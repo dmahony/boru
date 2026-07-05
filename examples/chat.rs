@@ -1,18 +1,17 @@
 use std::{
     collections::HashMap,
-    env,
-    fs,
-    fmt,
-    io,
+    env, fmt, fs, io,
     net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
     str::FromStr,
+    sync::Arc,
 };
 
 use arti_client::{
-    config::{pt::TransportConfigBuilder, BridgeConfigBuilder, CfgPath, TorClientConfig, TorClientConfigBuilder},
+    config::{TorClientConfig, TorClientConfigBuilder},
     BootstrapBehavior, TorClient,
 };
+use tor_rtcompat::PreferredRuntime;
 use bytes::Bytes;
 use clap::Parser;
 use crossterm::{
@@ -22,16 +21,21 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, PublicKey,
-    RelayMode, RelayUrl, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, PublicKey, RelayMode,
+    RelayUrl, SecretKey,
 };
 use iroh_gossip::{
     api::{Event, GossipReceiver},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
+    tor_transport::{TorPeerAddr, TorTicket},
 };
-use n0_error::{bail_any, AnyError, Result, StdResultExt};
+#[cfg(feature = "tor-transport")]
+use iroh::Watcher;
+use n0_error::{bail_any, Result, StdResultExt};
 use n0_future::{task, StreamExt};
+#[cfg(feature = "tor-transport")]
+use iroh_gossip::tor_transport::TorTransport;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -71,14 +75,6 @@ struct Args {
     /// Set the bind port for our socket. By default, a random port will be used.
     #[clap(long, default_value = "0")]
     bind_port: u16,
-    /// Tor bridge line(s) to pass into Arti. Repeat this flag for multiple bridges.
-    ///
-    /// Example: `--bridge 'Bridge obfs4 host:port fingerprint cert=... iat-mode=0'`
-    #[clap(long = "bridge", value_name = "BRIDGE_LINE", required = true)]
-    bridges: Vec<String>,
-    /// Path or command name for the obfs4proxy transport binary.
-    #[clap(long, value_name = "PATH", default_value = "obfs4proxy")]
-    obfs4proxy: String,
     #[clap(subcommand)]
     command: Command,
 }
@@ -138,6 +134,7 @@ impl Drop for TorStorageDirs {
     }
 }
 
+#[allow(unreachable_code, unused_variables)]
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -145,61 +142,8 @@ async fn main() -> Result<()> {
 
     println!("> Tor bootstrap is required before chat.");
     let tor_dirs = TorStorageDirs::new()?;
-    let tor_status_message = match tor_client_config(&args, &tor_dirs) {
-        Ok(tor_config) => match (TorClient::builder()
-            .config(tor_config)
-            .bootstrap_behavior(BootstrapBehavior::Manual)
-            .create_unbootstrapped_async()
-            .await)
-            .anyerr()
-        {
-            Ok(tor_client) => {
-                let mut last_bootstrap_status = format_tor_bootstrap_status_line(tor_client.bootstrap_status());
-                println!("{last_bootstrap_status}");
-                let mut bootstrap_events = tor_client.bootstrap_events();
-                let bootstrap = tor_client.bootstrap();
-                tokio::pin!(bootstrap);
-                loop {
-                    if tor_client.bootstrap_status().ready_for_traffic() {
-                        break;
-                    }
-                    tokio::select! {
-                        result = &mut bootstrap => {
-                            result.anyerr()?;
-                            let rendered = format_tor_bootstrap_status_line(tor_client.bootstrap_status());
-                            if last_bootstrap_status != rendered {
-                                println!("{rendered}");
-                                last_bootstrap_status = rendered;
-                            }
-                            break;
-                        }
-                        maybe_status = bootstrap_events.next() => {
-                            if let Some(status) = maybe_status {
-                                let rendered = format_tor_bootstrap_status_line(status);
-                                if last_bootstrap_status != rendered {
-                                    println!("{rendered}");
-                                    last_bootstrap_status = rendered;
-                                }
-                            }
-                        }
-                    }
-                }
-                "> Tor is ready.".to_string()
-            }
-            Err(err) => {
-                let message = format!("> Tor bootstrap failed: {err}");
-                println!("{message}");
-                message
-            }
-        },
-        Err(err) => {
-            let message = format!("> Tor config failed: {err}");
-            println!("{message}");
-            message
-        }
-    };
-    println!("> {}", tor_transport_notice(&args));
-    println!("> continuing into chat using the current iroh transport");
+    let (tor_client, tor_status_message) = bootstrap_tor(&tor_dirs).await?;
+    println!("> {}", tor_transport_notice());
 
     // parse the cli command
     let (topic, peers) = match &args.command {
@@ -238,10 +182,26 @@ async fn main() -> Result<()> {
     let memory_lookup = MemoryLookup::new();
 
     // build our magic endpoint
+    #[cfg(feature = "tor-transport")]
+    let tor_transport = TorTransport::new(
+        secret_key.public(),
+        Arc::clone(&tor_client),
+        args.bind_port,
+    );
+    #[cfg(feature = "tor-transport")]
+    let endpoint = Endpoint::builder(presets::N0DisableRelay)
+            .secret_key(secret_key.clone())
+            .address_lookup(memory_lookup.clone())
+            .relay_mode(relay_mode.clone())
+        .add_custom_transport(Arc::new(tor_transport.clone()))
+        .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
+        .bind()
+        .await?;
+    #[cfg(not(feature = "tor-transport"))]
     let endpoint = Endpoint::builder(presets::N0)
-        .secret_key(secret_key)
-        .address_lookup(memory_lookup.clone())
-        .relay_mode(relay_mode.clone())
+            .secret_key(secret_key.clone())
+            .address_lookup(memory_lookup.clone())
+            .relay_mode(relay_mode.clone())
         .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
         .bind()
         .await?;
@@ -256,10 +216,19 @@ async fn main() -> Result<()> {
         // before moving on
         endpoint.online().await;
     }
-    let ticket = {
-        let me = endpoint.addr();
-        let peers = peers.iter().cloned().chain([me]).collect();
-        Ticket { topic, peers }
+    let local_peer_addr = {
+        #[cfg(feature = "tor-transport")]
+        {
+            tor_transport.watch_local_peer_addr().initialized().await
+        }
+        #[cfg(not(feature = "tor-transport"))]
+        {
+            bail_any!("Tor transport feature is disabled")
+        }
+    };
+    let ticket = Ticket {
+        topic,
+        peers: vec![local_peer_addr],
     };
     println!("> ticket to join us: {ticket}");
 
@@ -269,16 +238,15 @@ async fn main() -> Result<()> {
         .spawn();
 
     // join the gossip topic by connecting to known peers, if any
-    let peer_ids = peers.iter().map(|p| p.id).collect();
-    let peer_count = peers.len();
+    let peer_ids = peers.iter().map(TorPeerAddr::endpoint_id).collect::<Vec<_>>();
+    let peer_count = peer_ids.len();
+    for peer in &peers {
+        memory_lookup.set_endpoint_info(peer.endpoint_addr());
+    }
     if peers.is_empty() {
         println!("> waiting for peers to join us...");
     } else {
         println!("> trying to connect to {} peers...", peers.len());
-        // add the peer addrs from the ticket to our endpoint's addressbook so that they can be dialed
-        for peer in peers.iter().cloned() {
-            memory_lookup.add_endpoint_info(peer);
-        }
     };
     let (sender, receiver) = gossip.subscribe_and_join(topic, peer_ids).await?.split();
     println!("> connected!");
@@ -299,14 +267,13 @@ async fn main() -> Result<()> {
         tor_status: tor_status_message.clone(),
         topic,
         relay_mode: relay_mode.clone(),
-        bridge_count: args.bridges.len(),
         connected: true,
         peer_count: peer_count,
         identity_label: local_label.clone(),
-        transport_notice: tor_transport_notice(&args),
+        transport_notice: tor_transport_notice(),
     });
     app.push_system(format!("Tor bootstrap finished: {}", tor_status_message));
-    app.push_system(tor_transport_notice(&args));
+    app.push_system(tor_transport_notice());
     app.push_system(format!("Ticket to join this room: {ticket}"));
     if peers.is_empty() {
         app.push_system("Waiting for peers to join us...");
@@ -374,38 +341,56 @@ fn print_tor_bootstrap_status(status: impl fmt::Display, last_rendered: &mut Opt
     }
 }
 
-fn tor_client_config(args: &Args, tor_dirs: &TorStorageDirs) -> Result<TorClientConfig> {
-    if args.bridges.is_empty() {
-        bail_any!(
-            "the chat example requires at least one --bridge line to start Arti in bridge mode"
-        );
-    }
-
-    let mut builder = TorClientConfigBuilder::from_directories(&tor_dirs.state_dir, &tor_dirs.cache_dir);
-
-    for bridge_line in &args.bridges {
-        let bridge: BridgeConfigBuilder =
-            bridge_line.parse().std_context("parse Tor bridge line")?;
-        builder.bridges().bridges().push(bridge);
-    }
-
-    let mut transport = TransportConfigBuilder::default();
-    transport
-        .protocols(vec!["obfs4"
-            .parse()
-            .std_context("parse obfs4 transport name")?])
-        .path(CfgPath::new(args.obfs4proxy.clone().into()))
-        .run_on_startup(true);
-    builder.bridges().transports().push(transport);
-
-    builder.build().std_context("build Arti Tor client config")
+fn tor_client_config(tor_dirs: &TorStorageDirs) -> Result<TorClientConfig> {
+    TorClientConfigBuilder::from_directories(&tor_dirs.state_dir, &tor_dirs.cache_dir)
+        .build()
+        .std_context("build Arti Tor client config")
 }
 
-fn tor_transport_notice(args: &Args) -> String {
-    format!(
-        "Tor bootstrap succeeded via {} configured obfs4 bridge(s). iroh gossip still uses the current non-Tor transport.",
-        args.bridges.len()
-    )
+async fn bootstrap_tor(tor_dirs: &TorStorageDirs) -> Result<(Arc<TorClient<PreferredRuntime>>, String)> {
+    let tor_config = tor_client_config(tor_dirs)?;
+    let tor_client = TorClient::builder()
+        .config(tor_config)
+        .bootstrap_behavior(BootstrapBehavior::Manual)
+        .create_unbootstrapped_async()
+        .await
+        .anyerr()?;
+
+    {
+        let mut last_bootstrap_status = None;
+        print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
+        let mut bootstrap_events = tor_client.bootstrap_events();
+        let bootstrap = tor_client.bootstrap();
+        tokio::pin!(bootstrap);
+
+        loop {
+            if tor_client.bootstrap_status().ready_for_traffic() {
+                break;
+            }
+            tokio::select! {
+                result = &mut bootstrap => {
+                    result.anyerr()?;
+                    print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
+                    break;
+                }
+                maybe_status = bootstrap_events.next() => {
+                    if let Some(status) = maybe_status {
+                        print_tor_bootstrap_status(status, &mut last_bootstrap_status);
+                    }
+                }
+            }
+        }
+
+        if !tor_client.bootstrap_status().ready_for_traffic() {
+            bail_any!("Tor bootstrap finished without becoming ready for traffic");
+        }
+    }
+
+    Ok((tor_client, "> Tor is ready.".to_string()))
+}
+
+fn tor_transport_notice() -> String {
+    "Tor bootstrap succeeded. Tor-backed custom transport redesign is in progress, so the legacy iroh gossip path is disabled.".to_string()
 }
 
 #[derive(Debug)]
@@ -433,7 +418,6 @@ struct StatusContext {
     tor_status: String,
     topic: TopicId,
     relay_mode: RelayMode,
-    bridge_count: usize,
     connected: bool,
     peer_count: usize,
     identity_label: String,
@@ -993,11 +977,8 @@ fn status_lines(context: &StatusContext) -> Vec<Line<'static>> {
             )),
         ]),
         Line::from(vec![
-            Span::styled("Bridges", label_style),
-            Span::raw(format!(
-                ": {} obfs4 bridge(s) • {}",
-                context.bridge_count, context.transport_notice
-            )),
+            Span::styled("Tor", label_style),
+            Span::raw(format!(": {}", context.transport_notice)),
         ]),
         Line::from(vec![
             Span::styled("Controls", label_style),
@@ -1086,41 +1067,7 @@ enum Message {
     Message { text: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Ticket {
-    topic: TopicId,
-    peers: Vec<EndpointAddr>,
-}
-impl Ticket {
-    /// Deserializes from bytes.
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        postcard::from_bytes(bytes).std_context("decode ticket")
-    }
-    /// Serializes to bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        postcard::to_stdvec(self).expect("postcard::to_stdvec is infallible")
-    }
-}
-
-/// Serializes to base32.
-impl fmt::Display for Ticket {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut text = data_encoding::BASE32_NOPAD.encode(&self.to_bytes()[..]);
-        text.make_ascii_lowercase();
-        write!(f, "{text}")
-    }
-}
-
-/// Deserializes from base32.
-impl FromStr for Ticket {
-    type Err = AnyError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bytes = data_encoding::BASE32_NOPAD
-            .decode(s.to_ascii_uppercase().as_bytes())
-            .std_context("decode ticket base32")?;
-        Self::from_bytes(&bytes)
-    }
-}
+type Ticket = TorTicket;
 
 // helpers
 
@@ -1185,7 +1132,6 @@ mod tests {
             tor_status: "Tor is ready".into(),
             topic: TopicId::from_bytes([7u8; 32]),
             relay_mode: RelayMode::Disabled,
-            bridge_count: 2,
             connected: true,
             peer_count: 3,
             identity_label: "alice".into(),
@@ -1199,46 +1145,32 @@ mod tests {
     }
 
     #[test]
-    fn cli_requires_at_least_one_bridge_line() {
-        let err =
-            Args::try_parse_from(["chat", "open"]).expect_err("missing bridge should be rejected");
-        let rendered = err.to_string();
-        assert!(
-            rendered.contains("--bridge"),
-            "unexpected parser error: {rendered}"
-        );
+    fn cli_parses_without_bridge_flags() {
+        let args = Args::try_parse_from(["chat", "open"]).expect("direct Tor should parse");
+        assert!(matches!(args.command, Command::Open { .. }));
     }
 
     #[test]
-    fn tor_transport_notice_with_bridges_mentions_bridge_count() {
-        let args = test_args(vec![valid_obfs4_bridge_line().to_string()]);
-        let notice = tor_transport_notice(&args);
-        assert!(notice.contains("1 configured obfs4 bridge"));
-        assert!(notice.contains("iroh gossip still uses the current non-Tor transport"));
+    fn tor_transport_notice_mentions_direct_tor() {
+        let notice = tor_transport_notice();
+        assert!(notice.contains("Tor bootstrap succeeded"));
+        assert!(notice.contains("legacy iroh gossip path is disabled"));
     }
-
     #[test]
-    fn tor_client_config_accepts_obfs4_bridge_and_transport_configuration() {
+    fn tor_client_config_builds_direct_tor_configuration() {
         let tor_dirs = TorStorageDirs::new().expect("test tor dirs should be creatable");
-        let args = test_args(vec![valid_obfs4_bridge_line().to_string()]);
-        let config = tor_client_config(&args, &tor_dirs).expect("bridge config should build");
+        let config = tor_client_config(&tor_dirs).expect("direct tor config should build");
         let _ = config;
     }
 
-    fn test_args(bridges: Vec<String>) -> Args {
+    fn test_args() -> Args {
         Args {
             secret_key: None,
             relay: None,
             no_relay: false,
             name: None,
             bind_port: 0,
-            bridges,
-            obfs4proxy: "obfs4proxy".to_string(),
             command: Command::Open { topic: None },
         }
-    }
-
-    fn valid_obfs4_bridge_line() -> &'static str {
-        "Bridge obfs4 192.0.2.55:38114 316E643333645F6D79216558614D3931657A5F5F cert=YXJlIGZyZXF1ZW50bHkgZnVsbCBvZiBsaXR0bGUgbWVzc2FnZXMgeW91IGNhbiBmaW5kLg iat-mode=0"
     }
 }
