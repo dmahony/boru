@@ -75,6 +75,12 @@ fn bootstrap_peers() -> Vec<EndpointId> {
 }
 ```
 
+The `examples/chat.rs` demo now bootstraps Tor before any gossip setup and prints the
+bootstrap progress first. It requires one or more `--bridge` lines plus `--obfs4proxy PATH`
+so Arti always exercises obfs4 bridge mode instead of trying direct connectivity. The
+example still warns that the current iroh gossip transport is not Tor-routed yet, then
+continues into the existing chat flow.
+
 # License
 
 This project is licensed under either of

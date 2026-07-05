@@ -59,6 +59,12 @@ serde = { version = "1.0.164", features = ["derive"] }
 
 # net dependencies (optional)
 futures-concurrency = { version = "7.6.1", optional = true }
+arti-client = { version = "0.44.0", optional = true, default-features = false, features = [
+    "tokio",
+    "native-tls",
+    "static-sqlite",
+    "pt-client",
+] }
 iroh = { version = "1", default-features = false, optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync"] }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
@@ -85,6 +91,8 @@ tracing-subscriber = { version = "0.3", features = [
 serde_json = { version = "1", optional = true }
 rayon = { version = "1.10.0", optional = true }
 comfy-table = { version = "7.1.4", optional = true }
+ratatui = { version = "0.28.1", default-features = false, features = ["crossterm"], optional = true }
+crossterm = { version = "0.28.1", optional = true }
 
 
 [dev-dependencies]
@@ -139,7 +147,7 @@ simulator = [
     "dep:comfy-table",
 ]
 metrics = ["iroh-metrics/metrics"]
-examples = ["net"]
+examples = ["net", "dep:arti-client", "dep:ratatui", "dep:crossterm"]
 
 [[test]]
 name = "sim"
