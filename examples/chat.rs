@@ -128,12 +128,6 @@ impl TorStorageDirs {
     }
 }
 
-impl Drop for TorStorageDirs {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
 #[allow(unreachable_code, unused_variables)]
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -356,34 +350,49 @@ async fn bootstrap_tor(tor_dirs: &TorStorageDirs) -> Result<(Arc<TorClient<Prefe
         .await
         .anyerr()?;
 
-    {
-        let mut last_bootstrap_status = None;
-        print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
-        let mut bootstrap_events = tor_client.bootstrap_events();
-        let bootstrap = tor_client.bootstrap();
-        tokio::pin!(bootstrap);
+    let mut last_bootstrap_status = None;
+    print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
+    let mut bootstrap_events = tor_client.bootstrap_events();
+    let mut bootstrap_task = {
+        let tor_client = Arc::clone(&tor_client);
+        tokio::spawn(async move { tor_client.bootstrap().await })
+    };
+    let mut bootstrap_task_done = false;
 
-        loop {
-            if tor_client.bootstrap_status().ready_for_traffic() {
-                break;
+    loop {
+        if tor_client.bootstrap_status().ready_for_traffic() {
+            break;
+        }
+
+        if bootstrap_task_done {
+            match bootstrap_events.next().await {
+                Some(status) => print_tor_bootstrap_status(status, &mut last_bootstrap_status),
+                None => break,
             }
-            tokio::select! {
-                result = &mut bootstrap => {
-                    result.anyerr()?;
-                    print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
-                    break;
-                }
-                maybe_status = bootstrap_events.next() => {
-                    if let Some(status) = maybe_status {
-                        print_tor_bootstrap_status(status, &mut last_bootstrap_status);
+            continue;
+        }
+
+        tokio::select! {
+            result = &mut bootstrap_task => {
+                match result {
+                    Ok(Ok(())) => {
+                        bootstrap_task_done = true;
+                        print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
                     }
+                    Ok(Err(err)) => return Err(err).std_context("Tor bootstrap task failed"),
+                    Err(err) => return Err(err).std_context("join Tor bootstrap task"),
+                }
+            }
+            maybe_status = bootstrap_events.next() => {
+                if let Some(status) = maybe_status {
+                    print_tor_bootstrap_status(status, &mut last_bootstrap_status);
                 }
             }
         }
+    }
 
-        if !tor_client.bootstrap_status().ready_for_traffic() {
-            bail_any!("Tor bootstrap finished without becoming ready for traffic");
-        }
+    if !tor_client.bootstrap_status().ready_for_traffic() {
+        bail_any!("Tor bootstrap finished without becoming ready for traffic");
     }
 
     Ok((tor_client, "> Tor is ready.".to_string()))
