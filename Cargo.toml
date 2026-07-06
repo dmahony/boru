@@ -199,3 +199,6 @@ debug = true
 [profile.release]
 debug = true
 
+[patch.crates-io]
+noq-proto = { path = "noq-proto-patched" }
+

@@ -247,7 +247,6 @@ mod tor_transport_impl {
 
     #[derive(Clone)]
     struct TorSender {
-        tor_client: Arc<TorClient<PreferredRuntime>>,
         local_custom_addr: CustomAddr,
         tx: UnboundedSender<OutgoingPacket>,
     }
@@ -295,7 +294,6 @@ mod tor_transport_impl {
             let (incoming_tx, incoming_rx) = unbounded_channel();
             let (outgoing_tx, outgoing_rx) = unbounded_channel();
             let sender = Arc::new(TorSender {
-                tor_client: Arc::clone(&self.tor_client),
                 local_custom_addr: local_custom_addr.clone(),
                 tx: outgoing_tx,
             });

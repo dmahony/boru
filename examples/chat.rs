@@ -139,6 +139,12 @@ async fn main() -> Result<()> {
     let (tor_client, tor_status_message) = bootstrap_tor(&tor_dirs).await?;
     println!("> {}", tor_transport_notice());
 
+    #[cfg(not(feature = "tor-transport"))]
+    {
+        println!("> Tor transport feature is disabled in this build; exiting after bootstrap.");
+        return Ok(());
+    }
+
     // parse the cli command
     let (topic, peers) = match &args.command {
         Command::Open { topic } => {

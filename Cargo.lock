@@ -3753,8 +3753,6 @@ dependencies = [
 [[package]]
 name = "noq-proto"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "775be06b8d66c2c64db60140bf54dee8410f67b73c81cc1e1e32f11dfdaae501"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
