@@ -7,6 +7,8 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
+#[cfg(feature = "tor-transport")]
+use std::fs;
 
 #[cfg(feature = "tor-transport")]
 use arti_client::{
