@@ -128,7 +128,6 @@ impl TorStorageDirs {
     }
 }
 
-#[allow(unreachable_code, unused_variables)]
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -170,8 +169,20 @@ async fn main() -> Result<()> {
     );
 
     // configure our relay map
+    // When tor-transport is enabled, default to disabled relays — Tor hidden services
+    // provide direct connectivity without needing the iroh relay infrastructure, and
+    // using relays would leak metadata outside the Tor network.
     let relay_mode = match (args.no_relay, args.relay.clone()) {
-        (false, None) => RelayMode::Default,
+        (false, None) => {
+            #[cfg(feature = "tor-transport")]
+            {
+                RelayMode::Disabled
+            }
+            #[cfg(not(feature = "tor-transport"))]
+            {
+                RelayMode::Default
+            }
+        }
         (false, Some(url)) => RelayMode::Custom(url.into()),
         (true, None) => RelayMode::Disabled,
         (true, Some(_)) => bail_any!("You cannot set --no-relay and --relay at the same time"),
@@ -405,7 +416,7 @@ async fn bootstrap_tor(tor_dirs: &TorStorageDirs) -> Result<(Arc<TorClient<Prefe
 }
 
 fn tor_transport_notice() -> String {
-    "Tor bootstrap succeeded. Tor-backed custom transport redesign is in progress, so the legacy iroh gossip path is disabled.".to_string()
+    "Tor-backed custom transport is operational. Gossip messages are relayed over Tor hidden services.".to_string()
 }
 
 #[derive(Debug)]
@@ -1002,39 +1013,6 @@ fn status_lines(context: &StatusContext) -> Vec<Line<'static>> {
     ]
 }
 
-async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
-    // init a peerid -> name hashmap
-    let mut names = HashMap::new();
-    while let Some(event) = receiver.try_next().await? {
-        if let Event::Received(msg) = event {
-            let (from, message) = SignedMessage::verify_and_decode(&msg.content)?;
-            match message {
-                Message::AboutMe { name } => {
-                    names.insert(from, name.clone());
-                    println!("> {} is now known as {}", from.fmt_short(), name);
-                }
-                Message::Message { text } => {
-                    let name = names
-                        .get(&from)
-                        .map_or_else(|| from.fmt_short().to_string(), String::to_string);
-                    println!("{name}: {text}");
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn input_loop(line_tx: tokio::sync::mpsc::Sender<String>) -> Result<()> {
-    let mut buffer = String::new();
-    let stdin = std::io::stdin(); // We get `Stdin` here.
-    loop {
-        stdin.read_line(&mut buffer).anyerr()?;
-        line_tx.blocking_send(buffer.clone()).anyerr()?;
-        buffer.clear();
-    }
-}
-
 const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;
 type Signature = ByteArray<SIGNATURE_LENGTH>;
 
@@ -1166,10 +1144,10 @@ mod tests {
     }
 
     #[test]
-    fn tor_transport_notice_mentions_direct_tor() {
+    fn tor_transport_notice_mentions_tor_operational() {
         let notice = tor_transport_notice();
-        assert!(notice.contains("Tor bootstrap succeeded"));
-        assert!(notice.contains("legacy iroh gossip path is disabled"));
+        assert!(notice.contains("Tor-backed custom transport"));
+        assert!(notice.contains("operational"));
     }
     #[test]
     fn tor_client_config_builds_direct_tor_configuration() {

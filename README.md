@@ -75,10 +75,19 @@ fn bootstrap_peers() -> Vec<EndpointId> {
 }
 ```
 
-The `examples/chat.rs` demo now bootstraps Tor before any gossip setup and prints the
-bootstrap progress first. It currently stops after Tor is ready and reports that the
-Tor-backed custom transport redesign is in progress, so the legacy iroh gossip path is
-disabled until that transport exists.
+The `examples/chat.rs` demo demonstrates a Tor-backed gossip chat application. It bootstraps Tor
+via Arti, creates an iroh endpoint with a Tor hidden-service custom transport, and provides a
+TUI for sending and receiving signed messages over gossip topics. Peers discover each other
+through Tor tickets (base32-encoded topic+peer addresses exchanged out-of-band).
+
+To run two peers:
+```text
+# Terminal 1 - create a room
+cargo run --example chat --features tor-transport -- open
+
+# Terminal 2 - join with the printed ticket
+cargo run --example chat --features tor-transport -- join <ticket>
+```
 
 # License
 
