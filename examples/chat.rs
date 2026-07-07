@@ -47,8 +47,6 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 #[cfg(feature = "tor-transport")]
-use std::env;
-#[cfg(feature = "tor-transport")]
 use tor_rtcompat::PreferredRuntime;
 
 /// Chat over iroh-gossip
