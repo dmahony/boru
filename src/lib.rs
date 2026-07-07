@@ -21,6 +21,7 @@ pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod proto;
+pub mod inbox;
 /// Tor-specific address and ticket scaffolding for the custom transport redesign.
 pub mod tor_transport;
 
