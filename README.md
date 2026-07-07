@@ -103,10 +103,10 @@ You can also set `IROH_GOSSIP_CHAT_DATA_DIR` to a different path to use a separa
 To run two peers:
 ```text
 # Terminal 1 - create a room
-cargo run --features examples --example chat -- open
+cargo chat open
 
 # Terminal 2 - join with the printed ticket
-cargo run --features examples --example chat -- join <ticket>
+cargo chat join <ticket>
 
 # Optional Tor mode
 cargo run --features "examples tor-transport" --example chat -- --tor open
