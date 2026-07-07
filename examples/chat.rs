@@ -1,7 +1,18 @@
-use std::{collections::HashMap, fmt, io, net::{Ipv4Addr, SocketAddrV4}, str::FromStr};
 #[cfg(feature = "tor-transport")]
 use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    env, fmt, io,
+    net::{Ipv4Addr, SocketAddrV4},
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
+#[cfg(feature = "tor-transport")]
+use arti_client::{
+    config::{TorClientConfig, TorClientConfigBuilder},
+    BootstrapBehavior, TorClient,
+};
 use bytes::Bytes;
 use clap::Parser;
 use crossterm::{
@@ -10,10 +21,14 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+#[cfg(feature = "tor-transport")]
+use iroh::Watcher;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, PublicKey,
     RelayMode, RelayUrl, SecretKey,
 };
+#[cfg(feature = "tor-transport")]
+use iroh_gossip::tor_transport::TorTransport;
 use iroh_gossip::{
     api::{Event, GossipReceiver},
     net::{Gossip, GOSSIP_ALPN},
@@ -32,16 +47,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 #[cfg(feature = "tor-transport")]
-use arti_client::{
-    config::{TorClientConfig, TorClientConfigBuilder},
-    BootstrapBehavior, TorClient,
-};
-#[cfg(feature = "tor-transport")]
-use iroh::Watcher;
-#[cfg(feature = "tor-transport")]
-use iroh_gossip::tor_transport::TorTransport;
-#[cfg(feature = "tor-transport")]
-use std::{env, fs, path::PathBuf};
+use std::env;
 #[cfg(feature = "tor-transport")]
 use tor_rtcompat::PreferredRuntime;
 
@@ -132,6 +138,66 @@ impl TorStorageDirs {
     }
 }
 
+fn get_data_dir() -> PathBuf {
+    if let Ok(val) = env::var("IROH_GOSSIP_CHAT_DATA_DIR") {
+        return PathBuf::from(val);
+    }
+    if let Some(val) = env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(val).join("iroh-gossip-chat");
+    }
+    if let Some(val) = env::var_os("HOME") {
+        return PathBuf::from(val)
+            .join(".local")
+            .join("share")
+            .join("iroh-gossip-chat");
+    }
+    if let Some(val) = env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(val).join("iroh-gossip-chat");
+    }
+    // Fallback
+    std::env::current_dir()
+        .unwrap_or_default()
+        .join(".iroh-gossip-chat")
+}
+
+fn load_or_generate_secret_key() -> Result<(SecretKey, PathBuf)> {
+    load_or_generate_secret_key_at(&get_data_dir())
+}
+
+fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf)> {
+    let key_path = data_dir.join("secret_key.txt");
+
+    if key_path.exists() {
+        let key_str =
+            std::fs::read_to_string(&key_path).std_context("failed to read secret key file")?;
+        let key_str = key_str.trim();
+        let key =
+            SecretKey::from_str(key_str).std_context("failed to parse secret key from file")?;
+        Ok((key, key_path))
+    } else {
+        let key = SecretKey::generate();
+        let key_str = data_encoding::HEXLOWER.encode(&key.to_bytes());
+        std::fs::create_dir_all(data_dir).std_context("failed to create data directory")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700));
+        }
+
+        std::fs::write(&key_path, format!("{key_str}\n"))
+            .std_context("failed to write secret key file")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        Ok((key, key_path))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -157,14 +223,17 @@ async fn main() -> Result<()> {
     };
 
     // parse or generate our secret key
-    let secret_key = match args.secret_key.as_ref() {
-        None => SecretKey::generate(),
-        Some(key) => key.parse()?,
+    let (secret_key, key_path) = match args.secret_key.as_ref() {
+        None => load_or_generate_secret_key()?,
+        Some(key) => {
+            let key = key.parse()?;
+            // When passed via CLI, we just pretend it was loaded from a synthetic path
+            // so we don't save or overwrite the user's explicit CLI override.
+            (key, PathBuf::from("<passed via cli flag>"))
+        }
     };
-    println!(
-        "> our secret key: {}",
-        data_encoding::HEXLOWER.encode(&secret_key.to_bytes())
-    );
+    println!("> our public key: {}", secret_key.public());
+    println!("> identity file: {}", key_path.display());
 
     // configure our relay map
     // When Tor is used, default to disabled relays — Tor hidden services provide direct
@@ -187,11 +256,8 @@ async fn main() -> Result<()> {
         if use_tor {
             let tor_dirs = TorStorageDirs::new()?;
             let (tor_client, tor_status_message) = bootstrap_tor(&tor_dirs).await?;
-            let tor_transport = TorTransport::new(
-                secret_key.public(),
-                Arc::clone(&tor_client),
-                args.bind_port,
-            );
+            let tor_transport =
+                TorTransport::new(secret_key.public(), Arc::clone(&tor_client), args.bind_port);
             let endpoint = Endpoint::builder(presets::N0DisableRelay)
                 .secret_key(secret_key.clone())
                 .address_lookup(memory_lookup.clone())
@@ -378,7 +444,6 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-
 
 #[derive(Debug)]
 struct TerminalGuard;
@@ -1094,7 +1159,9 @@ fn tor_client_config(tor_dirs: &TorStorageDirs) -> Result<TorClientConfig> {
 }
 
 #[cfg(feature = "tor-transport")]
-async fn bootstrap_tor(tor_dirs: &TorStorageDirs) -> Result<(Arc<TorClient<PreferredRuntime>>, String)> {
+async fn bootstrap_tor(
+    tor_dirs: &TorStorageDirs,
+) -> Result<(Arc<TorClient<PreferredRuntime>>, String)> {
     let tor_config = tor_client_config(tor_dirs)?;
     let tor_client = TorClient::builder()
         .config(tor_config)
@@ -1155,7 +1222,6 @@ async fn bootstrap_tor(tor_dirs: &TorStorageDirs) -> Result<(Arc<TorClient<Prefe
 fn tor_transport_notice() -> String {
     "Tor-backed custom transport is operational. Gossip messages are relayed over Tor hidden services.".to_string()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1223,7 +1289,9 @@ mod tests {
         };
         let lines = status_lines(&status);
         let rendered: Vec<_> = lines.iter().map(|line| line.to_string()).collect();
-        assert!(rendered.iter().any(|line| line.contains("Direct iroh transport is ready.")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Direct iroh transport is ready.")));
         assert!(rendered.iter().any(|line| line.contains("alice")));
         assert!(rendered.iter().any(|line| line.contains("3 known peers")));
     }
@@ -1250,4 +1318,148 @@ mod tests {
         let _ = config;
     }
 
+    // ── Identity persistence tests ────────────────────────────────────────
+
+    #[test]
+    fn secret_key_serialization_roundtrip() {
+        // Generate a key, serialize to hex, deserialize, verify same key material.
+        let key = SecretKey::generate();
+        let hex = data_encoding::HEXLOWER.encode(&key.to_bytes());
+        let recovered = SecretKey::from_str(&hex).expect("should parse hex-encoded secret key");
+        assert_eq!(key.to_bytes(), recovered.to_bytes());
+        assert_eq!(key.public(), recovered.public());
+    }
+
+    #[test]
+    fn secret_key_public_key_is_deterministic() {
+        // Same SecretKey bytes always produce the same PublicKey.
+        let key = SecretKey::generate();
+        let pk1 = key.public();
+        let pk2 = key.public();
+        assert_eq!(pk1, pk2);
+    }
+
+    #[test]
+    fn get_data_dir_respects_env_var() {
+        let test_dir = if cfg!(windows) {
+            "C:\\tmp\\iroh-test"
+        } else {
+            "/tmp/iroh-test-dir"
+        };
+        let prior = std::env::var_os("IROH_GOSSIP_CHAT_DATA_DIR");
+        std::env::set_var("IROH_GOSSIP_CHAT_DATA_DIR", test_dir);
+        let dir = get_data_dir();
+        assert_eq!(dir, PathBuf::from(test_dir));
+        match prior {
+            Some(v) => std::env::set_var("IROH_GOSSIP_CHAT_DATA_DIR", v),
+            None => std::env::remove_var("IROH_GOSSIP_CHAT_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn ticket_is_deterministic_for_same_key_and_topic() {
+        let key = SecretKey::generate();
+        let topic = TopicId::from_bytes([42u8; 32]);
+        let peer_addr = EndpointAddr::new(key.public());
+
+        let ticket_a = Ticket {
+            topic,
+            peers: vec![peer_addr.clone()],
+        };
+        let ticket_b = Ticket {
+            topic,
+            peers: vec![peer_addr],
+        };
+
+        // Same inputs produce identical ticket encoding.
+        assert_eq!(ticket_a.to_string(), ticket_b.to_string());
+        assert_eq!(ticket_a.to_bytes(), ticket_b.to_bytes());
+    }
+
+    #[test]
+    fn secret_key_file_write_and_read_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("iroh-key-test-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let key = SecretKey::generate();
+        let hex = data_encoding::HEXLOWER.encode(&key.to_bytes());
+        let key_path = tmp.join("secret_key.txt");
+        std::fs::write(&key_path, format!("{hex}\n")).expect("write key hex");
+
+        // Read back
+        let read_back = std::fs::read_to_string(&key_path).expect("read key file");
+        let recovered = SecretKey::from_str(read_back.trim()).expect("parse key");
+        assert_eq!(key.public(), recovered.public());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&key_path);
+        let _ = std::fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn load_or_generate_creates_and_reuses_key() {
+        // Use a dedicated temp directory so tests don't clobber each other.
+        let tmp = std::env::temp_dir().join(format!("iroh-key-test-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let key_path = tmp.join("secret_key.txt");
+
+        // First call should generate a new key.
+        let (key_a, path_a) = load_or_generate_secret_key_at(&tmp).expect("first load");
+        assert!(key_path.exists(), "key file should exist after generation");
+        assert_eq!(path_a, key_path);
+
+        // Second call should load the same key.
+        let (key_b, path_b) = load_or_generate_secret_key_at(&tmp).expect("second load");
+        assert_eq!(path_b, key_path);
+        assert_eq!(
+            key_a.public(),
+            key_b.public(),
+            "second load returns same identity"
+        );
+
+        // Parsing the stored hex should also match.
+        let stored = std::fs::read_to_string(&key_path)
+            .expect("read stored key")
+            .trim()
+            .to_string();
+        let from_stored = SecretKey::from_str(&stored).expect("parse stored key");
+        assert_eq!(key_a.public(), from_stored.public());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&key_path).expect("key file metadata");
+            let mode = meta.permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "key file should have restrictive 0o600 permissions"
+            );
+        }
+
+        // Clean up.
+        let _ = std::fs::remove_file(&key_path);
+        let _ = std::fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn load_or_generate_uses_existing_key_file() {
+        // Pre-write a known key and verify load_or_generate reads it back.
+        let tmp =
+            std::env::temp_dir().join(format!("iroh-key-existing-test-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let known_key = SecretKey::generate();
+        let hex = data_encoding::HEXLOWER.encode(&known_key.to_bytes());
+        let key_path = tmp.join("secret_key.txt");
+        std::fs::write(&key_path, format!("{hex}\n")).expect("pre-write key");
+
+        let (loaded, path) = load_or_generate_secret_key_at(&tmp).expect("load existing key");
+        assert_eq!(path, key_path);
+        assert_eq!(known_key.public(), loaded.public());
+
+        std::env::remove_var("IROH_GOSSIP_CHAT_DATA_DIR");
+        let _ = std::fs::remove_file(&key_path);
+        let _ = std::fs::remove_dir(&tmp);
+    }
 }

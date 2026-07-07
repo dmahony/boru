@@ -77,6 +77,29 @@ fn bootstrap_peers() -> Vec<EndpointId> {
 
 The `examples/chat.rs` demo runs over direct iroh connectivity by default. It prints a base32 ticket containing the topic and endpoint addresses, so peers can join without Tor. If you want Tor hidden services instead, build with `--features tor-transport` and pass `--tor`.
 
+## Identity Persistence
+
+Both the `chat` and `setup` examples persist the node identity (secret key) to disk so your iroh peer ID remains stable across restarts.
+
+**Storage location** (checked in order):
+1. `$IROH_GOSSIP_CHAT_DATA_DIR/secret_key.txt` — if the env var is set
+2. `$XDG_DATA_HOME/iroh-gossip-chat/secret_key.txt` — typical: `~/.local/share/iroh-gossip-chat/secret_key.txt`
+3. `$HOME/.local/share/iroh-gossip-chat/secret_key.txt` — fallback when `XDG_DATA_HOME` is unset
+4. `$LOCALAPPDATA/iroh-gossip-chat/secret_key.txt` — Windows
+5. `./.iroh-gossip-chat/secret_key.txt` — current directory fallback
+
+**File format:** The secret key is stored as lowercase hex-encoded bytes (64 hex chars) with a trailing newline. The file is created with restrictive permissions (`0o600`, owner read/write only) on Unix systems.
+
+**Resetting the identity:** Delete the `secret_key.txt` file. The next run will generate a fresh keypair.
+
+```text
+rm ~/.local/share/iroh-gossip-chat/secret_key.txt
+```
+
+You can also set `IROH_GOSSIP_CHAT_DATA_DIR` to a different path to use a separate identity for different sessions.
+
+**Overriding via CLI flag:** The `chat` example accepts `--secret-key <hex>` to use a specific key for one session without writing it to disk.
+
 To run two peers:
 ```text
 # Terminal 1 - create a room

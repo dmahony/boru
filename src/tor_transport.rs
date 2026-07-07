@@ -162,13 +162,18 @@ mod tor_transport_impl {
 
     use arti_client::TorClient;
     use futures::{Stream, StreamExt};
-    use iroh::{endpoint::transports::{CustomEndpoint, CustomSender, CustomTransport, RecvInfo}, PublicKey};
+    use iroh::{
+        endpoint::transports::{CustomEndpoint, CustomSender, CustomTransport, RecvInfo},
+        PublicKey,
+    };
     use noq_udp::RecvMeta;
+    use safelog::DisplayRedacted;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
     use tor_cell::relaycell::msg::Connected;
-    use tor_hsservice::{config::OnionServiceConfigBuilder, handle_rend_requests, HsNickname, StreamRequest};
-    use safelog::DisplayRedacted;
+    use tor_hsservice::{
+        config::OnionServiceConfigBuilder, handle_rend_requests, HsNickname, StreamRequest,
+    };
 
     #[derive(Debug, Clone)]
     struct OutgoingPacket {
@@ -203,7 +208,11 @@ mod tor_transport_impl {
 
     impl TorTransport {
         /// Create a new Tor custom transport factory.
-        pub fn new(endpoint_id: PublicKey, tor_client: Arc<TorClient<PreferredRuntime>>, service_port: u16) -> Self {
+        pub fn new(
+            endpoint_id: PublicKey,
+            tor_client: Arc<TorClient<PreferredRuntime>>,
+            service_port: u16,
+        ) -> Self {
             Self {
                 endpoint_id,
                 tor_client,
@@ -364,7 +373,11 @@ mod tor_transport_impl {
             recv_infos: &mut [RecvInfo],
         ) -> Poll<io::Result<usize>> {
             assert_eq!(bufs.len(), metas.len(), "non matching bufs & metas");
-            assert_eq!(bufs.len(), recv_infos.len(), "non matching bufs & recv_infos");
+            assert_eq!(
+                bufs.len(),
+                recv_infos.len(),
+                "non matching bufs & recv_infos"
+            );
             if bufs.is_empty() {
                 return Poll::Ready(Ok(0));
             }
@@ -412,16 +425,18 @@ mod tor_transport_impl {
             if !self.is_valid_send_addr(dst) {
                 return Poll::Ready(Err(io::Error::other("invalid Tor destination address")));
             }
-            let src = src.cloned().unwrap_or_else(|| self.local_custom_addr.clone());
+            let src = src
+                .cloned()
+                .unwrap_or_else(|| self.local_custom_addr.clone());
             tracing::debug!(dst = %dst, src = %src, bytes = transmit.contents.len(), "queueing tor transport packet");
             let packet = OutgoingPacket {
                 dst: dst.clone(),
                 src,
                 payload: transmit.contents.to_vec(),
             };
-            self.tx
-                .send(packet)
-                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Tor sender channel closed"))?;
+            self.tx.send(packet).map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "Tor sender channel closed")
+            })?;
             Poll::Ready(Ok(()))
         }
     }
@@ -438,7 +453,10 @@ mod tor_transport_impl {
         }
     }
 
-    async fn send_packet(tor_client: &TorClient<PreferredRuntime>, packet: OutgoingPacket) -> io::Result<()> {
+    async fn send_packet(
+        tor_client: &TorClient<PreferredRuntime>,
+        packet: OutgoingPacket,
+    ) -> io::Result<()> {
         let (onion, port) = TorPeerAddr::decode_custom_addr(&packet.dst)
             .map_err(|e| io::Error::other(e.to_string()))?;
         tracing::debug!(dst = %packet.dst, onion = %onion, port, bytes = packet.payload.len(), "opening tor connection for packet");
@@ -486,7 +504,9 @@ mod tor_transport_impl {
             let incoming_tx = incoming_tx.clone();
             let local_custom_addr = local_custom_addr.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_stream_request(stream_request, incoming_tx, local_custom_addr).await {
+                if let Err(err) =
+                    handle_stream_request(stream_request, incoming_tx, local_custom_addr).await
+                {
                     tracing::warn!(error = %err, "tor transport incoming receive failed");
                 }
             });
@@ -510,14 +530,16 @@ mod tor_transport_impl {
         Ok(())
     }
 
-    async fn read_frame(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> io::Result<(CustomAddr, Vec<u8>)> {
+    async fn read_frame(
+        stream: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> io::Result<(CustomAddr, Vec<u8>)> {
         let mut len_buf = [0u8; 2];
         stream.read_exact(&mut len_buf).await?;
         let src_len = u16::from_be_bytes(len_buf) as usize;
         let mut src_bytes = vec![0u8; src_len];
         stream.read_exact(&mut src_bytes).await?;
-        let src = CustomAddr::from_bytes(&src_bytes)
-            .map_err(|err| io::Error::other(err.to_string()))?;
+        let src =
+            CustomAddr::from_bytes(&src_bytes).map_err(|err| io::Error::other(err.to_string()))?;
         let mut payload_len_buf = [0u8; 4];
         stream.read_exact(&mut payload_len_buf).await?;
         let payload_len = u32::from_be_bytes(payload_len_buf) as usize;
