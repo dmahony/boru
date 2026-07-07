@@ -154,7 +154,7 @@ simulator = [
     "dep:comfy-table",
 ]
 metrics = ["iroh-metrics/metrics"]
-examples = ["net", "dep:arti-client", "dep:tor-rtcompat", "dep:ratatui", "dep:crossterm"]
+examples = ["net", "dep:ratatui", "dep:crossterm"]
 unstable-custom-transports = ["iroh/unstable-custom-transports"]
 tor-transport = [
     "net",

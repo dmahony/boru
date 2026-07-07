@@ -75,18 +75,18 @@ fn bootstrap_peers() -> Vec<EndpointId> {
 }
 ```
 
-The `examples/chat.rs` demo demonstrates a Tor-backed gossip chat application. It bootstraps Tor
-via Arti, creates an iroh endpoint with a Tor hidden-service custom transport, and provides a
-TUI for sending and receiving signed messages over gossip topics. Peers discover each other
-through Tor tickets (base32-encoded topic+peer addresses exchanged out-of-band).
+The `examples/chat.rs` demo runs over direct iroh connectivity by default. It prints a base32 ticket containing the topic and endpoint addresses, so peers can join without Tor. If you want Tor hidden services instead, build with `--features tor-transport` and pass `--tor`.
 
 To run two peers:
 ```text
 # Terminal 1 - create a room
-cargo run --example chat --features tor-transport -- open
+cargo run --features examples --example chat -- open
 
 # Terminal 2 - join with the printed ticket
-cargo run --example chat --features tor-transport -- join <ticket>
+cargo run --features examples --example chat -- join <ticket>
+
+# Optional Tor mode
+cargo run --features "examples tor-transport" --example chat -- --tor open
 ```
 
 # License

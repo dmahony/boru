@@ -207,7 +207,7 @@ mod tor_transport_impl {
             Self {
                 endpoint_id,
                 tor_client,
-                service_port: if service_port == 0 { 9735 } else { service_port },
+                service_port: if service_port == 0 { 80 } else { service_port },
                 local_peer_addr: Watchable::new(None),
             }
         }
@@ -275,20 +275,48 @@ mod tor_transport_impl {
                 .map_err(|e| io::Error::other(e.to_string()))?
                 .ok_or_else(|| io::Error::other("tor onion service disabled"))?;
             let (service, rend_requests) = launched;
-                let onion = service
+            let onion = service
                 .onion_address()
                 .ok_or_else(|| io::Error::other("tor onion service has no address"))?;
             let onion = onion.display_unredacted().to_string();
             let local_custom_addr = self
                 .local_custom_addr(&onion)
                 .map_err(|e| io::Error::other(e.to_string()))?;
-            let _ = self
-                .local_peer_addr
-                .set(Some(TorPeerAddr::new(
-                    self.endpoint_id,
-                    onion.clone(),
-                    self.service_port,
-                ).map_err(|e| io::Error::other(e.to_string()))?));
+
+            tracing::info!(
+                endpoint = %self.endpoint_id.fmt_short(),
+                onion = %onion,
+                port = self.service_port,
+                "tor onion service launched"
+            );
+
+            let service_for_watch = Arc::clone(&service);
+            let local_peer_addr = self.local_peer_addr.clone();
+            let endpoint_id = self.endpoint_id;
+            let onion_for_watch = onion.clone();
+            let service_port = self.service_port;
+            tokio::spawn(async move {
+                tracing::debug!(
+                    endpoint = %endpoint_id.fmt_short(),
+                    onion = %onion_for_watch,
+                    port = service_port,
+                    "waiting for tor onion service to become reachable"
+                );
+                let mut status_events = service_for_watch.status_events();
+                while !service_for_watch.status().state().is_fully_reachable() {
+                    if status_events.next().await.is_none() {
+                        break;
+                    }
+                }
+                let peer_addr = TorPeerAddr::new(endpoint_id, onion_for_watch, service_port)
+                    .expect("valid Tor peer addr");
+                tracing::info!(
+                    endpoint = %endpoint_id.fmt_short(),
+                    peer = %peer_addr,
+                    "tor onion service is reachable"
+                );
+                let _ = local_peer_addr.set(Some(peer_addr));
+            });
 
             let local_addrs = n0_watcher::Watchable::new(vec![local_custom_addr.clone()]);
             let (incoming_tx, incoming_rx) = unbounded_channel();
@@ -384,9 +412,11 @@ mod tor_transport_impl {
             if !self.is_valid_send_addr(dst) {
                 return Poll::Ready(Err(io::Error::other("invalid Tor destination address")));
             }
+            let src = src.cloned().unwrap_or_else(|| self.local_custom_addr.clone());
+            tracing::debug!(dst = %dst, src = %src, bytes = transmit.contents.len(), "queueing tor transport packet");
             let packet = OutgoingPacket {
                 dst: dst.clone(),
-                src: src.cloned().unwrap_or_else(|| self.local_custom_addr.clone()),
+                src,
                 payload: transmit.contents.to_vec(),
             };
             self.tx
@@ -411,6 +441,7 @@ mod tor_transport_impl {
     async fn send_packet(tor_client: &TorClient<PreferredRuntime>, packet: OutgoingPacket) -> io::Result<()> {
         let (onion, port) = TorPeerAddr::decode_custom_addr(&packet.dst)
             .map_err(|e| io::Error::other(e.to_string()))?;
+        tracing::debug!(dst = %packet.dst, onion = %onion, port, bytes = packet.payload.len(), "opening tor connection for packet");
         let mut stream = tor_client
             .connect((onion.as_str(), port))
             .await
@@ -419,6 +450,7 @@ mod tor_transport_impl {
         AsyncWriteExt::shutdown(&mut stream)
             .await
             .map_err(|e| io::Error::other(e.to_string()))?;
+        tracing::debug!(dst = %packet.dst, "tor packet sent");
         Ok(())
     }
 
@@ -466,11 +498,13 @@ mod tor_transport_impl {
         incoming_tx: UnboundedSender<IncomingPacket>,
         local_custom_addr: CustomAddr,
     ) -> io::Result<()> {
+        tracing::debug!(peer = %local_custom_addr, "accepting tor rendezvous stream");
         let mut stream = stream_request
             .accept(Connected::new_empty())
             .await
             .map_err(|e| io::Error::other(e.to_string()))?;
         let (src, payload) = read_frame(&mut stream).await?;
+        tracing::debug!(src = %src, bytes = payload.len(), "received tor packet");
         let _ = incoming_tx.send(IncomingPacket { src, payload });
         let _ = local_custom_addr;
         Ok(())
