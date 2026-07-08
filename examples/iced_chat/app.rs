@@ -648,9 +648,10 @@ impl IcedChat {
 
     fn view_chat_log(&self) -> iced::widget::Scrollable<'_, AppMessage> {
         use iced::widget::{scrollable, text, Column, Row};
-        use iced::Color;
+        use iced::widget::text::Wrapping;
+        use iced::{Color, Length};
 
-        let mut col = Column::new().spacing(2).width(iced::Length::Fill);
+        let mut col = Column::new().spacing(2).width(Length::Fill);
 
         for entry in &self.entries {
             let (label_c, body_c) = match entry.kind {
@@ -669,9 +670,14 @@ impl IcedChat {
             };
             let line = Row::new()
                 .push(text(format!("[{}]", entry.label)).color(label_c))
-                .push(text(format!(" {}", entry.body)).color(body_c))
+                .push(
+                    text(format!(" {}", entry.body))
+                        .color(body_c)
+                        .wrapping(Wrapping::Word)
+                        .width(Length::Fill),
+                )
                 .spacing(0)
-                .width(iced::Length::Fill);
+                .width(Length::Fill);
             col = col.push(line);
         }
 
