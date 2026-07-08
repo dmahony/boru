@@ -192,6 +192,8 @@ enum AppMessage {
     CopyToClipboard(String),
     NetEvent(NetEvent),
     FriendEvent(FriendEvent),
+    /// Delete a room from history (home screen delete or /leave).
+    DeleteRoom(TopicId),
 }
 
 // ── App state ─────────────────────────────────────────────────────────
@@ -784,6 +786,12 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
             return Task::none();
         }
         AppMessage::CopyToClipboard(text) => return clipboard::write(text),
+        AppMessage::DeleteRoom(topic) => {
+            // Remove from history and persist
+            state.room_history.remove(&topic);
+            let _ = state.room_history.save();
+            return Task::none();
+        },
     }
 }
 
@@ -847,16 +855,26 @@ fn view_chat_list(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Rend
                 &room.last_preview
             };
 
+            let delete_btn = button("×")
+                .on_press(AppMessage::DeleteRoom(topic))
+                .padding(4);
+
             let row_btn = button(
-                column![
-                    row![text(display_name).size(14).width(Length::Fill)],
-                    row![text(preview)
-                        .size(11)
-                        .color(Color::from_rgb(0.5, 0.5, 0.5))
-                        .width(Length::Fill)],
+                row![
+                    column![
+                        row![text(display_name).size(14).width(Length::Fill)],
+                        row![text(preview)
+                            .size(11)
+                            .color(Color::from_rgb(0.5, 0.5, 0.5))
+                            .width(Length::Fill)],
+                    ]
+                    .spacing(2)
+                    .padding(8)
+                    .width(Length::Fill),
+                    delete_btn,
                 ]
-                .spacing(2)
-                .padding(8),
+                .spacing(4)
+                .align_y(Alignment::Center),
             )
             .on_press(AppMessage::OpenRoom(topic))
             .width(Length::Fill)
@@ -1157,8 +1175,36 @@ fn handle_send(state: &mut AppState) {
     }
     if trimmed == "/help" {
         state.push_system(
-            "Commands:  /send <path> — share a file  |  /download — fetch pending file  |  /help — this help  |  /friend add <pk> [alias] — track friend  |  /friend remove <pk|alias> — remove friend  |  /friend list — list friends".into(),
+            "Commands:  /send <path> — share a file  |  /download — fetch pending file  |  /leave — leave and delete from history  |  /help — this help  |  /friend add <pk> [alias] — track friend  |  /friend remove <pk|alias> — remove friend  |  /friend list — list friends".into(),
         );
+        return;
+    }
+
+    // ── Leave room / delete from history ──
+    if trimmed == "/leave" {
+        let topic_str = state.topic.clone();
+        if let Ok(topic) = TopicId::from_str(&topic_str) {
+            // Broadcast Goodbye (best-effort)
+            if let Some(ref sender) = state.sender {
+                if let Ok(encoded) = SignedMessage::sign_and_encode(
+                    &state.secret_key,
+                    &Message::Goodbye,
+                ) {
+                    let sender = sender.clone();
+                    task::spawn(async move { sender.broadcast(encoded).await.ok(); });
+                }
+            }
+            // Remove room from history
+            state.room_history.remove(&topic);
+            let _ = state.room_history.save();
+        }
+        // Leave the room and go back to chat list
+        if let Some(handle) = state.forward_handle.take() {
+            handle.abort();
+        }
+        state.sender = None;
+        state.messages.clear();
+        state.screen = Screen::ChatList;
         return;
     }
 

@@ -161,6 +161,8 @@ pub enum AppMessage {
     FriendAdded { fid: String, label: String, was_new: bool },
     FriendRemoved { label: String },
     FriendListResult(Vec<(String, String)>),
+    /// Delete a room from history (home screen delete or /leave).
+    DeleteRoom(TopicId),
 }
 
 impl IcedChat {
@@ -509,6 +511,29 @@ impl IcedChat {
                     return iced::Task::none();
                 }
 
+                // ── Leave room / delete from history ──
+                if trimmed == "/leave" {
+                    let topic = self.topic;
+                    // Broadcast Goodbye (best-effort)
+                    if let Some(ref sender) = self.sender {
+                        if let Ok(encoded) = SignedMessage::sign_and_encode(
+                            &self.secret_key,
+                            &crate::Message::Goodbye,
+                        ) {
+                            let sender = sender.clone();
+                            task::spawn(async move { sender.broadcast(encoded).await.ok(); });
+                        }
+                    }
+                    // Remove room from history (not just go back — delete it)
+                    self.room_history.remove(&topic);
+                    self.room_history_dirty = true;
+                    self.persist_room_history();
+                    // Leave the room and go back to chat list
+                    self.leave_current_room();
+                    self.screen = Screen::ChatList;
+                    return iced::Task::none();
+                }
+
                 // ── Friend commands ──────────────────
                 if let Some(pubkey_str) = trimmed.strip_prefix("/friend add ") {
                     let pubkey_str = pubkey_str.trim().to_string();
@@ -753,6 +778,14 @@ impl IcedChat {
 
             AppMessage::FriendRemoved { label } => {
                 self.push_system(format!("Removed friend: {label}"));
+                iced::Task::none()
+            }
+
+            AppMessage::DeleteRoom(topic) => {
+                // Remove from history and persist
+                self.room_history.remove(&topic);
+                self.room_history_dirty = true;
+                self.persist_room_history();
                 iced::Task::none()
             }
 
@@ -1001,7 +1034,15 @@ impl IcedChat {
         }
 
         // ── Recent chats list ──
-        content = content.push(text("Recent Chats").size(16));
+        content = content.push(
+            row![
+                text("Recent Chats").size(16).width(Length::Fill),
+                text("(click room to open, click × to remove)")
+                    .size(10)
+                    .color(Color::from_rgb(0.5, 0.5, 0.5)),
+            ]
+            .spacing(4),
+        );
 
         if self.room_history.is_empty() {
             content = content.push(
@@ -1041,19 +1082,27 @@ impl IcedChat {
         };
 
         let btn = button(
-            column![
-                row![
-                    text(display_name).size(14).width(Length::Fill),
-                ],
-                row![
-                    text(preview)
-                        .size(11)
-                        .color(Color::from_rgb(0.5, 0.5, 0.5))
-                        .width(Length::Fill),
-                ],
+            row![
+                column![
+                    row![
+                        text(display_name).size(14).width(Length::Fill),
+                    ],
+                    row![
+                        text(preview)
+                            .size(11)
+                            .color(Color::from_rgb(0.5, 0.5, 0.5))
+                            .width(Length::Fill),
+                    ],
+                ]
+                .spacing(2)
+                .padding(8)
+                .width(Length::Fill),
+                button("×")
+                    .on_press(AppMessage::DeleteRoom(topic))
+                    .padding(4),
             ]
-            .spacing(2)
-            .padding(8),
+            .spacing(4)
+            .align_y(iced::Alignment::Center),
         )
         .on_press(AppMessage::RoomSelected(topic))
         .width(Length::Fill)
@@ -1184,12 +1233,15 @@ impl IcedChat {
             .push(text(""))
             .push(text("/send <path>    Share a file with peers"))
             .push(text("/download       Fetch the last shared file"))
+            .push(text("/leave          Leave this room and delete from history"))
             .push(text("/help           Toggle this menu"))
             .push(text("/friend add <pk> [alias]  Track a friend's online status"))
             .push(text("/friend remove <pk|alias> Stop tracking a friend"))
             .push(text("/friend list    List tracked friends and their status"))
             .push(text(""))
             .push(text("Type a message and press Enter to send."))
+            .push(text(""))
+            .push(text("Tip: click × on a room in the chat list to remove it."))
             .push(text(""))
             .push(button("Close").on_press(AppMessage::ToggleHelp))
             .spacing(4)
