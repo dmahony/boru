@@ -119,19 +119,10 @@ cargo run --example chat -- open
 cargo run --features "examples tor-transport" --example chat -- --tor open
 ```
 
-## GUI frontends (iced)
+## GUI frontend (iced)
 
-Two alternative **GUI** frontends built with [iced](https://iced.rs) are
+A **GUI** frontend built with [iced](https://iced.rs) is
 available behind the `gui` feature flag.
-
-**`chat-gui`** (single-file, monolithic):
-```text
-cargo chat-gui open                    # open a room
-cargo chat-gui join <ticket>           # join a room
-
-# Long form
-cargo run --features gui --example chat-gui -- open
-```
 
 **`iced-chat`** (modular, split across `main.rs` + `app.rs`):
 ```text
@@ -142,12 +133,10 @@ cargo iced-chat join <ticket>          # join a room
 cargo run --features gui --example iced_chat -- open
 ```
 
-Both GUIs replicate the full chat feature set: text messages, file
+The GUI replicates the full chat feature set: text messages, file
 sharing (`/send <path>`, `/download`), dark mode toggle, and a
 scrolling chat log.  Networking runs in background tokio tasks with
-events flowing into the iced event loop via a channel.  The
-`iced_chat` variant has a cleaner module structure for readers who
-prefer the separation of concerns.
+events flowing into the iced event loop via a channel.
 
 # License
 

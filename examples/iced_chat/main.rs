@@ -237,6 +237,7 @@ fn main() -> Result<()> {
         friends,
         room_history,
         tor_reconnect_rx_opt,
+        notice,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
         use std::net::{Ipv4Addr, SocketAddrV4};
@@ -308,6 +309,12 @@ fn main() -> Result<()> {
         };
         println!("> endpoint: {}", endpoint.id());
 
+        let notice = if use_tor {
+            "Tor-backed custom transport is operational.".to_string()
+        } else {
+            "Direct iroh transport is operational.".to_string()
+        };
+
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let blob_store = MemStore::new();
         let blobs_protocol = BlobsProtocol::new(&blob_store, None);
@@ -365,6 +372,7 @@ fn main() -> Result<()> {
             friends,
             room_history,
             use_tor.then(|| Arc::new(Mutex::new(tor_reconnect_rx))),
+            notice,
         ))
     })?;
 
@@ -386,6 +394,7 @@ fn main() -> Result<()> {
             Arc::clone(&friend_events_rx),
             tor_reconnect_rx_opt,
             initial_topic,
+            notice,
         ),
         initial_topic,
     )));
@@ -414,7 +423,13 @@ fn main() -> Result<()> {
             Arc::clone(&state.friend_events_rx),
         )
     })
-    .theme(|_: &IcedChat| Some(iced::Theme::Dark))
+    .theme(|state: &IcedChat| {
+        if state.dark_mode {
+            Some(iced::Theme::Dark)
+        } else {
+            Some(iced::Theme::Light)
+        }
+    })
     .run()
     .unwrap_or_else(|err| {
         eprintln!("Failed to launch iced GUI: {err}");

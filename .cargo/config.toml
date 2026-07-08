@@ -2,12 +2,9 @@
 #
 # Run with:  cargo chat open
 #            cargo chat join <ticket>
-#            cargo chat-gui open
-#            cargo chat-gui join <ticket>
 #            cargo iced-chat open
 #            cargo iced-chat join <ticket>
 
 [alias]
 chat = "run --features examples --example chat --"
-chat-gui = "run --features gui --example chat-gui --"
 iced-chat = "run --features gui --example iced_chat --"

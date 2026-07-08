@@ -213,12 +213,13 @@ name = "setup"
 required-features = ["examples"]
 
 [[example]]
-name = "chat-gui"
-required-features = ["gui"]
-
-[[example]]
 name = "iced_chat"
 required-features = ["gui"]
+
+[[test]]
+name = "interop_two_frontends"
+path = "tests/interop_two_frontends.rs"
+required-features = ["net", "test-utils"]
 
 [package.metadata.docs.rs]
 all-features = true

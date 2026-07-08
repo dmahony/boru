@@ -153,6 +153,10 @@ pub struct IcedChat {
     typing_peers: HashMap<PublicKey, Instant>,
     /// Last time we broadcast a typing indicator, for throttling.
     last_typing_sent: Option<Instant>,
+    /// Whether dark mode is enabled.
+    pub dark_mode: bool,
+    /// Transport notice displayed in the header (e.g. "Direct iroh transport is operational").
+    pub notice: String,
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +211,10 @@ pub enum AppMessage {
     ConnMonitorTick,
     /// Status update from the Tor reconnection monitor.
     TorReconnect(String),
+    /// Toggle dark mode on/off.
+    ToggleDark(bool),
+    /// Copy text to the system clipboard.
+    CopyToClipboard(String),
 }
 
 impl IcedChat {
@@ -228,6 +236,7 @@ impl IcedChat {
         friend_events_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
         tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
         initial_topic: Option<TopicId>,
+        notice: String,
     ) -> Self {
         Self {
             screen: Screen::ChatList,
@@ -266,6 +275,8 @@ impl IcedChat {
             tor_reconnect_rx,
             typing_peers: HashMap::new(),
             last_typing_sent: None,
+            dark_mode: false,
+            notice,
         }
     }
 
@@ -1144,6 +1155,15 @@ impl IcedChat {
                 self.push_system(msg);
                 iced::Task::none()
             }
+
+            AppMessage::ToggleDark(enabled) => {
+                self.dark_mode = enabled;
+                iced::Task::none()
+            }
+
+            AppMessage::CopyToClipboard(text) => {
+                return iced::clipboard::write(text);
+            }
         }
     }
 
@@ -1649,7 +1669,8 @@ impl IcedChat {
 
     fn view_chat_header(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, column, row, text};
-        use iced::Length;
+        use iced::widget::text::Wrapping;
+        use iced::{Color, Length};
 
         let room_name = self
             .room_history
@@ -1657,10 +1678,13 @@ impl IcedChat {
             .map(|r| r.display_name())
             .unwrap_or_else(|| format!("Room: {}", self.topic));
 
-        column![
+        let mut header = column![
             row![
                 button(" ← ").on_press(AppMessage::GoToChatList),
                 text(room_name).size(18).width(Length::Fill),
+                button(text("☀").size(14))
+                    .on_press(AppMessage::ToggleDark(!self.dark_mode))
+                    .padding(4),
             ]
             .spacing(4),
             text(format!(
@@ -1669,14 +1693,28 @@ impl IcedChat {
             ))
             .size(11),
             text(format!(
-                "Relay: {}  |  Ticket: {}",
+                "Relay: {}  |  Transport: {}",
                 fmt_relay_mode(&self.relay_mode),
-                self.ticket_str
+                self.notice,
             ))
             .size(10),
         ]
-        .spacing(2)
-        .into()
+        .spacing(2);
+
+        if !self.ticket_str.is_empty() {
+            header = header.push(
+                column![
+                    text("Ticket (click to copy):")
+                        .size(10)
+                        .color(Color::from_rgb(0.5, 0.5, 0.5)),
+                    text(&self.ticket_str)
+                        .size(10)
+                        .wrapping(Wrapping::Word),
+                ],
+            );
+        }
+
+        header.into()
     }
 
     fn view_chat_log(&self) -> iced::widget::Scrollable<'_, AppMessage> {
