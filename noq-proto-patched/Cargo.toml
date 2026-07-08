@@ -57,7 +57,7 @@ __all_without_fips = [
     "bloom",
     "tracing-log",
 ]
-__rustls-post-quantum-test = []
+__rustls-post-quantum-test = ["aws-lc-rs"]
 arbitrary = ["dep:arbitrary"]
 aws-lc-rs = [
     "dep:aws-lc-rs",

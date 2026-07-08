@@ -31,6 +31,15 @@ pub mod tor_transport;
 #[cfg(feature = "net")]
 pub mod chat_core;
 
+/// Frontend callback trait — decoupled from the core state machine.
+///
+/// The [`ChatCallbacks`] trait is the interface that frontend state structs
+/// implement to receive typed network-event callbacks.  Extracted into its
+/// own module so frontends (TUI, iced GUI, headless) can use it without
+/// depending on the full `chat_core` implementation.
+#[cfg(feature = "net")]
+pub mod chat_callbacks;
+
 /// Durable friends list storage for the chat frontends.
 #[cfg(feature = "net")]
 pub mod friends;
@@ -49,4 +58,18 @@ pub mod room;
 #[cfg(feature = "net")]
 pub mod room_history;
 
+/// Minimal small-room messaging using direct QUIC connections.
+///
+/// Replaces the gossip broadcast tree for rooms with ≤10 members.
+/// Broadcasts messages over direct connections and measures latency.
+#[cfg(feature = "net")]
+pub mod small_room;
+
 pub use proto::TopicId;
+
+/// Room metadata and roster documents synced via the gossip mesh.
+///
+/// Each room has two logical documents: metadata (name, description, rules)
+/// and a roster (member set). Both are broadcast over the gossip topic.
+#[cfg(feature = "net")]
+pub mod room_docs;

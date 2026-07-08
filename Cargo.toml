@@ -90,6 +90,9 @@ noq = { version = "1", optional = true, default-features = false }
 # test-utils dependencies (optional)
 humantime-serde = { version = "1.1.1", optional = true }
 
+# post-quantum TLS (optional)
+noq-proto = { path = "noq-proto-patched", optional = true }
+
 # simulator dependencies (optional)
 clap = { version = "4", features = ["derive"], optional = true }
 toml = { version = "1.1.2", optional = true }
@@ -124,6 +127,7 @@ iroh-blobs = { version = "0.103", default-features = false }
 testresult = "0.4.1"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 n0-tracing-test = "0.3"
+tempfile = "3"
 url = "2.4.0"
 rand = { version = "0.10", features = ["chacha"] }
 
@@ -157,6 +161,11 @@ simulator = [
     "dep:comfy-table",
 ]
 metrics = ["iroh-metrics/metrics"]
+post-quantum-tls = [
+    "dep:noq-proto",
+    "net",
+    "noq-proto?/__rustls-post-quantum-test",
+]
 examples = ["net", "dep:ratatui", "dep:crossterm"]
 gui = ["net", "dep:iced", "dep:tokio"]
 unstable-custom-transports = ["iroh/unstable-custom-transports"]
@@ -180,6 +189,11 @@ tor-transport = [
 name = "sim"
 path = "tests/sim.rs"
 required-features = ["test-utils"]
+
+[[test]]
+name = "room_e2e"
+path = "tests/room_e2e.rs"
+required-features = ["net", "test-utils"]
 
 [[bin]]
 name = "sim"

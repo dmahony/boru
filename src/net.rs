@@ -527,15 +527,27 @@ impl Actor {
         let conn_id = conn.stable_id();
 
         let queue = match self.peers.entry(peer_id) {
-            Entry::Occupied(mut entry) => entry.get_mut().accept_conn(send_tx, conn_id),
+            Entry::Occupied(mut entry) => entry.get_mut().accept_conn(send_tx, conn_id, origin),
             Entry::Vacant(entry) => {
                 entry.insert(PeerState::Active {
                     active_send_tx: send_tx,
                     active_conn_id: conn_id,
+                    active_conn_origin: origin,
                     other_conns: Vec::new(),
                 });
-                Vec::new()
+                Some(Vec::new())
             }
+        };
+
+        let Some(queue) = queue else {
+            debug!(
+                peer = %peer_id.fmt_short(),
+                ?origin,
+                "session collision: rejecting new connection, keeping existing one",
+            );
+            // Close the rejected connection so the remote peer gets a signal.
+            conn.close(0u32.into(), b"redundant connection");
+            return;
         };
 
         let max_message_size = self.state.max_message_size();
@@ -764,40 +776,78 @@ enum PeerState {
     Active {
         active_send_tx: mpsc::Sender<ProtoMessage>,
         active_conn_id: ConnId,
+        active_conn_origin: ConnOrigin,
         other_conns: Vec<ConnId>,
     },
 }
 
 impl PeerState {
+    /// The heuristic to decide whether a new connection should replace an existing active one.
+    ///
+    /// Returns `true` when the new session should replace the old one (current behavior),
+    /// `false` when the old session should stay and the new one should be rejected.
+    ///
+    /// The heuristic prefers Dial connections (our outgoing connections) over Accept
+    /// connections (incoming). A Dial connection is one we intentionally initiated;
+    /// an Accept connection is the remote peer doing the same thing. When both are the
+    /// same origin, prefer the newer connection (the peer simply reconnected).
+    fn should_keep_new_session(old_origin: ConnOrigin, new_origin: ConnOrigin) -> bool {
+        match (old_origin, new_origin) {
+            // Both sides initiated by the same party: prefer the newer connection.
+            // The remote peer likely simply reconnected.
+            (ConnOrigin::Accept, ConnOrigin::Accept) => true,
+            (ConnOrigin::Dial, ConnOrigin::Dial) => true,
+            // Our outgoing (Dial) connection is more intentional than an incoming (Accept):
+            // we decided to connect to this peer, so replace the passive Accept with
+            // our active Dial.
+            (ConnOrigin::Accept, ConnOrigin::Dial) => true,
+            // We already have an outgoing connection we initiated. The incoming
+            // connection from the same peer is redundant — keep our established
+            // connection and reject the new one.
+            (ConnOrigin::Dial, ConnOrigin::Accept) => false,
+        }
+    }
+
     fn accept_conn(
         &mut self,
         send_tx: mpsc::Sender<ProtoMessage>,
         conn_id: ConnId,
-    ) -> Vec<ProtoMessage> {
+        origin: ConnOrigin,
+    ) -> Option<Vec<ProtoMessage>> {
         match self {
             PeerState::Pending { queue } => {
                 let queue = std::mem::take(queue);
                 *self = PeerState::Active {
                     active_send_tx: send_tx,
                     active_conn_id: conn_id,
+                    active_conn_origin: origin,
                     other_conns: Vec::new(),
                 };
-                queue
+                Some(queue)
             }
             PeerState::Active {
                 active_send_tx,
                 active_conn_id,
+                active_conn_origin: old_origin,
                 other_conns,
             } => {
-                // We already have an active connection. We keep the old connection intact,
-                // but only use the new connection for sending from now on.
-                // By dropping the `send_tx` of the old connection, the send loop part of
-                // the `connection_loop` of the old connection will terminate, which will also
-                // notify the peer that the old connection may be dropped.
-                other_conns.push(*active_conn_id);
-                *active_send_tx = send_tx;
-                *active_conn_id = conn_id;
-                Vec::new()
+                if Self::should_keep_new_session(*old_origin, origin) {
+                    // Keep the new connection, demote the old one.
+                    // By dropping the `send_tx` of the old connection, the send loop of
+                    // the old connection_loop will terminate, which also notifies the peer
+                    // that the old connection may be dropped.
+                    other_conns.push(*active_conn_id);
+                    *active_send_tx = send_tx;
+                    *active_conn_id = conn_id;
+                    *old_origin = origin;
+                    Some(Vec::new())
+                } else {
+                    // Keep the old connection, reject the new one.
+                    // Dropping `send_tx` closes the channel so the caller's connection_loop
+                    // won't be spawned meaningfully — the caller is responsible for closing
+                    // the connection.
+                    None
+                }
             }
         }
     }

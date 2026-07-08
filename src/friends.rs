@@ -6,12 +6,12 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::{BufWriter, Write},
     path::{Path, PathBuf},
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::chat_core::atomic_write::atomic_write_json;
 use iroh::PublicKey;
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
@@ -199,57 +199,8 @@ impl FriendsStore {
                 "friends store has no data directory bound to it",
             ));
         }
-
-        fs::create_dir_all(data_dir).with_std_context(|_| {
-            format!("failed to create friends data dir {}", data_dir.display())
-        })?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700));
-        }
-
         let path = self.file_path();
-        let tmp_path = path.with_extension("json.tmp");
-        let encoded = serde_json::to_vec_pretty(self).std_context("encode friends store")?;
-
-        {
-            let file = fs::File::create(&tmp_path).with_std_context(|_| {
-                format!("failed to create temp friends file {}", tmp_path.display())
-            })?;
-            let mut writer = BufWriter::new(file);
-            writer.write_all(&encoded).with_std_context(|_| {
-                format!("failed to write temp friends file {}", tmp_path.display())
-            })?;
-            writer.write_all(b"\n").with_std_context(|_| {
-                format!(
-                    "failed to finalize temp friends file {}",
-                    tmp_path.display()
-                )
-            })?;
-            writer.flush().with_std_context(|_| {
-                format!("failed to flush temp friends file {}", tmp_path.display())
-            })?;
-            writer.get_ref().sync_all().with_std_context(|_| {
-                format!("failed to sync temp friends file {}", tmp_path.display())
-            })?;
-        }
-
-        if path.exists() {
-            fs::remove_file(&path).with_std_context(|_| {
-                format!("failed to remove old friends file {}", path.display())
-            })?;
-        }
-        fs::rename(&tmp_path, &path)
-            .with_std_context(|_| format!("failed to replace friends file {}", path.display()))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-        }
-
+        atomic_write_json(&path, self, "friends store")?;
         Ok(path)
     }
 

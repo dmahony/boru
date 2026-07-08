@@ -7,11 +7,11 @@
 
 use std::{
     fs,
-    io::{BufWriter, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::chat_core::atomic_write::atomic_write_json;
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
@@ -159,69 +159,8 @@ impl RoomHistoryStore {
                 "room history store has no data directory bound to it",
             ));
         }
-
-        fs::create_dir_all(data_dir).with_std_context(|_| {
-            format!(
-                "failed to create room history data dir {}",
-                data_dir.display()
-            )
-        })?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700));
-        }
-
         let path = self.file_path();
-        let tmp_path = path.with_extension("json.tmp");
-        let encoded =
-            serde_json::to_vec_pretty(self).std_context("encode room history store")?;
-
-        {
-            let file = fs::File::create(&tmp_path).with_std_context(|_| {
-                format!(
-                    "failed to create temp rooms file {}",
-                    tmp_path.display()
-                )
-            })?;
-            let mut writer = BufWriter::new(file);
-            writer
-                .write_all(&encoded)
-                .with_std_context(|_| {
-                    format!("failed to write temp rooms file {}", tmp_path.display())
-                })?;
-            writer.write_all(b"\n").with_std_context(|_| {
-                format!(
-                    "failed to finalize temp rooms file {}",
-                    tmp_path.display()
-                )
-            })?;
-            writer.flush().with_std_context(|_| {
-                format!("failed to flush temp rooms file {}", tmp_path.display())
-            })?;
-            writer.get_ref().sync_all().with_std_context(|_| {
-                format!(
-                    "failed to sync temp rooms file {}",
-                    tmp_path.display()
-                )
-            })?;
-        }
-
-        if path.exists() {
-            fs::remove_file(&path).with_std_context(|_| {
-                format!("failed to remove old rooms file {}", path.display())
-            })?;
-        }
-        fs::rename(&tmp_path, &path)
-            .with_std_context(|_| format!("failed to replace rooms file {}", path.display()))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-        }
-
+        atomic_write_json(&path, self, "room history store")?;
         Ok(path)
     }
 
@@ -238,12 +177,7 @@ impl RoomHistoryStore {
     /// Add or update a room entry.  If the topic already exists, updates
     /// its name and bumps last_seen.  Otherwise inserts a new entry
     /// (as newest).
-    pub fn upsert(
-        &mut self,
-        topic: TopicId,
-        name: impl Into<String>,
-        is_owner: bool,
-    ) {
+    pub fn upsert(&mut self, topic: TopicId, name: impl Into<String>, is_owner: bool) {
         if let Some(existing) = self.find_mut(&topic) {
             existing.touch();
             let n = name.into();
@@ -251,7 +185,8 @@ impl RoomHistoryStore {
                 existing.name = n;
             }
         } else {
-            self.rooms.push(RoomHistoryEntry::new(topic, name, is_owner));
+            self.rooms
+                .push(RoomHistoryEntry::new(topic, name, is_owner));
         }
         // Sort: newest first
         self.rooms.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));

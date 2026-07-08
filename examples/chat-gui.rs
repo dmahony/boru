@@ -17,6 +17,7 @@
 //! ```
 
 use std::{
+    collections::{HashMap, HashSet},
     env,
     net::{Ipv4Addr, SocketAddrV4},
     path::{Path, PathBuf},
@@ -28,14 +29,13 @@ use std::{
 use clap::Parser;
 use iced::widget::text::Wrapping;
 use iced::{
-    border,
-    clipboard,
+    border, clipboard,
     widget::{button, column, container, row, scrollable, text, text_input, toggler},
     Alignment, Color, Element, Length, Subscription, Task, Theme,
 };
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr,
-    PublicKey, RelayMode, RelayUrl, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, PublicKey,
+    RelayMode, RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
 use iroh_gossip::{
@@ -177,7 +177,10 @@ enum AppMessage {
     // ── Navigation ──
     GoToChatList,
     OpenRoom(TopicId),
-    RoomOpened { topic: TopicId, ticket: String },
+    RoomOpened {
+        topic: TopicId,
+        ticket: String,
+    },
     RoomJoinFailed(String),
     // ── Chat list ──
     JoinTicketInputChanged(String),
@@ -229,6 +232,14 @@ struct AppState {
     peer_count: usize,
     dark_mode: bool,
     pending_file: Option<(String, String)>,
+    /// Set of peer PublicKeys currently connected as gossip neighbors.
+    neighbors: HashSet<PublicKey>,
+    /// Number of peers reachable via a direct (hole-punched) connection.
+    direct_peers: usize,
+    /// Number of peers connected through a relay server.
+    relayed_peers: usize,
+    /// Counter for periodic connection refresh (decremented each Tick, ~60s at 50ms).
+    conn_refresh_counter: u32,
 
     // ── Chat list state ──
     room_history: iroh_gossip::room_history::RoomHistoryStore,
@@ -298,18 +309,16 @@ fn main() -> Result<()> {
             };
             Some(t)
         }
-        Some(Command::Join { ticket }) => {
-            match Ticket::from_str(ticket) {
-                Ok(t) => {
-                    println!("> joining chat room for topic {}", t.topic);
-                    Some(t.topic)
-                }
-                Err(e) => {
-                    eprintln!("error: failed to parse ticket: {e}");
-                    None
-                }
+        Some(Command::Join { ticket }) => match Ticket::from_str(ticket) {
+            Ok(t) => {
+                println!("> joining chat room for topic {}", t.topic);
+                Some(t.topic)
             }
-        }
+            Err(e) => {
+                eprintln!("error: failed to parse ticket: {e}");
+                None
+            }
+        },
         None => {
             println!("> no subcommand — showing chat list");
             None
@@ -454,6 +463,10 @@ fn main() -> Result<()> {
         relay_info: fmt_relay_mode(&relay_mode),
         connected: false,
         peer_count: 0,
+        neighbors: HashSet::new(),
+        direct_peers: 0,
+        relayed_peers: 0,
+        conn_refresh_counter: 0,
         dark_mode: false,
         pending_file: None,
         room_history,
@@ -491,11 +504,9 @@ fn main() -> Result<()> {
             Theme::Light
         }
     })
-    .title(|state: &AppState| {
-        match state.screen {
-            Screen::ChatList => "Iroh Gossip Chat — Inbox".to_string(),
-            Screen::Chat { .. } => format!("iroh-gossip Chat — {}", state.local_label),
-        }
+    .title(|state: &AppState| match state.screen {
+        Screen::ChatList => "Iroh Gossip Chat — Inbox".to_string(),
+        Screen::Chat { .. } => format!("iroh-gossip Chat — {}", state.local_label),
     })
     .run()
     .unwrap_or_else(|err| {
@@ -526,7 +537,10 @@ async fn subscribe_to_topic(
         handle.abort();
     }
 
-    let sub: GossipTopic = gossip.subscribe(topic, vec![]).await.map_err(|e| e.to_string())?;
+    let sub: GossipTopic = gossip
+        .subscribe(topic, vec![])
+        .await
+        .map_err(|e| e.to_string())?;
     let (sender, receiver) = sub.split();
     *sender_out = Some(sender.clone());
 
@@ -546,8 +560,11 @@ async fn subscribe_to_topic(
     // Broadcast our presence
     let msg = SignedMessage::sign_and_encode(
         secret_key,
-        &Message::AboutMe { name: label.to_string() },
-    ).map_err(|e| e.to_string())?;
+        &Message::AboutMe {
+            name: label.to_string(),
+        },
+    )
+    .map_err(|e| e.to_string())?;
     let _ = sender.broadcast(msg).await;
 
     Ok(ticket_str)
@@ -560,8 +577,16 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
         // ── Navigation ──
         AppMessage::GoToChatList => {
             // Save current room to history
-            let preview = state.messages.last()
-                .map(|e| if e.text.len() > 60 { format!("{}…", &e.text[..60]) } else { e.text.clone() })
+            let preview = state
+                .messages
+                .last()
+                .map(|e| {
+                    if e.text.len() > 60 {
+                        format!("{}…", &e.text[..60])
+                    } else {
+                        e.text.clone()
+                    }
+                })
                 .unwrap_or_default();
             if !state.topic.is_empty() {
                 if let Ok(topic) = TopicId::from_str(&state.topic) {
@@ -597,18 +622,31 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
                     let mut fwd = None;
                     let mut sender = None;
                     let ticket_str = subscribe_to_topic(
-                        &gossip, &endpoint, topic, &sk, &label, &net_tx, &mut fwd, &mut sender,
-                    ).await?;
+                        &gossip,
+                        &endpoint,
+                        topic,
+                        &sk,
+                        &label,
+                        &net_tx,
+                        &mut fwd,
+                        &mut sender,
+                    )
+                    .await?;
                     // We can't return the JoinHandle from here, so it lives until
                     // GoToChatList or another OpenRoom replaces it.
                     // Store sender for the mapping callback.
-                    Ok::<(TopicId, String, Option<GossipSender>), String>((topic, ticket_str, sender))
+                    Ok::<(TopicId, String, Option<GossipSender>), String>((
+                        topic, ticket_str, sender,
+                    ))
                 },
                 move |result| match result {
                     Ok((topic, ticket_str, _sender)) => {
                         // The sender is stored in the closure but we need it in state.
                         // RoomOpened handler will set it up.
-                        AppMessage::RoomOpened { topic, ticket: ticket_str }
+                        AppMessage::RoomOpened {
+                            topic,
+                            ticket: ticket_str,
+                        }
                     }
                     Err(e) => AppMessage::RoomJoinFailed(e),
                 },
@@ -766,6 +804,14 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
                 state.friends_dirty = false;
             }
 
+            // Periodic connection type refresh (~60s at 50ms tick)
+            if state.conn_refresh_counter == 0 {
+                recompute_connection_counts(state);
+                state.conn_refresh_counter = 1200;
+            } else {
+                state.conn_refresh_counter -= 1;
+            }
+
             return Task::none();
         }
 
@@ -791,7 +837,7 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
             state.room_history.remove(&topic);
             let _ = state.room_history.save();
             return Task::none();
-        },
+        }
     }
 }
 
@@ -808,9 +854,12 @@ fn view(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Renderer> {
 fn view_chat_list(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Renderer> {
     let header = column![
         text("Iroh Gossip Chat").size(22),
-        text(format!("Identity: {}  |  Relay: {}", state.local_label, state.relay_info))
-            .size(11)
-            .color(Color::from_rgb(0.5, 0.5, 0.5)),
+        text(format!(
+            "Identity: {}  |  Relay: {}",
+            state.local_label, state.relay_info
+        ))
+        .size(11)
+        .color(Color::from_rgb(0.5, 0.5, 0.5)),
     ]
     .spacing(2);
 
@@ -850,7 +899,11 @@ fn view_chat_list(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Rend
             let topic = room.topic;
             let display_name = room.display_name();
             let preview = if room.last_preview.is_empty() {
-                if room.is_owner { "Created this room" } else { "Joined this room" }
+                if room.is_owner {
+                    "Created this room"
+                } else {
+                    "Joined this room"
+                }
             } else {
                 &room.last_preview
             };
@@ -884,9 +937,14 @@ fn view_chat_list(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Rend
         }
     }
 
-    let body = column![header, action_row, join_input, scrollable(list).height(Length::Fill)]
-        .spacing(8)
-        .padding(12);
+    let body = column![
+        header,
+        action_row,
+        join_input,
+        scrollable(list).height(Length::Fill)
+    ]
+    .spacing(8)
+    .padding(12);
 
     container(body)
         .width(Length::Fill)
@@ -905,11 +963,13 @@ fn view_chat_screen(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Re
     let remote_color = Color::from_rgb(0.15, 0.35, 0.85);
 
     let status_text = format!(
-        "Identity: {}\nTopic: {}\nTransport: {}\nPeers: {} known  •  connected: {}\nRelay: {}",
+        "Identity: {}\nTopic: {}\nTransport: {}\nPeers: {} known  ·  {} direct, {} relay  ·  connected: {}\nRelay: {}",
         state.local_label,
         state.topic,
         state.transport_status,
         state.peer_count,
+        state.direct_peers,
+        state.relayed_peers,
         if state.connected { "yes" } else { "no" },
         state.relay_info,
     );
@@ -917,9 +977,10 @@ fn view_chat_screen(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Re
     let back_btn = button(" ← ").on_press(AppMessage::GoToChatList);
 
     let status_panel = container(
-        column![
-            row![back_btn, text(status_text).size(13).width(Length::Fill)],
-        ]
+        column![row![
+            back_btn,
+            text(status_text).size(13).width(Length::Fill)
+        ],]
         .spacing(2),
     )
     .padding(8)
@@ -1053,9 +1114,29 @@ fn subscription(_state: &AppState) -> Subscription<AppMessage> {
 
 // ── Network event handling ────────────────────────────────────────────
 
+/// Query the iroh endpoint for each neighbor and recompute direct/relay counts.
+fn recompute_connection_counts(state: &mut AppState) {
+    let mut direct = 0usize;
+    let mut relayed = 0usize;
+    let rt = state.runtime_handle.clone();
+    for peer in &state.neighbors {
+        let has_direct = rt
+            .block_on(async { state.endpoint.remote_info(*peer).await })
+            .map(|info| info.addrs().any(|a| !a.addr().is_relay()))
+            .unwrap_or(false);
+        if has_direct {
+            direct += 1;
+        } else {
+            relayed += 1;
+        }
+    }
+    state.direct_peers = direct;
+    state.relayed_peers = relayed;
+}
+
 fn handle_net_event(state: &mut AppState, event: NetEvent) {
     match event {
-        NetEvent::Message { from, message } => match message {
+        NetEvent::Message { from, message, .. } => match message {
             Message::AboutMe { name } => {
                 state.push_system(format!("{} is now known as {name}", from.fmt_short()));
             }
@@ -1075,8 +1156,13 @@ fn handle_net_event(state: &mut AppState, event: NetEvent) {
                     name
                 ));
             }
-            Message::Goodbye => {
-                // Handled via NeighborDown
+            Message::Goodbye
+            | Message::Typing
+            | Message::ReadReceipt { .. }
+            | Message::Edit { .. }
+            | Message::Delete { .. }
+            | Message::Reaction { .. } => {
+                // Handled via NeighborDown or by the shared chat_core handler.
             }
         },
         NetEvent::NeighborUp { peer } => {
@@ -1087,6 +1173,10 @@ fn handle_net_event(state: &mut AppState, event: NetEvent) {
                 state.friends.mark_online(fid);
                 state.friends_dirty = true;
             }
+            // Track for direct-vs-relay counting
+            state.neighbors.insert(peer);
+            // Recompute direct/relay counts via the endpoint
+            recompute_connection_counts(state);
         }
         NetEvent::NeighborDown { peer } => {
             state.push_system(format!("{} left the chat", peer.fmt_short()));
@@ -1096,6 +1186,10 @@ fn handle_net_event(state: &mut AppState, event: NetEvent) {
                 state.friends.mark_offline(fid);
                 state.friends_dirty = true;
             }
+            // Remove from neighbor tracking
+            state.neighbors.remove(&peer);
+            // Recompute direct/relay counts
+            recompute_connection_counts(state);
         }
         NetEvent::Error(err) => state.push_system(format!("Error: {err}")),
         NetEvent::Closed => {
@@ -1186,12 +1280,13 @@ fn handle_send(state: &mut AppState) {
         if let Ok(topic) = TopicId::from_str(&topic_str) {
             // Broadcast Goodbye (best-effort)
             if let Some(ref sender) = state.sender {
-                if let Ok(encoded) = SignedMessage::sign_and_encode(
-                    &state.secret_key,
-                    &Message::Goodbye,
-                ) {
+                if let Ok(encoded) =
+                    SignedMessage::sign_and_encode(&state.secret_key, &Message::Goodbye)
+                {
                     let sender = sender.clone();
-                    task::spawn(async move { sender.broadcast(encoded).await.ok(); });
+                    task::spawn(async move {
+                        sender.broadcast(encoded).await.ok();
+                    });
                 }
             }
             // Remove room from history
@@ -1255,14 +1350,18 @@ fn handle_send(state: &mut AppState) {
         let resolved = if let Ok(pk) = target.parse::<PublicKey>() {
             Some((pk, FriendId::from_public_key(pk)))
         } else {
-            state.friends.iter()
+            state
+                .friends
+                .iter()
                 .find(|(_, rec)| rec.label.as_deref() == Some(&target))
                 .map(|(fid, _)| (fid.parse_public_key().ok(), fid.clone()))
                 .and_then(|(pk_opt, fid)| pk_opt.map(|pk| (pk, fid)))
         };
         match resolved {
             Some((peer, fid)) => {
-                let label = state.friends.get(&fid)
+                let label = state
+                    .friends
+                    .get(&fid)
                     .and_then(|r| r.label.clone())
                     .unwrap_or_else(|| peer.fmt_short().to_string());
                 state.friends.remove(&fid);
@@ -1285,7 +1384,9 @@ fn handle_send(state: &mut AppState) {
                     state.push_system(format!("Friends ({}):", state.friends.len()));
                     for (peer, status) in &list {
                         let fid = FriendId::from_public_key(*peer);
-                        let label = state.friends.get(&fid)
+                        let label = state
+                            .friends
+                            .get(&fid)
                             .map(|r| r.display_label(&fid))
                             .unwrap_or_else(|| peer.fmt_short().to_string());
                         let status_str = match status {
@@ -1298,6 +1399,33 @@ fn handle_send(state: &mut AppState) {
                 }
             }
             Err(e) => state.push_system(format!("Failed to list friends: {e}")),
+        }
+        return;
+    }
+
+    if trimmed == "/connections" {
+        use iroh_gossip::chat_core::check_peer_connection_type;
+        let neighbors: Vec<iroh::PublicKey> = state.neighbors.iter().copied().collect();
+        if neighbors.is_empty() {
+            state.push_system("No known peers to inspect.".into());
+        } else {
+            state.push_system(format!("Connections ({}):", neighbors.len()));
+            let rt = state.runtime_handle.clone();
+            let ep = state.endpoint.clone();
+            // Ensure we yield to the Tokio runtime in each iteration.
+            for pk in &neighbors {
+                let ctype = rt.block_on(async { check_peer_connection_type(&ep, *pk).await });
+                state.push_system(format!(
+                    "  {} — {} ({})",
+                    pk.fmt_short(),
+                    match ctype {
+                        iroh_gossip::chat_core::ConnectionType::Direct => "direct",
+                        iroh_gossip::chat_core::ConnectionType::Relayed => "relayed",
+                        iroh_gossip::chat_core::ConnectionType::Unknown => "unknown",
+                    },
+                    pk.fmt_short(),
+                ));
+            }
         }
         return;
     }
@@ -1378,12 +1506,17 @@ async fn forward_gossip_events(
                     return;
                 }
             },
+            GossipEvent::NeighborUp(id) => {
+                if net_tx.send(NetEvent::NeighborUp { peer: id }).is_err() {
+                    return;
+                }
+            }
             GossipEvent::NeighborDown(id) => {
                 if net_tx.send(NetEvent::NeighborDown { peer: id }).is_err() {
                     return;
                 }
             }
-            GossipEvent::NeighborUp(_) | GossipEvent::Lagged => {}
+            GossipEvent::Lagged => {}
         }
     }
     let _ = net_tx.send(NetEvent::Closed);

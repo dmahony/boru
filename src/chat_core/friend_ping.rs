@@ -502,8 +502,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let status = mgr.friend_status(&pk2).await?;
-        assert_eq!(status, Some(FriendStatus::Online),
-            "reachable peer should be Online after ping");
+        assert_eq!(
+            status,
+            Some(FriendStatus::Online),
+            "reachable peer should be Online after ping"
+        );
 
         Ok(())
     }
@@ -519,11 +522,8 @@ mod tests {
             .bind()
             .await?;
 
-        let (mgr, _events) = FriendPingManager::spawn(
-            ep,
-            Duration::from_millis(100),
-            Duration::from_millis(500),
-        );
+        let (mgr, _events) =
+            FriendPingManager::spawn(ep, Duration::from_millis(100), Duration::from_millis(500));
 
         let peer = SecretKey::generate().public();
         mgr.add_friend(peer, None).await?;
@@ -532,8 +532,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let status = mgr.friend_status(&peer).await?;
-        assert_eq!(status, Some(FriendStatus::Unknown),
-            "peer with no addresses should remain Unknown");
+        assert_eq!(
+            status,
+            Some(FriendStatus::Unknown),
+            "peer with no addresses should remain Unknown"
+        );
 
         Ok(())
     }
@@ -549,11 +552,8 @@ mod tests {
             .bind()
             .await?;
 
-        let (mgr, _events) = FriendPingManager::spawn(
-            ep,
-            Duration::from_millis(100),
-            Duration::from_millis(500),
-        );
+        let (mgr, _events) =
+            FriendPingManager::spawn(ep, Duration::from_millis(100), Duration::from_millis(500));
 
         // Use a real-looking public key but with no transport addresses — connect fails.
         let peer = SecretKey::generate().public();
@@ -564,8 +564,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let status = mgr.friend_status(&peer).await?;
-        assert_eq!(status, Some(FriendStatus::Offline),
-            "unreachable peer should be Offline after failed ping");
+        assert_eq!(
+            status,
+            Some(FriendStatus::Offline),
+            "unreachable peer should be Offline after failed ping"
+        );
 
         Ok(())
     }
@@ -627,8 +630,11 @@ mod tests {
         match event {
             FriendEvent::StatusChanged { peer, status } => {
                 assert_eq!(peer, pk2);
-                assert_eq!(status, FriendStatus::Offline,
-                    "event should report Offline after peer disappears");
+                assert_eq!(
+                    status,
+                    FriendStatus::Offline,
+                    "event should report Offline after peer disappears"
+                );
             }
         }
 
@@ -646,11 +652,8 @@ mod tests {
             .bind()
             .await?;
 
-        let (mgr, mut events) = FriendPingManager::spawn(
-            ep,
-            Duration::from_millis(100),
-            Duration::from_millis(500),
-        );
+        let (mgr, mut events) =
+            FriendPingManager::spawn(ep, Duration::from_millis(100), Duration::from_millis(500));
 
         // Add a peer with a bogus address — first scan yields Offline but no event.
         let peer = SecretKey::generate().public();
@@ -694,11 +697,8 @@ mod tests {
             .bind()
             .await?;
 
-        let (mgr, _events) = FriendPingManager::spawn(
-            ep,
-            DEFAULT_PING_INTERVAL,
-            DEFAULT_CONNECT_TIMEOUT,
-        );
+        let (mgr, _events) =
+            FriendPingManager::spawn(ep, DEFAULT_PING_INTERVAL, DEFAULT_CONNECT_TIMEOUT);
 
         let p1 = SecretKey::generate().public();
         let p2 = SecretKey::generate().public();
@@ -717,8 +717,11 @@ mod tests {
         assert!(keys.contains(&p3));
 
         for (_key, status) in &list {
-            assert_eq!(*status, FriendStatus::Unknown,
-                "all friends should be Unknown before any ping");
+            assert_eq!(
+                *status,
+                FriendStatus::Unknown,
+                "all friends should be Unknown before any ping"
+            );
         }
 
         Ok(())
@@ -735,11 +738,8 @@ mod tests {
             .bind()
             .await?;
 
-        let (mgr, _events) = FriendPingManager::spawn(
-            ep,
-            DEFAULT_PING_INTERVAL,
-            DEFAULT_CONNECT_TIMEOUT,
-        );
+        let (mgr, _events) =
+            FriendPingManager::spawn(ep, DEFAULT_PING_INTERVAL, DEFAULT_CONNECT_TIMEOUT);
 
         let mgr2 = mgr.clone();
         let peer = SecretKey::generate().public();

@@ -269,6 +269,42 @@ pub struct HandshakeData {
     pub negotiated_key_exchange_group: Option<rustls::NamedGroup>,
 }
 
+impl HandshakeData {
+    /// Returns `true` if the negotiated key exchange group is a post-quantum or hybrid
+    /// post-quantum group (e.g. X25519MLKEM768, MLKEM768, secp256r1MLKEM768).
+    ///
+    /// Returns `false` if the handshake has not completed yet, or if only classical
+    /// ECDH groups (X25519, P-256, P-384, P-521) were negotiated.
+    pub fn is_post_quantum_key_exchange(&self) -> bool {
+        self.negotiated_key_exchange_group
+            .map_or(false, is_post_quantum_named_group)
+    }
+}
+
+/// Returns `true` if the given TLS [`NamedGroup`] is a post-quantum or hybrid
+/// post-quantum key exchange group.
+///
+/// Post-quantum key exchange groups in rustls include ML-KEM (FIPS 203, formerly
+/// Kyber) and hybrid groups that pair a classical ECDH with ML-KEM:
+///
+/// | Group | Type |
+/// |---|---|
+/// | `X25519MLKEM768` | Hybrid (X25519 + ML-KEM-768) |
+/// | `secp256r1MLKEM768` | Hybrid (P-256 + ML-KEM-768) |
+/// | `MLKEM768` | Pure ML-KEM-768 |
+///
+/// These are only available when the `aws_lc_rs` crypto provider is in use
+/// (e.g. when the `__rustls-post-quantum-test` feature is enabled).
+///
+/// [`NamedGroup`]: rustls::NamedGroup
+pub fn is_post_quantum_named_group(group: rustls::NamedGroup) -> bool {
+    use rustls::NamedGroup::*;
+    matches!(
+        group,
+        X25519MLKEM768 | MLKEM768 | MLKEM512 | MLKEM1024 | secp256r1MLKEM768
+    )
+}
+
 /// A QUIC-compatible TLS client configuration
 ///
 /// noq implicitly constructs a `QuicClientConfig` with reasonable defaults within
@@ -598,12 +634,25 @@ pub(crate) fn initial_suite_from_provider(
         .flatten()
 }
 
-#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
+#[cfg(feature = "__rustls-post-quantum-test")]
+pub(crate) fn configured_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    // aws-lc-rs includes X25519MLKEM768 (hybrid post-quantum) in its default
+    // key exchange groups, providing ML-KEM-768 (FIPS 203) alongside classical
+    // X25519 ECDH. This enables post-quantum TLS key exchange whenever the
+    // peer also supports the hybrid group.
+    Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+}
+
+#[cfg(all(
+    feature = "aws-lc-rs",
+    not(feature = "__rustls-post-quantum-test"),
+    not(feature = "ring")
+))]
 pub(crate) fn configured_provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::aws_lc_rs::default_provider())
 }
 
-#[cfg(feature = "ring")]
+#[cfg(all(feature = "ring", not(feature = "__rustls-post-quantum-test")))]
 pub(crate) fn configured_provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }

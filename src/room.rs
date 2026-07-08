@@ -8,10 +8,10 @@
 
 use std::{
     fs,
-    io::{BufWriter, Write},
     path::{Path, PathBuf},
 };
 
+use crate::chat_core::atomic_write::atomic_write_json;
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
@@ -128,57 +128,8 @@ impl RoomStore {
                 "room store has no data directory bound to it",
             ));
         }
-
-        fs::create_dir_all(data_dir).with_std_context(|_| {
-            format!("failed to create room data dir {}", data_dir.display())
-        })?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700));
-        }
-
         let path = self.file_path();
-        let tmp_path = path.with_extension("json.tmp");
-        let encoded = serde_json::to_vec_pretty(self).std_context("encode room store")?;
-
-        {
-            let file = fs::File::create(&tmp_path).with_std_context(|_| {
-                format!("failed to create temp room file {}", tmp_path.display())
-            })?;
-            let mut writer = BufWriter::new(file);
-            writer
-                .write_all(&encoded)
-                .with_std_context(|_| format!("failed to write temp room file {}", tmp_path.display()))?;
-            writer.write_all(b"\n").with_std_context(|_| {
-                format!(
-                    "failed to finalize temp room file {}",
-                    tmp_path.display()
-                )
-            })?;
-            writer.flush().with_std_context(|_| {
-                format!("failed to flush temp room file {}", tmp_path.display())
-            })?;
-            writer.get_ref().sync_all().with_std_context(|_| {
-                format!("failed to sync temp room file {}", tmp_path.display())
-            })?;
-        }
-
-        if path.exists() {
-            fs::remove_file(&path).with_std_context(|_| {
-                format!("failed to remove old room file {}", path.display())
-            })?;
-        }
-        fs::rename(&tmp_path, &path)
-            .with_std_context(|_| format!("failed to replace room file {}", path.display()))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-        }
-
+        atomic_write_json(&path, self, "room store")?;
         Ok(path)
     }
 }
@@ -226,8 +177,7 @@ mod tests {
         store.save().expect("save room store");
 
         // Simulate "open" without a topic — load saved room
-        let loaded = RoomStore::load_or_none(&dir)
-            .expect("should find saved room");
+        let loaded = RoomStore::load_or_none(&dir).expect("should find saved room");
         assert_eq!(loaded.topic, topic);
 
         // The ticket string derived from this topic is deterministic,
@@ -254,7 +204,10 @@ mod tests {
         fs::write(room_file_path(&dir), "{broken json}").expect("write corrupt file");
         // Should return None without panicking.
         let store = RoomStore::load_or_none(&dir);
-        assert!(store.is_none(), "load_or_none should return None on failure");
+        assert!(
+            store.is_none(),
+            "load_or_none should return None on failure"
+        );
     }
 
     #[test]

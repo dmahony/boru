@@ -7,15 +7,17 @@
 //! TUI-specific rendering (ratatui) and input handling (crossterm) live here.
 
 #[cfg(feature = "tor-transport")]
-use std::fs;
+use std::fmt;
 #[cfg(feature = "tor-transport")]
-use std::sync::Arc;
+use std::fs;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, io,
     net::{Ipv4Addr, SocketAddrV4},
     path::{Path, PathBuf},
     str::FromStr,
+    sync::{Arc, RwLock},
+    time::Duration,
 };
 
 #[cfg(feature = "tor-transport")]
@@ -23,6 +25,10 @@ use arti_client::{
     config::{TorClientConfig, TorClientConfigBuilder},
     BootstrapBehavior, TorClient,
 };
+#[cfg(feature = "tor-transport")]
+use tor_rtcompat::PreferredRuntime;
+#[cfg(feature = "tor-transport")]
+use n0_future::StreamExt;
 use clap::Parser;
 use crossterm::{
     cursor::{Hide, Show},
@@ -42,11 +48,18 @@ use iroh_gossip::chat_core::friend_ping::{
     DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
 };
 use iroh_gossip::chat_core::{
-    self, fmt_relay_mode, handle_net_event, AppState, ChatEntry, ChatKind, Message, SignedMessage,
-    StatusContext, Ticket,
+    self, check_peer_connection_type, fmt_relay_mode, handle_net_event, update_connection_counts,
+    AppState, ChatEntry, ChatKind, ConnectionType, Message, SignedMessage, StatusContext, Ticket,
 };
 use iroh_gossip::friends::{FriendId, FriendRecord, FriendsStore};
 use iroh_gossip::room::RoomStore;
+use iroh_gossip::room_docs::{
+    self, create_metadata_doc, create_roster_doc, list_members, read_metadata, RoomDocs,
+    RoomMetadata,
+};
+use iroh_gossip::small_room::{
+    room_size_fits_small_room, SmallRoomBuilder, SMALL_ROOM_ALPN, SMALL_ROOM_MAX_SIZE,
+};
 #[cfg(feature = "tor-transport")]
 use iroh_gossip::tor_transport::TorTransport;
 use iroh_gossip::{
@@ -292,6 +305,14 @@ async fn main() -> Result<()> {
     // create a memory lookup to pass in endpoint addresses to
     let memory_lookup = MemoryLookup::new();
 
+    // ── Tor reconnection monitor channel ──────────────────────────────
+    // Created unconditionally so the event loop always compiles.
+    // The monitor task is only spawned in Tor mode; otherwise the
+    // sender is never cloned and sits dormant.
+    #[allow(unused)]
+    let (tor_reconnect_tx, mut tor_reconnect_rx) =
+        tokio::sync::mpsc::unbounded_channel::<String>();
+
     // build our iroh endpoint
     let (endpoint, transport_status_message, transport_notice_text, local_peer_addr) = {
         #[cfg(feature = "tor-transport")]
@@ -310,6 +331,16 @@ async fn main() -> Result<()> {
                 .await?;
             endpoint.online().await;
             let local_peer_addr = tor_transport.watch_local_peer_addr().initialized().await;
+
+            // Spawn the Tor health-monitor background task to detect
+            // and reconnect with exponential backoff if Tor drops after
+            // the initial bootstrap.
+            let monitor_client = Arc::clone(&tor_client);
+            let monitor_tx = tor_reconnect_tx.clone();
+            tokio::spawn(async move {
+                monitor_tor_health(monitor_client, monitor_tx).await;
+            });
+
             (
                 endpoint,
                 format!("Tor bootstrap finished: {tor_status_message}"),
@@ -394,16 +425,44 @@ async fn main() -> Result<()> {
     };
     println!("> ticket to join us: {ticket}");
 
-    // setup router
+    // setup router with the gossip protocol, blob protocol, friend ping,
+    // and small-room protocol (for ≤10-member rooms)
+    let small_room_builder = SmallRoomBuilder::new(endpoint.clone(), endpoint.secret_key().clone());
+    let small_room_handler = small_room_builder.protocol_handler();
     let router = iroh::protocol::Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(iroh_blobs::ALPN, blobs_protocol.clone())
         .accept(FRIEND_PING_ALPN, PingHandler)
+        .accept(SMALL_ROOM_ALPN, small_room_handler)
         .spawn();
 
-    // join the gossip topic by connecting to known peers, if any
     let peer_ids = peers.iter().map(|peer| peer.id).collect::<Vec<_>>();
     let peer_count = peer_ids.len();
+
+    // ── Room protocol decision ──────────────────────────────────────────
+    // Note: peer_count is the number of bootstrap peers from the ticket.
+    // First-time room open has 0 (waiting for others to join); joining a
+    // ticket has ≥1.  For ≤10 members the small-room (direct QUIC) module
+    // replaces the broadcast-tree gossip protocol for lower latency.
+    //
+    // When no bootstrap peers exist (room open) we default to gossip so
+    // the first peers to connect can discover each other via the gossip
+    // mesh.  Small-room peers need bootstrap addresses to connect directly;
+    // once the bench/harness receives an addr from another peer it can
+    // call SmallRoomHandle::connect_to().
+    //
+    // For the latency-benchmark use case the small_room_bench example
+    // demonstrates the full flow: spawn N peers, connect them directly,
+    // broadcast messages, and record per-peer latency statistics.
+    let uses_small_room = peer_count > 0 && room_size_fits_small_room(peer_count);
+    if uses_small_room {
+        println!("> using small-room protocol ({peer_count} members ≤ {SMALL_ROOM_MAX_SIZE})");
+    } else if peer_count > 0 {
+        println!("> using gossip protocol ({peer_count} members > {SMALL_ROOM_MAX_SIZE})");
+    }
+
+    // join the gossip topic by connecting to known peers, if any
+    // (or for small rooms, use direct QUIC connections instead)
     for peer in &peers {
         memory_lookup.set_endpoint_info(peer.clone());
     }
@@ -436,8 +495,14 @@ async fn main() -> Result<()> {
             peer_count,
             identity_label: local_label.clone(),
             transport_notice: transport_notice_text.clone(),
+            direct_peers: 0,
+            relayed_peers: 0,
+            neighbors: HashSet::new(),
+            peer_connection_types: HashMap::new(),
         },
         friends,
+        local_public,
+        Some(local_label.clone()),
     );
     app.push_system(format!("Ticket to join this room: {ticket}"));
     if peers.is_empty() {
@@ -454,7 +519,38 @@ async fn main() -> Result<()> {
     }
 
     let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel();
-    task::spawn(chat_core::forward_gossip_events(receiver, net_tx));
+
+    // ── Room docs setup ─────────────────────────────────────────────────
+    // Create metadata doc and roster doc for this room.
+    let initial_metadata = RoomMetadata {
+        name: Some("iroh-gossip-chat".to_string()),
+        description: None,
+        rules: None,
+    };
+    let metadata_doc = create_metadata_doc(topic, &sender, initial_metadata)
+        .await
+        .expect("create metadata doc");
+    let roster_doc = create_roster_doc(
+        topic,
+        &sender,
+        local_public.to_string(),
+        local_label.clone(),
+    )
+    .await
+    .expect("create roster doc");
+    let room_docs = Arc::new(std::sync::RwLock::new(Some(RoomDocs {
+        metadata: metadata_doc.clone(),
+        roster: roster_doc.clone(),
+        topic,
+    })));
+
+    // Spawn the room-aware event forwarder: metadata + roster docs consume
+    // their respective messages; everything else goes to net_tx for chat.
+    let room_forwarder_net_tx = net_tx.clone();
+    task::spawn(async move {
+        forward_room_events_for_chat(metadata_doc, roster_doc, receiver, room_forwarder_net_tx)
+            .await;
+    });
 
     let mut names = HashMap::new();
     names.insert(local_public, local_label.clone());
@@ -492,7 +588,17 @@ async fn main() -> Result<()> {
     let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     spawn_input_thread(ui_tx);
 
+    // Periodic connection status monitor — refreshes every 60 seconds.
+    let mut conn_monitor = tokio::time::interval(Duration::from_secs(60));
+    conn_monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     while !app.should_quit {
+        // Non-blocking check for Tor reconnection status updates
+        // (infrequent messages only — every poll is cheap with try_recv)
+        while let Ok(status_msg) = tor_reconnect_rx.try_recv() {
+            app.push_system(status_msg);
+        }
+
         tokio::select! {
             Some(event) = ui_rx.recv() => {
                 let redraw = handle_ui_event(
@@ -504,6 +610,7 @@ async fn main() -> Result<()> {
                     &endpoint,
                     &blob_store,
                     &friend_mgr,
+                    &room_docs,
                 ).await?;
                 if app.friends_dirty {
                     if let Err(err) = app.friends.save() {
@@ -516,7 +623,8 @@ async fn main() -> Result<()> {
                 }
             }
             Some(event) = net_rx.recv() => {
-                handle_net_event(event, &mut app, &mut names, local_public)?;
+                handle_net_event(event, &mut app)?;
+                update_connection_counts(&endpoint, &mut app.status).await;
                 if app.friends_dirty {
                     if let Err(err) = app.friends.save() {
                         app.push_system(format!("Failed to save friends: {err}"));
@@ -527,6 +635,7 @@ async fn main() -> Result<()> {
             }
             Some(event) = friend_events.recv() => {
                 handle_friend_event(event, &mut app);
+                update_connection_counts(&endpoint, &mut app.status).await;
                 if app.friends_dirty {
                     if let Err(err) = app.friends.save() {
                         app.push_system(format!("Failed to save friends: {err}"));
@@ -534,6 +643,10 @@ async fn main() -> Result<()> {
                     app.friends_dirty = false;
                 }
                 terminal.draw(|frame| render_app(frame, &mut app))?;
+            }
+            _ = conn_monitor.tick() => {
+                // Periodic refresh of per-peer connection status.
+                update_connection_counts(&endpoint, &mut app.status).await;
             }
             else => break,
         }
@@ -614,6 +727,7 @@ async fn handle_ui_event(
     endpoint: &Endpoint,
     blob_store: &MemStore,
     friend_mgr: &FriendPingManager,
+    room_docs: &Arc<RwLock<Option<RoomDocs>>>,
 ) -> Result<bool> {
     match event {
         UiEvent::Key(key) => {
@@ -626,6 +740,7 @@ async fn handle_ui_event(
                 endpoint,
                 blob_store,
                 friend_mgr,
+                room_docs,
             )
             .await?;
             Ok(true)
@@ -647,6 +762,7 @@ async fn handle_key_event(
     endpoint: &Endpoint,
     blob_store: &MemStore,
     friend_mgr: &FriendPingManager,
+    room_docs: &Arc<RwLock<Option<RoomDocs>>>,
 ) -> Result<()> {
     let visible_height = app.last_log_height;
     match key {
@@ -921,6 +1037,62 @@ async fn handle_key_event(
                 return Ok(());
             }
 
+            if trimmed == "/room info" {
+                let docs = room_docs.read().unwrap();
+                match docs.as_ref() {
+                    None => {
+                        app.push_system("No room docs available (room not initialised).");
+                    }
+                    Some(docs) => {
+                        let md = read_metadata(&docs.metadata).await;
+                        let members = list_members(&docs.roster).await;
+                        app.push_system(format!(
+                            "Room: {} | Description: {} | Rules: {}",
+                            md.name.as_deref().unwrap_or("unnamed"),
+                            md.description.as_deref().unwrap_or("none"),
+                            md.rules.as_deref().unwrap_or("none"),
+                        ));
+                        app.push_system(format!("Members ({}):", members.len()));
+                        for (pk, member) in &members {
+                            app.push_system(format!(
+                                "  {} ({}) — joined at {}",
+                                member.display_name,
+                                &pk[..16],
+                                member.joined_at,
+                            ));
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
+            if trimmed == "/connections" {
+                let peers: Vec<iroh::PublicKey> =
+                    app.status.neighbors.iter().copied().collect();
+                if peers.is_empty() {
+                    app.push_system("No known peers to inspect.");
+                } else {
+                    app.push_system(format!("Connections ({}):", peers.len()));
+                    for pk in &peers {
+                        let ctype = check_peer_connection_type(endpoint, *pk).await;
+                        let label = app.names.get(pk).cloned().unwrap_or_else(|| {
+                            let s = pk.fmt_short();
+                            s.to_string()
+                        });
+                        app.push_system(format!(
+                            "  {label} — {} ({})",
+                            match ctype {
+                                ConnectionType::Direct => "direct",
+                                ConnectionType::Relayed => "relayed",
+                                ConnectionType::Unknown => "unknown",
+                            },
+                            pk.fmt_short(),
+                        ));
+                    }
+                }
+                return Ok(());
+            }
+
             // Normal text message
             let message = Message::Message {
                 text: trimmed.clone(),
@@ -971,6 +1143,78 @@ async fn handle_key_event(
     }
 
     Ok(())
+}
+
+// ── Room-aware event forwarder ────────────────────────────────────────────
+
+/// Combined gossip event forwarder that dispatches room doc messages
+/// (metadata 0xFE, roster 0xFF) to the appropriate doc handles, and
+/// forwards remaining events (chat messages, NeighborUp/Down) to NetEvent.
+async fn forward_room_events_for_chat(
+    metadata_doc: room_docs::RoomMetadataDoc,
+    roster_doc: room_docs::RosterDoc,
+    mut receiver: iroh_gossip::api::GossipReceiver,
+    net_tx: tokio::sync::mpsc::UnboundedSender<chat_core::NetEvent>,
+) {
+    use iroh_gossip::api::Event as GossipEvent;
+    use iroh_gossip::chat_core::{NetEvent, SignedMessage};
+    use n0_future::StreamExt;
+
+    while let Some(event_result) = receiver.next().await {
+        let event = match event_result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        // Check marker byte before consuming the event.
+        let is_metadata = matches!(
+            &event,
+            GossipEvent::Received(msg) if msg.content.first() == Some(&0xFE)
+        );
+        let is_roster = matches!(
+            &event,
+            GossipEvent::Received(msg) if msg.content.first() == Some(&0xFF)
+        );
+
+        if is_metadata {
+            let _ = room_docs::process_gossip_event(&metadata_doc, Ok(event)).await;
+            continue;
+        }
+
+        if is_roster {
+            let _ = room_docs::process_roster_event(&roster_doc, Ok(event)).await;
+            continue;
+        }
+
+        // Chat message or neighbor event — forward as NetEvent.
+        match event {
+            GossipEvent::Received(msg) => match SignedMessage::verify_and_decode(&msg.content) {
+                Ok((from, message)) => {
+                    if net_tx.send(NetEvent::Message { from, message }).is_err() {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = net_tx.send(NetEvent::Error(err.to_string()));
+                    return;
+                }
+            },
+            GossipEvent::NeighborUp(id) => {
+                if net_tx.send(NetEvent::NeighborUp { peer: id }).is_err() {
+                    return;
+                }
+            }
+            GossipEvent::NeighborDown(id) => {
+                if net_tx.send(NetEvent::NeighborDown { peer: id }).is_err() {
+                    return;
+                }
+            }
+            GossipEvent::Lagged => {
+                // Not forwarded — protocol-level backpressure signal.
+            }
+        }
+    }
+    let _ = net_tx.send(NetEvent::Closed);
 }
 
 // ── Friend event handling ──────────────────────────────────────────────────────
@@ -1190,10 +1434,22 @@ fn friends_panel_lines(app: &AppState) -> Vec<Line<'static>> {
         let name = record.display_label(id);
         let short_id: String = id.as_str().chars().take(12).collect();
         let (status_text, status_style) = friend_status_text(record);
+        // Look up connection type (direct/relayed) if we know this peer.
+        let conn_hint = id
+            .parse_public_key()
+            .ok()
+            .and_then(|pk| app.status.peer_connection_types.get(&pk))
+            .map(|ct| match ct {
+                ConnectionType::Direct => " D",
+                ConnectionType::Relayed => " ⤻",
+                ConnectionType::Unknown => "",
+            })
+            .unwrap_or("");
         lines.push(Line::from(vec![
             Span::styled(name, label_style),
             Span::raw(" "),
             Span::styled(format!("[{status_text}]"), status_style),
+            Span::styled(conn_hint, Style::default().fg(Color::Cyan)),
         ]));
         lines.push(Line::from(vec![Span::styled(
             format!("  {short_id}"),
@@ -1245,8 +1501,11 @@ fn status_lines(context: &StatusContext) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("Peers", label_style),
             Span::raw(format!(
-                ": {} known peers • connected: {}",
-                context.peer_count, context.connected
+                ": {} known • {} direct, {} relay • connected: {}",
+                context.peer_count,
+                context.direct_peers,
+                context.relayed_peers,
+                context.connected
             )),
         ]),
         Line::from(vec![
@@ -1306,6 +1565,14 @@ fn help_menu_lines() -> Vec<Line<'static>> {
             Span::styled("/friend list", label_style),
             Span::raw("     list tracked friends and their status"),
         ]),
+        Line::from(vec![
+            Span::styled("/room info", label_style),
+            Span::raw("     show room metadata and members"),
+        ]),
+        Line::from(vec![
+            Span::styled("/connections", label_style),
+            Span::raw("   show per-peer connection status"),
+        ]),
         Line::from(vec![Span::styled("Tips", title_style)]),
         Line::from(vec![Span::styled(
             "Press Esc to close this help view. PgUp/PgDn scroll older messages.",
@@ -1357,6 +1624,23 @@ fn tor_client_config(tor_dirs: &TorStorageDirs) -> Result<TorClientConfig> {
         .std_context("build Arti Tor client config")
 }
 
+/// Compute exponential backoff delay for the given attempt number.
+///
+/// Starts at 1 second, doubles each attempt, capped at `max_delay`.
+#[cfg(feature = "tor-transport")]
+fn backoff_delay(attempt: u32, max_delay: Duration) -> Duration {
+    let secs = 1u64 << attempt.saturating_sub(1).min(30);
+    Duration::from_secs(secs).min(max_delay)
+}
+
+/// Bootstrap Tor with exponential backoff on failure.
+///
+/// Retries the bootstrap process when:
+/// - The bootstrap task itself returns an error
+/// - Bootstrap completes but Tor is not ready for traffic
+///
+/// Uses exponential backoff starting at 1s, doubling each attempt,
+/// capped at 120s. Prints status updates after each failed attempt.
 #[cfg(feature = "tor-transport")]
 async fn bootstrap_tor(
     tor_dirs: &TorStorageDirs,
@@ -1369,52 +1653,131 @@ async fn bootstrap_tor(
         .await
         .anyerr()?;
 
-    let mut last_bootstrap_status = None;
-    print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
-    let mut bootstrap_events = tor_client.bootstrap_events();
-    let mut bootstrap_task = {
-        let tor_client = Arc::clone(&tor_client);
-        tokio::spawn(async move { tor_client.bootstrap().await })
-    };
-    let mut bootstrap_task_done = false;
+    let max_retries = 10u32;
+    for attempt in 1..=max_retries {
+        let mut last_bootstrap_status = None;
+        print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
+        let mut bootstrap_events = tor_client.bootstrap_events();
+        let mut bootstrap_task = {
+            let tor_client = Arc::clone(&tor_client);
+            tokio::spawn(async move { tor_client.bootstrap().await })
+        };
+        let mut bootstrap_task_done = false;
+
+        let result = 'inner: loop {
+            if tor_client.bootstrap_status().ready_for_traffic() {
+                break 'inner Ok(());
+            }
+
+            if bootstrap_task_done {
+                match bootstrap_events.next().await {
+                    Some(status) => {
+                        print_tor_bootstrap_status(status, &mut last_bootstrap_status);
+                        continue;
+                    }
+                    None => {
+                        break 'inner Err("bootstrap event stream ended unexpectedly".to_string());
+                    }
+                }
+            }
+
+            tokio::select! {
+                biased;
+                result = &mut bootstrap_task => {
+                    match result {
+                        Ok(Ok(())) => {
+                            bootstrap_task_done = true;
+                            print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
+                        }
+                        Ok(Err(err)) => {
+                            break 'inner Err(format!("bootstrap task failed: {err:#}"));
+                        }
+                        Err(err) => {
+                            break 'inner Err(format!("join bootstrap task: {err}"));
+                        }
+                    }
+                }
+                maybe_status = bootstrap_events.next() => {
+                    if let Some(status) = maybe_status {
+                        print_tor_bootstrap_status(status, &mut last_bootstrap_status);
+                    }
+                }
+            }
+        };
+
+        match result {
+            Ok(()) if tor_client.bootstrap_status().ready_for_traffic() => {
+                return Ok((tor_client, "> Tor is ready.".to_string()));
+            }
+            Ok(()) => {
+                // Bootstrap completed but Tor didn't become ready — rare but retryable.
+                println!(
+                    "> Tor bootstrap attempt {attempt}/{max_retries}: completed but not ready, retrying..."
+                );
+            }
+            Err(msg) => {
+                println!(
+                    "> Tor bootstrap attempt {attempt}/{max_retries} failed: {msg}"
+                );
+            }
+        }
+
+        if attempt < max_retries {
+            let delay = backoff_delay(attempt, Duration::from_secs(120));
+            println!("> Retrying Tor bootstrap in {}s...", delay.as_secs());
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    bail_any!(
+        "Tor bootstrap failed after {max_retries} attempts — check your Tor network connectivity"
+    );
+}
+
+/// Background task that monitors Tor client health and reconnects with
+/// exponential backoff if the Tor connection drops.
+///
+/// Checks every 30 seconds whether Tor is still ready for traffic.
+/// When a drop is detected, re-bootstraps using exponential backoff
+/// (1s base, 120s cap) and sends status updates through `status_tx`.
+#[cfg(feature = "tor-transport")]
+async fn monitor_tor_health(
+    tor_client: Arc<TorClient<PreferredRuntime>>,
+    status_tx: tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    let mut check_interval = tokio::time::interval(Duration::from_secs(30));
+    check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        if tor_client.bootstrap_status().ready_for_traffic() {
-            break;
-        }
-
-        if bootstrap_task_done {
-            match bootstrap_events.next().await {
-                Some(status) => print_tor_bootstrap_status(status, &mut last_bootstrap_status),
-                None => break,
-            }
-            continue;
-        }
-
         tokio::select! {
-            result = &mut bootstrap_task => {
-                match result {
-                    Ok(Ok(())) => {
-                        bootstrap_task_done = true;
-                        print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
+            _ = check_interval.tick() => {
+                if !tor_client.bootstrap_status().ready_for_traffic() {
+                    let _ = status_tx.send("⚠ Tor connection lost. Reconnecting...".to_string());
+
+                    for attempt in 1u32.. {
+                        match tor_client.bootstrap().await {
+                            Ok(()) if tor_client.bootstrap_status().ready_for_traffic() => {
+                                let _ = status_tx.send("✓ Tor reconnected successfully.".to_string());
+                                break;
+                            }
+                            Ok(()) => {
+                                let _ = status_tx.send(
+                                    format!("Tor re-bootstrap attempt {attempt}: completed but not ready, retrying...")
+                                );
+                            }
+                            Err(err) => {
+                                let _ = status_tx.send(
+                                    format!("Tor re-bootstrap attempt {attempt} failed: {err:#}")
+                                );
+                            }
+                        }
+                        let delay = backoff_delay(attempt, Duration::from_secs(120));
+                        tokio::time::sleep(delay).await;
                     }
-                    Ok(Err(err)) => return Err(err).std_context("Tor bootstrap task failed"),
-                    Err(err) => return Err(err).std_context("join Tor bootstrap task"),
-                }
-            }
-            maybe_status = bootstrap_events.next() => {
-                if let Some(status) = maybe_status {
-                    print_tor_bootstrap_status(status, &mut last_bootstrap_status);
                 }
             }
         }
     }
-
-    if !tor_client.bootstrap_status().ready_for_traffic() {
-        bail_any!("Tor bootstrap finished without becoming ready for traffic");
-    }
-
-    Ok((tor_client, "> Tor is ready.".to_string()))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1484,6 +1847,10 @@ mod tests {
             peer_count: 3,
             identity_label: "alice".into(),
             transport_notice: "transport notice".into(),
+            direct_peers: 0,
+            relayed_peers: 0,
+            neighbors: HashSet::new(),
+            peer_connection_types: HashMap::new(),
         };
         let lines = status_lines(&status);
         let rendered: Vec<_> = lines.iter().map(|line| line.to_string()).collect();
@@ -1491,7 +1858,7 @@ mod tests {
             .iter()
             .any(|line| line.contains("Direct iroh transport is ready.")));
         assert!(rendered.iter().any(|line| line.contains("alice")));
-        assert!(rendered.iter().any(|line| line.contains("3 known peers")));
+        assert!(rendered.iter().any(|line| line.contains("3 known")));
     }
 
     #[test]
@@ -1516,6 +1883,10 @@ mod tests {
             peer_count: 0,
             identity_label: "alice".into(),
             transport_notice: "transport notice".into(),
+            direct_peers: 0,
+            relayed_peers: 0,
+            neighbors: HashSet::new(),
+            peer_connection_types: HashMap::new(),
         };
         let app = AppState::new(
             status,
@@ -1523,6 +1894,8 @@ mod tests {
                 std::env::temp_dir()
                     .join(format!("iroh-chat-friends-empty-{}", rand::random::<u64>())),
             ),
+            SecretKey::generate().public(),
+            Some("alice".into()),
         );
         let rendered: Vec<String> = friends_panel_lines(&app)
             .iter()
@@ -1542,6 +1915,10 @@ mod tests {
             peer_count: 1,
             identity_label: "alice".into(),
             transport_notice: "transport notice".into(),
+            direct_peers: 0,
+            relayed_peers: 0,
+            neighbors: HashSet::new(),
+            peer_connection_types: HashMap::new(),
         };
         let mut store = FriendsStore::empty_at(std::env::temp_dir().join(format!(
             "iroh-chat-friends-status-{}",
@@ -1551,7 +1928,12 @@ mod tests {
         let friend_id = FriendId::from_public_key(peer);
         store.set_label(friend_id.clone(), "Bob");
         store.mark_online(friend_id.clone());
-        let app = AppState::new(status, store);
+        let app = AppState::new(
+            status,
+            store,
+            SecretKey::generate().public(),
+            Some("alice".into()),
+        );
         let rendered: Vec<String> = friends_panel_lines(&app)
             .iter()
             .map(|line| line.to_string())

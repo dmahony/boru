@@ -3,22 +3,25 @@
 //! Supports a chat-list (inbox) screen and individual chat-room screens,
 //! with dynamic room switching — like Telegram/Signal.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey};
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket};
 use iroh_gossip::api::GossipSender;
-use iroh_gossip::chat_core::friend_ping::{
-    FriendEvent, FriendPingManager, FriendStatus,
+use iroh_gossip::chat_callbacks::ChatCallbacks;
+use iroh_gossip::chat_core::{
+    friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
+    MessageHash,
 };
+use iroh_gossip::chat_core::handle_net_event as chat_net_event;
 use iroh_gossip::friends::{FriendId, FriendsStore};
 use iroh_gossip::net::Gossip;
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room_history::{RoomHistoryEntry, RoomHistoryStore};
-use n0_future::Stream;
 use n0_future::task;
+use n0_future::Stream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 
@@ -38,6 +41,12 @@ struct ChatEntry {
     kind: ChatKind,
     label: String,
     body: String,
+    /// Protocol message content hash, for edit/delete/reaction matching.
+    message_hash: Option<MessageHash>,
+    /// Whether this entry has been edited after initial delivery.
+    edited: bool,
+    /// Emoji reactions attached to this entry.
+    reactions: Vec<String>,
 }
 
 impl ChatEntry {
@@ -46,6 +55,9 @@ impl ChatEntry {
             kind: ChatKind::System,
             label: "System".into(),
             body: text.into(),
+            message_hash: None,
+            edited: false,
+            reactions: Vec::new(),
         }
     }
     fn local(label: impl Into<String>, text: impl Into<String>) -> Self {
@@ -53,13 +65,19 @@ impl ChatEntry {
             kind: ChatKind::Local,
             label: label.into(),
             body: text.into(),
+            message_hash: None,
+            edited: false,
+            reactions: Vec::new(),
         }
     }
-    fn remote(label: impl Into<String>, text: impl Into<String>) -> Self {
+    fn remote(label: impl Into<String>, text: impl Into<String>, hash: Option<MessageHash>) -> Self {
         Self {
             kind: ChatKind::Remote,
             label: label.into(),
             body: text.into(),
+            message_hash: hash,
+            edited: false,
+            reactions: Vec::new(),
         }
     }
 }
@@ -110,6 +128,7 @@ pub struct IcedChat {
     local_label: String,
     local_public: PublicKey,
     relay_mode: RelayMode,
+    runtime_handle: tokio::runtime::Handle,
     pub net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
     net_tx: UnboundedSender<NetEvent>,
     /// JoinHandle to abort the current forward_gossip_events task when
@@ -119,6 +138,14 @@ pub struct IcedChat {
     friends_dirty: bool,
     friend_mgr: FriendPingManager,
     pub friend_events_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
+    /// Set of peer PublicKeys currently connected as gossip neighbors.
+    neighbors: HashSet<PublicKey>,
+    /// Number of peers reachable via a direct (hole-punched) connection.
+    direct_peers: usize,
+    /// Number of peers connected through a relay server.
+    relayed_peers: usize,
+    /// Counter for periodic connection refresh (decremented per ConnMonitorTick).
+    conn_refresh_counter: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -158,11 +185,19 @@ pub enum AppMessage {
     ErrorMsg(String),
     ExecuteFileSend(String),
     ExecuteDownload,
-    FriendAdded { fid: String, label: String, was_new: bool },
-    FriendRemoved { label: String },
+    FriendAdded {
+        fid: String,
+        label: String,
+        was_new: bool,
+    },
+    FriendRemoved {
+        label: String,
+    },
     FriendListResult(Vec<(String, String)>),
     /// Delete a room from history (home screen delete or /leave).
     DeleteRoom(TopicId),
+    /// Periodic tick for connection type refresh.
+    ConnMonitorTick,
 }
 
 impl IcedChat {
@@ -175,6 +210,7 @@ impl IcedChat {
         local_label: String,
         local_public: PublicKey,
         relay_mode: RelayMode,
+        runtime_handle: tokio::runtime::Handle,
         net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
         net_tx: UnboundedSender<NetEvent>,
         room_history: RoomHistoryStore,
@@ -205,6 +241,7 @@ impl IcedChat {
             local_label,
             local_public,
             relay_mode,
+            runtime_handle,
             net_rx,
             net_tx,
             forward_handle: None,
@@ -212,6 +249,10 @@ impl IcedChat {
             friends_dirty: false,
             friend_mgr,
             friend_events_rx,
+            neighbors: HashSet::new(),
+            direct_peers: 0,
+            relayed_peers: 0,
+            conn_refresh_counter: 0,
         }
     }
 
@@ -221,8 +262,8 @@ impl IcedChat {
     fn push_local(&mut self, text: impl Into<String>) {
         self.entries.push(ChatEntry::local(&self.local_label, text));
     }
-    fn push_remote(&mut self, label: impl Into<String>, text: impl Into<String>) {
-        self.entries.push(ChatEntry::remote(label, text));
+    fn push_remote(&mut self, label: impl Into<String>, text: impl Into<String>, hash: Option<MessageHash>) {
+        self.entries.push(ChatEntry::remote(label, text, hash));
     }
 }
 
@@ -297,7 +338,10 @@ impl IcedChat {
                 iced::Task::perform(
                     async move {
                         // Subscribe to the new topic
-                        let sub = gossip.subscribe(topic, vec![]).await.map_err(|e| e.to_string())?;
+                        let sub = gossip
+                            .subscribe(topic, vec![])
+                            .await
+                            .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
                         let ticket = Ticket {
                             topic,
@@ -312,19 +356,18 @@ impl IcedChat {
                         let msg = SignedMessage::sign_and_encode(
                             &sk,
                             &crate::Message::AboutMe { name: label },
-                        ).map_err(|e| e.to_string())?;
+                        )
+                        .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
 
                         Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str)) => {
-                            AppMessage::RoomOpened {
-                                topic,
-                                ticket: ticket_str,
-                                sender,
-                            }
-                        }
+                        Ok((sender, topic, ticket_str)) => AppMessage::RoomOpened {
+                            topic,
+                            ticket: ticket_str,
+                            sender,
+                        },
                         Err(e) => AppMessage::RoomJoinFailed(e),
                     },
                 )
@@ -343,7 +386,10 @@ impl IcedChat {
 
                 iced::Task::perform(
                     async move {
-                        let sub = gossip.subscribe(topic, vec![]).await.map_err(|e| e.to_string())?;
+                        let sub = gossip
+                            .subscribe(topic, vec![])
+                            .await
+                            .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
                         let ticket = Ticket {
                             topic,
@@ -357,7 +403,8 @@ impl IcedChat {
                         let msg = SignedMessage::sign_and_encode(
                             &sk,
                             &crate::Message::AboutMe { name: label },
-                        ).map_err(|e| e.to_string())?;
+                        )
+                        .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
 
                         Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
@@ -373,7 +420,11 @@ impl IcedChat {
                 )
             }
 
-            AppMessage::RoomOpened { topic, ticket, sender } => {
+            AppMessage::RoomOpened {
+                topic,
+                ticket,
+                sender,
+            } => {
                 self.pending_topic = None;
                 self.sender = Some(sender);
 
@@ -383,7 +434,10 @@ impl IcedChat {
                 self.entries.clear();
                 self.names.clear();
                 self.composer_text.clear();
-                self.push_system(format!("Connected as {}.  Topic: {topic}", self.local_label));
+                self.push_system(format!(
+                    "Connected as {}.  Topic: {topic}",
+                    self.local_label
+                ));
                 self.push_system("Type a message and press Enter to send.  /help for commands.");
                 self.push_system(format!("Ticket to join this room: {ticket}"));
 
@@ -412,11 +466,16 @@ impl IcedChat {
 
                 iced::Task::perform(
                     async move {
-                        let ticket: Ticket = ticket_input.parse().map_err(|e: n0_error::AnyError| e.to_string())?;
+                        let ticket: Ticket = ticket_input
+                            .parse()
+                            .map_err(|e: n0_error::AnyError| e.to_string())?;
                         let topic = ticket.topic;
                         let peers: Vec<_> = ticket.peers.iter().map(|p| p.id).collect();
 
-                        let sub = gossip.subscribe(topic, peers).await.map_err(|e| e.to_string())?;
+                        let sub = gossip
+                            .subscribe(topic, peers)
+                            .await
+                            .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
                         let new_ticket = Ticket {
                             topic,
@@ -429,7 +488,8 @@ impl IcedChat {
                         let msg = SignedMessage::sign_and_encode(
                             &sk,
                             &crate::Message::AboutMe { name: label },
-                        ).map_err(|e| e.to_string())?;
+                        )
+                        .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
 
                         Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
@@ -521,7 +581,9 @@ impl IcedChat {
                             &crate::Message::Goodbye,
                         ) {
                             let sender = sender.clone();
-                            task::spawn(async move { sender.broadcast(encoded).await.ok(); });
+                            task::spawn(async move {
+                                sender.broadcast(encoded).await.ok();
+                            });
                         }
                     }
                     // Remove room from history (not just go back — delete it)
@@ -537,12 +599,13 @@ impl IcedChat {
                 // ── Friend commands ──────────────────
                 if let Some(pubkey_str) = trimmed.strip_prefix("/friend add ") {
                     let pubkey_str = pubkey_str.trim().to_string();
-                    let (key_part, alias) =
-                        if let Some((key_part, rest)) = pubkey_str.split_once(char::is_whitespace) {
-                            (key_part.to_string(), Some(rest.trim().to_string()))
-                        } else {
-                            (pubkey_str, None)
-                        };
+                    let (key_part, alias) = if let Some((key_part, rest)) =
+                        pubkey_str.split_once(char::is_whitespace)
+                    {
+                        (key_part.to_string(), Some(rest.trim().to_string()))
+                    } else {
+                        (pubkey_str, None)
+                    };
                     let mgr = self.friend_mgr.clone();
                     return iced::Task::perform(
                         async move {
@@ -618,6 +681,40 @@ impl IcedChat {
                     );
                 }
 
+                if trimmed == "/connections" {
+                    use iroh_gossip::chat_core::check_peer_connection_type;
+                    let neighbors: Vec<iroh::PublicKey> =
+                        self.neighbors.iter().copied().collect();
+                    if neighbors.is_empty() {
+                        self.push_system("No known peers to inspect.");
+                    } else {
+                        self.push_system(format!("Connections ({}):", neighbors.len()));
+                        let rt = self.runtime_handle.clone();
+                        let ep = self.endpoint.clone();
+                        let names = self.names.clone();
+                        // Query each peer and push results inline via block_on.
+                        for pk in &neighbors {
+                            let ctype = rt.block_on(async {
+                                check_peer_connection_type(&ep, *pk).await
+                            });
+                            let label = names
+                                .get(pk)
+                                .cloned()
+                                .unwrap_or_else(|| pk.fmt_short().to_string());
+                            self.push_system(format!(
+                                "  {label} — {} ({})",
+                                match ctype {
+                                    iroh_gossip::chat_core::ConnectionType::Direct => "direct",
+                                    iroh_gossip::chat_core::ConnectionType::Relayed => "relayed",
+                                    iroh_gossip::chat_core::ConnectionType::Unknown => "unknown",
+                                },
+                                pk.fmt_short(),
+                            ));
+                        }
+                    }
+                    return iced::Task::none();
+                }
+
                 // Normal text message
                 let text = trimmed.clone();
                 match SignedMessage::sign_and_encode(
@@ -651,7 +748,7 @@ impl IcedChat {
 
             AppMessage::NetEvent(event) => {
                 self.update_room_preview(&event);
-                self.handle_net_event(event);
+                let _ = chat_net_event(event, self);
                 self.try_save_friends();
                 iced::Task::none()
             }
@@ -758,10 +855,19 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::FriendAdded { fid, label, was_new } => {
+            AppMessage::FriendAdded {
+                fid,
+                label,
+                was_new,
+            } => {
                 let friend_id = FriendId::new(fid);
                 self.friends.ensure_friend(friend_id.clone());
-                if self.friends.get(&friend_id).and_then(|r| r.label.clone()).is_some() {
+                if self
+                    .friends
+                    .get(&friend_id)
+                    .and_then(|r| r.label.clone())
+                    .is_some()
+                {
                     // Already has a label
                 } else if label != friend_id.as_str().chars().take(12).collect::<String>() {
                     self.friends.set_label(friend_id, &label);
@@ -800,6 +906,17 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+
+            AppMessage::ConnMonitorTick => {
+                // Periodic connection type refresh (~60s).
+                if self.conn_refresh_counter == 0 {
+                    self.recompute_connection_counts();
+                    self.conn_refresh_counter = 60;
+                } else {
+                    self.conn_refresh_counter -= 1;
+                }
+                iced::Task::none()
+            }
         }
     }
 
@@ -835,6 +952,26 @@ impl IcedChat {
 // ── Net event handling ────────────────────────────────────────────────
 
 impl IcedChat {
+    /// Query the iroh endpoint for each neighbor to recompute direct/relay counts.
+    fn recompute_connection_counts(&mut self) {
+        let mut direct = 0usize;
+        let mut relayed = 0usize;
+        let rt = self.runtime_handle.clone();
+        for peer in &self.neighbors {
+            let has_direct = rt
+                .block_on(async { self.endpoint.remote_info(*peer).await })
+                .map(|info| info.addrs().any(|a| !a.addr().is_relay()))
+                .unwrap_or(false);
+            if has_direct {
+                direct += 1;
+            } else {
+                relayed += 1;
+            }
+        }
+        self.direct_peers = direct;
+        self.relayed_peers = relayed;
+    }
+
     fn handle_net_event(&mut self, event: NetEvent) {
         match event {
             NetEvent::Message { from, message } => match message {
@@ -863,7 +1000,7 @@ impl IcedChat {
                             .get(&from)
                             .cloned()
                             .unwrap_or_else(|| from.fmt_short().to_string());
-                        self.push_remote(name, text);
+                        self.push_remote(name, text, None);
                     }
                 }
                 Message::FileShare { name, ticket } => {
@@ -886,8 +1023,13 @@ impl IcedChat {
                         self.pending_file = Some((name, ticket));
                     }
                 }
-                Message::Goodbye => {
-                    // Handled via NeighborDown
+                Message::Goodbye
+                | Message::Typing
+                | Message::ReadReceipt { .. }
+                | Message::Edit { .. }
+                | Message::Delete { .. }
+                | Message::Reaction { .. } => {
+                    // Handled via NeighborDown or by the shared chat_core handler.
                 }
             },
             NetEvent::NeighborUp { peer } => {
@@ -903,6 +1045,9 @@ impl IcedChat {
                     .cloned()
                     .unwrap_or_else(|| peer.fmt_short().to_string());
                 self.push_system(format!("{name} joined the chat"));
+                // Track neighbor and recompute direct/relay counts
+                self.neighbors.insert(peer);
+                self.recompute_connection_counts();
             }
             NetEvent::NeighborDown { peer } => {
                 // Track friend state
@@ -917,6 +1062,9 @@ impl IcedChat {
                     .cloned()
                     .unwrap_or_else(|| peer.fmt_short().to_string());
                 self.push_system(format!("{name} left the chat"));
+                // Remove from neighbor tracking
+                self.neighbors.remove(&peer);
+                self.recompute_connection_counts();
             }
             NetEvent::Closed => self.push_system("The gossip receiver closed."),
             NetEvent::Error(err) => self.push_system(format!("Network error: {err}")),
@@ -951,6 +1099,113 @@ impl IcedChat {
     }
 }
 
+// ── ChatCallbacks impl for IcedChat ────────────────────────────────────
+
+impl ChatCallbacks for IcedChat {
+    fn local_public(&self) -> PublicKey {
+        self.local_public
+    }
+
+    fn resolve_name(&self, peer: &PublicKey) -> String {
+        self.names
+            .get(peer)
+            .cloned()
+            .unwrap_or_else(|| peer.fmt_short().to_string())
+    }
+
+    fn set_name(&mut self, peer: PublicKey, name: String) {
+        self.names.insert(peer, name);
+    }
+
+    fn is_friend(&self, peer: &PublicKey) -> bool {
+        let fid = FriendId::from_public_key(*peer);
+        self.friends.get(&fid).is_some()
+    }
+
+    fn friend_mark_online(&mut self, fid: FriendId) {
+        self.friends.mark_online(fid);
+    }
+
+    fn friend_mark_offline(&mut self, fid: FriendId) {
+        self.friends.mark_offline(fid);
+    }
+
+    fn friend_set_name(&mut self, fid: FriendId, name: String) {
+        self.friends.set_last_announced_name(fid, name);
+    }
+
+    fn mark_friends_dirty(&mut self) {
+        self.friends_dirty = true;
+    }
+
+    fn push_system(&mut self, text: String) {
+        self.entries.push(ChatEntry::system(text));
+    }
+
+    fn push_remote(&mut self, label: String, text: String, hash: Option<MessageHash>) {
+        self.entries.push(ChatEntry::remote(label, text, hash));
+    }
+
+    fn set_pending_file(&mut self, name: String, ticket: String) {
+        self.pending_file = Some((name, ticket));
+    }
+
+    fn set_typing(&mut self, _peer: PublicKey) {
+        // IcedChat does not currently display typing indicators.
+    }
+
+    fn has_message(&self, hash: &MessageHash) -> bool {
+        self.entries.iter().any(|e| e.message_hash.as_ref() == Some(hash))
+    }
+
+    fn edit_message(&mut self, hash: &MessageHash, new_text: String) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.message_hash.as_ref() == Some(hash))
+        {
+            entry.body = new_text;
+            entry.edited = true;
+        }
+    }
+
+    fn delete_message(&mut self, hash: &MessageHash) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.message_hash.as_ref() == Some(hash))
+        {
+            entry.body = "[message deleted]".to_string();
+            entry.edited = false;
+            entry.reactions.clear();
+        }
+    }
+
+    fn add_reaction(&mut self, hash: &MessageHash, emoji: String) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.message_hash.as_ref() == Some(hash))
+        {
+            entry.reactions.push(emoji);
+        }
+    }
+
+    fn on_neighbor_up(&mut self, peer: PublicKey) {
+        self.neighbors.insert(peer);
+        self.recompute_connection_counts();
+    }
+
+    fn on_neighbor_down(&mut self, peer: PublicKey) {
+        self.neighbors.remove(&peer);
+        self.recompute_connection_counts();
+    }
+
+    fn request_quit(&mut self) {
+        // IcedChat handles window close through the iced framework.
+    }
+}
+
 // ── View ──────────────────────────────────────────────────────────────
 
 impl IcedChat {
@@ -970,18 +1225,17 @@ impl IcedChat {
         let mut content = Column::new().spacing(8).padding(12);
 
         // Header
-        content = content.push(
-            row![
-                text("Iroh Gossip Chat").size(22),
-            ]
-            .spacing(8),
-        );
+        content = content.push(row![text("Iroh Gossip Chat").size(22),].spacing(8));
 
         // Identity info
         content = content.push(
-            text(format!("Identity: {}  |  Relay: {}", self.local_label, fmt_relay_mode(&self.relay_mode)))
-                .size(11)
-                .color(Color::from_rgb(0.5, 0.5, 0.5)),
+            text(format!(
+                "Identity: {}  |  Relay: {}",
+                self.local_label,
+                fmt_relay_mode(&self.relay_mode)
+            ))
+            .size(11)
+            .color(Color::from_rgb(0.5, 0.5, 0.5)),
         );
 
         content = content.push(text("")); // spacer
@@ -990,22 +1244,16 @@ impl IcedChat {
         content = content.push(
             row![
                 button(
-                    row![
-                        text(" + ").size(16),
-                        text("New Chat").size(14),
-                    ]
-                    .align_y(Alignment::Center)
-                    .spacing(4),
+                    row![text(" + ").size(16), text("New Chat").size(14),]
+                        .align_y(Alignment::Center)
+                        .spacing(4),
                 )
                 .on_press(AppMessage::NewChatCreated)
                 .padding(8),
                 button(
-                    row![
-                        text(" ⇄ ").size(16),
-                        text("Join via Ticket").size(14),
-                    ]
-                    .align_y(Alignment::Center)
-                    .spacing(4),
+                    row![text(" ⇄ ").size(16), text("Join via Ticket").size(14),]
+                        .align_y(Alignment::Center)
+                        .spacing(4),
                 )
                 .on_press(AppMessage::JoinFromTicket)
                 .padding(8),
@@ -1084,15 +1332,11 @@ impl IcedChat {
         let btn = button(
             row![
                 column![
-                    row![
-                        text(display_name).size(14).width(Length::Fill),
-                    ],
-                    row![
-                        text(preview)
-                            .size(11)
-                            .color(Color::from_rgb(0.5, 0.5, 0.5))
-                            .width(Length::Fill),
-                    ],
+                    row![text(display_name).size(14).width(Length::Fill),],
+                    row![text(preview)
+                        .size(11)
+                        .color(Color::from_rgb(0.5, 0.5, 0.5))
+                        .width(Length::Fill),],
                 ]
                 .spacing(2)
                 .padding(8)
@@ -1108,9 +1352,7 @@ impl IcedChat {
         .width(Length::Fill)
         .padding(0);
 
-        container(btn)
-            .width(Length::Fill)
-            .into()
+        container(btn).width(Length::Fill).into()
     }
 
     // ── Chat screen view ─────────────────────────────────────────────
@@ -1145,7 +1387,9 @@ impl IcedChat {
         use iced::widget::{button, column, row, text};
         use iced::Length;
 
-        let room_name = self.room_history.find(&self.topic)
+        let room_name = self
+            .room_history
+            .find(&self.topic)
             .map(|r| r.display_name())
             .unwrap_or_else(|| format!("Room: {}", self.topic));
 
@@ -1155,16 +1399,25 @@ impl IcedChat {
                 text(room_name).size(18).width(Length::Fill),
             ]
             .spacing(4),
-            text(format!("Topic: {}  |  Identity: {}", self.topic, self.local_label)).size(11),
-            text(format!("Relay: {}  |  Ticket: {}", fmt_relay_mode(&self.relay_mode), self.ticket_str)).size(10),
+            text(format!(
+                "Topic: {}  |  Identity: {}  |  {} direct, {} relay",
+                self.topic, self.local_label, self.direct_peers, self.relayed_peers,
+            ))
+            .size(11),
+            text(format!(
+                "Relay: {}  |  Ticket: {}",
+                fmt_relay_mode(&self.relay_mode),
+                self.ticket_str
+            ))
+            .size(10),
         ]
         .spacing(2)
         .into()
     }
 
     fn view_chat_log(&self) -> iced::widget::Scrollable<'_, AppMessage> {
-        use iced::widget::{scrollable, text, Column, Row};
         use iced::widget::text::Wrapping;
+        use iced::widget::{scrollable, text, Column, Row};
         use iced::{Color, Length};
 
         let mut col = Column::new().spacing(2).width(Length::Fill);
@@ -1233,15 +1486,23 @@ impl IcedChat {
             .push(text(""))
             .push(text("/send <path>    Share a file with peers"))
             .push(text("/download       Fetch the last shared file"))
-            .push(text("/leave          Leave this room and delete from history"))
+            .push(text(
+                "/leave          Leave this room and delete from history",
+            ))
             .push(text("/help           Toggle this menu"))
-            .push(text("/friend add <pk> [alias]  Track a friend's online status"))
+            .push(text(
+                "/friend add <pk> [alias]  Track a friend's online status",
+            ))
             .push(text("/friend remove <pk|alias> Stop tracking a friend"))
-            .push(text("/friend list    List tracked friends and their status"))
+            .push(text(
+                "/friend list    List tracked friends and their status",
+            ))
             .push(text(""))
             .push(text("Type a message and press Enter to send."))
             .push(text(""))
-            .push(text("Tip: click × on a room in the chat list to remove it."))
+            .push(text(
+                "Tip: click × on a room in the chat list to remove it.",
+            ))
             .push(text(""))
             .push(button("Close").on_press(AppMessage::ToggleHelp))
             .spacing(4)
@@ -1281,22 +1542,25 @@ fn subscription_stream(
 ) -> Pin<Box<dyn Stream<Item = AppMessage> + Send>> {
     let rx = Arc::clone(&rx.0);
     let friend_rx = Arc::clone(&friend_rx.0);
-    Box::pin(n0_future::stream::unfold((rx, friend_rx), |(rx, friend_rx)| async move {
-        let mut rx_guard = rx.lock().await;
-        let mut friend_guard = friend_rx.lock().await;
-        tokio::select! {
-            event = rx_guard.recv() => {
-                drop(friend_guard);
-                drop(rx_guard);
-                event.map(|e| (AppMessage::NetEvent(e), (rx, friend_rx)))
+    Box::pin(n0_future::stream::unfold(
+        (rx, friend_rx),
+        |(rx, friend_rx)| async move {
+            let mut rx_guard = rx.lock().await;
+            let mut friend_guard = friend_rx.lock().await;
+            tokio::select! {
+                event = rx_guard.recv() => {
+                    drop(friend_guard);
+                    drop(rx_guard);
+                    event.map(|e| (AppMessage::NetEvent(e), (rx, friend_rx)))
+                }
+                event = friend_guard.recv() => {
+                    drop(rx_guard);
+                    drop(friend_guard);
+                    event.map(|e| (AppMessage::FriendEvent(e), (rx, friend_rx)))
+                }
             }
-            event = friend_guard.recv() => {
-                drop(rx_guard);
-                drop(friend_guard);
-                event.map(|e| (AppMessage::FriendEvent(e), (rx, friend_rx)))
-            }
-        }
-    }))
+        },
+    ))
 }
 
 impl IcedChat {
@@ -1304,9 +1568,13 @@ impl IcedChat {
         rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
         friend_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
     ) -> iced::Subscription<AppMessage> {
-        iced::Subscription::run_with(
-            (RxHandle(rx), FriendRxHandle(friend_rx)),
-            |(rx, friend_rx)| subscription_stream(&rx, &friend_rx),
-        )
+        iced::Subscription::batch(vec![
+            iced::time::every(std::time::Duration::from_secs(1))
+                .map(|_| AppMessage::ConnMonitorTick),
+            iced::Subscription::run_with(
+                (RxHandle(rx), FriendRxHandle(friend_rx)),
+                |(rx, friend_rx)| subscription_stream(&rx, &friend_rx),
+            ),
+        ])
     }
 }

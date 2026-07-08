@@ -6,13 +6,20 @@
 //!
 //! It has **no** terminal/ratatui/crossterm dependencies, making it usable from
 //! any frontend (TUI, GUI, headless).
+//!
+//! The [`ChatCallbacks`] trait is defined in [`crate::chat_callbacks`].
 
+pub mod atomic_write;
 pub mod friend_ping;
 
-use std::{collections::HashMap, fmt, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    str::FromStr,
+};
 
 use bytes::Bytes;
-use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey};
+use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey};
 use n0_error::{Result, StdResultExt};
 use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -21,6 +28,10 @@ use serde_byte_array::ByteArray;
 use crate::api::{Event, GossipReceiver};
 use crate::friends::{FriendId, FriendsStore};
 use crate::proto::TopicId;
+
+/// Re-export the callback trait for convenience — existing import paths
+/// (`iroh_gossip::chat_core::ChatCallbacks`) continue to work.
+pub use crate::chat_callbacks::ChatCallbacks;
 
 // ── Composer ─────────────────────────────────────────────────────────────────
 
@@ -170,6 +181,12 @@ pub struct ChatEntry {
     pub label: String,
     /// The message body text.
     pub body: String,
+    /// Hash of the protocol message that produced this entry, when known.
+    pub message_hash: Option<MessageHash>,
+    /// Whether this entry has been edited after initial delivery.
+    pub edited: bool,
+    /// Emoji reactions attached to this entry.
+    pub reactions: Vec<String>,
 }
 
 impl ChatEntry {
@@ -179,6 +196,9 @@ impl ChatEntry {
             kind: ChatKind::System,
             label: "System".to_string(),
             body: text.into(),
+            message_hash: None,
+            edited: false,
+            reactions: Vec::new(),
         }
     }
 
@@ -188,6 +208,9 @@ impl ChatEntry {
             kind: ChatKind::Local,
             label: label.into(),
             body: text.into(),
+            message_hash: None,
+            edited: false,
+            reactions: Vec::new(),
         }
     }
 
@@ -197,7 +220,16 @@ impl ChatEntry {
             kind: ChatKind::Remote,
             label: label.into(),
             body: text.into(),
+            message_hash: None,
+            edited: false,
+            reactions: Vec::new(),
         }
+    }
+
+    /// Attach a protocol message hash to this entry.
+    pub fn with_message_hash(mut self, hash: MessageHash) -> Self {
+        self.message_hash = Some(hash);
+        self
     }
 }
 
@@ -220,6 +252,25 @@ pub struct StatusContext {
     pub identity_label: String,
     /// A notice about the transport (shown in the status panel).
     pub transport_notice: String,
+    /// Number of peers with a direct (hole-punched) connection.
+    pub direct_peers: usize,
+    /// Number of peers connected through a relay server.
+    pub relayed_peers: usize,
+    /// Set of peer PublicKeys that are currently gossip neighbors.
+    pub neighbors: HashSet<PublicKey>,
+    /// Cached per-peer connection type (direct vs relay).
+    pub peer_connection_types: HashMap<PublicKey, ConnectionType>,
+}
+
+/// Whether a peer's connection goes through a relay server or directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnectionType {
+    /// Peer has at least one direct (IP-based) address.
+    Direct,
+    /// Peer is reachable only via a relay server.
+    Relayed,
+    /// Connection type is unknown (not a neighbor, or no info yet).
+    Unknown,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -249,11 +300,25 @@ pub struct AppState {
     pub friends: FriendsStore,
     /// Whether the friends store has unsaved changes.
     pub friends_dirty: bool,
+    /// Peers that have recently broadcast a typing indicator.
+    pub typing_peers: Vec<PublicKey>,
+    /// Display name cache: peer PublicKey → last announced display name.
+    pub names: HashMap<PublicKey, String>,
 }
 
 impl AppState {
-    /// Create a new chat state with the given status context and friends store.
-    pub fn new(status: StatusContext, friends: FriendsStore) -> Self {
+    /// Create a new chat state with the given status context, friends store,
+    /// and an initial name entry for our own identity.
+    pub fn new(
+        status: StatusContext,
+        friends: FriendsStore,
+        local_public: PublicKey,
+        local_label: Option<String>,
+    ) -> Self {
+        let mut names = HashMap::new();
+        if let Some(label) = local_label {
+            names.insert(local_public, label);
+        }
         Self {
             status,
             entries: Vec::new(),
@@ -266,6 +331,8 @@ impl AppState {
             pending_file: None,
             friends,
             friends_dirty: false,
+            typing_peers: Vec::new(),
+            names,
         }
     }
 
@@ -282,6 +349,23 @@ impl AppState {
     /// Append a remote (received) message.
     pub fn push_remote(&mut self, label: impl Into<String>, text: impl Into<String>) {
         self.push_entry(ChatEntry::remote(label, text), true);
+    }
+
+    /// Append a remote (received) message and remember its protocol hash.
+    pub fn push_remote_with_hash(
+        &mut self,
+        label: impl Into<String>,
+        text: impl Into<String>,
+        hash: MessageHash,
+    ) {
+        self.push_entry(ChatEntry::remote(label, text).with_message_hash(hash), true);
+    }
+
+    /// Track that a peer is currently typing.
+    pub fn set_typing(&mut self, peer: PublicKey) {
+        if !self.typing_peers.contains(&peer) {
+            self.typing_peers.push(peer);
+        }
     }
 
     /// Push a raw [`ChatEntry`].
@@ -324,6 +408,120 @@ impl AppState {
         let max = self.max_scroll_offset(visible_height);
         self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max);
         self.follow_latest = self.scroll_offset >= max;
+    }
+}
+
+// ── ChatCallbacks impl for AppState ──────────────────────────────────────────
+
+impl ChatCallbacks for AppState {
+    fn local_public(&self) -> PublicKey {
+        // Not stored directly in AppState; used via the names cache.
+        // Callers that need this should pass it explicitly. We return a
+        // placeholder here that is overridden by set_name calls.
+        PublicKey::from_bytes(&[0u8; 32]).expect("32-byte all-zero key is valid")
+    }
+
+    fn resolve_name(&self, peer: &PublicKey) -> String {
+        self.names
+            .get(peer)
+            .cloned()
+            .unwrap_or_else(|| peer.fmt_short().to_string())
+    }
+
+    fn set_name(&mut self, peer: PublicKey, name: String) {
+        self.names.insert(peer, name);
+    }
+
+    fn is_friend(&self, peer: &PublicKey) -> bool {
+        let fid = FriendId::from_public_key(*peer);
+        self.friends.get(&fid).is_some()
+    }
+
+    fn friend_mark_online(&mut self, fid: FriendId) {
+        self.friends.mark_online(fid);
+    }
+
+    fn friend_mark_offline(&mut self, fid: FriendId) {
+        self.friends.mark_offline(fid);
+    }
+
+    fn friend_set_name(&mut self, fid: FriendId, name: String) {
+        self.friends.set_last_announced_name(fid, name);
+    }
+
+    fn mark_friends_dirty(&mut self) {
+        self.friends_dirty = true;
+    }
+
+    fn push_system(&mut self, text: String) {
+        self.push_entry(ChatEntry::system(text), true);
+    }
+
+    fn push_remote(&mut self, label: String, text: String, hash: Option<MessageHash>) {
+        let mut entry = ChatEntry::remote(label, text);
+        if let Some(h) = hash {
+            entry = entry.with_message_hash(h);
+        }
+        self.push_entry(entry, true);
+    }
+
+    fn set_pending_file(&mut self, name: String, ticket: String) {
+        self.pending_file = Some((name, ticket));
+    }
+
+    fn set_typing(&mut self, peer: PublicKey) {
+        if !self.typing_peers.contains(&peer) {
+            self.typing_peers.push(peer);
+        }
+    }
+
+    fn has_message(&self, hash: &MessageHash) -> bool {
+        self.entries.iter().any(|e| e.message_hash == Some(*hash))
+    }
+
+    fn edit_message(&mut self, hash: &MessageHash, new_text: String) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.message_hash == Some(*hash))
+        {
+            entry.body = new_text;
+            entry.edited = true;
+        }
+    }
+
+    fn delete_message(&mut self, hash: &MessageHash) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.message_hash == Some(*hash))
+        {
+            entry.body = "[message deleted]".to_string();
+            entry.edited = false;
+            entry.reactions.clear();
+        }
+    }
+
+    fn add_reaction(&mut self, hash: &MessageHash, emoji: String) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.message_hash == Some(*hash))
+        {
+            entry.reactions.push(emoji);
+        }
+    }
+
+    fn on_neighbor_up(&mut self, peer: PublicKey) {
+        self.status.neighbors.insert(peer);
+    }
+
+    fn on_neighbor_down(&mut self, peer: PublicKey) {
+        self.status.neighbors.remove(&peer);
+    }
+
+    fn request_quit(&mut self) {
+        self.should_quit = true;
     }
 }
 
@@ -381,6 +579,44 @@ pub enum Message {
     /// This is a best-effort notification: the gossip protocol also
     /// detects disconnection via NeighborDown events.
     Goodbye,
+    /// Lightweight broadcast indicator that the sender is typing.
+    Typing,
+    /// Acknowledge that a message has been read.
+    ReadReceipt {
+        /// Hash of the message being acknowledged.
+        message_hash: MessageHash,
+    },
+    /// Replace the text of a previously sent message.
+    Edit {
+        /// Hash of the original message being edited.
+        original_hash: MessageHash,
+        /// Replacement message text.
+        new_text: String,
+    },
+    /// Mark a previously sent message as deleted.
+    Delete {
+        /// Hash of the message being deleted.
+        message_hash: MessageHash,
+    },
+    /// Add an emoji reaction to a previously sent message.
+    Reaction {
+        /// Hash of the message being reacted to.
+        message_hash: MessageHash,
+        /// Reaction emoji.
+        emoji: String,
+    },
+}
+
+/// Content hash used by richer interaction messages to refer to a chat message.
+pub type Hash = [u8; 32];
+
+/// Descriptive alias for message reference hashes.
+pub type MessageHash = Hash;
+
+/// Calculate the stable content hash for a protocol message.
+pub fn message_hash(message: &Message) -> MessageHash {
+    let bytes = postcard::to_stdvec(message).expect("postcard::to_stdvec is infallible");
+    *blake3::hash(&bytes).as_bytes()
 }
 
 const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;
@@ -486,98 +722,127 @@ pub fn fmt_relay_mode(relay_mode: &RelayMode) -> String {
 
 // ── Network event dispatch ───────────────────────────────────────────────────
 
-/// Process a decoded [`NetEvent`] against the chat state and the name cache.
+/// Process a decoded [`NetEvent`] against a [`ChatCallbacks`] implementor.
 ///
-/// Updates `app.entries` with incoming messages, handles `AboutMe` name
-/// announcements, and tracks pending file downloads.
+/// Handles common logic: friend tracking, name resolution, message
+/// modification (edit/delete/reaction), typing indicators, and file
+/// sharing. Frontend-specific side-effects (persistence, connection
+/// counting, room previews) are delegated to the callbacks.
 pub fn handle_net_event(
     event: NetEvent,
-    app: &mut AppState,
-    names: &mut HashMap<PublicKey, String>,
-    local_public: PublicKey,
+    cb: &mut impl ChatCallbacks,
 ) -> Result<()> {
     match event {
-        NetEvent::Message { from, message } => match message {
-            Message::AboutMe { name } => {
-                names.insert(from, name.clone());
-                if from != local_public {
-                    let fid = FriendId::from_public_key(from);
-                    if app.friends.get(&fid).is_some() {
-                        app.friends.set_last_announced_name(fid, name.clone());
-                        app.friends_dirty = true;
+        NetEvent::Message { from, message } => {
+            let incoming_hash = message_hash(&message);
+            match message {
+                Message::AboutMe { name } => {
+                    cb.set_name(from, name.clone());
+                    if from != cb.local_public() {
+                        let fid = FriendId::from_public_key(from);
+                        if cb.is_friend(&from) {
+                            cb.friend_set_name(fid, name.clone());
+                            cb.mark_friends_dirty();
+                        }
+                        cb.push_system(format!(
+                            "{} is now known as {}",
+                            from.fmt_short(),
+                            name
+                        ));
                     }
-                    app.push_system(format!("{} is now known as {}", from.fmt_short(), name));
+                }
+                Message::Message { text } => {
+                    if from != cb.local_public() {
+                        let fid = FriendId::from_public_key(from);
+                        if cb.is_friend(&from) {
+                            cb.friend_mark_online(fid);
+                            cb.mark_friends_dirty();
+                        }
+                        let display_name = cb.resolve_name(&from);
+                        cb.push_remote(display_name, text, Some(incoming_hash));
+                    }
+                }
+                Message::FileShare { name, ticket } => {
+                    if from != cb.local_public() {
+                        let fid = FriendId::from_public_key(from);
+                        if cb.is_friend(&from) {
+                            cb.friend_mark_online(fid);
+                            cb.mark_friends_dirty();
+                        }
+                        let sender_name = cb.resolve_name(&from);
+                        cb.push_system(format!(
+                            "{} shared a file: {} (type /download to fetch it)",
+                            sender_name, name
+                        ));
+                        cb.set_pending_file(name, ticket);
+                    }
+                }
+                Message::Goodbye => {
+                    // Handled via NetEvent::NeighborDown, which fires for
+                    // both clean (Goodbye) and unclean (crash/disconnect)
+                    // departures.
+                }
+                Message::Typing => {
+                    if from != cb.local_public() {
+                        cb.set_typing(from);
+                    }
+                }
+                Message::ReadReceipt { message_hash } => {
+                    if from != cb.local_public() && cb.has_message(&message_hash) {
+                        let name = cb.resolve_name(&from);
+                        cb.push_system(format!("{name} read a message"));
+                    }
+                }
+                Message::Edit {
+                    original_hash,
+                    new_text,
+                } => {
+                    if from != cb.local_public() {
+                        cb.edit_message(&original_hash, new_text);
+                    }
+                }
+                Message::Delete { message_hash } => {
+                    if from != cb.local_public() {
+                        cb.delete_message(&message_hash);
+                    }
+                }
+                Message::Reaction {
+                    message_hash,
+                    emoji,
+                } => {
+                    if from != cb.local_public() {
+                        cb.add_reaction(&message_hash, emoji);
+                    }
                 }
             }
-            Message::Message { text } => {
-                if from != local_public {
-                    let fid = FriendId::from_public_key(from);
-                    if app.friends.get(&fid).is_some() {
-                        app.friends.mark_online(fid);
-                        app.friends_dirty = true;
-                    }
-                    let name = names
-                        .get(&from)
-                        .cloned()
-                        .unwrap_or_else(|| from.fmt_short().to_string());
-                    app.push_remote(name, text);
-                }
-            }
-            Message::FileShare { name, ticket } => {
-                if from != local_public {
-                    let fid = FriendId::from_public_key(from);
-                    if app.friends.get(&fid).is_some() {
-                        app.friends.mark_online(fid);
-                        app.friends_dirty = true;
-                    }
-                    let sender_name = names
-                        .get(&from)
-                        .cloned()
-                        .unwrap_or_else(|| from.fmt_short().to_string());
-                    app.push_system(format!(
-                        "{} shared a file: {} (type /download to fetch it)",
-                        sender_name, name
-                    ));
-                    app.pending_file = Some((name, ticket));
-                }
-            }
-            Message::Goodbye => {
-                // Handled via NetEvent::NeighborDown, which fires for
-                // both clean (Goodbye) and unclean (crash/disconnect)
-                // departures.
-            }
-        },
+        }
         NetEvent::NeighborUp { peer } => {
             let fid = FriendId::from_public_key(peer);
-            if app.friends.get(&fid).is_some() {
-                app.friends.mark_online(fid);
-                app.friends_dirty = true;
+            if cb.is_friend(&peer) {
+                cb.friend_mark_online(fid);
+                cb.mark_friends_dirty();
             }
-            let name = names
-                .get(&peer)
-                .cloned()
-                .unwrap_or_else(|| peer.fmt_short().to_string());
-            app.push_system(format!("{name} joined the chat"));
+            let name = cb.resolve_name(&peer);
+            cb.push_system(format!("{name} joined the chat"));
+            cb.on_neighbor_up(peer);
         }
         NetEvent::NeighborDown { peer } => {
             let fid = FriendId::from_public_key(peer);
-            if app.friends.get(&fid).is_some() {
-                app.friends.mark_offline(fid);
-                app.friends_dirty = true;
+            if cb.is_friend(&peer) {
+                cb.friend_mark_offline(fid);
+                cb.mark_friends_dirty();
             }
-            let name = names
-                .get(&peer)
-                .cloned()
-                .unwrap_or_else(|| peer.fmt_short().to_string());
-            app.push_system(format!("{name} left the chat"));
+            let name = cb.resolve_name(&peer);
+            cb.push_system(format!("{name} left the chat"));
+            cb.on_neighbor_down(peer);
         }
         NetEvent::Closed => {
-            app.push_system("The gossip receiver closed.");
-            app.should_quit = true;
+            cb.push_system("The gossip receiver closed.".into());
+            cb.request_quit();
         }
         NetEvent::Error(err) => {
-            app.push_system(format!("Network error: {err}"));
-            app.should_quit = true;
+            cb.push_system(format!("Network error: {err}"));
+            cb.request_quit();
         }
     }
     Ok(())
@@ -621,6 +886,58 @@ pub async fn forward_gossip_events(
         }
     }
     let _ = net_tx.send(NetEvent::Closed);
+}
+
+/// Update `StatusContext.direct_peers` and `.relayed_peers` by querying the
+/// iroh [`Endpoint`] for each known neighbor.
+///
+/// For each peer in `status.neighbors` we ask the endpoint for remote info.
+/// A peer with at least one direct (IP-based) transport address is counted
+/// as `direct`; a peer reachable only via relay is counted as `relayed`.
+///
+/// Also populates `status.peer_connection_types` with per-peer granularity.
+pub async fn update_connection_counts(endpoint: &Endpoint, status: &mut StatusContext) {
+    let mut direct = 0usize;
+    let mut relayed = 0usize;
+    let peers: Vec<iroh::PublicKey> = status.neighbors.iter().copied().collect();
+    for peer in &peers {
+        let ctype = check_peer_connection_type(endpoint, *peer).await;
+        match ctype {
+            ConnectionType::Direct => direct += 1,
+            ConnectionType::Relayed => relayed += 1,
+            ConnectionType::Unknown => {}
+        }
+        if ctype != ConnectionType::Unknown {
+            status.peer_connection_types.insert(*peer, ctype);
+        }
+    }
+    status.direct_peers = direct;
+    status.relayed_peers = relayed;
+}
+
+/// Query the iroh [`Endpoint`] for a single peer and return its connection type.
+///
+/// Returns:
+/// - [`ConnectionType::Direct`] if the peer has at least one direct (IP-based) address.
+/// - [`ConnectionType::Relayed`] if the peer is reachable only via relay.
+/// - [`ConnectionType::Unknown`] if the peer is not known to the endpoint.
+pub async fn check_peer_connection_type(
+    endpoint: &Endpoint,
+    peer: iroh::PublicKey,
+) -> ConnectionType {
+    match endpoint.remote_info(peer).await {
+        Some(info) => {
+            let has_direct = info
+                .addrs()
+                .any(|a| matches!(a.addr(), iroh::TransportAddr::Ip(_)));
+            if has_direct {
+                ConnectionType::Direct
+            } else {
+                ConnectionType::Relayed
+            }
+        }
+        None => ConnectionType::Unknown,
+    }
 }
 
 #[cfg(test)]
@@ -809,6 +1126,10 @@ mod tests {
             peer_count: 0,
             identity_label: "tester".into(),
             transport_notice: "notice".into(),
+            direct_peers: 0,
+            relayed_peers: 0,
+            neighbors: HashSet::new(),
+            peer_connection_types: HashMap::new(),
         }
     }
 
@@ -1304,11 +1625,17 @@ mod tests {
         // Friend should be marked online
         let fid = FriendId::from_public_key(remote_key.public());
         assert!(
-            app.friends.get(&fid).map(|r| r.status.online).unwrap_or(false),
+            app.friends
+                .get(&fid)
+                .map(|r| r.status.online)
+                .unwrap_or(false),
             "friend should be marked online"
         );
         assert!(app.friends_dirty, "friends should be marked dirty");
-        assert!(app.entries.iter().any(|e| e.body == "alice joined the chat"));
+        assert!(app
+            .entries
+            .iter()
+            .any(|e| e.body == "alice joined the chat"));
     }
 
     #[test]
@@ -1366,8 +1693,203 @@ mod tests {
         // But we still show a system message.
         let short = remote_key.public().fmt_short();
         assert!(
-            app.entries.iter().any(|e| e.body == format!("{short} joined the chat")),
+            app.entries
+                .iter()
+                .any(|e| e.body == format!("{short} joined the chat")),
             "should show join message even for non-friends"
+        );
+    }
+    // ── SignedMessage roundtrip helper ──────────────────────────────────
+
+    fn assert_signed_message_roundtrip(msg: Message, predicate: impl FnOnce(&Message) -> bool) {
+        let key = SecretKey::generate();
+        let encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
+        let (pk, decoded) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        assert_eq!(pk, key.public());
+        assert!(
+            predicate(&decoded),
+            "unexpected decoded message: {decoded:?}"
+        );
+    }
+
+    // ── Basic roundtrip tests for each new interaction type ─────────────
+
+    #[test]
+    fn signed_message_roundtrip_typing() {
+        assert_signed_message_roundtrip(Message::Typing, |decoded| {
+            matches!(decoded, Message::Typing)
+        });
+    }
+
+    #[test]
+    fn signed_message_roundtrip_read_receipt() {
+        let hash = [1u8; 32];
+        assert_signed_message_roundtrip(
+            Message::ReadReceipt { message_hash: hash },
+            |decoded| matches!(decoded, Message::ReadReceipt { message_hash } if *message_hash == hash),
+        );
+    }
+
+    #[test]
+    fn signed_message_roundtrip_edit() {
+        let hash = [2u8; 32];
+        assert_signed_message_roundtrip(
+            Message::Edit {
+                original_hash: hash,
+                new_text: "updated".into(),
+            },
+            |decoded| {
+                matches!(decoded, Message::Edit { original_hash, new_text }
+                    if *original_hash == hash && new_text == "updated")
+            },
+        );
+    }
+
+    #[test]
+    fn signed_message_roundtrip_delete() {
+        let hash = [3u8; 32];
+        assert_signed_message_roundtrip(
+            Message::Delete { message_hash: hash },
+            |decoded| matches!(decoded, Message::Delete { message_hash } if *message_hash == hash),
+        );
+    }
+
+    #[test]
+    fn signed_message_roundtrip_reaction() {
+        let hash = [4u8; 32];
+        assert_signed_message_roundtrip(
+            Message::Reaction {
+                message_hash: hash,
+                emoji: "👍".into(),
+            },
+            |decoded| {
+                matches!(decoded, Message::Reaction { message_hash, emoji }
+                    if *message_hash == hash && emoji == "👍")
+            },
+        );
+    }
+
+    // ── Edge case roundtrip tests ───────────────────────────────────────
+
+    #[test]
+    fn signed_message_roundtrip_reaction_empty_emoji() {
+        let hash = [5u8; 32];
+        assert_signed_message_roundtrip(
+            Message::Reaction {
+                message_hash: hash,
+                emoji: String::new(),
+            },
+            |decoded| {
+                matches!(decoded, Message::Reaction { message_hash, emoji }
+                    if *message_hash == hash && emoji.is_empty())
+            },
+        );
+    }
+
+    #[test]
+    fn signed_message_roundtrip_reaction_various_emoji() {
+        let hash = [6u8; 32];
+        for emoji in &[
+            "🔥", // fire - single codepoint
+            "👍🏿", // thumbs up dark skin tone
+            "👨‍👩‍👧‍👦", // family ZWJ
+            "🇦🇺", // AU flag
+            "1⃣",  // keycap 1
+            "❤️", // heart + VS16
+            "😀", // grinning face
+            "🎉", // party popper
+        ] {
+            assert_signed_message_roundtrip(
+                Message::Reaction {
+                    message_hash: hash,
+                    emoji: (*emoji).to_string(),
+                },
+                |decoded| {
+                    matches!(decoded, Message::Reaction { message_hash, emoji }
+                        if *message_hash == hash && emoji.as_str() == *emoji)
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn signed_message_roundtrip_reaction_long_emoji_string() {
+        let hash = [7u8; 32];
+        let many_hearts: String = std::iter::repeat("❤️").take(50).collect();
+        assert_signed_message_roundtrip(
+            Message::Reaction {
+                message_hash: hash,
+                emoji: many_hearts.clone(),
+            },
+            |decoded| {
+                matches!(decoded, Message::Reaction { message_hash, emoji }
+                    if *message_hash == hash && *emoji == many_hearts)
+            },
+        );
+    }
+
+    #[test]
+    fn signed_message_roundtrip_edit_empty_text() {
+        let hash = [8u8; 32];
+        assert_signed_message_roundtrip(
+            Message::Edit {
+                original_hash: hash,
+                new_text: String::new(),
+            },
+            |decoded| {
+                matches!(decoded, Message::Edit { original_hash, new_text }
+                    if *original_hash == hash && new_text.is_empty())
+            },
+        );
+    }
+
+    #[test]
+    fn signed_message_roundtrip_edit_long_text() {
+        let hash = [9u8; 32];
+        let long_text: String = std::iter::repeat("A").take(10_000).collect();
+        assert_signed_message_roundtrip(
+            Message::Edit {
+                original_hash: hash,
+                new_text: long_text.clone(),
+            },
+            |decoded| {
+                matches!(decoded, Message::Edit { original_hash, new_text }
+                    if *original_hash == hash && *new_text == long_text)
+            },
+        );
+    }
+
+    #[test]
+    fn signed_message_roundtrip_edit_unicode_text() {
+        let hash = [10u8; 32];
+        let unicode_text = "日本語 русский العربية 😊👋".to_string();
+        assert_signed_message_roundtrip(
+            Message::Edit {
+                original_hash: hash,
+                new_text: unicode_text.clone(),
+            },
+            |decoded| {
+                matches!(decoded, Message::Edit { original_hash, new_text }
+                    if *original_hash == hash && *new_text == unicode_text)
+            },
+        );
+    }
+
+    #[test]
+    fn signed_message_roundtrip_read_receipt_zero_hash() {
+        let hash = [0u8; 32];
+        assert_signed_message_roundtrip(
+            Message::ReadReceipt { message_hash: hash },
+            |decoded| matches!(decoded, Message::ReadReceipt { message_hash } if *message_hash == hash),
+        );
+    }
+
+    #[test]
+    fn signed_message_roundtrip_delete_zero_hash() {
+        let hash = [0u8; 32];
+        assert_signed_message_roundtrip(
+            Message::Delete { message_hash: hash },
+            |decoded| matches!(decoded, Message::Delete { message_hash } if *message_hash == hash),
         );
     }
 }

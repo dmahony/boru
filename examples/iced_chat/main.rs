@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, RelayMode,
-    RelayUrl, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, RelayMode, RelayUrl,
+    SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 use iroh_gossip::chat_core::friend_ping::{
@@ -295,22 +295,26 @@ fn main() -> Result<()> {
         ))
     })?;
 
-    let app_cell = std::sync::Mutex::new(Some((IcedChat::new(
-        secret_key,
-        gossip,
-        blob_store,
-        endpoint.clone(),
-        local_label,
-        local_public,
-        relay_mode,
-        Arc::clone(&net_rx),
-        net_tx,
-        room_history,
-        friends,
-        friend_mgr,
-        Arc::clone(&friend_events_rx),
+    let app_cell = std::sync::Mutex::new(Some((
+        IcedChat::new(
+            secret_key,
+            gossip,
+            blob_store,
+            endpoint.clone(),
+            local_label,
+            local_public,
+            relay_mode,
+            runtime.handle().clone(),
+            Arc::clone(&net_rx),
+            net_tx,
+            room_history,
+            friends,
+            friend_mgr,
+            Arc::clone(&friend_events_rx),
+            initial_topic,
+        ),
         initial_topic,
-    ), initial_topic)));
+    )));
 
     iced::application(
         move || {
@@ -330,7 +334,12 @@ fn main() -> Result<()> {
         IcedChat::view,
     )
     .title(|_: &IcedChat| "Iroh Gossip Chat".to_string())
-    .subscription(|state: &IcedChat| IcedChat::subscription(Arc::clone(&state.net_rx), Arc::clone(&state.friend_events_rx)))
+    .subscription(|state: &IcedChat| {
+        IcedChat::subscription(
+            Arc::clone(&state.net_rx),
+            Arc::clone(&state.friend_events_rx),
+        )
+    })
     .theme(|_: &IcedChat| Some(iced::Theme::Dark))
     .run()
     .unwrap_or_else(|err| {
