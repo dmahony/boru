@@ -35,4 +35,11 @@ pub mod chat_core;
 #[cfg(feature = "net")]
 pub mod friends;
 
+/// Durable room metadata for the chat frontends.
+///
+/// Persists the room topic so reopening a room reuses the same topic
+/// instead of generating a new one each time.
+#[cfg(feature = "net")]
+pub mod room;
+
 pub use proto::TopicId;

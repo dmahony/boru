@@ -46,6 +46,7 @@ use iroh_gossip::chat_core::{
     StatusContext, Ticket,
 };
 use iroh_gossip::friends::{FriendId, FriendRecord, FriendsStore};
+use iroh_gossip::room::RoomStore;
 #[cfg(feature = "tor-transport")]
 use iroh_gossip::tor_transport::TorTransport;
 use iroh_gossip::{
@@ -223,8 +224,29 @@ async fn main() -> Result<()> {
     // parse the cli command
     let (topic, peers) = match &args.command {
         Command::Open { topic } => {
-            let topic = topic.unwrap_or_else(|| TopicId::from_bytes(rand::random()));
-            println!("> opening chat room for topic {topic}");
+            let topic = match topic {
+                Some(t) => *t,
+                None => {
+                    // Try to reuse a previously saved room topic.
+                    let data_dir = get_data_dir();
+                    match RoomStore::load_or_none(&data_dir) {
+                        Some(store) => {
+                            println!("> reusing saved room topic {}", store.topic);
+                            store.topic
+                        }
+                        None => {
+                            let t = TopicId::from_bytes(rand::random());
+                            println!("> opening new chat room for topic {t}");
+                            // Persist the new topic so reopening reuses it.
+                            let room = RoomStore::new(&data_dir, t);
+                            if let Err(err) = room.save() {
+                                eprintln!("warning: failed to save room metadata: {err}");
+                            }
+                            t
+                        }
+                    }
+                }
+            };
             (topic, vec![])
         }
         Command::Join { ticket } => {

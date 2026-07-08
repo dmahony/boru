@@ -46,6 +46,7 @@ use iroh_gossip::{
     friends::{FriendId, FriendsStore},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
+    room::RoomStore,
 };
 use n0_error::{bail_any, Result, StdResultExt};
 use n0_future::{task, StreamExt};
@@ -250,8 +251,25 @@ fn main() -> Result<()> {
     ) = runtime.block_on(async {
         let (topic, peers) = match &args.command {
             Command::Open { topic } => {
-                let topic = topic.unwrap_or_else(|| TopicId::from_bytes(rand::random()));
-                println!("> opening chat room for topic {topic}");
+                let data_dir = get_data_dir();
+                let topic = match topic {
+                    Some(t) => *t,
+                    None => match RoomStore::load_or_none(&data_dir) {
+                        Some(store) => {
+                            println!("> reusing saved room topic {}", store.topic);
+                            store.topic
+                        }
+                        None => {
+                            let t = TopicId::from_bytes(rand::random());
+                            println!("> opening new chat room for topic {t}");
+                            let room = RoomStore::new(&data_dir, t);
+                            if let Err(err) = room.save() {
+                                eprintln!("warning: failed to save room metadata: {err}");
+                            }
+                            t
+                        }
+                    },
+                };
                 (topic, vec![])
             }
             Command::Join { ticket } => {
