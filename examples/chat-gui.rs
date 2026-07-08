@@ -548,7 +548,13 @@ fn handle_net_event(state: &mut AppState, event: NetEvent) {
                 state.pending_file = Some((name.clone(), ticket));
                 state.push_system(format!("{} shared — click Download or type /download to fetch", name));
             }
+            Message::Goodbye => {
+                // Handled via NeighborDown (cleaner, covers both clean and unclean exits)
+            }
         },
+        NetEvent::NeighborDown { peer } => {
+            state.push_system(format!("{} left the chat", peer.fmt_short()));
+        }
         NetEvent::Error(err) => state.push_system(format!("Error: {err}")),
         NetEvent::Closed => {
             state.push_system("The gossip receiver closed.".into());
@@ -650,18 +656,26 @@ async fn forward_gossip_events(
     net_tx: mpsc::UnboundedSender<NetEvent>,
 ) {
     while let Ok(Some(event)) = receiver.try_next().await {
-        if let GossipEvent::Received(msg) = event {
-            match SignedMessage::verify_and_decode(&msg.content) {
-                Ok((from, message)) => {
-                    if net_tx.send(NetEvent::Message { from, message }).is_err() {
+        match event {
+            GossipEvent::Received(msg) => {
+                match SignedMessage::verify_and_decode(&msg.content) {
+                    Ok((from, message)) => {
+                        if net_tx.send(NetEvent::Message { from, message }).is_err() {
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = net_tx.send(NetEvent::Error(err.to_string()));
                         return;
                     }
                 }
-                Err(err) => {
-                    let _ = net_tx.send(NetEvent::Error(err.to_string()));
+            }
+            GossipEvent::NeighborDown(id) => {
+                if net_tx.send(NetEvent::NeighborDown { peer: id }).is_err() {
                     return;
                 }
             }
+            GossipEvent::NeighborUp(_) | GossipEvent::Lagged => {}
         }
     }
     let _ = net_tx.send(NetEvent::Closed);

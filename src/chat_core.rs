@@ -334,6 +334,11 @@ pub enum NetEvent {
         /// The decoded message payload.
         message: Message,
     },
+    /// A peer has left the gossip mesh (connection dropped or app closed).
+    NeighborDown {
+        /// Public key of the peer that left.
+        peer: PublicKey,
+    },
     /// The gossip receiver stream closed.
     Closed,
     /// A fatal network error occurred.
@@ -362,6 +367,10 @@ pub enum Message {
         /// BlobTicket serialized to string.
         ticket: String,
     },
+    /// Graceful goodbye — the sender is leaving the chat.
+    /// This is a best-effort notification: the gossip protocol also
+    /// detects disconnection via NeighborDown events.
+    Goodbye,
 }
 
 const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;
@@ -507,7 +516,19 @@ pub fn handle_net_event(
                     app.pending_file = Some((name, ticket));
                 }
             }
+            Message::Goodbye => {
+                // Handled via NetEvent::NeighborDown, which fires for
+                // both clean (Goodbye) and unclean (crash/disconnect)
+                // departures.
+            }
         },
+        NetEvent::NeighborDown { peer } => {
+            let name = names
+                .get(&peer)
+                .cloned()
+                .unwrap_or_else(|| peer.fmt_short().to_string());
+            app.push_system(format!("{name} left the chat"));
+        }
         NetEvent::Closed => {
             app.push_system("The gossip receiver closed.");
             app.should_quit = true;
@@ -529,17 +550,29 @@ pub async fn forward_gossip_events(
     net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
 ) {
     while let Ok(Some(event)) = receiver.try_next().await {
-        if let Event::Received(msg) = event {
-            match SignedMessage::verify_and_decode(&msg.content) {
-                Ok((from, message)) => {
-                    if net_tx.send(NetEvent::Message { from, message }).is_err() {
+        match event {
+            Event::Received(msg) => {
+                match SignedMessage::verify_and_decode(&msg.content) {
+                    Ok((from, message)) => {
+                        if net_tx.send(NetEvent::Message { from, message }).is_err() {
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = net_tx.send(NetEvent::Error(err.to_string()));
                         return;
                     }
                 }
-                Err(err) => {
-                    let _ = net_tx.send(NetEvent::Error(err.to_string()));
+            }
+            Event::NeighborDown(id) => {
+                if net_tx.send(NetEvent::NeighborDown { peer: id }).is_err() {
                     return;
                 }
+            }
+            Event::NeighborUp(_) | Event::Lagged => {
+                // Joined notifications and lagged warnings are intentionally
+                // not forwarded for now.  NeighborUp is noisy during initial
+                // connection; Lagged is a protocol-level backpressure signal.
             }
         }
     }
@@ -1130,5 +1163,49 @@ mod tests {
         .unwrap();
         assert!(app.should_quit);
         assert!(app.entries.iter().any(|e| e.body.contains("timeout")));
+    }
+
+    #[test]
+    fn handle_net_event_neighbor_down_uses_display_name() {
+        let remote_key = SecretKey::generate();
+        let mut app = AppState::new(test_status());
+        let mut names = HashMap::new();
+        names.insert(remote_key.public(), "alice".to_string());
+
+        handle_net_event(
+            NetEvent::NeighborDown {
+                peer: remote_key.public(),
+            },
+            &mut app,
+            &mut names,
+            SecretKey::generate().public(),
+        )
+        .unwrap();
+        assert!(app.entries.iter().any(|e| e.body == "alice left the chat"));
+    }
+
+    #[test]
+    fn handle_net_event_neighbor_down_falls_back_to_short_key() {
+        let remote_key = SecretKey::generate();
+        let mut app = AppState::new(test_status());
+        let mut names = HashMap::new();
+
+        handle_net_event(
+            NetEvent::NeighborDown {
+                peer: remote_key.public(),
+            },
+            &mut app,
+            &mut names,
+            SecretKey::generate().public(),
+        )
+        .unwrap();
+        // Without a display name, it formats the short public key.
+        let short = remote_key.public().fmt_short();
+        assert!(
+            app.entries.iter().any(|e| e.body == format!("{short} left the chat")),
+            "expected '{} left the chat' but got: {:?}",
+            short,
+            app.entries
+        );
     }
 }

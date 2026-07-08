@@ -555,6 +555,14 @@ async fn handle_key_event(
                 app.help_visible = false;
                 return Ok(());
             }
+            // Best-effort goodbye broadcast before we disconnect.
+            let goodbye = SignedMessage::sign_and_encode(
+                secret_key,
+                &Message::Goodbye,
+            );
+            if let Ok(encoded) = goodbye {
+                let _ = sender.broadcast(encoded).await;
+            }
             app.should_quit = true;
         }
         KeyEvent {
@@ -562,6 +570,14 @@ async fn handle_key_event(
             modifiers,
             ..
         } if modifiers.contains(KeyModifiers::CONTROL) => {
+            // Best-effort goodbye broadcast before we disconnect.
+            let goodbye = SignedMessage::sign_and_encode(
+                secret_key,
+                &Message::Goodbye,
+            );
+            if let Ok(encoded) = goodbye {
+                let _ = sender.broadcast(encoded).await;
+            }
             app.should_quit = true;
         }
         KeyEvent {

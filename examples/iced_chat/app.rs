@@ -307,7 +307,15 @@ impl IcedChat {
                         self.pending_file = Some((name, ticket));
                     }
                 }
+                Message::Goodbye => {
+                    // Handled via NeighborDown (cleaner, covers both clean and unclean exits)
+                }
             },
+            NetEvent::NeighborDown { peer } => {
+                let name = self.names.get(&peer).cloned()
+                    .unwrap_or_else(|| peer.fmt_short().to_string());
+                self.push_system(format!("{name} left the chat"));
+            }
             NetEvent::Closed => self.push_system("The gossip receiver closed."),
             NetEvent::Error(err) => self.push_system(format!("Network error: {err}")),
         }
