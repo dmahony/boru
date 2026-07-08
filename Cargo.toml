@@ -195,6 +195,11 @@ name = "room_e2e"
 path = "tests/room_e2e.rs"
 required-features = ["net", "test-utils"]
 
+[[test]]
+name = "interop_three_frontends"
+path = "tests/interop_three_frontends.rs"
+required-features = ["net", "test-utils"]
+
 [[bin]]
 name = "sim"
 required-features = ["simulator"]
