@@ -1031,7 +1031,18 @@ impl IcedChat {
                             let name = file.file_name().to_string();
                             let path = file.path().to_string_lossy().to_string();
                             let encoded = format!("{name}|{path}|{path}");
-                            AppMessage::ExecuteFileSend(encoded)
+                            // Auto-detect image files by extension for inline display
+                            let is_image = name.to_lowercase().ends_with(".png")
+                                || name.to_lowercase().ends_with(".jpg")
+                                || name.to_lowercase().ends_with(".jpeg")
+                                || name.to_lowercase().ends_with(".gif")
+                                || name.to_lowercase().ends_with(".webp")
+                                || name.to_lowercase().ends_with(".bmp");
+                            if is_image {
+                                AppMessage::ExecuteImageSend(encoded)
+                            } else {
+                                AppMessage::ExecuteFileSend(encoded)
+                            }
                         } else {
                             AppMessage::ToggleHelp
                         }
@@ -1144,11 +1155,9 @@ impl IcedChat {
                 iced::Task::perform(
                     async move {
                         let path_buf = std::path::PathBuf::from(&abs_path);
-                        eprintln!(">>> ExecuteImageSend: reading {:?}", path_buf);
                         let image_bytes = tokio::fs::read(&path_buf)
                             .await
                             .map_err(|e| format!("Failed to read image: {e}"))?;
-                        eprintln!(">>> ExecuteImageSend: read {} bytes", image_bytes.len());
                         let tag = blob_store
                             .blobs()
                             .add_path(path_buf)
@@ -1221,12 +1230,10 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::ImageSent(name) => {
-                eprintln!(">>> ImageSent: {name}");
                 self.push_local(format!("[Image: {name}]"));
                 iced::Task::none()
             }
             AppMessage::ImageDownloaded(name, image_bytes) => {
-                eprintln!(">>> ImageDownloaded: {name}, {} bytes", image_bytes.len());
                 let sender_name = self
                     .names
                     .get(&self.local_public)
@@ -1899,7 +1906,6 @@ impl IcedChat {
 
             // ── Image ──
             if let Some(ref img_bytes) = entry.image_bytes {
-                eprintln!(">>> rendering image: {} bytes", img_bytes.len());
                 let handle = iced::widget::image::Handle::from_bytes(img_bytes.clone());
                 let img = iced::widget::image(handle)
                     .content_fit(iced::ContentFit::ScaleDown)
