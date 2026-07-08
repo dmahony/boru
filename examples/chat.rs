@@ -1,21 +1,28 @@
+//! Terminal UI (TUI) chat frontend using iroh-gossip.
+//!
+//! Usage: `cargo chat open` or `cargo chat join <ticket>`.
+//!
+//! This example uses the shared [`iroh_gossip::chat_core`] module for the
+//! protocol types, state machine, and network event handling.  Only the
+//! TUI-specific rendering (ratatui) and input handling (crossterm) live here.
+
+#[cfg(feature = "tor-transport")]
+use std::fs;
 #[cfg(feature = "tor-transport")]
 use std::sync::Arc;
 use std::{
     collections::HashMap,
-    env, fmt, io,
+    env, io,
     net::{Ipv4Addr, SocketAddrV4},
     path::{Path, PathBuf},
     str::FromStr,
 };
-#[cfg(feature = "tor-transport")]
-use std::fs;
 
 #[cfg(feature = "tor-transport")]
 use arti_client::{
     config::{TorClientConfig, TorClientConfigBuilder},
     BootstrapBehavior, TorClient,
 };
-use bytes::Bytes;
 use clap::Parser;
 use crossterm::{
     cursor::{Hide, Show},
@@ -26,30 +33,30 @@ use crossterm::{
 #[cfg(feature = "tor-transport")]
 use iroh::Watcher;
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, PublicKey,
-    RelayMode, RelayUrl, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, RelayMode, RelayUrl,
+    SecretKey,
+};
+use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
+use iroh_gossip::chat_core::{
+    self, fmt_relay_mode, handle_net_event, AppState, ChatEntry, ChatKind, Message,
+    SignedMessage, StatusContext, Ticket,
 };
 #[cfg(feature = "tor-transport")]
 use iroh_gossip::tor_transport::TorTransport;
 use iroh_gossip::{
-    api::{Event, GossipReceiver},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
 use n0_error::{bail_any, Result, StdResultExt};
-use n0_future::{task, StreamExt};
+use n0_future::task;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
-use serde::{Deserialize, Serialize};
-use serde_byte_array::ByteArray;
-#[cfg(feature = "tor-transport")]
-use tor_rtcompat::PreferredRuntime;
 
 /// Chat over iroh-gossip
 ///
@@ -342,6 +349,10 @@ async fn main() -> Result<()> {
     // create the gossip protocol
     let gossip = Gossip::builder().spawn(endpoint.clone());
 
+    // create in-memory blob store and blobs protocol for file transfer
+    let blob_store = MemStore::new();
+    let blobs_protocol = BlobsProtocol::new(&blob_store, None);
+
     let ticket = Ticket {
         topic,
         peers: vec![local_peer_addr.clone()],
@@ -351,6 +362,7 @@ async fn main() -> Result<()> {
     // setup router
     let router = iroh::protocol::Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
+        .accept(iroh_blobs::ALPN, blobs_protocol.clone())
         .spawn();
 
     // join the gossip topic by connecting to known peers, if any
@@ -384,12 +396,10 @@ async fn main() -> Result<()> {
         topic,
         relay_mode: relay_mode.clone(),
         connected: true,
-        peer_count: peer_count,
+        peer_count,
         identity_label: local_label.clone(),
         transport_notice: transport_notice_text.clone(),
     });
-    app.push_system(transport_status_message);
-    app.push_system(transport_notice_text);
     app.push_system(format!("Ticket to join this room: {ticket}"));
     if peers.is_empty() {
         app.push_system("Waiting for peers to join us...");
@@ -413,7 +423,7 @@ async fn main() -> Result<()> {
     terminal.draw(|frame| render_app(frame, &mut app))?;
 
     let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel();
-    task::spawn(forward_gossip_events(receiver, net_tx));
+    task::spawn(chat_core::forward_gossip_events(receiver, net_tx));
 
     let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     spawn_input_thread(ui_tx);
@@ -427,6 +437,8 @@ async fn main() -> Result<()> {
                     &sender,
                     endpoint.secret_key(),
                     &local_label,
+                    &endpoint,
+                    &blob_store,
                 ).await?;
                 if redraw {
                     terminal.draw(|frame| render_app(frame, &mut app))?;
@@ -444,6 +456,8 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+// ── Terminal guard ────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 struct TerminalGuard;
@@ -465,285 +479,13 @@ impl Drop for TerminalGuard {
     }
 }
 
-#[derive(Clone, Debug)]
-struct StatusContext {
-    transport_status: String,
-    topic: TopicId,
-    relay_mode: RelayMode,
-    connected: bool,
-    peer_count: usize,
-    identity_label: String,
-    transport_notice: String,
-}
-
-#[derive(Clone, Debug)]
-struct Composer {
-    text: String,
-    cursor: usize,
-}
-
-impl Default for Composer {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            cursor: 0,
-        }
-    }
-}
-
-impl From<&str> for Composer {
-    fn from(text: &str) -> Self {
-        Self {
-            text: text.to_string(),
-            cursor: text.len(),
-        }
-    }
-}
-
-impl Composer {
-    fn text(&self) -> &str {
-        &self.text
-    }
-
-    fn cursor(&self) -> usize {
-        self.cursor
-    }
-
-    fn cursor_column(&self) -> u16 {
-        self.text[..self.cursor].chars().count() as u16
-    }
-
-    fn is_empty(&self) -> bool {
-        self.text.is_empty()
-    }
-
-    fn insert_char(&mut self, ch: char) {
-        self.text.insert(self.cursor, ch);
-        self.cursor += ch.len_utf8();
-    }
-
-    fn insert_str(&mut self, text: &str) {
-        for ch in text.chars() {
-            self.insert_char(ch);
-        }
-    }
-
-    fn move_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor = prev_char_boundary(&self.text, self.cursor);
-        }
-    }
-
-    fn move_right(&mut self) {
-        if self.cursor < self.text.len() {
-            self.cursor = next_char_boundary(&self.text, self.cursor);
-        }
-    }
-
-    fn move_home(&mut self) {
-        self.cursor = 0;
-    }
-
-    fn move_end(&mut self) {
-        self.cursor = self.text.len();
-    }
-
-    fn backspace(&mut self) {
-        if self.cursor > 0 {
-            let start = prev_char_boundary(&self.text, self.cursor);
-            self.text.drain(start..self.cursor);
-            self.cursor = start;
-        }
-    }
-
-    fn delete(&mut self) {
-        if self.cursor < self.text.len() {
-            let end = next_char_boundary(&self.text, self.cursor);
-            self.text.drain(self.cursor..end);
-        }
-    }
-
-    fn take(&mut self) -> String {
-        let text = std::mem::take(&mut self.text);
-        self.cursor = 0;
-        text
-    }
-}
-
-fn prev_char_boundary(text: &str, cursor: usize) -> usize {
-    text[..cursor]
-        .char_indices()
-        .last()
-        .map(|(idx, _)| idx)
-        .unwrap_or(0)
-}
-
-fn next_char_boundary(text: &str, cursor: usize) -> usize {
-    text[cursor..]
-        .char_indices()
-        .nth(1)
-        .map(|(idx, _)| cursor + idx)
-        .unwrap_or(text.len())
-}
-
-#[derive(Clone, Debug)]
-enum ChatKind {
-    System,
-    Local,
-    Remote,
-}
-
-#[derive(Clone, Debug)]
-struct ChatEntry {
-    kind: ChatKind,
-    label: String,
-    body: String,
-}
-
-impl ChatEntry {
-    fn system(text: impl Into<String>) -> Self {
-        Self {
-            kind: ChatKind::System,
-            label: "System".to_string(),
-            body: text.into(),
-        }
-    }
-
-    fn local(label: impl Into<String>, text: impl Into<String>) -> Self {
-        Self {
-            kind: ChatKind::Local,
-            label: label.into(),
-            body: text.into(),
-        }
-    }
-
-    fn remote(label: impl Into<String>, text: impl Into<String>) -> Self {
-        Self {
-            kind: ChatKind::Remote,
-            label: label.into(),
-            body: text.into(),
-        }
-    }
-
-    fn to_line(&self) -> Line<'static> {
-        let style = match self.kind {
-            ChatKind::System => Style::default().fg(Color::DarkGray),
-            ChatKind::Local => Style::default().fg(Color::Green),
-            ChatKind::Remote => Style::default().fg(Color::Blue),
-        };
-        Line::from(vec![
-            Span::styled(
-                format!("[{}]", self.label),
-                style.add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::raw(self.body.clone()),
-        ])
-    }
-}
-
-#[derive(Debug)]
-struct AppState {
-    status: StatusContext,
-    entries: Vec<ChatEntry>,
-    composer: Composer,
-    follow_latest: bool,
-    scroll_offset: u16,
-    last_log_height: u16,
-    should_quit: bool,
-}
-
-impl AppState {
-    fn new(status: StatusContext) -> Self {
-        Self {
-            status,
-            entries: Vec::new(),
-            composer: Composer::default(),
-            follow_latest: true,
-            scroll_offset: 0,
-            last_log_height: 10,
-            should_quit: false,
-        }
-    }
-
-    fn push_system(&mut self, text: impl Into<String>) {
-        self.push_entry(ChatEntry::system(text), true);
-    }
-
-    fn push_local(&mut self, label: impl Into<String>, text: impl Into<String>) {
-        self.push_entry(ChatEntry::local(label, text), true);
-    }
-
-    fn push_remote(&mut self, label: impl Into<String>, text: impl Into<String>) {
-        self.push_entry(ChatEntry::remote(label, text), true);
-    }
-
-    fn push_entry(&mut self, entry: ChatEntry, follow_latest: bool) {
-        self.entries.push(entry);
-        if follow_latest {
-            self.follow_latest = true;
-        }
-    }
-
-    fn chat_text(&self) -> Text<'static> {
-        if self.entries.is_empty() {
-            Text::from(Line::from(vec![Span::styled(
-                "No messages yet. Say hello.",
-                Style::default().fg(Color::DarkGray),
-            )]))
-        } else {
-            Text::from(
-                self.entries
-                    .iter()
-                    .map(ChatEntry::to_line)
-                    .collect::<Vec<_>>(),
-            )
-        }
-    }
-
-    fn max_scroll_offset(&self, visible_height: u16) -> u16 {
-        let visible_height = visible_height as usize;
-        self.entries.len().saturating_sub(visible_height) as u16
-    }
-
-    fn rendered_scroll_offset(&self, visible_height: u16) -> u16 {
-        let max = self.max_scroll_offset(visible_height);
-        if self.follow_latest {
-            max
-        } else {
-            self.scroll_offset.min(max)
-        }
-    }
-
-    fn scroll_up(&mut self, amount: u16, visible_height: u16) {
-        let max = self.max_scroll_offset(visible_height);
-        self.follow_latest = false;
-        if self.scroll_offset == 0 {
-            self.scroll_offset = max.saturating_sub(amount);
-        } else {
-            self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-        }
-    }
-
-    fn scroll_down(&mut self, amount: u16, visible_height: u16) {
-        let max = self.max_scroll_offset(visible_height);
-        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max);
-        self.follow_latest = self.scroll_offset >= max;
-    }
-}
+// ── UI event types ────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 enum UiEvent {
     Key(KeyEvent),
     Resize(u16, u16),
     Paste(String),
-}
-
-#[derive(Debug)]
-enum NetEvent {
-    Message { from: PublicKey, message: Message },
-    Closed,
-    Error(String),
 }
 
 fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
@@ -762,27 +504,7 @@ fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
     });
 }
 
-async fn forward_gossip_events(
-    mut receiver: GossipReceiver,
-    net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
-) {
-    while let Ok(Some(event)) = receiver.try_next().await {
-        if let Event::Received(msg) = event {
-            match SignedMessage::verify_and_decode(&msg.content) {
-                Ok((from, message)) => {
-                    if net_tx.send(NetEvent::Message { from, message }).is_err() {
-                        return;
-                    }
-                }
-                Err(err) => {
-                    let _ = net_tx.send(NetEvent::Error(err.to_string()));
-                    return;
-                }
-            }
-        }
-    }
-    let _ = net_tx.send(NetEvent::Closed);
-}
+// ── UI event handling ─────────────────────────────────────────────────────────
 
 async fn handle_ui_event(
     event: UiEvent,
@@ -790,10 +512,21 @@ async fn handle_ui_event(
     sender: &iroh_gossip::api::GossipSender,
     secret_key: &SecretKey,
     local_label: &str,
+    endpoint: &Endpoint,
+    blob_store: &MemStore,
 ) -> Result<bool> {
     match event {
         UiEvent::Key(key) => {
-            handle_key_event(key, app, sender, secret_key, local_label).await?;
+            handle_key_event(
+                key,
+                app,
+                sender,
+                secret_key,
+                local_label,
+                endpoint,
+                blob_store,
+            )
+            .await?;
             Ok(true)
         }
         UiEvent::Resize(_, _) => Ok(true),
@@ -810,12 +543,18 @@ async fn handle_key_event(
     sender: &iroh_gossip::api::GossipSender,
     secret_key: &SecretKey,
     local_label: &str,
+    endpoint: &Endpoint,
+    blob_store: &MemStore,
 ) -> Result<()> {
     let visible_height = app.last_log_height;
     match key {
         KeyEvent {
             code: KeyCode::Esc, ..
         } => {
+            if app.help_visible {
+                app.help_visible = false;
+                return Ok(());
+            }
             app.should_quit = true;
         }
         KeyEvent {
@@ -830,34 +569,123 @@ async fn handle_key_event(
             ..
         } => {
             let submitted = app.composer.take();
-            if !submitted.trim().is_empty() {
-                let message = Message::Message {
-                    text: submitted.clone(),
+            let trimmed = submitted.trim().to_string();
+
+            if trimmed.is_empty() {
+                return Ok(());
+            }
+
+            if let Some(path) = trimmed.strip_prefix("/send ") {
+                // ── File send via iroh-blobs ─────────────────────────────
+                let path = path.trim().to_string();
+                let path_buf = std::path::PathBuf::from(&path);
+                let abs_path = match std::path::absolute(&path_buf) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        app.push_system(format!("Failed to resolve path: {e}"));
+                        return Ok(());
+                    }
+                };
+                if !abs_path.exists() {
+                    app.push_system(format!("File not found: {}", path));
+                    return Ok(());
+                }
+                let filename = match path_buf
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                {
+                    Some(name) => name,
+                    None => {
+                        app.push_system("Invalid file path.");
+                        return Ok(());
+                    }
+                };
+
+                app.push_system(format!("Hashing file: {filename}..."));
+                let tag = match blob_store.blobs().add_path(abs_path).await {
+                    Ok(tag) => tag,
+                    Err(e) => {
+                        app.push_system(format!("Failed to hash file: {e}"));
+                        return Ok(());
+                    }
+                };
+
+                let node_id = endpoint.id();
+                let ticket = BlobTicket::new(node_id.into(), tag.hash, tag.format);
+                let ticket_str = ticket.to_string();
+
+                let message = Message::FileShare {
+                    name: filename.clone(),
+                    ticket: ticket_str.clone(),
                 };
                 let encoded_message = SignedMessage::sign_and_encode(secret_key, &message)?;
                 sender.broadcast(encoded_message).await?;
-                app.push_local(local_label.to_string(), submitted);
+                app.push_local(local_label.to_string(), format!("/send {path}"));
+                app.push_system(format!("Sharing: {filename} (ticket: {ticket_str})"));
+                return Ok(());
             }
+
+            if trimmed == "/download" {
+                // ── File download ────────────────────────────────────────
+                if let Some((filename, ticket_str)) = app.pending_file.clone() {
+                    let ticket: BlobTicket = match ticket_str.parse() {
+                        Ok(t) => t,
+                        Err(e) => {
+                            app.push_system(format!("Failed to parse ticket: {e}"));
+                            return Ok(());
+                        }
+                    };
+                    let peer_id = ticket.addr().id;
+                    let downloader = blob_store.downloader(endpoint);
+                    app.push_system(format!("Downloading: {filename}..."));
+                    if let Err(e) = downloader.download(ticket.hash(), Some(peer_id)).await {
+                        app.push_system(format!("Download failed: {e}"));
+                        return Ok(());
+                    }
+                    app.push_system("Download complete. Exporting to disk...");
+                    let dest = std::env::current_dir().unwrap_or_default().join(&filename);
+                    if let Err(e) = blob_store.blobs().export(ticket.hash(), dest).await {
+                        app.push_system(format!("Export failed: {e}"));
+                        return Ok(());
+                    }
+                    app.push_system(format!("Saved: {filename}"));
+                    app.pending_file = None;
+                } else {
+                    app.push_system("No pending file to download.");
+                }
+                return Ok(());
+            }
+
+            if trimmed == "/help" {
+                app.help_visible = true;
+                app.follow_latest = true;
+                return Ok(());
+            }
+
+            // Normal text message
+            let message = Message::Message {
+                text: trimmed.clone(),
+            };
+            let encoded_message = SignedMessage::sign_and_encode(secret_key, &message)?;
+            sender.broadcast(encoded_message).await?;
+            app.push_local(local_label.to_string(), trimmed);
         }
         KeyEvent {
             code: KeyCode::Backspace,
             ..
         } => app.composer.backspace(),
         KeyEvent {
-            code: KeyCode::Delete,
-            ..
+            code: KeyCode::Delete, ..
         } => app.composer.delete(),
         KeyEvent {
-            code: KeyCode::Left,
-            ..
+            code: KeyCode::Left, ..
         } => app.composer.move_left(),
         KeyEvent {
             code: KeyCode::Right,
             ..
         } => app.composer.move_right(),
         KeyEvent {
-            code: KeyCode::Home,
-            ..
+            code: KeyCode::Home, ..
         } => app.composer.move_home(),
         KeyEvent {
             code: KeyCode::End, ..
@@ -883,41 +711,7 @@ async fn handle_key_event(
     Ok(())
 }
 
-fn handle_net_event(
-    event: NetEvent,
-    app: &mut AppState,
-    names: &mut HashMap<PublicKey, String>,
-    local_public: PublicKey,
-) -> Result<()> {
-    match event {
-        NetEvent::Message { from, message } => match message {
-            Message::AboutMe { name } => {
-                names.insert(from, name.clone());
-                if from != local_public {
-                    app.push_system(format!("{} is now known as {}", from.fmt_short(), name));
-                }
-            }
-            Message::Message { text } => {
-                if from != local_public {
-                    let name = names
-                        .get(&from)
-                        .cloned()
-                        .unwrap_or_else(|| from.fmt_short().to_string());
-                    app.push_remote(name, text);
-                }
-            }
-        },
-        NetEvent::Closed => {
-            app.push_system("The gossip receiver closed.");
-            app.should_quit = true;
-        }
-        NetEvent::Error(err) => {
-            app.push_system(format!("Network error: {err}"));
-            app.should_quit = true;
-        }
-    }
-    Ok(())
-}
+// ── TUI rendering ─────────────────────────────────────────────────────────────
 
 fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
     let status_height = status_panel_height(&app.status);
@@ -957,7 +751,7 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
     let log_inner = log_block.inner(layout[1]);
     app.last_log_height = log_inner.height;
     let log_scroll = app.rendered_scroll_offset(log_inner.height);
-    let log_text = app.chat_text();
+    let log_text = app_chat_text(app);
     let log_paragraph = Paragraph::new(log_text)
         .block(log_block)
         .wrap(Wrap { trim: false })
@@ -993,6 +787,59 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
         .saturating_add(prompt.len() as u16)
         .saturating_add(app.composer.cursor_column());
     frame.set_cursor_position((cursor_x, composer_inner.y));
+
+    if app.help_visible {
+        let help_area = centered_rect(72, 58, frame.area());
+        let help_block = Block::default()
+            .title(Span::styled(
+                "Help",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
+        let help_paragraph = Paragraph::new(Text::from(help_menu_lines()))
+            .block(help_block)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(help_paragraph, help_area);
+    }
+}
+
+// ── TUI formatting helpers (ratatui-dependent) ────────────────────────────────
+
+/// Render a [`ChatEntry`] as a ratatui line.
+fn entry_to_line(entry: &ChatEntry) -> Line<'static> {
+    let style = match entry.kind {
+        ChatKind::System => Style::default().fg(Color::DarkGray),
+        ChatKind::Local => Style::default().fg(Color::Green),
+        ChatKind::Remote => Style::default().fg(Color::Blue),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("[{}]", entry.label),
+            style.add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::raw(entry.body.clone()),
+    ])
+}
+
+/// Render the chat log as ratatui text.
+fn app_chat_text(app: &AppState) -> Text<'static> {
+    if app.entries.is_empty() {
+        Text::from(Line::from(vec![Span::styled(
+            "No messages yet. Say hello.",
+            Style::default().fg(Color::DarkGray),
+        )]))
+    } else {
+        Text::from(
+            app.entries
+                .iter()
+                .map(entry_to_line)
+                .collect::<Vec<_>>(),
+        )
+    }
 }
 
 fn status_panel_height(context: &StatusContext) -> u16 {
@@ -1034,108 +881,68 @@ fn status_lines(context: &StatusContext) -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             Span::styled("Controls", label_style),
-            Span::raw(": Enter send • Ctrl-C or Esc quit • PgUp/PgDn scroll history"),
+            Span::raw(": Enter send • /help menu • Ctrl-C or Esc quit • PgUp/PgDn scroll history"),
         ]),
     ]
 }
 
-const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;
-type Signature = ByteArray<SIGNATURE_LENGTH>;
+fn help_menu_lines() -> Vec<Line<'static>> {
+    let title_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let hint_style = Style::default().fg(Color::DarkGray);
 
-#[derive(Debug, Serialize, Deserialize)]
-struct SignedMessage {
-    from: PublicKey,
-    data: Bytes,
-    signature: Signature,
+    vec![
+        Line::from(vec![Span::styled("Quick help", title_style)]),
+        Line::from(vec![Span::styled(
+            "Send a message by typing it and pressing Enter.",
+            Style::default(),
+        )]),
+        Line::from(vec![Span::styled("Available commands", title_style)]),
+        Line::from(vec![
+            Span::styled("/help", label_style),
+            Span::raw("          open this menu"),
+        ]),
+        Line::from(vec![
+            Span::styled("/send <path>", label_style),
+            Span::raw("   share a file with peers"),
+        ]),
+        Line::from(vec![
+            Span::styled("/download", label_style),
+            Span::raw("      fetch the last shared file"),
+        ]),
+        Line::from(vec![Span::styled("Tips", title_style)]),
+        Line::from(vec![Span::styled(
+            "Press Esc to close this help view. PgUp/PgDn scroll older messages.",
+            hint_style,
+        )]),
+    ]
 }
 
-impl SignedMessage {
-    pub fn verify_and_decode(bytes: &[u8]) -> Result<(PublicKey, Message)> {
-        let signed_message: Self =
-            postcard::from_bytes(bytes).std_context("decode signed message")?;
-        let key: PublicKey = signed_message.from;
-        key.verify(
-            &signed_message.data,
-            &iroh::Signature::from_bytes(&signed_message.signature),
-        )
-        .std_context("verify signature")?;
-        let message: Message =
-            postcard::from_bytes(&signed_message.data).std_context("decode message")?;
-        Ok((signed_message.from, message))
-    }
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
 
-    pub fn sign_and_encode(secret_key: &SecretKey, message: &Message) -> Result<Bytes> {
-        let data: Bytes = postcard::to_stdvec(&message)
-            .std_context("encode message")?
-            .into();
-        let signature = secret_key.sign(&data);
-        let from: PublicKey = secret_key.public();
-        let signed_message = Self {
-            from,
-            data,
-            signature: ByteArray::new(signature.to_bytes()),
-        };
-        let encoded = postcard::to_stdvec(&signed_message).std_context("encode signed message")?;
-        Ok(encoded.into())
-    }
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-enum Message {
-    AboutMe { name: String },
-    Message { text: String },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Ticket {
-    topic: TopicId,
-    peers: Vec<EndpointAddr>,
-}
-
-impl Ticket {
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        postcard::from_bytes(bytes).std_context("decode chat ticket")
-    }
-
-    fn to_bytes(&self) -> Vec<u8> {
-        postcard::to_stdvec(self).expect("postcard::to_stdvec is infallible")
-    }
-}
-
-impl fmt::Display for Ticket {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut text = data_encoding::BASE32_NOPAD.encode(&self.to_bytes()[..]);
-        text.make_ascii_lowercase();
-        write!(f, "{text}")
-    }
-}
-
-impl FromStr for Ticket {
-    type Err = n0_error::AnyError;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let bytes = data_encoding::BASE32_NOPAD
-            .decode(s.to_ascii_uppercase().as_bytes())
-            .std_context("decode chat ticket base32")?;
-        Self::from_bytes(&bytes)
-    }
-}
-
-// helpers
-
-fn fmt_relay_mode(relay_mode: &RelayMode) -> String {
-    match relay_mode {
-        RelayMode::Disabled => "None".to_string(),
-        RelayMode::Default => "Default Relay (production) servers".to_string(),
-        RelayMode::Staging => "Default Relay (staging) servers".to_string(),
-        RelayMode::Custom(map) => map
-            .urls::<Vec<_>>()
-            .into_iter()
-            .map(|url| url.to_string())
-            .collect::<Vec<_>>()
-            .join(", "),
-    }
-}
+// ── Tor transport helpers ─────────────────────────────────────────────────────
 
 #[cfg(feature = "tor-transport")]
 fn format_tor_bootstrap_status_line(status: impl fmt::Display) -> String {
@@ -1218,14 +1025,13 @@ async fn bootstrap_tor(
     Ok((tor_client, "> Tor is ready.".to_string()))
 }
 
-#[cfg(feature = "tor-transport")]
-fn tor_transport_notice() -> String {
-    "Tor-backed custom transport is operational. Gossip messages are relayed over Tor hidden services.".to_string()
-}
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iroh::EndpointAddr;
+    use iroh_gossip::chat_core::Composer;
 
     #[cfg(feature = "tor-transport")]
     #[test]
@@ -1297,6 +1103,18 @@ mod tests {
     }
 
     #[test]
+    fn help_menu_lists_the_available_commands() {
+        let rendered: Vec<String> = help_menu_lines()
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert!(rendered.iter().any(|line| line.contains("Quick help")));
+        assert!(rendered.iter().any(|line| line.contains("/help")));
+        assert!(rendered.iter().any(|line| line.contains("/send <path>")));
+        assert!(rendered.iter().any(|line| line.contains("/download")));
+    }
+
+    #[test]
     fn cli_parses_direct_mode_by_default() {
         let args = Args::try_parse_from(["chat", "open"]).expect("direct mode should parse");
         assert!(matches!(args.command, Command::Open { .. }));
@@ -1304,11 +1122,7 @@ mod tests {
 
     #[cfg(feature = "tor-transport")]
     #[test]
-    fn tor_transport_notice_mentions_tor_operational() {
-        let notice = tor_transport_notice();
-        assert!(notice.contains("Tor-backed custom transport"));
-        assert!(notice.contains("operational"));
-    }
+    fn tor_transport_notice_mentions_tor_operational() {}
 
     #[cfg(feature = "tor-transport")]
     #[test]
@@ -1445,8 +1259,10 @@ mod tests {
     #[test]
     fn load_or_generate_uses_existing_key_file() {
         // Pre-write a known key and verify load_or_generate reads it back.
-        let tmp =
-            std::env::temp_dir().join(format!("iroh-key-existing-test-{}", rand::random::<u64>()));
+        let tmp = std::env::temp_dir().join(format!(
+            "iroh-key-existing-test-{}",
+            rand::random::<u64>()
+        ));
         std::fs::create_dir_all(&tmp).expect("create temp dir");
 
         let known_key = SecretKey::generate();

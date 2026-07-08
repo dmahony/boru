@@ -66,7 +66,7 @@ arti-client = { version = "0.44.0", optional = true, default-features = false, f
     "pt-client",
 ] }
 iroh = { version = "1", default-features = false, optional = true }
-tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt"] }
+tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt", "macros"] }
 n0-watcher = { version = "1.0.0", optional = true }
 noq-udp = { version = "1.0.0", optional = true }
 tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
@@ -82,6 +82,7 @@ irpc = { version = "0.17.0", optional = true, default-features = false, features
     "spans",
 ] }
 n0-error = { version = "1", features = ["anyhow"] }
+serde-byte-array = "0.1.2"
 
 # rpc dependencies (optional)
 noq = { version = "1", optional = true, default-features = false }
@@ -100,6 +101,7 @@ rayon = { version = "1.10.0", optional = true }
 comfy-table = { version = "7.1.4", optional = true }
 ratatui = { version = "0.28.1", default-features = false, features = ["crossterm"], optional = true }
 crossterm = { version = "0.28.1", optional = true }
+iced = { version = "0.14", default-features = false, features = ["tokio", "x11", "wayland", "tiny-skia", "image"], optional = true }
 
 
 [dev-dependencies]
@@ -118,11 +120,11 @@ iroh = { version = "1", default-features = false, features = [
     "test-utils",
     "tls-ring"
 ] }
+iroh-blobs = { version = "0.103", default-features = false }
 testresult = "0.4.1"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 n0-tracing-test = "0.3"
 url = "2.4.0"
-serde-byte-array = "0.1.2"
 rand = { version = "0.10", features = ["chacha"] }
 
 [features]
@@ -155,6 +157,7 @@ simulator = [
 ]
 metrics = ["iroh-metrics/metrics"]
 examples = ["net", "dep:ratatui", "dep:crossterm"]
+gui = ["net", "dep:iced", "dep:tokio"]
 unstable-custom-transports = ["iroh/unstable-custom-transports"]
 tor-transport = [
     "net",
@@ -188,6 +191,14 @@ required-features = ["examples"]
 [[example]]
 name = "setup"
 required-features = ["examples"]
+
+[[example]]
+name = "chat-gui"
+required-features = ["gui"]
+
+[[example]]
+name = "iced_chat"
+required-features = ["gui"]
 
 [package.metadata.docs.rs]
 all-features = true

@@ -24,4 +24,11 @@ pub mod proto;
 /// Tor-specific address and ticket scaffolding for the custom transport redesign.
 pub mod tor_transport;
 
+/// Shared chat core — state machine, protocol types, and network event handling.
+///
+/// Available when the `net` feature is enabled.  Used by the `chat` example
+/// and is intended for reuse by other frontends (GUI, headless, etc.).
+#[cfg(feature = "net")]
+pub mod chat_core;
+
 pub use proto::TopicId;

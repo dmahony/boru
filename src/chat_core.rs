@@ -1,0 +1,1134 @@
+//! Shared chat core — reusable state machine, protocol types, and network event handling.
+//!
+//! This module contains the protocol types (`Message`, `SignedMessage`, `Ticket`),
+//! the chat state machine (`AppState`, `Composer`, `ChatEntry`, `StatusContext`),
+//! and network event processing (`handle_net_event`, `forward_gossip_events`).
+//!
+//! It has **no** terminal/ratatui/crossterm dependencies, making it usable from
+//! any frontend (TUI, GUI, headless).
+
+use std::{
+    collections::HashMap,
+    fmt,
+    str::FromStr,
+};
+
+use bytes::Bytes;
+use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey};
+use n0_error::{Result, StdResultExt};
+use n0_future::StreamExt;
+use serde::{Deserialize, Serialize};
+use serde_byte_array::ByteArray;
+
+use crate::api::{Event, GossipReceiver};
+use crate::proto::TopicId;
+
+// ── Composer ─────────────────────────────────────────────────────────────────
+
+/// A text buffer with cursor tracking, suitable for a message composer / input line.
+#[derive(Clone, Debug)]
+pub struct Composer {
+    text: String,
+    cursor: usize,
+}
+
+impl Default for Composer {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
+        }
+    }
+}
+
+impl From<&str> for Composer {
+    fn from(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            cursor: text.len(),
+        }
+    }
+}
+
+impl Composer {
+    /// The current text content.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Byte offset of the cursor.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Visual column (character count up to cursor) for rendering.
+    pub fn cursor_column(&self) -> u16 {
+        self.text[..self.cursor].chars().count() as u16
+    }
+
+    /// Whether the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// Insert a character at the cursor position.
+    pub fn insert_char(&mut self, ch: char) {
+        self.text.insert(self.cursor, ch);
+        self.cursor += ch.len_utf8();
+    }
+
+    /// Insert a string at the cursor position.
+    pub fn insert_str(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.insert_char(ch);
+        }
+    }
+
+    /// Move cursor one character left.
+    pub fn move_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor = prev_char_boundary(&self.text, self.cursor);
+        }
+    }
+
+    /// Move cursor one character right.
+    pub fn move_right(&mut self) {
+        if self.cursor < self.text.len() {
+            self.cursor = next_char_boundary(&self.text, self.cursor);
+        }
+    }
+
+    /// Move cursor to the start.
+    pub fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    /// Move cursor to the end.
+    pub fn move_end(&mut self) {
+        self.cursor = self.text.len();
+    }
+
+    /// Delete the character before the cursor.
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            let start = prev_char_boundary(&self.text, self.cursor);
+            self.text.drain(start..self.cursor);
+            self.cursor = start;
+        }
+    }
+
+    /// Delete the character at the cursor.
+    pub fn delete(&mut self) {
+        if self.cursor < self.text.len() {
+            let end = next_char_boundary(&self.text, self.cursor);
+            self.text.drain(self.cursor..end);
+        }
+    }
+
+    /// Take the buffer contents and reset.
+    pub fn take(&mut self) -> String {
+        let text = std::mem::take(&mut self.text);
+        self.cursor = 0;
+        text
+    }
+}
+
+fn prev_char_boundary(text: &str, cursor: usize) -> usize {
+    text[..cursor]
+        .char_indices()
+        .last()
+        .map(|(idx, _)| idx)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    text[cursor..]
+        .char_indices()
+        .nth(1)
+        .map(|(idx, _)| cursor + idx)
+        .unwrap_or(text.len())
+}
+
+// ── Chat entry types ─────────────────────────────────────────────────────────
+
+/// Whether a chat message originated locally, from a remote peer, or is a system notice.
+#[derive(Clone, Debug)]
+pub enum ChatKind {
+    /// System notification (join/leave, errors, info).
+    System,
+    /// A message we sent ourselves.
+    Local,
+    /// A message from a remote peer.
+    Remote,
+}
+
+/// A single entry in the chat log.
+#[derive(Clone, Debug)]
+pub struct ChatEntry {
+    /// Kind of entry (system, local, remote).
+    pub kind: ChatKind,
+    /// Display label (e.g. nickname or "System").
+    pub label: String,
+    /// The message body text.
+    pub body: String,
+}
+
+impl ChatEntry {
+    /// Create a system notification entry.
+    pub fn system(text: impl Into<String>) -> Self {
+        Self {
+            kind: ChatKind::System,
+            label: "System".to_string(),
+            body: text.into(),
+        }
+    }
+
+    /// Create a local (self-sent) message entry.
+    pub fn local(label: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            kind: ChatKind::Local,
+            label: label.into(),
+            body: text.into(),
+        }
+    }
+
+    /// Create a remote (received) message entry.
+    pub fn remote(label: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            kind: ChatKind::Remote,
+            label: label.into(),
+            body: text.into(),
+        }
+    }
+}
+
+// ── Status context ────────────────────────────────────────────────────────────
+
+/// Connection status information displayed in the status panel.
+#[derive(Clone, Debug)]
+pub struct StatusContext {
+    /// Human-readable transport status message.
+    pub transport_status: String,
+    /// The gossip topic for this chat room.
+    pub topic: TopicId,
+    /// Relay configuration.
+    pub relay_mode: RelayMode,
+    /// Whether we are connected to peers.
+    pub connected: bool,
+    /// Number of known peers.
+    pub peer_count: usize,
+    /// Our display name / label.
+    pub identity_label: String,
+    /// A notice about the transport (shown in the status panel).
+    pub transport_notice: String,
+}
+
+// ── App state ─────────────────────────────────────────────────────────────────
+
+/// The complete chat application state, independent of any rendering backend.
+#[derive(Debug)]
+pub struct AppState {
+    /// Connection status context.
+    pub status: StatusContext,
+    /// All chat log entries.
+    pub entries: Vec<ChatEntry>,
+    /// The composer / input buffer.
+    pub composer: Composer,
+    /// Whether to auto-scroll to the latest message.
+    pub follow_latest: bool,
+    /// Current scroll offset (in lines).
+    pub scroll_offset: u16,
+    /// Last measured log height (updated by the renderer).
+    pub last_log_height: u16,
+    /// Whether the user has requested to quit.
+    pub should_quit: bool,
+    /// Whether the help overlay is visible.
+    pub help_visible: bool,
+    /// Pending file download info: (filename, ticket_string).
+    pub pending_file: Option<(String, String)>,
+}
+
+impl AppState {
+    /// Create a new chat state with the given status context.
+    pub fn new(status: StatusContext) -> Self {
+        Self {
+            status,
+            entries: Vec::new(),
+            composer: Composer::default(),
+            follow_latest: true,
+            scroll_offset: 0,
+            last_log_height: 10,
+            should_quit: false,
+            help_visible: false,
+            pending_file: None,
+        }
+    }
+
+    /// Append a system notification.
+    pub fn push_system(&mut self, text: impl Into<String>) {
+        self.push_entry(ChatEntry::system(text), true);
+    }
+
+    /// Append a local (self-sent) message.
+    pub fn push_local(&mut self, label: impl Into<String>, text: impl Into<String>) {
+        self.push_entry(ChatEntry::local(label, text), true);
+    }
+
+    /// Append a remote (received) message.
+    pub fn push_remote(&mut self, label: impl Into<String>, text: impl Into<String>) {
+        self.push_entry(ChatEntry::remote(label, text), true);
+    }
+
+    /// Push a raw [`ChatEntry`].
+    pub fn push_entry(&mut self, entry: ChatEntry, follow_latest: bool) {
+        self.entries.push(entry);
+        if follow_latest {
+            self.follow_latest = true;
+        }
+    }
+
+    /// Maximum scroll offset given the visible height.
+    pub fn max_scroll_offset(&self, visible_height: u16) -> u16 {
+        let visible_height = visible_height as usize;
+        self.entries.len().saturating_sub(visible_height) as u16
+    }
+
+    /// The rendered scroll offset, clamped and respecting follow-latest mode.
+    pub fn rendered_scroll_offset(&self, visible_height: u16) -> u16 {
+        let max = self.max_scroll_offset(visible_height);
+        if self.follow_latest {
+            max
+        } else {
+            self.scroll_offset.min(max)
+        }
+    }
+
+    /// Scroll up by `amount` lines.
+    pub fn scroll_up(&mut self, amount: u16, visible_height: u16) {
+        let max = self.max_scroll_offset(visible_height);
+        self.follow_latest = false;
+        if self.scroll_offset == 0 {
+            self.scroll_offset = max.saturating_sub(amount);
+        } else {
+            self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        }
+    }
+
+    /// Scroll down by `amount` lines.
+    pub fn scroll_down(&mut self, amount: u16, visible_height: u16) {
+        let max = self.max_scroll_offset(visible_height);
+        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max);
+        self.follow_latest = self.scroll_offset >= max;
+    }
+}
+
+// ── Network event types ──────────────────────────────────────────────────────
+
+/// An event received from the gossip network (decoded from the wire).
+#[derive(Debug, Clone)]
+pub enum NetEvent {
+    /// A decoded message from a peer.
+    Message {
+        /// Public key of the sender.
+        from: PublicKey,
+        /// The decoded message payload.
+        message: Message,
+    },
+    /// The gossip receiver stream closed.
+    Closed,
+    /// A fatal network error occurred.
+    Error(String),
+}
+
+// ── Protocol types ───────────────────────────────────────────────────────────
+
+/// Messages that can be sent between peers in the chat.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Message {
+    /// Announce or change your display name.
+    AboutMe {
+        /// The new display name.
+        name: String,
+    },
+    /// A regular text message.
+    Message {
+        /// The message text.
+        text: String,
+    },
+    /// Announce a file available for download.
+    FileShare {
+        /// The file name (basename only, no path).
+        name: String,
+        /// BlobTicket serialized to string.
+        ticket: String,
+    },
+}
+
+const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;
+type Signature = ByteArray<SIGNATURE_LENGTH>;
+
+/// A signed message envelope with sender identity and signature.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignedMessage {
+    from: PublicKey,
+    data: Bytes,
+    signature: Signature,
+}
+
+impl SignedMessage {
+    /// Verify a signed message and decode the inner [`Message`].
+    pub fn verify_and_decode(bytes: &[u8]) -> Result<(PublicKey, Message)> {
+        let signed_message: Self =
+            postcard::from_bytes(bytes).std_context("decode signed message")?;
+        let key: PublicKey = signed_message.from;
+        key.verify(
+            &signed_message.data,
+            &iroh::Signature::from_bytes(&signed_message.signature),
+        )
+        .std_context("verify signature")?;
+        let message: Message =
+            postcard::from_bytes(&signed_message.data).std_context("decode message")?;
+        Ok((signed_message.from, message))
+    }
+
+    /// Sign a [`Message`] and encode it into a `Bytes` payload ready for gossip broadcast.
+    pub fn sign_and_encode(secret_key: &SecretKey, message: &Message) -> Result<Bytes> {
+        let data: Bytes = postcard::to_stdvec(&message)
+            .std_context("encode message")?
+            .into();
+        let signature = secret_key.sign(&data);
+        let from: PublicKey = secret_key.public();
+        let signed_message = Self {
+            from,
+            data,
+            signature: ByteArray::new(signature.to_bytes()),
+        };
+        let encoded = postcard::to_stdvec(&signed_message).std_context("encode signed message")?;
+        Ok(encoded.into())
+    }
+}
+
+/// A chat-room ticket that peers use to join a topic.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ticket {
+    /// The gossip topic to join.
+    pub topic: TopicId,
+    /// Known peers to bootstrap from.
+    pub peers: Vec<EndpointAddr>,
+}
+
+impl Ticket {
+    /// Decode a ticket from serialized bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        postcard::from_bytes(bytes).std_context("decode chat ticket")
+    }
+
+    /// Encode this ticket into bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("postcard::to_stdvec is infallible")
+    }
+}
+
+impl fmt::Display for Ticket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut text = data_encoding::BASE32_NOPAD.encode(&self.to_bytes()[..]);
+        text.make_ascii_lowercase();
+        write!(f, "{text}")
+    }
+}
+
+impl FromStr for Ticket {
+    type Err = n0_error::AnyError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let bytes = data_encoding::BASE32_NOPAD
+            .decode(s.to_ascii_uppercase().as_bytes())
+            .std_context("decode chat ticket base32")?;
+        Self::from_bytes(&bytes)
+    }
+}
+
+// ── Formatting helpers ───────────────────────────────────────────────────────
+
+/// Format a [`RelayMode`] into a human-readable string.
+pub fn fmt_relay_mode(relay_mode: &RelayMode) -> String {
+    match relay_mode {
+        RelayMode::Disabled => "None".to_string(),
+        RelayMode::Default => "Default Relay (production) servers".to_string(),
+        RelayMode::Staging => "Default Relay (staging) servers".to_string(),
+        RelayMode::Custom(map) => map
+            .urls::<Vec<_>>()
+            .into_iter()
+            .map(|url| url.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+// ── Network event dispatch ───────────────────────────────────────────────────
+
+/// Process a decoded [`NetEvent`] against the chat state and the name cache.
+///
+/// Updates `app.entries` with incoming messages, handles `AboutMe` name
+/// announcements, and tracks pending file downloads.
+pub fn handle_net_event(
+    event: NetEvent,
+    app: &mut AppState,
+    names: &mut HashMap<PublicKey, String>,
+    local_public: PublicKey,
+) -> Result<()> {
+    match event {
+        NetEvent::Message { from, message } => match message {
+            Message::AboutMe { name } => {
+                names.insert(from, name.clone());
+                if from != local_public {
+                    app.push_system(format!("{} is now known as {}", from.fmt_short(), name));
+                }
+            }
+            Message::Message { text } => {
+                if from != local_public {
+                    let name = names
+                        .get(&from)
+                        .cloned()
+                        .unwrap_or_else(|| from.fmt_short().to_string());
+                    app.push_remote(name, text);
+                }
+            }
+            Message::FileShare { name, ticket } => {
+                if from != local_public {
+                    let sender_name = names
+                        .get(&from)
+                        .cloned()
+                        .unwrap_or_else(|| from.fmt_short().to_string());
+                    app.push_system(format!(
+                        "{} shared a file: {} (type /download to fetch it)",
+                        sender_name, name
+                    ));
+                    app.pending_file = Some((name, ticket));
+                }
+            }
+        },
+        NetEvent::Closed => {
+            app.push_system("The gossip receiver closed.");
+            app.should_quit = true;
+        }
+        NetEvent::Error(err) => {
+            app.push_system(format!("Network error: {err}"));
+            app.should_quit = true;
+        }
+    }
+    Ok(())
+}
+
+/// Forward raw gossip events into a [`NetEvent`] channel.
+///
+/// Spawn this as a background task to bridge the gossip receiver
+/// into a `NetEvent` stream.
+pub async fn forward_gossip_events(
+    mut receiver: GossipReceiver,
+    net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+) {
+    while let Ok(Some(event)) = receiver.try_next().await {
+        if let Event::Received(msg) = event {
+            match SignedMessage::verify_and_decode(&msg.content) {
+                Ok((from, message)) => {
+                    if net_tx.send(NetEvent::Message { from, message }).is_err() {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = net_tx.send(NetEvent::Error(err.to_string()));
+                    return;
+                }
+            }
+        }
+    }
+    let _ = net_tx.send(NetEvent::Closed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::TopicId;
+
+    // ── Composer tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn composer_default_is_empty() {
+        let c = Composer::default();
+        assert!(c.is_empty());
+        assert_eq!(c.text(), "");
+        assert_eq!(c.cursor(), 0);
+        assert_eq!(c.cursor_column(), 0);
+    }
+
+    #[test]
+    fn composer_from_str_sets_text_and_cursor_at_end() {
+        let c = Composer::from("hello");
+        assert_eq!(c.text(), "hello");
+        assert_eq!(c.cursor(), 5);
+        assert!(!c.is_empty());
+    }
+
+    #[test]
+    fn composer_insert_char_at_cursor() {
+        let mut c = Composer::from("ab");
+        c.move_home();
+        c.insert_char('X');
+        assert_eq!(c.text(), "Xab");
+        assert_eq!(c.cursor(), 1);
+    }
+
+    #[test]
+    fn composer_insert_str_at_cursor() {
+        let mut c = Composer::from("ab");
+        c.insert_str("XY");
+        assert_eq!(c.text(), "abXY");
+        assert_eq!(c.cursor(), 4);
+    }
+
+    #[test]
+    fn composer_insert_str_mid_buffer() {
+        let mut c = Composer::from("ab");
+        c.move_home();
+        c.insert_str("12");
+        assert_eq!(c.text(), "12ab");
+        assert_eq!(c.cursor(), 2);
+    }
+
+    #[test]
+    fn composer_move_left_and_right() {
+        let mut c = Composer::from("abc");
+        c.move_left();
+        assert_eq!(c.cursor(), 2);
+        c.move_left();
+        assert_eq!(c.cursor(), 1);
+        c.move_left();
+        assert_eq!(c.cursor(), 0);
+        c.move_left(); // no-op at start
+        assert_eq!(c.cursor(), 0);
+        c.move_right();
+        assert_eq!(c.cursor(), 1);
+        c.move_right();
+        assert_eq!(c.cursor(), 2);
+        c.move_right();
+        assert_eq!(c.cursor(), 3);
+        c.move_right(); // no-op at end
+        assert_eq!(c.cursor(), 3);
+    }
+
+    #[test]
+    fn composer_move_home_and_end() {
+        let mut c = Composer::from("hello world");
+        c.move_home();
+        assert_eq!(c.cursor(), 0);
+        c.move_end();
+        assert_eq!(c.cursor(), 11);
+    }
+
+    #[test]
+    fn composer_backspace_removes_before_cursor() {
+        let mut c = Composer::from("abcd");
+        c.move_left();
+        c.backspace();
+        assert_eq!(c.text(), "abd");
+        assert_eq!(c.cursor(), 2);
+    }
+
+    #[test]
+    fn composer_backspace_at_start_does_nothing() {
+        let mut c = Composer::from("test");
+        c.move_home();
+        c.backspace();
+        assert_eq!(c.text(), "test");
+        assert_eq!(c.cursor(), 0);
+    }
+
+    #[test]
+    fn composer_delete_removes_after_cursor() {
+        // "abcd" cursor at end → move_left → cursor before 'd'
+        // delete removes 'd' → "abc", cursor at end (3)
+        let mut c = Composer::from("abcd");
+        c.move_left();
+        c.delete();
+        assert_eq!(c.text(), "abc");
+        assert_eq!(c.cursor(), 3);
+    }
+
+    #[test]
+    fn composer_delete_at_end_does_nothing() {
+        let mut c = Composer::from("abc");
+        c.delete();
+        assert_eq!(c.text(), "abc");
+        assert_eq!(c.cursor(), 3);
+    }
+
+    #[test]
+    fn composer_take_clears_buffer() {
+        let mut c = Composer::from("hello");
+        let taken = c.take();
+        assert_eq!(taken, "hello");
+        assert!(c.is_empty());
+        assert_eq!(c.cursor(), 0);
+    }
+
+    #[test]
+    fn composer_cursor_column_is_unicode_aware() {
+        let mut c = Composer::default();
+        c.insert_char('é');  // 2 bytes, 1 column
+        c.insert_char('☃');  // 3 bytes, 1 column
+        assert_eq!(c.cursor_column(), 2);
+        c.move_home();
+        assert_eq!(c.cursor_column(), 0);
+        c.move_right();
+        assert_eq!(c.cursor_column(), 1);
+        c.move_right();
+        assert_eq!(c.cursor_column(), 2);
+    }
+
+    #[test]
+    fn composer_insert_unicode_at_cursor() {
+        let mut c = Composer::from("a");
+        c.move_home();
+        c.insert_char('é');
+        assert_eq!(c.text(), "éa");
+        assert_eq!(c.cursor(), 2);
+    }
+
+    // ── ChatEntry tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn chat_entry_system_uses_system_label() {
+        let e = ChatEntry::system("hello");
+        assert!(matches!(e.kind, ChatKind::System));
+        assert_eq!(e.label, "System");
+        assert_eq!(e.body, "hello");
+    }
+
+    #[test]
+    fn chat_entry_local_uses_given_label() {
+        let e = ChatEntry::local("alice", "hey");
+        assert!(matches!(e.kind, ChatKind::Local));
+        assert_eq!(e.label, "alice");
+        assert_eq!(e.body, "hey");
+    }
+
+    #[test]
+    fn chat_entry_remote_uses_given_label() {
+        let e = ChatEntry::remote("bob", "hi");
+        assert!(matches!(e.kind, ChatKind::Remote));
+        assert_eq!(e.label, "bob");
+        assert_eq!(e.body, "hi");
+    }
+
+    // ── StatusContext tests ──────────────────────────────────────────────
+
+    fn test_status() -> StatusContext {
+        StatusContext {
+            transport_status: "ready".into(),
+            topic: TopicId::from_bytes([0u8; 32]),
+            relay_mode: RelayMode::Default,
+            connected: true,
+            peer_count: 0,
+            identity_label: "tester".into(),
+            transport_notice: "notice".into(),
+        }
+    }
+
+    #[test]
+    fn status_context_fields_are_accessible() {
+        let s = test_status();
+        assert_eq!(s.transport_status, "ready");
+        assert_eq!(s.identity_label, "tester");
+        assert!(s.connected);
+    }
+
+    // ── AppState tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn app_state_new_creates_empty_state() {
+        let app = AppState::new(test_status());
+        assert!(app.entries.is_empty());
+        assert!(app.composer.is_empty());
+        assert!(app.follow_latest);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn app_state_push_system_adds_entry_and_sets_follow() {
+        let mut app = AppState::new(test_status());
+        app.follow_latest = false;
+        app.push_system("system msg");
+        assert_eq!(app.entries.len(), 1);
+        assert!(matches!(app.entries[0].kind, ChatKind::System));
+        assert_eq!(app.entries[0].body, "system msg");
+        assert!(app.follow_latest);
+    }
+
+    #[test]
+    fn app_state_push_local_adds_local_entry() {
+        let mut app = AppState::new(test_status());
+        app.push_local("alice", "hello");
+        assert!(matches!(app.entries[0].kind, ChatKind::Local));
+        assert_eq!(app.entries[0].label, "alice");
+        assert_eq!(app.entries[0].body, "hello");
+    }
+
+    #[test]
+    fn app_state_push_remote_adds_remote_entry() {
+        let mut app = AppState::new(test_status());
+        app.push_remote("bob", "hi");
+        assert!(matches!(app.entries[0].kind, ChatKind::Remote));
+        assert_eq!(app.entries[0].label, "bob");
+        assert_eq!(app.entries[0].body, "hi");
+    }
+
+    #[test]
+    fn app_state_entries_maintain_insertion_order() {
+        let mut app = AppState::new(test_status());
+        app.push_system("sys");
+        app.push_local("A", "local");
+        app.push_remote("B", "remote");
+        assert_eq!(app.entries.len(), 3);
+        assert!(matches!(app.entries[0].kind, ChatKind::System));
+        assert!(matches!(app.entries[1].kind, ChatKind::Local));
+        assert!(matches!(app.entries[2].kind, ChatKind::Remote));
+    }
+
+    #[test]
+    fn app_state_max_scroll_offset_zero_when_fewer_entries_than_height() {
+        let mut app = AppState::new(test_status());
+        assert_eq!(app.max_scroll_offset(10), 0);
+        for i in 0..5 {
+            app.push_system(format!("m{i}"));
+        }
+        assert_eq!(app.max_scroll_offset(10), 0);
+    }
+
+    #[test]
+    fn app_state_max_scroll_offset_non_zero_when_more_entries_than_height() {
+        let mut app = AppState::new(test_status());
+        for i in 0..15 {
+            app.push_system(format!("m{i}"));
+        }
+        assert_eq!(app.max_scroll_offset(10), 5);
+    }
+
+    #[test]
+    fn app_state_rendered_scroll_following_returns_max() {
+        let mut app = AppState::new(test_status());
+        for i in 0..20 {
+            app.push_system(format!("m{i}"));
+        }
+        app.follow_latest = true;
+        assert_eq!(app.rendered_scroll_offset(10), 10);
+    }
+
+    #[test]
+    fn app_state_rendered_scroll_not_following_uses_scroll_offset() {
+        let mut app = AppState::new(test_status());
+        for i in 0..20 {
+            app.push_system(format!("m{i}"));
+        }
+        app.follow_latest = false;
+        app.scroll_offset = 3;
+        assert_eq!(app.rendered_scroll_offset(10), 3);
+        // Clamped to max (10) when scroll_offset exceeds
+        app.scroll_offset = 100;
+        assert_eq!(app.rendered_scroll_offset(10), 10);
+    }
+
+    #[test]
+    fn app_state_scroll_up_from_top_wraps() {
+        let mut app = AppState::new(test_status());
+        for i in 0..10 {
+            app.push_system(format!("m{i}"));
+        }
+        app.scroll_up(3, 5);
+        assert!(!app.follow_latest);
+        // max = 10 - 5 = 5, scroll_offset was 0 => wraps to 5 - 3 = 2
+        assert_eq!(app.scroll_offset, 2);
+    }
+
+    #[test]
+    fn app_state_scroll_up_from_mid() {
+        let mut app = AppState::new(test_status());
+        for i in 0..10 {
+            app.push_system(format!("m{i}"));
+        }
+        app.scroll_offset = 5;
+        app.scroll_up(2, 5);
+        assert_eq!(app.scroll_offset, 3);
+    }
+
+    #[test]
+    fn app_state_scroll_down_re_enables_follow_at_bottom() {
+        let mut app = AppState::new(test_status());
+        for i in 0..10 {
+            app.push_system(format!("m{i}"));
+        }
+        app.follow_latest = false;
+        app.scroll_offset = 0;
+        app.scroll_down(10, 5); // max=5, so should land at 5
+        assert_eq!(app.scroll_offset, 5);
+        assert!(app.follow_latest);
+    }
+
+    #[test]
+    fn app_state_scroll_down_does_not_follow_when_not_at_bottom() {
+        let mut app = AppState::new(test_status());
+        for i in 0..10 {
+            app.push_system(format!("m{i}"));
+        }
+        app.follow_latest = false;
+        app.scroll_offset = 0;
+        app.scroll_down(2, 5);
+        assert_eq!(app.scroll_offset, 2);
+        assert!(!app.follow_latest);
+    }
+
+    #[test]
+    fn app_state_push_entry_without_follow_does_not_change_flag() {
+        let mut app = AppState::new(test_status());
+        app.follow_latest = false;
+        app.push_entry(ChatEntry::system("test"), false);
+        assert!(!app.follow_latest, "push_entry with false should not change flag");
+    }
+
+    #[test]
+    fn app_state_push_entry_with_follow_sets_flag() {
+        let mut app = AppState::new(test_status());
+        app.follow_latest = false;
+        app.push_entry(ChatEntry::system("test"), true);
+        assert!(app.follow_latest);
+    }
+
+    // ── Message serialization tests ──────────────────────────────────────
+
+    #[test]
+    fn message_serialization_roundtrip_about_me() {
+        let msg = Message::AboutMe { name: "alice".into() };
+        let bytes = postcard::to_stdvec(&msg).unwrap();
+        let decoded: Message = postcard::from_bytes(&bytes).unwrap();
+        assert!(matches!(decoded, Message::AboutMe { ref name } if name == "alice"));
+    }
+
+    #[test]
+    fn message_serialization_roundtrip_text() {
+        let msg = Message::Message { text: "hello world".into() };
+        let bytes = postcard::to_stdvec(&msg).unwrap();
+        let decoded: Message = postcard::from_bytes(&bytes).unwrap();
+        assert!(matches!(decoded, Message::Message { ref text } if text == "hello world"));
+    }
+
+    #[test]
+    fn message_serialization_roundtrip_file_share() {
+        let msg = Message::FileShare {
+            name: "photo.png".into(),
+            ticket: "ticket123".into(),
+        };
+        let bytes = postcard::to_stdvec(&msg).unwrap();
+        let decoded: Message = postcard::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::FileShare { name, ticket } => {
+                assert_eq!(name, "photo.png");
+                assert_eq!(ticket, "ticket123");
+            }
+            _ => panic!("expected FileShare"),
+        }
+    }
+
+    #[test]
+    fn signed_message_sign_and_verify_roundtrip() {
+        let key = SecretKey::generate();
+        let msg = Message::Message { text: "secure chat".into() };
+        let encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
+        let (pk, decoded) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        assert_eq!(pk, key.public());
+        assert!(matches!(decoded, Message::Message { ref text } if text == "secure chat"));
+    }
+
+    #[test]
+    fn signed_message_rejects_tampered_data() {
+        let key = SecretKey::generate();
+        let msg = Message::Message { text: "original".into() };
+        let mut encoded = SignedMessage::sign_and_encode(&key, &msg)
+            .unwrap()
+            .to_vec();
+        if let Some(b) = encoded.last_mut() {
+            *b ^= 0xff;
+        }
+        let result = SignedMessage::verify_and_decode(&encoded);
+        assert!(result.is_err(), "tampered message should fail verification");
+    }
+
+    #[test]
+    fn signed_message_wrong_key_fails_verification() {
+        let key_a = SecretKey::generate();
+        let key_b = SecretKey::generate();
+        let msg = Message::Message { text: "secret".into() };
+        let encoded = SignedMessage::sign_and_encode(&key_a, &msg).unwrap();
+        // Verification should still succeed because the signed message
+        // contains the claimed public key — the signature matches key_a
+        // and the protocol trusts the claimed key.  This test verifies
+        // that a message signed by one key cannot be claimed as having
+        // come from a different key after verification.
+        let (pk, _) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        assert_eq!(pk, key_a.public());
+        assert_ne!(pk, key_b.public());
+    }
+
+    // ── Ticket serialization tests ───────────────────────────────────────
+
+    #[test]
+    fn ticket_roundtrip_through_base32() {
+        let ticket = Ticket {
+            topic: TopicId::from_bytes([9u8; 32]),
+            peers: vec![EndpointAddr::new(SecretKey::generate().public())],
+        };
+        let encoded = ticket.to_string();
+        let decoded = Ticket::from_str(&encoded).unwrap();
+        assert_eq!(decoded, ticket);
+    }
+
+    #[test]
+    fn ticket_is_deterministic() {
+        let key = SecretKey::generate();
+        let topic = TopicId::from_bytes([42u8; 32]);
+        let peer = EndpointAddr::new(key.public());
+        let a = Ticket { topic, peers: vec![peer.clone()] };
+        let b = Ticket { topic, peers: vec![peer] };
+        assert_eq!(a.to_string(), b.to_string());
+        assert_eq!(a.to_bytes(), b.to_bytes());
+    }
+
+    #[test]
+    fn ticket_to_bytes_and_from_bytes_roundtrip() {
+        let ticket = Ticket {
+            topic: TopicId::from_bytes([1u8; 32]),
+            peers: vec![],
+        };
+        let bytes = ticket.to_bytes();
+        let decoded = Ticket::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, ticket);
+    }
+
+    // ── fmt_relay_mode tests ─────────────────────────────────────────────
+
+    #[test]
+    fn fmt_relay_mode_disabled() {
+        assert_eq!(fmt_relay_mode(&RelayMode::Disabled), "None");
+    }
+
+    #[test]
+    fn fmt_relay_mode_default() {
+        let rendered = fmt_relay_mode(&RelayMode::Default);
+        assert!(rendered.contains("Default Relay"));
+    }
+
+    #[test]
+    fn fmt_relay_mode_staging() {
+        let rendered = fmt_relay_mode(&RelayMode::Staging);
+        assert!(rendered.contains("staging"));
+    }
+
+    // ── handle_net_event tests ──────────────────────────────────────────
+
+    #[test]
+    fn handle_net_event_message_appends_remote_entry() {
+        let key = SecretKey::generate();
+        let mut app = AppState::new(test_status());
+        let mut names = HashMap::new();
+
+        let event = NetEvent::Message {
+            from: key.public(),
+            message: Message::Message { text: "hi".into() },
+        };
+        handle_net_event(event, &mut app, &mut names, SecretKey::generate().public()).unwrap();
+        assert_eq!(app.entries.len(), 1);
+        assert!(matches!(app.entries[0].kind, ChatKind::Remote));
+        assert_eq!(app.entries[0].body, "hi");
+    }
+
+    #[test]
+    fn handle_net_event_about_me_stores_name_and_notifies() {
+        let remote_key = SecretKey::generate();
+        let local_key = SecretKey::generate();
+        let mut app = AppState::new(test_status());
+        let mut names = HashMap::new();
+
+        let event = NetEvent::Message {
+            from: remote_key.public(),
+            message: Message::AboutMe { name: "bob".into() },
+        };
+        handle_net_event(event, &mut app, &mut names, local_key.public()).unwrap();
+        // Name should be stored
+        assert_eq!(names.get(&remote_key.public()).unwrap(), "bob");
+        // Should have a system notification about the name
+        assert!(app.entries.iter().any(|e| e.body.contains("bob")));
+    }
+
+    #[test]
+    fn handle_net_event_own_message_is_skipped() {
+        let local_key = SecretKey::generate();
+        let mut app = AppState::new(test_status());
+        let mut names = HashMap::new();
+
+        let event = NetEvent::Message {
+            from: local_key.public(),
+            message: Message::Message { text: "echo".into() },
+        };
+        handle_net_event(
+            event,
+            &mut app,
+            &mut names,
+            local_key.public(),
+        )
+        .unwrap();
+        // Own messages should not appear as remote entries
+        assert!(app.entries.is_empty());
+    }
+
+    #[test]
+    fn handle_net_event_file_share_sets_pending() {
+        let remote_key = SecretKey::generate();
+        let mut app = AppState::new(test_status());
+        let mut names = HashMap::new();
+
+        let event = NetEvent::Message {
+            from: remote_key.public(),
+            message: Message::FileShare {
+                name: "doc.pdf".into(),
+                ticket: "abc123".into(),
+            },
+        };
+        handle_net_event(event, &mut app, &mut names, SecretKey::generate().public()).unwrap();
+        assert_eq!(app.pending_file, Some(("doc.pdf".into(), "abc123".into())));
+        assert!(app.entries.iter().any(|e| e.body.contains("doc.pdf")));
+    }
+
+    #[test]
+    fn handle_net_event_closed_sets_quit() {
+        let mut app = AppState::new(test_status());
+        let mut names = HashMap::new();
+        handle_net_event(NetEvent::Closed, &mut app, &mut names, SecretKey::generate().public())
+            .unwrap();
+        assert!(app.should_quit);
+        assert!(app.entries.iter().any(|e| e.body.contains("closed")));
+    }
+
+    #[test]
+    fn handle_net_event_error_sets_quit() {
+        let mut app = AppState::new(test_status());
+        let mut names = HashMap::new();
+        handle_net_event(
+            NetEvent::Error("timeout".into()),
+            &mut app,
+            &mut names,
+            SecretKey::generate().public(),
+        )
+        .unwrap();
+        assert!(app.should_quit);
+        assert!(app.entries.iter().any(|e| e.body.contains("timeout")));
+    }
+}

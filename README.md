@@ -100,17 +100,54 @@ You can also set `IROH_GOSSIP_CHAT_DATA_DIR` to a different path to use a separa
 
 **Overriding via CLI flag:** The `chat` example accepts `--secret-key <hex>` to use a specific key for one session without writing it to disk.
 
-To run two peers:
+The examples use Cargo aliases (defined in `.cargo/config.toml`) for
+convenience.  The long-form `cargo run --example ...` is always an
+alternative.
+
+To run two peers with the **TUI (ratatui)** frontend:
 ```text
-# Terminal 1 - create a room
+# Terminal 1 — create a room
 cargo chat open
 
-# Terminal 2 - join with the printed ticket
+# Terminal 2 — join with the printed ticket
 cargo chat join <ticket>
+
+# Long form (also works without the alias)
+cargo run --example chat -- open
 
 # Optional Tor mode
 cargo run --features "examples tor-transport" --example chat -- --tor open
 ```
+
+## GUI frontends (iced)
+
+Two alternative **GUI** frontends built with [iced](https://iced.rs) are
+available behind the `gui` feature flag.
+
+**`chat-gui`** (single-file, monolithic):
+```text
+cargo chat-gui open                    # open a room
+cargo chat-gui join <ticket>           # join a room
+
+# Long form
+cargo run --features gui --example chat-gui -- open
+```
+
+**`iced-chat`** (modular, split across `main.rs` + `app.rs`):
+```text
+cargo iced-chat open                   # open a room
+cargo iced-chat join <ticket>          # join a room
+
+# Long form
+cargo run --features gui --example iced_chat -- open
+```
+
+Both GUIs replicate the full chat feature set: text messages, file
+sharing (`/send <path>`, `/download`), dark mode toggle, and a
+scrolling chat log.  Networking runs in background tokio tasks with
+events flowing into the iced event loop via a channel.  The
+`iced_chat` variant has a cleaner module structure for readers who
+prefer the separation of concerns.
 
 # License
 
