@@ -848,6 +848,12 @@ pub fn handle_net_event(
     Ok(())
 }
 
+/// Room-doc messages on the gossip topic use marker prefixes.
+/// Metadata updates start with 0xFE, roster updates start with 0xFF.
+/// These are handled by the room_docs layer and are not SignedMessages.
+const METADATA_MARKER: u8 = 0xFE;
+const ROSTER_MARKER: u8 = 0xFF;
+
 /// Forward raw gossip events into a [`NetEvent`] channel.
 ///
 /// Spawn this as a background task to bridge the gossip receiver
@@ -858,17 +864,28 @@ pub async fn forward_gossip_events(
 ) {
     while let Ok(Some(event)) = receiver.try_next().await {
         match event {
-            Event::Received(msg) => match SignedMessage::verify_and_decode(&msg.content) {
-                Ok((from, message)) => {
-                    if net_tx.send(NetEvent::Message { from, message }).is_err() {
-                        return;
+            Event::Received(msg) => {
+                // Skip room-doc messages (metadata 0xFE, roster 0xFF) —
+                // they are not SignedMessages and would fail decode.
+                if let Some(&marker) = msg.content.first() {
+                    if marker == METADATA_MARKER || marker == ROSTER_MARKER {
+                        continue;
                     }
                 }
-                Err(err) => {
-                    let _ = net_tx.send(NetEvent::Error(err.to_string()));
-                    return;
+                match SignedMessage::verify_and_decode(&msg.content) {
+                    Ok((from, message)) => {
+                        if net_tx.send(NetEvent::Message { from, message }).is_err() {
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        // Log the error but keep running — a single bad
+                        // message should not kill the network bridge task.
+                        tracing::warn!("forward_gossip_events: decode error (dropped): {err}");
+                        continue;
+                    }
                 }
-            },
+            }
             Event::NeighborUp(id) => {
                 if net_tx.send(NetEvent::NeighborUp { peer: id }).is_err() {
                     return;
@@ -1462,7 +1479,7 @@ mod tests {
     fn handle_net_event_message_appends_remote_entry() {
         let key = SecretKey::generate();
         let mut app = test_app();
-        let mut names = HashMap::new();
+        let mut names: HashMap<iroh::PublicKey, String> = HashMap::new();
 
         let event = NetEvent::Message {
             from: key.public(),
@@ -1479,7 +1496,7 @@ mod tests {
         let remote_key = SecretKey::generate();
         let local_key = SecretKey::generate();
         let mut app = test_app();
-        let mut names = HashMap::new();
+        let mut names: HashMap<iroh::PublicKey, String> = HashMap::new();
 
         let event = NetEvent::Message {
             from: remote_key.public(),
@@ -1496,7 +1513,7 @@ mod tests {
     fn handle_net_event_own_message_is_skipped() {
         let local_key = SecretKey::generate();
         let mut app = test_app();
-        let mut names = HashMap::new();
+        let mut names: HashMap<iroh::PublicKey, String> = HashMap::new();
 
         let event = NetEvent::Message {
             from: local_key.public(),

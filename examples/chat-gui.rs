@@ -1603,23 +1603,40 @@ fn handle_download(state: &mut AppState) {
 
 // ── Background network task ───────────────────────────────────────────
 
+/// Room-doc messages on the gossip topic use marker prefixes.
+/// Metadata updates start with 0xFE, roster updates start with 0xFF.
+/// These are handled by the TUI's room_docs layer and are not SignedMessages.
+const METADATA_MARKER: u8 = 0xFE;
+const ROSTER_MARKER: u8 = 0xFF;
+
 async fn forward_gossip_events(
     mut receiver: GossipReceiver,
     net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
 ) {
     while let Ok(Some(event)) = receiver.try_next().await {
         match event {
-            GossipEvent::Received(msg) => match SignedMessage::verify_and_decode(&msg.content) {
-                Ok((from, message)) => {
-                    if net_tx.send(NetEvent::Message { from, message }).is_err() {
-                        return;
+            GossipEvent::Received(msg) => {
+                // Skip room-doc messages (metadata 0xFE, roster 0xFF) —
+                // they are not SignedMessages and would fail decode.
+                if let Some(&marker) = msg.content.first() {
+                    if marker == METADATA_MARKER || marker == ROSTER_MARKER {
+                        continue;
                     }
                 }
-                Err(err) => {
-                    let _ = net_tx.send(NetEvent::Error(err.to_string()));
-                    return;
+                match SignedMessage::verify_and_decode(&msg.content) {
+                    Ok((from, message)) => {
+                        if net_tx.send(NetEvent::Message { from, message }).is_err() {
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        // Log the error but keep running — a single bad
+                        // message should not kill the network bridge task.
+                        eprintln!("forward_gossip_events: decode error (dropped): {err}");
+                        continue;
+                    }
                 }
-            },
+            }
             GossipEvent::NeighborUp(id) => {
                 if net_tx.send(NetEvent::NeighborUp { peer: id }).is_err() {
                     return;
