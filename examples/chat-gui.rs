@@ -726,9 +726,8 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
                     // We can't return the JoinHandle from here, so it lives until
                     // GoToChatList or another OpenRoom replaces it.
                     // Store sender for the mapping callback.
-                    Ok::<(TopicId, String, Option<GossipSender>), String>((
-                        topic, ticket_str, sender,
-                    ))
+                    let sender = sender.ok_or_else(|| "missing gossip sender after subscribe".to_string())?;
+                    Ok::<(TopicId, String, GossipSender), String>((topic, ticket_str, sender))
                 },
                 move |result| match result {
                     Ok((topic, ticket_str, sender)) => AppMessage::RoomOpened {
