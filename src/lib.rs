@@ -31,4 +31,8 @@ pub mod tor_transport;
 #[cfg(feature = "net")]
 pub mod chat_core;
 
+/// Durable friends list storage for the chat frontends.
+#[cfg(feature = "net")]
+pub mod friends;
+
 pub use proto::TopicId;

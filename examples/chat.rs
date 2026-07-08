@@ -33,14 +33,19 @@ use crossterm::{
 #[cfg(feature = "tor-transport")]
 use iroh::Watcher;
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, RelayMode, RelayUrl,
-    SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, PublicKey, RelayMode,
+    RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
-use iroh_gossip::chat_core::{
-    self, fmt_relay_mode, handle_net_event, AppState, ChatEntry, ChatKind, Message,
-    SignedMessage, StatusContext, Ticket,
+use iroh_gossip::chat_core::friend_ping::{
+    FriendEvent, FriendPingManager, FriendStatus, PingHandler, DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
 };
+use iroh_gossip::chat_core::{
+    self, fmt_relay_mode, handle_net_event, AppState, ChatEntry, ChatKind, Message, SignedMessage,
+    StatusContext, Ticket,
+};
+use iroh_gossip::friends::{FriendId, FriendRecord, FriendsStore};
 #[cfg(feature = "tor-transport")]
 use iroh_gossip::tor_transport::TorTransport;
 use iroh_gossip::{
@@ -242,6 +247,14 @@ async fn main() -> Result<()> {
     println!("> our public key: {}", secret_key.public());
     println!("> identity file: {}", key_path.display());
 
+    // load or create the persistent friends list
+    let data_dir = get_data_dir();
+    let friends = FriendsStore::load_or_default(&data_dir);
+    let friend_count = friends.len();
+    if friend_count > 0 {
+        println!("> loaded {friend_count} friend(s) from disk");
+    }
+
     // configure our relay map
     // When Tor is used, default to disabled relays — Tor hidden services provide direct
     // connectivity without needing the iroh relay infrastructure.
@@ -363,6 +376,7 @@ async fn main() -> Result<()> {
     let router = iroh::protocol::Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(iroh_blobs::ALPN, blobs_protocol.clone())
+        .accept(FRIEND_PING_ALPN, PingHandler)
         .spawn();
 
     // join the gossip topic by connecting to known peers, if any
@@ -391,15 +405,18 @@ async fn main() -> Result<()> {
         sender.broadcast(encoded_message).await?;
     }
 
-    let mut app = AppState::new(StatusContext {
-        transport_status: transport_status_message.clone(),
-        topic,
-        relay_mode: relay_mode.clone(),
-        connected: true,
-        peer_count,
-        identity_label: local_label.clone(),
-        transport_notice: transport_notice_text.clone(),
-    });
+    let mut app = AppState::new(
+        StatusContext {
+            transport_status: transport_status_message.clone(),
+            topic,
+            relay_mode: relay_mode.clone(),
+            connected: true,
+            peer_count,
+            identity_label: local_label.clone(),
+            transport_notice: transport_notice_text.clone(),
+        },
+        friends,
+    );
     app.push_system(format!("Ticket to join this room: {ticket}"));
     if peers.is_empty() {
         app.push_system("Waiting for peers to join us...");
@@ -414,16 +431,41 @@ async fn main() -> Result<()> {
         app.push_system(format!("You announced yourself as {name}."));
     }
 
+    let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel();
+    task::spawn(chat_core::forward_gossip_events(receiver, net_tx));
+
     let mut names = HashMap::new();
     names.insert(local_public, local_label.clone());
+
+    // Show how many friends were loaded from disk at startup.
+    if app.friends.is_empty() {
+        app.push_system("No friends file yet; starting with an empty friends list.");
+    } else {
+        app.push_system(format!(
+            "Loaded {} friends from {}.",
+            app.friends.len(),
+            app.friends.file_path().display()
+        ));
+    }
 
     let _terminal_guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
     terminal.draw(|frame| render_app(frame, &mut app))?;
 
-    let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel();
-    task::spawn(chat_core::forward_gossip_events(receiver, net_tx));
+    // ── Friend ping manager ────────────────────────────────────────────
+    let (friend_mgr, mut friend_events) = FriendPingManager::spawn(
+        endpoint.clone(),
+        DEFAULT_PING_INTERVAL,
+        DEFAULT_CONNECT_TIMEOUT,
+    );
+    for peer in app
+        .friends
+        .iter()
+        .filter_map(|(id, _)| id.parse_public_key().ok())
+    {
+        let _ = friend_mgr.add_friend(peer, None).await;
+    }
 
     let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     spawn_input_thread(ui_tx);
@@ -439,17 +481,52 @@ async fn main() -> Result<()> {
                     &local_label,
                     &endpoint,
                     &blob_store,
+                    &friend_mgr,
                 ).await?;
+                if app.friends_dirty {
+                    if let Err(err) = app.friends.save() {
+                        app.push_system(format!("Failed to save friends: {err}"));
+                    }
+                    app.friends_dirty = false;
+                }
                 if redraw {
                     terminal.draw(|frame| render_app(frame, &mut app))?;
                 }
             }
             Some(event) = net_rx.recv() => {
                 handle_net_event(event, &mut app, &mut names, local_public)?;
+                if app.friends_dirty {
+                    if let Err(err) = app.friends.save() {
+                        app.push_system(format!("Failed to save friends: {err}"));
+                    }
+                    app.friends_dirty = false;
+                }
+                terminal.draw(|frame| render_app(frame, &mut app))?;
+            }
+            Some(event) = friend_events.recv() => {
+                handle_friend_event(event, &mut app);
+                if app.friends_dirty {
+                    if let Err(err) = app.friends.save() {
+                        app.push_system(format!("Failed to save friends: {err}"));
+                    }
+                    app.friends_dirty = false;
+                }
                 terminal.draw(|frame| render_app(frame, &mut app))?;
             }
             else => break,
         }
+    }
+
+    // Sync final friend ping status to persistent store before shutdown.
+    if let Ok(tracked) = friend_mgr.list_friends().await {
+        for (peer, status) in tracked {
+            let id = FriendId::from_public_key(peer);
+            let rec = app.friends.ensure_friend(id);
+            rec.status.online = status.is_online();
+        }
+    }
+    if app.friends_dirty {
+        let _ = app.friends.save();
     }
 
     router.shutdown().await.anyerr()?;
@@ -484,7 +561,7 @@ impl Drop for TerminalGuard {
 #[derive(Debug)]
 enum UiEvent {
     Key(KeyEvent),
-    Resize(u16, u16),
+    Resize,
     Paste(String),
 }
 
@@ -493,7 +570,7 @@ fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
         while let Ok(event) = event::read() {
             let keep_running = match event {
                 CEvent::Key(key) => ui_tx.send(UiEvent::Key(key)).is_ok(),
-                CEvent::Resize(width, height) => ui_tx.send(UiEvent::Resize(width, height)).is_ok(),
+                CEvent::Resize(_width, _height) => ui_tx.send(UiEvent::Resize).is_ok(),
                 CEvent::Paste(text) => ui_tx.send(UiEvent::Paste(text)).is_ok(),
                 _ => true,
             };
@@ -514,6 +591,7 @@ async fn handle_ui_event(
     local_label: &str,
     endpoint: &Endpoint,
     blob_store: &MemStore,
+    friend_mgr: &FriendPingManager,
 ) -> Result<bool> {
     match event {
         UiEvent::Key(key) => {
@@ -525,11 +603,12 @@ async fn handle_ui_event(
                 local_label,
                 endpoint,
                 blob_store,
+                friend_mgr,
             )
             .await?;
             Ok(true)
         }
-        UiEvent::Resize(_, _) => Ok(true),
+        UiEvent::Resize => Ok(true),
         UiEvent::Paste(text) => {
             app.composer.insert_str(&text);
             Ok(true)
@@ -545,6 +624,7 @@ async fn handle_key_event(
     local_label: &str,
     endpoint: &Endpoint,
     blob_store: &MemStore,
+    friend_mgr: &FriendPingManager,
 ) -> Result<()> {
     let visible_height = app.last_log_height;
     match key {
@@ -556,10 +636,7 @@ async fn handle_key_event(
                 return Ok(());
             }
             // Best-effort goodbye broadcast before we disconnect.
-            let goodbye = SignedMessage::sign_and_encode(
-                secret_key,
-                &Message::Goodbye,
-            );
+            let goodbye = SignedMessage::sign_and_encode(secret_key, &Message::Goodbye);
             if let Ok(encoded) = goodbye {
                 let _ = sender.broadcast(encoded).await;
             }
@@ -571,10 +648,7 @@ async fn handle_key_event(
             ..
         } if modifiers.contains(KeyModifiers::CONTROL) => {
             // Best-effort goodbye broadcast before we disconnect.
-            let goodbye = SignedMessage::sign_and_encode(
-                secret_key,
-                &Message::Goodbye,
-            );
+            let goodbye = SignedMessage::sign_and_encode(secret_key, &Message::Goodbye);
             if let Ok(encoded) = goodbye {
                 let _ = sender.broadcast(encoded).await;
             }
@@ -678,6 +752,153 @@ async fn handle_key_event(
                 return Ok(());
             }
 
+            if let Some(pubkey_str) = trimmed.strip_prefix("/friend add ") {
+                let pubkey_str = pubkey_str.trim().to_string();
+                let (pubkey, alias) =
+                    if let Some((key_part, rest)) = pubkey_str.split_once(char::is_whitespace) {
+                        (key_part.to_string(), Some(rest.trim().to_string()))
+                    } else {
+                        (pubkey_str, None)
+                    };
+                match pubkey.parse::<PublicKey>() {
+                    Ok(peer) => {
+                        let fid = FriendId::from_public_key(peer);
+                        let was_new = app.friends.get(&fid).is_none();
+                        if let Some(alias_text) = &alias {
+                            app.friends.set_label(fid.clone(), alias_text.clone());
+                        } else {
+                            app.friends.ensure_friend(fid.clone());
+                        }
+                        app.friends_dirty = true;
+
+                        match friend_mgr.add_friend(peer, None).await {
+                            Ok(_) => {
+                                if was_new {
+                                    let label = if let Some(ref alias_text) = alias {
+                                        format!("{alias_text} ({})", peer.fmt_short())
+                                    } else {
+                                        peer.fmt_short().to_string()
+                                    };
+                                    app.push_system(format!("Added friend: {label}"));
+                                } else {
+                                    app.push_system(format!(
+                                        "Updated friend: {}",
+                                        peer.fmt_short()
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                app.push_system(format!("Failed to add friend: {e}"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        app.push_system(format!("Invalid public key: {e}"));
+                    }
+                }
+                return Ok(());
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("/friend remove ") {
+                let target = rest.trim().to_string();
+                // Try to resolve by exact public key first, then by alias.
+                let resolved = if let Ok(pk) = target.parse::<PublicKey>() {
+                    Some((pk, FriendId::from_public_key(pk)))
+                } else {
+                    // Try to find by alias
+                    app.friends
+                        .iter()
+                        .find(|(_, rec)| rec.label.as_deref() == Some(&target))
+                        .map(|(fid, _)| (fid.parse_public_key().ok(), fid.clone()))
+                        .and_then(|(pk_opt, fid)| pk_opt.map(|pk| (pk, fid)))
+                };
+
+                match resolved {
+                    Some((peer, fid)) => {
+                        let label = app
+                            .friends
+                            .get(&fid)
+                            .and_then(|r| r.label.clone())
+                            .unwrap_or_else(|| peer.fmt_short().to_string());
+                        app.friends.remove(&fid);
+                        app.friends_dirty = true;
+                        let _ = friend_mgr.remove_friend(&peer).await;
+                        app.push_system(format!("Removed friend: {label}"));
+                    }
+                    None => {
+                        app.push_system(format!("Friend not found: {target}"));
+                    }
+                }
+                return Ok(());
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("/friend rename ") {
+                let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
+                if parts.len() < 2 {
+                    app.push_system("Usage: /friend rename <public-key> <new-alias>");
+                    return Ok(());
+                }
+                let target = parts[0].trim();
+                let new_alias = parts[1].trim().to_string();
+                let resolved = if let Ok(pk) = target.parse::<PublicKey>() {
+                    Some(FriendId::from_public_key(pk))
+                } else {
+                    app.friends
+                        .iter()
+                        .find(|(_, rec)| rec.label.as_deref() == Some(target))
+                        .map(|(fid, _)| fid.clone())
+                };
+                match resolved {
+                    Some(fid) => {
+                        app.friends.set_label(fid.clone(), &new_alias);
+                        app.friends_dirty = true;
+                        app.push_system(format!("Renamed friend to: {new_alias}"));
+                    }
+                    None => {
+                        app.push_system(format!("Friend not found: {target}"));
+                    }
+                }
+                return Ok(());
+            }
+
+            if trimmed == "/friend list" {
+                match friend_mgr.list_friends().await {
+                    Ok(list) => {
+                        if list.is_empty() && app.friends.is_empty() {
+                            app.push_system("No friends tracked yet.");
+                        } else {
+                            app.push_system(format!("Friends ({}):", app.friends.len()));
+                            for (peer, status) in &list {
+                                let fid = FriendId::from_public_key(*peer);
+                                let label = app
+                                    .friends
+                                    .get(&fid)
+                                    .and_then(|r| r.display_label(&fid).into())
+                                    .or_else(|| Some(peer.fmt_short().to_string()))
+                                    .unwrap();
+                                let status_str = match status {
+                                    FriendStatus::Unknown => "?",
+                                    FriendStatus::Online => "ONLINE",
+                                    FriendStatus::Offline => "offline",
+                                };
+                                let ping_status = app
+                                    .friends
+                                    .get(&fid)
+                                    .map(|r| if r.status.online { "online" } else { "offline" })
+                                    .unwrap_or("unknown");
+                                app.push_system(format!(
+                                    "  {label}: {status_str} (persisted: {ping_status})"
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        app.push_system(format!("Failed to list friends: {e}"));
+                    }
+                }
+                return Ok(());
+            }
+
             // Normal text message
             let message = Message::Message {
                 text: trimmed.clone(),
@@ -691,17 +912,20 @@ async fn handle_key_event(
             ..
         } => app.composer.backspace(),
         KeyEvent {
-            code: KeyCode::Delete, ..
+            code: KeyCode::Delete,
+            ..
         } => app.composer.delete(),
         KeyEvent {
-            code: KeyCode::Left, ..
+            code: KeyCode::Left,
+            ..
         } => app.composer.move_left(),
         KeyEvent {
             code: KeyCode::Right,
             ..
         } => app.composer.move_right(),
         KeyEvent {
-            code: KeyCode::Home, ..
+            code: KeyCode::Home,
+            ..
         } => app.composer.move_home(),
         KeyEvent {
             code: KeyCode::End, ..
@@ -727,6 +951,38 @@ async fn handle_key_event(
     Ok(())
 }
 
+// ── Friend event handling ──────────────────────────────────────────────────────
+
+/// Handle a [`FriendEvent`] from the friend ping manager background task.
+fn handle_friend_event(event: FriendEvent, app: &mut AppState) {
+    match event {
+        FriendEvent::StatusChanged { peer, status } => {
+            let fid = FriendId::from_public_key(peer);
+            let label = app
+                .friends
+                .get(&fid)
+                .and_then(|r| r.display_label(&fid).into())
+                .unwrap_or_else(|| peer.fmt_short().to_string());
+
+            match status {
+                FriendStatus::Online => {
+                    app.friends.mark_online(fid);
+                    app.friends_dirty = true;
+                    app.push_system(format!("Friend {label} is now ONLINE"));
+                }
+                FriendStatus::Offline => {
+                    app.friends.mark_offline(fid);
+                    app.friends_dirty = true;
+                    app.push_system(format!("Friend {label} is now offline"));
+                }
+                FriendStatus::Unknown => {
+                    // No transition to display for Unknown
+                }
+            }
+        }
+    }
+}
+
 // ── TUI rendering ─────────────────────────────────────────────────────────────
 
 fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
@@ -735,10 +991,23 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(status_height),
-            Constraint::Min(5),
+            Constraint::Min(10),
             Constraint::Length(5),
         ])
         .split(frame.area());
+
+    let body_area = layout[1];
+    let body_layout = if body_area.width >= 100 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(40), Constraint::Length(34)])
+            .split(body_area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(6), Constraint::Length(9)])
+            .split(body_area)
+    };
 
     let status_block = Block::default()
         .title(Span::styled(
@@ -764,7 +1033,7 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta));
-    let log_inner = log_block.inner(layout[1]);
+    let log_inner = log_block.inner(body_layout[0]);
     app.last_log_height = log_inner.height;
     let log_scroll = app.rendered_scroll_offset(log_inner.height);
     let log_text = app_chat_text(app);
@@ -772,7 +1041,21 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
         .block(log_block)
         .wrap(Wrap { trim: false })
         .scroll((log_scroll, 0));
-    frame.render_widget(log_paragraph, layout[1]);
+    frame.render_widget(log_paragraph, body_layout[0]);
+
+    let friends_block = Block::default()
+        .title(Span::styled(
+            format!("Friends ({})", app.friends.len()),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let friends_paragraph = Paragraph::new(Text::from(friends_panel_lines(app)))
+        .block(friends_block)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(friends_paragraph, body_layout[1]);
 
     let composer_block = Block::default()
         .title(Span::styled(
@@ -849,12 +1132,65 @@ fn app_chat_text(app: &AppState) -> Text<'static> {
             Style::default().fg(Color::DarkGray),
         )]))
     } else {
-        Text::from(
-            app.entries
-                .iter()
-                .map(entry_to_line)
-                .collect::<Vec<_>>(),
-        )
+        Text::from(app.entries.iter().map(entry_to_line).collect::<Vec<_>>())
+    }
+}
+
+fn friends_panel_lines(app: &AppState) -> Vec<Line<'static>> {
+    let title_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
+    let hint_style = Style::default().fg(Color::DarkGray);
+    let mut lines = vec![
+        Line::from(vec![Span::styled("Tracked friends", title_style)]),
+        Line::from(vec![Span::styled(
+            "Manage entries with /friend add, /friend remove, /friend rename, and /friend list.",
+            hint_style,
+        )]),
+    ];
+
+    if app.friends.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "No friends yet.",
+            Style::default().fg(Color::DarkGray),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "Add one with /friend add <public-key> [alias].",
+            hint_style,
+        )]));
+        return lines;
+    }
+
+    for (id, record) in app.friends.iter() {
+        let name = record.display_label(id);
+        let short_id: String = id.as_str().chars().take(12).collect();
+        let (status_text, status_style) = friend_status_text(record);
+        lines.push(Line::from(vec![
+            Span::styled(name, label_style),
+            Span::raw(" "),
+            Span::styled(format!("[{status_text}]"), status_style),
+        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("  {short_id}"),
+            hint_style,
+        )]));
+    }
+
+    lines
+}
+
+fn friend_status_text(record: &FriendRecord) -> (&'static str, Style) {
+    if record.status.last_seen_at_unix_ms.is_none()
+        && record.status.last_offline_at_unix_ms.is_none()
+    {
+        ("unknown", Style::default().fg(Color::Yellow))
+    } else if record.status.online {
+        ("online", Style::default().fg(Color::Green))
+    } else {
+        ("offline", Style::default().fg(Color::DarkGray))
     }
 }
 
@@ -897,7 +1233,9 @@ fn status_lines(context: &StatusContext) -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             Span::styled("Controls", label_style),
-            Span::raw(": Enter send • /help menu • Ctrl-C or Esc quit • PgUp/PgDn scroll history"),
+            Span::raw(
+                ": Enter send • /help menu • /friend list • Ctrl-C or Esc quit • PgUp/PgDn scroll history",
+            ),
         ]),
     ]
 }
@@ -929,6 +1267,22 @@ fn help_menu_lines() -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("/download", label_style),
             Span::raw("      fetch the last shared file"),
+        ]),
+        Line::from(vec![
+            Span::styled("/friend add <pubkey> [alias]", label_style),
+            Span::raw("  track a peer's online status"),
+        ]),
+        Line::from(vec![
+            Span::styled("/friend remove <pubkey|alias>", label_style),
+            Span::raw("  stop tracking a friend"),
+        ]),
+        Line::from(vec![
+            Span::styled("/friend rename <pubkey|alias> <name>", label_style),
+            Span::raw("  change a friend's local alias"),
+        ]),
+        Line::from(vec![
+            Span::styled("/friend list", label_style),
+            Span::raw("     list tracked friends and their status"),
         ]),
         Line::from(vec![Span::styled("Tips", title_style)]),
         Line::from(vec![Span::styled(
@@ -1131,6 +1485,60 @@ mod tests {
     }
 
     #[test]
+    fn friends_panel_shows_empty_state() {
+        let status = StatusContext {
+            transport_status: "Direct iroh transport is ready.".into(),
+            topic: TopicId::from_bytes([7u8; 32]),
+            relay_mode: RelayMode::Disabled,
+            connected: true,
+            peer_count: 0,
+            identity_label: "alice".into(),
+            transport_notice: "transport notice".into(),
+        };
+        let app = AppState::new(
+            status,
+            FriendsStore::empty_at(
+                std::env::temp_dir()
+                    .join(format!("iroh-chat-friends-empty-{}", rand::random::<u64>())),
+            ),
+        );
+        let rendered: Vec<String> = friends_panel_lines(&app)
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert!(rendered.iter().any(|line| line.contains("No friends yet.")));
+        assert!(rendered.iter().any(|line| line.contains("/friend add")));
+    }
+
+    #[test]
+    fn friends_panel_lists_live_status() {
+        let status = StatusContext {
+            transport_status: "Direct iroh transport is ready.".into(),
+            topic: TopicId::from_bytes([8u8; 32]),
+            relay_mode: RelayMode::Disabled,
+            connected: true,
+            peer_count: 1,
+            identity_label: "alice".into(),
+            transport_notice: "transport notice".into(),
+        };
+        let mut store = FriendsStore::empty_at(std::env::temp_dir().join(format!(
+            "iroh-chat-friends-status-{}",
+            rand::random::<u64>()
+        )));
+        let peer = SecretKey::generate().public();
+        let friend_id = FriendId::from_public_key(peer);
+        store.set_label(friend_id.clone(), "Bob");
+        store.mark_online(friend_id.clone());
+        let app = AppState::new(status, store);
+        let rendered: Vec<String> = friends_panel_lines(&app)
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert!(rendered.iter().any(|line| line.contains("Bob")));
+        assert!(rendered.iter().any(|line| line.contains("online")));
+    }
+
+    #[test]
     fn cli_parses_direct_mode_by_default() {
         let args = Args::try_parse_from(["chat", "open"]).expect("direct mode should parse");
         assert!(matches!(args.command, Command::Open { .. }));
@@ -1275,10 +1683,8 @@ mod tests {
     #[test]
     fn load_or_generate_uses_existing_key_file() {
         // Pre-write a known key and verify load_or_generate reads it back.
-        let tmp = std::env::temp_dir().join(format!(
-            "iroh-key-existing-test-{}",
-            rand::random::<u64>()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("iroh-key-existing-test-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&tmp).expect("create temp dir");
 
         let known_key = SecretKey::generate();

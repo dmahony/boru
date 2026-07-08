@@ -7,11 +7,9 @@
 //! It has **no** terminal/ratatui/crossterm dependencies, making it usable from
 //! any frontend (TUI, GUI, headless).
 
-use std::{
-    collections::HashMap,
-    fmt,
-    str::FromStr,
-};
+pub mod friend_ping;
+
+use std::{collections::HashMap, fmt, str::FromStr};
 
 use bytes::Bytes;
 use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey};
@@ -21,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 
 use crate::api::{Event, GossipReceiver};
+use crate::friends::{FriendId, FriendsStore};
 use crate::proto::TopicId;
 
 // ── Composer ─────────────────────────────────────────────────────────────────
@@ -246,11 +245,15 @@ pub struct AppState {
     pub help_visible: bool,
     /// Pending file download info: (filename, ticket_string).
     pub pending_file: Option<(String, String)>,
+    /// Durable friends list store.
+    pub friends: FriendsStore,
+    /// Whether the friends store has unsaved changes.
+    pub friends_dirty: bool,
 }
 
 impl AppState {
-    /// Create a new chat state with the given status context.
-    pub fn new(status: StatusContext) -> Self {
+    /// Create a new chat state with the given status context and friends store.
+    pub fn new(status: StatusContext, friends: FriendsStore) -> Self {
         Self {
             status,
             entries: Vec::new(),
@@ -261,6 +264,8 @@ impl AppState {
             should_quit: false,
             help_visible: false,
             pending_file: None,
+            friends,
+            friends_dirty: false,
         }
     }
 
@@ -491,11 +496,21 @@ pub fn handle_net_event(
             Message::AboutMe { name } => {
                 names.insert(from, name.clone());
                 if from != local_public {
+                    let fid = FriendId::from_public_key(from);
+                    if app.friends.get(&fid).is_some() {
+                        app.friends.set_last_announced_name(fid, name.clone());
+                        app.friends_dirty = true;
+                    }
                     app.push_system(format!("{} is now known as {}", from.fmt_short(), name));
                 }
             }
             Message::Message { text } => {
                 if from != local_public {
+                    let fid = FriendId::from_public_key(from);
+                    if app.friends.get(&fid).is_some() {
+                        app.friends.mark_online(fid);
+                        app.friends_dirty = true;
+                    }
                     let name = names
                         .get(&from)
                         .cloned()
@@ -505,6 +520,11 @@ pub fn handle_net_event(
             }
             Message::FileShare { name, ticket } => {
                 if from != local_public {
+                    let fid = FriendId::from_public_key(from);
+                    if app.friends.get(&fid).is_some() {
+                        app.friends.mark_online(fid);
+                        app.friends_dirty = true;
+                    }
                     let sender_name = names
                         .get(&from)
                         .cloned()
@@ -523,6 +543,11 @@ pub fn handle_net_event(
             }
         },
         NetEvent::NeighborDown { peer } => {
+            let fid = FriendId::from_public_key(peer);
+            if app.friends.get(&fid).is_some() {
+                app.friends.mark_offline(fid);
+                app.friends_dirty = true;
+            }
             let name = names
                 .get(&peer)
                 .cloned()
@@ -551,19 +576,17 @@ pub async fn forward_gossip_events(
 ) {
     while let Ok(Some(event)) = receiver.try_next().await {
         match event {
-            Event::Received(msg) => {
-                match SignedMessage::verify_and_decode(&msg.content) {
-                    Ok((from, message)) => {
-                        if net_tx.send(NetEvent::Message { from, message }).is_err() {
-                            return;
-                        }
-                    }
-                    Err(err) => {
-                        let _ = net_tx.send(NetEvent::Error(err.to_string()));
+            Event::Received(msg) => match SignedMessage::verify_and_decode(&msg.content) {
+                Ok((from, message)) => {
+                    if net_tx.send(NetEvent::Message { from, message }).is_err() {
                         return;
                     }
                 }
-            }
+                Err(err) => {
+                    let _ = net_tx.send(NetEvent::Error(err.to_string()));
+                    return;
+                }
+            },
             Event::NeighborDown(id) => {
                 if net_tx.send(NetEvent::NeighborDown { peer: id }).is_err() {
                     return;
@@ -708,8 +731,8 @@ mod tests {
     #[test]
     fn composer_cursor_column_is_unicode_aware() {
         let mut c = Composer::default();
-        c.insert_char('é');  // 2 bytes, 1 column
-        c.insert_char('☃');  // 3 bytes, 1 column
+        c.insert_char('é'); // 2 bytes, 1 column
+        c.insert_char('☃'); // 3 bytes, 1 column
         assert_eq!(c.cursor_column(), 2);
         c.move_home();
         assert_eq!(c.cursor_column(), 0);
@@ -768,6 +791,10 @@ mod tests {
         }
     }
 
+    fn test_app() -> AppState {
+        AppState::new(test_status(), FriendsStore::default())
+    }
+
     #[test]
     fn status_context_fields_are_accessible() {
         let s = test_status();
@@ -780,7 +807,7 @@ mod tests {
 
     #[test]
     fn app_state_new_creates_empty_state() {
-        let app = AppState::new(test_status());
+        let app = test_app();
         assert!(app.entries.is_empty());
         assert!(app.composer.is_empty());
         assert!(app.follow_latest);
@@ -789,7 +816,7 @@ mod tests {
 
     #[test]
     fn app_state_push_system_adds_entry_and_sets_follow() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         app.follow_latest = false;
         app.push_system("system msg");
         assert_eq!(app.entries.len(), 1);
@@ -800,7 +827,7 @@ mod tests {
 
     #[test]
     fn app_state_push_local_adds_local_entry() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         app.push_local("alice", "hello");
         assert!(matches!(app.entries[0].kind, ChatKind::Local));
         assert_eq!(app.entries[0].label, "alice");
@@ -809,7 +836,7 @@ mod tests {
 
     #[test]
     fn app_state_push_remote_adds_remote_entry() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         app.push_remote("bob", "hi");
         assert!(matches!(app.entries[0].kind, ChatKind::Remote));
         assert_eq!(app.entries[0].label, "bob");
@@ -818,7 +845,7 @@ mod tests {
 
     #[test]
     fn app_state_entries_maintain_insertion_order() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         app.push_system("sys");
         app.push_local("A", "local");
         app.push_remote("B", "remote");
@@ -830,7 +857,7 @@ mod tests {
 
     #[test]
     fn app_state_max_scroll_offset_zero_when_fewer_entries_than_height() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         assert_eq!(app.max_scroll_offset(10), 0);
         for i in 0..5 {
             app.push_system(format!("m{i}"));
@@ -840,7 +867,7 @@ mod tests {
 
     #[test]
     fn app_state_max_scroll_offset_non_zero_when_more_entries_than_height() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         for i in 0..15 {
             app.push_system(format!("m{i}"));
         }
@@ -849,7 +876,7 @@ mod tests {
 
     #[test]
     fn app_state_rendered_scroll_following_returns_max() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         for i in 0..20 {
             app.push_system(format!("m{i}"));
         }
@@ -859,7 +886,7 @@ mod tests {
 
     #[test]
     fn app_state_rendered_scroll_not_following_uses_scroll_offset() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         for i in 0..20 {
             app.push_system(format!("m{i}"));
         }
@@ -873,7 +900,7 @@ mod tests {
 
     #[test]
     fn app_state_scroll_up_from_top_wraps() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         for i in 0..10 {
             app.push_system(format!("m{i}"));
         }
@@ -885,7 +912,7 @@ mod tests {
 
     #[test]
     fn app_state_scroll_up_from_mid() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         for i in 0..10 {
             app.push_system(format!("m{i}"));
         }
@@ -896,7 +923,7 @@ mod tests {
 
     #[test]
     fn app_state_scroll_down_re_enables_follow_at_bottom() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         for i in 0..10 {
             app.push_system(format!("m{i}"));
         }
@@ -909,7 +936,7 @@ mod tests {
 
     #[test]
     fn app_state_scroll_down_does_not_follow_when_not_at_bottom() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         for i in 0..10 {
             app.push_system(format!("m{i}"));
         }
@@ -922,15 +949,18 @@ mod tests {
 
     #[test]
     fn app_state_push_entry_without_follow_does_not_change_flag() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         app.follow_latest = false;
         app.push_entry(ChatEntry::system("test"), false);
-        assert!(!app.follow_latest, "push_entry with false should not change flag");
+        assert!(
+            !app.follow_latest,
+            "push_entry with false should not change flag"
+        );
     }
 
     #[test]
     fn app_state_push_entry_with_follow_sets_flag() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         app.follow_latest = false;
         app.push_entry(ChatEntry::system("test"), true);
         assert!(app.follow_latest);
@@ -940,7 +970,9 @@ mod tests {
 
     #[test]
     fn message_serialization_roundtrip_about_me() {
-        let msg = Message::AboutMe { name: "alice".into() };
+        let msg = Message::AboutMe {
+            name: "alice".into(),
+        };
         let bytes = postcard::to_stdvec(&msg).unwrap();
         let decoded: Message = postcard::from_bytes(&bytes).unwrap();
         assert!(matches!(decoded, Message::AboutMe { ref name } if name == "alice"));
@@ -948,7 +980,9 @@ mod tests {
 
     #[test]
     fn message_serialization_roundtrip_text() {
-        let msg = Message::Message { text: "hello world".into() };
+        let msg = Message::Message {
+            text: "hello world".into(),
+        };
         let bytes = postcard::to_stdvec(&msg).unwrap();
         let decoded: Message = postcard::from_bytes(&bytes).unwrap();
         assert!(matches!(decoded, Message::Message { ref text } if text == "hello world"));
@@ -974,7 +1008,9 @@ mod tests {
     #[test]
     fn signed_message_sign_and_verify_roundtrip() {
         let key = SecretKey::generate();
-        let msg = Message::Message { text: "secure chat".into() };
+        let msg = Message::Message {
+            text: "secure chat".into(),
+        };
         let encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
         let (pk, decoded) = SignedMessage::verify_and_decode(&encoded).unwrap();
         assert_eq!(pk, key.public());
@@ -984,10 +1020,10 @@ mod tests {
     #[test]
     fn signed_message_rejects_tampered_data() {
         let key = SecretKey::generate();
-        let msg = Message::Message { text: "original".into() };
-        let mut encoded = SignedMessage::sign_and_encode(&key, &msg)
-            .unwrap()
-            .to_vec();
+        let msg = Message::Message {
+            text: "original".into(),
+        };
+        let mut encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap().to_vec();
         if let Some(b) = encoded.last_mut() {
             *b ^= 0xff;
         }
@@ -999,7 +1035,9 @@ mod tests {
     fn signed_message_wrong_key_fails_verification() {
         let key_a = SecretKey::generate();
         let key_b = SecretKey::generate();
-        let msg = Message::Message { text: "secret".into() };
+        let msg = Message::Message {
+            text: "secret".into(),
+        };
         let encoded = SignedMessage::sign_and_encode(&key_a, &msg).unwrap();
         // Verification should still succeed because the signed message
         // contains the claimed public key — the signature matches key_a
@@ -1029,8 +1067,14 @@ mod tests {
         let key = SecretKey::generate();
         let topic = TopicId::from_bytes([42u8; 32]);
         let peer = EndpointAddr::new(key.public());
-        let a = Ticket { topic, peers: vec![peer.clone()] };
-        let b = Ticket { topic, peers: vec![peer] };
+        let a = Ticket {
+            topic,
+            peers: vec![peer.clone()],
+        };
+        let b = Ticket {
+            topic,
+            peers: vec![peer],
+        };
         assert_eq!(a.to_string(), b.to_string());
         assert_eq!(a.to_bytes(), b.to_bytes());
     }
@@ -1070,7 +1114,7 @@ mod tests {
     #[test]
     fn handle_net_event_message_appends_remote_entry() {
         let key = SecretKey::generate();
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         let mut names = HashMap::new();
 
         let event = NetEvent::Message {
@@ -1087,7 +1131,7 @@ mod tests {
     fn handle_net_event_about_me_stores_name_and_notifies() {
         let remote_key = SecretKey::generate();
         let local_key = SecretKey::generate();
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         let mut names = HashMap::new();
 
         let event = NetEvent::Message {
@@ -1104,20 +1148,16 @@ mod tests {
     #[test]
     fn handle_net_event_own_message_is_skipped() {
         let local_key = SecretKey::generate();
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         let mut names = HashMap::new();
 
         let event = NetEvent::Message {
             from: local_key.public(),
-            message: Message::Message { text: "echo".into() },
+            message: Message::Message {
+                text: "echo".into(),
+            },
         };
-        handle_net_event(
-            event,
-            &mut app,
-            &mut names,
-            local_key.public(),
-        )
-        .unwrap();
+        handle_net_event(event, &mut app, &mut names, local_key.public()).unwrap();
         // Own messages should not appear as remote entries
         assert!(app.entries.is_empty());
     }
@@ -1125,7 +1165,7 @@ mod tests {
     #[test]
     fn handle_net_event_file_share_sets_pending() {
         let remote_key = SecretKey::generate();
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         let mut names = HashMap::new();
 
         let event = NetEvent::Message {
@@ -1142,17 +1182,22 @@ mod tests {
 
     #[test]
     fn handle_net_event_closed_sets_quit() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         let mut names = HashMap::new();
-        handle_net_event(NetEvent::Closed, &mut app, &mut names, SecretKey::generate().public())
-            .unwrap();
+        handle_net_event(
+            NetEvent::Closed,
+            &mut app,
+            &mut names,
+            SecretKey::generate().public(),
+        )
+        .unwrap();
         assert!(app.should_quit);
         assert!(app.entries.iter().any(|e| e.body.contains("closed")));
     }
 
     #[test]
     fn handle_net_event_error_sets_quit() {
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         let mut names = HashMap::new();
         handle_net_event(
             NetEvent::Error("timeout".into()),
@@ -1168,7 +1213,7 @@ mod tests {
     #[test]
     fn handle_net_event_neighbor_down_uses_display_name() {
         let remote_key = SecretKey::generate();
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         let mut names = HashMap::new();
         names.insert(remote_key.public(), "alice".to_string());
 
@@ -1187,7 +1232,7 @@ mod tests {
     #[test]
     fn handle_net_event_neighbor_down_falls_back_to_short_key() {
         let remote_key = SecretKey::generate();
-        let mut app = AppState::new(test_status());
+        let mut app = test_app();
         let mut names = HashMap::new();
 
         handle_net_event(
@@ -1202,7 +1247,9 @@ mod tests {
         // Without a display name, it formats the short public key.
         let short = remote_key.public().fmt_short();
         assert!(
-            app.entries.iter().any(|e| e.body == format!("{short} left the chat")),
+            app.entries
+                .iter()
+                .any(|e| e.body == format!("{short} left the chat")),
             "expected '{} left the chat' but got: {:?}",
             short,
             app.entries

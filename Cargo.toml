@@ -135,6 +135,7 @@ net = [
     "dep:tokio",
     "dep:tokio-util",
     "dep:futures-concurrency",
+    "dep:serde_json",
 ]
 rpc = [
     "dep:irpc",
