@@ -28,6 +28,7 @@ use clap::Parser;
 use iced::widget::text::Wrapping;
 use iced::{
     border,
+    clipboard,
     widget::{button, column, container, row, scrollable, text, text_input, toggler},
     Alignment, Color, Element, Length, Subscription, Task, Theme,
 };
@@ -173,6 +174,7 @@ enum AppMessage {
     ToggleDark(bool),
     Tick,
     AcceptDownload,
+    CopyToClipboard(String),
 }
 
 struct AppState {
@@ -544,6 +546,7 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
         AppMessage::SendPressed => handle_send(state),
         AppMessage::AcceptDownload => handle_download(state),
         AppMessage::ToggleDark(dark) => state.dark_mode = dark,
+        AppMessage::CopyToClipboard(text) => return clipboard::write(text),
     }
     Task::none()
 }
@@ -583,6 +586,8 @@ fn view(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Renderer> {
             )
         });
 
+    let ticket_prefix: &str = "Ticket to join this room: ";
+
     let log_col =
         state
             .messages
@@ -593,12 +598,25 @@ fn view(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Renderer> {
                     ChatLineKind::Local => local_color,
                     ChatLineKind::Remote => remote_color,
                 };
-                col.push(
-                    text(&line.text)
-                        .color(color)
-                        .size(14)
-                        .wrapping(Wrapping::Word),
-                )
+                let elem: Element<'_, AppMessage, Theme, iced::Renderer> =
+                    if let Some(ticket_val) = line.text.strip_prefix(ticket_prefix) {
+                        button(
+                            text(&line.text)
+                                .color(color)
+                                .size(14)
+                                .wrapping(Wrapping::Word),
+                        )
+                        .on_press(AppMessage::CopyToClipboard(ticket_val.to_string()))
+                        .style(button::text)
+                        .into()
+                    } else {
+                        text(&line.text)
+                            .color(color)
+                            .size(14)
+                            .wrapping(Wrapping::Word)
+                            .into()
+                    };
+                col.push(elem)
             });
     let log_panel = container(scrollable(log_col).height(Length::Fill).width(Length::Fill))
         .padding(8)
