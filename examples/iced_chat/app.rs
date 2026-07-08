@@ -48,6 +48,8 @@ struct ChatEntry {
     edited: bool,
     /// Emoji reactions attached to this entry.
     reactions: Vec<String>,
+    /// Decoded image bytes for inline rendering, if this is an image message.
+    image_bytes: Option<Vec<u8>>,
 }
 
 impl ChatEntry {
@@ -59,6 +61,7 @@ impl ChatEntry {
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
+            image_bytes: None,
         }
     }
     fn local(label: impl Into<String>, text: impl Into<String>) -> Self {
@@ -69,6 +72,7 @@ impl ChatEntry {
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
+            image_bytes: None,
         }
     }
     fn remote(label: impl Into<String>, text: impl Into<String>, hash: Option<MessageHash>) -> Self {
@@ -79,6 +83,18 @@ impl ChatEntry {
             message_hash: hash,
             edited: false,
             reactions: Vec::new(),
+            image_bytes: None,
+        }
+    }
+    fn image(label: impl Into<String>, body: impl Into<String>, image_bytes: Vec<u8>, hash: Option<MessageHash>) -> Self {
+        Self {
+            kind: ChatKind::Remote,
+            label: label.into(),
+            body: body.into(),
+            message_hash: hash,
+            edited: false,
+            reactions: Vec::new(),
+            image_bytes: Some(image_bytes),
         }
     }
 }
@@ -116,6 +132,8 @@ pub struct IcedChat {
     composer_text: String,
     help_visible: bool,
     pending_file: Option<(String, String)>,
+    /// Pending image download: (filename, blob_hash, sender_pk).
+    pending_image: Option<(String, MessageHash, PublicKey)>,
     names: HashMap<PublicKey, String>,
     topic: TopicId,
     ticket_str: String,
@@ -157,6 +175,8 @@ pub struct IcedChat {
     pub dark_mode: bool,
     /// Transport notice displayed in the header (e.g. "Direct iroh transport is operational").
     pub notice: String,
+    /// Online friends that can be direct-chatted; keyed by PublicKey with display label.
+    online_friends: HashMap<PublicKey, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +207,7 @@ pub enum AppMessage {
     // ── Chat ──
     InputChanged(String),
     SendPressed,
+    AttachPressed,
     ToggleHelp,
     NetEvent(NetEvent),
     FriendEvent(FriendEvent),
@@ -196,6 +217,9 @@ pub enum AppMessage {
     ErrorMsg(String),
     ExecuteFileSend(String),
     ExecuteDownload,
+    ExecuteImageSend(String),
+    ImageSent(String),
+    ImageDownloaded(String, Vec<u8>),
     FriendAdded {
         fid: String,
         label: String,
@@ -215,6 +239,8 @@ pub enum AppMessage {
     ToggleDark(bool),
     /// Copy text to the system clipboard.
     CopyToClipboard(String),
+    /// Open a direct chat with an online friend.
+    OpenFriendChat(PublicKey),
 }
 
 impl IcedChat {
@@ -249,6 +275,7 @@ impl IcedChat {
             composer_text: String::new(),
             help_visible: false,
             pending_file: None,
+            pending_image: None,
             names: HashMap::new(),
             topic: initial_topic.unwrap_or(TopicId::from_bytes([0u8; 32])),
             ticket_str: String::new(),
@@ -277,6 +304,7 @@ impl IcedChat {
             last_typing_sent: None,
             dark_mode: false,
             notice,
+            online_friends: HashMap::new(),
         }
     }
 
@@ -285,9 +313,6 @@ impl IcedChat {
     }
     fn push_local(&mut self, text: impl Into<String>) {
         self.entries.push(ChatEntry::local(&self.local_label, text));
-    }
-    fn push_remote(&mut self, label: impl Into<String>, text: impl Into<String>, hash: Option<MessageHash>) {
-        self.entries.push(ChatEntry::remote(label, text, hash));
     }
 }
 
@@ -303,6 +328,7 @@ impl IcedChat {
         self.entries.clear();
         self.names.clear();
         self.pending_file = None;
+        self.pending_image = None;
     }
 
     /// Save the current room to history.
@@ -332,6 +358,21 @@ impl IcedChat {
         }
         self.room_history_dirty = true;
     }
+}
+
+// ── Deterministic private topic ────────────────────────────────────
+
+/// Create a deterministic topic id from two peer public keys.
+///
+/// Both peers derive the same topic by sorting their public keys
+/// before hashing, so either side can initiate a private chat.
+fn private_topic(a: &PublicKey, b: &PublicKey) -> TopicId {
+    let (pk1, pk2) = if a <= b { (a, b) } else { (b, a) };
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(pk1.as_bytes());
+    hasher.update(pk2.as_bytes());
+    let hash = hasher.finalize();
+    TopicId::from_bytes(*hash.as_bytes())
 }
 
 // ── Update ────────────────────────────────────────────────────────────
@@ -534,6 +575,11 @@ impl IcedChat {
                 iced::Task::done(AppMessage::CreateNewRoom)
             }
 
+            AppMessage::OpenFriendChat(peer) => {
+                let topic = private_topic(&self.local_public, &peer);
+                iced::Task::done(AppMessage::OpenRoom(topic))
+            }
+
             AppMessage::RoomSelected(topic) => {
                 if let Screen::ChatList = self.screen {
                     iced::Task::done(AppMessage::OpenRoom(topic))
@@ -609,6 +655,32 @@ impl IcedChat {
                         },
                         |r: Result<String, String>| match r {
                             Ok(v) => AppMessage::ExecuteFileSend(v),
+                            Err(e) => AppMessage::ErrorMsg(e),
+                        },
+                    );
+                }
+
+                if let Some(path) = trimmed.strip_prefix("/image ") {
+                    let path = path.trim().to_string();
+                    return iced::Task::perform(
+                        async move {
+                            let path_buf = std::path::PathBuf::from(&path);
+                            let abs_path = std::path::absolute(&path_buf)
+                                .map_err(|_| format!("Invalid path: {path}"))?;
+                            if !abs_path.exists() {
+                                return Err(format!("File not found: {path}"));
+                            }
+                            let filename = path_buf
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            if filename.is_empty() {
+                                return Err("Invalid file path.".to_string());
+                            }
+                            Ok(format!("{filename}|{}|{path}", abs_path.display()))
+                        },
+                        |r: Result<String, String>| match r {
+                            Ok(v) => AppMessage::ExecuteImageSend(v),
                             Err(e) => AppMessage::ErrorMsg(e),
                         },
                     );
@@ -949,6 +1021,24 @@ impl IcedChat {
                 }
             }
 
+            AppMessage::AttachPressed => {
+                iced::Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Select a file to share")
+                        .pick_file(),
+                    |file| {
+                        if let Some(file) = file {
+                            let name = file.file_name().to_string();
+                            let path = file.path().to_string_lossy().to_string();
+                            let encoded = format!("{name}|{path}|{path}");
+                            AppMessage::ExecuteFileSend(encoded)
+                        } else {
+                            AppMessage::ToggleHelp
+                        }
+                    },
+                )
+            }
+
             AppMessage::ToggleHelp => {
                 self.help_visible = !self.help_visible;
                 iced::Task::none()
@@ -958,6 +1048,33 @@ impl IcedChat {
                 self.update_room_preview(&event);
                 let _ = chat_net_event(event, self);
                 self.try_save_friends();
+                // Check if an ImageShare was just received and auto-download
+                if let Some((name, hash, sender_pk)) = self.pending_image.take() {
+                    let blob_store = self.blob_store.clone();
+                    let endpoint = self.endpoint.clone();
+                    return iced::Task::perform(
+                        async move {
+                            let blob_hash: iroh_blobs::Hash = hash.into();
+                            blob_store
+                                .downloader(&endpoint)
+                                .download(blob_hash, Some(sender_pk))
+                                .await
+                                .map_err(|e| format!("Download: {e}"))?;
+                            let mut reader = blob_store.blobs().reader(blob_hash);
+                            let mut buf = Vec::new();
+                            use tokio::io::AsyncReadExt;
+                            reader
+                                .read_to_end(&mut buf)
+                                .await
+                                .map_err(|e| format!("Read: {e}"))?;
+                            Ok((name, buf))
+                        },
+                        |r: Result<(String, Vec<u8>), String>| match r {
+                            Ok((name, data)) => AppMessage::ImageDownloaded(name, data),
+                            Err(e) => AppMessage::ErrorMsg(e),
+                        },
+                    );
+                }
                 iced::Task::none()
             }
 
@@ -1011,6 +1128,49 @@ impl IcedChat {
                 )
             }
 
+            AppMessage::ExecuteImageSend(encoded) => {
+                let parts: Vec<&str> = encoded.splitn(3, '|').collect();
+                if parts.len() < 3 {
+                    return iced::Task::none();
+                }
+                let filename = parts[0].to_string();
+                let abs_path = parts[1].to_string();
+
+                let blob_store = self.blob_store.clone();
+                let sender = self.sender.clone();
+                let secret_key = self.secret_key.clone();
+                let fname = filename.clone();
+
+                iced::Task::perform(
+                    async move {
+                        let path_buf = std::path::PathBuf::from(&abs_path);
+                        let image_bytes = tokio::fs::read(&path_buf)
+                            .await
+                            .map_err(|e| format!("Failed to read image: {e}"))?;
+                        let tag = blob_store
+                            .blobs()
+                            .add_path(path_buf)
+                            .await
+                            .map_err(|e| format!("Failed to hash image: {e}"))?;
+                        let hash: MessageHash = *tag.hash.as_bytes();
+                        let msg = crate::Message::ImageShare {
+                            name: filename.clone(),
+                            hash,
+                        };
+                        let encoded = SignedMessage::sign_and_encode(&secret_key, &msg)
+                            .map_err(|e| format!("Failed to sign: {e}"))?;
+                        if let Some(ref sender) = sender {
+                            sender.broadcast(encoded).await.ok();
+                        }
+                        Ok((fname, image_bytes))
+                    },
+                    |r: Result<(String, Vec<u8>), String>| match r {
+                        Ok((name, bytes)) => AppMessage::ImageDownloaded(name, bytes),
+                        Err(e) => AppMessage::ErrorMsg(e),
+                    },
+                )
+            }
+
             AppMessage::ExecuteDownload => {
                 let pending = self.pending_file.clone();
                 match pending {
@@ -1056,6 +1216,24 @@ impl IcedChat {
             AppMessage::DownloadDone(name) => {
                 self.push_system(format!("Saved: {name}"));
                 self.pending_file = None;
+                iced::Task::none()
+            }
+            AppMessage::ImageSent(name) => {
+                self.push_local(format!("[Image: {name}]"));
+                iced::Task::none()
+            }
+            AppMessage::ImageDownloaded(name, image_bytes) => {
+                let sender_name = self
+                    .names
+                    .get(&self.local_public)
+                    .cloned()
+                    .unwrap_or_else(|| self.local_public.fmt_short().to_string());
+                self.entries.push(ChatEntry::image(
+                    &sender_name,
+                    format!("[Image: {name}]"),
+                    image_bytes,
+                    None,
+                ));
                 iced::Task::none()
             }
             AppMessage::ErrorMsg(msg) => {
@@ -1219,105 +1397,6 @@ impl IcedChat {
         self.relayed_peers = relayed;
     }
 
-    fn handle_net_event(&mut self, event: NetEvent) {
-        match event {
-            NetEvent::Message { from, message } => match message {
-                Message::AboutMe { name } => {
-                    self.names.insert(from, name.clone());
-                    // Track friend state
-                    let fid = FriendId::from_public_key(from);
-                    if self.friends.get(&fid).is_some() {
-                        self.friends.set_last_announced_name(fid, name.clone());
-                        self.friends_dirty = true;
-                    }
-                    if from != self.local_public {
-                        self.push_system(format!("{} is now known as {}", from.fmt_short(), name));
-                    }
-                }
-                Message::Message { text } => {
-                    if from != self.local_public {
-                        // Track friend state
-                        let fid = FriendId::from_public_key(from);
-                        if self.friends.get(&fid).is_some() {
-                            self.friends.mark_online(fid);
-                            self.friends_dirty = true;
-                        }
-                        let name = self
-                            .names
-                            .get(&from)
-                            .cloned()
-                            .unwrap_or_else(|| from.fmt_short().to_string());
-                        self.push_remote(name, text, None);
-                    }
-                }
-                Message::FileShare { name, ticket } => {
-                    if from != self.local_public {
-                        // Track friend state
-                        let fid = FriendId::from_public_key(from);
-                        if self.friends.get(&fid).is_some() {
-                            self.friends.mark_online(fid);
-                            self.friends_dirty = true;
-                        }
-                        let sender_name = self
-                            .names
-                            .get(&from)
-                            .cloned()
-                            .unwrap_or_else(|| from.fmt_short().to_string());
-                        self.push_system(format!(
-                            "{} shared a file: {} (type /download to fetch it)",
-                            sender_name, name
-                        ));
-                        self.pending_file = Some((name, ticket));
-                    }
-                }
-                Message::Goodbye
-                | Message::Typing
-                | Message::ReadReceipt { .. }
-                | Message::Edit { .. }
-                | Message::Delete { .. }
-                | Message::Reaction { .. } => {
-                    // Handled via NeighborDown or by the shared chat_core handler.
-                }
-            },
-            NetEvent::NeighborUp { peer } => {
-                // Track friend state
-                let fid = FriendId::from_public_key(peer);
-                if self.friends.get(&fid).is_some() {
-                    self.friends.mark_online(fid);
-                    self.friends_dirty = true;
-                }
-                let name = self
-                    .names
-                    .get(&peer)
-                    .cloned()
-                    .unwrap_or_else(|| peer.fmt_short().to_string());
-                self.push_system(format!("{name} joined the chat"));
-                // Track neighbor and recompute direct/relay counts
-                self.neighbors.insert(peer);
-                self.recompute_connection_counts();
-            }
-            NetEvent::NeighborDown { peer } => {
-                // Track friend state
-                let fid = FriendId::from_public_key(peer);
-                if self.friends.get(&fid).is_some() {
-                    self.friends.mark_offline(fid);
-                    self.friends_dirty = true;
-                }
-                let name = self
-                    .names
-                    .get(&peer)
-                    .cloned()
-                    .unwrap_or_else(|| peer.fmt_short().to_string());
-                self.push_system(format!("{name} left the chat"));
-                // Remove from neighbor tracking
-                self.neighbors.remove(&peer);
-                self.recompute_connection_counts();
-            }
-            NetEvent::Closed => self.push_system("The gossip receiver closed."),
-            NetEvent::Error(err) => self.push_system(format!("Network error: {err}")),
-        }
-    }
-
     fn handle_friend_event(&mut self, event: FriendEvent) {
         match event {
             FriendEvent::StatusChanged { peer, status } => {
@@ -1332,11 +1411,13 @@ impl IcedChat {
                     FriendStatus::Online => {
                         self.friends.mark_online(fid);
                         self.friends_dirty = true;
+                        self.online_friends.insert(peer, label.clone());
                         self.push_system(format!("Friend {label} is now ONLINE"));
                     }
                     FriendStatus::Offline => {
                         self.friends.mark_offline(fid);
                         self.friends_dirty = true;
+                        self.online_friends.remove(&peer);
                         self.push_system(format!("Friend {label} is now offline"));
                     }
                     FriendStatus::Unknown => {}
@@ -1395,6 +1476,10 @@ impl ChatCallbacks for IcedChat {
 
     fn set_pending_file(&mut self, name: String, ticket: String) {
         self.pending_file = Some((name, ticket));
+    }
+
+    fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
+        self.pending_image = Some((name, hash, from));
     }
 
     fn set_typing(&mut self, peer: PublicKey) {
@@ -1495,14 +1580,14 @@ impl IcedChat {
         content = content.push(
             row![
                 button(
-                    row![text(" + ").size(16), text("New Chat").size(14),]
+                    row![text(" ➕ ").size(16), text("New Chat").size(14),]
                         .align_y(Alignment::Center)
                         .spacing(4),
                 )
                 .on_press(AppMessage::NewChatCreated)
                 .padding(8),
                 button(
-                    row![text(" ⇄ ").size(16), text("Join via Ticket").size(14),]
+                    row![text(" 🔗 ").size(16), text("Join via Ticket").size(14),]
                         .align_y(Alignment::Center)
                         .spacing(4),
                 )
@@ -1536,7 +1621,7 @@ impl IcedChat {
         content = content.push(
             row![
                 text("Recent Chats").size(16).width(Length::Fill),
-                text("(click room to open, click × to remove)")
+                text("(click room to open, click ✕ to remove)")
                     .size(10)
                     .color(Color::from_rgb(0.5, 0.5, 0.5)),
             ]
@@ -1557,10 +1642,60 @@ impl IcedChat {
             content = content.push(scrollable(list).height(Length::Fill));
         }
 
+        // ── Online Friends ──
+        content = content.push(text("").size(4)); // small spacer
+        content = content.push(
+            row![
+                text("Online Friends").size(16).width(Length::Fill),
+                text(format!("{} friend(s) online", self.online_friends.len()))
+                    .size(10)
+                    .color(Color::from_rgb(0.5, 0.5, 0.5)),
+            ]
+            .spacing(4),
+        );
+
+        if self.online_friends.is_empty() {
+            content = content.push(
+                text("No friends online. Add friends via /friend add <pk> in a chat.")
+                    .color(Color::from_rgb(0.5, 0.5, 0.5))
+                    .size(13),
+            );
+        } else {
+            let mut online_list = Column::new().spacing(2).width(Length::Fill);
+            // Sort by label for stable ordering
+            let mut sorted: Vec<(&PublicKey, &String)> = self.online_friends.iter().collect();
+            sorted.sort_by(|a, b| a.1.cmp(b.1));
+            for (pk, label) in sorted {
+                online_list = online_list.push(self.view_online_friend_row(*pk, label));
+            }
+            content = content.push(scrollable(online_list).height(Length::Shrink));
+        }
+
         container(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+
+    /// A single row for an online friend: green dot + label + Chat button.
+    fn view_online_friend_row<'a>(&self, pk: PublicKey, label: &'a str) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, container, row, text};
+        use iced::Length;
+
+        container(
+            row![
+                text("🟢").size(12),
+                text(label).size(14).width(Length::Fill),
+                button("💬 Chat")
+                    .on_press(AppMessage::OpenFriendChat(pk))
+                    .padding(4),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .padding(8),
+        )
+        .width(Length::Fill)
+        .into()
     }
 
     fn view_room_row(&self, room: &RoomHistoryEntry) -> iced::Element<'_, AppMessage> {
@@ -1592,7 +1727,7 @@ impl IcedChat {
                 .spacing(2)
                 .padding(8)
                 .width(Length::Fill),
-                button("×")
+                button("✕")
                     .on_press(AppMessage::DeleteRoom(topic))
                     .padding(4),
             ]
@@ -1680,9 +1815,9 @@ impl IcedChat {
 
         let mut header = column![
             row![
-                button(" ← ").on_press(AppMessage::GoToChatList),
+                button(" ◀ ").on_press(AppMessage::GoToChatList),
                 text(room_name).size(18).width(Length::Fill),
-                button(text("☀").size(14))
+                button(text(if self.dark_mode { "☀" } else { "🌙" }).size(14))
                     .on_press(AppMessage::ToggleDark(!self.dark_mode))
                     .padding(4),
             ]
@@ -1756,6 +1891,15 @@ impl IcedChat {
                 .width(Length::Fill);
             col = col.push(line);
 
+            // ── Image ──
+            if let Some(ref img_bytes) = entry.image_bytes {
+                let handle = iced::widget::image::Handle::from_bytes(img_bytes.clone());
+                let img = iced::widget::image(handle)
+                    .width(Length::Fill)
+                    .height(Length::Shrink);
+                col = col.push(img);
+            }
+
             // ── Reactions ──
             if !entry.reactions.is_empty() {
                 let reactions_text = format!("      {}", entry.reactions.join("  "));
@@ -1802,8 +1946,9 @@ impl IcedChat {
                     .on_submit(AppMessage::SendPressed)
                     .width(iced::Length::Fill),
             )
-            .push(button("Send").on_press(AppMessage::SendPressed))
-            .push(button("?").on_press(AppMessage::ToggleHelp))
+            .push(button("📎").on_press(AppMessage::AttachPressed))
+            .push(button("➤").on_press(AppMessage::SendPressed))
+            .push(button("❓").on_press(AppMessage::ToggleHelp))
             .spacing(4)
             .align_y(Alignment::Center)
             .into()
@@ -1817,6 +1962,7 @@ impl IcedChat {
             .push(text("Help").size(20))
             .push(text(""))
             .push(text("/send <path>    Share a file with peers"))
+            .push(text("/image <path>   Share an image inline"))
             .push(text("/download       Fetch the last shared file"))
             .push(text(
                 "/leave          Leave this room and delete from history",
@@ -1837,10 +1983,10 @@ impl IcedChat {
             .push(text("Type a message and press Enter to send."))
             .push(text(""))
             .push(text(
-                "Tip: click × on a room in the chat list to remove it.",
+                "Tip: click ✕ on a room in the chat list to remove it.",
             ))
             .push(text(""))
-            .push(button("Close").on_press(AppMessage::ToggleHelp))
+            .push(button("❌").on_press(AppMessage::ToggleHelp))
             .spacing(4)
             .padding(16)
             .align_x(Alignment::Center);
