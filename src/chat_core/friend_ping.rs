@@ -27,8 +27,6 @@ use n0_error::{bail_any, Result};
 use tokio::sync::{mpsc, oneshot};
 use tracing::trace;
 
-use crate::net::GOSSIP_ALPN;
-
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 /// ALPN used by the friend ping manager to test connectivity.
@@ -38,7 +36,7 @@ use crate::net::GOSSIP_ALPN;
 pub const FRIEND_PING_ALPN: &[u8] = b"/iroh-gossip-chat/friend-ping/1";
 
 /// Default interval between friend ping cycles.
-pub const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(60);
+pub const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Default per-ping connect timeout.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -366,7 +364,7 @@ impl FriendPingActor {
         // Wrap the connect call with a global timeout so we don't hang on misbehaving peers.
         let connect_fut =
             self.endpoint
-                .connect_with_opts(addrs.clone(), GOSSIP_ALPN, Default::default());
+                .connect_with_opts(addrs.clone(), FRIEND_PING_ALPN, Default::default());
 
         match tokio::time::timeout(self.connect_timeout, connect_fut).await {
             Ok(Ok(connecting)) => {
@@ -487,9 +485,9 @@ mod tests {
             .bind()
             .await?;
 
-        // ep2 needs to accept GOSSIP_ALPN connections for friend pings to succeed.
+        // ep2 needs to accept FRIEND_PING_ALPN connections for friend pings to succeed.
         let _router2 = iroh::protocol::Router::builder(ep2.clone())
-            .accept(GOSSIP_ALPN, AcceptCloseHandler)
+            .accept(FRIEND_PING_ALPN, AcceptCloseHandler)
             .spawn();
 
         let (mgr, _events) = FriendPingManager::spawn(
@@ -594,7 +592,7 @@ mod tests {
             .await?;
 
         let _router2 = iroh::protocol::Router::builder(ep2.clone())
-            .accept(GOSSIP_ALPN, AcceptCloseHandler)
+            .accept(FRIEND_PING_ALPN, AcceptCloseHandler)
             .spawn();
 
         let (mgr, mut events) = FriendPingManager::spawn(

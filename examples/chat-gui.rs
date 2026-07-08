@@ -693,6 +693,9 @@ fn handle_net_event(state: &mut AppState, event: NetEvent) {
                 // Handled via NeighborDown (cleaner, covers both clean and unclean exits)
             }
         },
+        NetEvent::NeighborUp { peer } => {
+            state.push_system(format!("{} joined the chat", peer.fmt_short()));
+        }
         NetEvent::NeighborDown { peer } => {
             state.push_system(format!("{} left the chat", peer.fmt_short()));
         }

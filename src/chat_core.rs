@@ -339,6 +339,11 @@ pub enum NetEvent {
         /// The decoded message payload.
         message: Message,
     },
+    /// A peer has joined the gossip mesh (new neighbor connection).
+    NeighborUp {
+        /// Public key of the peer that joined.
+        peer: PublicKey,
+    },
     /// A peer has left the gossip mesh (connection dropped or app closed).
     NeighborDown {
         /// Public key of the peer that left.
@@ -542,6 +547,18 @@ pub fn handle_net_event(
                 // departures.
             }
         },
+        NetEvent::NeighborUp { peer } => {
+            let fid = FriendId::from_public_key(peer);
+            if app.friends.get(&fid).is_some() {
+                app.friends.mark_online(fid);
+                app.friends_dirty = true;
+            }
+            let name = names
+                .get(&peer)
+                .cloned()
+                .unwrap_or_else(|| peer.fmt_short().to_string());
+            app.push_system(format!("{name} joined the chat"));
+        }
         NetEvent::NeighborDown { peer } => {
             let fid = FriendId::from_public_key(peer);
             if app.friends.get(&fid).is_some() {
@@ -587,15 +604,19 @@ pub async fn forward_gossip_events(
                     return;
                 }
             },
+            Event::NeighborUp(id) => {
+                if net_tx.send(NetEvent::NeighborUp { peer: id }).is_err() {
+                    return;
+                }
+            }
             Event::NeighborDown(id) => {
                 if net_tx.send(NetEvent::NeighborDown { peer: id }).is_err() {
                     return;
                 }
             }
-            Event::NeighborUp(_) | Event::Lagged => {
-                // Joined notifications and lagged warnings are intentionally
-                // not forwarded for now.  NeighborUp is noisy during initial
-                // connection; Lagged is a protocol-level backpressure signal.
+            Event::Lagged => {
+                // Lagged warnings are protocol-level backpressure signals;
+                // not forwarded to the frontend.
             }
         }
     }
@@ -1253,6 +1274,100 @@ mod tests {
             "expected '{} left the chat' but got: {:?}",
             short,
             app.entries
+        );
+    }
+
+    #[test]
+    fn handle_net_event_neighbor_up_marks_friend_online() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+
+        // Add the peer as a friend first.
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends.ensure_friend(fid.clone());
+        app.friends.mark_offline(fid);
+        app.friends_dirty = false;
+
+        let mut names = HashMap::new();
+        names.insert(remote_key.public(), "alice".to_string());
+
+        handle_net_event(
+            NetEvent::NeighborUp {
+                peer: remote_key.public(),
+            },
+            &mut app,
+            &mut names,
+            SecretKey::generate().public(),
+        )
+        .unwrap();
+
+        // Friend should be marked online
+        let fid = FriendId::from_public_key(remote_key.public());
+        assert!(
+            app.friends.get(&fid).map(|r| r.status.online).unwrap_or(false),
+            "friend should be marked online"
+        );
+        assert!(app.friends_dirty, "friends should be marked dirty");
+        assert!(app.entries.iter().any(|e| e.body == "alice joined the chat"));
+    }
+
+    #[test]
+    fn handle_net_event_neighbor_up_falls_back_to_short_key() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        let mut names = HashMap::new();
+
+        handle_net_event(
+            NetEvent::NeighborUp {
+                peer: remote_key.public(),
+            },
+            &mut app,
+            &mut names,
+            SecretKey::generate().public(),
+        )
+        .unwrap();
+
+        // Without a display name, it formats the short public key.
+        let short = remote_key.public().fmt_short();
+        assert!(
+            app.entries
+                .iter()
+                .any(|e| e.body == format!("{short} joined the chat")),
+            "expected '{} joined the chat' but got: {:?}",
+            short,
+            app.entries
+        );
+    }
+
+    #[test]
+    fn handle_net_event_neighbor_up_non_friend_not_marked() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        let mut names = HashMap::new();
+
+        // Don't add the peer as a friend.
+
+        handle_net_event(
+            NetEvent::NeighborUp {
+                peer: remote_key.public(),
+            },
+            &mut app,
+            &mut names,
+            SecretKey::generate().public(),
+        )
+        .unwrap();
+
+        // Should NOT have a friend record (only friend presence is updated).
+        let fid = FriendId::from_public_key(remote_key.public());
+        assert!(
+            app.friends.get(&fid).is_none(),
+            "non-friend should not get a friend record"
+        );
+        // But we still show a system message.
+        let short = remote_key.public().fmt_short();
+        assert!(
+            app.entries.iter().any(|e| e.body == format!("{short} joined the chat")),
+            "should show join message even for non-friends"
         );
     }
 }

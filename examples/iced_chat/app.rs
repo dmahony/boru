@@ -541,6 +541,20 @@ impl IcedChat {
                     // Handled via NeighborDown (cleaner, covers both clean and unclean exits)
                 }
             },
+            NetEvent::NeighborUp { peer } => {
+                // Track friend state
+                let fid = FriendId::from_public_key(peer);
+                if self.friends.get(&fid).is_some() {
+                    self.friends.mark_online(fid);
+                    self.friends_dirty = true;
+                }
+                let name = self
+                    .names
+                    .get(&peer)
+                    .cloned()
+                    .unwrap_or_else(|| peer.fmt_short().to_string());
+                self.push_system(format!("{name} joined the chat"));
+            }
             NetEvent::NeighborDown { peer } => {
                 // Track friend state
                 let fid = FriendId::from_public_key(peer);
