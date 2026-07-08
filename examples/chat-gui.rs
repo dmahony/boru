@@ -50,6 +50,10 @@ use iroh_gossip::{
     proto::TopicId,
     room::RoomStore,
 };
+#[cfg(feature = "tor-transport")]
+use iroh_gossip::tor_transport::{
+    bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport,
+};
 use n0_error::{bail_any, Result, StdResultExt};
 use n0_future::{task, StreamExt};
 
@@ -78,6 +82,10 @@ struct Args {
     relay: Option<RelayUrl>,
     #[clap(long)]
     no_relay: bool,
+    /// Use Tor hidden services instead of direct iroh connectivity.
+    #[cfg(feature = "tor-transport")]
+    #[clap(long)]
+    tor: bool,
     #[clap(short, long)]
     name: Option<String>,
     #[clap(long, default_value = "0")]
@@ -197,6 +205,8 @@ enum AppMessage {
     FriendEvent(FriendEvent),
     /// Delete a room from history (home screen delete or /leave).
     DeleteRoom(TopicId),
+    /// Status update from the Tor reconnection monitor.
+    TorReconnect(String),
 }
 
 // ── App state ─────────────────────────────────────────────────────────
@@ -250,6 +260,8 @@ struct AppState {
     friends_dirty: bool,
     friend_mgr: FriendPingManager,
     friend_events_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<FriendEvent>>>,
+    /// Optional receiver for Tor reconnection status updates.
+    tor_reconnect_rx: Option<Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>>,
 }
 
 impl AppState {
@@ -337,13 +349,28 @@ fn main() -> Result<()> {
     println!("> our public key: {local_public}");
     println!("> identity file: {}", key_path.display());
 
-    let relay_mode = match (args.no_relay, args.relay.clone()) {
-        (true, Some(_)) => bail_any!("You cannot set --no-relay and --relay at the same time"),
-        (true, None) => RelayMode::Disabled,
-        (false, None) => RelayMode::Default,
-        (false, Some(url)) => RelayMode::Custom(url.into()),
+    let use_tor = {
+        #[cfg(feature = "tor-transport")]
+        { args.tor }
+        #[cfg(not(feature = "tor-transport"))]
+        { false }
+    };
+    let relay_mode = match (use_tor, args.no_relay, args.relay.clone()) {
+        (_, true, Some(_)) => bail_any!("You cannot set --no-relay and --relay at the same time"),
+        (_, true, None) => RelayMode::Disabled,
+        (true, false, None) => RelayMode::Disabled,
+        (false, false, None) => RelayMode::Default,
+        (_, false, Some(url)) => RelayMode::Custom(url.into()),
     };
     println!("> relay servers: {}", fmt_relay_mode(&relay_mode));
+
+    // ── Tor reconnection monitor channel ──────────────────────────────
+    // Created unconditionally so the event loop always compiles.
+    // The monitor task is only spawned in Tor mode; otherwise the
+    // sender is never cloned and sits dormant.
+    #[allow(unused)]
+    let (tor_reconnect_tx, tor_reconnect_rx) =
+        tokio::sync::mpsc::unbounded_channel::<String>();
 
     // ── Build endpoint, gossip, router (no topic subscription yet) ──
 
@@ -358,27 +385,84 @@ fn main() -> Result<()> {
         friend_events_rx,
         friends,
         room_history,
+        transport_status,
+        notice,
+        tor_reconnect_rx_opt,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
 
-        let endpoint = {
-            let builder = if matches!(relay_mode, RelayMode::Disabled) {
-                Endpoint::builder(presets::N0DisableRelay)
+        let (endpoint, ep_transport_status, ep_notice) = {
+            #[cfg(feature = "tor-transport")]
+            if use_tor {
+                let tor_dirs = TorStorageDirs::new()?;
+                let (tor_client, tor_status_message) = bootstrap_tor(&tor_dirs).await?;
+                let tor_transport =
+                    TorTransport::new(secret_key.public(), Arc::clone(&tor_client), args.bind_port);
+                let endpoint = Endpoint::builder(presets::N0DisableRelay)
+                    .secret_key(secret_key.clone())
+                    .address_lookup(memory_lookup.clone())
+                    .relay_mode(relay_mode.clone())
+                    .add_custom_transport(Arc::new(tor_transport.clone()))
+                    .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
+                    .bind()
+                    .await?;
+                endpoint.online().await;
+                let local_peer_addr = tor_transport.watch_local_peer_addr().initialized().await;
+
+                // Spawn the Tor health-monitor background task to detect
+                // and reconnect with exponential backoff if Tor drops after
+                // the initial bootstrap.
+                let monitor_client = Arc::clone(&tor_client);
+                let monitor_tx = tor_reconnect_tx.clone();
+                tokio::spawn(async move {
+                    monitor_tor_health(monitor_client, monitor_tx).await;
+                });
+
+                let ts = format!("Tor bootstrap finished: {tor_status_message}");
+                let nt = "Tor-backed custom transport is operational. Gossip messages are relayed over Tor hidden services."
+                    .to_string();
+                // local_peer_addr is consumed by endpoint_addr(), so note it's EndpointAddr
+                #[allow(clippy::let_unit_value)]
+                { let _ = local_peer_addr; }
+                (endpoint, ts, nt)
             } else {
-                Endpoint::builder(presets::N0)
-            };
-            builder
-                .secret_key(secret_key.clone())
-                .address_lookup(memory_lookup.clone())
-                .relay_mode(relay_mode.clone())
-                .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))
-                .unwrap()
-                .bind()
-                .await?
+                let builder = if matches!(relay_mode, RelayMode::Disabled) {
+                    Endpoint::builder(presets::N0DisableRelay)
+                } else {
+                    Endpoint::builder(presets::N0)
+                };
+                let endpoint = builder
+                    .secret_key(secret_key.clone())
+                    .address_lookup(memory_lookup.clone())
+                    .relay_mode(relay_mode.clone())
+                    .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
+                    .bind()
+                    .await?;
+                if !matches!(relay_mode, RelayMode::Disabled) {
+                    endpoint.online().await;
+                }
+                (endpoint, "Direct iroh transport is ready.".into(), "Direct iroh transport is operational.".into())
+            }
+            #[cfg(not(feature = "tor-transport"))]
+            {
+                let builder = if matches!(relay_mode, RelayMode::Disabled) {
+                    Endpoint::builder(presets::N0DisableRelay)
+                } else {
+                    Endpoint::builder(presets::N0)
+                };
+                let endpoint = builder
+                    .secret_key(secret_key.clone())
+                    .address_lookup(memory_lookup.clone())
+                    .relay_mode(relay_mode.clone())
+                    .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
+                    .bind()
+                    .await?;
+                if !matches!(relay_mode, RelayMode::Disabled) {
+                    endpoint.online().await;
+                }
+                (endpoint, "Direct iroh transport is ready.".into(), "Direct iroh transport is operational.".into())
+            }
         };
-        if !matches!(relay_mode, RelayMode::Disabled) {
-            endpoint.online().await;
-        }
         println!("> our endpoint id: {}", endpoint.id());
 
         let gossip = Gossip::builder().spawn(endpoint.clone());
@@ -437,6 +521,9 @@ fn main() -> Result<()> {
             friend_events_rx,
             friends,
             room_history,
+            ep_transport_status,
+            ep_notice,
+            use_tor.then(|| Arc::new(Mutex::new(tor_reconnect_rx))),
         ))
     })?;
 
@@ -457,8 +544,8 @@ fn main() -> Result<()> {
         messages: vec![],
         input_value: String::new(),
         ticket: String::new(),
-        transport_status: "Direct iroh transport is ready.".into(),
-        notice: "Direct iroh transport is operational.".into(),
+        transport_status,
+        notice,
         topic: String::new(),
         relay_info: fmt_relay_mode(&relay_mode),
         connected: false,
@@ -475,6 +562,7 @@ fn main() -> Result<()> {
         friends_dirty: false,
         friend_mgr,
         friend_events_rx,
+        tor_reconnect_rx: tor_reconnect_rx_opt,
     };
 
     let app_cell = std::sync::Mutex::new(Some((app, initial_topic)));
@@ -812,6 +900,27 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
                 state.conn_refresh_counter -= 1;
             }
 
+            // Poll Tor reconnection status updates
+            if let Some(ref rx) = state.tor_reconnect_rx {
+                let msgs: Vec<String> = match rx.try_lock() {
+                    Ok(mut guard) => {
+                        let mut msgs = Vec::new();
+                        loop {
+                            match guard.try_recv() {
+                                Ok(msg) => msgs.push(msg),
+                                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                            }
+                        }
+                        msgs
+                    }
+                    Err(_) => Vec::new(),
+                };
+                for msg in msgs {
+                    state.push_system(msg);
+                }
+            }
+
             return Task::none();
         }
 
@@ -836,6 +945,11 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
             // Remove from history and persist
             state.room_history.remove(&topic);
             let _ = state.room_history.save();
+            return Task::none();
+        }
+
+        AppMessage::TorReconnect(msg) => {
+            state.push_system(msg);
             return Task::none();
         }
     }

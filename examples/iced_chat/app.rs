@@ -146,6 +146,8 @@ pub struct IcedChat {
     relayed_peers: usize,
     /// Counter for periodic connection refresh (decremented per ConnMonitorTick).
     conn_refresh_counter: u32,
+    /// Optional receiver for Tor reconnection status updates.
+    tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +200,8 @@ pub enum AppMessage {
     DeleteRoom(TopicId),
     /// Periodic tick for connection type refresh.
     ConnMonitorTick,
+    /// Status update from the Tor reconnection monitor.
+    TorReconnect(String),
 }
 
 impl IcedChat {
@@ -217,6 +221,7 @@ impl IcedChat {
         friends: FriendsStore,
         friend_mgr: FriendPingManager,
         friend_events_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
+        tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
         initial_topic: Option<TopicId>,
     ) -> Self {
         Self {
@@ -253,6 +258,7 @@ impl IcedChat {
             direct_peers: 0,
             relayed_peers: 0,
             conn_refresh_counter: 0,
+            tor_reconnect_rx,
         }
     }
 
@@ -915,6 +921,33 @@ impl IcedChat {
                 } else {
                     self.conn_refresh_counter -= 1;
                 }
+
+                // Poll Tor reconnection status updates
+                if let Some(ref rx) = self.tor_reconnect_rx {
+                    let msgs: Vec<String> = match rx.try_lock() {
+                        Ok(mut guard) => {
+                            let mut msgs = Vec::new();
+                            loop {
+                                match guard.try_recv() {
+                                    Ok(msg) => msgs.push(msg),
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                                }
+                            }
+                            msgs
+                        }
+                        Err(_) => Vec::new(),
+                    };
+                    for msg in msgs {
+                        self.push_system(msg);
+                    }
+                }
+
+                iced::Task::none()
+            }
+
+            AppMessage::TorReconnect(msg) => {
+                self.push_system(msg);
                 iced::Task::none()
             }
         }

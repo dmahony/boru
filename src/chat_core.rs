@@ -1134,7 +1134,12 @@ mod tests {
     }
 
     fn test_app() -> AppState {
-        AppState::new(test_status(), FriendsStore::default())
+        AppState::new(
+            test_status(),
+            FriendsStore::default(),
+            SecretKey::generate().public(),
+            Some("tester".into()),
+        )
     }
 
     #[test]
@@ -1463,7 +1468,7 @@ mod tests {
             from: key.public(),
             message: Message::Message { text: "hi".into() },
         };
-        handle_net_event(event, &mut app, &mut names, SecretKey::generate().public()).unwrap();
+        handle_net_event(event, &mut app).unwrap();
         assert_eq!(app.entries.len(), 1);
         assert!(matches!(app.entries[0].kind, ChatKind::Remote));
         assert_eq!(app.entries[0].body, "hi");
@@ -1480,9 +1485,9 @@ mod tests {
             from: remote_key.public(),
             message: Message::AboutMe { name: "bob".into() },
         };
-        handle_net_event(event, &mut app, &mut names, local_key.public()).unwrap();
+        handle_net_event(event, &mut app).unwrap();
         // Name should be stored
-        assert_eq!(names.get(&remote_key.public()).unwrap(), "bob");
+        assert_eq!(app.names.get(&remote_key.public()).unwrap(), "bob");
         // Should have a system notification about the name
         assert!(app.entries.iter().any(|e| e.body.contains("bob")));
     }
@@ -1499,7 +1504,7 @@ mod tests {
                 text: "echo".into(),
             },
         };
-        handle_net_event(event, &mut app, &mut names, local_key.public()).unwrap();
+        handle_net_event(event, &mut app).unwrap();
         // Own messages should not appear as remote entries
         assert!(app.entries.is_empty());
     }
@@ -1508,7 +1513,6 @@ mod tests {
     fn handle_net_event_file_share_sets_pending() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
-        let mut names = HashMap::new();
 
         let event = NetEvent::Message {
             from: remote_key.public(),
@@ -1517,7 +1521,7 @@ mod tests {
                 ticket: "abc123".into(),
             },
         };
-        handle_net_event(event, &mut app, &mut names, SecretKey::generate().public()).unwrap();
+        handle_net_event(event, &mut app).unwrap();
         assert_eq!(app.pending_file, Some(("doc.pdf".into(), "abc123".into())));
         assert!(app.entries.iter().any(|e| e.body.contains("doc.pdf")));
     }
@@ -1525,12 +1529,9 @@ mod tests {
     #[test]
     fn handle_net_event_closed_sets_quit() {
         let mut app = test_app();
-        let mut names = HashMap::new();
         handle_net_event(
             NetEvent::Closed,
             &mut app,
-            &mut names,
-            SecretKey::generate().public(),
         )
         .unwrap();
         assert!(app.should_quit);
@@ -1540,12 +1541,9 @@ mod tests {
     #[test]
     fn handle_net_event_error_sets_quit() {
         let mut app = test_app();
-        let mut names = HashMap::new();
         handle_net_event(
             NetEvent::Error("timeout".into()),
             &mut app,
-            &mut names,
-            SecretKey::generate().public(),
         )
         .unwrap();
         assert!(app.should_quit);
@@ -1556,16 +1554,13 @@ mod tests {
     fn handle_net_event_neighbor_down_uses_display_name() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
-        let mut names = HashMap::new();
-        names.insert(remote_key.public(), "alice".to_string());
+        app.names.insert(remote_key.public(), "alice".to_string());
 
         handle_net_event(
             NetEvent::NeighborDown {
                 peer: remote_key.public(),
             },
             &mut app,
-            &mut names,
-            SecretKey::generate().public(),
         )
         .unwrap();
         assert!(app.entries.iter().any(|e| e.body == "alice left the chat"));
@@ -1575,15 +1570,12 @@ mod tests {
     fn handle_net_event_neighbor_down_falls_back_to_short_key() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
-        let mut names = HashMap::new();
 
         handle_net_event(
             NetEvent::NeighborDown {
                 peer: remote_key.public(),
             },
             &mut app,
-            &mut names,
-            SecretKey::generate().public(),
         )
         .unwrap();
         // Without a display name, it formats the short public key.
@@ -1609,16 +1601,13 @@ mod tests {
         app.friends.mark_offline(fid);
         app.friends_dirty = false;
 
-        let mut names = HashMap::new();
-        names.insert(remote_key.public(), "alice".to_string());
+        app.names.insert(remote_key.public(), "alice".to_string());
 
         handle_net_event(
             NetEvent::NeighborUp {
                 peer: remote_key.public(),
             },
             &mut app,
-            &mut names,
-            SecretKey::generate().public(),
         )
         .unwrap();
 
@@ -1642,15 +1631,12 @@ mod tests {
     fn handle_net_event_neighbor_up_falls_back_to_short_key() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
-        let mut names = HashMap::new();
 
         handle_net_event(
             NetEvent::NeighborUp {
                 peer: remote_key.public(),
             },
             &mut app,
-            &mut names,
-            SecretKey::generate().public(),
         )
         .unwrap();
 
@@ -1670,7 +1656,6 @@ mod tests {
     fn handle_net_event_neighbor_up_non_friend_not_marked() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
-        let mut names = HashMap::new();
 
         // Don't add the peer as a friend.
 
@@ -1679,8 +1664,6 @@ mod tests {
                 peer: remote_key.public(),
             },
             &mut app,
-            &mut names,
-            SecretKey::generate().public(),
         )
         .unwrap();
 

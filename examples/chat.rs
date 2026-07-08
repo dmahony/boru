@@ -6,10 +6,6 @@
 //! protocol types, state machine, and network event handling.  Only the
 //! TUI-specific rendering (ratatui) and input handling (crossterm) live here.
 
-#[cfg(feature = "tor-transport")]
-use std::fmt;
-#[cfg(feature = "tor-transport")]
-use std::fs;
 use std::{
     collections::{HashMap, HashSet},
     env, io,
@@ -21,14 +17,11 @@ use std::{
 };
 
 #[cfg(feature = "tor-transport")]
-use arti_client::{
-    config::{TorClientConfig, TorClientConfigBuilder},
-    BootstrapBehavior, TorClient,
+use iroh_gossip::tor_transport::{
+    bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport,
 };
 #[cfg(feature = "tor-transport")]
-use tor_rtcompat::PreferredRuntime;
-#[cfg(feature = "tor-transport")]
-use n0_future::StreamExt;
+use iroh::Watcher;
 use clap::Parser;
 use crossterm::{
     cursor::{Hide, Show},
@@ -36,8 +29,6 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-#[cfg(feature = "tor-transport")]
-use iroh::Watcher;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, PublicKey, RelayMode,
     RelayUrl, SecretKey,
@@ -60,8 +51,6 @@ use iroh_gossip::room_docs::{
 use iroh_gossip::small_room::{
     room_size_fits_small_room, SmallRoomBuilder, SMALL_ROOM_ALPN, SMALL_ROOM_MAX_SIZE,
 };
-#[cfg(feature = "tor-transport")]
-use iroh_gossip::tor_transport::TorTransport;
 use iroh_gossip::{
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
@@ -127,41 +116,6 @@ enum Command {
         /// The ticket, as base32 string.
         ticket: String,
     },
-}
-
-#[cfg(feature = "tor-transport")]
-#[derive(Debug)]
-struct TorStorageDirs {
-    root: PathBuf,
-    state_dir: PathBuf,
-    cache_dir: PathBuf,
-}
-
-#[cfg(feature = "tor-transport")]
-impl TorStorageDirs {
-    fn new() -> Result<Self> {
-        let root = env::temp_dir().join(format!(
-            "iroh-gossip-chat-tor-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let state_dir = root.join("state");
-        let cache_dir = root.join("cache");
-        fs::create_dir_all(&state_dir)?;
-        fs::create_dir_all(&cache_dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
-            fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700))?;
-            fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o700))?;
-        }
-        Ok(Self {
-            root,
-            state_dir,
-            cache_dir,
-        })
-    }
 }
 
 fn get_data_dir() -> PathBuf {
@@ -1599,185 +1553,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
-}
-
-// ── Tor transport helpers ─────────────────────────────────────────────────────
-
-#[cfg(feature = "tor-transport")]
-fn format_tor_bootstrap_status_line(status: impl fmt::Display) -> String {
-    format!("> Tor bootstrap status: {status}")
-}
-
-#[cfg(feature = "tor-transport")]
-fn print_tor_bootstrap_status(status: impl fmt::Display, last_rendered: &mut Option<String>) {
-    let rendered = format_tor_bootstrap_status_line(status);
-    if last_rendered.as_deref() != Some(rendered.as_str()) {
-        println!("{rendered}");
-        *last_rendered = Some(rendered);
-    }
-}
-
-#[cfg(feature = "tor-transport")]
-fn tor_client_config(tor_dirs: &TorStorageDirs) -> Result<TorClientConfig> {
-    TorClientConfigBuilder::from_directories(&tor_dirs.state_dir, &tor_dirs.cache_dir)
-        .build()
-        .std_context("build Arti Tor client config")
-}
-
-/// Compute exponential backoff delay for the given attempt number.
-///
-/// Starts at 1 second, doubles each attempt, capped at `max_delay`.
-#[cfg(feature = "tor-transport")]
-fn backoff_delay(attempt: u32, max_delay: Duration) -> Duration {
-    let secs = 1u64 << attempt.saturating_sub(1).min(30);
-    Duration::from_secs(secs).min(max_delay)
-}
-
-/// Bootstrap Tor with exponential backoff on failure.
-///
-/// Retries the bootstrap process when:
-/// - The bootstrap task itself returns an error
-/// - Bootstrap completes but Tor is not ready for traffic
-///
-/// Uses exponential backoff starting at 1s, doubling each attempt,
-/// capped at 120s. Prints status updates after each failed attempt.
-#[cfg(feature = "tor-transport")]
-async fn bootstrap_tor(
-    tor_dirs: &TorStorageDirs,
-) -> Result<(Arc<TorClient<PreferredRuntime>>, String)> {
-    let tor_config = tor_client_config(tor_dirs)?;
-    let tor_client = TorClient::builder()
-        .config(tor_config)
-        .bootstrap_behavior(BootstrapBehavior::Manual)
-        .create_unbootstrapped_async()
-        .await
-        .anyerr()?;
-
-    let max_retries = 10u32;
-    for attempt in 1..=max_retries {
-        let mut last_bootstrap_status = None;
-        print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
-        let mut bootstrap_events = tor_client.bootstrap_events();
-        let mut bootstrap_task = {
-            let tor_client = Arc::clone(&tor_client);
-            tokio::spawn(async move { tor_client.bootstrap().await })
-        };
-        let mut bootstrap_task_done = false;
-
-        let result = 'inner: loop {
-            if tor_client.bootstrap_status().ready_for_traffic() {
-                break 'inner Ok(());
-            }
-
-            if bootstrap_task_done {
-                match bootstrap_events.next().await {
-                    Some(status) => {
-                        print_tor_bootstrap_status(status, &mut last_bootstrap_status);
-                        continue;
-                    }
-                    None => {
-                        break 'inner Err("bootstrap event stream ended unexpectedly".to_string());
-                    }
-                }
-            }
-
-            tokio::select! {
-                biased;
-                result = &mut bootstrap_task => {
-                    match result {
-                        Ok(Ok(())) => {
-                            bootstrap_task_done = true;
-                            print_tor_bootstrap_status(tor_client.bootstrap_status(), &mut last_bootstrap_status);
-                        }
-                        Ok(Err(err)) => {
-                            break 'inner Err(format!("bootstrap task failed: {err:#}"));
-                        }
-                        Err(err) => {
-                            break 'inner Err(format!("join bootstrap task: {err}"));
-                        }
-                    }
-                }
-                maybe_status = bootstrap_events.next() => {
-                    if let Some(status) = maybe_status {
-                        print_tor_bootstrap_status(status, &mut last_bootstrap_status);
-                    }
-                }
-            }
-        };
-
-        match result {
-            Ok(()) if tor_client.bootstrap_status().ready_for_traffic() => {
-                return Ok((tor_client, "> Tor is ready.".to_string()));
-            }
-            Ok(()) => {
-                // Bootstrap completed but Tor didn't become ready — rare but retryable.
-                println!(
-                    "> Tor bootstrap attempt {attempt}/{max_retries}: completed but not ready, retrying..."
-                );
-            }
-            Err(msg) => {
-                println!(
-                    "> Tor bootstrap attempt {attempt}/{max_retries} failed: {msg}"
-                );
-            }
-        }
-
-        if attempt < max_retries {
-            let delay = backoff_delay(attempt, Duration::from_secs(120));
-            println!("> Retrying Tor bootstrap in {}s...", delay.as_secs());
-            tokio::time::sleep(delay).await;
-        }
-    }
-
-    bail_any!(
-        "Tor bootstrap failed after {max_retries} attempts — check your Tor network connectivity"
-    );
-}
-
-/// Background task that monitors Tor client health and reconnects with
-/// exponential backoff if the Tor connection drops.
-///
-/// Checks every 30 seconds whether Tor is still ready for traffic.
-/// When a drop is detected, re-bootstraps using exponential backoff
-/// (1s base, 120s cap) and sends status updates through `status_tx`.
-#[cfg(feature = "tor-transport")]
-async fn monitor_tor_health(
-    tor_client: Arc<TorClient<PreferredRuntime>>,
-    status_tx: tokio::sync::mpsc::UnboundedSender<String>,
-) {
-    let mut check_interval = tokio::time::interval(Duration::from_secs(30));
-    check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            _ = check_interval.tick() => {
-                if !tor_client.bootstrap_status().ready_for_traffic() {
-                    let _ = status_tx.send("⚠ Tor connection lost. Reconnecting...".to_string());
-
-                    for attempt in 1u32.. {
-                        match tor_client.bootstrap().await {
-                            Ok(()) if tor_client.bootstrap_status().ready_for_traffic() => {
-                                let _ = status_tx.send("✓ Tor reconnected successfully.".to_string());
-                                break;
-                            }
-                            Ok(()) => {
-                                let _ = status_tx.send(
-                                    format!("Tor re-bootstrap attempt {attempt}: completed but not ready, retrying...")
-                                );
-                            }
-                            Err(err) => {
-                                let _ = status_tx.send(
-                                    format!("Tor re-bootstrap attempt {attempt} failed: {err:#}")
-                                );
-                            }
-                        }
-                        let delay = backoff_delay(attempt, Duration::from_secs(120));
-                        tokio::time::sleep(delay).await;
-                    }
-                }
-            }
-        }
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
