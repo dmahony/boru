@@ -1,18 +1,19 @@
 //! # GUI chat frontend for iroh-gossip (iced 0.14)
 //!
-//! Alternative frontend using the iced GUI toolkit.  Networking runs in
-//! background tokio tasks; events flow through channels to iced.
+//! Modern inbox-style UI: shows a list of recent chats on startup,
+//! then opens a room when you click one — like Telegram / Signal.
 //!
 //! ## Build / run
 //!
 //! ```text
-//! cargo chat-gui open              # open a room
-//! cargo chat-gui join <ticket>     # join a room
+//! cargo chat-gui                    # show recent-chat list
+//! cargo chat-gui open               # open a new room
+//! cargo chat-gui join <ticket>      # join a room
 //! ```
 //!
 //! Long form:
 //! ```text
-//! cargo run --features gui --example chat-gui -- open
+//! cargo run --features gui --example chat-gui --
 //! ```
 
 use std::{
@@ -33,12 +34,12 @@ use iced::{
     Alignment, Color, Element, Length, Subscription, Task, Theme,
 };
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, PublicKey, RelayMode,
-    RelayUrl, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr,
+    PublicKey, RelayMode, RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
 use iroh_gossip::{
-    api::{Event as GossipEvent, GossipReceiver, GossipSender},
+    api::{Event as GossipEvent, GossipReceiver, GossipSender, GossipTopic},
     chat_core::friend_ping::{
         FriendEvent, FriendPingManager, FriendStatus, PingHandler, DEFAULT_CONNECT_TIMEOUT,
         DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
@@ -51,7 +52,6 @@ use iroh_gossip::{
 };
 use n0_error::{bail_any, Result, StdResultExt};
 use n0_future::{task, StreamExt};
-use tokio::sync::mpsc;
 
 fn ensure_graphical_session() {
     #[cfg(target_os = "linux")]
@@ -82,13 +82,16 @@ struct Args {
     name: Option<String>,
     #[clap(long, default_value = "0")]
     bind_port: u16,
+    /// Optional subcommand.  When omitted, shows the chat list (inbox).
     #[clap(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Parser, Debug)]
 enum Command {
+    /// Open a new or saved chat room.
     Open { topic: Option<TopicId> },
+    /// Join an existing chat room via ticket.
     Join { ticket: String },
 }
 
@@ -147,9 +150,6 @@ fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf
     }
 }
 
-// ── Protocol types ────────────────────────────────────────────────────
-// (imported from iroh_gossip::chat_core)
-
 // ── Channel messages & app state ──────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -165,28 +165,57 @@ struct ChatLine {
     text: String,
 }
 
-// (imported from iroh_gossip::chat_core)
+/// Which screen is currently visible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Screen {
+    ChatList,
+    Chat { topic: TopicId },
+}
 
 #[derive(Debug, Clone)]
 enum AppMessage {
+    // ── Navigation ──
+    GoToChatList,
+    OpenRoom(TopicId),
+    RoomOpened { topic: TopicId, ticket: String },
+    RoomJoinFailed(String),
+    // ── Chat list ──
+    JoinTicketInputChanged(String),
+    CreateNewRoom,
+    JoinFromTicket,
+    // ── Chat ──
     InputChanged(String),
     SendPressed,
     ToggleDark(bool),
     Tick,
     AcceptDownload,
     CopyToClipboard(String),
+    NetEvent(NetEvent),
+    FriendEvent(FriendEvent),
 }
 
+// ── App state ─────────────────────────────────────────────────────────
+
 struct AppState {
+    // ── Navigation ──
+    screen: Screen,
+
+    // ── Runtime / network ──
     runtime_handle: tokio::runtime::Handle,
     local_label: String,
     local_public: PublicKey,
     secret_key: SecretKey,
-    sender: GossipSender,
+    gossip: Gossip,
+    sender: Option<GossipSender>,
     blob_store: MemStore,
     endpoint: Endpoint,
     router: iroh::protocol::Router,
-    net_rx: Arc<Mutex<mpsc::UnboundedReceiver<NetEvent>>>,
+    net_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<NetEvent>>>,
+    net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+    /// Handle to abort the current gossip forwarding task.
+    forward_handle: Option<task::JoinHandle<()>>,
+
+    // ── Chat screen state ──
     messages: Vec<ChatLine>,
     input_value: String,
     ticket: String,
@@ -198,10 +227,16 @@ struct AppState {
     peer_count: usize,
     dark_mode: bool,
     pending_file: Option<(String, String)>,
+
+    // ── Chat list state ──
+    room_history: iroh_gossip::room_history::RoomHistoryStore,
+    join_ticket_input: String,
+
+    // ── Friends ──
     friends: FriendsStore,
     friends_dirty: bool,
     friend_mgr: FriendPingManager,
-    friend_events_rx: Arc<Mutex<mpsc::UnboundedReceiver<FriendEvent>>>,
+    friend_events_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<FriendEvent>>>,
 }
 
 impl AppState {
@@ -237,70 +272,82 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().std_context("failed to create tokio runtime")?;
     let runtime_handle = runtime.handle().clone();
 
+    // Determine initial topic from CLI
+    let initial_topic: Option<TopicId> = match &args.command {
+        Some(Command::Open { topic }) => {
+            let data_dir = get_data_dir();
+            let t = match topic {
+                Some(t) => *t,
+                None => match RoomStore::load_or_none(&data_dir) {
+                    Some(store) => {
+                        println!("> reusing saved room topic {}", store.topic);
+                        store.topic
+                    }
+                    None => {
+                        let t = TopicId::from_bytes(rand::random());
+                        println!("> opening new chat room for topic {t}");
+                        let room = RoomStore::new(&data_dir, t);
+                        if let Err(err) = room.save() {
+                            eprintln!("warning: failed to save room metadata: {err}");
+                        }
+                        t
+                    }
+                },
+            };
+            Some(t)
+        }
+        Some(Command::Join { ticket }) => {
+            match Ticket::from_str(ticket) {
+                Ok(t) => {
+                    println!("> joining chat room for topic {}", t.topic);
+                    Some(t.topic)
+                }
+                Err(e) => {
+                    eprintln!("error: failed to parse ticket: {e}");
+                    None
+                }
+            }
+        }
+        None => {
+            println!("> no subcommand — showing chat list");
+            None
+        }
+    };
+
+    let (secret_key, key_path) = match args.secret_key.as_ref() {
+        None => load_or_generate_secret_key()?,
+        Some(key) => (key.parse()?, PathBuf::from("<passed via cli flag>")),
+    };
+    let local_public = secret_key.public();
+    let local_label = args
+        .name
+        .clone()
+        .unwrap_or_else(|| local_public.fmt_short().to_string());
+    println!("> our public key: {local_public}");
+    println!("> identity file: {}", key_path.display());
+
+    let relay_mode = match (args.no_relay, args.relay.clone()) {
+        (true, Some(_)) => bail_any!("You cannot set --no-relay and --relay at the same time"),
+        (true, None) => RelayMode::Disabled,
+        (false, None) => RelayMode::Default,
+        (false, Some(url)) => RelayMode::Custom(url.into()),
+    };
+    println!("> relay servers: {}", fmt_relay_mode(&relay_mode));
+
+    // ── Build endpoint, gossip, router (no topic subscription yet) ──
+
     let (
-        topic,
-        peers,
-        secret_key,
-        local_public,
-        local_label,
-        relay_mode,
         endpoint,
+        gossip,
         blob_store,
-        sender,
-        net_rx,
-        ticket,
         router,
+        net_rx,
+        net_tx,
+        friend_mgr,
+        friend_events_rx,
+        friends,
+        room_history,
     ) = runtime.block_on(async {
-        let (topic, peers) = match &args.command {
-            Command::Open { topic } => {
-                let data_dir = get_data_dir();
-                let topic = match topic {
-                    Some(t) => *t,
-                    None => match RoomStore::load_or_none(&data_dir) {
-                        Some(store) => {
-                            println!("> reusing saved room topic {}", store.topic);
-                            store.topic
-                        }
-                        None => {
-                            let t = TopicId::from_bytes(rand::random());
-                            println!("> opening new chat room for topic {t}");
-                            let room = RoomStore::new(&data_dir, t);
-                            if let Err(err) = room.save() {
-                                eprintln!("warning: failed to save room metadata: {err}");
-                            }
-                            t
-                        }
-                    },
-                };
-                (topic, vec![])
-            }
-            Command::Join { ticket } => {
-                let Ticket { topic, peers } = Ticket::from_str(ticket)?;
-                println!("> joining chat room for topic {topic}");
-                (topic, peers)
-            }
-        };
-
-        let (secret_key, key_path) = match args.secret_key.as_ref() {
-            None => load_or_generate_secret_key()?,
-            Some(key) => (key.parse()?, PathBuf::from("<passed via cli flag>")),
-        };
-        let local_public = secret_key.public();
-        let local_label = args
-            .name
-            .clone()
-            .unwrap_or_else(|| local_public.fmt_short().to_string());
-        println!("> our public key: {local_public}");
-        println!("> identity file: {}", key_path.display());
-
-        let relay_mode = match (args.no_relay, args.relay.clone()) {
-            (true, Some(_)) => bail_any!("You cannot set --no-relay and --relay at the same time"),
-            (true, None) => RelayMode::Disabled,
-            (false, None) => RelayMode::Default,
-            (false, Some(url)) => RelayMode::Custom(url.into()),
-        };
-        println!("> relay servers: {}", fmt_relay_mode(&relay_mode));
-
         let memory_lookup = MemoryLookup::new();
 
         let endpoint = {
@@ -321,17 +368,11 @@ fn main() -> Result<()> {
         if !matches!(relay_mode, RelayMode::Disabled) {
             endpoint.online().await;
         }
-        let local_peer_addr = endpoint.addr();
         println!("> our endpoint id: {}", endpoint.id());
 
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let blob_store = MemStore::new();
         let blobs_protocol = BlobsProtocol::new(&blob_store, None);
-        let ticket = Ticket {
-            topic,
-            peers: vec![local_peer_addr],
-        };
-        println!("> ticket to join us: {ticket}");
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
@@ -339,113 +380,103 @@ fn main() -> Result<()> {
             .accept(FRIEND_PING_ALPN, PingHandler)
             .spawn();
 
-        let peer_ids = peers.iter().map(|p| p.id).collect::<Vec<_>>();
-        for peer in &peers {
-            memory_lookup.set_endpoint_info(peer.clone());
-        }
-        let (sender, receiver) = gossip.subscribe(topic, peer_ids).await?.split();
-
-        if let Some(ref name) = args.name {
-            let msg = SignedMessage::sign_and_encode(
-                &secret_key,
-                &Message::AboutMe { name: name.clone() },
-            )?;
-            sender.broadcast(msg).await?;
+        // Load or create the persistent friends list
+        let data_dir = get_data_dir();
+        let friends = FriendsStore::load_or_default(&data_dir);
+        if friends.len() > 0 {
+            println!("> loaded {} friend(s) from disk", friends.len());
         }
 
-        let (net_tx, net_rx_tmp) = mpsc::unbounded_channel::<NetEvent>();
+        // Load room history
+        let room_history = iroh_gossip::room_history::RoomHistoryStore::load_or_default(&data_dir);
+        if !room_history.is_empty() {
+            println!("> loaded {} room(s) from history", room_history.len());
+        }
+
+        // Network event channel (shared across rooms)
+        let (net_tx, net_rx_tmp) = tokio::sync::mpsc::unbounded_channel::<NetEvent>();
         let net_rx = Arc::new(Mutex::new(net_rx_tmp));
-        task::spawn(forward_gossip_events(receiver, net_tx));
+
+        // Friend ping manager
+        let _guard = runtime.handle().enter();
+        let (friend_mgr, friend_events_rx_tmp) = FriendPingManager::spawn(
+            endpoint.clone(),
+            DEFAULT_PING_INTERVAL,
+            DEFAULT_CONNECT_TIMEOUT,
+        );
+        drop(_guard);
+        let friend_events_rx = Arc::new(Mutex::new(friend_events_rx_tmp));
+
+        // Register existing friends (we're already inside runtime.block_on, so .await directly)
+        for peer in friends
+            .iter()
+            .filter_map(|(id, _)| id.parse_public_key().ok())
+        {
+            let _ = friend_mgr.add_friend(peer, None).await;
+        }
 
         Result::<_>::Ok((
-            topic,
-            peers,
-            secret_key,
-            local_public,
-            local_label,
-            relay_mode,
             endpoint,
+            gossip,
             blob_store,
-            sender,
-            net_rx,
-            ticket.to_string(),
             router,
+            net_rx,
+            net_tx,
+            friend_mgr,
+            friend_events_rx,
+            friends,
+            room_history,
         ))
     })?;
 
-    // Load or create the persistent friends list
-    let data_dir = get_data_dir();
-    let friends = FriendsStore::load_or_default(&data_dir);
-    if friends.len() > 0 {
-        println!("> loaded {} friend(s) from disk", friends.len());
-    }
-
-    // ── Friend ping manager ────────────────────────────────────
-    // Enter the Tokio runtime context so tokio::task::spawn inside
-    // FriendPingManager::spawn has a reactor to attach to.  The spawn
-    // is non-async (it fires a task then returns), so we just need a
-    // momentary EnterGuard.
-    let _guard = runtime.handle().enter();
-    let (friend_mgr, friend_events_rx_tmp) = FriendPingManager::spawn(
-        endpoint.clone(),
-        DEFAULT_PING_INTERVAL,
-        DEFAULT_CONNECT_TIMEOUT,
-    );
-    drop(_guard);
-    let friend_events_rx = Arc::new(Mutex::new(friend_events_rx_tmp));
-
-    // Register existing friends with the ping manager
-    // Use the outer runtime_handle (not Handle::current) because we dropped
-    // the EnterGuard above and this thread is no longer inside a tokio context.
-    for peer in friends
-        .iter()
-        .filter_map(|(id, _)| id.parse_public_key().ok())
-    {
-        let _ = runtime_handle
-            .block_on(async { friend_mgr.add_friend(peer, None).await });
-    }
-
     let app = AppState {
+        screen: Screen::ChatList,
         runtime_handle: runtime_handle.clone(),
         local_label,
         local_public,
         secret_key,
-        sender,
+        gossip,
+        sender: None,
         blob_store,
         endpoint,
         router,
         net_rx,
-        messages: vec![
-            ChatLine { kind: ChatLineKind::System, text: format!("Ticket to join this room: {}", ticket) },
-            ChatLine { kind: ChatLineKind::System, text: if peers.is_empty() { "Waiting for peers to join us...".into() } else { format!("Trying to connect to {} peers...", peers.len()) } },
-            ChatLine { kind: ChatLineKind::System, text: "Type a message and press Enter.  /send <path> shares a file  |  /help lists commands".into() },
-        ],
+        net_tx,
+        forward_handle: None,
+        messages: vec![],
         input_value: String::new(),
-        ticket: ticket.clone(),
+        ticket: String::new(),
         transport_status: "Direct iroh transport is ready.".into(),
         notice: "Direct iroh transport is operational.".into(),
-        topic: topic.to_string(),
+        topic: String::new(),
         relay_info: fmt_relay_mode(&relay_mode),
-        connected: true,
-        peer_count: peers.len(),
+        connected: false,
+        peer_count: 0,
         dark_mode: false,
         pending_file: None,
+        room_history,
+        join_ticket_input: String::new(),
         friends,
         friends_dirty: false,
         friend_mgr,
         friend_events_rx,
     };
 
-    let app_cell = std::sync::Mutex::new(Some(app));
+    let app_cell = std::sync::Mutex::new(Some((app, initial_topic)));
 
     iced::application(
         move || {
-            let state = app_cell
+            let (state, init_topic) = app_cell
                 .lock()
                 .unwrap()
                 .take()
-                .expect("iced_chat boot called more than once");
-            (state, iced::Task::none())
+                .expect("chat-gui boot called more than once");
+            let task = if let Some(topic) = init_topic {
+                Task::done(AppMessage::OpenRoom(topic))
+            } else {
+                Task::none()
+            };
+            (state, task)
         },
         update,
         view,
@@ -458,7 +489,12 @@ fn main() -> Result<()> {
             Theme::Light
         }
     })
-    .title(|state: &AppState| format!("iroh-gossip Chat — {}", state.local_label))
+    .title(|state: &AppState| {
+        match state.screen {
+            Screen::ChatList => "Iroh Gossip Chat — Inbox".to_string(),
+            Screen::Chat { .. } => format!("iroh-gossip Chat — {}", state.local_label),
+        }
+    })
     .run()
     .unwrap_or_else(|err| {
         eprintln!("Failed to launch iced GUI: {err}");
@@ -469,43 +505,229 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+// ── Helpers: room switching ───────────────────────────────────────────
+
+/// Subscribe to a gossip topic and set up event forwarding.
+/// Returns the ticket string.  Runs inside the tokio runtime.
+async fn subscribe_to_topic(
+    gossip: &Gossip,
+    endpoint: &Endpoint,
+    topic: TopicId,
+    secret_key: &SecretKey,
+    label: &str,
+    net_tx: &tokio::sync::mpsc::UnboundedSender<NetEvent>,
+    forward_handle: &mut Option<task::JoinHandle<()>>,
+    sender_out: &mut Option<GossipSender>,
+) -> Result<String, String> {
+    // Abort any existing forwarding task
+    if let Some(handle) = forward_handle.take() {
+        handle.abort();
+    }
+
+    let sub: GossipTopic = gossip.subscribe(topic, vec![]).await.map_err(|e| e.to_string())?;
+    let (sender, receiver) = sub.split();
+    *sender_out = Some(sender.clone());
+
+    let ticket = Ticket {
+        topic,
+        peers: vec![EndpointAddr::new(endpoint.id())],
+    };
+    let ticket_str = ticket.to_string();
+
+    // Spawn forwarding task
+    let tx = net_tx.clone();
+    let handle = task::spawn(async move {
+        forward_gossip_events(receiver, tx).await;
+    });
+    *forward_handle = Some(handle);
+
+    // Broadcast our presence
+    let msg = SignedMessage::sign_and_encode(
+        secret_key,
+        &Message::AboutMe { name: label.to_string() },
+    ).map_err(|e| e.to_string())?;
+    let _ = sender.broadcast(msg).await;
+
+    Ok(ticket_str)
+}
+
 // ── Update ────────────────────────────────────────────────────────────
 
 fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
     match message {
-        AppMessage::Tick => {
-            // Poll network events
-            let connected = {
-                let mut guard = match state.net_rx.try_lock() {
-                    Ok(g) => g,
-                    Err(_) => return Task::none(),
-                };
-                loop {
-                    match guard.try_recv() {
-                        Ok(event) => {
-                            drop(guard);
-                            handle_net_event(state, event);
-                            guard = match state.net_rx.try_lock() {
-                                Ok(g) => g,
-                                Err(_) => return Task::none(),
-                            };
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            drop(guard);
-                            state.push_system("Network channel closed.".into());
-                            state.connected = false;
-                            break;
-                        }
+        // ── Navigation ──
+        AppMessage::GoToChatList => {
+            // Save current room to history
+            let preview = state.messages.last()
+                .map(|e| if e.text.len() > 60 { format!("{}…", &e.text[..60]) } else { e.text.clone() })
+                .unwrap_or_default();
+            if !state.topic.is_empty() {
+                if let Ok(topic) = TopicId::from_str(&state.topic) {
+                    state.room_history.upsert(topic, &state.local_label, true);
+                    if !preview.is_empty() {
+                        state.room_history.update_preview(&topic, &preview);
                     }
+                    let _ = state.room_history.save();
                 }
-                state.connected
-            };
-            if !connected {
-                return Task::none();
             }
 
-            // Poll friend events (simple non-reentrant drain)
+            // Abort forwarding
+            if let Some(handle) = state.forward_handle.take() {
+                handle.abort();
+            }
+            state.sender = None;
+            state.messages.clear();
+            state.pending_file = None;
+            state.connected = false;
+            state.screen = Screen::ChatList;
+            return Task::none();
+        }
+
+        AppMessage::OpenRoom(topic) => {
+            let gossip = state.gossip.clone();
+            let endpoint = state.endpoint.clone(); // Endpoint is Clone
+            let sk = state.secret_key.clone();
+            let label = state.local_label.clone();
+            let net_tx = state.net_tx.clone();
+
+            Task::perform(
+                async move {
+                    let mut fwd = None;
+                    let mut sender = None;
+                    let ticket_str = subscribe_to_topic(
+                        &gossip, &endpoint, topic, &sk, &label, &net_tx, &mut fwd, &mut sender,
+                    ).await?;
+                    // We can't return the JoinHandle from here, so it lives until
+                    // GoToChatList or another OpenRoom replaces it.
+                    // Store sender for the mapping callback.
+                    Ok::<(TopicId, String, Option<GossipSender>), String>((topic, ticket_str, sender))
+                },
+                move |result| match result {
+                    Ok((topic, ticket_str, _sender)) => {
+                        // The sender is stored in the closure but we need it in state.
+                        // RoomOpened handler will set it up.
+                        AppMessage::RoomOpened { topic, ticket: ticket_str }
+                    }
+                    Err(e) => AppMessage::RoomJoinFailed(e),
+                },
+            )
+        }
+
+        AppMessage::RoomOpened { topic, ticket } => {
+            state.screen = Screen::Chat { topic };
+            state.topic = topic.to_string();
+            state.ticket = ticket.clone();
+            state.messages.clear();
+            state.connected = true;
+            state.push_system(format!("Ticket to join this room: {ticket}"));
+            state.push_system("Type a message and press Enter.  /send <path> shares a file  |  /help lists commands".into());
+            // Update room history
+            state.room_history.upsert(topic, &state.local_label, true);
+            let _ = state.room_history.save();
+            return Task::none();
+        }
+
+        AppMessage::RoomJoinFailed(e) => {
+            state.push_system(format!("Failed to join room: {e}"));
+            return Task::none();
+        }
+
+        // ── Chat list ──
+        AppMessage::JoinTicketInputChanged(text) => {
+            state.join_ticket_input = text;
+            return Task::none();
+        }
+
+        AppMessage::CreateNewRoom => {
+            let topic = TopicId::from_bytes(rand::random());
+            return Task::done(AppMessage::OpenRoom(topic));
+        }
+
+        AppMessage::JoinFromTicket => {
+            let input = state.join_ticket_input.clone();
+            return match Ticket::from_str(&input) {
+                Ok(ticket) => Task::done(AppMessage::OpenRoom(ticket.topic)),
+                Err(e) => {
+                    state.push_system(format!("Invalid ticket: {e}"));
+                    Task::none()
+                }
+            };
+        }
+
+        // ── Chat events ──
+        AppMessage::NetEvent(event) => {
+            handle_net_event(state, event);
+            return Task::none();
+        }
+
+        AppMessage::FriendEvent(event) => {
+            let fid = FriendId::from_public_key(match &event {
+                FriendEvent::StatusChanged { peer, .. } => *peer,
+            });
+            let label = state
+                .friends
+                .get(&fid)
+                .map(|r| r.display_label(&fid))
+                .unwrap_or_else(|| fid.as_str().to_string());
+            match event {
+                FriendEvent::StatusChanged { peer, status } => {
+                    let fid = FriendId::from_public_key(peer);
+                    match status {
+                        FriendStatus::Online => {
+                            state.friends.mark_online(fid);
+                            state.friends_dirty = true;
+                            state.push_system(format!("Friend {label} is now ONLINE"));
+                        }
+                        FriendStatus::Offline => {
+                            state.friends.mark_offline(fid);
+                            state.friends_dirty = true;
+                            state.push_system(format!("Friend {label} is now offline"));
+                        }
+                        FriendStatus::Unknown => {}
+                    }
+                }
+            }
+            if state.friends_dirty {
+                let _ = state.friends.save();
+                state.friends_dirty = false;
+            }
+            return Task::none();
+        }
+
+        AppMessage::Tick => {
+            // Collect pending net events, then process them outside the lock
+            let mut pending_events: Vec<NetEvent> = Vec::new();
+
+            if let Screen::Chat { .. } = state.screen {
+                let mut disconnected = false;
+                {
+                    let mut guard = match state.net_rx.try_lock() {
+                        Ok(g) => g,
+                        Err(_) => return Task::none(),
+                    };
+                    loop {
+                        match guard.try_recv() {
+                            Ok(event) => pending_events.push(event),
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                disconnected = true;
+                                break;
+                            }
+                        }
+                    }
+                } // guard dropped here
+                if disconnected {
+                    state.push_system("Network channel closed.".into());
+                    state.connected = false;
+                }
+            }
+
+            // Process net events after releasing the lock
+            for event in pending_events {
+                handle_net_event(state, event);
+            }
+
+            // Poll friend events regardless of screen
             let friend_rx = Arc::clone(&state.friend_events_rx);
             if let Ok(mut friend_guard) = friend_rx.try_lock() {
                 loop {
@@ -531,8 +753,8 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
                                 FriendStatus::Unknown => {}
                             }
                         }
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
                     }
                 }
             }
@@ -541,19 +763,121 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
                 let _ = state.friends.save();
                 state.friends_dirty = false;
             }
+
+            return Task::none();
         }
-        AppMessage::InputChanged(value) => state.input_value = value,
-        AppMessage::SendPressed => handle_send(state),
-        AppMessage::AcceptDownload => handle_download(state),
-        AppMessage::ToggleDark(dark) => state.dark_mode = dark,
+
+        AppMessage::InputChanged(value) => {
+            state.input_value = value;
+            return Task::none();
+        }
+        AppMessage::SendPressed => {
+            handle_send(state);
+            return Task::none();
+        }
+        AppMessage::AcceptDownload => {
+            handle_download(state);
+            return Task::none();
+        }
+        AppMessage::ToggleDark(dark) => {
+            state.dark_mode = dark;
+            return Task::none();
+        }
         AppMessage::CopyToClipboard(text) => return clipboard::write(text),
     }
-    Task::none()
 }
 
 // ── View ──────────────────────────────────────────────────────────────
 
 fn view(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Renderer> {
+    match state.screen {
+        Screen::ChatList => view_chat_list(state),
+        Screen::Chat { .. } => view_chat_screen(state),
+    }
+}
+
+/// Render the chat list (inbox) screen.
+fn view_chat_list(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Renderer> {
+    let header = column![
+        text("Iroh Gossip Chat").size(22),
+        text(format!("Identity: {}  |  Relay: {}", state.local_label, state.relay_info))
+            .size(11)
+            .color(Color::from_rgb(0.5, 0.5, 0.5)),
+    ]
+    .spacing(2);
+
+    let join_input = text_input("Paste ticket to join a room…", &state.join_ticket_input)
+        .on_input(AppMessage::JoinTicketInputChanged)
+        .on_submit(AppMessage::JoinFromTicket)
+        .width(Length::Fill);
+
+    let action_row = row![
+        button(
+            row![text(" + ").size(16), text("New Chat").size(14)]
+                .align_y(Alignment::Center)
+                .spacing(4),
+        )
+        .on_press(AppMessage::CreateNewRoom)
+        .padding(8),
+        button(
+            row![text(" ⇄ ").size(16), text("Join via Ticket").size(14)]
+                .align_y(Alignment::Center)
+                .spacing(4),
+        )
+        .on_press(AppMessage::JoinFromTicket)
+        .padding(8),
+    ]
+    .spacing(8);
+
+    let mut list = column![].spacing(2).width(Length::Fill);
+
+    if state.room_history.is_empty() {
+        list = list.push(
+            text("No recent chats. Create a new chat or join an existing one.")
+                .color(Color::from_rgb(0.5, 0.5, 0.5))
+                .size(13),
+        );
+    } else {
+        for room in &state.room_history.rooms {
+            let topic = room.topic;
+            let display_name = room.display_name();
+            let preview = if room.last_preview.is_empty() {
+                if room.is_owner { "Created this room" } else { "Joined this room" }
+            } else {
+                &room.last_preview
+            };
+
+            let row_btn = button(
+                column![
+                    row![text(display_name).size(14).width(Length::Fill)],
+                    row![text(preview)
+                        .size(11)
+                        .color(Color::from_rgb(0.5, 0.5, 0.5))
+                        .width(Length::Fill)],
+                ]
+                .spacing(2)
+                .padding(8),
+            )
+            .on_press(AppMessage::OpenRoom(topic))
+            .width(Length::Fill)
+            .padding(0);
+
+            list = list.push(container(row_btn).width(Length::Fill));
+        }
+    }
+
+    let body = column![header, action_row, join_input, scrollable(list).height(Length::Fill)]
+        .spacing(8)
+        .padding(12);
+
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Render the chat screen (messages for the current room).
+fn view_chat_screen(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Renderer> {
     let sys_color = if state.dark_mode {
         Color::from_rgb(0.6, 0.6, 0.6)
     } else {
@@ -571,20 +895,28 @@ fn view(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Renderer> {
         if state.connected { "yes" } else { "no" },
         state.relay_info,
     );
-    let status_panel = container(column![text(status_text).size(13)].spacing(2))
-        .padding(8)
-        .style(move |_| {
-            let bg = if state.dark_mode {
-                Color::from_rgb(0.18, 0.18, 0.20)
-            } else {
-                Color::from_rgb(0.93, 0.93, 0.96)
-            };
-            container::Style::default().background(bg).border(
-                border::Border::default()
-                    .width(1)
-                    .color(Color::from_rgb(0.6, 0.6, 0.6)),
-            )
-        });
+
+    let back_btn = button(" ← ").on_press(AppMessage::GoToChatList);
+
+    let status_panel = container(
+        column![
+            row![back_btn, text(status_text).size(13).width(Length::Fill)],
+        ]
+        .spacing(2),
+    )
+    .padding(8)
+    .style(move |_| {
+        let bg = if state.dark_mode {
+            Color::from_rgb(0.18, 0.18, 0.20)
+        } else {
+            Color::from_rgb(0.93, 0.93, 0.96)
+        };
+        container::Style::default().background(bg).border(
+            border::Border::default()
+                .width(1)
+                .color(Color::from_rgb(0.6, 0.6, 0.6)),
+        )
+    });
 
     let ticket_prefix: &str = "Ticket to join this room: ";
 
@@ -726,19 +1058,46 @@ fn handle_net_event(state: &mut AppState, event: NetEvent) {
                 ));
             }
             Message::Goodbye => {
-                // Handled via NeighborDown (cleaner, covers both clean and unclean exits)
+                // Handled via NeighborDown
             }
         },
         NetEvent::NeighborUp { peer } => {
             state.push_system(format!("{} joined the chat", peer.fmt_short()));
+            // Track friend state
+            let fid = FriendId::from_public_key(peer);
+            if state.friends.get(&fid).is_some() {
+                state.friends.mark_online(fid);
+                state.friends_dirty = true;
+            }
         }
         NetEvent::NeighborDown { peer } => {
             state.push_system(format!("{} left the chat", peer.fmt_short()));
+            // Track friend state
+            let fid = FriendId::from_public_key(peer);
+            if state.friends.get(&fid).is_some() {
+                state.friends.mark_offline(fid);
+                state.friends_dirty = true;
+            }
         }
         NetEvent::Error(err) => state.push_system(format!("Error: {err}")),
         NetEvent::Closed => {
             state.push_system("The gossip receiver closed.".into());
             state.connected = false;
+        }
+    }
+    // Update preview in room history
+    if !state.topic.is_empty() {
+        if let Ok(topic) = TopicId::from_str(&state.topic) {
+            if let Some(last) = state.messages.last() {
+                let preview = if last.text.len() > 60 {
+                    format!("{}…", &last.text[..60])
+                } else {
+                    last.text.clone()
+                };
+                if !preview.is_empty() && preview != "Ticket to join this room: " {
+                    state.room_history.update_preview(&topic, &preview);
+                }
+            }
         }
     }
 }
@@ -783,7 +1142,9 @@ fn handle_send(state: &mut AppState) {
                 ticket: ticket_str.clone(),
             },
         ) {
-            let _ = rt.block_on(async { state.sender.broadcast(encoded).await });
+            if let Some(ref sender) = state.sender {
+                let _ = rt.block_on(async { sender.broadcast(encoded).await });
+            }
         }
         state.push_local_msg(format!("/send {path}"));
         state.push_system(format!("Sharing: {filename} (ticket: {ticket_str})"));
@@ -900,7 +1261,9 @@ fn handle_send(state: &mut AppState) {
     };
     let rt = state.runtime_handle.clone();
     if let Ok(encoded) = SignedMessage::sign_and_encode(&state.secret_key, &msg) {
-        let _ = rt.block_on(async { state.sender.broadcast(encoded).await });
+        if let Some(ref sender) = state.sender {
+            let _ = rt.block_on(async { sender.broadcast(encoded).await });
+        }
     }
     state.push_local_msg(trimmed);
 }
@@ -954,7 +1317,7 @@ fn handle_download(state: &mut AppState) {
 
 async fn forward_gossip_events(
     mut receiver: GossipReceiver,
-    net_tx: mpsc::UnboundedSender<NetEvent>,
+    net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
 ) {
     while let Ok(Some(event)) = receiver.try_next().await {
         match event {
@@ -979,6 +1342,3 @@ async fn forward_gossip_events(
     }
     let _ = net_tx.send(NetEvent::Closed);
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────
-// fmt_relay_mode imported from iroh_gossip::chat_core

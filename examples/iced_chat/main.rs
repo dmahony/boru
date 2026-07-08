@@ -1,6 +1,9 @@
 //! Iced desktop frontend for iroh-gossip chat.
 //!
-//! Usage: cargo run --features gui --example iced_chat [options] open|join <ticket>
+//! Usage:
+//!   cargo run --features gui --example iced_chat       # show chat list
+//!   cargo run --features gui --example iced_chat open   # open new room
+//!   cargo run --features gui --example iced_chat join <ticket>  # join room
 
 mod app;
 
@@ -10,8 +13,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, PublicKey,
-    RelayMode, RelayUrl, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, RelayMode,
+    RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 use iroh_gossip::chat_core::friend_ping::{
@@ -19,13 +22,11 @@ use iroh_gossip::chat_core::friend_ping::{
     FRIEND_PING_ALPN,
 };
 use iroh_gossip::friends::FriendsStore;
-use iroh_gossip::{
-    net::{Gossip, GOSSIP_ALPN},
-    proto::TopicId,
-    room::RoomStore,
-};
+use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
+use iroh_gossip::proto::TopicId;
+use iroh_gossip::room::RoomStore;
+use iroh_gossip::room_history::RoomHistoryStore;
 use n0_error::{bail_any, Result, StdResultExt};
-use n0_future::task;
 use tokio::sync::Mutex;
 
 use app::IcedChat;
@@ -57,25 +58,26 @@ struct Args {
     name: Option<String>,
     #[clap(long, default_value = "0")]
     bind_port: u16,
+    /// Optional subcommand.  When omitted, shows the chat list (inbox).
     #[clap(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Parser, Debug)]
 enum Command {
+    /// Open a new or saved chat room.
     Open { topic: Option<TopicId> },
+    /// Join an existing chat room via ticket.
     Join { ticket: String },
 }
 
 // ── Message protocol ──────────────────────────────────────────────────
-// Types imported from iroh_gossip::chat_core and re-exported for app.rs
 pub use iroh_gossip::chat_core::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 
 // ── Network event bridging ────────────────────────────────────────────
-// forward_gossip_events imported from iroh_gossip::chat_core
 pub use iroh_gossip::chat_core::forward_gossip_events;
 
-// ── Identity persistence (copied from chat.rs) ────────────────────────
+// ── Identity persistence ──────────────────────────────────────────────
 
 fn get_data_dir() -> PathBuf {
     if let Ok(val) = std::env::var("IROH_GOSSIP_CHAT_DATA_DIR") {
@@ -138,27 +140,12 @@ fn main() -> Result<()> {
     ensure_graphical_session();
 
     let runtime = tokio::runtime::Runtime::new().std_context("failed to create tokio runtime")?;
-    let runtime_handle = runtime.handle().clone();
-
-    let (
-        topic,
-        _peers,
-        secret_key,
-        local_public,
-        local_label,
-        relay_mode,
-        endpoint,
-        blob_store,
-        sender,
-        net_rx,
-        ticket_str,
-        local_peer_count,
-        friends,
-    ) = runtime.block_on(async {
-        let (topic, peers) = match &args.command {
-            Command::Open { topic } => {
+    // Determine if there's an initial room to connect to
+    let initial_topic: Option<TopicId> = runtime.block_on(async {
+        match &args.command {
+            Some(Command::Open { topic }) => {
                 let data_dir = get_data_dir();
-                let topic = match topic {
+                let t = match topic {
                     Some(t) => *t,
                     None => match RoomStore::load_or_none(&data_dir) {
                         Some(store) => {
@@ -176,31 +163,60 @@ fn main() -> Result<()> {
                         }
                     },
                 };
-                (topic, Vec::new())
+                Some(t)
             }
-            Command::Join { ticket } => {
-                let Ticket { topic, peers } = Ticket::from_str(ticket)?;
-                println!("> joining chat room for topic {topic}");
-                (topic, peers)
+            Some(Command::Join { ticket }) => {
+                let ticket: Ticket = match Ticket::from_str(ticket) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("error: failed to parse ticket: {e}");
+                        return None;
+                    }
+                };
+                println!("> joining chat room for topic {}", ticket.topic);
+                Some(ticket.topic)
             }
-        };
+            None => {
+                println!("> no subcommand — showing chat list");
+                None
+            }
+        }
+    });
 
-        let (secret_key, key_path) = match args.secret_key.as_ref() {
-            None => load_or_generate_secret_key()?,
-            Some(key) => (key.parse()?, PathBuf::from("<passed via cli flag>")),
-        };
-        let local_public = secret_key.public();
-        println!("> our public key: {local_public}");
-        println!("> identity file: {}", key_path.display());
+    let (secret_key, key_path) = match args.secret_key.as_ref() {
+        None => load_or_generate_secret_key()?,
+        Some(key) => (key.parse()?, PathBuf::from("<passed via cli flag>")),
+    };
+    let local_public = secret_key.public();
+    println!("> our public key: {local_public}");
+    println!("> identity file: {}", key_path.display());
 
-        let relay_mode = match (args.no_relay, args.relay.clone()) {
-            (true, Some(_)) => bail_any!("--no-relay and --relay are mutually exclusive"),
-            (true, None) => RelayMode::Disabled,
-            (false, None) => RelayMode::Default,
-            (false, Some(url)) => RelayMode::Custom(url.into()),
-        };
-        println!("> relay: {}", fmt_relay_mode(&relay_mode));
+    let local_label = args
+        .name
+        .clone()
+        .unwrap_or_else(|| local_public.fmt_short().to_string());
 
+    let relay_mode = match (args.no_relay, args.relay.clone()) {
+        (true, Some(_)) => bail_any!("--no-relay and --relay are mutually exclusive"),
+        (true, None) => RelayMode::Disabled,
+        (false, None) => RelayMode::Default,
+        (false, Some(url)) => RelayMode::Custom(url.into()),
+    };
+    println!("> relay: {}", fmt_relay_mode(&relay_mode));
+
+    // ── Build the endpoint, gossip, and router (no topic subscription yet) ──
+
+    let (
+        endpoint,
+        gossip,
+        blob_store,
+        net_rx,
+        net_tx,
+        friend_mgr,
+        friend_events_rx,
+        friends,
+        room_history,
+    ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
         use std::net::{Ipv4Addr, SocketAddrV4};
         let ep_builder = if matches!(relay_mode, RelayMode::Disabled) {
@@ -224,12 +240,11 @@ fn main() -> Result<()> {
         let blob_store = MemStore::new();
         let blobs_protocol = BlobsProtocol::new(&blob_store, None);
 
-        let ticket_struct = Ticket {
-            topic,
-            peers: vec![EndpointAddr::new(endpoint.id())],
-        };
-        let ticket_str = ticket_struct.to_string();
-        println!("> ticket: {ticket_str}");
+        let _router = iroh::protocol::Router::builder(endpoint.clone())
+            .accept(GOSSIP_ALPN, gossip.clone())
+            .accept(iroh_blobs::ALPN, blobs_protocol.clone())
+            .accept(FRIEND_PING_ALPN, PingHandler)
+            .spawn();
 
         // Load or create the persistent friends list
         let data_dir = get_data_dir();
@@ -238,96 +253,78 @@ fn main() -> Result<()> {
             println!("> loaded {} friend(s) from disk", friends.len());
         }
 
-        let _router = iroh::protocol::Router::builder(endpoint.clone())
-            .accept(GOSSIP_ALPN, gossip.clone())
-            .accept(iroh_blobs::ALPN, blobs_protocol.clone())
-            .accept(FRIEND_PING_ALPN, PingHandler)
-            .spawn();
-
-        let peer_ids: Vec<PublicKey> = peers.iter().map(|p| p.id).collect();
-        let local_peer_count = peers.len();
-        let (sender, receiver) = gossip.subscribe(topic, peer_ids).await?.split();
-
-        let local_label = args
-            .name
-            .clone()
-            .unwrap_or_else(|| local_public.fmt_short().to_string());
-
-        if let Some(name) = args.name.clone() {
-            let msg = Message::AboutMe { name };
-            let encoded = SignedMessage::sign_and_encode(&secret_key, &msg)?;
-            sender.broadcast(encoded).await?;
+        // Load room history
+        let room_history = RoomHistoryStore::load_or_default(&data_dir);
+        if !room_history.is_empty() {
+            println!("> loaded {} room(s) from history", room_history.len());
         }
 
+        // Create the network event channel (shared across rooms)
         let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
         let net_rx = Arc::new(Mutex::new(net_rx));
-        task::spawn(forward_gossip_events(receiver, net_tx));
+
+        // ── Friend ping manager ──────────────────────────────────────
+        let _guard = runtime.handle().enter();
+        let (friend_mgr, friend_events_rx_tmp) = FriendPingManager::spawn(
+            endpoint.clone(),
+            DEFAULT_PING_INTERVAL,
+            DEFAULT_CONNECT_TIMEOUT,
+        );
+        drop(_guard);
+        let friend_events_rx = Arc::new(Mutex::new(friend_events_rx_tmp));
+
+        // Register existing friends with the ping manager
+        // (we're already inside runtime.block_on, so .await directly)
+        for peer in friends
+            .iter()
+            .filter_map(|(id, _)| id.parse_public_key().ok())
+        {
+            let _ = friend_mgr.add_friend(peer, None).await;
+        }
 
         Result::<_>::Ok((
-            topic,
-            peers,
-            secret_key,
-            local_public,
-            local_label,
-            relay_mode,
             endpoint,
+            gossip,
             blob_store,
-            sender,
             net_rx,
-            ticket_str,
-            local_peer_count,
+            net_tx,
+            friend_mgr,
+            friend_events_rx,
             friends,
+            room_history,
         ))
     })?;
 
-    // ── Friend ping manager ────────────────────────────────────
-    // Enter the Tokio runtime context so tokio::task::spawn inside
-    // FriendPingManager::spawn has a reactor to attach to.
-    let _guard = runtime.handle().enter();
-    let (friend_mgr, friend_events_rx_tmp) = FriendPingManager::spawn(
-        endpoint.clone(),
-        DEFAULT_PING_INTERVAL,
-        DEFAULT_CONNECT_TIMEOUT,
-    );
-    drop(_guard);
-    let friend_events_rx = Arc::new(Mutex::new(friend_events_rx_tmp));
-
-    // Register existing friends with the ping manager
-    // Use runtime_handle (not Handle::current) because we dropped
-    // the EnterGuard above and this thread is no longer inside a tokio context.
-    for peer in friends
-        .iter()
-        .filter_map(|(id, _)| id.parse_public_key().ok())
-    {
-        let _ = runtime_handle
-            .block_on(async { friend_mgr.add_friend(peer, None).await });
-    }
-
-    let app_cell = std::sync::Mutex::new(Some(IcedChat::new(
+    let app_cell = std::sync::Mutex::new(Some((IcedChat::new(
         secret_key,
-        sender,
+        gossip,
         blob_store,
         endpoint.clone(),
         local_label,
         local_public,
-        topic,
         relay_mode,
         Arc::clone(&net_rx),
-        ticket_str,
-        local_peer_count,
+        net_tx,
+        room_history,
         friends,
         friend_mgr,
         Arc::clone(&friend_events_rx),
-    )));
+        initial_topic,
+    ), initial_topic)));
 
     iced::application(
         move || {
-            let state = app_cell
+            let (state, opt_topic) = app_cell
                 .lock()
                 .unwrap()
                 .take()
                 .expect("iced_chat boot called more than once");
-            (state, iced::Task::none())
+            let task = if let Some(topic) = opt_topic {
+                iced::Task::done(app::AppMessage::OpenRoom(topic))
+            } else {
+                iced::Task::none()
+            };
+            (state, task)
         },
         IcedChat::update,
         IcedChat::view,

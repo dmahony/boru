@@ -1,21 +1,28 @@
 //! The iced Application for the gossip chat frontend.
+//!
+//! Supports a chat-list (inbox) screen and individual chat-room screens,
+//! with dynamic room switching — like Telegram/Signal.
 
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use iroh::{PublicKey, RelayMode, SecretKey};
+use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey};
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket};
 use iroh_gossip::api::GossipSender;
 use iroh_gossip::chat_core::friend_ping::{
     FriendEvent, FriendPingManager, FriendStatus,
 };
 use iroh_gossip::friends::{FriendId, FriendsStore};
+use iroh_gossip::net::Gossip;
 use iroh_gossip::proto::TopicId;
+use iroh_gossip::room_history::{RoomHistoryEntry, RoomHistoryStore};
 use n0_future::Stream;
-use tokio::sync::{mpsc::UnboundedReceiver, Mutex};
+use n0_future::task;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::Mutex;
 
-use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage};
+use crate::{fmt_relay_mode, forward_gossip_events, Message, NetEvent, SignedMessage, Ticket};
 
 // ── Chat entry types ──────────────────────────────────────────────────
 
@@ -57,25 +64,57 @@ impl ChatEntry {
     }
 }
 
+// ── Screen navigation ─────────────────────────────────────────────────
+
+/// The active screen in the application.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Screen {
+    /// The chat-list / inbox showing recent rooms.
+    ChatList,
+    /// An individual chat room with a given topic.
+    Chat { topic: TopicId },
+}
+
 // ── Application state ─────────────────────────────────────────────────
 
 pub struct IcedChat {
+    // ── Navigation ──
+    screen: Screen,
+    /// Pending topic we're connecting to (used during the async handoff
+    /// from clicking a room to actually subscribing).
+    pending_topic: Option<TopicId>,
+
+    // ── ChatList state ──
+    room_history: RoomHistoryStore,
+    room_history_dirty: bool,
+    /// Text input for the "Join via ticket" field in the chat list.
+    join_ticket_input: String,
+    /// Optional error message shown in the chat list.
+    chat_list_error: String,
+
+    // ── Chat state (active room) ──
     entries: Vec<ChatEntry>,
     composer_text: String,
     help_visible: bool,
     pending_file: Option<(String, String)>,
     names: HashMap<PublicKey, String>,
+    topic: TopicId,
+    ticket_str: String,
+
+    // ── Shared network state ──
     secret_key: SecretKey,
-    sender: GossipSender,
+    gossip: Gossip,
+    sender: Option<GossipSender>,
     blob_store: MemStore,
     endpoint: iroh::Endpoint,
     local_label: String,
     local_public: PublicKey,
-    topic: TopicId,
     relay_mode: RelayMode,
-    _ticket_str: String,
-    _peer_count: usize,
     pub net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
+    net_tx: UnboundedSender<NetEvent>,
+    /// JoinHandle to abort the current forward_gossip_events task when
+    /// switching rooms.
+    forward_handle: Option<task::JoinHandle<()>>,
     friends: FriendsStore,
     friends_dirty: bool,
     friend_mgr: FriendPingManager,
@@ -84,6 +123,30 @@ pub struct IcedChat {
 
 #[derive(Debug, Clone)]
 pub enum AppMessage {
+    // ── Navigation ──
+    /// Open the chat list screen (go back from a chat).
+    GoToChatList,
+    /// Open a specific room.
+    OpenRoom(TopicId),
+    /// A new room was created and we're now connected to it.
+    RoomOpened {
+        topic: TopicId,
+        ticket: String,
+        sender: GossipSender,
+    },
+    /// Finished creating a new room (random topic).
+    CreateNewRoom,
+    /// Join a room from a ticket string.
+    JoinFromTicket,
+    /// The room switch / join failed.
+    RoomJoinFailed(String),
+
+    // ── ChatList ──
+    JoinTicketInputChanged(String),
+    NewChatCreated,
+    RoomSelected(TopicId),
+
+    // ── Chat ──
     InputChanged(String),
     SendPressed,
     ToggleHelp,
@@ -95,14 +158,8 @@ pub enum AppMessage {
     ErrorMsg(String),
     ExecuteFileSend(String),
     ExecuteDownload,
-    FriendAdded {
-        fid: String,
-        label: String,
-        was_new: bool,
-    },
-    FriendRemoved {
-        label: String,
-    },
+    FriendAdded { fid: String, label: String, was_new: bool },
+    FriendRemoved { label: String },
     FriendListResult(Vec<(String, String)>),
 }
 
@@ -110,52 +167,50 @@ impl IcedChat {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         secret_key: SecretKey,
-        sender: GossipSender,
+        gossip: Gossip,
         blob_store: MemStore,
         endpoint: iroh::Endpoint,
         local_label: String,
         local_public: PublicKey,
-        topic: TopicId,
         relay_mode: RelayMode,
         net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
-        ticket_str: String,
-        peer_count: usize,
+        net_tx: UnboundedSender<NetEvent>,
+        room_history: RoomHistoryStore,
         friends: FriendsStore,
         friend_mgr: FriendPingManager,
         friend_events_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
+        initial_topic: Option<TopicId>,
     ) -> Self {
-        let mut app = Self {
+        Self {
+            screen: Screen::ChatList,
+            pending_topic: None,
+            room_history,
+            room_history_dirty: false,
+            join_ticket_input: String::new(),
+            chat_list_error: String::new(),
             entries: Vec::new(),
             composer_text: String::new(),
             help_visible: false,
             pending_file: None,
             names: HashMap::new(),
+            topic: initial_topic.unwrap_or(TopicId::from_bytes([0u8; 32])),
+            ticket_str: String::new(),
             secret_key,
-            sender,
+            gossip,
+            sender: None,
             blob_store,
             endpoint,
-            local_label: local_label.clone(),
+            local_label,
             local_public,
-            topic,
             relay_mode,
-            _ticket_str: ticket_str,
-            _peer_count: peer_count,
             net_rx,
+            net_tx,
+            forward_handle: None,
             friends,
             friends_dirty: false,
             friend_mgr,
             friend_events_rx,
-        };
-        app.push_system(format!("Connected as {local_label}.  Topic: {}", app.topic));
-        if peer_count == 0 {
-            app.push_system("Waiting for peers to join us...");
-        } else {
-            app.push_system(format!(
-                "Connecting to {peer_count} peers from the ticket..."
-            ));
         }
-        app.push_system("Type a message and press Enter to send.  /help for commands.");
-        app
     }
 
     fn push_system(&mut self, text: impl Into<String>) {
@@ -169,11 +224,245 @@ impl IcedChat {
     }
 }
 
+// ── Room switching helpers ───────────────────────────────────────────
+
+impl IcedChat {
+    fn leave_current_room(&mut self) {
+        // Abort the forwarding task
+        if let Some(handle) = self.forward_handle.take() {
+            handle.abort();
+        }
+        self.sender = None;
+        self.entries.clear();
+        self.names.clear();
+        self.pending_file = None;
+    }
+
+    /// Save the current room to history.
+    fn save_room_to_history(&mut self) {
+        let topic = self.topic;
+        let name = self
+            .names
+            .get(&self.local_public)
+            .cloned()
+            .unwrap_or_default();
+        let preview = self
+            .entries
+            .last()
+            .map(|e| {
+                let t = e.body.clone();
+                if t.len() > 60 {
+                    format!("{}…", &t[..60])
+                } else {
+                    t
+                }
+            })
+            .unwrap_or_default();
+
+        self.room_history.upsert(topic, &name, true);
+        if !preview.is_empty() {
+            self.room_history.update_preview(&topic, &preview);
+        }
+        self.room_history_dirty = true;
+    }
+}
+
 // ── Update ────────────────────────────────────────────────────────────
 
 impl IcedChat {
     pub fn update(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
         match message {
+            // ── Navigation ────────────────────────────────────────────
+            AppMessage::GoToChatList => {
+                // Save current room to history
+                self.save_room_to_history();
+                self.persist_room_history();
+
+                // Leave the current room
+                self.leave_current_room();
+                self.screen = Screen::ChatList;
+                iced::Task::none()
+            }
+
+            AppMessage::CreateNewRoom => {
+                let topic = TopicId::from_bytes(rand::random());
+                let gossip = self.gossip.clone();
+                let net_tx = self.net_tx.clone();
+                let sk = self.secret_key.clone();
+                let label = self.local_label.clone();
+                let ep_id = self.endpoint.id();
+
+                iced::Task::perform(
+                    async move {
+                        // Subscribe to the new topic
+                        let sub = gossip.subscribe(topic, vec![]).await.map_err(|e| e.to_string())?;
+                        let (sender, receiver) = sub.split();
+                        let ticket = Ticket {
+                            topic,
+                            peers: vec![EndpointAddr::new(ep_id)],
+                        };
+                        let ticket_str = ticket.to_string();
+
+                        // Spawn forwarding
+                        let _ = task::spawn(forward_gossip_events(receiver, net_tx));
+
+                        // Broadcast our presence
+                        let msg = SignedMessage::sign_and_encode(
+                            &sk,
+                            &crate::Message::AboutMe { name: label },
+                        ).map_err(|e| e.to_string())?;
+                        let _ = sender.broadcast(msg).await;
+
+                        Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
+                    },
+                    |result| match result {
+                        Ok((sender, topic, ticket_str)) => {
+                            AppMessage::RoomOpened {
+                                topic,
+                                ticket: ticket_str,
+                                sender,
+                            }
+                        }
+                        Err(e) => AppMessage::RoomJoinFailed(e),
+                    },
+                )
+            }
+
+            AppMessage::OpenRoom(topic) => {
+                // Save the current room first
+                self.save_room_to_history();
+                self.leave_current_room();
+
+                let gossip = self.gossip.clone();
+                let net_tx = self.net_tx.clone();
+                let sk = self.secret_key.clone();
+                let label = self.local_label.clone();
+                let ep_id = self.endpoint.id();
+
+                iced::Task::perform(
+                    async move {
+                        let sub = gossip.subscribe(topic, vec![]).await.map_err(|e| e.to_string())?;
+                        let (sender, receiver) = sub.split();
+                        let ticket = Ticket {
+                            topic,
+                            peers: vec![EndpointAddr::new(ep_id)],
+                        };
+                        let ticket_str = ticket.to_string();
+
+                        let _ = task::spawn(forward_gossip_events(receiver, net_tx));
+
+                        // Broadcast our presence
+                        let msg = SignedMessage::sign_and_encode(
+                            &sk,
+                            &crate::Message::AboutMe { name: label },
+                        ).map_err(|e| e.to_string())?;
+                        let _ = sender.broadcast(msg).await;
+
+                        Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
+                    },
+                    |result| match result {
+                        Ok((sender, topic, ticket_str)) => AppMessage::RoomOpened {
+                            topic,
+                            ticket: ticket_str,
+                            sender,
+                        },
+                        Err(e) => AppMessage::RoomJoinFailed(e),
+                    },
+                )
+            }
+
+            AppMessage::RoomOpened { topic, ticket, sender } => {
+                self.pending_topic = None;
+                self.sender = Some(sender);
+
+                self.screen = Screen::Chat { topic };
+                self.topic = topic;
+                self.ticket_str = ticket.clone();
+                self.entries.clear();
+                self.names.clear();
+                self.composer_text.clear();
+                self.push_system(format!("Connected as {}.  Topic: {topic}", self.local_label));
+                self.push_system("Type a message and press Enter to send.  /help for commands.");
+                self.push_system(format!("Ticket to join this room: {ticket}"));
+
+                // Update room history
+                self.room_history.upsert(topic, &self.local_label, true);
+                self.room_history_dirty = true;
+                self.persist_room_history();
+
+                iced::Task::none()
+            }
+
+            AppMessage::RoomJoinFailed(e) => {
+                self.pending_topic = None;
+                self.chat_list_error = format!("Failed to join room: {e}");
+                self.screen = Screen::ChatList;
+                iced::Task::none()
+            }
+
+            AppMessage::JoinFromTicket => {
+                let ticket_input = self.join_ticket_input.clone();
+                let gossip = self.gossip.clone();
+                let net_tx = self.net_tx.clone();
+                let sk = self.secret_key.clone();
+                let label = self.local_label.clone();
+                let ep_id = self.endpoint.id();
+
+                iced::Task::perform(
+                    async move {
+                        let ticket: Ticket = ticket_input.parse().map_err(|e: n0_error::AnyError| e.to_string())?;
+                        let topic = ticket.topic;
+                        let peers: Vec<_> = ticket.peers.iter().map(|p| p.id).collect();
+
+                        let sub = gossip.subscribe(topic, peers).await.map_err(|e| e.to_string())?;
+                        let (sender, receiver) = sub.split();
+                        let new_ticket = Ticket {
+                            topic,
+                            peers: vec![EndpointAddr::new(ep_id)],
+                        };
+                        let ticket_str = new_ticket.to_string();
+
+                        let _ = task::spawn(forward_gossip_events(receiver, net_tx));
+
+                        let msg = SignedMessage::sign_and_encode(
+                            &sk,
+                            &crate::Message::AboutMe { name: label },
+                        ).map_err(|e| e.to_string())?;
+                        let _ = sender.broadcast(msg).await;
+
+                        Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
+                    },
+                    |result| match result {
+                        Ok((sender, topic, ticket_str)) => AppMessage::RoomOpened {
+                            topic,
+                            ticket: ticket_str,
+                            sender,
+                        },
+                        Err(e) => AppMessage::RoomJoinFailed(e),
+                    },
+                )
+            }
+
+            AppMessage::NewChatCreated => {
+                // Navigate to the newly created room — handled via OpenRoom
+                iced::Task::done(AppMessage::CreateNewRoom)
+            }
+
+            AppMessage::RoomSelected(topic) => {
+                if let Screen::ChatList = self.screen {
+                    iced::Task::done(AppMessage::OpenRoom(topic))
+                } else {
+                    iced::Task::none()
+                }
+            }
+
+            // ── ChatList ─────────────────────────────────────────────
+            AppMessage::JoinTicketInputChanged(text) => {
+                self.join_ticket_input = text;
+                iced::Task::none()
+            }
+
+            // ── Chat ─────────────────────────────────────────────────
             AppMessage::InputChanged(text) => {
                 self.composer_text = text;
                 iced::Task::none()
@@ -220,7 +509,7 @@ impl IcedChat {
                     return iced::Task::none();
                 }
 
-                // ── Friend commands ────────────────────────────────
+                // ── Friend commands ──────────────────
                 if let Some(pubkey_str) = trimmed.strip_prefix("/friend add ") {
                     let pubkey_str = pubkey_str.trim().to_string();
                     let (key_part, alias) =
@@ -257,9 +546,6 @@ impl IcedChat {
                     let mgr = self.friend_mgr.clone();
                     return iced::Task::perform(
                         async move {
-                            // We resolve by public key first, then alias.
-                            // Unfortunately we can't access self.friends from here,
-                            // so we try parsing as a public key directly.
                             match target.parse::<PublicKey>() {
                                 Ok(peer) => {
                                     let removed = mgr.remove_friend(&peer).await.unwrap_or(false);
@@ -314,14 +600,20 @@ impl IcedChat {
                     &crate::Message::Message { text: trimmed },
                 ) {
                     Ok(encoded) => {
-                        let sender = self.sender.clone();
-                        iced::Task::perform(
-                            async move {
-                                sender.broadcast(encoded).await.ok();
-                                text
-                            },
-                            AppMessage::MessageSent,
-                        )
+                        if let Some(ref sender) = self.sender {
+                            let sender = sender.clone();
+                            iced::Task::perform(
+                                async move {
+                                    sender.broadcast(encoded).await.ok();
+                                    text
+                                },
+                                AppMessage::MessageSent,
+                            )
+                        } else {
+                            iced::Task::done(AppMessage::ErrorMsg(
+                                "Not connected to any room.".into(),
+                            ))
+                        }
                     }
                     Err(e) => iced::Task::done(AppMessage::ErrorMsg(e.to_string())),
                 }
@@ -333,6 +625,7 @@ impl IcedChat {
             }
 
             AppMessage::NetEvent(event) => {
+                self.update_room_preview(&event);
                 self.handle_net_event(event);
                 self.try_save_friends();
                 iced::Task::none()
@@ -376,7 +669,9 @@ impl IcedChat {
                         };
                         let encoded = SignedMessage::sign_and_encode(&secret_key, &msg)
                             .map_err(|e| format!("Failed to sign: {e}"))?;
-                        sender.broadcast(encoded).await.ok();
+                        if let Some(ref sender) = sender {
+                            sender.broadcast(encoded).await.ok();
+                        }
                         Ok(fname)
                     },
                     |r: Result<String, String>| match r {
@@ -475,6 +770,27 @@ impl IcedChat {
         }
     }
 
+    fn persist_room_history(&mut self) {
+        if self.room_history_dirty {
+            let _ = self.room_history.save();
+            self.room_history_dirty = false;
+        }
+    }
+
+    fn update_room_preview(&mut self, event: &NetEvent) {
+        if let NetEvent::Message { from: _, message } = event {
+            if let Message::Message { text } = message {
+                let preview = if text.len() > 60 {
+                    format!("{}…", &text[..60])
+                } else {
+                    text.clone()
+                };
+                self.room_history.update_preview(&self.topic, &preview);
+                self.room_history_dirty = true;
+            }
+        }
+    }
+
     fn try_save_friends(&mut self) {
         if self.friends_dirty {
             let _ = self.friends.save();
@@ -538,7 +854,7 @@ impl IcedChat {
                     }
                 }
                 Message::Goodbye => {
-                    // Handled via NeighborDown (cleaner, covers both clean and unclean exits)
+                    // Handled via NeighborDown
                 }
             },
             NetEvent::NeighborUp { peer } => {
@@ -606,10 +922,155 @@ impl IcedChat {
 
 impl IcedChat {
     pub fn view(&self) -> iced::Element<'_, AppMessage> {
+        match self.screen {
+            Screen::ChatList => self.view_chat_list(),
+            Screen::Chat { .. } => self.view_chat_screen(),
+        }
+    }
+
+    // ── Chat list (inbox) view ───────────────────────────────────────
+
+    fn view_chat_list(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, row, scrollable, text, text_input, Column};
+        use iced::{Alignment, Color, Length};
+
+        let mut content = Column::new().spacing(8).padding(12);
+
+        // Header
+        content = content.push(
+            row![
+                text("Iroh Gossip Chat").size(22),
+            ]
+            .spacing(8),
+        );
+
+        // Identity info
+        content = content.push(
+            text(format!("Identity: {}  |  Relay: {}", self.local_label, fmt_relay_mode(&self.relay_mode)))
+                .size(11)
+                .color(Color::from_rgb(0.5, 0.5, 0.5)),
+        );
+
+        content = content.push(text("")); // spacer
+
+        // ── New Chat / Join buttons ──
+        content = content.push(
+            row![
+                button(
+                    row![
+                        text(" + ").size(16),
+                        text("New Chat").size(14),
+                    ]
+                    .align_y(Alignment::Center)
+                    .spacing(4),
+                )
+                .on_press(AppMessage::NewChatCreated)
+                .padding(8),
+                button(
+                    row![
+                        text(" ⇄ ").size(16),
+                        text("Join via Ticket").size(14),
+                    ]
+                    .align_y(Alignment::Center)
+                    .spacing(4),
+                )
+                .on_press(AppMessage::JoinFromTicket)
+                .padding(8),
+            ]
+            .spacing(8),
+        );
+
+        // ── Join ticket input ──
+        content = content.push(
+            row![
+                text_input("Paste ticket to join a room…", &self.join_ticket_input)
+                    .on_input(AppMessage::JoinTicketInputChanged)
+                    .on_submit(AppMessage::JoinFromTicket)
+                    .width(Length::Fill),
+            ]
+            .spacing(4),
+        );
+
+        // Error message
+        if !self.chat_list_error.is_empty() {
+            content = content.push(
+                text(&self.chat_list_error)
+                    .color(Color::from_rgb(0.8, 0.2, 0.2))
+                    .size(12),
+            );
+        }
+
+        // ── Recent chats list ──
+        content = content.push(text("Recent Chats").size(16));
+
+        if self.room_history.is_empty() {
+            content = content.push(
+                text("No recent chats. Create a new chat or join an existing one.")
+                    .color(Color::from_rgb(0.5, 0.5, 0.5))
+                    .size(13),
+            );
+        } else {
+            let mut list = Column::new().spacing(2).width(Length::Fill);
+            for room in &self.room_history.rooms {
+                list = list.push(self.view_room_row(room));
+            }
+            content = content.push(scrollable(list).height(Length::Fill));
+        }
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn view_room_row(&self, room: &RoomHistoryEntry) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text};
+        use iced::{Color, Length};
+
+        let topic = room.topic;
+        let display_name = room.display_name();
+
+        let preview = if room.last_preview.is_empty() {
+            if room.is_owner {
+                "Created this room".to_string()
+            } else {
+                "Joined this room".to_string()
+            }
+        } else {
+            room.last_preview.clone()
+        };
+
+        let btn = button(
+            column![
+                row![
+                    text(display_name).size(14).width(Length::Fill),
+                ],
+                row![
+                    text(preview)
+                        .size(11)
+                        .color(Color::from_rgb(0.5, 0.5, 0.5))
+                        .width(Length::Fill),
+                ],
+            ]
+            .spacing(2)
+            .padding(8),
+        )
+        .on_press(AppMessage::RoomSelected(topic))
+        .width(Length::Fill)
+        .padding(0);
+
+        container(btn)
+            .width(Length::Fill)
+            .into()
+    }
+
+    // ── Chat screen view ─────────────────────────────────────────────
+
+    fn view_chat_screen(&self) -> iced::Element<'_, AppMessage> {
         use iced::{widget, Length};
 
         let content = widget::column![
-            self.view_header(),
+            self.view_chat_header(),
             self.view_chat_log(),
             widget::container(self.view_composer()).width(Length::Fill),
         ]
@@ -631,16 +1092,22 @@ impl IcedChat {
         }
     }
 
-    fn view_header(&self) -> iced::Element<'_, AppMessage> {
-        let relay = fmt_relay_mode(&self.relay_mode);
-        iced::widget::column![
-            iced::widget::text("Iroh Gossip Chat").size(18),
-            iced::widget::text(format!(
-                "Topic: {}  |  Identity: {}",
-                self.topic, self.local_label
-            ))
-            .size(11),
-            iced::widget::text(format!("Relay: {relay}  |  Peers: {}", self._peer_count)).size(11),
+    fn view_chat_header(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, row, text};
+        use iced::Length;
+
+        let room_name = self.room_history.find(&self.topic)
+            .map(|r| r.display_name())
+            .unwrap_or_else(|| format!("Room: {}", self.topic));
+
+        column![
+            row![
+                button(" ← ").on_press(AppMessage::GoToChatList),
+                text(room_name).size(18).width(Length::Fill),
+            ]
+            .spacing(4),
+            text(format!("Topic: {}  |  Identity: {}", self.topic, self.local_label)).size(11),
+            text(format!("Relay: {}  |  Ticket: {}", fmt_relay_mode(&self.relay_mode), self.ticket_str)).size(10),
         ]
         .spacing(2)
         .into()
@@ -740,7 +1207,6 @@ impl IcedChat {
 
 // ── Subscription ──────────────────────────────────────────────────────
 
-/// Wrapper so we can satisfy `Hash` for `Subscription::run_with`.
 struct RxHandle(Arc<Mutex<UnboundedReceiver<NetEvent>>>);
 
 impl std::hash::Hash for RxHandle {
@@ -757,7 +1223,6 @@ impl std::hash::Hash for FriendRxHandle {
     }
 }
 
-/// Build the async stream that bridges gossip events and friend events into iced messages.
 fn subscription_stream(
     rx: &RxHandle,
     friend_rx: &FriendRxHandle,

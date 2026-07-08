@@ -42,4 +42,11 @@ pub mod friends;
 #[cfg(feature = "net")]
 pub mod room;
 
+/// Durable multi-room history for the chat frontends.
+///
+/// Stores a list of known rooms so the GUI can show a recent-chat list
+/// on startup — like Telegram/Signal's conversation list.
+#[cfg(feature = "net")]
+pub mod room_history;
+
 pub use proto::TopicId;
