@@ -1837,14 +1837,16 @@ impl IcedChat {
         .spacing(2);
 
         if !self.ticket_str.is_empty() {
+            let ticket = self.ticket_str.clone();
             header = header.push(
                 column![
                     text("Ticket (click to copy):")
                         .size(10)
                         .color(Color::from_rgb(0.5, 0.5, 0.5)),
-                    text(&self.ticket_str)
-                        .size(10)
-                        .wrapping(Wrapping::Word),
+                    button(text(&self.ticket_str).size(10).wrapping(Wrapping::Word))
+                        .on_press(AppMessage::CopyToClipboard(ticket))
+                        .padding(0)
+                        .style(button::text),
                 ],
             );
         }
@@ -1893,10 +1895,12 @@ impl IcedChat {
 
             // ── Image ──
             if let Some(ref img_bytes) = entry.image_bytes {
+                eprintln!(">>> rendering image: {} bytes", img_bytes.len());
                 let handle = iced::widget::image::Handle::from_bytes(img_bytes.clone());
                 let img = iced::widget::image(handle)
+                    .content_fit(iced::ContentFit::ScaleDown)
                     .width(Length::Fill)
-                    .height(Length::Shrink);
+                    .height(Length::Fixed(300.0));
                 col = col.push(img);
             }
 
