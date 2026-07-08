@@ -188,6 +188,7 @@ enum AppMessage {
     RoomOpened {
         topic: TopicId,
         ticket: String,
+        sender: GossipSender,
     },
     RoomJoinFailed(String),
     // ── Chat list ──
@@ -730,20 +731,18 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
                     ))
                 },
                 move |result| match result {
-                    Ok((topic, ticket_str, _sender)) => {
-                        // The sender is stored in the closure but we need it in state.
-                        // RoomOpened handler will set it up.
-                        AppMessage::RoomOpened {
-                            topic,
-                            ticket: ticket_str,
-                        }
-                    }
+                    Ok((topic, ticket_str, sender)) => AppMessage::RoomOpened {
+                        topic,
+                        ticket: ticket_str,
+                        sender,
+                    },
                     Err(e) => AppMessage::RoomJoinFailed(e),
                 },
             )
         }
 
-        AppMessage::RoomOpened { topic, ticket } => {
+        AppMessage::RoomOpened { topic, ticket, sender } => {
+            state.sender = Some(sender);
             state.screen = Screen::Chat { topic };
             state.topic = topic.to_string();
             state.ticket = ticket.clone();
