@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(feature = "tor-transport")]
@@ -39,8 +39,9 @@ use iroh_gossip::chat_core::friend_ping::{
     DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
 };
 use iroh_gossip::chat_core::{
-    self, check_peer_connection_type, fmt_relay_mode, handle_net_event, update_connection_counts,
-    AppState, ChatEntry, ChatKind, ConnectionType, Message, SignedMessage, StatusContext, Ticket,
+    self, check_peer_connection_type, fmt_relay_mode, handle_net_event, message_hash,
+    update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, Message,
+    SignedMessage, StatusContext, Ticket,
 };
 use iroh_gossip::friends::{FriendId, FriendRecord, FriendsStore};
 use iroh_gossip::room::RoomStore;
@@ -542,9 +543,16 @@ async fn main() -> Result<()> {
     let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     spawn_input_thread(ui_tx);
 
+    // Typing indicator state: throttle broadcast and track reset.
+    let mut typing_state = TypingBroadcastState::new();
+
     // Periodic connection status monitor — refreshes every 60 seconds.
     let mut conn_monitor = tokio::time::interval(Duration::from_secs(60));
     conn_monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // Typing decay timer: sweep stale entries every second.
+    let mut typing_decay = tokio::time::interval(Duration::from_secs(1));
+    typing_decay.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     while !app.should_quit {
         // Non-blocking check for Tor reconnection status updates
@@ -565,6 +573,7 @@ async fn main() -> Result<()> {
                     &blob_store,
                     &friend_mgr,
                     &room_docs,
+                    &mut typing_state,
                 ).await?;
                 if app.friends_dirty {
                     if let Err(err) = app.friends.save() {
@@ -601,6 +610,12 @@ async fn main() -> Result<()> {
             _ = conn_monitor.tick() => {
                 // Periodic refresh of per-peer connection status.
                 update_connection_counts(&endpoint, &mut app.status).await;
+            }
+            _ = typing_decay.tick() => {
+                // Remove typing indicators >5 seconds stale.
+                if app.clear_expired_typing() {
+                    terminal.draw(|frame| render_app(frame, &mut app))?;
+                }
             }
             else => break,
         }
@@ -654,6 +669,23 @@ enum UiEvent {
     Paste(String),
 }
 
+/// Tracks throttled broadcast of typing indicators to the gossip network.
+struct TypingBroadcastState {
+    last_broadcast: Instant,
+    was_typing: bool,
+}
+
+impl TypingBroadcastState {
+    fn new() -> Self {
+        Self {
+            // Start with last_broadcast far in the past so the first keystroke
+            // always fires the indicator.
+            last_broadcast: Instant::now() - Duration::from_secs(10),
+            was_typing: false,
+        }
+    }
+}
+
 fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
     std::thread::spawn(move || {
         while let Ok(event) = event::read() {
@@ -682,6 +714,7 @@ async fn handle_ui_event(
     blob_store: &MemStore,
     friend_mgr: &FriendPingManager,
     room_docs: &Arc<RwLock<Option<RoomDocs>>>,
+    typing_state: &mut TypingBroadcastState,
 ) -> Result<bool> {
     match event {
         UiEvent::Key(key) => {
@@ -695,6 +728,7 @@ async fn handle_ui_event(
                 blob_store,
                 friend_mgr,
                 room_docs,
+                typing_state,
             )
             .await?;
             Ok(true)
@@ -717,6 +751,7 @@ async fn handle_key_event(
     blob_store: &MemStore,
     friend_mgr: &FriendPingManager,
     room_docs: &Arc<RwLock<Option<RoomDocs>>>,
+    typing_state: &mut TypingBroadcastState,
 ) -> Result<()> {
     let visible_height = app.last_log_height;
     match key {
@@ -1047,6 +1082,127 @@ async fn handle_key_event(
                 return Ok(());
             }
 
+            if let Some(rest) = trimmed.strip_prefix("/edit ") {
+                // ── Edit a previously sent message ──────────────────────
+                let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
+                if parts.len() < 2 {
+                    app.push_system("Usage: /edit <index> <new text> (index is 1-based message number)");
+                    return Ok(());
+                }
+                let idx: usize = match parts[0].parse::<usize>() {
+                    Ok(n) if n >= 1 => n - 1,
+                    _ => {
+                        app.push_system("Invalid index. Use a positive number (1-based).");
+                        return Ok(());
+                    }
+                };
+                let new_text = parts[1].to_string();
+                let entry = match app.entries.get(idx) {
+                    Some(e) => e,
+                    None => {
+                        app.push_system(format!("No message at index {}.", idx + 1));
+                        return Ok(());
+                    }
+                };
+                let original_text = entry.body.clone();
+                let original_hash = message_hash(&Message::Message {
+                    text: original_text,
+                });
+                let message = Message::Edit {
+                    original_hash,
+                    new_text: new_text.clone(),
+                };
+                let encoded = SignedMessage::sign_and_encode(secret_key, &message)?;
+                sender.broadcast(encoded).await?;
+                // Update the local entry.
+                if let Some(entry) = app.entries.get_mut(idx) {
+                    entry.body = new_text;
+                    entry.edited = true;
+                }
+                app.push_system(format!("Edited message at index {}.", idx + 1));
+                return Ok(());
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("/delete ") {
+                // ── Delete a previously sent message ────────────────────
+                let idx: usize = match rest.trim().parse::<usize>() {
+                    Ok(n) if n >= 1 => n - 1,
+                    _ => {
+                        app.push_system("Invalid index. Use a positive number (1-based).");
+                        return Ok(());
+                    }
+                };
+                let entry = match app.entries.get(idx) {
+                    Some(e) => e,
+                    None => {
+                        app.push_system(format!("No message at index {}.", idx + 1));
+                        return Ok(());
+                    }
+                };
+                let original_text = entry.body.clone();
+                let message_hash_val = message_hash(&Message::Message {
+                    text: original_text,
+                });
+                let message = Message::Delete {
+                    message_hash: message_hash_val,
+                };
+                let encoded = SignedMessage::sign_and_encode(secret_key, &message)?;
+                sender.broadcast(encoded).await?;
+                // Update the local entry.
+                if let Some(entry) = app.entries.get_mut(idx) {
+                    entry.body = "[deleted]".to_string();
+                    entry.edited = true;
+                }
+                app.push_system(format!("Deleted message at index {}.", idx + 1));
+                return Ok(());
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("/react ") {
+                // ── React to a message ──────────────────────────
+                let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
+                if parts.len() < 2 {
+                    app.push_system(
+                        "Usage: /react <index> <emoji> (index is 1-based message number)",
+                    );
+                    return Ok(());
+                }
+                let idx: usize = match parts[0].parse::<usize>() {
+                    Ok(n) if n >= 1 => n - 1,
+                    _ => {
+                        app.push_system("Invalid index. Use a positive number (1-based).");
+                        return Ok(());
+                    }
+                };
+                let emoji = parts[1].to_string();
+                let entry = match app.entries.get(idx) {
+                    Some(e) => e,
+                    None => {
+                        app.push_system(format!("No message at index {}.", idx + 1));
+                        return Ok(());
+                    }
+                };
+                let original_text = entry.body.clone();
+                let message_hash_val = message_hash(&Message::Message {
+                    text: original_text,
+                });
+                let message = Message::Reaction {
+                    message_hash: message_hash_val,
+                    emoji: emoji.clone(),
+                };
+                let encoded = SignedMessage::sign_and_encode(secret_key, &message)?;
+                sender.broadcast(encoded).await?;
+                // Add reactions locally immediately.
+                if let Some(entry) = app.entries.get_mut(idx) {
+                    entry.reactions.push(emoji);
+                }
+                app.push_system(format!(
+                    "Reacted to message at index {} with {}.",
+                    idx + 1,
+                    parts[1]
+                ));
+                return Ok(());
+            }
+
             // Normal text message
             let message = Message::Message {
                 text: trimmed.clone(),
@@ -1054,6 +1210,7 @@ async fn handle_key_event(
             let encoded_message = SignedMessage::sign_and_encode(secret_key, &message)?;
             sender.broadcast(encoded_message).await?;
             app.push_local(local_label.to_string(), trimmed);
+            typing_state.was_typing = false;
         }
         KeyEvent {
             code: KeyCode::Backspace,
@@ -1092,6 +1249,16 @@ async fn handle_key_event(
             ..
         } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
             app.composer.insert_char(ch);
+            // Broadcast typing indicator (throttled to at most 1 per 3 seconds)
+            // so remote peers see that we are composing a message.
+            if typing_state.last_broadcast.elapsed() >= Duration::from_secs(3) {
+                let typing_msg = SignedMessage::sign_and_encode(secret_key, &Message::Typing);
+                if let Ok(encoded) = typing_msg {
+                    let _ = sender.broadcast(encoded).await;
+                }
+                typing_state.last_broadcast = Instant::now();
+                typing_state.was_typing = true;
+            }
         }
         _ => {}
     }
@@ -1211,12 +1378,13 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(status_height),
+            Constraint::Length(1), // Typing indicator strip
             Constraint::Min(10),
             Constraint::Length(5),
         ])
         .split(frame.area());
 
-    let body_area = layout[1];
+    let body_area = layout[2];
     let body_layout = if body_area.width >= 100 {
         Layout::default()
             .direction(Direction::Horizontal)
@@ -1243,6 +1411,30 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
         .block(status_block)
         .wrap(Wrap { trim: true });
     frame.render_widget(status_paragraph, layout[0]);
+
+    // ── Typing indicator strip ────────────────────────────────────────
+    if !app.typing_peers.is_empty() {
+        let typing_names: Vec<String> = app
+            .typing_peers
+            .keys()
+            .filter_map(|pk| app.names.get(pk))
+            .cloned()
+            .collect();
+        let typing_text = if typing_names.len() <= 3 {
+            format!("{} is typing...", typing_names.join(", "))
+        } else {
+            format!(
+                "{}, and {} more are typing...",
+                typing_names[..3].join(", "),
+                typing_names.len() - 3
+            )
+        };
+        let typing_paragraph = Paragraph::new(Text::from(Line::from(vec![
+            Span::styled("✎ ", Style::default().fg(Color::Green)),
+            Span::raw(typing_text),
+        ])));
+        frame.render_widget(typing_paragraph, layout[1]);
+    }
 
     let log_block = Block::default()
         .title(Span::styled(
@@ -1286,8 +1478,8 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
-    let composer_inner = composer_block.inner(layout[2]);
-    frame.render_widget(composer_block, layout[2]);
+    let composer_inner = composer_block.inner(layout[3]);
+    frame.render_widget(composer_block, layout[3]);
     let prompt = "> ";
     let composer_line = Line::from(vec![
         Span::styled(
@@ -1327,21 +1519,36 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
 
 // ── TUI formatting helpers (ratatui-dependent) ────────────────────────────────
 
-/// Render a [`ChatEntry`] as a ratatui line.
-fn entry_to_line(entry: &ChatEntry) -> Line<'static> {
+/// Render a [`ChatEntry`] as ratatui lines (message line + optional reactions).
+fn entry_to_line(entry: &ChatEntry) -> Vec<Line<'static>> {
     let style = match entry.kind {
         ChatKind::System => Style::default().fg(Color::DarkGray),
         ChatKind::Local => Style::default().fg(Color::Green),
         ChatKind::Remote => Style::default().fg(Color::Blue),
     };
-    Line::from(vec![
+    let mut lines = vec![Line::from(vec![
         Span::styled(
             format!("[{}]", entry.label),
             style.add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::raw(entry.body.clone()),
-    ])
+        Span::raw(if entry.edited {
+            format!("{} ✎", entry.body)
+        } else {
+            entry.body.clone()
+        }),
+    ])];
+    if !entry.reactions.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  [", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                entry.reactions.join(", "),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled("]", Style::default().fg(Color::Yellow)),
+        ]));
+    }
+    lines
 }
 
 /// Render the chat log as ratatui text.
@@ -1352,7 +1559,12 @@ fn app_chat_text(app: &AppState) -> Text<'static> {
             Style::default().fg(Color::DarkGray),
         )]))
     } else {
-        Text::from(app.entries.iter().map(entry_to_line).collect::<Vec<_>>())
+        Text::from(
+            app.entries
+                .iter()
+                .flat_map(entry_to_line)
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -1526,6 +1738,10 @@ fn help_menu_lines() -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("/connections", label_style),
             Span::raw("   show per-peer connection status"),
+        ]),
+        Line::from(vec![
+            Span::styled("/react <index> <emoji>", label_style),
+            Span::raw("  react to a message"),
         ]),
         Line::from(vec![Span::styled("Tips", title_style)]),
         Line::from(vec![Span::styled(

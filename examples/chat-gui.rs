@@ -39,12 +39,13 @@ use iroh::{
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
 use iroh_gossip::{
-    api::{Event as GossipEvent, GossipReceiver, GossipSender, GossipTopic},
+    api::{GossipSender, GossipTopic},
     chat_core::friend_ping::{
         FriendEvent, FriendPingManager, FriendStatus, PingHandler, DEFAULT_CONNECT_TIMEOUT,
         DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
     },
     chat_core::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket},
+    chat_callbacks::ChatCallbacks,
     friends::{FriendId, FriendsStore},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
@@ -55,7 +56,7 @@ use iroh_gossip::tor_transport::{
     bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport,
 };
 use n0_error::{bail_any, Result, StdResultExt};
-use n0_future::{task, StreamExt};
+use n0_future::{task};
 
 fn ensure_graphical_session() {
     #[cfg(target_os = "linux")]
@@ -160,7 +161,7 @@ fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf
 
 // ── Channel messages & app state ──────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum ChatLineKind {
     System,
     Local,
@@ -171,6 +172,12 @@ enum ChatLineKind {
 struct ChatLine {
     kind: ChatLineKind,
     text: String,
+    /// Protocol message hash for edit/delete/reaction lookups.
+    message_hash: Option<iroh_gossip::chat_core::MessageHash>,
+    /// Whether this message has been edited after initial delivery.
+    edited: bool,
+    /// Emoji reactions attached to this message.
+    reactions: Vec<String>,
 }
 
 /// Which screen is currently visible.
@@ -263,6 +270,14 @@ struct AppState {
     friend_events_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<FriendEvent>>>,
     /// Optional receiver for Tor reconnection status updates.
     tor_reconnect_rx: Option<Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>>,
+
+    // ── Rich features ──
+    /// Display name cache: peer PublicKey → last announced display name.
+    names: HashMap<iroh::PublicKey, String>,
+    /// Peers that have recently broadcast a typing indicator.
+    typing_peers: Vec<iroh::PublicKey>,
+    /// Last time we broadcast a Typing message (for throttling).
+    last_typing_broadcast: std::time::Instant,
 }
 
 impl AppState {
@@ -270,6 +285,9 @@ impl AppState {
         self.messages.push(ChatLine {
             kind: ChatLineKind::System,
             text,
+            message_hash: None,
+            edited: false,
+            reactions: Vec::new(),
         });
     }
 
@@ -277,14 +295,143 @@ impl AppState {
         self.messages.push(ChatLine {
             kind: ChatLineKind::Local,
             text: format!("[{}] {}", self.local_label, text),
+            message_hash: None,
+            edited: false,
+            reactions: Vec::new(),
+        });
+    }
+}
+
+// ── ChatCallbacks implementation ─────────────────────────────────────
+
+impl ChatCallbacks for AppState {
+    fn local_public(&self) -> iroh::PublicKey {
+        self.local_public
+    }
+
+    fn resolve_name(&self, peer: &iroh::PublicKey) -> String {
+        self.names
+            .get(peer)
+            .cloned()
+            .unwrap_or_else(|| peer.fmt_short().to_string())
+    }
+
+    fn set_name(&mut self, peer: iroh::PublicKey, name: String) {
+        self.names.insert(peer, name);
+    }
+
+    fn is_friend(&self, peer: &iroh::PublicKey) -> bool {
+        let fid = FriendId::from_public_key(*peer);
+        self.friends.get(&fid).is_some()
+    }
+
+    fn friend_mark_online(&mut self, fid: FriendId) {
+        self.friends.mark_online(fid);
+    }
+
+    fn friend_mark_offline(&mut self, fid: FriendId) {
+        self.friends.mark_offline(fid);
+    }
+
+    fn friend_set_name(&mut self, fid: FriendId, name: String) {
+        self.friends.set_last_announced_name(fid, name);
+    }
+
+    fn mark_friends_dirty(&mut self) {
+        self.friends_dirty = true;
+    }
+
+    fn push_system(&mut self, text: String) {
+        self.messages.push(ChatLine {
+            kind: ChatLineKind::System,
+            text,
+            message_hash: None,
+            edited: false,
+            reactions: Vec::new(),
         });
     }
 
-    fn push_remote_msg(&mut self, label: String, text: String) {
+    fn push_remote(&mut self, label: String, text: String, hash: Option<iroh_gossip::chat_core::MessageHash>) {
         self.messages.push(ChatLine {
             kind: ChatLineKind::Remote,
             text: format!("[{}] {}", label, text),
+            message_hash: hash,
+            edited: false,
+            reactions: Vec::new(),
         });
+    }
+
+    fn set_pending_file(&mut self, name: String, ticket: String) {
+        self.pending_file = Some((name, ticket));
+    }
+
+    fn set_typing(&mut self, peer: iroh::PublicKey) {
+        if !self.typing_peers.contains(&peer) {
+            self.typing_peers.push(peer);
+        }
+    }
+
+    fn clear_typing(&mut self, peer: iroh::PublicKey) {
+        self.typing_peers.retain(|p| p != &peer);
+    }
+
+    fn has_message(&self, hash: &iroh_gossip::chat_core::MessageHash) -> bool {
+        self.messages.iter().any(|m| m.message_hash == Some(*hash))
+    }
+
+    fn edit_message(&mut self, hash: &iroh_gossip::chat_core::MessageHash, new_text: String) {
+        if let Some(entry) = self
+            .messages
+            .iter_mut()
+            .find(|m| m.message_hash == Some(*hash))
+        {
+            if let Some((prefix, _)) = entry.text.split_once("] ") {
+                entry.text = format!("{}] {} (edited)", prefix, new_text);
+            } else {
+                entry.text = new_text;
+            }
+            entry.edited = true;
+        }
+    }
+
+    fn delete_message(&mut self, hash: &iroh_gossip::chat_core::MessageHash) {
+        if let Some(entry) = self
+            .messages
+            .iter_mut()
+            .find(|m| m.message_hash == Some(*hash))
+        {
+            if let Some((prefix, _)) = entry.text.split_once("] ") {
+                entry.text = format!("{}] [message deleted]", prefix);
+            } else {
+                entry.text = "[message deleted]".to_string();
+            }
+            entry.edited = false;
+            entry.reactions.clear();
+        }
+    }
+
+    fn add_reaction(&mut self, hash: &iroh_gossip::chat_core::MessageHash, emoji: String) {
+        if let Some(entry) = self
+            .messages
+            .iter_mut()
+            .find(|m| m.message_hash == Some(*hash))
+        {
+            entry.reactions.push(emoji);
+        }
+    }
+
+    fn on_neighbor_up(&mut self, peer: iroh::PublicKey) {
+        self.neighbors.insert(peer);
+        recompute_connection_counts(self);
+    }
+
+    fn on_neighbor_down(&mut self, peer: iroh::PublicKey) {
+        self.neighbors.remove(&peer);
+        recompute_connection_counts(self);
+    }
+
+    fn request_quit(&mut self) {
+        self.push_system("The gossip receiver closed.".into());
     }
 }
 
@@ -564,6 +711,11 @@ fn main() -> Result<()> {
         friend_mgr,
         friend_events_rx,
         tor_reconnect_rx: tor_reconnect_rx_opt,
+
+        // ── Rich features ──
+        names: HashMap::new(),
+        typing_peers: Vec::new(),
+        last_typing_broadcast: std::time::Instant::now(),
     };
 
     let app_cell = std::sync::Mutex::new(Some((app, initial_room)));
@@ -643,7 +795,7 @@ async fn subscribe_to_topic(
     // Spawn forwarding task
     let tx = net_tx.clone();
     let handle = task::spawn(async move {
-        forward_gossip_events(receiver, tx).await;
+        iroh_gossip::chat_core::forward_gossip_events(receiver, tx).await;
     });
     *forward_handle = Some(handle);
 
@@ -929,6 +1081,24 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
 
         AppMessage::InputChanged(value) => {
             state.input_value = value;
+            // Broadcast Typing indicator (throttled to every 2 seconds)
+            if !state.input_value.is_empty() {
+                let now = std::time::Instant::now();
+                if now.duration_since(state.last_typing_broadcast).as_secs() >= 2 {
+                    state.last_typing_broadcast = now;
+                    if let Some(ref sender) = state.sender {
+                        let sender = sender.clone();
+                        let sk = state.secret_key.clone();
+                        state.runtime_handle.spawn(async move {
+                            if let Ok(encoded) =
+                                SignedMessage::sign_and_encode(&sk, &Message::Typing)
+                            {
+                                let _ = sender.broadcast(encoded).await;
+                            }
+                        });
+                    }
+                }
+            }
             return Task::none();
         }
         AppMessage::SendPressed => {
@@ -1126,10 +1296,17 @@ fn view_chat_screen(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Re
                     ChatLineKind::Local => local_color,
                     ChatLineKind::Remote => remote_color,
                 };
-                let elem: Element<'_, AppMessage, Theme, iced::Renderer> =
-                    if let Some(ticket_val) = line.text.strip_prefix(ticket_prefix) {
+                let mut msg_parts = column![].spacing(2);
+                // The message text
+                let display_text = if line.edited && line.kind != ChatLineKind::System {
+                    format!("{} (edited)", line.text)
+                } else {
+                    line.text.clone()
+                };
+                let text_elem: Element<'_, AppMessage, Theme, iced::Renderer> =
+                    if let Some(ticket_val) = display_text.strip_prefix(ticket_prefix) {
                         button(
-                            text(&line.text)
+                            text(display_text.clone())
                                 .color(color)
                                 .size(14)
                                 .wrapping(Wrapping::Word),
@@ -1138,13 +1315,23 @@ fn view_chat_screen(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Re
                         .style(button::text)
                         .into()
                     } else {
-                        text(&line.text)
+                        text(display_text)
                             .color(color)
                             .size(14)
                             .wrapping(Wrapping::Word)
                             .into()
                     };
-                col.push(elem)
+                msg_parts = msg_parts.push(text_elem);
+                // Reactions row
+                if !line.reactions.is_empty() {
+                    let reactions_text = line.reactions.join(" ");
+                    msg_parts = msg_parts.push(
+                        text(reactions_text)
+                            .size(16)
+                            .color(Color::from_rgb(0.8, 0.6, 0.2)),
+                    );
+                }
+                col.push(msg_parts)
             });
     let log_panel = container(scrollable(log_col).height(Length::Fill).width(Length::Fill))
         .padding(8)
@@ -1252,68 +1439,10 @@ fn recompute_connection_counts(state: &mut AppState) {
 }
 
 fn handle_net_event(state: &mut AppState, event: NetEvent) {
-    match event {
-        NetEvent::Message { from, message, .. } => match message {
-            Message::AboutMe { name } => {
-                state.push_system(format!("{} is now known as {name}", from.fmt_short()));
-            }
-            Message::Message { text } => {
-                if from == state.local_public {
-                    return;
-                }
-                state.push_remote_msg(from.fmt_short().to_string(), text);
-            }
-            Message::FileShare { name, ticket } => {
-                if from == state.local_public {
-                    return;
-                }
-                state.pending_file = Some((name.clone(), ticket));
-                state.push_system(format!(
-                    "{} shared — click Download or type /download to fetch",
-                    name
-                ));
-            }
-            Message::Goodbye
-            | Message::Typing
-            | Message::ReadReceipt { .. }
-            | Message::Edit { .. }
-            | Message::Delete { .. }
-            | Message::Reaction { .. } => {
-                // Handled via NeighborDown or by the shared chat_core handler.
-            }
-        },
-        NetEvent::NeighborUp { peer } => {
-            state.push_system(format!("{} joined the chat", peer.fmt_short()));
-            // Track friend state
-            let fid = FriendId::from_public_key(peer);
-            if state.friends.get(&fid).is_some() {
-                state.friends.mark_online(fid);
-                state.friends_dirty = true;
-            }
-            // Track for direct-vs-relay counting
-            state.neighbors.insert(peer);
-            // Recompute direct/relay counts via the endpoint
-            recompute_connection_counts(state);
-        }
-        NetEvent::NeighborDown { peer } => {
-            state.push_system(format!("{} left the chat", peer.fmt_short()));
-            // Track friend state
-            let fid = FriendId::from_public_key(peer);
-            if state.friends.get(&fid).is_some() {
-                state.friends.mark_offline(fid);
-                state.friends_dirty = true;
-            }
-            // Remove from neighbor tracking
-            state.neighbors.remove(&peer);
-            // Recompute direct/relay counts
-            recompute_connection_counts(state);
-        }
-        NetEvent::Error(err) => state.push_system(format!("Error: {err}")),
-        NetEvent::Closed => {
-            state.push_system("The gossip receiver closed.".into());
-            state.connected = false;
-        }
-    }
+    // Delegate to the shared handler which handles Typing, Edit, Delete,
+    // Reaction, ReadReceipt, Name resolution, Friend tracking, etc.
+    let _ = iroh_gossip::chat_core::handle_net_event(event, state);
+
     // Update preview in room history
     if !state.topic.is_empty() {
         if let Ok(topic) = TopicId::from_str(&state.topic) {
@@ -1386,7 +1515,7 @@ fn handle_send(state: &mut AppState) {
     }
     if trimmed == "/help" {
         state.push_system(
-            "Commands:  /send <path> — share a file  |  /download — fetch pending file  |  /leave — leave and delete from history  |  /help — this help  |  /friend add <pk> [alias] — track friend  |  /friend remove <pk|alias> — remove friend  |  /friend list — list friends".into(),
+            "Commands:  /send <path> — share a file  |  /download — fetch pending file  |  /react <hash> <emoji> — react to a message  |  /edit <hash> <new text> — edit your message  |  /delete <hash> — delete your message  |  /leave — leave and delete from history  |  /help — this help  |  /friend add <pk> [alias] — track friend  |  /friend remove <pk|alias> — remove friend  |  /friend list — list friends".into(),
         );
         return;
     }
@@ -1547,6 +1676,135 @@ fn handle_send(state: &mut AppState) {
         return;
     }
 
+    // ── React command ──────────────────────────────────────────
+    if let Some(rest) = trimmed.strip_prefix("/react ") {
+        let rest = rest.trim();
+        let (hash_hex, emoji) = match rest.split_once(char::is_whitespace) {
+            Some((h, e)) => (h, e.trim()),
+            None => {
+                state.push_system("Usage: /react <message_hash_hex> <emoji>".into());
+                return;
+            }
+        };
+        let hash_bytes = match hex_decode(hash_hex) {
+            Some(b) => {
+                if b.len() != 32 {
+                    state.push_system("Hash must be 64 hex characters (32 bytes).".into());
+                    return;
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            None => {
+                state.push_system("Invalid hex hash.".into());
+                return;
+            }
+        };
+        if let Ok(encoded) = SignedMessage::sign_and_encode(
+            &state.secret_key,
+            &Message::Reaction {
+                message_hash: hash_bytes,
+                emoji: emoji.to_string(),
+            },
+        ) {
+            if let Some(ref sender) = state.sender {
+                let sender = sender.clone();
+                let rt = state.runtime_handle.clone();
+                rt.spawn(async move {
+                    let _ = sender.broadcast(encoded).await;
+                });
+            }
+            state.push_system(format!("Reacted with '{}'", emoji));
+        } else {
+            state.push_system("Failed to encode reaction.".into());
+        }
+        return;
+    }
+
+    // ── Edit command ───────────────────────────────────────────
+    if let Some(rest) = trimmed.strip_prefix("/edit ") {
+        let (hash_hex, new_text) = match rest.split_once(char::is_whitespace) {
+            Some((h, t)) => (h, t),
+            None => {
+                state.push_system("Usage: /edit <message_hash_hex> <new text>".into());
+                return;
+            }
+        };
+        let hash_bytes = match hex_decode(hash_hex) {
+            Some(b) => {
+                if b.len() != 32 {
+                    state.push_system("Hash must be 64 hex characters (32 bytes).".into());
+                    return;
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            None => {
+                state.push_system("Invalid hex hash.".into());
+                return;
+            }
+        };
+        if let Ok(encoded) = SignedMessage::sign_and_encode(
+            &state.secret_key,
+            &Message::Edit {
+                original_hash: hash_bytes,
+                new_text: new_text.to_string(),
+            },
+        ) {
+            if let Some(ref sender) = state.sender {
+                let sender = sender.clone();
+                let rt = state.runtime_handle.clone();
+                rt.spawn(async move {
+                    let _ = sender.broadcast(encoded).await;
+                });
+            }
+            state.push_system(format!("Edited message: {}", new_text));
+        } else {
+            state.push_system("Failed to encode edit.".into());
+        }
+        return;
+    }
+
+    // ── Delete command ─────────────────────────────────────────
+    if let Some(hash_hex) = trimmed.strip_prefix("/delete ") {
+        let hash_hex = hash_hex.trim();
+        let hash_bytes = match hex_decode(hash_hex) {
+            Some(b) => {
+                if b.len() != 32 {
+                    state.push_system("Hash must be 64 hex characters (32 bytes).".into());
+                    return;
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            None => {
+                state.push_system("Invalid hex hash.".into());
+                return;
+            }
+        };
+        if let Ok(encoded) = SignedMessage::sign_and_encode(
+            &state.secret_key,
+            &Message::Delete {
+                message_hash: hash_bytes,
+            },
+        ) {
+            if let Some(ref sender) = state.sender {
+                let sender = sender.clone();
+                let rt = state.runtime_handle.clone();
+                rt.spawn(async move {
+                    let _ = sender.broadcast(encoded).await;
+                });
+            }
+            state.push_system("Message deleted.".into());
+        } else {
+            state.push_system("Failed to encode delete.".into());
+        }
+        return;
+    }
+
     let msg = Message::Message {
         text: trimmed.clone(),
     };
@@ -1557,6 +1815,17 @@ fn handle_send(state: &mut AppState) {
         }
     }
     state.push_local_msg(trimmed);
+}
+
+/// Decode a hex string into bytes. Returns None on invalid hex.
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 fn handle_download(state: &mut AppState) {
@@ -1602,56 +1871,4 @@ fn handle_download(state: &mut AppState) {
         state.push_system(format!("Saved: {filename}"));
         state.pending_file = None;
     }
-}
-
-// ── Background network task ───────────────────────────────────────────
-
-/// Room-doc messages on the gossip topic use marker prefixes.
-/// Metadata updates start with 0xFE, roster updates start with 0xFF.
-/// These are handled by the TUI's room_docs layer and are not SignedMessages.
-const METADATA_MARKER: u8 = 0xFE;
-const ROSTER_MARKER: u8 = 0xFF;
-
-async fn forward_gossip_events(
-    mut receiver: GossipReceiver,
-    net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
-) {
-    while let Ok(Some(event)) = receiver.try_next().await {
-        match event {
-            GossipEvent::Received(msg) => {
-                // Skip room-doc messages (metadata 0xFE, roster 0xFF) —
-                // they are not SignedMessages and would fail decode.
-                if let Some(&marker) = msg.content.first() {
-                    if marker == METADATA_MARKER || marker == ROSTER_MARKER {
-                        continue;
-                    }
-                }
-                match SignedMessage::verify_and_decode(&msg.content) {
-                    Ok((from, message)) => {
-                        if net_tx.send(NetEvent::Message { from, message }).is_err() {
-                            return;
-                        }
-                    }
-                    Err(err) => {
-                        // Log the error but keep running — a single bad
-                        // message should not kill the network bridge task.
-                        eprintln!("forward_gossip_events: decode error (dropped): {err}");
-                        continue;
-                    }
-                }
-            }
-            GossipEvent::NeighborUp(id) => {
-                if net_tx.send(NetEvent::NeighborUp { peer: id }).is_err() {
-                    return;
-                }
-            }
-            GossipEvent::NeighborDown(id) => {
-                if net_tx.send(NetEvent::NeighborDown { peer: id }).is_err() {
-                    return;
-                }
-            }
-            GossipEvent::Lagged => {}
-        }
-    }
-    let _ = net_tx.send(NetEvent::Closed);
 }

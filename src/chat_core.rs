@@ -16,6 +16,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     str::FromStr,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
@@ -300,8 +301,9 @@ pub struct AppState {
     pub friends: FriendsStore,
     /// Whether the friends store has unsaved changes.
     pub friends_dirty: bool,
-    /// Peers that have recently broadcast a typing indicator.
-    pub typing_peers: Vec<PublicKey>,
+    /// Peers that have recently broadcast a typing indicator, mapped to the
+    /// last `Instant` the typing message was received.
+    pub typing_peers: HashMap<PublicKey, Instant>,
     /// Display name cache: peer PublicKey → last announced display name.
     pub names: HashMap<PublicKey, String>,
 }
@@ -331,7 +333,7 @@ impl AppState {
             pending_file: None,
             friends,
             friends_dirty: false,
-            typing_peers: Vec::new(),
+            typing_peers: HashMap::new(),
             names,
         }
     }
@@ -361,11 +363,23 @@ impl AppState {
         self.push_entry(ChatEntry::remote(label, text).with_message_hash(hash), true);
     }
 
-    /// Track that a peer is currently typing.
+    /// Track that a peer is currently typing (records the current instant).
     pub fn set_typing(&mut self, peer: PublicKey) {
-        if !self.typing_peers.contains(&peer) {
-            self.typing_peers.push(peer);
-        }
+        self.typing_peers.insert(peer, Instant::now());
+    }
+
+    /// Stop tracking a peer's typing indicator.
+    pub fn clear_typing(&mut self, peer: &PublicKey) {
+        self.typing_peers.remove(peer);
+    }
+
+    /// Remove typing indicators that haven't been refreshed in the last 5 seconds.
+    /// Returns true if any entries were removed.
+    pub fn clear_expired_typing(&mut self) -> bool {
+        let cutoff = Instant::now() - Duration::from_secs(5);
+        let before = self.typing_peers.len();
+        self.typing_peers.retain(|_, &mut last_seen| last_seen > cutoff);
+        self.typing_peers.len() < before
     }
 
     /// Push a raw [`ChatEntry`].
@@ -470,9 +484,11 @@ impl ChatCallbacks for AppState {
     }
 
     fn set_typing(&mut self, peer: PublicKey) {
-        if !self.typing_peers.contains(&peer) {
-            self.typing_peers.push(peer);
-        }
+        self.typing_peers.insert(peer, Instant::now());
+    }
+
+    fn clear_typing(&mut self, peer: PublicKey) {
+        self.typing_peers.remove(&peer);
     }
 
     fn has_message(&self, hash: &MessageHash) -> bool {
@@ -1511,12 +1527,15 @@ mod tests {
 
     #[test]
     fn handle_net_event_own_message_is_skipped() {
-        let local_key = SecretKey::generate();
         let mut app = test_app();
         let mut names: HashMap<iroh::PublicKey, String> = HashMap::new();
 
+        // Use the same placeholder key that AppState::local_public() returns
+        // to simulate a self-sent message.
+        let own_key: PublicKey =
+            PublicKey::from_bytes(&[0u8; 32]).expect("32-byte all-zero key is valid");
         let event = NetEvent::Message {
-            from: local_key.public(),
+            from: own_key,
             message: Message::Message {
                 text: "echo".into(),
             },

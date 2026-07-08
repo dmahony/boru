@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey};
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket};
@@ -148,6 +149,10 @@ pub struct IcedChat {
     conn_refresh_counter: u32,
     /// Optional receiver for Tor reconnection status updates.
     tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
+    /// Peers that have recently (within ~5s) broadcast a typing indicator.
+    typing_peers: HashMap<PublicKey, Instant>,
+    /// Last time we broadcast a typing indicator, for throttling.
+    last_typing_sent: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +264,8 @@ impl IcedChat {
             relayed_peers: 0,
             conn_refresh_counter: 0,
             tor_reconnect_rx,
+            typing_peers: HashMap::new(),
+            last_typing_sent: None,
         }
     }
 
@@ -533,6 +540,33 @@ impl IcedChat {
             // ── Chat ─────────────────────────────────────────────────
             AppMessage::InputChanged(text) => {
                 self.composer_text = text;
+
+                // Broadcast a Typing indicator when the user is typing,
+                // throttled to at most once every 3 seconds.
+                if !self.composer_text.is_empty() {
+                    let now = Instant::now();
+                    let enough_time_passed = self
+                        .last_typing_sent
+                        .map(|t| {
+                            now.saturating_duration_since(t).as_secs() >= 3
+                        })
+                        .unwrap_or(true);
+                    if enough_time_passed {
+                        self.last_typing_sent = Some(now);
+                        if let Some(ref sender) = self.sender {
+                            let sender = sender.clone();
+                            let sk = self.secret_key.clone();
+                            task::spawn(async move {
+                                if let Ok(encoded) =
+                                    SignedMessage::sign_and_encode(&sk, &crate::Message::Typing)
+                                {
+                                    sender.broadcast(encoded).await.ok();
+                                }
+                            });
+                        }
+                    }
+                }
+
                 iced::Task::none()
             }
 
@@ -719,6 +753,163 @@ impl IcedChat {
                         }
                     }
                     return iced::Task::none();
+                }
+
+                // ── Reactions ──
+                if let Some(rest) = trimmed.strip_prefix("/react ") {
+                    let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                    if parts.len() < 2 {
+                        self.push_system("Usage: /react <msg_index> <emoji>".to_string());
+                        return iced::Task::none();
+                    }
+                    let idx: usize = match parts[0].parse() {
+                        Ok(i) => i,
+                        Err(_) => {
+                            self.push_system("Usage: /react <msg_index> <emoji>".to_string());
+                            return iced::Task::none();
+                        }
+                    };
+                    let emoji = parts[1].to_string();
+                    if idx == 0 || idx > self.entries.len() {
+                        self.push_system(format!("No message at index {idx}"));
+                        return iced::Task::none();
+                    }
+                    let Some(hash) = self.entries[idx - 1].message_hash else {
+                        self.push_system("Cannot react to a system message".to_string());
+                        return iced::Task::none();
+                    };
+                    // Apply locally first
+                    self.add_reaction(&hash, emoji.clone());
+                    // Broadcast
+                    match SignedMessage::sign_and_encode(
+                        &self.secret_key,
+                        &crate::Message::Reaction {
+                            message_hash: hash,
+                            emoji,
+                        },
+                    ) {
+                        Ok(encoded) => {
+                            if let Some(ref sender) = self.sender {
+                                let sender = sender.clone();
+                                return iced::Task::perform(
+                                    async move {
+                                        sender.broadcast(encoded).await.ok();
+                                    },
+                                    |_| AppMessage::ToggleHelp,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            return iced::Task::done(AppMessage::ErrorMsg(e.to_string()));
+                        }
+                    }
+                    return iced::Task::done(AppMessage::ErrorMsg(
+                        "Not connected to any room.".into(),
+                    ));
+                }
+
+                // ── Edit ──
+                if let Some(rest) = trimmed.strip_prefix("/edit ") {
+                    let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                    if parts.len() < 2 {
+                        self.push_system(
+                            "Usage: /edit <msg_index> <new_text>".to_string(),
+                        );
+                        return iced::Task::none();
+                    }
+                    let idx: usize = match parts[0].parse() {
+                        Ok(i) => i,
+                        Err(_) => {
+                            self.push_system(
+                                "Usage: /edit <msg_index> <new_text>".to_string(),
+                            );
+                            return iced::Task::none();
+                        }
+                    };
+                    let new_text = parts[1].to_string();
+                    if idx == 0 || idx > self.entries.len() {
+                        self.push_system(format!("No message at index {idx}"));
+                        return iced::Task::none();
+                    }
+                    let Some(hash) = self.entries[idx - 1].message_hash else {
+                        self.push_system("Cannot edit a system message".to_string());
+                        return iced::Task::none();
+                    };
+                    // Apply locally first
+                    self.edit_message(&hash, new_text.clone());
+                    // Broadcast
+                    match SignedMessage::sign_and_encode(
+                        &self.secret_key,
+                        &crate::Message::Edit {
+                            original_hash: hash,
+                            new_text,
+                        },
+                    ) {
+                        Ok(encoded) => {
+                            if let Some(ref sender) = self.sender {
+                                let sender = sender.clone();
+                                return iced::Task::perform(
+                                    async move {
+                                        sender.broadcast(encoded).await.ok();
+                                    },
+                                    |_| AppMessage::ToggleHelp,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            return iced::Task::done(AppMessage::ErrorMsg(e.to_string()));
+                        }
+                    }
+                    return iced::Task::done(AppMessage::ErrorMsg(
+                        "Not connected to any room.".into(),
+                    ));
+                }
+
+                // ── Delete ──
+                if let Some(idx_str) = trimmed.strip_prefix("/delete ") {
+                    let idx_str = idx_str.trim().to_string();
+                    let idx: usize = match idx_str.parse() {
+                        Ok(i) => i,
+                        Err(_) => {
+                            self.push_system(
+                                "Usage: /delete <msg_index>".to_string(),
+                            );
+                            return iced::Task::none();
+                        }
+                    };
+                    if idx == 0 || idx > self.entries.len() {
+                        self.push_system(format!("No message at index {idx}"));
+                        return iced::Task::none();
+                    }
+                    let Some(hash) = self.entries[idx - 1].message_hash else {
+                        self.push_system("Cannot delete a system message".to_string());
+                        return iced::Task::none();
+                    };
+                    // Apply locally first
+                    self.delete_message(&hash);
+                    // Broadcast
+                    match SignedMessage::sign_and_encode(
+                        &self.secret_key,
+                        &crate::Message::Delete { message_hash: hash },
+                    ) {
+                        Ok(encoded) => {
+                            if let Some(ref sender) = self.sender {
+                                let sender = sender.clone();
+                                return iced::Task::perform(
+                                    async move {
+                                        sender.broadcast(encoded).await.ok();
+                                    },
+                                    |_| AppMessage::ToggleHelp,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            return iced::Task::done(AppMessage::ErrorMsg(e.to_string()));
+                        }
+                    }
+                    return iced::Task::done(AppMessage::ErrorMsg(
+                        "Not connected to any room.".into(),
+                    ));
                 }
 
                 // Normal text message
@@ -921,6 +1112,9 @@ impl IcedChat {
                 } else {
                     self.conn_refresh_counter -= 1;
                 }
+
+                // Clear stale typing indicators (older than 5s).
+                self.clear_stale_typing();
 
                 // Poll Tor reconnection status updates
                 if let Some(ref rx) = self.tor_reconnect_rx {
@@ -1183,8 +1377,12 @@ impl ChatCallbacks for IcedChat {
         self.pending_file = Some((name, ticket));
     }
 
-    fn set_typing(&mut self, _peer: PublicKey) {
-        // IcedChat does not currently display typing indicators.
+    fn set_typing(&mut self, peer: PublicKey) {
+        self.typing_peers.insert(peer, Instant::now());
+    }
+
+    fn clear_typing(&mut self, peer: PublicKey) {
+        self.typing_peers.remove(&peer);
     }
 
     fn has_message(&self, hash: &MessageHash) -> bool {
@@ -1390,6 +1588,39 @@ impl IcedChat {
 
     // ── Chat screen view ─────────────────────────────────────────────
 
+    /// Remove typing indicators older than 5 seconds.
+    fn clear_stale_typing(&mut self) {
+        let cutoff = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(5))
+            .unwrap_or(Instant::now());
+        self.typing_peers.retain(|_, last| *last > cutoff);
+    }
+
+    /// Build the typing indicator text (e.g. "Alice is typing..." or
+    /// "Alice and Bob are typing...").
+    fn typing_indicator_text(&self) -> Option<String> {
+        if self.typing_peers.is_empty() {
+            return None;
+        }
+        let names: Vec<String> = self
+            .typing_peers
+            .keys()
+            .map(|pk| {
+                self.names
+                    .get(pk)
+                    .cloned()
+                    .unwrap_or_else(|| pk.fmt_short().to_string())
+            })
+            .collect();
+        if names.len() == 1 {
+            Some(format!("{} is typing...", names[0]))
+        } else if names.len() == 2 {
+            Some(format!("{} and {} are typing...", names[0], names[1]))
+        } else {
+            Some(format!("{} people are typing...", names.len()))
+        }
+    }
+
     fn view_chat_screen(&self) -> iced::Element<'_, AppMessage> {
         use iced::{widget, Length};
 
@@ -1470,10 +1701,15 @@ impl IcedChat {
                     Color::from_rgb(0.8, 0.8, 0.8),
                 ),
             };
+            let body_text = if entry.edited {
+                format!(" {} (edited)", entry.body)
+            } else {
+                format!(" {}", entry.body)
+            };
             let line = Row::new()
                 .push(text(format!("[{}]", entry.label)).color(label_c))
                 .push(
-                    text(format!(" {}", entry.body))
+                    text(body_text)
                         .color(body_c)
                         .wrapping(Wrapping::Word)
                         .width(Length::Fill),
@@ -1481,10 +1717,35 @@ impl IcedChat {
                 .spacing(0)
                 .width(Length::Fill);
             col = col.push(line);
+
+            // ── Reactions ──
+            if !entry.reactions.is_empty() {
+                let reactions_text = format!("      {}", entry.reactions.join("  "));
+                let reactions_line = Row::new()
+                    .push(
+                        text(reactions_text)
+                            .color(Color::from_rgb(0.6, 0.6, 0.6))
+                            .size(12)
+                            .wrapping(Wrapping::Word)
+                            .width(Length::Fill),
+                    )
+                    .spacing(0)
+                    .width(Length::Fill);
+                col = col.push(reactions_line);
+            }
         }
 
         if self.entries.is_empty() {
             col = col.push(text("No messages yet.").color(Color::from_rgb(0.5, 0.5, 0.5)));
+        }
+
+        // Typing indicator at the bottom of the log
+        if let Some(typing_text) = self.typing_indicator_text() {
+            col = col.push(
+                text(typing_text)
+                    .color(Color::from_rgb(0.4, 0.4, 0.4))
+                    .size(12),
+            );
         }
 
         scrollable(col)
@@ -1530,6 +1791,10 @@ impl IcedChat {
             .push(text(
                 "/friend list    List tracked friends and their status",
             ))
+            .push(text(""))
+            .push(text("/react <idx> <emoji>  Add a reaction to a message"))
+            .push(text("/edit <idx> <text>   Edit a message"))
+            .push(text("/delete <idx>        Delete a message"))
             .push(text(""))
             .push(text("Type a message and press Enter to send."))
             .push(text(""))
