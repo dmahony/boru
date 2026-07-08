@@ -184,7 +184,7 @@ enum Screen {
 enum AppMessage {
     // ── Navigation ──
     GoToChatList,
-    OpenRoom(TopicId),
+    OpenRoom(TopicId, Vec<iroh::EndpointId>),
     RoomOpened {
         topic: TopicId,
         ticket: String,
@@ -297,8 +297,7 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().std_context("failed to create tokio runtime")?;
     let runtime_handle = runtime.handle().clone();
 
-    // Determine initial topic from CLI
-    let initial_topic: Option<TopicId> = match &args.command {
+    let mut initial_room: Option<(TopicId, Vec<iroh::EndpointId>)> = match &args.command {
         Some(Command::Open { topic }) => {
             let data_dir = get_data_dir();
             let t = match topic {
@@ -319,12 +318,13 @@ fn main() -> Result<()> {
                     }
                 },
             };
-            Some(t)
+            Some((t, vec![]))
         }
         Some(Command::Join { ticket }) => match Ticket::from_str(ticket) {
             Ok(t) => {
                 println!("> joining chat room for topic {}", t.topic);
-                Some(t.topic)
+                let bootstrap: Vec<_> = t.peers.iter().map(|p| p.id).collect();
+                Some((t.topic, bootstrap))
             }
             Err(e) => {
                 eprintln!("error: failed to parse ticket: {e}");
@@ -565,17 +565,17 @@ fn main() -> Result<()> {
         tor_reconnect_rx: tor_reconnect_rx_opt,
     };
 
-    let app_cell = std::sync::Mutex::new(Some((app, initial_topic)));
+    let app_cell = std::sync::Mutex::new(Some((app, initial_room)));
 
     iced::application(
         move || {
-            let (state, init_topic) = app_cell
+            let (state, init_room) = app_cell
                 .lock()
                 .unwrap()
                 .take()
                 .expect("chat-gui boot called more than once");
-            let task = if let Some(topic) = init_topic {
-                Task::done(AppMessage::OpenRoom(topic))
+            let task = if let Some((topic, bootstrap)) = init_room {
+                Task::done(AppMessage::OpenRoom(topic, bootstrap))
             } else {
                 Task::none()
             };
@@ -614,6 +614,7 @@ async fn subscribe_to_topic(
     gossip: &Gossip,
     endpoint: &Endpoint,
     topic: TopicId,
+    bootstrap: Vec<iroh::EndpointId>,
     secret_key: &SecretKey,
     label: &str,
     net_tx: &tokio::sync::mpsc::UnboundedSender<NetEvent>,
@@ -626,7 +627,7 @@ async fn subscribe_to_topic(
     }
 
     let sub: GossipTopic = gossip
-        .subscribe(topic, vec![])
+        .subscribe(topic, bootstrap)
         .await
         .map_err(|e| e.to_string())?;
     let (sender, receiver) = sub.split();
@@ -698,7 +699,7 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
             return Task::none();
         }
 
-        AppMessage::OpenRoom(topic) => {
+        AppMessage::OpenRoom(topic, bootstrap) => {
             let gossip = state.gossip.clone();
             let endpoint = state.endpoint.clone(); // Endpoint is Clone
             let sk = state.secret_key.clone();
@@ -713,6 +714,7 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
                         &gossip,
                         &endpoint,
                         topic,
+                        bootstrap,
                         &sk,
                         &label,
                         &net_tx,
@@ -768,13 +770,16 @@ fn update(state: &mut AppState, message: AppMessage) -> Task<AppMessage> {
 
         AppMessage::CreateNewRoom => {
             let topic = TopicId::from_bytes(rand::random());
-            return Task::done(AppMessage::OpenRoom(topic));
+            return Task::done(AppMessage::OpenRoom(topic, vec![]));
         }
 
         AppMessage::JoinFromTicket => {
             let input = state.join_ticket_input.clone();
             return match Ticket::from_str(&input) {
-                Ok(ticket) => Task::done(AppMessage::OpenRoom(ticket.topic)),
+                Ok(ticket) => {
+                    let bootstrap: Vec<_> = ticket.peers.iter().map(|p| p.id).collect();
+                    Task::done(AppMessage::OpenRoom(ticket.topic, bootstrap))
+                }
                 Err(e) => {
                     state.push_system(format!("Invalid ticket: {e}"));
                     Task::none()
@@ -1043,7 +1048,7 @@ fn view_chat_list(state: &AppState) -> Element<'_, AppMessage, Theme, iced::Rend
                 .spacing(4)
                 .align_y(Alignment::Center),
             )
-            .on_press(AppMessage::OpenRoom(topic))
+            .on_press(AppMessage::OpenRoom(topic, vec![]))
             .width(Length::Fill)
             .padding(0);
 
