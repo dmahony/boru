@@ -1144,9 +1144,11 @@ impl IcedChat {
                 iced::Task::perform(
                     async move {
                         let path_buf = std::path::PathBuf::from(&abs_path);
+                        eprintln!(">>> ExecuteImageSend: reading {:?}", path_buf);
                         let image_bytes = tokio::fs::read(&path_buf)
                             .await
                             .map_err(|e| format!("Failed to read image: {e}"))?;
+                        eprintln!(">>> ExecuteImageSend: read {} bytes", image_bytes.len());
                         let tag = blob_store
                             .blobs()
                             .add_path(path_buf)
@@ -1219,10 +1221,12 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::ImageSent(name) => {
+                eprintln!(">>> ImageSent: {name}");
                 self.push_local(format!("[Image: {name}]"));
                 iced::Task::none()
             }
             AppMessage::ImageDownloaded(name, image_bytes) => {
+                eprintln!(">>> ImageDownloaded: {name}, {} bytes", image_bytes.len());
                 let sender_name = self
                     .names
                     .get(&self.local_public)
