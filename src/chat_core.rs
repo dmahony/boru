@@ -297,6 +297,8 @@ pub struct AppState {
     pub help_visible: bool,
     /// Pending file download info: (filename, ticket_string).
     pub pending_file: Option<(String, String)>,
+    /// Pending image download info: (filename, blob_hash, sender_pk).
+    pub pending_image: Option<(String, MessageHash, PublicKey)>,
     /// Durable friends list store.
     pub friends: FriendsStore,
     /// Whether the friends store has unsaved changes.
@@ -331,6 +333,7 @@ impl AppState {
             should_quit: false,
             help_visible: false,
             pending_file: None,
+            pending_image: None,
             friends,
             friends_dirty: false,
             typing_peers: HashMap::new(),
@@ -483,6 +486,10 @@ impl ChatCallbacks for AppState {
         self.pending_file = Some((name, ticket));
     }
 
+    fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
+        self.pending_image = Some((name, hash, from));
+    }
+
     fn set_typing(&mut self, peer: PublicKey) {
         self.typing_peers.insert(peer, Instant::now());
     }
@@ -492,14 +499,14 @@ impl ChatCallbacks for AppState {
     }
 
     fn has_message(&self, hash: &MessageHash) -> bool {
-        self.entries.iter().any(|e| e.message_hash == Some(*hash))
+        self.entries.iter().any(|e| e.message_hash.as_ref() == Some(hash))
     }
 
     fn edit_message(&mut self, hash: &MessageHash, new_text: String) {
         if let Some(entry) = self
             .entries
             .iter_mut()
-            .find(|entry| entry.message_hash == Some(*hash))
+            .find(|e| e.message_hash.as_ref() == Some(hash))
         {
             entry.body = new_text;
             entry.edited = true;
@@ -620,6 +627,13 @@ pub enum Message {
         message_hash: MessageHash,
         /// Reaction emoji.
         emoji: String,
+    },
+    /// Announce an image available for download and inline display.
+    ImageShare {
+        /// The image file name (basename only, no path).
+        name: String,
+        /// Blob hash for the image content, for blob-store lookup and download.
+        hash: MessageHash,
     },
 }
 
@@ -791,6 +805,21 @@ pub fn handle_net_event(
                             sender_name, name
                         ));
                         cb.set_pending_file(name, ticket);
+                    }
+                }
+                Message::ImageShare { name, hash } => {
+                    if from != cb.local_public() {
+                        let fid = FriendId::from_public_key(from);
+                        if cb.is_friend(&from) {
+                            cb.friend_mark_online(fid);
+                            cb.mark_friends_dirty();
+                        }
+                        let sender_name = cb.resolve_name(&from);
+                        cb.push_system(format!(
+                            "{} shared an image: {}",
+                            sender_name, name
+                        ));
+                        cb.set_pending_image(name, hash, from);
                     }
                 }
                 Message::Goodbye => {
@@ -1382,6 +1411,23 @@ mod tests {
                 assert_eq!(ticket, "ticket123");
             }
             _ => panic!("expected FileShare"),
+        }
+    }
+
+    #[test]
+    fn message_serialization_roundtrip_image_share() {
+        let msg = Message::ImageShare {
+            name: "cat.jpg".into(),
+            hash: [0xab; 32],
+        };
+        let bytes = postcard::to_stdvec(&msg).unwrap();
+        let decoded: Message = postcard::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::ImageShare { name, hash } => {
+                assert_eq!(name, "cat.jpg");
+                assert_eq!(hash, [0xab; 32]);
+            }
+            _ => panic!("expected ImageShare"),
         }
     }
 

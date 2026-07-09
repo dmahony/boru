@@ -130,6 +130,7 @@ n0-tracing-test = "0.3"
 tempfile = "3"
 url = "2.4.0"
 rand = { version = "0.10", features = ["chacha"] }
+rfd = "0.15"
 
 [features]
 default = ["net", "metrics"]

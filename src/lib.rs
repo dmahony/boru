@@ -58,6 +58,13 @@ pub mod room;
 #[cfg(feature = "net")]
 pub mod room_history;
 
+/// Durable chat message history for the chat frontends.
+///
+/// Stores every signed gossip message so late-joiners can catch up
+/// and messages survive restarts.
+#[cfg(feature = "net")]
+pub mod chat_history;
+
 /// Minimal small-room messaging using direct QUIC connections.
 ///
 /// Replaces the gossip broadcast tree for rooms with ≤10 members.

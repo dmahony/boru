@@ -17,6 +17,7 @@ use iroh_gossip::chat_core::{
     MessageHash,
 };
 use iroh_gossip::chat_core::handle_net_event as chat_net_event;
+use iroh_gossip::chat_history::ChatHistoryStore;
 use iroh_gossip::friends::{FriendId, FriendsStore};
 use iroh_gossip::net::Gossip;
 use iroh_gossip::proto::TopicId;
@@ -175,7 +176,10 @@ pub struct IcedChat {
     pub dark_mode: bool,
     /// Transport notice displayed in the header (e.g. "Direct iroh transport is operational").
     pub notice: String,
-    /// Online friends that can be direct-chatted; keyed by PublicKey with display label.
+    /// Persistent chat message history (loaded on startup, saved on each message).
+    chat_history: ChatHistoryStore,
+    /// Whether chat history has unsaved changes.
+    chat_history_dirty: bool,
     online_friends: HashMap<PublicKey, String>,
 }
 
@@ -263,6 +267,7 @@ impl IcedChat {
         tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
         initial_topic: Option<TopicId>,
         notice: String,
+        chat_history: ChatHistoryStore,
     ) -> Self {
         Self {
             screen: Screen::ChatList,
@@ -304,6 +309,8 @@ impl IcedChat {
             last_typing_sent: None,
             dark_mode: false,
             notice,
+            chat_history,
+            chat_history_dirty: false,
             online_friends: HashMap::new(),
         }
     }
@@ -1059,6 +1066,7 @@ impl IcedChat {
                 self.update_room_preview(&event);
                 let _ = chat_net_event(event, self);
                 self.try_save_friends();
+                self.try_save_chat_history();
                 // Check if an ImageShare was just received and auto-download
                 if let Some((name, hash, sender_pk)) = self.pending_image.take() {
                     let blob_store = self.blob_store.clone();
@@ -1381,6 +1389,13 @@ impl IcedChat {
         if self.friends_dirty {
             let _ = self.friends.save();
             self.friends_dirty = false;
+        }
+    }
+
+    fn try_save_chat_history(&mut self) {
+        if self.chat_history_dirty {
+            let _ = self.chat_history.save();
+            self.chat_history_dirty = false;
         }
     }
 }

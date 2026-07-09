@@ -63,6 +63,10 @@ pub trait ChatCallbacks {
     /// Record a pending file download: `(filename, ticket_string)`.
     fn set_pending_file(&mut self, name: String, ticket: String);
 
+    /// Record a pending image download: `(filename, blob_hash, sender_pk)`.
+    /// The frontend should automatically download and render the image.
+    fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey);
+
     /// Mark a peer as currently typing.
     fn set_typing(&mut self, peer: PublicKey);
 

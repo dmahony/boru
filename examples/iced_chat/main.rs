@@ -25,6 +25,7 @@ use iroh_gossip::chat_core::friend_ping::{
     FriendPingManager, PingHandler, DEFAULT_CONNECT_TIMEOUT, DEFAULT_PING_INTERVAL,
     FRIEND_PING_ALPN,
 };
+use iroh_gossip::chat_history::ChatHistoryStore;
 use iroh_gossip::friends::FriendsStore;
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
@@ -238,6 +239,7 @@ fn main() -> Result<()> {
         room_history,
         tor_reconnect_rx_opt,
         notice,
+        chat_history,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
         use std::net::{Ipv4Addr, SocketAddrV4};
@@ -338,6 +340,12 @@ fn main() -> Result<()> {
             println!("> loaded {} room(s) from history", room_history.len());
         }
 
+        // Load chat message history
+        let chat_history = ChatHistoryStore::load_or_default(&data_dir);
+        if !chat_history.is_empty() {
+            println!("> loaded {} chat message(s) from history", chat_history.len());
+        }
+
         // Create the network event channel (shared across rooms)
         let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
         let net_rx = Arc::new(Mutex::new(net_rx));
@@ -373,6 +381,7 @@ fn main() -> Result<()> {
             room_history,
             use_tor.then(|| Arc::new(Mutex::new(tor_reconnect_rx))),
             notice,
+            chat_history,
         ))
     })?;
 
@@ -395,6 +404,7 @@ fn main() -> Result<()> {
             tor_reconnect_rx_opt,
             initial_topic,
             notice,
+            chat_history,
         ),
         initial_topic,
     )));
