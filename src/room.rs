@@ -11,13 +11,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::chat_core::atomic_write::atomic_write_json;
+use iroh::EndpointAddr;
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
+use crate::chat_core::atomic_write::atomic_write_json;
 use crate::proto::TopicId;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 /// Name of the on-disk room metadata file (lives beside `secret_key.txt`).
 pub const ROOM_FILE_NAME: &str = "room.json";
 
@@ -38,9 +39,13 @@ fn room_file_path(data_dir: &Path) -> PathBuf {
 pub struct RoomStore {
     /// Format version for future migrations.
     #[serde(default = "default_schema_version")]
-    schema_version: u32,
+    pub schema_version: u32,
     /// The gossip topic for the room — stable across reopen.
     pub topic: TopicId,
+    /// Known bootstrap peer addresses, persisted so reopening a room can
+    /// seed the address lookup without a fresh ticket.
+    #[serde(default)]
+    pub peers: Vec<EndpointAddr>,
     /// Data directory used for load/save operations.
     #[serde(skip)]
     data_dir: PathBuf,
@@ -54,15 +59,31 @@ impl RoomStore {
         Self {
             schema_version: SCHEMA_VERSION,
             topic: TopicId::from_bytes([0u8; 32]),
+            peers: Vec::new(),
             data_dir: data_dir.into(),
         }
     }
 
-    /// Create a store with a known topic, bound to a data directory.
+    /// Create a store with a known topic and empty peer list, bound to a data directory.
     pub fn new(data_dir: impl Into<PathBuf>, topic: TopicId) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             topic,
+            peers: Vec::new(),
+            data_dir: data_dir.into(),
+        }
+    }
+
+    /// Create a store with a known topic and bootstrap peers, bound to a data directory.
+    pub fn with_peers(
+        data_dir: impl Into<PathBuf>,
+        topic: TopicId,
+        peers: Vec<EndpointAddr>,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            topic,
+            peers,
             data_dir: data_dir.into(),
         }
     }
@@ -118,6 +139,20 @@ impl RoomStore {
                 None
             }
         }
+    }
+
+    /// Replace the full peers list and persist to disk.
+    pub fn set_peers(&mut self, peers: Vec<EndpointAddr>) -> Result<()> {
+        self.peers = peers;
+        self.save()?;
+        Ok(())
+    }
+
+    /// Clear the peers list and persist to disk.
+    pub fn clear_peers(&mut self) -> Result<()> {
+        self.peers.clear();
+        self.save()?;
+        Ok(())
     }
 
     /// Persist the room store atomically to `room.json`.

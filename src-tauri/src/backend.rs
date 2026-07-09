@@ -13,16 +13,15 @@ use std::{
 
 use anyhow::{Context, Result};
 use iroh::{
-    endpoint::presets,
-    protocol::Router,
-    Endpoint, PublicKey, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
+    SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 use iroh_gossip::{
     chat_core::{
         self,
         friend_ping::{FRIEND_PING_ALPN, PingHandler},
-        handle_net_event,
+        handle_net_event, refresh_bootstrap_peers, seed_memory_lookup,
         AppState as ChatAppState, ChatEntry, ChatCallbacks, MeshHealth, Message, NetEvent,
         SignedMessage, StatusContext, Ticket,
     },
@@ -86,6 +85,7 @@ pub struct ChatBackend {
     router: Router,
     secret_key: SecretKey,
     data_dir: PathBuf,
+    memory_lookup: MemoryLookup,
 
     // Runtime state
     sender: Option<iroh_gossip::api::GossipSender>,
@@ -121,9 +121,12 @@ impl ChatBackend {
         let local_public = secret_key.public();
         info!("our public key: {local_public}");
 
+        let memory_lookup = MemoryLookup::new();
+
         // Build the iroh endpoint
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret_key.clone())
+            .address_lookup(memory_lookup.clone())
             .bind()
             .await
             .context("bind endpoint")?;
@@ -182,6 +185,7 @@ impl ChatBackend {
             router,
             secret_key,
             data_dir,
+            memory_lookup,
             sender: None,
             current_topic: None,
             current_ticket: None,
@@ -199,21 +203,24 @@ impl ChatBackend {
 
     /// Create a new chat room.
     pub async fn create_room(&mut self, topic: Option<TopicId>) -> IpcResult<String> {
-        let topic = match topic {
-            Some(t) => t,
+        let (topic, saved_peers) = match topic {
+            Some(t) => (t, Vec::new()),
             None => {
                 match RoomStore::load_or_none(&self.data_dir) {
-                    Some(store) => store.topic,
+                    Some(store) => {
+                        let saved = store.peers.clone();
+                        (store.topic, saved)
+                    }
                     None => {
                         let t = TopicId::from_bytes(rand::random());
                         let room = RoomStore::new(&self.data_dir, t);
                         let _ = room.save();
-                        t
+                        (t, vec![])
                     }
                 }
             }
         };
-        self.enter_room(topic, vec![]).await?;
+        self.enter_room(topic, saved_peers).await?;
 
         let _ = self.event_tx.send(FrontendEvent::Topic { topic: topic.to_string() });
         if let Some(tk) = &self.current_ticket {
@@ -243,11 +250,24 @@ impl ChatBackend {
         let peer_ids: Vec<PublicKey> = peers.iter().map(|p| p.id).collect();
         let peer_count = peer_ids.len();
 
+        // Seed the in-memory address lookup with the bootstrap peers so the
+        // endpoint can resolve them even before gossip provides addresses.
+        seed_memory_lookup(&self.memory_lookup, &peers);
+
         let gossip_topic = self.gossip.subscribe_and_join(topic, peer_ids.clone()).await
             .map_err(|e| format!("failed to join gossip topic: {e}"))?;
         let (sender, receiver) = gossip_topic.split();
         self.sender = Some(sender.clone());
         self.current_topic = Some(topic);
+
+        // Refresh the stored bootstrap peers from the just-connected peers.
+        if let Some(mut room) = RoomStore::load_or_none(&self.data_dir) {
+            let mut neighbor_set: HashSet<_> = peer_ids.iter().copied().collect();
+            neighbor_set.insert(self.endpoint.id());
+            if refresh_bootstrap_peers(&mut room, &neighbor_set, &self.endpoint).await {
+                let _ = room.save();
+            }
+        }
 
         let my_addr = self.endpoint.addr();
         let ticket_obj = Ticket {

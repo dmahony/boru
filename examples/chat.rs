@@ -30,6 +30,7 @@ use iroh::{
     RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use iroh_gossip::backfill::{
     BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN, BACKFILL_TRIGGER_THRESHOLD,
 };
@@ -38,7 +39,8 @@ use iroh_gossip::chat_core::friend_ping::{
     DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
 };
 use iroh_gossip::chat_core::{
-    check_peer_connection_type, download_candidates, fmt_relay_mode, handle_net_event, message_hash,
+    check_peer_connection_type, collect_bootstrap_peers, download_candidates, fmt_relay_mode,
+    handle_net_event, message_hash, refresh_bootstrap_peers, seed_memory_lookup,
     update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, MeshHealth, Message,
     NetEvent, SignedMessage, StatusContext, Ticket,
 };
@@ -192,15 +194,23 @@ async fn main() -> Result<()> {
     // parse the cli command
     let (topic, peers) = match &args.command {
         Command::Open { topic } => {
-            let topic = match topic {
-                Some(t) => *t,
+            let data_dir = get_data_dir();
+            let (topic, saved_peers) = match topic {
+                Some(t) => (*t, Vec::new()),
                 None => {
-                    // Try to reuse a previously saved room topic.
-                    let data_dir = get_data_dir();
+                    // Try to reuse a previously saved room topic and its
+                    // bootstrap peers so reconnection works even without
+                    // the original ticket.
                     match RoomStore::load_or_none(&data_dir) {
                         Some(store) => {
-                            println!("> reusing saved room topic {}", store.topic);
-                            store.topic
+                            let n_peers = store.peers.len();
+                            let peer_info = if n_peers > 0 {
+                                format!(" with {n_peers} saved bootstrap peer(s)")
+                            } else {
+                                String::new()
+                            };
+                            println!("> reusing saved room topic {}{peer_info}", store.topic);
+                            (store.topic, store.peers.clone())
                         }
                         None => {
                             let t = TopicId::from_bytes(rand::random());
@@ -210,12 +220,12 @@ async fn main() -> Result<()> {
                             if let Err(err) = room.save() {
                                 eprintln!("warning: failed to save room metadata: {err}");
                             }
-                            t
+                            (t, vec![])
                         }
                     }
                 }
             };
-            (topic, vec![])
+            (topic, saved_peers)
         }
         Command::Join { ticket } => {
             let Ticket { topic, peers } = Ticket::from_str(ticket)?;
@@ -366,6 +376,13 @@ async fn main() -> Result<()> {
     };
     println!("> our endpoint id: {}", endpoint.id());
 
+    // Add mDNS local address lookup for LAN peer discovery
+    if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
+        if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
+            addr_lookup.add(mdns);
+        }
+    }
+
     // create the gossip protocol
     let gossip = Gossip::builder().spawn(endpoint.clone());
 
@@ -405,20 +422,49 @@ async fn main() -> Result<()> {
         .accept(BACKFILL_ALPN, backfill_handler)
         .spawn();
 
-    let peer_ids = peers.iter().map(|peer| peer.id).collect::<Vec<_>>();
+    // Merge peers from the join command (ticket or saved RoomStore) with any
+    // previously saved RoomStore bootstrap peers, so the address lookup has
+    // the best possible coverage for reconnection.
+    let (peer_ids, addr_material) = {
+        let room_peers = RoomStore::load_or_none(&get_data_dir())
+            .map(|s| s.peers)
+            .unwrap_or_default();
+        collect_bootstrap_peers(&[&peers[..], &room_peers[..]])
+    };
     let peer_count = peer_ids.len();
 
     // join the gossip topic by connecting to known peers
-    for peer in &peers {
-        memory_lookup.set_endpoint_info(peer.clone());
+    for addr in &addr_material {
+        memory_lookup.set_endpoint_info(addr.clone());
     }
-    if peers.is_empty() {
+    if peer_ids.is_empty() {
         println!("> waiting for peers to join us...");
     } else {
-        println!("> trying to connect to {} peers...", peers.len());
+        println!("> trying to connect to {} peers...", addr_material.len());
     };
-    let (sender, receiver) = gossip.subscribe_and_join(topic, peer_ids).await?.split();
+    let (sender, receiver) = gossip.subscribe_and_join(topic, peer_ids.clone()).await?.split();
     println!("> connected!");
+
+    // Refresh the stored bootstrap peers from the just-connected peers so
+    // future reopen/rejoin has up-to-date addresses even if the original
+    // ticket creator is offline.
+    {
+        if let Some(mut room) = RoomStore::load_or_none(&get_data_dir()) {
+            let mut neighbor_set: HashSet<_> = peer_ids.iter().copied().collect();
+            // Also note our own peer id so room creators can rejoin themselves.
+            neighbor_set.insert(endpoint.id());
+            if refresh_bootstrap_peers(&mut room, &neighbor_set, &endpoint).await {
+                if let Err(err) = room.save() {
+                    eprintln!("warning: failed to save refreshed bootstrap peers: {err}");
+                } else {
+                    println!(
+                        "> refreshed {} bootstrap peer(s) for future reconnections",
+                        room.peers.len()
+                    );
+                }
+            }
+        }
+    }
 
     let local_public = endpoint.secret_key().public();
     let local_label = args

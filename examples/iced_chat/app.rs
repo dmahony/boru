@@ -342,6 +342,7 @@ impl IcedChat {
         local_public: PublicKey,
         local_peer_addr: EndpointAddr,
         relay_mode: RelayMode,
+        _data_dir: std::path::PathBuf,
         runtime_handle: tokio::runtime::Handle,
         net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
         net_tx: UnboundedSender<NetEvent>,
@@ -359,6 +360,7 @@ impl IcedChat {
     ) -> Self {
         let (initial_topic, initial_bootstrap) = initial_room
             .unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
+        let online_friends = online_friends_from_store(&friends);
         Self {
             screen: Screen::ChatList,
             pending_topic: None,
@@ -408,7 +410,7 @@ impl IcedChat {
             chat_history,
             chat_history_dirty: false,
             history_saved_count: 0,
-            online_friends: HashMap::new(),
+            online_friends,
             initial_bootstrap_peers: initial_bootstrap,
             whisper_handle,
             whisper_events_rx,
@@ -498,6 +500,18 @@ fn private_topic(a: &PublicKey, b: &PublicKey) -> TopicId {
     hasher.update(pk2.as_bytes());
     let hash = hasher.finalize();
     TopicId::from_bytes(*hash.as_bytes())
+}
+
+fn online_friends_from_store(friends: &FriendsStore) -> HashMap<PublicKey, String> {
+    friends
+        .iter()
+        .filter(|(_, record)| record.status.online)
+        .filter_map(|(id, record)| {
+            id.parse_public_key()
+                .ok()
+                .map(|pk| (pk, record.display_label(id)))
+        })
+        .collect()
 }
 
 // ── Update ────────────────────────────────────────────────────────────
@@ -645,15 +659,29 @@ impl IcedChat {
                 let label = self.local_label.clone();
                 let ticket_str = self.room_ticket(topic).to_string();
                 let forward_handle_slot = self.forward_handle_slot.clone();
-                // Extract bootstrap peers from ticket (if any) and clear them
-                // so room switching doesn't reuse them.
-                let bootstrap_peers: Vec<_> = self.initial_bootstrap_peers
+                let endpoint = self.endpoint.clone();
+                // Extract bootstrap peer addresses from ticket/RoomStore (if any)
+                // and clear them so room switching doesn't reuse them.
+                let initial_addrs: Vec<EndpointAddr> = self.initial_bootstrap_peers
                     .drain(..)
-                    .map(|addr| addr.id)
                     .collect();
+                let bootstrap_peers: Vec<_> = initial_addrs.iter().map(|addr| addr.id).collect();
 
                 iced::Task::perform(
                     async move {
+                        // Seed the endpoint address lookup with bootstrap peer
+                        // addresses so the endpoint can resolve them by their
+                        // transport info (relay URL, direct addresses) from the
+                        // ticket or RoomStore — not just by public key.
+                        if !initial_addrs.is_empty() {
+                            let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
+                            if let Ok(addr_lookup) = endpoint.address_lookup() {
+                                addr_lookup.add(memory_lookup.clone());
+                            }
+                            for addr in &initial_addrs {
+                                memory_lookup.set_endpoint_info(addr.clone());
+                            }
+                        }
                         let sub = gossip
                             .subscribe(topic, bootstrap_peers)
                             .await
@@ -2248,20 +2276,61 @@ impl IcedChat {
             content = content.push(scrollable(online_list).height(Length::Shrink));
         }
 
+        // ── Discovered Users ──
+        let mut discovered_users: Vec<(PublicKey, String)> = self
+            .neighbors
+            .iter()
+            .copied()
+            .filter(|peer| *peer != self.local_public)
+            .filter(|peer| {
+                let fid = FriendId::from_public_key(*peer);
+                self.friends.get(&fid).is_none()
+            })
+            .map(|peer| (peer, self.resolve_name(&peer)))
+            .collect();
+        discovered_users.sort_by(|a, b| a.1.cmp(&b.1));
+
+        content = content.push(Space::new().height(Length::Fixed(SPACE_8))); // small spacer
+        content = content.push(
+            row![
+                text("Discovered Users").size(TYPO_MD).width(Length::Fill),
+                text(format!("{} user(s) discovered", discovered_users.len()))
+                    .size(TYPO_XXS)
+                    .color(Color::from_rgb(0.5, 0.5, 0.5)),
+            ]
+            .spacing(SPACE_4),
+        );
+
+        if discovered_users.is_empty() {
+            content = content.push(
+                text("No other users discovered yet.")
+                    .color(Color::from_rgb(0.5, 0.5, 0.5))
+                    .size(TYPO_SM),
+            );
+        } else {
+            let mut discovered_list = Column::new().spacing(SPACE_2).width(Length::Fill);
+            for (pk, label) in discovered_users {
+                discovered_list = discovered_list.push(self.view_online_friend_row(pk, &label));
+            }
+            content = content.push(scrollable(discovered_list).height(Length::Shrink));
+        }
+
         container(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
     }
 
-    /// A single row for an online friend: green dot + label + Chat button.
-    fn view_online_friend_row<'a>(
+    /// A single row for an online peer: green dot + label + Chat button.
+    fn view_online_friend_row(
         &self,
         pk: PublicKey,
-        label: &'a str,
-    ) -> iced::Element<'a, AppMessage> {
+        label: impl Into<String>,
+    ) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, container, row, text};
         use iced::Length;
+
+        let label = label.into();
 
         container(
             row![

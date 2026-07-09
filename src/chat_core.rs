@@ -21,7 +21,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use iroh::{Endpoint, EndpointAddr, PublicKey, RelayMode, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, PublicKey, RelayMode, SecretKey};
 use n0_error::{Result, StdResultExt};
 use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,88 @@ use serde_byte_array::ByteArray;
 use crate::api::{Event, GossipReceiver};
 use crate::friends::{FriendId, FriendsStore};
 use crate::proto::TopicId;
+
+// ── Bootstrap peer resolution ─────────────────────────────────────────────────
+
+/// Collect unique bootstrap peer IDs from multiple address sources, preserving
+/// the EndpointAddr information for seeding the endpoint address lookup.
+///
+/// Takes multiple slices of [`EndpointAddr`] values (e.g. from a ticket and
+/// from a RoomStore), deduplicates them, and returns the peer IDs (for
+/// `subscribe_and_join`) plus the full addresses (for seeding a MemoryLookup).
+pub fn collect_bootstrap_peers(
+    sources: impl IntoIterator<Item = impl AsRef<[EndpointAddr]>>,
+) -> (Vec<EndpointId>, Vec<EndpointAddr>) {
+    let mut seen_ids = HashSet::new();
+    let mut peer_ids = Vec::new();
+    let mut all_addrs = Vec::new();
+    let mut seen_addrs = HashSet::new();
+
+    for source in sources {
+        for addr in source.as_ref() {
+            if seen_ids.insert(addr.id) {
+                peer_ids.push(addr.id);
+            }
+            if seen_addrs.insert(addr.id) {
+                all_addrs.push(addr.clone());
+            }
+        }
+    }
+
+    (peer_ids, all_addrs)
+}
+
+/// Seed an [`iroh::address_lookup::memory::MemoryLookup`] with every
+/// [`EndpointAddr`] from a deduplicated address list, so that
+/// `endpoint.connect()` can resolve the peers by their addresses.
+///
+/// Call this **before** `subscribe_and_join()` so the address resolution
+/// chain has the ticket/room-store peer addresses available.
+pub fn seed_memory_lookup(
+    memory_lookup: &iroh::address_lookup::memory::MemoryLookup,
+    addrs: &[EndpointAddr],
+) {
+    for addr in addrs {
+        memory_lookup.set_endpoint_info(addr.clone());
+    }
+}
+
+/// Refresh the stored bootstrap peers in a [`RoomStore`] using the
+/// endpoint's current remote info for a set of known peer IDs.
+///
+/// Call this **after** joining a room so that future reconnections
+/// have up-to-date address information, even if the original ticket
+/// creator is offline.
+///
+/// Returns `true` if the peers list changed.
+pub async fn refresh_bootstrap_peers(
+    room_store: &mut crate::room::RoomStore,
+    peer_ids: &std::collections::HashSet<iroh::PublicKey>,
+    endpoint: &iroh::Endpoint,
+) -> bool {
+    let mut refreshed: Vec<iroh::EndpointAddr> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for pk in peer_ids {
+        if !seen.insert(*pk) {
+            continue;
+        }
+        if let Some(info) = endpoint.remote_info(*pk).await {
+            let addr = iroh::EndpointAddr::from_parts(info.id(), info.into_addrs().map(|a| a.into_addr()));
+            refreshed.push(addr);
+        }
+    }
+
+    if refreshed.is_empty() {
+        return false;
+    }
+
+    let changed = room_store.peers != refreshed;
+    if changed {
+        room_store.peers = refreshed;
+    }
+    changed
+}
 
 /// Re-export the callback trait for convenience — existing import paths
 /// (`iroh_gossip::chat_core::ChatCallbacks`) continue to work.
@@ -2566,5 +2648,69 @@ mod tests {
         let candidates = download_candidates(pk_a, &neighbors);
         assert_eq!(candidates.len(), 1, "should have just the original");
         assert_eq!(candidates[0], pk_a);
+    }
+
+    // ── collect_bootstrap_peers tests ──────────────────────────────────────
+
+    #[test]
+    fn test_collect_bootstrap_peers_dedup() {
+        let sk1 = SecretKey::generate();
+        let sk2 = SecretKey::generate();
+        let pk1 = sk1.public();
+        let pk2 = sk2.public();
+
+        let addr1 = EndpointAddr::new(pk1);
+        let addr2 = EndpointAddr::new(pk2);
+        let addr1_dup = EndpointAddr::new(pk1); // same pk1
+
+        let ticket_peers = vec![addr1, addr2.clone()];
+        let room_peers = vec![addr1_dup];
+
+        let (peer_ids, all_addrs) = collect_bootstrap_peers(&[&ticket_peers[..], &room_peers[..]]);
+
+        assert_eq!(peer_ids.len(), 2, "should have 2 unique peer IDs");
+        assert!(peer_ids.contains(&pk1), "pk1 should be in peer_ids");
+        assert!(peer_ids.contains(&pk2), "pk2 should be in peer_ids");
+
+        assert_eq!(all_addrs.len(), 2, "should have 2 unique addresses");
+    }
+
+    #[test]
+    fn test_collect_bootstrap_peers_empty() {
+        let (ids, addrs) = collect_bootstrap_peers(&[&[] as &[EndpointAddr]]);
+        assert!(ids.is_empty(), "empty sources → empty peer_ids");
+        assert!(addrs.is_empty(), "empty sources → empty addrs");
+    }
+
+    #[test]
+    fn test_collect_bootstrap_peers_single_source() {
+        let sk = SecretKey::generate();
+        let pk = sk.public();
+        let addr = EndpointAddr::new(pk);
+
+        let (ids, addrs) = collect_bootstrap_peers(&[&[addr.clone()][..]]);
+        assert_eq!(ids, vec![pk], "single source should produce its peer ID");
+        assert_eq!(addrs.len(), 1, "single source should produce its addr");
+    }
+
+    #[test]
+    fn test_seed_memory_lookup_adds_addresses() {
+        let sk = SecretKey::generate();
+        let pk = sk.public();
+        let addr = EndpointAddr::new(pk);
+
+        let lookup = iroh::address_lookup::memory::MemoryLookup::new();
+        seed_memory_lookup(&lookup, &[addr]);
+
+        let resolved = lookup.get_endpoint_info(pk);
+        assert!(resolved.is_some(), "seed_memory_lookup should add the address");
+    }
+
+    #[test]
+    fn test_seed_memory_lookup_empty() {
+        let lookup = iroh::address_lookup::memory::MemoryLookup::new();
+        seed_memory_lookup(&lookup, &[]);
+        // Should not panic — verify by checking nothing was added
+        assert!(lookup.get_endpoint_info(SecretKey::generate().public()).is_none());
     }
 }

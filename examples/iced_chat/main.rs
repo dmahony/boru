@@ -19,6 +19,7 @@ use iroh::{
     RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use iroh_gossip::backfill::{
     BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN, BACKFILL_TRIGGER_THRESHOLD,
 };
@@ -165,12 +166,19 @@ fn main() -> Result<()> {
     let initial_room: Option<(TopicId, Vec<EndpointAddr>)> = runtime.block_on(async {
         match &args.command {
             Some(Command::Open { topic }) => {
-                let t = match topic {
-                    Some(t) => *t,
+                let (t, peers) = match topic {
+                    Some(t) => (*t, Vec::new()),
                     None => match RoomStore::load_or_none(&data_dir) {
                         Some(store) => {
-                            println!("> reusing saved room topic {}", store.topic);
-                            store.topic
+                            let n_peers = store.peers.len();
+                            if n_peers > 0 {
+                                println!("> reusing saved room topic {} with {n_peers} saved bootstrap peer(s)", store.topic);
+                            } else {
+                                println!("> reusing saved room topic {}", store.topic);
+                            }
+                            // Pass saved bootstrap peers so the GUI can seed
+                            // its address lookup before subscribing.
+                            (store.topic, store.peers.clone())
                         }
                         None => {
                             let t = TopicId::from_bytes(rand::random());
@@ -179,11 +187,11 @@ fn main() -> Result<()> {
                             if let Err(err) = room.save() {
                                 eprintln!("warning: failed to save room metadata: {err}");
                             }
-                            t
+                            (t, vec![])
                         }
                     },
                 };
-                Some((t, vec![]))
+                Some((t, peers))
             }
             Some(Command::Join { ticket }) => {
                 let ticket: Ticket = match Ticket::from_str(ticket) {
@@ -333,6 +341,13 @@ fn main() -> Result<()> {
         };
         println!("> endpoint: {}", endpoint.id());
 
+        // Add mDNS local address lookup for LAN peer discovery
+        if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
+            if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
+                addr_lookup.add(mdns);
+            }
+        }
+
         let notice = if use_tor {
             "Tor-backed custom transport is operational.".to_string()
         } else {
@@ -441,6 +456,7 @@ fn main() -> Result<()> {
             local_public,
             local_peer_addr,
             relay_mode,
+            data_dir,
             runtime.handle().clone(),
             Arc::clone(&net_rx),
             net_tx,
