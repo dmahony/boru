@@ -587,6 +587,19 @@ async fn main() -> Result<()> {
             }
             Some(event) = net_rx.recv() => {
                 handle_net_event(event, &mut app)?;
+                // Auto-download pending image (ImageShare received)
+                if let Some((name, hash, sender_pk)) = app.pending_image.take() {
+                    let blob_hash: iroh_blobs::Hash = hash.into();
+                    if let Err(err) = blob_store
+                        .downloader(&endpoint)
+                        .download(blob_hash, Some(sender_pk))
+                        .await
+                    {
+                        app.push_system(format!("Failed to download image '{}': {err}", name));
+                    } else {
+                        app.push_system(format!("Downloaded image: {}", name));
+                    }
+                }
                 update_connection_counts(&endpoint, &mut app.status).await;
                 if app.friends_dirty {
                     if let Err(err) = app.friends.save() {
