@@ -308,6 +308,8 @@ pub struct AppState {
     pub typing_peers: HashMap<PublicKey, Instant>,
     /// Display name cache: peer PublicKey → last announced display name.
     pub names: HashMap<PublicKey, String>,
+    /// Our own public key — used to filter self-messages on echo.
+    pub local_public: PublicKey,
 }
 
 impl AppState {
@@ -338,6 +340,7 @@ impl AppState {
             friends_dirty: false,
             typing_peers: HashMap::new(),
             names,
+            local_public,
         }
     }
 
@@ -432,10 +435,7 @@ impl AppState {
 
 impl ChatCallbacks for AppState {
     fn local_public(&self) -> PublicKey {
-        // Not stored directly in AppState; used via the names cache.
-        // Callers that need this should pass it explicitly. We return a
-        // placeholder here that is overridden by set_name calls.
-        PublicKey::from_bytes(&[0u8; 32]).expect("32-byte all-zero key is valid")
+        self.local_public
     }
 
     fn resolve_name(&self, peer: &PublicKey) -> String {
@@ -1574,12 +1574,7 @@ mod tests {
     #[test]
     fn handle_net_event_own_message_is_skipped() {
         let mut app = test_app();
-        let mut names: HashMap<iroh::PublicKey, String> = HashMap::new();
-
-        // Use the same placeholder key that AppState::local_public() returns
-        // to simulate a self-sent message.
-        let own_key: PublicKey =
-            PublicKey::from_bytes(&[0u8; 32]).expect("32-byte all-zero key is valid");
+        let own_key = app.local_public;
         let event = NetEvent::Message {
             from: own_key,
             message: Message::Message {
