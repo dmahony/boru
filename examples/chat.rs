@@ -1474,8 +1474,8 @@ async fn forward_room_events_for_chat(
                     }
                 }
                 Err(err) => {
-                    let _ = net_tx.send(NetEvent::Error(err.to_string()));
-                    return;
+                    tracing::warn!("forward_room_events_for_chat: decode error (dropped): {err}");
+                    continue;
                 }
             },
             GossipEvent::NeighborUp(id) => {
