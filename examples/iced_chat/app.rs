@@ -51,6 +51,9 @@ struct ChatEntry {
     reactions: Vec<String>,
     /// Decoded image bytes for inline rendering, if this is an image message.
     image_bytes: Option<Vec<u8>>,
+    /// Cached image handle to avoid re-decoding every frame.
+    #[allow(clippy::rc_clone_in_vec_init)]
+    image_handle: Option<iced::widget::image::Handle>,
 }
 
 impl ChatEntry {
@@ -63,6 +66,7 @@ impl ChatEntry {
             edited: false,
             reactions: Vec::new(),
             image_bytes: None,
+            image_handle: None,
         }
     }
     fn local(label: impl Into<String>, text: impl Into<String>) -> Self {
@@ -74,6 +78,7 @@ impl ChatEntry {
             edited: false,
             reactions: Vec::new(),
             image_bytes: None,
+            image_handle: None,
         }
     }
     fn remote(label: impl Into<String>, text: impl Into<String>, hash: Option<MessageHash>) -> Self {
@@ -85,9 +90,11 @@ impl ChatEntry {
             edited: false,
             reactions: Vec::new(),
             image_bytes: None,
+            image_handle: None,
         }
     }
     fn image(label: impl Into<String>, body: impl Into<String>, image_bytes: Vec<u8>, hash: Option<MessageHash>) -> Self {
+        let handle = iced::widget::image::Handle::from_bytes(image_bytes.clone());
         Self {
             kind: ChatKind::Remote,
             label: label.into(),
@@ -96,6 +103,7 @@ impl ChatEntry {
             edited: false,
             reactions: Vec::new(),
             image_bytes: Some(image_bytes),
+            image_handle: Some(handle),
         }
     }
 }
@@ -1969,9 +1977,8 @@ impl IcedChat {
             col = col.push(line);
 
             // ── Image ──
-            if let Some(ref img_bytes) = entry.image_bytes {
-                let handle = iced::widget::image::Handle::from_bytes(img_bytes.clone());
-                let img = iced::widget::image(handle)
+            if let Some(ref handle) = entry.image_handle {
+                let img = iced::widget::image(handle.clone())
                     .content_fit(iced::ContentFit::ScaleDown)
                     .width(Length::Fill)
                     .height(Length::Fixed(300.0));
