@@ -317,6 +317,8 @@ pub enum AppMessage {
     TorReconnect(String),
     /// Toggle dark mode on/off.
     ToggleDark(bool),
+    /// Internal no-op for async task completions that should not change UI state.
+    Noop,
     /// Copy text to the system clipboard.
     CopyToClipboard(String),
     /// Open a direct chat with an online friend.
@@ -1149,7 +1151,7 @@ impl IcedChat {
                                     async move {
                                         sender.broadcast(encoded).await.ok();
                                     },
-                                    |_| AppMessage::ToggleHelp,
+                                    |_| AppMessage::Noop,
                                 );
                             }
                         }
@@ -1202,7 +1204,7 @@ impl IcedChat {
                                     async move {
                                         sender.broadcast(encoded).await.ok();
                                     },
-                                    |_| AppMessage::ToggleHelp,
+                                    |_| AppMessage::Noop,
                                 );
                             }
                         }
@@ -1247,7 +1249,7 @@ impl IcedChat {
                                     async move {
                                         sender.broadcast(encoded).await.ok();
                                     },
-                                    |_| AppMessage::ToggleHelp,
+                                    |_| AppMessage::Noop,
                                 );
                             }
                         }
@@ -1297,7 +1299,7 @@ impl IcedChat {
                                 .map_err(|e| e.to_string())
                         },
                         |r: Result<(), String>| match r {
-                            Ok(()) => AppMessage::ToggleHelp,
+                            Ok(()) => AppMessage::Noop,
                             Err(e) => AppMessage::ErrorMsg(format!("Whisper failed: {e}")),
                         },
                     );
@@ -1416,7 +1418,7 @@ impl IcedChat {
                                 AppMessage::ExecuteFileSend(encoded)
                             }
                         } else {
-                            AppMessage::ToggleHelp
+                            AppMessage::Noop
                         }
                     },
                 )
@@ -1773,7 +1775,7 @@ impl IcedChat {
                                     s.broadcast(encoded).await.ok();
                                 }
                             },
-                            |_| AppMessage::ToggleHelp,
+                            |_| AppMessage::Noop,
                         ));
                     }
                 } else {
@@ -1796,7 +1798,7 @@ impl IcedChat {
                                     s.broadcast(encoded).await.ok();
                                 }
                             },
-                            |_| AppMessage::ToggleHelp,
+                            |_| AppMessage::Noop,
                         ));
                     }
                 } else {
@@ -1857,6 +1859,8 @@ impl IcedChat {
                 self.dark_mode = enabled;
                 iced::Task::none()
             }
+
+            AppMessage::Noop => iced::Task::none(),
 
             AppMessage::CopyToClipboard(text) => {
                 return iced::clipboard::write(text);
