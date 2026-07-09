@@ -366,6 +366,7 @@ impl IcedChat {
         self.room_history_dirty = true;
 
         // Persist chat messages to durable history
+        eprintln!(">>> save_room_to_history: pushing {} entries for topic {}", self.entries.len(), topic);
         for entry in &self.entries {
             let kind = match entry.kind {
                 ChatKind::System => "system",
@@ -1425,7 +1426,11 @@ impl IcedChat {
 
     fn try_save_chat_history(&mut self) {
         if self.chat_history_dirty {
-            let _ = self.chat_history.save();
+            eprintln!(">>> saving chat history to {}", self.chat_history.file_path().display());
+            match self.chat_history.save() {
+                Ok(path) => eprintln!(">>> saved {} entries", self.chat_history.len()),
+                Err(e) => eprintln!(">>> chat history save failed: {e}"),
+            }
             self.chat_history_dirty = false;
         }
     }
