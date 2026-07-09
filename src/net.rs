@@ -200,8 +200,11 @@ impl Builder {
             self.alpn,
             address_lookup,
         );
-        let me = actor.endpoint.id().fmt_short();
+        let me = actor.endpoint.id().fmt_short().to_string();
         let max_message_size = actor.state.max_message_size();
+
+        // Initialise gossip debug tracing (reads `IROH_GOSSIP_DEBUG` env var).
+        crate::gossip_debug::init(&me);
 
         let actor_handle = task::spawn(actor.run().instrument(error_span!("gossip", %me)));
 
@@ -227,12 +230,6 @@ impl Gossip {
             config: Default::default(),
             alpn: None,
         }
-    }
-
-    /// Listen on a noq endpoint for incoming RPC connections.
-    #[cfg(feature = "rpc")]
-    pub async fn listen(self, endpoint: noq::Endpoint) {
-        self.inner.api.listen(endpoint).await
     }
 
     /// Get the maximum message size configured for this gossip actor.
@@ -635,7 +632,7 @@ impl Actor {
                 }
 
                 if !sender_dead {
-                    let subscriber_fut = topic_subscriber_loop(tx, event_sender.subscribe());
+                    let subscriber_fut = topic_subscriber_loop(topic_id, tx, event_sender.subscribe());
                     let fut = async move {
                         subscriber_fut.await;
                         topic_id
@@ -714,6 +711,41 @@ impl Actor {
                     }
                 }
                 OutEvent::EmitEvent(topic_id, event) => {
+                    // Log gossip debug trace for protocol-level events.
+                    if crate::gossip_debug::is_enabled() {
+                        let topic_short = topic_id.fmt_short();
+                        match &event {
+                            crate::proto::Event::NeighborUp(p) => {
+                                let p_str = p.fmt_short().to_string();
+                                crate::gossip_debug::log_event(
+                                    "NeighborUp",
+                                    Some(&topic_short),
+                                    Some(&p_str),
+                                    None,
+                                );
+                            }
+                            crate::proto::Event::NeighborDown(p) => {
+                                let p_str = p.fmt_short().to_string();
+                                crate::gossip_debug::log_event(
+                                    "NeighborDown",
+                                    Some(&topic_short),
+                                    Some(&p_str),
+                                    None,
+                                );
+                            }
+                            crate::proto::Event::Received(msg) => {
+                                let len = msg.content.len();
+                                let from_str = msg.delivered_from.fmt_short().to_string();
+                                crate::gossip_debug::log_event(
+                                    "Received",
+                                    Some(&topic_short),
+                                    Some(&from_str),
+                                    Some(len),
+                                );
+                            }
+                        }
+                    }
+
                     let Some(state) = self.topics.get_mut(&topic_id) else {
                         // TODO: unreachable?
                         warn!(?topic_id, "gossip state emitted event for unknown topic");
@@ -980,6 +1012,7 @@ fn decode_peer_data(peer_data: &PeerData) -> Result<AddrInfo, postcard::Error> {
 }
 
 async fn topic_subscriber_loop(
+    topic_id: TopicId,
     sender: irpc::channel::mpsc::Sender<Event>,
     mut topic_events: broadcast::Receiver<ProtoEvent>,
 ) {
@@ -989,7 +1022,17 @@ async fn topic_subscriber_loop(
            msg = topic_events.recv() => {
                let event = match msg {
                    Err(broadcast::error::RecvError::Closed) => break,
-                   Err(broadcast::error::RecvError::Lagged(_)) => Event::Lagged,
+                   Err(broadcast::error::RecvError::Lagged(_)) => {
+                       if crate::gossip_debug::is_enabled() {
+                           crate::gossip_debug::log_event(
+                               "Lagged",
+                               Some(&topic_id.fmt_short()),
+                               None,
+                               None,
+                           );
+                       }
+                       Event::Lagged
+                   }
                    Ok(event) => event.into(),
                };
                if sender.send(event).await.is_err() {

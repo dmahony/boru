@@ -15,7 +15,7 @@ pub use net::Gossip;
 #[doc(inline)]
 pub use net::GOSSIP_ALPN as ALPN;
 
-#[cfg(any(feature = "net", feature = "rpc"))]
+#[cfg(feature = "net")]
 pub mod api;
 pub mod metrics;
 #[cfg(feature = "net")]
@@ -65,13 +65,6 @@ pub mod room_history;
 #[cfg(feature = "net")]
 pub mod chat_history;
 
-/// Minimal small-room messaging using direct QUIC connections.
-///
-/// Replaces the gossip broadcast tree for rooms with ≤10 members.
-/// Broadcasts messages over direct connections and measures latency.
-#[cfg(feature = "net")]
-pub mod small_room;
-
 /// Whisper protocol — direct QUIC channels for private 1:1 messaging and file transfer.
 #[cfg(feature = "net")]
 pub mod whisper;
@@ -80,6 +73,14 @@ pub mod whisper;
 /// from existing peers via a dedicated QUIC ALPN.
 #[cfg(feature = "net")]
 pub mod backfill;
+
+/// Opt-in gossip debug tracing — append-only event log for diagnosing
+/// mesh-forwarding bugs.
+///
+/// Enable with `IROH_GOSSIP_DEBUG=1`.  Auto-initialised by the gossip actor;
+/// no manual setup needed.
+#[cfg(feature = "net")]
+pub mod gossip_debug;
 
 pub use proto::TopicId;
 

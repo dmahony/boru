@@ -32,6 +32,7 @@ use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_history::RoomHistoryStore;
+use iroh_gossip::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
 #[cfg(feature = "tor-transport")]
 use iroh_gossip::tor_transport::{bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport};
 use n0_error::{bail_any, Result, StdResultExt};
@@ -255,6 +256,8 @@ fn main() -> Result<()> {
         notice,
         chat_history,
             backfill_handle,
+            whisper_events_rx,
+            whisper_handle,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
         use std::net::{Ipv4Addr, SocketAddrV4};
@@ -351,15 +354,25 @@ fn main() -> Result<()> {
         let chat_history = Arc::new(std::sync::Mutex::new(chat_history));
 
         let backfill_handler = BackfillProtocolHandler::new(chat_history.clone());
+
+        // ── Whisper protocol ──────────────────────────────────────────
+        // Direct QUIC channels for private 1:1 messaging and file transfer.
+        let whisper_builder = WhisperBuilder::new(endpoint.clone(), secret_key.clone());
+        let whisper_handler = whisper_builder.protocol_handler();
+        let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn().await;
+
         let _router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol.clone())
             .accept(FRIEND_PING_ALPN, PingHandler)
             .accept(BACKFILL_ALPN, backfill_handler)
+            .accept(WHISPER_ALPN, whisper_handler)
             .spawn();
 
         // Spawn the backfill background actor for requesting history
         let backfill_handle = BackfillHandle::spawn(endpoint.clone());
+
+        let whisper_events_rx = Arc::new(Mutex::new(whisper_events_rx_tmp));
 
         // Load or create the persistent friends list
         let friends = FriendsStore::load_or_default(&data_dir);
@@ -411,6 +424,8 @@ fn main() -> Result<()> {
             notice,
             chat_history,
             backfill_handle,
+            whisper_events_rx,
+            whisper_handle,
         ))
     })?;
 
@@ -433,6 +448,8 @@ fn main() -> Result<()> {
             friends,
             friend_mgr,
             Arc::clone(&friend_events_rx),
+            Arc::clone(&whisper_events_rx),
+            whisper_handle.clone(),
             tor_reconnect_rx_opt,
             initial_room,
             notice,
@@ -464,6 +481,7 @@ fn main() -> Result<()> {
         IcedChat::subscription(
             Arc::clone(&state.net_rx),
             Arc::clone(&state.friend_events_rx),
+            Arc::clone(&state.whisper_events_rx),
         )
     })
     .theme(|state: &IcedChat| {

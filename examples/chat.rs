@@ -49,9 +49,6 @@ use iroh_gossip::room_docs::{
     self, create_metadata_doc, create_roster_doc, list_members, read_metadata, RoomDocs,
     RoomMetadata,
 };
-use iroh_gossip::small_room::{
-    room_size_fits_small_room, SmallRoomBuilder, SMALL_ROOM_ALPN, SMALL_ROOM_MAX_SIZE,
-};
 #[cfg(feature = "tor-transport")]
 use iroh_gossip::tor_transport::{bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport};
 use iroh_gossip::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
@@ -383,9 +380,7 @@ async fn main() -> Result<()> {
     println!("> ticket to join us: {ticket}");
 
     // setup router with the gossip protocol, blob protocol, friend ping,
-    // small-room protocol (for ≤10-member rooms), and whisper protocol
-    let small_room_builder = SmallRoomBuilder::new(endpoint.clone(), endpoint.secret_key().clone());
-    let small_room_handler = small_room_builder.protocol_handler();
+    // and whisper protocol
     let whisper_builder = WhisperBuilder::new(endpoint.clone(), endpoint.secret_key().clone());
     let whisper_handler = whisper_builder.protocol_handler();
     let (whisper_handle, mut whisper_events) = whisper_builder.spawn().await;
@@ -401,7 +396,6 @@ async fn main() -> Result<()> {
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(iroh_blobs::ALPN, blobs_protocol.clone())
         .accept(FRIEND_PING_ALPN, PingHandler)
-        .accept(SMALL_ROOM_ALPN, small_room_handler)
         .accept(WHISPER_ALPN, whisper_handler)
         .accept(BACKFILL_ALPN, backfill_handler)
         .spawn();
@@ -409,30 +403,7 @@ async fn main() -> Result<()> {
     let peer_ids = peers.iter().map(|peer| peer.id).collect::<Vec<_>>();
     let peer_count = peer_ids.len();
 
-    // ── Room protocol decision ──────────────────────────────────────────
-    // Note: peer_count is the number of bootstrap peers from the ticket.
-    // First-time room open has 0 (waiting for others to join); joining a
-    // ticket has ≥1.  For ≤10 members the small-room (direct QUIC) module
-    // replaces the broadcast-tree gossip protocol for lower latency.
-    //
-    // When no bootstrap peers exist (room open) we default to gossip so
-    // the first peers to connect can discover each other via the gossip
-    // mesh.  Small-room peers need bootstrap addresses to connect directly;
-    // once the bench/harness receives an addr from another peer it can
-    // call SmallRoomHandle::connect_to().
-    //
-    // For the latency-benchmark use case the small_room_bench example
-    // demonstrates the full flow: spawn N peers, connect them directly,
-    // broadcast messages, and record per-peer latency statistics.
-    let uses_small_room = peer_count > 0 && room_size_fits_small_room(peer_count);
-    if uses_small_room {
-        println!("> using small-room protocol ({peer_count} members ≤ {SMALL_ROOM_MAX_SIZE})");
-    } else if peer_count > 0 {
-        println!("> using gossip protocol ({peer_count} members > {SMALL_ROOM_MAX_SIZE})");
-    }
-
-    // join the gossip topic by connecting to known peers, if any
-    // (or for small rooms, use direct QUIC connections instead)
+    // join the gossip topic by connecting to known peers
     for peer in &peers {
         memory_lookup.set_endpoint_info(peer.clone());
     }
@@ -569,6 +540,12 @@ async fn main() -> Result<()> {
     let mut conn_monitor = tokio::time::interval(Duration::from_secs(60));
     conn_monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Mesh quiescence watchdog — monitors for prolonged inactivity every 30 seconds.
+    // Tracks health transitions and pushes system notifications on degradation/recovery.
+    let mut last_mesh_health: Option<MeshHealth> = None;
+    let mut mesh_watchdog = tokio::time::interval(Duration::from_secs(30));
+    mesh_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     // Periodic presence heartbeat — broadcasts every 5 seconds.
     let presence_sender = sender.clone();
     let presence_secret_key = endpoint.secret_key().clone();
@@ -580,6 +557,25 @@ async fn main() -> Result<()> {
             let msg = Message::Presence;
             if let Ok(encoded) = SignedMessage::sign_and_encode(&presence_secret_key, &msg) {
                 if presence_sender.broadcast(encoded.into()).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Periodic invisible keepalive heartbeat — broadcasts every 2 seconds
+    // to keep connections warm and update mesh health timestamps without
+    // cluttering the chat log or user interface.
+    let heartbeat_sender = sender.clone();
+    let heartbeat_secret_key = endpoint.secret_key().clone();
+    tokio::spawn(async move {
+        let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(2));
+        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            heartbeat_interval.tick().await;
+            let msg = Message::Heartbeat;
+            if let Ok(encoded) = SignedMessage::sign_and_encode(&heartbeat_secret_key, &msg) {
+                if heartbeat_sender.broadcast(encoded.into()).await.is_err() {
                     break;
                 }
             }
@@ -680,6 +676,14 @@ async fn main() -> Result<()> {
                 // Periodic refresh of per-peer connection status.
                 update_connection_counts(&endpoint, &mut app.status).await;
                 app.status.recompute_mesh_health(&endpoint).await;
+            }
+            _ = mesh_watchdog.tick() => {
+                // Periodic mesh quiescence check — detects prolonged inactivity.
+                app.status.recompute_mesh_health(&endpoint).await;
+                if let Some(notification) = app.status.check_mesh_quiescence(&mut last_mesh_health) {
+                    app.push_system(notification);
+                    terminal.draw(|frame| render_app(frame, &mut app))?;
+                }
             }
             else => break,
         }

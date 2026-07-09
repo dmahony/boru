@@ -16,6 +16,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     str::FromStr,
+    sync::{LazyLock, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -316,6 +317,47 @@ impl StatusContext {
         }
 
         self.mesh_health = new_health;
+    }
+
+    /// Check the current mesh health against a previously observed state and
+    /// return an optional user-facing notification message on transition.
+    ///
+    /// Returns `Some(notification)` when the mesh health has changed since
+    /// `last_health` was recorded, or `None` on the first call or when the
+    /// state has not changed.
+    ///
+    /// The caller should display the returned message to the user (e.g. as a
+    /// system notification in the chat log) and persist the updated
+    /// `last_health` for future calls.
+    pub fn check_mesh_quiescence(
+        &self,
+        last_health: &mut Option<MeshHealth>,
+    ) -> Option<String> {
+        let current_health = &self.mesh_health;
+        let notification = match (last_health.as_ref(), current_health) {
+            // Good → Degraded: warn the user
+            (Some(MeshHealth::Good), MeshHealth::Degraded(reason)) => {
+                Some(format!("⚠ Mesh health degraded: {reason}"))
+            }
+            // Good → Offline: warn the user
+            (Some(MeshHealth::Good), MeshHealth::Offline(reason)) => {
+                Some(format!("⚠ Mesh offline: {reason}"))
+            }
+            // Degraded → Good: recovery
+            (Some(MeshHealth::Degraded(_)), MeshHealth::Good) => {
+                Some("✓ Mesh health recovered: all peers are active.".to_string())
+            }
+            // Offline → Good: recovery
+            (Some(MeshHealth::Offline(_)), MeshHealth::Good) => {
+                Some("✓ Mesh health recovered: endpoint is back online.".to_string())
+            }
+            // First check: don't notify
+            (None, _) => None,
+            // Same state or other transitions: no notification
+            _ => None,
+        };
+        *last_health = Some(current_health.clone());
+        notification
     }
 }
 
@@ -670,6 +712,18 @@ pub enum Message {
         /// Blob hash for the image content, for blob-store lookup and download.
         hash: MessageHash,
     },
+    /// Invisible keepalive heartbeat — keeps connections warm and updates
+    /// mesh health timestamps without producing any chat log entry or UI
+    /// notification.
+    ///
+    /// Frontends broadcast this periodically (every 2–3 seconds) as a
+    /// lightweight gossip message.  Peers receive it and update their
+    /// `last_activity` timestamp for the sender, preventing the mesh
+    /// health from decaying to "Degraded" or "Offline."
+    ///
+    /// This is intentionally separate from `Presence`, which is a
+    /// *visible* status indicator.
+    Heartbeat,
 }
 
 /// Content hash used by richer interaction messages to refer to a chat message.
@@ -794,6 +848,35 @@ pub fn fmt_relay_mode(relay_mode: &RelayMode) -> String {
 
 // ── Network event dispatch ───────────────────────────────────────────────────
 
+/// Key used for message deduplication: (sender, content_hash, sent_at_seconds).
+type DedupKey = (PublicKey, MessageHash, u64);
+
+/// How long we remember a message for deduplication.
+///
+/// Must be at least as long as the maximum TTL to cover the gossip-storm and
+/// backfill window.  Default message TTL is 1 hour; we use 2 hours to safely
+/// cover reconnection + backfill scenarios.
+const DEDUP_TTL: Duration = Duration::from_secs(7200);
+
+/// Trigger a cleanup sweep when the seen set grows beyond this size.
+const DEDUP_SWEEP_THRESHOLD: usize = 10_000;
+
+/// Set of already-processed messages, keyed by (sender, content_hash, sent_at).
+///
+/// The value is the [`Instant`] when we first saw the message, used for TTL-based
+/// eviction.  Entries older than [`DEDUP_TTL`] are periodically pruned.
+static SEEN_MESSAGES: LazyLock<Mutex<HashMap<DedupKey, Instant>>> = LazyLock::new(|| {
+    Mutex::new(HashMap::new())
+});
+
+/// Prune entries older than [`DEDUP_TTL`] from the seen-messages set.
+fn prune_seen_messages() {
+    let now = Instant::now();
+    if let Ok(mut seen) = SEEN_MESSAGES.lock() {
+        seen.retain(|_, first_seen| now.duration_since(*first_seen) < DEDUP_TTL);
+    }
+}
+
 /// Process a decoded [`NetEvent`] against a [`ChatCallbacks`] implementor.
 ///
 /// Handles common logic: friend tracking, name resolution, message
@@ -807,6 +890,32 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
             message,
             sent_at,
         } => {
+            let incoming_hash = message_hash(&message);
+
+            // ── Deduplication ──────────────────────────────────────────
+            // Suppress duplicate deliveries from gossip fan-out, backfill,
+            // and reconnection paths without dropping legitimate new messages.
+            let dedup_key = (from, incoming_hash, sent_at);
+            {
+                let mut seen = SEEN_MESSAGES.lock().unwrap();
+                if seen.insert(dedup_key, Instant::now()).is_none() {
+                    // First time — continue processing below.
+                } else {
+                    tracing::debug!(
+                        "dedup: duplicate message from {} (hash={}, sent_at={})",
+                        from.fmt_short(),
+                        hex::encode(incoming_hash),
+                        sent_at,
+                    );
+                    return Ok(());
+                }
+                // Periodic eviction of stale entries to bound memory growth.
+                if seen.len() >= DEDUP_SWEEP_THRESHOLD {
+                    drop(seen);
+                    prune_seen_messages();
+                }
+            }
+
             cb.record_activity(from);
             if from != cb.local_public() {
                 let age_secs = SystemTime::now()
@@ -825,7 +934,6 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                     return Ok(());
                 }
             }
-            let incoming_hash = message_hash(&message);
             match message {
                 Message::AboutMe { name } => {
                     cb.set_name(from, name.clone());
@@ -883,6 +991,11 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                 }
                 Message::Presence => {
                     cb.record_presence(from);
+                }
+                Message::Heartbeat => {
+                    // Heartbeat is invisible — record activity to update
+                    // mesh health timestamps, but never push to the chat log.
+                    cb.record_activity(from);
                 }
                 Message::ReadReceipt { message_hash } => {
                     if from != cb.local_public() && cb.has_message(&message_hash) {
@@ -1828,6 +1941,196 @@ mod tests {
             "should show join message even for non-friends"
         );
     }
+
+    // ── handle_net_event dedup tests ───────────────────────────────────
+
+    /// Clear the global seen-messages set so tests start fresh.
+    fn clear_seen_messages() {
+        if let Ok(mut seen) = SEEN_MESSAGES.lock() {
+            seen.clear();
+        }
+    }
+
+    #[test]
+    fn handle_net_event_dedup_exact_duplicate_is_suppressed() {
+        clear_seen_messages();
+        let key = SecretKey::generate();
+        let mut app = test_app();
+
+        let event = NetEvent::Message {
+            from: key.public(),
+            message: Message::Message { text: "hello".into() },
+            sent_at: 1_000_000,
+        };
+
+        // First delivery produces one entry.
+        handle_net_event(event.clone(), &mut app).unwrap();
+        assert_eq!(app.entries.len(), 1);
+
+        // Second delivery (same from, same content, same sent_at) is suppressed.
+        handle_net_event(event, &mut app).unwrap();
+        assert_eq!(
+            app.entries.len(),
+            1,
+            "duplicate message should not add a second entry"
+        );
+    }
+
+    #[test]
+    fn handle_net_event_dedup_different_text_passes() {
+        clear_seen_messages();
+        let key = SecretKey::generate();
+        let mut app = test_app();
+
+        let event_a = NetEvent::Message {
+            from: key.public(),
+            message: Message::Message { text: "first".into() },
+            sent_at: 1_000_000,
+        };
+        let event_b = NetEvent::Message {
+            from: key.public(),
+            message: Message::Message { text: "second".into() },
+            sent_at: 1_000_001,
+        };
+
+        handle_net_event(event_a, &mut app).unwrap();
+        handle_net_event(event_b, &mut app).unwrap();
+        assert_eq!(
+            app.entries.len(),
+            2,
+            "different messages from same sender should both appear"
+        );
+        assert_eq!(app.entries[0].body, "first");
+        assert_eq!(app.entries[1].body, "second");
+    }
+
+    #[test]
+    fn handle_net_event_dedup_different_sender_passes() {
+        clear_seen_messages();
+        let key_a = SecretKey::generate();
+        let key_b = SecretKey::generate();
+        let mut app = test_app();
+
+        // Both send the same text at the same time — different senders,
+        // so both are legitimate new messages.
+        let identical_text = "same text".to_string();
+        let event_a = NetEvent::Message {
+            from: key_a.public(),
+            message: Message::Message {
+                text: identical_text.clone(),
+            },
+            sent_at: 1_000_000,
+        };
+        let event_b = NetEvent::Message {
+            from: key_b.public(),
+            message: Message::Message { text: identical_text },
+            sent_at: 1_000_000,
+        };
+
+        handle_net_event(event_a, &mut app).unwrap();
+        handle_net_event(event_b, &mut app).unwrap();
+        assert_eq!(
+            app.entries.len(),
+            2,
+            "same content from different senders should both appear"
+        );
+    }
+
+    #[test]
+    fn handle_net_event_dedup_different_sent_at_passes() {
+        clear_seen_messages();
+        let key = SecretKey::generate();
+        let mut app = test_app();
+
+        // Same content from same sender at different timestamps is a
+        // legitimate re-send and should NOT be deduped.
+        let event_t1 = NetEvent::Message {
+            from: key.public(),
+            message: Message::Message { text: "hello".into() },
+            sent_at: 1_000_000,
+        };
+        let event_t2 = NetEvent::Message {
+            from: key.public(),
+            message: Message::Message { text: "hello".into() },
+            sent_at: 1_000_002,
+        };
+
+        handle_net_event(event_t1, &mut app).unwrap();
+        handle_net_event(event_t2, &mut app).unwrap();
+        assert_eq!(
+            app.entries.len(),
+            2,
+            "same content from same sender at different timestamps should both appear"
+        );
+    }
+
+    #[test]
+    fn handle_net_event_dedup_self_message_is_recorded() {
+        // Self-messages are normally skipped for push_remote but should
+        // still be tracked in the dedup set so duplicate gossip deliveries
+        // of our own messages are suppressed.
+        clear_seen_messages();
+        let local_key = SecretKey::generate();
+        let mut app = AppState::new(
+            test_status(),
+            FriendsStore::default(),
+            local_key.public(),
+            Some("self".into()),
+        );
+
+        let event = NetEvent::Message {
+            from: local_key.public(),
+            message: Message::Message {
+                text: "self-msg".into(),
+            },
+            sent_at: 1_000_000,
+        };
+
+        // Self-message produces no remote entry.
+        handle_net_event(event.clone(), &mut app).unwrap();
+        assert!(app.entries.is_empty());
+
+        // Duplicate self-message is still suppressed at the dedup layer.
+        handle_net_event(event, &mut app).unwrap();
+        assert!(app.entries.is_empty());
+    }
+
+    #[test]
+    fn handle_net_event_dedup_about_me_is_deduped() {
+        clear_seen_messages();
+        let key = SecretKey::generate();
+        let mut app = test_app();
+
+        let event = NetEvent::Message {
+            from: key.public(),
+            message: Message::AboutMe {
+                name: "bob".into(),
+            },
+            sent_at: 1_000_000,
+        };
+
+        handle_net_event(event.clone(), &mut app).unwrap();
+        // First delivery: one system notification.
+        let system_count_before = app
+            .entries
+            .iter()
+            .filter(|e| e.body.contains("bob"))
+            .count();
+        assert_eq!(system_count_before, 1);
+
+        // Second delivery: suppressed.
+        handle_net_event(event, &mut app).unwrap();
+        let system_count_after = app
+            .entries
+            .iter()
+            .filter(|e| e.body.contains("bob"))
+            .count();
+        assert_eq!(
+            system_count_after, 1,
+            "duplicate AboutMe should not produce a second notification"
+        );
+    }
+
     // ── SignedMessage roundtrip helper ──────────────────────────────────
 
     fn assert_signed_message_roundtrip(msg: Message, predicate: impl FnOnce(&Message) -> bool) {

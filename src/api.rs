@@ -73,11 +73,7 @@ impl From<irpc::channel::oneshot::RecvError> for ApiError {
 /// [`Gossip`] derefs to [`GossipApi`], so all functions on [`GossipApi`] are directly callable
 /// from [`Gossip`].
 ///
-/// Additionally, a [`GossipApi`] can be created by connecting to an RPC server. See [`Gossip::listen`]
-/// and [`GossipApi::connect`] (*requires the `rpc` feature).
-///
 /// [`Gossip`]: crate::net::Gossip
-/// [`Gossip::listen`]: crate::net::Gossip::listen
 #[derive(Debug, Clone)]
 pub struct GossipApi {
     client: Client<Request>,
@@ -90,27 +86,6 @@ impl GossipApi {
         Self {
             client: local.into(),
         }
-    }
-
-    /// Connect to a remote as a RPC client.
-    #[cfg(feature = "rpc")]
-    pub fn connect(endpoint: noq::Endpoint, addr: std::net::SocketAddr) -> Self {
-        let inner = irpc::Client::noq(endpoint, addr);
-        Self { client: inner }
-    }
-
-    /// Listen on a noq endpoint for incoming RPC connections.
-    #[cfg(all(feature = "rpc", feature = "net"))]
-    pub(crate) async fn listen(&self, endpoint: noq::Endpoint) {
-        use irpc::rpc::{listen, RemoteService};
-
-        let local = self
-            .client
-            .as_local()
-            .expect("cannot listen on remote client");
-        let handler = Request::remote_handler(local);
-
-        listen::<Request>(endpoint, handler).await
     }
 
     /// Join a gossip topic with options.
@@ -411,113 +386,6 @@ impl JoinOptions {
 #[cfg(test)]
 mod tests {
     use crate::api::GossipTopic;
-
-    #[cfg(all(feature = "rpc", feature = "net"))]
-    #[tokio::test]
-    #[n0_tracing_test::traced_test]
-    async fn test_rpc() -> n0_error::Result<()> {
-        use iroh::{address_lookup::memory::MemoryLookup, protocol::Router, RelayMap};
-        use n0_error::{AnyError, Result, StackResultExt, StdResultExt};
-        use n0_future::{time::Duration, StreamExt};
-        use rand::SeedableRng;
-
-        use crate::{
-            api::{Event, GossipApi},
-            net::{tests::create_endpoint, Gossip},
-            proto::TopicId,
-            ALPN,
-        };
-
-        let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(1);
-        let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
-
-        async fn create_gossip_endpoint(
-            rng: &mut rand::rngs::ChaCha12Rng,
-            relay_map: RelayMap,
-        ) -> Result<(Router, Gossip)> {
-            let endpoint = create_endpoint(rng, relay_map, None).await?;
-            let gossip = Gossip::builder().spawn(endpoint.clone());
-            let router = Router::builder(endpoint)
-                .accept(ALPN, gossip.clone())
-                .spawn();
-            Ok((router, gossip))
-        }
-
-        let topic_id = TopicId::from_bytes([0u8; 32]);
-
-        // create our gossip endpoint
-        let (router, gossip) = create_gossip_endpoint(&mut rng, relay_map.clone()).await?;
-
-        // create a second endpoint so that we can test actually joining
-        let (endpoint2_id, endpoint2_addr, endpoint2_task) = {
-            let (router, gossip) = create_gossip_endpoint(&mut rng, relay_map.clone()).await?;
-            let endpoint_addr = router.endpoint().addr();
-            let endpoint_id = router.endpoint().id();
-            let task = tokio::task::spawn(async move {
-                let mut topic = gossip.subscribe_and_join(topic_id, vec![]).await?;
-                topic.broadcast(b"hello".to_vec().into()).await?;
-                Ok::<_, AnyError>(router)
-            });
-            (endpoint_id, endpoint_addr, task)
-        };
-
-        // create a memory lookup service to add endpoint addr manually
-        let memory_lookup = MemoryLookup::new();
-        memory_lookup.add_endpoint_info(endpoint2_addr);
-
-        router.endpoint().address_lookup()?.add(memory_lookup);
-
-        // expose the gossip endpoint over RPC
-        let (rpc_server_endpoint, rpc_server_cert) =
-            irpc::util::make_server_endpoint("127.0.0.1:0".parse().unwrap())
-                .context("make server endpoint")?;
-        let rpc_server_addr = rpc_server_endpoint
-            .local_addr()
-            .std_context("resolve server addr")?;
-        let rpc_server_task = tokio::task::spawn(async move {
-            gossip.listen(rpc_server_endpoint).await;
-        });
-
-        // connect to the RPC endpoint with a new client
-        let rpc_client_endpoint =
-            irpc::util::make_client_endpoint("127.0.0.1:0".parse().unwrap(), &[&rpc_server_cert])
-                .context("make client endpoint")?;
-        let rpc_client = GossipApi::connect(rpc_client_endpoint, rpc_server_addr);
-
-        // join via RPC
-        let recv = async move {
-            let mut topic = rpc_client
-                .subscribe_and_join(topic_id, vec![endpoint2_id])
-                .await?;
-            // wait for a message
-            while let Some(event) = topic.try_next().await? {
-                match event {
-                    Event::Received(message) => {
-                        assert_eq!(&message.content[..], b"hello");
-                        break;
-                    }
-                    Event::Lagged => panic!("unexpected lagged event"),
-                    _ => {}
-                }
-            }
-            Ok::<_, AnyError>(())
-        };
-
-        // timeout to not hang in case of failure
-        tokio::time::timeout(Duration::from_secs(10), recv)
-            .await
-            .std_context("rpc recv timeout")??;
-
-        // shutdown
-        rpc_server_task.abort();
-        router.shutdown().await.std_context("shutdown router")?;
-        let router2 = endpoint2_task.await.std_context("join endpoint task")??;
-        router2
-            .shutdown()
-            .await
-            .std_context("shutdown second router")?;
-        Ok(())
-    }
 
     #[test]
     fn ensure_gossip_topic_is_sync() {

@@ -85,14 +85,9 @@ irpc = { version = "0.17.0", optional = true, default-features = false, features
 n0-error = { version = "1", features = ["anyhow"] }
 serde-byte-array = "0.1.2"
 
-# rpc dependencies (optional)
-noq = { version = "1", optional = true, default-features = false }
 
 # test-utils dependencies (optional)
 humantime-serde = { version = "1.1.1", optional = true }
-
-# post-quantum TLS (optional)
-noq-proto = { path = "noq-proto-patched", optional = true }
 
 # simulator dependencies (optional)
 clap = { version = "4", features = ["derive"], optional = true }
@@ -141,15 +136,6 @@ net = [
     "dep:futures-concurrency",
     "dep:serde_json",
 ]
-rpc = [
-    "dep:irpc",
-    "dep:tokio",
-    "dep:noq",
-    "irpc/rpc",
-    "irpc/noq_endpoint_setup",
-]
-rpc-tls-ring = ["noq/ring"]
-rpc-tls-aws-lc-rs = ["noq/aws-lc-rs"]
 test-utils = ["rand/chacha", "dep:humantime-serde"]
 simulator = [
     "test-utils",
@@ -161,11 +147,6 @@ simulator = [
     "dep:comfy-table",
 ]
 metrics = ["iroh-metrics/metrics"]
-post-quantum-tls = [
-    "dep:noq-proto",
-    "net",
-    "noq-proto?/__rustls-post-quantum-test",
-]
 examples = ["net", "dep:ratatui", "dep:crossterm"]
 gui = ["net", "dep:iced", "dep:tokio", "dep:rfd"]
 unstable-custom-transports = ["iroh/unstable-custom-transports"]
@@ -211,6 +192,10 @@ required-features = ["examples"]
 name = "iced_chat"
 required-features = ["gui"]
 
+[[example]]
+name = "doctor"
+required-features = ["net"]
+
 [[test]]
 name = "interop_two_frontends"
 path = "tests/interop_two_frontends.rs"
@@ -225,7 +210,4 @@ debug = true
 
 [profile.release]
 debug = true
-
-[patch.crates-io]
-noq-proto = { path = "noq-proto-patched" }
 

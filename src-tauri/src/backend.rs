@@ -8,6 +8,7 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -22,8 +23,8 @@ use iroh_gossip::{
         self,
         friend_ping::{FRIEND_PING_ALPN, PingHandler},
         handle_net_event,
-        AppState as ChatAppState, ChatEntry, ChatCallbacks, Message, NetEvent, SignedMessage,
-        StatusContext, Ticket,
+        AppState as ChatAppState, ChatEntry, ChatCallbacks, MeshHealth, Message, NetEvent,
+        SignedMessage, StatusContext, Ticket,
     },
     friends::FriendsStore,
     net::{Gossip, GOSSIP_ALPN},
@@ -288,6 +289,49 @@ impl ChatBackend {
         });
         self._event_task_handle = Some(handle);
 
+        // Periodic invisible keepalive heartbeat — broadcasts every 2 seconds
+        // to keep connections warm and update mesh health timestamps without
+        // producing any chat log entries or UI notifications.
+        let hb_sender = sender.clone();
+        let hb_secret_key = self.secret_key.clone();
+        tokio::spawn(async move {
+            let mut hb_interval = tokio::time::interval(Duration::from_secs(2));
+            hb_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                hb_interval.tick().await;
+                let msg = Message::Heartbeat;
+                if let Ok(encoded) = SignedMessage::sign_and_encode(&hb_secret_key, &msg) {
+                    if hb_sender.broadcast(encoded).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Mesh quiescence watchdog — monitors for prolonged inactivity every 30 seconds.
+        // Pushes system notifications on health transitions (degraded/recovered).
+        let wd_app_state = self.app_state.clone();
+        let wd_event_tx = self.event_tx.clone();
+        let wd_endpoint = self.endpoint.clone();
+        tokio::spawn(async move {
+            let mut last_mesh_health: Option<MeshHealth> = None;
+            let mut wd_interval = tokio::time::interval(Duration::from_secs(30));
+            wd_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                wd_interval.tick().await;
+                let mut state = wd_app_state.lock().await;
+                state.status.recompute_mesh_health(&wd_endpoint).await;
+                if let Some(notification) = state.status.check_mesh_quiescence(&mut last_mesh_health) {
+                    state.push_system(notification.clone());
+                    let _ = wd_event_tx.send(FrontendEvent::NewEntry {
+                        kind: "system".to_string(),
+                        label: "System".to_string(),
+                        body: notification,
+                    });
+                }
+            }
+        });
+
         Ok(())
     }
 
@@ -456,15 +500,16 @@ async fn process_net_events(
             });
         }
 
-        // Periodically update connection counts when neighbors change
+        // Update connection counts and online user list when neighbors change
         let current_ncount = state.status.neighbors.len();
+        let ncount_changed = current_ncount != last_peer_count;
         drop(state); // release lock
 
-        if current_ncount > 0 && current_ncount != last_peer_count {
+        if ncount_changed {
             last_peer_count = current_ncount;
             let mut state2 = app_state.lock().await;
             chat_core::update_connection_counts(&endpoint, &mut state2.status).await;
-            // Build and emit the online user list
+            // Build and emit the online user list (always, even when count goes to 0)
             let online_list = build_online_user_list(&state2);
             let _ = event_tx.send(FrontendEvent::OnlineUserList { users: online_list });
             let _ = event_tx.send(FrontendEvent::StatusUpdate {

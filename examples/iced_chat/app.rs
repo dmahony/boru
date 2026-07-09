@@ -17,8 +17,9 @@ use iroh_gossip::chat_core::handle_net_event as chat_net_event;
 use iced::widget::text_editor;
 use iroh_gossip::chat_core::{
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
-    MessageHash,
+    MeshHealth, MessageHash,
 };
+use iroh_gossip::whisper::{WhisperEvent, WhisperHandle};
 use iroh_gossip::chat_history::{ChatHistoryStore, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendsStore};
 use iroh_gossip::net::Gossip;
@@ -203,6 +204,16 @@ pub struct IcedChat {
     relayed_peers: usize,
     /// Counter for periodic connection refresh (decremented per ConnMonitorTick).
     conn_refresh_counter: u32,
+    /// Current mesh health summary from the quiescence watchdog.
+    mesh_health: MeshHealth,
+    /// Previous mesh health state, used to detect transitions.
+    last_mesh_health: Option<MeshHealth>,
+    /// Counter for periodic presence broadcast (decremented per ConnMonitorTick,
+    /// broadcasts Message::Presence when it hits 0, resets to 5).
+    presence_counter: u32,
+    /// Counter for periodic invisible keepalive heartbeat (decremented per
+    /// ConnMonitorTick, broadcasts Message::Heartbeat when it hits 0, resets to 2).
+    heartbeat_counter: u32,
     /// Optional receiver for Tor reconnection status updates.
     tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
     /// Whether to auto-scroll to the latest message.
@@ -223,6 +234,10 @@ pub struct IcedChat {
     /// Bootstrap peer addresses from the initial join ticket (if any).
     /// Used only for the first room subscription; cleared after use.
     initial_bootstrap_peers: Vec<EndpointAddr>,
+    /// Handle for sending whisper/private messages.
+    whisper_handle: WhisperHandle,
+    /// Receiver for incoming whisper events.
+    pub whisper_events_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -257,6 +272,8 @@ pub enum AppMessage {
     ToggleHelp,
     NetEvent(NetEvent),
     FriendEvent(FriendEvent),
+    /// An event from the whisper (DM) protocol.
+    WhisperEvent(WhisperEvent),
     MessageSent(String),
     FileSent(String),
     DownloadDone(String),
@@ -279,6 +296,8 @@ pub enum AppMessage {
     DeleteRoom(TopicId),
     /// Periodic tick for connection type refresh.
     ConnMonitorTick,
+    /// Periodic tick for mesh quiescence watchdog.
+    MeshWatchdogTick,
     /// Status update from the Tor reconnection monitor.
     TorReconnect(String),
     /// Toggle dark mode on/off.
@@ -309,6 +328,8 @@ impl IcedChat {
         friends: FriendsStore,
         friend_mgr: FriendPingManager,
         friend_events_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
+        whisper_events_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
+        whisper_handle: WhisperHandle,
         tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
         initial_room: Option<(TopicId, Vec<EndpointAddr>)>,
         notice: String,
@@ -355,6 +376,10 @@ impl IcedChat {
             direct_peers: 0,
             relayed_peers: 0,
             conn_refresh_counter: 0,
+            mesh_health: MeshHealth::Good,
+            last_mesh_health: None,
+            presence_counter: 5,
+            heartbeat_counter: 2,
             tor_reconnect_rx,
             follow_latest: true,
             dark_mode: false,
@@ -364,6 +389,8 @@ impl IcedChat {
             history_saved_count: 0,
             online_friends: HashMap::new(),
             initial_bootstrap_peers: initial_bootstrap,
+            whisper_handle,
+            whisper_events_rx,
         }
     }
 
@@ -548,6 +575,23 @@ impl IcedChat {
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
 
+                        // Periodic invisible keepalive heartbeat — 2-second interval.
+                        let hb_sender = sender.clone();
+                        let hb_sk = sk.clone();
+                        task::spawn(async move {
+                            let mut hb_interval = tokio::time::interval(std::time::Duration::from_secs(2));
+                            hb_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                            loop {
+                                hb_interval.tick().await;
+                                let hb_msg = crate::Message::Heartbeat;
+                                if let Ok(encoded) = SignedMessage::sign_and_encode(&hb_sk, &hb_msg) {
+                                    if hb_sender.broadcast(encoded).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+
                         Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
                     },
                     |result| match result {
@@ -646,6 +690,23 @@ impl IcedChat {
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
+
+                        // Periodic invisible keepalive heartbeat — 2-second interval.
+                        let hb_sender = sender.clone();
+                        let hb_sk = sk.clone();
+                        task::spawn(async move {
+                            let mut hb_interval = tokio::time::interval(std::time::Duration::from_secs(2));
+                            hb_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                            loop {
+                                hb_interval.tick().await;
+                                let hb_msg = crate::Message::Heartbeat;
+                                if let Ok(encoded) = SignedMessage::sign_and_encode(&hb_sk, &hb_msg) {
+                                    if hb_sender.broadcast(encoded).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        });
 
                         Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
                     },
@@ -1216,6 +1277,113 @@ impl IcedChat {
                     ));
                 }
 
+                // Normal text message — check for whisper commands first
+                if let Some(rest) = trimmed.strip_prefix("/whisper ") {
+                    // ── Whisper DM ──────────────────────────────────────────
+                    let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
+                    if parts.len() < 2 {
+                        self.push_system("Usage: /whisper <peer-key|friend-alias> <message>");
+                        return iced::Task::none();
+                    }
+                    let target = parts[0].trim().to_string();
+                    let message = parts[1].trim().to_string();
+                    // Resolve peer key from alias or direct public key
+                    let peer_key = self.resolve_peer_key(&target);
+                    let peer_key = match peer_key {
+                        Some(pk) => pk,
+                        None => {
+                            self.push_system(format!(
+                                "Unknown peer: {target}. Use a public key or friend alias."
+                            ));
+                            return iced::Task::none();
+                        }
+                    };
+                    let whisper_handle = self.whisper_handle.clone();
+                    let text = message.clone();
+                    let label = self
+                        .names
+                        .get(&peer_key)
+                        .cloned()
+                        .unwrap_or_else(|| peer_key.fmt_short().to_string());
+                    self.push_system(format!("[Whisper to {label}] {message}"));
+                    return iced::Task::perform(
+                        async move {
+                            whisper_handle
+                                .send_dm(peer_key, text)
+                                .await
+                                .map_err(|e| e.to_string())
+                        },
+                        |r: Result<(), String>| match r {
+                            Ok(()) => AppMessage::ToggleHelp,
+                            Err(e) => AppMessage::ErrorMsg(format!("Whisper failed: {e}")),
+                        },
+                    );
+                }
+
+                if let Some(rest) = trimmed.strip_prefix("/whisper-file ") {
+                    // ── Whisper file transfer ──────────────────────────────
+                    let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
+                    if parts.len() < 2 {
+                        self.push_system("Usage: /whisper-file <peer-key|friend-alias> <path>");
+                        return iced::Task::none();
+                    }
+                    let target = parts[0].trim().to_string();
+                    let path = parts[1].trim().to_string();
+                    let peer_key = self.resolve_peer_key(&target);
+                    let peer_key = match peer_key {
+                        Some(pk) => pk,
+                        None => {
+                            self.push_system(format!(
+                                "Unknown peer: {target}. Use a public key or friend alias."
+                            ));
+                            return iced::Task::none();
+                        }
+                    };
+                    let path_buf = std::path::PathBuf::from(&path);
+                    let abs_path = match std::path::absolute(&path_buf) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.push_system(format!("Failed to resolve path: {e}"));
+                            return iced::Task::none();
+                        }
+                    };
+                    if !abs_path.exists() {
+                        self.push_system(format!("File not found: {path}"));
+                        return iced::Task::none();
+                    }
+                    let filename = path_buf
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if filename.is_empty() {
+                        self.push_system("Invalid file path.");
+                        return iced::Task::none();
+                    }
+                    let blob_store = self.blob_store.clone();
+                    let whisper_handle = self.whisper_handle.clone();
+                    let fname = filename.clone();
+                    self.push_system(format!("[Whisper] Hashing file: {filename}..."));
+                    return iced::Task::perform(
+                        async move {
+                            let tag = blob_store
+                                .blobs()
+                                .add_path(abs_path)
+                                .await
+                                .map_err(|e| format!("Failed to hash file: {e}"))?;
+                            let ticket = tag.hash.to_string();
+                            whisper_handle
+                                .send_file(peer_key, fname.clone(), ticket)
+                                .await
+                                .map_err(|e| format!("Whisper file failed: {e}"))?;
+                            Ok::<String, String>(fname)
+                        },
+                        |r: Result<String, String>| match r {
+                            Ok(name) => AppMessage::FileSent(name),
+                            Err(e) => AppMessage::ErrorMsg(e),
+                        },
+                    );
+                }
+
                 // Normal text message
                 let text = trimmed.clone();
                 match SignedMessage::sign_and_encode(
@@ -1314,6 +1482,52 @@ impl IcedChat {
             AppMessage::FriendEvent(event) => {
                 self.handle_friend_event(event);
                 self.try_save_friends();
+                iced::Task::none()
+            }
+
+            AppMessage::WhisperEvent(event) => {
+                match event {
+                    iroh_gossip::whisper::WhisperEvent::Message { from, content } => {
+                        let text = String::from_utf8_lossy(&content).to_string();
+                        let label = self
+                            .names
+                            .get(&from)
+                            .cloned()
+                            .unwrap_or_else(|| from.fmt_short().to_string());
+                        self.entries.push(ChatEntry::remote(
+                            format!("Whisper from {label}"),
+                            text,
+                            None,
+                        ));
+                    }
+                    iroh_gossip::whisper::WhisperEvent::FileTransfer { from, name, ticket } => {
+                        let label = self
+                            .names
+                            .get(&from)
+                            .cloned()
+                            .unwrap_or_else(|| from.fmt_short().to_string());
+                        self.push_system(format!(
+                            "[Whisper from {label}] File received: {name}. Use /download to fetch."
+                        ));
+                        self.pending_file = Some((name, ticket));
+                    }
+                    iroh_gossip::whisper::WhisperEvent::Connected { peer } => {
+                        let label = self
+                            .names
+                            .get(&peer)
+                            .cloned()
+                            .unwrap_or_else(|| peer.fmt_short().to_string());
+                        self.push_system(format!("[Whisper] Connected to {label}"));
+                    }
+                    iroh_gossip::whisper::WhisperEvent::Disconnected { peer } => {
+                        let label = self
+                            .names
+                            .get(&peer)
+                            .cloned()
+                            .unwrap_or_else(|| peer.fmt_short().to_string());
+                        self.push_system(format!("[Whisper] Disconnected from {label}"));
+                    }
+                }
                 iced::Task::none()
             }
 
@@ -1561,6 +1775,93 @@ impl IcedChat {
                     }
                 }
 
+                // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
+                let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
+                if self.presence_counter == 0 {
+                    self.presence_counter = 5;
+                    if let Some(ref sender) = self.sender {
+                        let sk = self.secret_key.clone();
+                        let s = sender.clone();
+                        tasks.push(iced::Task::perform(
+                            async move {
+                                if let Ok(encoded) =
+                                    SignedMessage::sign_and_encode(&sk, &crate::Message::Presence)
+                                {
+                                    s.broadcast(encoded).await.ok();
+                                }
+                            },
+                            |_| AppMessage::ToggleHelp,
+                        ));
+                    }
+                } else {
+                    self.presence_counter -= 1;
+                }
+
+                // Periodic invisible keepalive heartbeat — broadcasts Message::Heartbeat
+                // every ~2s to keep connections warm and update mesh health timestamps
+                // without producing any chat log entry or UI notification.
+                if self.heartbeat_counter == 0 {
+                    self.heartbeat_counter = 2;
+                    if let Some(ref sender) = self.sender {
+                        let sk = self.secret_key.clone();
+                        let s = sender.clone();
+                        tasks.push(iced::Task::perform(
+                            async move {
+                                if let Ok(encoded) =
+                                    SignedMessage::sign_and_encode(&sk, &crate::Message::Heartbeat)
+                                {
+                                    s.broadcast(encoded).await.ok();
+                                }
+                            },
+                            |_| AppMessage::ToggleHelp,
+                        ));
+                    }
+                } else {
+                    self.heartbeat_counter -= 1;
+                }
+
+                if tasks.is_empty() {
+                    iced::Task::none()
+                } else {
+                    iced::Task::batch(tasks)
+                }
+            }
+
+            AppMessage::MeshWatchdogTick => {
+                // Periodic mesh quiescence check — monitors for prolonged inactivity.
+                let new_health = if self.sender.is_none() {
+                    MeshHealth::Offline("Not connected to any room".to_string())
+                } else if self.neighbors.is_empty() {
+                    MeshHealth::Degraded("No peers in the mesh".to_string())
+                } else {
+                    MeshHealth::Good
+                };
+
+                // Detect transitions and push system notifications.
+                let notification = match (&self.last_mesh_health, &new_health) {
+                    (Some(MeshHealth::Good), MeshHealth::Degraded(reason)) => {
+                        Some(format!("⚠ Mesh health degraded: {reason}"))
+                    }
+                    (Some(MeshHealth::Good), MeshHealth::Offline(reason)) => {
+                        Some(format!("⚠ Mesh offline: {reason}"))
+                    }
+                    (Some(MeshHealth::Degraded(_)), MeshHealth::Good) => {
+                        Some("✓ Mesh health recovered: all peers are active.".to_string())
+                    }
+                    (Some(MeshHealth::Offline(_)), MeshHealth::Good) => {
+                        Some("✓ Mesh health recovered: endpoint is back online.".to_string())
+                    }
+                    (None, _) => None,
+                    _ => None,
+                };
+
+                self.mesh_health = new_health;
+                self.last_mesh_health = Some(self.mesh_health.clone());
+
+                if let Some(msg) = notification {
+                    self.push_system(msg);
+                }
+
                 iced::Task::none()
             }
 
@@ -1629,6 +1930,17 @@ impl IcedChat {
 // ── Net event handling ────────────────────────────────────────────────
 
 impl IcedChat {
+    /// Resolve a peer identifier (public key string or friend alias) to a [`PublicKey`].
+    fn resolve_peer_key(&self, target: &str) -> Option<PublicKey> {
+        if let Ok(pk) = target.parse::<PublicKey>() {
+            return Some(pk);
+        }
+        // Try to resolve by friend alias.
+        self.friends
+            .iter()
+            .find(|(_, rec)| rec.label.as_deref() == Some(target))
+            .and_then(|(fid, _)| fid.parse_public_key().ok())
+    }
     /// Query the iroh endpoint for each neighbor to recompute direct/relay counts.
     fn recompute_connection_counts(&mut self) {
         let mut direct = 0usize;
@@ -2255,27 +2567,46 @@ impl std::hash::Hash for FriendRxHandle {
     }
 }
 
+struct WhisperRxHandle(Arc<Mutex<UnboundedReceiver<WhisperEvent>>>);
+
+impl std::hash::Hash for WhisperRxHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
 fn subscription_stream(
     rx: &RxHandle,
     friend_rx: &FriendRxHandle,
+    whisper_rx: &WhisperRxHandle,
 ) -> Pin<Box<dyn Stream<Item = AppMessage> + Send>> {
     let rx = Arc::clone(&rx.0);
     let friend_rx = Arc::clone(&friend_rx.0);
+    let whisper_rx = Arc::clone(&whisper_rx.0);
     Box::pin(n0_future::stream::unfold(
-        (rx, friend_rx),
-        |(rx, friend_rx)| async move {
+        (rx, friend_rx, whisper_rx),
+        |(rx, friend_rx, whisper_rx)| async move {
             let mut rx_guard = rx.lock().await;
             let mut friend_guard = friend_rx.lock().await;
+            let mut whisper_guard = whisper_rx.lock().await;
             tokio::select! {
                 event = rx_guard.recv() => {
+                    drop(whisper_guard);
                     drop(friend_guard);
                     drop(rx_guard);
-                    event.map(|e| (AppMessage::NetEvent(e), (rx, friend_rx)))
+                    event.map(|e| (AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx)))
                 }
                 event = friend_guard.recv() => {
+                    drop(whisper_guard);
                     drop(rx_guard);
                     drop(friend_guard);
-                    event.map(|e| (AppMessage::FriendEvent(e), (rx, friend_rx)))
+                    event.map(|e| (AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx)))
+                }
+                event = whisper_guard.recv() => {
+                    drop(friend_guard);
+                    drop(rx_guard);
+                    drop(whisper_guard);
+                    event.map(|e| (AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx)))
                 }
             }
         },
@@ -2286,13 +2617,16 @@ impl IcedChat {
     pub fn subscription(
         rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
         friend_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
+        whisper_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
     ) -> iced::Subscription<AppMessage> {
         iced::Subscription::batch(vec![
             iced::time::every(std::time::Duration::from_secs(1))
                 .map(|_| AppMessage::ConnMonitorTick),
+            iced::time::every(std::time::Duration::from_secs(30))
+                .map(|_| AppMessage::MeshWatchdogTick),
             iced::Subscription::run_with(
-                (RxHandle(rx), FriendRxHandle(friend_rx)),
-                |(rx, friend_rx)| subscription_stream(&rx, &friend_rx),
+                (RxHandle(rx), FriendRxHandle(friend_rx), WhisperRxHandle(whisper_rx)),
+                |(rx, friend_rx, whisper_rx)| subscription_stream(&rx, &friend_rx, &whisper_rx),
             ),
         ])
     }
