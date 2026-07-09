@@ -572,7 +572,9 @@ impl IcedChat {
                                 } else if let Ok(bytes) = hex::decode(&entry.sender) {
                                     if bytes.len() == 32 {
                                         let arr: [u8; 32] = bytes.try_into().unwrap();
-                                        PublicKey::from_bytes(&arr).fmt_short().to_string()
+                                        PublicKey::from_bytes(&arr)
+                                            .map(|pk| pk.fmt_short().to_string())
+                                            .unwrap_or_else(|_| "local".to_string())
                                     } else {
                                         "local".to_string()
                                     }
