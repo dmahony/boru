@@ -16,7 +16,7 @@
 //!
 //! The ALPN for whisper connections is [`WHISPER_ALPN`].
 
-use std::{collections::HashMap, io, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use iroh::{
@@ -96,7 +96,7 @@ pub enum WhisperEvent {
 
 // ── Internal commands ──────────────────────────────────────────────────────────
 
-enum Cmd {
+pub(crate) enum Cmd {
     SendDm {
         peer: PublicKey,
         text: String,
@@ -200,7 +200,7 @@ impl WhisperHandle {
 
     /// Create a raw inner handle for tests (bypasses the public API).
     #[doc(hidden)]
-    pub fn _cmd_tx(&self) -> mpsc::Sender<Cmd> {
+    fn _cmd_tx(&self) -> mpsc::Sender<Cmd> {
         self.cmd_tx.clone()
     }
 }
