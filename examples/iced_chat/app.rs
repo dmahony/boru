@@ -502,16 +502,14 @@ fn private_topic(a: &PublicKey, b: &PublicKey) -> TopicId {
     TopicId::from_bytes(*hash.as_bytes())
 }
 
-fn online_friends_from_store(friends: &FriendsStore) -> HashMap<PublicKey, String> {
-    friends
-        .iter()
-        .filter(|(_, record)| record.status.online)
-        .filter_map(|(id, record)| {
-            id.parse_public_key()
-                .ok()
-                .map(|pk| (pk, record.display_label(id)))
-        })
-        .collect()
+/// Build the initial online-friends set.
+///
+/// Returns an empty HashMap — online status is determined by the
+/// FriendPingManager, not by persisted store flags that may be stale
+/// from a previous session. The FriendPingManager fires its first tick
+/// immediately and populates `online_friends` via `FriendEvent` messages.
+fn online_friends_from_store(_friends: &FriendsStore) -> HashMap<PublicKey, String> {
+    HashMap::new()
 }
 
 // ── Update ────────────────────────────────────────────────────────────
@@ -908,7 +906,20 @@ impl IcedChat {
 
             AppMessage::OpenFriendChat(peer) => {
                 let topic = private_topic(&self.local_public, &peer);
-                iced::Task::done(AppMessage::OpenRoom(topic))
+                // Send a whisper notification to alert the peer that a
+                // private chat room has been opened for them.
+                let whisper_handle = self.whisper_handle.clone();
+                iced::Task::batch(vec![
+                    iced::Task::perform(
+                        async move {
+                            let _ = whisper_handle
+                                .send_dm(peer, "\x00PRIVATE_CHAT".to_string())
+                                .await;
+                        },
+                        |_| AppMessage::Noop,
+                    ),
+                    iced::Task::done(AppMessage::OpenRoom(topic)),
+                ])
             }
 
             AppMessage::RoomSelected(topic) => {
@@ -1517,11 +1528,37 @@ impl IcedChat {
                             .get(&from)
                             .cloned()
                             .unwrap_or_else(|| from.fmt_short().to_string());
-                        self.entries.push(ChatEntry::remote(
-                            format!("Whisper from {label}"),
-                            text,
-                            None,
-                        ));
+
+                        // Check if this is a private chat invitation marker.
+                        let is_invite = text == "\x00PRIVATE_CHAT";
+                        if is_invite {
+                            self.push_system(format!(
+                                "{label} opened a private chat with you."
+                            ));
+                        }
+
+                        // If the sender is a tracked friend, auto-open the
+                        // private gossip room so the receiving user sees the
+                        // conversation immediately.
+                        let fid = FriendId::from_public_key(from);
+                        if self.friends.get(&fid).is_some() {
+                            let private_topic = private_topic(&self.local_public, &from);
+                            let already_on_topic = matches!(self.screen, Screen::Chat { topic } if topic == private_topic);
+                            if !already_on_topic && !is_invite {
+                                // Save current room before switching
+                                self.save_room_to_history();
+                                // Navigate to the private chat room
+                                return iced::Task::done(AppMessage::OpenRoom(private_topic));
+                            }
+                        }
+
+                        if !is_invite {
+                            self.entries.push(ChatEntry::remote(
+                                format!("Whisper from {label}"),
+                                text,
+                                None,
+                            ));
+                        }
                     }
                     iroh_gossip::whisper::WhisperEvent::FileTransfer { from, name, ticket } => {
                         let label = self

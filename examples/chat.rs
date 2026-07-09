@@ -1604,6 +1604,15 @@ fn handle_whisper_event(event: WhisperEvent, app: &mut AppState) {
                 .get(&from)
                 .cloned()
                 .unwrap_or_else(|| from.fmt_short().to_string());
+
+            // Suppress internal private-chat invitation markers; show a
+            // system message instead so the user knows someone initiated
+            // a chat on the other end.
+            if text == "\x00PRIVATE_CHAT" {
+                app.push_system(format!("{label} opened a private chat with you."));
+                return;
+            }
+
             app.push_entry(
                 ChatEntry::remote(format!("Whisper from {label}"), text),
                 true,

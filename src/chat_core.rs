@@ -1043,7 +1043,9 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) {
                             cb.friend_mark_online(fid);
-                            cb.mark_friends_dirty();
+                            // NOT mark_friends_dirty — online status is
+                            // determined by the dedicated friend ping manager
+                            // (FriendPingManager), not by gossip activity.
                         }
                         let display_name = cb.resolve_name(&from);
                         cb.push_remote(display_name, text, Some(incoming_hash));
@@ -1054,7 +1056,8 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) {
                             cb.friend_mark_online(fid);
-                            cb.mark_friends_dirty();
+                            // NOT mark_friends_dirty — friend ping manager
+                            // is the authority for online status.
                         }
                         let sender_name = cb.resolve_name(&from);
                         cb.push_system(format!(
@@ -1069,7 +1072,8 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) {
                             cb.friend_mark_online(fid);
-                            cb.mark_friends_dirty();
+                            // NOT mark_friends_dirty — friend ping manager
+                            // is the authority for online status.
                         }
                         let sender_name = cb.resolve_name(&from);
                         cb.push_system(format!("{} shared an image: {}", sender_name, name));
@@ -1122,7 +1126,8 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
             let fid = FriendId::from_public_key(peer);
             if cb.is_friend(&peer) {
                 cb.friend_mark_online(fid);
-                cb.mark_friends_dirty();
+                // NOT mark_friends_dirty — friend ping manager is the
+                // authority for online status, not gossip neighbor state.
             }
             let name = cb.resolve_name(&peer);
             cb.push_system(format!("{name} joined the chat"));
@@ -2007,7 +2012,8 @@ mod tests {
         )
         .unwrap();
 
-        // Friend should be marked online
+        // Friend should be marked online (in memory), but DURTY flag is not
+        // set — online status persistence is left to the friend ping manager.
         let fid = FriendId::from_public_key(remote_key.public());
         assert!(
             app.friends
@@ -2016,7 +2022,10 @@ mod tests {
                 .unwrap_or(false),
             "friend should be marked online"
         );
-        assert!(app.friends_dirty, "friends should be marked dirty");
+        assert!(
+            !app.friends_dirty,
+            "friends should NOT be marked dirty from gossip-level NeighborUp alone"
+        );
         assert!(app
             .entries
             .iter()
