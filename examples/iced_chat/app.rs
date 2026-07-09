@@ -440,9 +440,9 @@ impl IcedChat {
         match message {
             // ── Navigation ────────────────────────────────────────────
             AppMessage::GoToChatList => {
-                // Save current room to history
+                // Save current room to history.
                 self.save_room_to_history();
-                // Update room list preview
+                // Update room list preview.
                 let name = self
                     .names
                     .get(&self.local_public)
@@ -468,8 +468,9 @@ impl IcedChat {
                 self.persist_room_history();
                 self.try_save_chat_history();
 
-                // Leave the current room
-                self.leave_current_room();
+                // Going back to the chat list only changes the UI screen.
+                // Keep the room subscription alive so returning is instant
+                // and the local peer stays online in the room.
                 self.screen = Screen::ChatList;
                 iced::Task::none()
             }
