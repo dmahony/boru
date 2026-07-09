@@ -514,6 +514,16 @@ impl ChatCallbacks for AppState {
     }
 
     fn resolve_name(&self, peer: &PublicKey) -> String {
+        // Priority: friend label > friend's last announced name > session name > short key.
+        let fid = FriendId::from_public_key(*peer);
+        if let Some(record) = self.friends.get(&fid) {
+            if let Some(label) = &record.label {
+                return label.clone();
+            }
+            if let Some(name) = &record.last_announced_name {
+                return name.clone();
+            }
+        }
         self.names
             .get(peer)
             .cloned()
@@ -1160,6 +1170,30 @@ pub async fn update_connection_counts(endpoint: &Endpoint, status: &mut StatusCo
     status.relayed_peers = relayed;
 }
 
+/// Build a list of blob download candidates: the original sender first, then
+/// any online gossip neighbors (deduplicated).
+///
+/// Pass the result as the `providers` argument to
+/// [`Downloader::download`][iroh_blobs::api::downloader::Downloader::download]
+/// so the download can fall back to other peers that may have the blob
+/// if the original sender is offline.
+///
+/// The original sender is always placed first so the primary peer is tried
+/// before fallback candidates.
+pub fn download_candidates(
+    original: PublicKey,
+    neighbors: &HashSet<PublicKey>,
+) -> Vec<PublicKey> {
+    let mut candidates: Vec<PublicKey> = Vec::with_capacity(neighbors.len() + 1);
+    candidates.push(original);
+    for n in neighbors {
+        if *n != original {
+            candidates.push(*n);
+        }
+    }
+    candidates
+}
+
 /// Query the iroh [`Endpoint`] for a single peer and return its connection type.
 ///
 /// Returns:
@@ -1776,6 +1810,27 @@ mod tests {
     }
 
     #[test]
+    fn handle_net_event_image_share_sets_pending() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+
+        let event = NetEvent::Message {
+            from: remote_key.public(),
+            message: Message::ImageShare {
+                name: "photo.jpg".into(),
+                hash: [0xab; 32],
+            },
+            sent_at: now_secs(),
+        };
+        handle_net_event(event, &mut app).unwrap();
+        assert_eq!(
+            app.pending_image,
+            Some(("photo.jpg".into(), [0xab; 32], remote_key.public()))
+        );
+        assert!(app.entries.iter().any(|e| e.body.contains("photo.jpg")));
+    }
+
+    #[test]
     fn handle_net_event_file_share_sets_pending() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
@@ -1960,7 +2015,7 @@ mod tests {
         let event = NetEvent::Message {
             from: key.public(),
             message: Message::Message { text: "hello".into() },
-            sent_at: 1_000_000,
+            sent_at: now_secs(),
         };
 
         // First delivery produces one entry.
@@ -1985,12 +2040,12 @@ mod tests {
         let event_a = NetEvent::Message {
             from: key.public(),
             message: Message::Message { text: "first".into() },
-            sent_at: 1_000_000,
+            sent_at: now_secs(),
         };
         let event_b = NetEvent::Message {
             from: key.public(),
             message: Message::Message { text: "second".into() },
-            sent_at: 1_000_001,
+            sent_at: now_secs() + 1,
         };
 
         handle_net_event(event_a, &mut app).unwrap();
@@ -2019,12 +2074,12 @@ mod tests {
             message: Message::Message {
                 text: identical_text.clone(),
             },
-            sent_at: 1_000_000,
+            sent_at: now_secs(),
         };
         let event_b = NetEvent::Message {
             from: key_b.public(),
             message: Message::Message { text: identical_text },
-            sent_at: 1_000_000,
+            sent_at: now_secs(),
         };
 
         handle_net_event(event_a, &mut app).unwrap();
@@ -2047,12 +2102,12 @@ mod tests {
         let event_t1 = NetEvent::Message {
             from: key.public(),
             message: Message::Message { text: "hello".into() },
-            sent_at: 1_000_000,
+            sent_at: now_secs(),
         };
         let event_t2 = NetEvent::Message {
             from: key.public(),
             message: Message::Message { text: "hello".into() },
-            sent_at: 1_000_002,
+            sent_at: now_secs() + 2,
         };
 
         handle_net_event(event_t1, &mut app).unwrap();
@@ -2083,7 +2138,7 @@ mod tests {
             message: Message::Message {
                 text: "self-msg".into(),
             },
-            sent_at: 1_000_000,
+            sent_at: now_secs(),
         };
 
         // Self-message produces no remote entry.
@@ -2106,7 +2161,7 @@ mod tests {
             message: Message::AboutMe {
                 name: "bob".into(),
             },
-            sent_at: 1_000_000,
+            sent_at: now_secs(),
         };
 
         handle_net_event(event.clone(), &mut app).unwrap();
@@ -2129,6 +2184,161 @@ mod tests {
             system_count_after, 1,
             "duplicate AboutMe should not produce a second notification"
         );
+    }
+
+    // ── resolve_name with friends store tests ────────────────────────────
+
+    #[test]
+    fn resolve_name_prefers_friend_label_over_session_name() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        // Set a session name.
+        app.names
+            .insert(remote_key.public(), "session_alice".to_string());
+        // Add as friend with a label.
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends.set_label(fid, "Friend Alice");
+
+        let display = app.resolve_name(&remote_key.public());
+        assert_eq!(
+            display, "Friend Alice",
+            "friend label should override session name"
+        );
+    }
+
+    #[test]
+    fn resolve_name_prefers_friend_announced_name_over_session_name() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        // Give them a session name.
+        app.names
+            .insert(remote_key.public(), "session_bob".to_string());
+        // Add as friend with last_announced_name but no label.
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends
+            .set_last_announced_name(fid, "friend_bob");
+
+        let display = app.resolve_name(&remote_key.public());
+        assert_eq!(
+            display, "friend_bob",
+            "friend's last announced name should override session name"
+        );
+    }
+
+    #[test]
+    fn resolve_name_prefers_friend_label_over_friend_announced_name() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends.set_last_announced_name(fid.clone(), "auto_name");
+        app.friends.set_label(fid, "Label");
+
+        let display = app.resolve_name(&remote_key.public());
+        assert_eq!(
+            display, "Label",
+            "friend label should take priority over last_announced_name"
+        );
+    }
+
+    #[test]
+    fn resolve_name_falls_back_to_session_name_when_not_a_friend() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        app.names
+            .insert(remote_key.public(), "session_carol".to_string());
+
+        // Not a friend — should use session name.
+        let display = app.resolve_name(&remote_key.public());
+        assert_eq!(display, "session_carol");
+    }
+
+    #[test]
+    fn resolve_name_falls_back_to_short_pk_when_no_name_or_friend() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        // No name, no friend — should fall back to short key.
+        let display = app.resolve_name(&remote_key.public());
+        let short = format!("{}", remote_key.public().fmt_short());
+        assert_eq!(display, short);
+    }
+
+    #[test]
+    fn resolve_name_falls_back_to_short_pk_when_friend_has_no_named_fields() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        let fid = FriendId::from_public_key(remote_key.public());
+        // Ensure the friend exists, but with no label and no last_announced_name.
+        app.friends.ensure_friend(fid);
+
+        // No session name either — should fall back to short key.
+        let display = app.resolve_name(&remote_key.public());
+        let short = format!("{}", remote_key.public().fmt_short());
+        assert_eq!(display, short);
+    }
+
+    #[test]
+    fn handle_net_event_message_shows_friend_label() {
+        clear_seen_messages();
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        // Add as friend with a label.
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends.set_label(fid, "Best Friend");
+
+        let event = NetEvent::Message {
+            from: remote_key.public(),
+            message: Message::Message {
+                text: "hello!".into(),
+            },
+            sent_at: now_secs(),
+        };
+        handle_net_event(event, &mut app).unwrap();
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].label, "Best Friend");
+        assert_eq!(app.entries[0].body, "hello!");
+    }
+
+    #[test]
+    fn handle_net_event_neighbor_up_shows_friend_label() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        // Add as friend with a label.
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends.set_label(fid, "Buddy");
+
+        handle_net_event(
+            NetEvent::NeighborUp {
+                peer: remote_key.public(),
+            },
+            &mut app,
+        )
+        .unwrap();
+
+        assert!(app
+            .entries
+            .iter()
+            .any(|e| e.body == "Buddy joined the chat"));
+    }
+
+    #[test]
+    fn handle_net_event_neighbor_down_shows_friend_label() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends.set_label(fid, "Pal");
+
+        handle_net_event(
+            NetEvent::NeighborDown {
+                peer: remote_key.public(),
+            },
+            &mut app,
+        )
+        .unwrap();
+
+        assert!(app
+            .entries
+            .iter()
+            .any(|e| e.body == "Pal left the chat"));
     }
 
     // ── SignedMessage roundtrip helper ──────────────────────────────────
@@ -2317,5 +2527,44 @@ mod tests {
             Message::Delete { message_hash: hash },
             |decoded| matches!(decoded, Message::Delete { message_hash } if *message_hash == hash),
         );
+    }
+
+    // ── download_candidates ──────────────────────────────────────────────
+
+    #[test]
+    fn test_download_candidates_original_first() {
+        let pk_a = SecretKey::generate().public();
+        let pk_b = SecretKey::generate().public();
+        let pk_c = SecretKey::generate().public();
+        let mut neighbors = HashSet::new();
+        neighbors.insert(pk_b);
+        neighbors.insert(pk_c);
+
+        let candidates = download_candidates(pk_a, &neighbors);
+        assert_eq!(candidates.len(), 3, "should have 3 candidates");
+        assert_eq!(candidates[0], pk_a, "original sender should be first");
+        assert!(candidates.contains(&pk_b), "should include neighbor B");
+        assert!(candidates.contains(&pk_c), "should include neighbor C");
+    }
+
+    #[test]
+    fn test_download_candidates_deduplicates_original() {
+        let pk_a = SecretKey::generate().public();
+        let mut neighbors = HashSet::new();
+        neighbors.insert(pk_a); // original is also a neighbor
+
+        let candidates = download_candidates(pk_a, &neighbors);
+        assert_eq!(candidates.len(), 1, "should deduplicate");
+        assert_eq!(candidates[0], pk_a, "original should be the only entry");
+    }
+
+    #[test]
+    fn test_download_candidates_no_neighbors() {
+        let pk_a = SecretKey::generate().public();
+        let neighbors = HashSet::new();
+
+        let candidates = download_candidates(pk_a, &neighbors);
+        assert_eq!(candidates.len(), 1, "should have just the original");
+        assert_eq!(candidates[0], pk_a);
     }
 }

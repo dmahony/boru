@@ -38,7 +38,7 @@ use iroh_gossip::chat_core::friend_ping::{
     DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
 };
 use iroh_gossip::chat_core::{
-    check_peer_connection_type, fmt_relay_mode, handle_net_event, message_hash,
+    check_peer_connection_type, download_candidates, fmt_relay_mode, handle_net_event, message_hash,
     update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, MeshHealth, Message,
     NetEvent, SignedMessage, StatusContext, Ticket,
 };
@@ -708,9 +708,10 @@ async fn main() -> Result<()> {
                 // Auto-download pending image (ImageShare received)
                 if let Some((name, hash, sender_pk)) = app.pending_image.take() {
                     let blob_hash: iroh_blobs::Hash = hash.into();
+                    let candidates = download_candidates(sender_pk, &app.status.neighbors);
                     if let Err(err) = blob_store
                         .downloader(&endpoint)
-                        .download(blob_hash, Some(sender_pk))
+                        .download(blob_hash, candidates)
                         .await
                     {
                         app.push_system(format!("Failed to download image '{}': {err}", name));
@@ -1018,8 +1019,9 @@ async fn handle_key_event(
                     };
                     let peer_id = ticket.addr().id;
                     let downloader = blob_store.downloader(endpoint);
+                    let candidates = download_candidates(peer_id, &app.status.neighbors);
                     app.push_system(format!("Downloading: {filename}..."));
-                    if let Err(e) = downloader.download(ticket.hash(), Some(peer_id)).await {
+                    if let Err(e) = downloader.download(ticket.hash(), candidates).await {
                         app.push_system(format!("Download failed: {e}"));
                         return Ok(());
                     }

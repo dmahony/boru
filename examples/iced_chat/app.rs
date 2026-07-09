@@ -16,6 +16,7 @@ use iroh_gossip::chat_callbacks::ChatCallbacks;
 use iroh_gossip::chat_core::handle_net_event as chat_net_event;
 use iced::widget::text_editor;
 use iroh_gossip::chat_core::{
+    download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     MeshHealth, MessageHash,
 };
@@ -296,8 +297,11 @@ pub enum AppMessage {
     ExecuteFileSend(String),
     ExecuteDownload,
     ExecuteImageSend(String),
-    ImageSent(String),
-    ImageDownloaded(String, Vec<u8>),
+    ImageDownloaded {
+        sender: PublicKey,
+        name: String,
+        image_bytes: Vec<u8>,
+    },
     FriendAdded {
         fid: String,
         label: String,
@@ -1438,12 +1442,14 @@ impl IcedChat {
                 if let Some((name, hash, sender_pk)) = self.pending_image.take() {
                     let blob_store = self.blob_store.clone();
                     let endpoint = self.endpoint.clone();
+                    let neighbors = self.neighbors.clone();
                     return iced::Task::perform(
                         async move {
                             let blob_hash: iroh_blobs::Hash = hash.into();
+                            let candidates = download_candidates(sender_pk, &neighbors);
                             blob_store
                                 .downloader(&endpoint)
-                                .download(blob_hash, Some(sender_pk))
+                                .download(blob_hash, candidates)
                                 .await
                                 .map_err(|e| format!("Download: {e}"))?;
                             let mut reader = blob_store.blobs().reader(blob_hash);
@@ -1455,8 +1461,12 @@ impl IcedChat {
                                 .map_err(|e| format!("Read: {e}"))?;
                             Ok((name, buf))
                         },
-                        |r: Result<(String, Vec<u8>), String>| match r {
-                            Ok((name, data)) => AppMessage::ImageDownloaded(name, data),
+                        move |r: Result<(String, Vec<u8>), String>| match r {
+                            Ok((name, data)) => AppMessage::ImageDownloaded {
+                                sender: sender_pk,
+                                name,
+                                image_bytes: data,
+                            },
                             Err(e) => AppMessage::ErrorMsg(e),
                         },
                     );
@@ -1572,6 +1582,7 @@ impl IcedChat {
                 let sender = self.sender.clone();
                 let secret_key = self.secret_key.clone();
                 let fname = filename.clone();
+                let local_pk = self.local_public;
 
                 iced::Task::perform(
                     async move {
@@ -1594,10 +1605,14 @@ impl IcedChat {
                         if let Some(ref sender) = sender {
                             sender.broadcast(encoded).await.ok();
                         }
-                        Ok((fname, image_bytes))
+                        Ok((local_pk, fname, image_bytes))
                     },
-                    |r: Result<(String, Vec<u8>), String>| match r {
-                        Ok((name, bytes)) => AppMessage::ImageDownloaded(name, bytes),
+                    |r: Result<(PublicKey, String, Vec<u8>), String>| match r {
+                        Ok((sender_pk, name, bytes)) => AppMessage::ImageDownloaded {
+                            sender: sender_pk,
+                            name,
+                            image_bytes: bytes,
+                        },
                         Err(e) => AppMessage::ErrorMsg(e),
                     },
                 )
@@ -1609,15 +1624,17 @@ impl IcedChat {
                     Some((filename, ticket_str)) => {
                         let blob_store = self.blob_store.clone();
                         let endpoint = self.endpoint.clone();
+                        let neighbors = self.neighbors.clone();
                         iced::Task::perform(
                             async move {
                                 let ticket: BlobTicket = ticket_str
                                     .parse::<BlobTicket>()
                                     .map_err(|e| format!("Parse ticket: {e}"))?;
                                 let peer_id = ticket.addr().id;
+                                let candidates = download_candidates(peer_id, &neighbors);
                                 blob_store
                                     .downloader(&endpoint)
-                                    .download(ticket.hash(), Some(peer_id))
+                                    .download(ticket.hash(), candidates)
                                     .await
                                     .map_err(|e| format!("Download: {e}"))?;
                                 let dest =
@@ -1650,16 +1667,16 @@ impl IcedChat {
                 self.pending_file = None;
                 iced::Task::none()
             }
-            AppMessage::ImageSent(name) => {
-                self.push_local(format!("[Image: {name}]"));
-                iced::Task::none()
-            }
-            AppMessage::ImageDownloaded(name, image_bytes) => {
+            AppMessage::ImageDownloaded {
+                sender,
+                name,
+                image_bytes,
+            } => {
                 let sender_name = self
                     .names
-                    .get(&self.local_public)
+                    .get(&sender)
                     .cloned()
-                    .unwrap_or_else(|| self.local_public.fmt_short().to_string());
+                    .unwrap_or_else(|| sender.fmt_short().to_string());
                 self.entries.push(ChatEntry::image(
                     &sender_name,
                     format!("[Image: {name}]"),
@@ -1986,6 +2003,16 @@ impl ChatCallbacks for IcedChat {
     }
 
     fn resolve_name(&self, peer: &PublicKey) -> String {
+        // Priority: friend label > friend's last announced name > session name > short key.
+        let fid = FriendId::from_public_key(*peer);
+        if let Some(record) = self.friends.get(&fid) {
+            if let Some(label) = &record.label {
+                return label.clone();
+            }
+            if let Some(name) = &record.last_announced_name {
+                return name.clone();
+            }
+        }
         self.names
             .get(peer)
             .cloned()
