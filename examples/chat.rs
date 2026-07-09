@@ -543,16 +543,9 @@ async fn main() -> Result<()> {
     let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     spawn_input_thread(ui_tx);
 
-    // Typing indicator state: throttle broadcast and track reset.
-    let mut typing_state = TypingBroadcastState::new();
-
     // Periodic connection status monitor — refreshes every 60 seconds.
     let mut conn_monitor = tokio::time::interval(Duration::from_secs(60));
     conn_monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    // Typing decay timer: sweep stale entries every second.
-    let mut typing_decay = tokio::time::interval(Duration::from_secs(1));
-    typing_decay.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     while !app.should_quit {
         // Non-blocking check for Tor reconnection status updates
@@ -573,7 +566,6 @@ async fn main() -> Result<()> {
                     &blob_store,
                     &friend_mgr,
                     &room_docs,
-                    &mut typing_state,
                 ).await?;
                 if app.friends_dirty {
                     if let Err(err) = app.friends.save() {
@@ -623,12 +615,6 @@ async fn main() -> Result<()> {
             _ = conn_monitor.tick() => {
                 // Periodic refresh of per-peer connection status.
                 update_connection_counts(&endpoint, &mut app.status).await;
-            }
-            _ = typing_decay.tick() => {
-                // Remove typing indicators >5 seconds stale.
-                if app.clear_expired_typing() {
-                    terminal.draw(|frame| render_app(frame, &mut app))?;
-                }
             }
             else => break,
         }
@@ -682,22 +668,7 @@ enum UiEvent {
     Paste(String),
 }
 
-/// Tracks throttled broadcast of typing indicators to the gossip network.
-struct TypingBroadcastState {
-    last_broadcast: Instant,
-    was_typing: bool,
-}
 
-impl TypingBroadcastState {
-    fn new() -> Self {
-        Self {
-            // Start with last_broadcast far in the past so the first keystroke
-            // always fires the indicator.
-            last_broadcast: Instant::now() - Duration::from_secs(10),
-            was_typing: false,
-        }
-    }
-}
 
 fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
     std::thread::spawn(move || {
@@ -734,7 +705,6 @@ async fn handle_ui_event(
     blob_store: &MemStore,
     friend_mgr: &FriendPingManager,
     room_docs: &Arc<RwLock<Option<RoomDocs>>>,
-    typing_state: &mut TypingBroadcastState,
 ) -> Result<bool> {
     match event {
         UiEvent::Key(key) => {
@@ -748,7 +718,6 @@ async fn handle_ui_event(
                 blob_store,
                 friend_mgr,
                 room_docs,
-                typing_state,
             )
             .await?;
             Ok(true)
@@ -771,7 +740,6 @@ async fn handle_key_event(
     blob_store: &MemStore,
     friend_mgr: &FriendPingManager,
     room_docs: &Arc<RwLock<Option<RoomDocs>>>,
-    typing_state: &mut TypingBroadcastState,
 ) -> Result<()> {
     let visible_height = app.last_log_height;
     match key {
@@ -1230,7 +1198,6 @@ async fn handle_key_event(
             let encoded_message = SignedMessage::sign_and_encode(secret_key, &message)?;
             sender.broadcast(encoded_message).await?;
             app.push_local(local_label.to_string(), trimmed);
-            typing_state.was_typing = false;
         }
         KeyEvent {
             code: KeyCode::Backspace,
@@ -1269,16 +1236,6 @@ async fn handle_key_event(
             ..
         } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
             app.composer.insert_char(ch);
-            // Broadcast typing indicator (throttled to at most 1 per 3 seconds)
-            // so remote peers see that we are composing a message.
-            if typing_state.last_broadcast.elapsed() >= Duration::from_secs(3) {
-                let typing_msg = SignedMessage::sign_and_encode(secret_key, &Message::Typing);
-                if let Ok(encoded) = typing_msg {
-                    let _ = sender.broadcast(encoded).await;
-                }
-                typing_state.last_broadcast = Instant::now();
-                typing_state.was_typing = true;
-            }
         }
         _ => {}
     }
@@ -1398,7 +1355,6 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(status_height),
-            Constraint::Length(1), // Typing indicator strip
             Constraint::Min(10),
             Constraint::Length(5),
         ])
@@ -1431,30 +1387,6 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
         .block(status_block)
         .wrap(Wrap { trim: true });
     frame.render_widget(status_paragraph, layout[0]);
-
-    // ── Typing indicator strip ────────────────────────────────────────
-    if !app.typing_peers.is_empty() {
-        let typing_names: Vec<String> = app
-            .typing_peers
-            .keys()
-            .filter_map(|pk| app.names.get(pk))
-            .cloned()
-            .collect();
-        let typing_text = if typing_names.len() <= 3 {
-            format!("{} is typing...", typing_names.join(", "))
-        } else {
-            format!(
-                "{}, and {} more are typing...",
-                typing_names[..3].join(", "),
-                typing_names.len() - 3
-            )
-        };
-        let typing_paragraph = Paragraph::new(Text::from(Line::from(vec![
-            Span::styled("✎ ", Style::default().fg(Color::Green)),
-            Span::raw(typing_text),
-        ])));
-        frame.render_widget(typing_paragraph, layout[1]);
-    }
 
     let log_block = Block::default()
         .title(Span::styled(
