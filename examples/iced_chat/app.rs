@@ -246,7 +246,8 @@ pub struct IcedChat {
     /// for the current room. Used to avoid re-saving the same entries
     /// on every room-navigation event.
     history_saved_count: usize,
-    online_friends: HashMap<PublicKey, String>,
+    /// Cache of friend PublicKey -> is_online for quick lookup in the UI.
+    friend_online_cache: HashSet<PublicKey>,
     /// Bootstrap peer addresses from the initial join ticket (if any).
     /// Used only for the first room subscription; cleared after use.
     initial_bootstrap_peers: Vec<EndpointAddr>,
@@ -360,7 +361,7 @@ impl IcedChat {
     ) -> Self {
         let (initial_topic, initial_bootstrap) = initial_room
             .unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
-        let online_friends = online_friends_from_store(&friends);
+        let friend_online_cache = HashSet::new();
         Self {
             screen: Screen::ChatList,
             pending_topic: None,
@@ -410,7 +411,7 @@ impl IcedChat {
             chat_history,
             chat_history_dirty: false,
             history_saved_count: 0,
-            online_friends,
+            friend_online_cache,
             initial_bootstrap_peers: initial_bootstrap,
             whisper_handle,
             whisper_events_rx,
@@ -489,6 +490,41 @@ impl IcedChat {
 
 // ── Deterministic private topic ────────────────────────────────────
 
+/// Format a unix-ms timestamp into a human-readable relative time string.
+fn format_last_seen(last_seen_ms: Option<u64>) -> String {
+    let Some(ms) = last_seen_ms else {
+        return String::new();
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let elapsed_secs = if now_ms > ms {
+        (now_ms - ms) / 1000
+    } else {
+        0
+    };
+
+    if elapsed_secs < 60 {
+        if elapsed_secs <= 5 {
+            "just now".to_string()
+        } else {
+            format!("{}s ago", elapsed_secs)
+        }
+    } else if elapsed_secs < 3600 {
+        let mins = elapsed_secs / 60;
+        format!("{}m ago", mins)
+    } else if elapsed_secs < 86400 {
+        let hours = elapsed_secs / 3600;
+        format!("{}h ago", hours)
+    } else {
+        let days = elapsed_secs / 86400;
+        format!("{}d ago", days)
+    }
+}
+
 /// Create a deterministic topic id from two peer public keys.
 ///
 /// Both peers derive the same topic by sorting their public keys
@@ -500,16 +536,6 @@ fn private_topic(a: &PublicKey, b: &PublicKey) -> TopicId {
     hasher.update(pk2.as_bytes());
     let hash = hasher.finalize();
     TopicId::from_bytes(*hash.as_bytes())
-}
-
-/// Build the initial online-friends set.
-///
-/// Returns an empty HashMap — online status is determined by the
-/// FriendPingManager, not by persisted store flags that may be stale
-/// from a previous session. The FriendPingManager fires its first tick
-/// immediately and populates `online_friends` via `FriendEvent` messages.
-fn online_friends_from_store(_friends: &FriendsStore) -> HashMap<PublicKey, String> {
-    HashMap::new()
 }
 
 // ── Update ────────────────────────────────────────────────────────────
@@ -2056,7 +2082,7 @@ impl IcedChat {
                     FriendStatus::Online => {
                         self.friends.mark_online(fid);
                         self.friends_dirty = true;
-                        self.online_friends.insert(peer, label.clone());
+                        self.friend_online_cache.insert(peer);
                         if has_been_seen {
                             self.push_system(format!("Friend {label} is now ONLINE"));
                         }
@@ -2064,7 +2090,7 @@ impl IcedChat {
                     FriendStatus::Offline => {
                         self.friends.mark_offline(fid);
                         self.friends_dirty = true;
-                        self.online_friends.remove(&peer);
+                        self.friend_online_cache.remove(&peer);
                         if has_been_seen {
                             self.push_system(format!("Friend {label} is now offline"));
                         }
@@ -2300,33 +2326,39 @@ impl IcedChat {
             content = content.push(scrollable(list).height(Length::Fill));
         }
 
-        // ── Online Friends ──
+        // ── All Friends ──
         content = content.push(Space::new().height(Length::Fixed(SPACE_8))); // small spacer
         content = content.push(
             row![
-                text("Online Friends").size(TYPO_MD).width(Length::Fill),
-                text(format!("{} friend(s) online", self.online_friends.len()))
+                text("Friends").size(TYPO_MD).width(Length::Fill),
+                text(format!("{} total", self.friends.len()))
                     .size(TYPO_XXS)
                     .color(Color::from_rgb(0.5, 0.5, 0.5)),
             ]
             .spacing(SPACE_4),
         );
 
-        if self.online_friends.is_empty() {
+        if self.friends.is_empty() {
             content = content.push(
-                text("No friends online. Add friends via /friend add <pk> in a chat.")
+                text("No friends yet. Add friends via /friend add <pk> in a chat.")
                     .color(Color::from_rgb(0.5, 0.5, 0.5))
                     .size(TYPO_SM),
             );
         } else {
-            let mut online_list = Column::new().spacing(SPACE_2).width(Length::Fill);
-            // Sort by label for stable ordering
-            let mut sorted: Vec<(&PublicKey, &String)> = self.online_friends.iter().collect();
-            sorted.sort_by(|a, b| a.1.cmp(b.1));
-            for (pk, label) in sorted {
-                online_list = online_list.push(self.view_online_friend_row(*pk, label));
+            let mut friends_list = Column::new().spacing(SPACE_2).width(Length::Fill);
+            let mut sorted: Vec<(&FriendId, &iroh_gossip::friends::FriendRecord)> =
+                self.friends.iter().collect();
+            sorted.sort_by(|a, b| {
+                let label_a = a.1.display_label(a.0);
+                let label_b = b.1.display_label(b.0);
+                label_a.cmp(&label_b)
+            });
+            for (fid, record) in sorted {
+                if let Ok(pk) = fid.parse_public_key() {
+                    friends_list = friends_list.push(self.view_friend_row(pk, fid, record));
+                }
             }
-            content = content.push(scrollable(online_list).height(Length::Shrink));
+            content = content.push(scrollable(friends_list).height(Length::Shrink));
         }
 
         // ── Discovered Users ──
@@ -2363,7 +2395,7 @@ impl IcedChat {
         } else {
             let mut discovered_list = Column::new().spacing(SPACE_2).width(Length::Fill);
             for (pk, label) in discovered_users {
-                discovered_list = discovered_list.push(self.view_online_friend_row(pk, &label));
+                discovered_list = discovered_list.push(self.view_discovered_user_row(pk, &label));
             }
             content = content.push(scrollable(discovered_list).height(Length::Shrink));
         }
@@ -2374,8 +2406,53 @@ impl IcedChat {
             .into()
     }
 
-    /// A single row for an online peer: green dot + label + Chat button.
-    fn view_online_friend_row(
+    /// A single row for a known friend: status indicator + label + last-seen + Chat button.
+    fn view_friend_row(
+        &self,
+        pk: PublicKey,
+        fid: &FriendId,
+        record: &iroh_gossip::friends::FriendRecord,
+    ) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, row, text};
+        use iced::{Color, Length};
+
+        let label = record.display_label(fid);
+        let online = self.friend_online_cache.contains(&pk);
+
+        let status_emoji = if online { "🟢" } else { "🔴" };
+        let status_color = if online {
+            Color::from_rgb(0.2, 0.7, 0.2)
+        } else {
+            Color::from_rgb(0.6, 0.6, 0.6)
+        };
+
+        let last_seen_str = if online {
+            String::new()
+        } else {
+            format_last_seen(record.status.last_seen_at_unix_ms)
+        };
+
+        container(
+            row![
+                text(status_emoji).size(TYPO_XS),
+                text(label).size(TYPO_MD).width(Length::Fill),
+                text(last_seen_str)
+                    .size(TYPO_XS)
+                    .color(status_color),
+                button("💬 Chat")
+                    .on_press(AppMessage::OpenFriendChat(pk))
+                    .padding(SPACE_4),
+            ]
+            .spacing(SPACE_8)
+            .align_y(iced::Alignment::Center)
+            .padding(SPACE_8),
+        )
+        .width(Length::Fill)
+        .into()
+    }
+
+    /// A single row for a discovered (non-friend) user.
+    fn view_discovered_user_row(
         &self,
         pk: PublicKey,
         label: impl Into<String>,
