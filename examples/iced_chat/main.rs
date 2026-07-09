@@ -5,6 +5,8 @@
 //!   cargo run --features gui --example iced_chat open   # open new room
 //!   cargo run --features gui --example iced_chat join <ticket>  # join room
 
+use iroh::Watcher;
+
 mod app;
 
 use std::path::{Path, PathBuf};
@@ -16,11 +18,10 @@ use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, RelayMode, RelayUrl,
     SecretKey,
 };
-#[cfg(feature = "tor-transport")]
-use iroh_gossip::tor_transport::{
-    bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport,
-};
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
+use iroh_gossip::backfill::{
+    BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN, BACKFILL_TRIGGER_THRESHOLD,
+};
 use iroh_gossip::chat_core::friend_ping::{
     FriendPingManager, PingHandler, DEFAULT_CONNECT_TIMEOUT, DEFAULT_PING_INTERVAL,
     FRIEND_PING_ALPN,
@@ -31,6 +32,8 @@ use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_history::RoomHistoryStore;
+#[cfg(feature = "tor-transport")]
+use iroh_gossip::tor_transport::{bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport};
 use n0_error::{bail_any, Result, StdResultExt};
 use tokio::sync::Mutex;
 
@@ -59,6 +62,10 @@ struct Args {
     relay: Option<RelayUrl>,
     #[clap(long)]
     no_relay: bool,
+    /// Directory for persistent state (secret key, chat history, room history).
+    /// Defaults to IROH_GOSSIP_CHAT_DATA_DIR env var, or ~/.local/share/iroh-gossip-chat/.
+    #[clap(long)]
+    data_dir: Option<PathBuf>,
     /// Use Tor hidden services instead of direct iroh connectivity.
     #[cfg(feature = "tor-transport")]
     #[clap(long)]
@@ -88,7 +95,10 @@ pub use iroh_gossip::chat_core::forward_gossip_events;
 
 // ── Identity persistence ──────────────────────────────────────────────
 
-fn get_data_dir() -> PathBuf {
+fn get_data_dir(cli_override: Option<PathBuf>) -> PathBuf {
+    if let Some(dir) = cli_override {
+        return dir;
+    }
     if let Ok(val) = std::env::var("IROH_GOSSIP_CHAT_DATA_DIR") {
         return PathBuf::from(val);
     }
@@ -109,8 +119,8 @@ fn get_data_dir() -> PathBuf {
         .join(".iroh-gossip-chat")
 }
 
-fn load_or_generate_secret_key() -> Result<(SecretKey, PathBuf)> {
-    load_or_generate_secret_key_at(&get_data_dir())
+fn load_or_generate_secret_key(data_dir: &Path) -> Result<(SecretKey, PathBuf)> {
+    load_or_generate_secret_key_at(data_dir)
 }
 
 fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf)> {
@@ -148,12 +158,12 @@ fn main() -> Result<()> {
     let args = Args::parse();
     ensure_graphical_session();
 
+    let data_dir = get_data_dir(args.data_dir.clone());
     let runtime = tokio::runtime::Runtime::new().std_context("failed to create tokio runtime")?;
     // Determine if there's an initial room to connect to
     let initial_topic: Option<TopicId> = runtime.block_on(async {
         match &args.command {
             Some(Command::Open { topic }) => {
-                let data_dir = get_data_dir();
                 let t = match topic {
                     Some(t) => *t,
                     None => match RoomStore::load_or_none(&data_dir) {
@@ -193,7 +203,7 @@ fn main() -> Result<()> {
     });
 
     let (secret_key, key_path) = match args.secret_key.as_ref() {
-        None => load_or_generate_secret_key()?,
+        None => load_or_generate_secret_key(&data_dir)?,
         Some(key) => (key.parse()?, PathBuf::from("<passed via cli flag>")),
     };
     let local_public = secret_key.public();
@@ -207,9 +217,13 @@ fn main() -> Result<()> {
 
     let use_tor = {
         #[cfg(feature = "tor-transport")]
-        { args.tor }
+        {
+            args.tor
+        }
         #[cfg(not(feature = "tor-transport"))]
-        { false }
+        {
+            false
+        }
     };
     let relay_mode = match (use_tor, args.no_relay, args.relay.clone()) {
         (_, true, Some(_)) => bail_any!("--no-relay and --relay are mutually exclusive"),
@@ -222,8 +236,7 @@ fn main() -> Result<()> {
 
     // ── Tor reconnection monitor channel ──────────────────────────────
     #[allow(unused)]
-    let (tor_reconnect_tx, tor_reconnect_rx) =
-        tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tor_reconnect_tx, tor_reconnect_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     // ── Build the endpoint, gossip, and router (no topic subscription yet) ──
 
@@ -241,6 +254,7 @@ fn main() -> Result<()> {
         tor_reconnect_rx_opt,
         notice,
         chat_history,
+            backfill_handle,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
         use std::net::{Ipv4Addr, SocketAddrV4};
@@ -326,14 +340,28 @@ fn main() -> Result<()> {
         let blob_store = MemStore::new();
         let blobs_protocol = BlobsProtocol::new(&blob_store, None);
 
+        // Load chat message history (needed before Router for backfill)
+        let chat_history = ChatHistoryStore::load_or_default(&data_dir);
+        if !chat_history.is_empty() {
+            println!(
+                "> loaded {} chat message(s) from history (durable local state in chat_history.json; use /leave to clear the active room, or delete the file to clear all rooms)",
+                chat_history.len()
+            );
+        }
+        let chat_history = Arc::new(std::sync::Mutex::new(chat_history));
+
+        let backfill_handler = BackfillProtocolHandler::new(chat_history.clone());
         let _router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol.clone())
             .accept(FRIEND_PING_ALPN, PingHandler)
+            .accept(BACKFILL_ALPN, backfill_handler)
             .spawn();
 
+        // Spawn the backfill background actor for requesting history
+        let backfill_handle = BackfillHandle::spawn(endpoint.clone());
+
         // Load or create the persistent friends list
-        let data_dir = get_data_dir();
         let friends = FriendsStore::load_or_default(&data_dir);
         if friends.len() > 0 {
             println!("> loaded {} friend(s) from disk", friends.len());
@@ -343,12 +371,6 @@ fn main() -> Result<()> {
         let room_history = RoomHistoryStore::load_or_default(&data_dir);
         if !room_history.is_empty() {
             println!("> loaded {} room(s) from history", room_history.len());
-        }
-
-        // Load chat message history
-        let chat_history = ChatHistoryStore::load_or_default(&data_dir);
-        if !chat_history.is_empty() {
-            println!("> loaded {} chat message(s) from history", chat_history.len());
         }
 
         // Create the network event channel (shared across rooms)
@@ -388,6 +410,7 @@ fn main() -> Result<()> {
             use_tor.then(|| Arc::new(Mutex::new(tor_reconnect_rx))),
             notice,
             chat_history,
+            backfill_handle,
         ))
     })?;
 
@@ -402,7 +425,6 @@ fn main() -> Result<()> {
             local_peer_addr,
             relay_mode,
             runtime.handle().clone(),
-
             Arc::clone(&net_rx),
             net_tx,
             room_history,
@@ -413,6 +435,8 @@ fn main() -> Result<()> {
             initial_topic,
             notice,
             chat_history,
+            backfill_handle,
+            
         ),
         initial_topic,
     )));

@@ -72,6 +72,15 @@ pub mod chat_history;
 #[cfg(feature = "net")]
 pub mod small_room;
 
+/// Whisper protocol — direct QUIC channels for private 1:1 messaging and file transfer.
+#[cfg(feature = "net")]
+pub mod whisper;
+
+/// History backfill protocol — lets late-joining peers request message history
+/// from existing peers via a dedicated QUIC ALPN.
+#[cfg(feature = "net")]
+pub mod backfill;
+
 pub use proto::TopicId;
 
 /// Room metadata and roster documents synced via the gossip mesh.

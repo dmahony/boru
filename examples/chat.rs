@@ -12,37 +12,37 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
-#[cfg(feature = "tor-transport")]
-use iroh_gossip::tor_transport::{
-    bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport,
-};
-#[cfg(feature = "tor-transport")]
-use iroh::Watcher;
 use clap::Parser;
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{self, Event as CEvent, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+#[cfg(feature = "tor-transport")]
+use iroh::Watcher;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, PublicKey, RelayMode,
     RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
+use iroh_gossip::backfill::{
+    BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN, BACKFILL_TRIGGER_THRESHOLD,
+};
 use iroh_gossip::chat_core::friend_ping::{
     FriendEvent, FriendPingManager, FriendStatus, PingHandler, DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
 };
 use iroh_gossip::chat_core::{
     self, check_peer_connection_type, fmt_relay_mode, handle_net_event, message_hash,
-    update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, Message,
-    SignedMessage, StatusContext, Ticket,
+    update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, MeshHealth, Message,
+    NetEvent, SignedMessage, StatusContext, Ticket,
 };
+use iroh_gossip::chat_history::ChatHistoryStore;
 use iroh_gossip::friends::{FriendId, FriendRecord, FriendsStore};
 use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_docs::{
@@ -52,6 +52,9 @@ use iroh_gossip::room_docs::{
 use iroh_gossip::small_room::{
     room_size_fits_small_room, SmallRoomBuilder, SMALL_ROOM_ALPN, SMALL_ROOM_MAX_SIZE,
 };
+#[cfg(feature = "tor-transport")]
+use iroh_gossip::tor_transport::{bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport};
+use iroh_gossip::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
 use iroh_gossip::{
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
@@ -265,8 +268,7 @@ async fn main() -> Result<()> {
     // The monitor task is only spawned in Tor mode; otherwise the
     // sender is never cloned and sits dormant.
     #[allow(unused)]
-    let (tor_reconnect_tx, mut tor_reconnect_rx) =
-        tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tor_reconnect_tx, mut tor_reconnect_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     // build our iroh endpoint
     let (endpoint, transport_status_message, transport_notice_text, local_peer_addr) = {
@@ -381,14 +383,27 @@ async fn main() -> Result<()> {
     println!("> ticket to join us: {ticket}");
 
     // setup router with the gossip protocol, blob protocol, friend ping,
-    // and small-room protocol (for ≤10-member rooms)
+    // small-room protocol (for ≤10-member rooms), and whisper protocol
     let small_room_builder = SmallRoomBuilder::new(endpoint.clone(), endpoint.secret_key().clone());
     let small_room_handler = small_room_builder.protocol_handler();
+    let whisper_builder = WhisperBuilder::new(endpoint.clone(), endpoint.secret_key().clone());
+    let whisper_handler = whisper_builder.protocol_handler();
+    let (whisper_handle, mut whisper_events) = whisper_builder.spawn().await;
+
+    // Backfill protocol — uses an empty store for the TUI (no persistent history)
+    let backfill_history = Arc::new(Mutex::new(ChatHistoryStore::empty_at(
+        std::path::PathBuf::from("/tmp/iroh-backfill"),
+    )));
+    let backfill_handler = BackfillProtocolHandler::new(backfill_history);
+    let backfill_handle = BackfillHandle::spawn(endpoint.clone());
+
     let router = iroh::protocol::Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(iroh_blobs::ALPN, blobs_protocol.clone())
         .accept(FRIEND_PING_ALPN, PingHandler)
         .accept(SMALL_ROOM_ALPN, small_room_handler)
+        .accept(WHISPER_ALPN, whisper_handler)
+        .accept(BACKFILL_ALPN, backfill_handler)
         .spawn();
 
     let peer_ids = peers.iter().map(|peer| peer.id).collect::<Vec<_>>();
@@ -454,6 +469,8 @@ async fn main() -> Result<()> {
             relayed_peers: 0,
             neighbors: HashSet::new(),
             peer_connection_types: HashMap::new(),
+            last_activity: HashMap::new(),
+            mesh_health: MeshHealth::Good,
         },
         friends,
         local_public,
@@ -547,6 +564,23 @@ async fn main() -> Result<()> {
     let mut conn_monitor = tokio::time::interval(Duration::from_secs(60));
     conn_monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Periodic presence heartbeat — broadcasts every 5 seconds.
+    let presence_sender = sender.clone();
+    let presence_secret_key = endpoint.secret_key().clone();
+    tokio::spawn(async move {
+        let mut presence_interval = tokio::time::interval(Duration::from_secs(5));
+        presence_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            presence_interval.tick().await;
+            let msg = Message::Presence;
+            if let Ok(encoded) = SignedMessage::sign_and_encode(&presence_secret_key, &msg) {
+                if presence_sender.broadcast(encoded.into()).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
     while !app.should_quit {
         // Non-blocking check for Tor reconnection status updates
         // (infrequent messages only — every poll is cheap with try_recv)
@@ -566,6 +600,7 @@ async fn main() -> Result<()> {
                     &blob_store,
                     &friend_mgr,
                     &room_docs,
+                    &whisper_handle,
                 ).await?;
                 if app.friends_dirty {
                     if let Err(err) = app.friends.save() {
@@ -578,7 +613,25 @@ async fn main() -> Result<()> {
                 }
             }
             Some(event) = net_rx.recv() => {
-                handle_net_event(event, &mut app)?;
+                handle_net_event(event.clone(), &mut app)?;
+                if let NetEvent::NeighborUp { peer } = event {
+                    if app.entries.len() < BACKFILL_TRIGGER_THRESHOLD {
+                        let handle = backfill_handle.clone();
+                        let endpoint = endpoint.clone();
+                        let net_tx = net_tx.clone();
+                        let local_history_count = app.entries.len();
+                        tokio::spawn(async move {
+                            let _ = handle
+                                .try_backfill_from_peer(
+                                    &endpoint,
+                                    peer,
+                                    local_history_count,
+                                    net_tx,
+                                )
+                                .await;
+                        });
+                    }
+                }
                 // Auto-download pending image (ImageShare received)
                 if let Some((name, hash, sender_pk)) = app.pending_image.take() {
                     let blob_hash: iroh_blobs::Hash = hash.into();
@@ -593,6 +646,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 update_connection_counts(&endpoint, &mut app.status).await;
+                app.status.recompute_mesh_health(&endpoint).await;
                 if app.friends_dirty {
                     if let Err(err) = app.friends.save() {
                         app.push_system(format!("Failed to save friends: {err}"));
@@ -604,6 +658,7 @@ async fn main() -> Result<()> {
             Some(event) = friend_events.recv() => {
                 handle_friend_event(event, &mut app);
                 update_connection_counts(&endpoint, &mut app.status).await;
+                app.status.recompute_mesh_health(&endpoint).await;
                 if app.friends_dirty {
                     if let Err(err) = app.friends.save() {
                         app.push_system(format!("Failed to save friends: {err}"));
@@ -612,9 +667,14 @@ async fn main() -> Result<()> {
                 }
                 terminal.draw(|frame| render_app(frame, &mut app))?;
             }
+            Some(event) = whisper_events.recv() => {
+                handle_whisper_event(event, &mut app);
+                terminal.draw(|frame| render_app(frame, &mut app))?;
+            }
             _ = conn_monitor.tick() => {
                 // Periodic refresh of per-peer connection status.
                 update_connection_counts(&endpoint, &mut app.status).await;
+                app.status.recompute_mesh_health(&endpoint).await;
             }
             else => break,
         }
@@ -668,8 +728,6 @@ enum UiEvent {
     Paste(String),
 }
 
-
-
 fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
     std::thread::spawn(move || {
         while let Ok(event) = event::read() {
@@ -705,6 +763,7 @@ async fn handle_ui_event(
     blob_store: &MemStore,
     friend_mgr: &FriendPingManager,
     room_docs: &Arc<RwLock<Option<RoomDocs>>>,
+    whisper_handle: &WhisperHandle,
 ) -> Result<bool> {
     match event {
         UiEvent::Key(key) => {
@@ -718,6 +777,7 @@ async fn handle_ui_event(
                 blob_store,
                 friend_mgr,
                 room_docs,
+                whisper_handle,
             )
             .await?;
             Ok(true)
@@ -740,6 +800,7 @@ async fn handle_key_event(
     blob_store: &MemStore,
     friend_mgr: &FriendPingManager,
     room_docs: &Arc<RwLock<Option<RoomDocs>>>,
+    whisper_handle: &WhisperHandle,
 ) -> Result<()> {
     let visible_height = app.last_log_height;
     match key {
@@ -751,7 +812,7 @@ async fn handle_key_event(
                 return Ok(());
             }
             // Best-effort goodbye broadcast before we disconnect.
-            let goodbye = SignedMessage::sign_and_encode(secret_key, &Message::Goodbye);
+            let goodbye = SignedMessage::sign_and_encode(secret_key, &Message::Leave);
             if let Ok(encoded) = goodbye {
                 let _ = sender.broadcast(encoded).await;
             }
@@ -763,7 +824,7 @@ async fn handle_key_event(
             ..
         } if modifiers.contains(KeyModifiers::CONTROL) => {
             // Best-effort goodbye broadcast before we disconnect.
-            let goodbye = SignedMessage::sign_and_encode(secret_key, &Message::Goodbye);
+            let goodbye = SignedMessage::sign_and_encode(secret_key, &Message::Leave);
             if let Ok(encoded) = goodbye {
                 let _ = sender.broadcast(encoded).await;
             }
@@ -1044,8 +1105,7 @@ async fn handle_key_event(
             }
 
             if trimmed == "/connections" {
-                let peers: Vec<iroh::PublicKey> =
-                    app.status.neighbors.iter().copied().collect();
+                let peers: Vec<iroh::PublicKey> = app.status.neighbors.iter().copied().collect();
                 if peers.is_empty() {
                     app.push_system("No known peers to inspect.");
                 } else {
@@ -1074,7 +1134,9 @@ async fn handle_key_event(
                 // ── Edit a previously sent message ──────────────────────
                 let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
                 if parts.len() < 2 {
-                    app.push_system("Usage: /edit <index> <new text> (index is 1-based message number)");
+                    app.push_system(
+                        "Usage: /edit <index> <new text> (index is 1-based message number)",
+                    );
                     return Ok(());
                 }
                 let idx: usize = match parts[0].parse::<usize>() {
@@ -1191,6 +1253,118 @@ async fn handle_key_event(
                 return Ok(());
             }
 
+            if let Some(rest) = trimmed.strip_prefix("/whisper ") {
+                // ── Whisper DM ──────────────────────────────────────────
+                let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
+                if parts.len() < 2 {
+                    app.push_system("Usage: /whisper <peer-key|friend-alias> <message>");
+                    return Ok(());
+                }
+                let target = parts[0].trim();
+                let message = parts[1].trim().to_string();
+                let peer_key = resolve_peer_key(app, target);
+                let peer_key = match peer_key {
+                    Some(pk) => pk,
+                    None => {
+                        app.push_system(format!(
+                            "Unknown peer: {target}. Use a public key or friend alias."
+                        ));
+                        return Ok(());
+                    }
+                };
+                match whisper_handle.send_dm(peer_key, message).await {
+                    Ok(_) => {
+                        let label = app
+                            .names
+                            .get(&peer_key)
+                            .cloned()
+                            .unwrap_or_else(|| peer_key.fmt_short().to_string());
+                        app.push_local(
+                            local_label.to_string(),
+                            format!("[Whisper to {label}] {}", parts[1]),
+                        );
+                    }
+                    Err(e) => {
+                        app.push_system(format!("Whisper failed: {e}"));
+                    }
+                }
+                return Ok(());
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("/whisper-file ") {
+                // ── Whisper file transfer ───────────────────────────────
+                let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
+                if parts.len() < 2 {
+                    app.push_system("Usage: /whisper-file <peer-key|friend-alias> <path>");
+                    return Ok(());
+                }
+                let target = parts[0].trim();
+                let path = parts[1].trim().to_string();
+                let peer_key = resolve_peer_key(app, target);
+                let peer_key = match peer_key {
+                    Some(pk) => pk,
+                    None => {
+                        app.push_system(format!(
+                            "Unknown peer: {target}. Use a public key or friend alias."
+                        ));
+                        return Ok(());
+                    }
+                };
+
+                let path_buf = std::path::PathBuf::from(&path);
+                let abs_path = match std::path::absolute(&path_buf) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        app.push_system(format!("Failed to resolve path: {e}"));
+                        return Ok(());
+                    }
+                };
+                if !abs_path.exists() {
+                    app.push_system(format!("File not found: {}", path));
+                    return Ok(());
+                }
+                let filename = match path_buf
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                {
+                    Some(name) => name,
+                    None => {
+                        app.push_system("Invalid file path.");
+                        return Ok(());
+                    }
+                };
+
+                app.push_system(format!("Hashing file: {filename}..."));
+                let tag = match blob_store.blobs().add_path(abs_path).await {
+                    Ok(tag) => tag,
+                    Err(e) => {
+                        app.push_system(format!("Failed to hash file: {e}"));
+                        return Ok(());
+                    }
+                };
+
+                let node_id = endpoint.id();
+                let ticket = BlobTicket::new(node_id.into(), tag.hash, tag.format);
+                let ticket_str = ticket.to_string();
+
+                match whisper_handle
+                    .send_file(peer_key, filename.clone(), ticket_str.clone())
+                    .await
+                {
+                    Ok(_) => {
+                        app.push_local(
+                            local_label.to_string(),
+                            format!("/whisper-file {target} {path}"),
+                        );
+                        app.push_system(format!("Sent file '{filename}' via whisper to peer"));
+                    }
+                    Err(e) => {
+                        app.push_system(format!("Whisper file transfer failed: {e}"));
+                    }
+                }
+                return Ok(());
+            }
+
             // Normal text message
             let message = Message::Message {
                 text: trimmed.clone(),
@@ -1287,8 +1461,15 @@ async fn forward_room_events_for_chat(
         // Chat message or neighbor event — forward as NetEvent.
         match event {
             GossipEvent::Received(msg) => match SignedMessage::verify_and_decode(&msg.content) {
-                Ok((from, message)) => {
-                    if net_tx.send(NetEvent::Message { from, message }).is_err() {
+                Ok((from, message, sent_at)) => {
+                    if net_tx
+                        .send(NetEvent::Message {
+                            from,
+                            message,
+                            sent_at,
+                        })
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -1313,6 +1494,66 @@ async fn forward_room_events_for_chat(
         }
     }
     let _ = net_tx.send(NetEvent::Closed);
+}
+
+// ── Whisper event handling ──────────────────────────────────────────────────────
+
+/// Resolve a peer identifier (public key string or friend alias) to a [`PublicKey`].
+fn resolve_peer_key(app: &AppState, target: &str) -> Option<PublicKey> {
+    if let Ok(pk) = target.parse::<PublicKey>() {
+        return Some(pk);
+    }
+    // Try to resolve by friend alias.
+    app.friends
+        .iter()
+        .find(|(_, rec)| rec.label.as_deref() == Some(target))
+        .and_then(|(fid, _)| fid.parse_public_key().ok())
+}
+
+/// Handle a [`WhisperEvent`] from the whisper protocol background task.
+fn handle_whisper_event(event: WhisperEvent, app: &mut AppState) {
+    match event {
+        WhisperEvent::Message { from, content } => {
+            let text = String::from_utf8_lossy(&content).to_string();
+            let label = app
+                .names
+                .get(&from)
+                .cloned()
+                .unwrap_or_else(|| from.fmt_short().to_string());
+            app.push_entry(
+                ChatEntry::remote(format!("Whisper from {label}"), text),
+                true,
+            );
+        }
+        WhisperEvent::FileTransfer { from, name, ticket } => {
+            let label = app
+                .names
+                .get(&from)
+                .cloned()
+                .unwrap_or_else(|| from.fmt_short().to_string());
+            app.push_system(format!(
+                "[Whisper from {label}] File received: {name}. Use /download to fetch."
+            ));
+            // Store pending file download info so the user can /download.
+            app.pending_file = Some((name, ticket));
+        }
+        WhisperEvent::Connected { peer } => {
+            let label = app
+                .names
+                .get(&peer)
+                .cloned()
+                .unwrap_or_else(|| peer.fmt_short().to_string());
+            app.push_system(format!("[Whisper] Connected to {label}"));
+        }
+        WhisperEvent::Disconnected { peer } => {
+            let label = app
+                .names
+                .get(&peer)
+                .cloned()
+                .unwrap_or_else(|| peer.fmt_short().to_string());
+            app.push_system(format!("[Whisper] Disconnected from {label}"));
+        }
+    }
 }
 
 // ── Friend event handling ──────────────────────────────────────────────────────
@@ -1599,6 +1840,13 @@ fn status_lines(context: &StatusContext) -> Vec<Line<'static>> {
     let label_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
+    let (health_label, health_value, health_color) = match &context.mesh_health {
+        MeshHealth::Good => ("Mesh health", "Good".to_string(), Color::Green),
+        MeshHealth::Degraded(reason) => {
+            ("Mesh health", format!("Degraded: {reason}"), Color::Yellow)
+        }
+        MeshHealth::Offline(reason) => ("Mesh health", format!("Offline: {reason}"), Color::Red),
+    };
     vec![
         Line::from(vec![
             Span::styled("Transport", label_style),
@@ -1625,6 +1873,13 @@ fn status_lines(context: &StatusContext) -> Vec<Line<'static>> {
                 context.relayed_peers,
                 context.connected
             )),
+        ]),
+        Line::from(vec![
+            Span::styled(health_label, label_style),
+            Span::styled(
+                format!(": {health_value}"),
+                Style::default().fg(health_color),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Notice", label_style),
@@ -1694,6 +1949,14 @@ fn help_menu_lines() -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("/react <index> <emoji>", label_style),
             Span::raw("  react to a message"),
+        ]),
+        Line::from(vec![
+            Span::styled("/whisper <peer|alias> <msg>", label_style),
+            Span::raw("  send a private DM"),
+        ]),
+        Line::from(vec![
+            Span::styled("/whisper-file <peer|alias> <path>", label_style),
+            Span::raw("  send a file privately"),
         ]),
         Line::from(vec![Span::styled("Tips", title_style)]),
         Line::from(vec![Span::styled(
@@ -1794,6 +2057,8 @@ mod tests {
             relayed_peers: 0,
             neighbors: HashSet::new(),
             peer_connection_types: HashMap::new(),
+            last_activity: HashMap::new(),
+            mesh_health: MeshHealth::Good,
         };
         let lines = status_lines(&status);
         let rendered: Vec<_> = lines.iter().map(|line| line.to_string()).collect();
@@ -1830,6 +2095,8 @@ mod tests {
             relayed_peers: 0,
             neighbors: HashSet::new(),
             peer_connection_types: HashMap::new(),
+            last_activity: HashMap::new(),
+            mesh_health: MeshHealth::Good,
         };
         let app = AppState::new(
             status,
@@ -1862,6 +2129,8 @@ mod tests {
             relayed_peers: 0,
             neighbors: HashSet::new(),
             peer_connection_types: HashMap::new(),
+            last_activity: HashMap::new(),
+            mesh_health: MeshHealth::Good,
         };
         let mut store = FriendsStore::empty_at(std::env::temp_dir().join(format!(
             "iroh-chat-friends-status-{}",
