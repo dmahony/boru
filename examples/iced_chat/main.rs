@@ -229,6 +229,7 @@ fn main() -> Result<()> {
 
     let (
         endpoint,
+        local_peer_addr,
         gossip,
         blob_store,
         net_rx,
@@ -244,7 +245,7 @@ fn main() -> Result<()> {
         let memory_lookup = MemoryLookup::new();
         use std::net::{Ipv4Addr, SocketAddrV4};
 
-        let endpoint = {
+        let (endpoint, local_peer_addr) = {
             #[cfg(feature = "tor-transport")]
             if use_tor {
                 let tor_dirs = TorStorageDirs::new()?;
@@ -260,7 +261,7 @@ fn main() -> Result<()> {
                     .bind()
                     .await?;
                 endpoint.online().await;
-                let _local_peer_addr = tor_transport.watch_local_peer_addr().initialized().await;
+                let local_peer_addr = tor_transport.watch_local_peer_addr().initialized().await.endpoint_addr();
 
                 // Spawn the Tor health-monitor background task
                 let monitor_client = Arc::clone(&tor_client);
@@ -270,7 +271,7 @@ fn main() -> Result<()> {
                 });
 
                 println!("> Tor bootstrap finished: {tor_status_message}");
-                endpoint
+                (endpoint, local_peer_addr)
             } else {
                 let ep_builder = if matches!(relay_mode, RelayMode::Disabled) {
                     Endpoint::builder(presets::N0DisableRelay)
@@ -287,7 +288,9 @@ fn main() -> Result<()> {
                 if !matches!(relay_mode, RelayMode::Disabled) {
                     endpoint.online().await;
                 }
-                endpoint
+                let local_peer_addr = endpoint.addr();
+                (endpoint, local_peer_addr)
+
             }
             #[cfg(not(feature = "tor-transport"))]
             {
@@ -306,7 +309,9 @@ fn main() -> Result<()> {
                 if !matches!(relay_mode, RelayMode::Disabled) {
                     endpoint.online().await;
                 }
-                endpoint
+                let local_peer_addr = endpoint.addr();
+                (endpoint, local_peer_addr)
+
             }
         };
         println!("> endpoint: {}", endpoint.id());
@@ -371,6 +376,7 @@ fn main() -> Result<()> {
 
         Result::<_>::Ok((
             endpoint,
+            local_peer_addr,
             gossip,
             blob_store,
             net_rx,
@@ -393,8 +399,10 @@ fn main() -> Result<()> {
             endpoint.clone(),
             local_label,
             local_public,
+            local_peer_addr,
             relay_mode,
             runtime.handle().clone(),
+
             Arc::clone(&net_rx),
             net_tx,
             room_history,

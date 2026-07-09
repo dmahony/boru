@@ -158,6 +158,7 @@ pub struct IcedChat {
     endpoint: iroh::Endpoint,
     local_label: String,
     local_public: PublicKey,
+    local_peer_addr: EndpointAddr,
     relay_mode: RelayMode,
     runtime_handle: tokio::runtime::Handle,
     pub net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
@@ -265,6 +266,7 @@ impl IcedChat {
         endpoint: iroh::Endpoint,
         local_label: String,
         local_public: PublicKey,
+        local_peer_addr: EndpointAddr,
         relay_mode: RelayMode,
         runtime_handle: tokio::runtime::Handle,
         net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
@@ -300,6 +302,7 @@ impl IcedChat {
             endpoint,
             local_label,
             local_public,
+            local_peer_addr,
             relay_mode,
             runtime_handle,
             net_rx,
@@ -320,6 +323,13 @@ impl IcedChat {
             chat_history,
             chat_history_dirty: false,
             online_friends: HashMap::new(),
+        }
+    }
+
+    fn room_ticket(&self, topic: TopicId) -> Ticket {
+        Ticket {
+            topic,
+            peers: vec![self.local_peer_addr.clone()],
         }
     }
 
@@ -437,7 +447,7 @@ impl IcedChat {
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
-                let ep_id = self.endpoint.id();
+                let ticket_str = self.room_ticket(topic).to_string();
 
                 iced::Task::perform(
                     async move {
@@ -447,11 +457,6 @@ impl IcedChat {
                             .await
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
-                        let ticket = Ticket {
-                            topic,
-                            peers: vec![EndpointAddr::new(ep_id)],
-                        };
-                        let ticket_str = ticket.to_string();
 
                         // Spawn forwarding
                         let _ = task::spawn(forward_gossip_events(receiver, net_tx));
@@ -487,7 +492,7 @@ impl IcedChat {
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
-                let ep_id = self.endpoint.id();
+                let ticket_str = self.room_ticket(topic).to_string();
 
                 iced::Task::perform(
                     async move {
@@ -496,11 +501,6 @@ impl IcedChat {
                             .await
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
-                        let ticket = Ticket {
-                            topic,
-                            peers: vec![EndpointAddr::new(ep_id)],
-                        };
-                        let ticket_str = ticket.to_string();
 
                         let _ = task::spawn(forward_gossip_events(receiver, net_tx));
 
@@ -607,7 +607,7 @@ impl IcedChat {
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
-                let ep_id = self.endpoint.id();
+                let local_peer_addr = self.local_peer_addr.clone();
 
                 iced::Task::perform(
                     async move {
@@ -624,7 +624,7 @@ impl IcedChat {
                         let (sender, receiver) = sub.split();
                         let new_ticket = Ticket {
                             topic,
-                            peers: vec![EndpointAddr::new(ep_id)],
+                            peers: vec![local_peer_addr],
                         };
                         let ticket_str = new_ticket.to_string();
 
