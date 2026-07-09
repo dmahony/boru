@@ -29,6 +29,9 @@ use tokio::sync::Mutex;
 
 use crate::{fmt_relay_mode, forward_gossip_events, Message, NetEvent, SignedMessage, Ticket};
 
+/// Scrollable ID for the chat log — used to auto-scroll to bottom.
+const CHAT_LOG: &str = "chat_log";
+
 // ── Chat entry types ──────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -180,6 +183,8 @@ pub struct IcedChat {
     typing_peers: HashMap<PublicKey, Instant>,
     /// Last time we broadcast a typing indicator, for throttling.
     last_typing_sent: Option<Instant>,
+    /// Whether to auto-scroll to the latest message.
+    follow_latest: bool,
     /// Whether dark mode is enabled.
     pub dark_mode: bool,
     /// Transport notice displayed in the header (e.g. "Direct iroh transport is operational").
@@ -315,6 +320,7 @@ impl IcedChat {
             tor_reconnect_rx,
             typing_peers: HashMap::new(),
             last_typing_sent: None,
+            follow_latest: true,
             dark_mode: false,
             notice,
             chat_history,
@@ -2016,6 +2022,8 @@ impl IcedChat {
         }
 
         scrollable(col)
+            .id(CHAT_LOG)
+            .anchor_bottom()
             .width(iced::Length::Fill)
             .height(iced::Length::Fill)
     }
