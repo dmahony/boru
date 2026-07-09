@@ -673,9 +673,12 @@ mod tests {
 
         let _router = iroh::protocol::Router::builder(ep_responder.clone())
             .accept(BACKFILL_ALPN, slow_handler)
-            .spawn()
-            .unwrap_or_else(|e| panic!("spawn router: {e}"));
-        let addr = ep_responder.addr();
+            .spawn();
+
+        let sk_requester = SecretKey::generate();
+        let ep_requester = Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+            .secret_key(sk_requester)
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddrV4>().unwrap())
             .unwrap()
             .bind()
             .await
@@ -683,7 +686,7 @@ mod tests {
 
         let addr = EndpointAddr::from_parts(
             sk_responder.public(),
-            [ep_responder.addr()].into_iter(),
+            ep_responder.addr().addrs.clone(),
         );
 
         let (net_tx, _) = tokio::sync::mpsc::unbounded_channel();
@@ -744,7 +747,7 @@ mod tests {
 
         let addr = EndpointAddr::from_parts(
             sk_responder.public(),
-            [ep_responder.addr()].into_iter(),
+            ep_responder.addr().addrs.clone(),
         );
 
         let (net_tx, _) = tokio::sync::mpsc::unbounded_channel();

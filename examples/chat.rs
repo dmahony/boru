@@ -42,7 +42,7 @@ use iroh_gossip::chat_core::{
     update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, MeshHealth, Message,
     NetEvent, SignedMessage, StatusContext, Ticket,
 };
-use iroh_gossip::chat_history::ChatHistoryStore;
+use iroh_gossip::chat_history::{ChatHistoryStore, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendRecord, FriendsStore};
 use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_docs::{
@@ -385,11 +385,16 @@ async fn main() -> Result<()> {
     let whisper_handler = whisper_builder.protocol_handler();
     let (whisper_handle, mut whisper_events) = whisper_builder.spawn().await;
 
-    // Backfill protocol — uses an empty store for the TUI (no persistent history)
-    let backfill_history = Arc::new(Mutex::new(ChatHistoryStore::empty_at(
-        std::path::PathBuf::from("/tmp/iroh-backfill"),
-    )));
-    let backfill_handler = BackfillProtocolHandler::new(backfill_history);
+    // Load persistent chat message history (needed before Router for backfill)
+    let chat_history = ChatHistoryStore::load_or_default(&data_dir);
+    if !chat_history.is_empty() {
+        println!(
+            "> loaded {} chat message(s) from history (durable local state in chat_history.json; use /leave to clear the active room, or delete the file to clear all rooms)",
+            chat_history.len()
+        );
+    }
+    let chat_history = Arc::new(Mutex::new(chat_history));
+    let backfill_handler = BackfillProtocolHandler::new(chat_history.clone());
     let backfill_handle = BackfillHandle::spawn(endpoint.clone());
 
     let router = iroh::protocol::Router::builder(endpoint.clone())
@@ -461,6 +466,49 @@ async fn main() -> Result<()> {
         app.push_system(format!("You announced yourself as {name}."));
     }
 
+    // Replay persistent chat history into the current room's UI.
+    let mut names = HashMap::new();
+    names.insert(local_public, local_label.clone());
+    {
+        let history = chat_history.lock().unwrap();
+        let local_hex = hex::encode(local_public.as_bytes());
+        for entry in history.entries() {
+            if entry.topic == topic {
+                let kind = if entry.sender == local_hex {
+                    ChatKind::Local
+                } else if entry.kind == "system" || entry.sender.is_empty() {
+                    ChatKind::System
+                } else {
+                    ChatKind::Remote
+                };
+                let label = match kind {
+                    ChatKind::Local => local_label.clone(),
+                    ChatKind::System => "System".to_string(),
+                    ChatKind::Remote => {
+                        if let Ok(pk) = PublicKey::from_str(&entry.sender) {
+                            names.get(&pk).cloned().unwrap_or_else(|| {
+                                format!("..{}", &entry.sender[entry.sender.len().saturating_sub(8)..])
+                            })
+                        } else {
+                            format!("..{}", &entry.sender[entry.sender.len().saturating_sub(8)..])
+                        }
+                    }
+                };
+                app.entries.push(ChatEntry {
+                    kind,
+                    label,
+                    body: entry.text_preview.clone(),
+                    message_hash: None,
+                    edited: false,
+                    reactions: Vec::new(),
+                });
+            }
+        }
+    }
+    // All current entries are already persisted — start the save-counter
+    // above the current count so only new live-chat entries get saved.
+    let mut history_saved_count = app.entries.len();
+
     let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // ── Room docs setup ─────────────────────────────────────────────────
@@ -499,10 +547,6 @@ async fn main() -> Result<()> {
         )
         .await;
     });
-
-    let mut names = HashMap::new();
-    names.insert(local_public, local_label.clone());
-
     // Show how many friends were loaded from disk at startup.
     if app.friends.is_empty() {
         app.push_system("No friends file yet; starting with an empty friends list.");
@@ -612,15 +656,43 @@ async fn main() -> Result<()> {
                 if redraw {
                     terminal.draw(|frame| render_app(frame, &mut app))?;
                 }
+                // Persist any new entries (from local sends) to the history store.
+                if history_saved_count < app.entries.len() {
+                    let local_hex = hex::encode(local_public.as_bytes());
+                    let mut store = chat_history.lock().unwrap();
+                    for entry in &app.entries[history_saved_count..] {
+                        let kind = match entry.kind {
+                            ChatKind::System => "system",
+                            ChatKind::Local => "text",
+                            ChatKind::Remote => "text",
+                        };
+                        let sender = match entry.kind {
+                            ChatKind::Local => local_hex.clone(),
+                            _ => String::new(),
+                        };
+                        store.push(HistoryEntry::new(
+                            topic,
+                            sender,
+                            Vec::new(),
+                            kind,
+                            entry.body.clone(),
+                        ));
+                    }
+                    history_saved_count = app.entries.len();
+                    drop(store);
+                    if let Err(err) = chat_history.lock().unwrap().save() {
+                        eprintln!("warning: failed to save chat history: {err}");
+                    }
+                }
             }
             Some(event) = net_rx.recv() => {
                 handle_net_event(event.clone(), &mut app)?;
                 if let NetEvent::NeighborUp { peer } = event {
-                    if app.entries.len() < BACKFILL_TRIGGER_THRESHOLD {
+                    if chat_history.lock().unwrap().len() < BACKFILL_TRIGGER_THRESHOLD {
                         let handle = backfill_handle.clone();
                         let endpoint = endpoint.clone();
                         let net_tx = net_tx.clone();
-                        let local_history_count = app.entries.len();
+                        let local_history_count = chat_history.lock().unwrap().len();
                         tokio::spawn(async move {
                             let _ = handle
                                 .try_backfill_from_peer(
@@ -653,6 +725,34 @@ async fn main() -> Result<()> {
                         app.push_system(format!("Failed to save friends: {err}"));
                     }
                     app.friends_dirty = false;
+                }
+                // Persist new entries (from remote messages) to the history store.
+                if history_saved_count < app.entries.len() {
+                    let local_hex = hex::encode(local_public.as_bytes());
+                    let mut store = chat_history.lock().unwrap();
+                    for entry in &app.entries[history_saved_count..] {
+                        let kind = match entry.kind {
+                            ChatKind::System => "system",
+                            ChatKind::Local => "text",
+                            ChatKind::Remote => "text",
+                        };
+                        let sender = match entry.kind {
+                            ChatKind::Local => local_hex.clone(),
+                            _ => String::new(),
+                        };
+                        store.push(HistoryEntry::new(
+                            topic,
+                            sender,
+                            Vec::new(),
+                            kind,
+                            entry.body.clone(),
+                        ));
+                    }
+                    history_saved_count = app.entries.len();
+                    drop(store);
+                    if let Err(err) = chat_history.lock().unwrap().save() {
+                        eprintln!("warning: failed to save chat history: {err}");
+                    }
                 }
                 terminal.draw(|frame| render_app(frame, &mut app))?;
             }
@@ -699,6 +799,11 @@ async fn main() -> Result<()> {
     }
     if app.friends_dirty {
         let _ = app.friends.save();
+    }
+
+    // Save chat history before shutdown.
+    if let Err(err) = chat_history.lock().unwrap().save() {
+        eprintln!("warning: failed to save chat history: {err}");
     }
 
     router.shutdown().await.anyerr()?;
