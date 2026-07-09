@@ -25,7 +25,7 @@ use iroh::Watcher;
 use clap::Parser;
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event as CEvent, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -703,7 +703,14 @@ fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
     std::thread::spawn(move || {
         while let Ok(event) = event::read() {
             let keep_running = match event {
-                CEvent::Key(key) => ui_tx.send(UiEvent::Key(key)).is_ok(),
+                CEvent::Key(key) => {
+                    // Only handle press events — skip Release and Repeat
+                    if key.kind != event::KeyEventKind::Press {
+                        true
+                    } else {
+                        ui_tx.send(UiEvent::Key(key)).is_ok()
+                    }
+                }
                 CEvent::Resize(_width, _height) => ui_tx.send(UiEvent::Resize).is_ok(),
                 CEvent::Paste(text) => ui_tx.send(UiEvent::Paste(text)).is_ok(),
                 _ => true,
