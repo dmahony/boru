@@ -230,4 +230,3 @@ debug = true
 [patch.crates-io]
 noq-proto = { path = "noq-proto-patched" }
 
-iroh-blobs = { path = "/home/dan/iroh-blobs-patched" }
