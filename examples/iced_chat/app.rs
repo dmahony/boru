@@ -386,11 +386,7 @@ impl IcedChat {
                 ChatKind::Local => "text",
                 ChatKind::Remote => "text",
             };
-            let preview = if entry.body.len() > 120 {
-                format!("{}…", &entry.body[..120])
-            } else {
-                entry.body.clone()
-            };
+            let body_text = entry.body.clone();
             let sender = match entry.kind {
                 ChatKind::Local => hex::encode(self.local_public.as_bytes()),
                 _ => String::new(),
@@ -400,7 +396,7 @@ impl IcedChat {
                 sender,
                 Vec::new(), // signed bytes not available here
                 kind,
-                preview,
+                body_text,
             );
             self.chat_history.push(history_entry);
         }
@@ -561,17 +557,36 @@ impl IcedChat {
                     .chat_history
                     .for_topic(&topic)
                     .into_iter()
-                    .map(|e| e.summary())
+                    .cloned()
                     .collect();
                 if !history_entries.is_empty() {
-                    self.push_system(format!(
-                        "--- {} previous messages ---",
-                        history_entries.len()
-                    ));
-                    for summary in history_entries {
-                        self.push_system(summary);
+                    for entry in &history_entries {
+                        match entry.kind.as_str() {
+                            "system" => {
+                                self.push_system(&entry.text_preview);
+                            }
+                            _ => {
+                                // Parse sender from hex, use short display
+                                let label = if entry.sender.is_empty() {
+                                    "peer".to_string()
+                                } else if let Ok(bytes) = hex::decode(&entry.sender) {
+                                    if bytes.len() == 32 {
+                                        let arr: [u8; 32] = bytes.try_into().unwrap();
+                                        PublicKey::from_bytes(&arr).fmt_short().to_string()
+                                    } else {
+                                        "local".to_string()
+                                    }
+                                } else {
+                                    "local".to_string()
+                                };
+                                if label == self.local_public.fmt_short().to_string() {
+                                    self.push_local(&entry.text_preview);
+                                } else {
+                                    self.entries.push(ChatEntry::remote(&label, &entry.text_preview, None));
+                                }
+                            }
+                        }
                     }
-                    self.push_system("--- end of history ---");
                 }
 
                 // Update room history
