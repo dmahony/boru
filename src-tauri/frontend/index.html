@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Iroh Gossip Chat</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Landing screen -->
+    <div id="landing" class="screen">
+      <div class="landing-card">
+        <h1>Iroh Gossip Chat</h1>
+        <p class="subtitle">Decentralized, peer-to-peer messaging</p>
+        <div class="landing-actions">
+          <button id="create-room-btn" class="btn primary">Create Room</button>
+          <div class="divider"><span>or</span></div>
+          <div class="join-row">
+            <input id="join-ticket-input" type="text" placeholder="Paste a ticket to join...">
+            <button id="join-room-btn" class="btn secondary">Join</button>
+          </div>
+        </div>
+        <div id="status-msg" class="status-msg"></div>
+      </div>
+    </div>
+
+    <!-- Chat screen -->
+    <div id="chat" class="screen hidden">
+      <div id="chat-header">
+        <span id="chat-title">Chat Room</span>
+        <span id="connection-status" class="badge offline">Offline</span>
+        <span id="peer-count" class="badge">0 peers</span>
+        <div class="header-actions">
+          <button id="copy-ticket-btn" class="btn small" title="Copy ticket">Copy Ticket</button>
+          <button id="settings-btn" class="btn small" title="Settings">Settings</button>
+        </div>
+      </div>
+      <div id="message-list"></div>
+      <div id="chat-input-area">
+        <input id="message-input" type="text" placeholder="Type a message..." autocomplete="off">
+        <button id="send-btn" class="btn primary">Send</button>
+      </div>
+    </div>
+
+    <!-- Settings modal -->
+    <div id="settings-modal" class="modal hidden">
+      <div class="modal-content">
+        <h2>Settings</h2>
+        <label>Display Name</label>
+        <div class="name-row">
+          <input id="nickname-input" type="text" placeholder="Your nickname">
+          <button id="set-name-btn" class="btn secondary">Set</button>
+        </div>
+        <p class="hint">Your nickname is broadcast to all peers when changed.</p>
+        <button id="close-settings-btn" class="btn">Close</button>
+      </div>
+    </div>
+
+    <!-- Toast notifications -->
+    <div id="toast-container"></div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

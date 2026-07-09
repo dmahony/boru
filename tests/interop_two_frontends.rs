@@ -82,9 +82,7 @@ async fn drain_events(
 
 /// Register gossip on an endpoint's router and spawn it.
 fn spawn_gossip_router(ep: Endpoint, gossip: Gossip) -> iroh::protocol::Router {
-    Router::builder(ep)
-        .accept(GOSSIP_ALPN, gossip)
-        .spawn()
+    Router::builder(ep).accept(GOSSIP_ALPN, gossip).spawn()
 }
 
 // ── Test 1: Three peers in the same room ───────────────────────────────
@@ -173,33 +171,15 @@ async fn interop_three_peers_message_flow() -> Result<()> {
         },
     )
     .await?;
-    let roster_a = create_roster_doc(
-        topic,
-        &sender_a,
-        pk_a.to_string(),
-        "PeerA".into(),
-    )
-    .await?;
+    let roster_a = create_roster_doc(topic, &sender_a, pk_a.to_string(), "PeerA".into()).await?;
 
     // B creates metadata + roster
     let md_b = create_metadata_doc(topic, &sender_b, RoomMetadata::empty()).await?;
-    let roster_b = create_roster_doc(
-        topic,
-        &sender_b,
-        pk_b.to_string(),
-        "PeerB".into(),
-    )
-    .await?;
+    let roster_b = create_roster_doc(topic, &sender_b, pk_b.to_string(), "PeerB".into()).await?;
 
     // C creates metadata + roster
     let md_c = create_metadata_doc(topic, &sender_c, RoomMetadata::empty()).await?;
-    let roster_c = create_roster_doc(
-        topic,
-        &sender_c,
-        pk_c.to_string(),
-        "PeerC".into(),
-    )
-    .await?;
+    let roster_c = create_roster_doc(topic, &sender_c, pk_c.to_string(), "PeerC".into()).await?;
 
     sleep(Duration::from_millis(300)).await;
     drain_events(&_md_a, &roster_a, &mut rx_a, Duration::from_millis(500), 30).await;

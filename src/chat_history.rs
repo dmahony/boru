@@ -184,12 +184,10 @@ impl ChatHistoryStore {
             return Ok(None);
         }
 
-        let raw = fs::read_to_string(&path).with_std_context(|_| {
-            format!("failed to read history file {}", path.display())
-        })?;
-        let mut store: Self = serde_json::from_str(&raw).with_std_context(|_| {
-            format!("failed to parse history file {}", path.display())
-        })?;
+        let raw = fs::read_to_string(&path)
+            .with_std_context(|_| format!("failed to read history file {}", path.display()))?;
+        let mut store: Self = serde_json::from_str(&raw)
+            .with_std_context(|_| format!("failed to parse history file {}", path.display()))?;
 
         if store.schema_version != SCHEMA_VERSION {
             return Err(n0_error::anyerr!(
@@ -271,10 +269,16 @@ impl ChatHistoryStore {
     /// Filter entries by topic, returning matching entries in insertion
     /// order.
     pub fn for_topic(&self, topic: &TopicId) -> Vec<&HistoryEntry> {
-        self.entries
-            .iter()
-            .filter(|e| e.topic == *topic)
-            .collect()
+        self.entries.iter().filter(|e| e.topic == *topic).collect()
+    }
+
+    /// Return up to `count` of the most recent entries, oldest-first.
+    pub fn get_recent_messages(&self, count: usize) -> Vec<&HistoryEntry> {
+        if count == 0 {
+            return Vec::new();
+        }
+        let start = self.entries.len().saturating_sub(count);
+        self.entries[start..].iter().collect()
     }
 
     /// The path to the history file, for display purposes.

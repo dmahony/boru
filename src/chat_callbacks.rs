@@ -8,6 +8,8 @@
 //! headless) to live in a different module tree without a hard dependency
 //! on the core implementation.
 
+use std::time::Duration;
+
 use iroh::PublicKey;
 
 use crate::chat_core::MessageHash;
@@ -28,6 +30,13 @@ use crate::friends::FriendId;
 pub trait ChatCallbacks {
     /// Our own [`PublicKey`] — used to filter out self-messages.
     fn local_public(&self) -> PublicKey;
+
+    /// Maximum age allowed for received messages before they are dropped.
+    ///
+    /// Frontends can override this to make TTL configurable.
+    fn message_ttl(&self) -> Duration {
+        Duration::from_secs(3600)
+    }
 
     /// Look up a peer's display name, falling back to a short public key.
     fn resolve_name(&self, peer: &PublicKey) -> String {
@@ -84,6 +93,14 @@ pub trait ChatCallbacks {
 
     /// A gossip neighbor has disconnected.
     fn on_neighbor_down(&mut self, peer: PublicKey);
+
+    /// Record that we received any kind of gossip activity from a peer
+    /// (message, neighbor up/down, presence ping).  Updates the mesh health
+    /// timestamp for this peer.
+    fn record_activity(&mut self, peer: PublicKey);
+
+    /// Record a presence heartbeat from a peer — updates the last-seen timestamp.
+    fn record_presence(&mut self, _peer: PublicKey) {}
 
     /// Request the frontend to quit (gossip receiver closed or error).
     fn request_quit(&mut self);

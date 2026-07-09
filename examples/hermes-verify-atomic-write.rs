@@ -22,7 +22,10 @@ fn main() -> Result<()> {
     fs::create_dir_all(&tmp)?;
 
     let path = tmp.join("test.json");
-    let data = TestData { name: "hello".into(), value: 42 };
+    let data = TestData {
+        name: "hello".into(),
+        value: 42,
+    };
 
     // Test 1: round-trip
     atomic_write_json(&path, &data, "test")?;
@@ -40,7 +43,10 @@ fn main() -> Result<()> {
     assert!(nested.exists());
 
     // Test 4: overwrite
-    let v2 = TestData { name: "world".into(), value: 99 };
+    let v2 = TestData {
+        name: "world".into(),
+        value: 99,
+    };
     atomic_write_json(&path, &v2, "overwrite")?;
     let raw = fs::read_to_string(&path).expect("read");
     let decoded: TestData = serde_json::from_str(&raw).expect("parse");

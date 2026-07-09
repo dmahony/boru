@@ -92,6 +92,8 @@ Both the `chat` and `setup` examples persist the node identity (secret key) to d
 
 **Resetting the identity:** Delete the `secret_key.txt` file. The next run will generate a fresh keypair.
 
+The chat room transcript is stored separately in `chat_history.json` under the same data directory. That file is durable local history, not live network state. To clear the current room's transcript from the UI, use `/leave`; to clear everything, delete `chat_history.json`.
+
 ```text
 rm ~/.local/share/iroh-gossip-chat/secret_key.txt
 ```

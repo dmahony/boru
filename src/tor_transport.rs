@@ -676,7 +676,9 @@ mod tor_transport_impl {
                             continue;
                         }
                         None => {
-                            break 'inner Err("bootstrap event stream ended unexpectedly".to_string());
+                            break 'inner Err(
+                                "bootstrap event stream ended unexpectedly".to_string()
+                            );
                         }
                     }
                 }
@@ -715,9 +717,7 @@ mod tor_transport_impl {
                     );
                 }
                 Err(msg) => {
-                    println!(
-                        "> Tor bootstrap attempt {attempt}/{max_retries} failed: {msg}"
-                    );
+                    println!("> Tor bootstrap attempt {attempt}/{max_retries} failed: {msg}");
                 }
             }
 

@@ -50,8 +50,12 @@ where
     let data_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     // ── 1. Ensure the directory exists ──────────────────────────────
-    fs::create_dir_all(data_dir)
-        .with_std_context(|_| format!("failed to create data dir for {label}: {}", data_dir.display()))?;
+    fs::create_dir_all(data_dir).with_std_context(|_| {
+        format!(
+            "failed to create data dir for {label}: {}",
+            data_dir.display()
+        )
+    })?;
 
     #[cfg(unix)]
     {
@@ -61,8 +65,8 @@ where
 
     // ── 2. Serialise ────────────────────────────────────────────────
     let tmp_path = path.with_extension("json.tmp");
-    let encoded = serde_json::to_vec_pretty(data)
-        .with_std_context(|_| format!("encode {label}"))?;
+    let encoded =
+        serde_json::to_vec_pretty(data).with_std_context(|_| format!("encode {label}"))?;
 
     // ── 3. Pre-commit validation: round-trip through serde ──────────
     //
@@ -75,33 +79,49 @@ where
 
     // ── 4. Write to tmp file with fsync ─────────────────────────────
     {
-        let file = fs::File::create(&tmp_path)
-            .with_std_context(|_| format!("failed to create temp file for {label}: {}", tmp_path.display()))?;
+        let file = fs::File::create(&tmp_path).with_std_context(|_| {
+            format!(
+                "failed to create temp file for {label}: {}",
+                tmp_path.display()
+            )
+        })?;
         let mut writer = BufWriter::new(file);
 
-        writer
-            .write_all(&encoded)
-            .with_std_context(|_| format!("failed to write temp file for {label}: {}", tmp_path.display()))?;
+        writer.write_all(&encoded).with_std_context(|_| {
+            format!(
+                "failed to write temp file for {label}: {}",
+                tmp_path.display()
+            )
+        })?;
 
         // Trailing newline keeps the file valid POSIX text.
-        writer
-            .write_all(b"\n")
-            .with_std_context(|_| format!("failed to finalise temp file for {label}: {}", tmp_path.display()))?;
+        writer.write_all(b"\n").with_std_context(|_| {
+            format!(
+                "failed to finalise temp file for {label}: {}",
+                tmp_path.display()
+            )
+        })?;
 
-        writer
-            .flush()
-            .with_std_context(|_| format!("failed to flush temp file for {label}: {}", tmp_path.display()))?;
+        writer.flush().with_std_context(|_| {
+            format!(
+                "failed to flush temp file for {label}: {}",
+                tmp_path.display()
+            )
+        })?;
 
-        writer
-            .get_ref()
-            .sync_all()
-            .with_std_context(|_| format!("failed to sync temp file for {label}: {}", tmp_path.display()))?;
+        writer.get_ref().sync_all().with_std_context(|_| {
+            format!(
+                "failed to sync temp file for {label}: {}",
+                tmp_path.display()
+            )
+        })?;
     }
 
     // ── 5. Replace the old file atomically ──────────────────────────
     if path.exists() {
-        fs::remove_file(path)
-            .with_std_context(|_| format!("failed to remove old file for {label}: {}", path.display()))?;
+        fs::remove_file(path).with_std_context(|_| {
+            format!("failed to remove old file for {label}: {}", path.display())
+        })?;
     }
 
     fs::rename(&tmp_path, path)
@@ -186,6 +206,9 @@ mod tests {
 
         // The .json.tmp sibling should *not* exist after a successful write.
         let tmp_path = path.with_extension("json.tmp");
-        assert!(!tmp_path.exists(), "temp file should not remain after successful write");
+        assert!(
+            !tmp_path.exists(),
+            "temp file should not remain after successful write"
+        );
     }
 }

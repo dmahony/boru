@@ -11,12 +11,13 @@ use std::time::Instant;
 use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey};
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket};
 use iroh_gossip::api::GossipSender;
+use iroh_gossip::backfill::BackfillHandle;
 use iroh_gossip::chat_callbacks::ChatCallbacks;
+use iroh_gossip::chat_core::handle_net_event as chat_net_event;
 use iroh_gossip::chat_core::{
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     MessageHash,
 };
-use iroh_gossip::chat_core::handle_net_event as chat_net_event;
 use iroh_gossip::chat_history::{ChatHistoryStore, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendsStore};
 use iroh_gossip::net::Gossip;
@@ -84,7 +85,11 @@ impl ChatEntry {
             image_handle: None,
         }
     }
-    fn remote(label: impl Into<String>, text: impl Into<String>, hash: Option<MessageHash>) -> Self {
+    fn remote(
+        label: impl Into<String>,
+        text: impl Into<String>,
+        hash: Option<MessageHash>,
+    ) -> Self {
         Self {
             kind: ChatKind::Remote,
             label: label.into(),
@@ -96,7 +101,12 @@ impl ChatEntry {
             image_handle: None,
         }
     }
-    fn image(label: impl Into<String>, body: impl Into<String>, image_bytes: Vec<u8>, hash: Option<MessageHash>) -> Self {
+    fn image(
+        label: impl Into<String>,
+        body: impl Into<String>,
+        image_bytes: Vec<u8>,
+        hash: Option<MessageHash>,
+    ) -> Self {
         let handle = iced::widget::image::Handle::from_bytes(image_bytes.clone());
         Self {
             kind: ChatKind::Remote,
@@ -163,6 +173,7 @@ pub struct IcedChat {
     runtime_handle: tokio::runtime::Handle,
     pub net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
     net_tx: UnboundedSender<NetEvent>,
+    backfill_handle: iroh_gossip::backfill::BackfillHandle,
     /// JoinHandle to abort the current forward_gossip_events task when
     /// switching rooms.
     forward_handle: Option<task::JoinHandle<()>>,
@@ -187,9 +198,13 @@ pub struct IcedChat {
     /// Transport notice displayed in the header (e.g. "Direct iroh transport is operational").
     pub notice: String,
     /// Persistent chat message history (loaded on startup, saved on each message).
-    chat_history: ChatHistoryStore,
+    chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
     /// Whether chat history has unsaved changes.
     chat_history_dirty: bool,
+    /// Number of entries that have already been saved to chat_history
+    /// for the current room. Used to avoid re-saving the same entries
+    /// on every room-navigation event.
+    history_saved_count: usize,
     online_friends: HashMap<PublicKey, String>,
 }
 
@@ -278,7 +293,8 @@ impl IcedChat {
         tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
         initial_topic: Option<TopicId>,
         notice: String,
-        chat_history: ChatHistoryStore,
+        chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
+        backfill_handle: BackfillHandle,
     ) -> Self {
         Self {
             screen: Screen::ChatList,
@@ -307,6 +323,7 @@ impl IcedChat {
             runtime_handle,
             net_rx,
             net_tx,
+            backfill_handle,
             forward_handle: None,
             friends,
             friends_dirty: false,
@@ -322,6 +339,7 @@ impl IcedChat {
             notice,
             chat_history,
             chat_history_dirty: false,
+            history_saved_count: 0,
             online_friends: HashMap::new(),
         }
     }
@@ -354,37 +372,21 @@ impl IcedChat {
         self.names.clear();
         self.pending_file = None;
         self.pending_image = None;
+        self.history_saved_count = 0;
     }
 
-    /// Save the current room to history.
+    /// Save any new entries in the current room to durable history.
+    /// Only saves entries that have not yet been persisted (tracked by
+    /// `history_saved_count`), avoiding duplication on room navigation.
     fn save_room_to_history(&mut self) {
         let topic = self.topic;
-        let name = self
-            .names
-            .get(&self.local_public)
-            .cloned()
-            .unwrap_or_default();
-        let preview = self
-            .entries
-            .last()
-            .map(|e| {
-                let t = e.body.clone();
-                if t.len() > 60 {
-                    format!("{}…", &t[..60])
-                } else {
-                    t
-                }
-            })
-            .unwrap_or_default();
-
-        self.room_history.upsert(topic, &name, true);
-        if !preview.is_empty() {
-            self.room_history.update_preview(&topic, &preview);
+        let current_count = self.entries.len();
+        if self.history_saved_count >= current_count {
+            return;
         }
-        self.room_history_dirty = true;
 
-        // Persist chat messages to durable history
-        for entry in &self.entries {
+        // Persist chat messages to durable history — only the new ones.
+        for entry in &self.entries[self.history_saved_count..] {
             let kind = match entry.kind {
                 ChatKind::System => "system",
                 ChatKind::Local => "text",
@@ -402,8 +404,9 @@ impl IcedChat {
                 kind,
                 body_text,
             );
-            self.chat_history.push(history_entry);
+            self.chat_history.lock().unwrap().push(history_entry);
         }
+        self.history_saved_count = current_count;
         self.chat_history_dirty = true;
     }
 }
@@ -432,6 +435,29 @@ impl IcedChat {
             AppMessage::GoToChatList => {
                 // Save current room to history
                 self.save_room_to_history();
+                // Update room list preview
+                let name = self
+                    .names
+                    .get(&self.local_public)
+                    .cloned()
+                    .unwrap_or_default();
+                let preview = self
+                    .entries
+                    .last()
+                    .map(|e| {
+                        let t = e.body.clone();
+                        if t.len() > 60 {
+                            format!("{}…", &t[..60])
+                        } else {
+                            t
+                        }
+                    })
+                    .unwrap_or_default();
+                self.room_history.upsert(self.topic, &name, true);
+                if !preview.is_empty() {
+                    self.room_history.update_preview(&self.topic, &preview);
+                }
+                self.room_history_dirty = true;
                 self.persist_room_history();
                 self.try_save_chat_history();
 
@@ -485,6 +511,29 @@ impl IcedChat {
             AppMessage::OpenRoom(topic) => {
                 // Save the current room first
                 self.save_room_to_history();
+                // Update room list preview for previous room
+                let name = self
+                    .names
+                    .get(&self.local_public)
+                    .cloned()
+                    .unwrap_or_default();
+                let preview = self
+                    .entries
+                    .last()
+                    .map(|e| {
+                        let t = e.body.clone();
+                        if t.len() > 60 {
+                            format!("{}…", &t[..60])
+                        } else {
+                            t
+                        }
+                    })
+                    .unwrap_or_default();
+                self.room_history.upsert(self.topic, &name, true);
+                if !preview.is_empty() {
+                    self.room_history.update_preview(&self.topic, &preview);
+                }
+                self.room_history_dirty = true;
                 self.try_save_chat_history();
                 self.leave_current_room();
 
@@ -549,6 +598,8 @@ impl IcedChat {
                 // Replay chat history for this topic
                 let history_entries: Vec<_> = self
                     .chat_history
+                    .lock()
+                    .unwrap()
                     .for_topic(&topic)
                     .into_iter()
                     .cloned()
@@ -578,7 +629,11 @@ impl IcedChat {
                                 if label == self.local_public.fmt_short().to_string() {
                                     self.push_local(&entry.text_preview);
                                 } else {
-                                    self.entries.push(ChatEntry::remote(&label, &entry.text_preview, None));
+                                    self.entries.push(ChatEntry::remote(
+                                        &label,
+                                        &entry.text_preview,
+                                        None,
+                                    ));
                                 }
                             }
                         }
@@ -759,12 +814,11 @@ impl IcedChat {
                 // ── Leave room / delete from history ──
                 if trimmed == "/leave" {
                     let topic = self.topic;
-                    // Broadcast Goodbye (best-effort)
+                    // Broadcast Leave (best-effort)
                     if let Some(ref sender) = self.sender {
-                        if let Ok(encoded) = SignedMessage::sign_and_encode(
-                            &self.secret_key,
-                            &crate::Message::Goodbye,
-                        ) {
+                        if let Ok(encoded) =
+                            SignedMessage::sign_and_encode(&self.secret_key, &crate::Message::Leave)
+                        {
                             let sender = sender.clone();
                             task::spawn(async move {
                                 sender.broadcast(encoded).await.ok();
@@ -774,7 +828,7 @@ impl IcedChat {
                     // Remove room and chat history (not just go back — delete it)
                     self.room_history.remove(&topic);
                     self.room_history_dirty = true;
-                    self.chat_history.remove_topic(&topic);
+                    self.chat_history.lock().unwrap().remove_topic(&topic);
                     self.chat_history_dirty = true;
                     self.persist_room_history();
                     self.try_save_chat_history();
@@ -871,8 +925,7 @@ impl IcedChat {
 
                 if trimmed == "/connections" {
                     use iroh_gossip::chat_core::check_peer_connection_type;
-                    let neighbors: Vec<iroh::PublicKey> =
-                        self.neighbors.iter().copied().collect();
+                    let neighbors: Vec<iroh::PublicKey> = self.neighbors.iter().copied().collect();
                     if neighbors.is_empty() {
                         self.push_system("No known peers to inspect.");
                     } else {
@@ -882,9 +935,8 @@ impl IcedChat {
                         let names = self.names.clone();
                         // Query each peer and push results inline via block_on.
                         for pk in &neighbors {
-                            let ctype = rt.block_on(async {
-                                check_peer_connection_type(&ep, *pk).await
-                            });
+                            let ctype =
+                                rt.block_on(async { check_peer_connection_type(&ep, *pk).await });
                             let label = names
                                 .get(pk)
                                 .cloned()
@@ -960,17 +1012,13 @@ impl IcedChat {
                 if let Some(rest) = trimmed.strip_prefix("/edit ") {
                     let parts: Vec<&str> = rest.splitn(2, ' ').collect();
                     if parts.len() < 2 {
-                        self.push_system(
-                            "Usage: /edit <msg_index> <new_text>".to_string(),
-                        );
+                        self.push_system("Usage: /edit <msg_index> <new_text>".to_string());
                         return iced::Task::none();
                     }
                     let idx: usize = match parts[0].parse() {
                         Ok(i) => i,
                         Err(_) => {
-                            self.push_system(
-                                "Usage: /edit <msg_index> <new_text>".to_string(),
-                            );
+                            self.push_system("Usage: /edit <msg_index> <new_text>".to_string());
                             return iced::Task::none();
                         }
                     };
@@ -1019,9 +1067,7 @@ impl IcedChat {
                     let idx: usize = match idx_str.parse() {
                         Ok(i) => i,
                         Err(_) => {
-                            self.push_system(
-                                "Usage: /delete <msg_index>".to_string(),
-                            );
+                            self.push_system("Usage: /delete <msg_index>".to_string());
                             return iced::Task::none();
                         }
                     };
@@ -1354,7 +1400,7 @@ impl IcedChat {
                 // Remove room and chat history, then persist.
                 self.room_history.remove(&topic);
                 self.room_history_dirty = true;
-                self.chat_history.remove_topic(&topic);
+                self.chat_history.lock().unwrap().remove_topic(&topic);
                 self.chat_history_dirty = true;
                 self.persist_room_history();
                 self.try_save_chat_history();
@@ -1391,7 +1437,9 @@ impl IcedChat {
                                 match guard.try_recv() {
                                     Ok(msg) => msgs.push(msg),
                                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                        break
+                                    }
                                 }
                             }
                             msgs
@@ -1430,7 +1478,10 @@ impl IcedChat {
     }
 
     fn update_room_preview(&mut self, event: &NetEvent) {
-        if let NetEvent::Message { from: _, message } = event {
+        if let NetEvent::Message {
+            from: _, message, ..
+        } = event
+        {
             if let Message::Message { text } = message {
                 let preview = if text.len() > 60 {
                     format!("{}…", &text[..60])
@@ -1452,7 +1503,7 @@ impl IcedChat {
 
     fn try_save_chat_history(&mut self) {
         if self.chat_history_dirty {
-            let _ = self.chat_history.save();
+            let _ = self.chat_history.lock().unwrap().save();
             self.chat_history_dirty = false;
         }
     }
@@ -1567,7 +1618,9 @@ impl ChatCallbacks for IcedChat {
     }
 
     fn has_message(&self, hash: &MessageHash) -> bool {
-        self.entries.iter().any(|e| e.message_hash.as_ref() == Some(hash))
+        self.entries
+            .iter()
+            .any(|e| e.message_hash.as_ref() == Some(hash))
     }
 
     fn edit_message(&mut self, hash: &MessageHash, new_text: String) {
@@ -1612,6 +1665,8 @@ impl ChatCallbacks for IcedChat {
         self.neighbors.remove(&peer);
         self.recompute_connection_counts();
     }
+
+    fn record_activity(&mut self, _peer: PublicKey) {}
 
     fn request_quit(&mut self) {
         // IcedChat handles window close through the iced framework.
@@ -1754,7 +1809,11 @@ impl IcedChat {
     }
 
     /// A single row for an online friend: green dot + label + Chat button.
-    fn view_online_friend_row<'a>(&self, pk: PublicKey, label: &'a str) -> iced::Element<'a, AppMessage> {
+    fn view_online_friend_row<'a>(
+        &self,
+        pk: PublicKey,
+        label: &'a str,
+    ) -> iced::Element<'a, AppMessage> {
         use iced::widget::{button, container, row, text};
         use iced::Length;
 
@@ -1846,8 +1905,8 @@ impl IcedChat {
     }
 
     fn view_chat_header(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, row, text};
         use iced::widget::text::Wrapping;
+        use iced::widget::{button, column, row, text};
         use iced::{Color, Length};
 
         let room_name = self
@@ -1881,17 +1940,15 @@ impl IcedChat {
 
         if !self.ticket_str.is_empty() {
             let ticket = self.ticket_str.clone();
-            header = header.push(
-                column![
-                    text("Ticket (click to copy):")
-                        .size(10)
-                        .color(Color::from_rgb(0.5, 0.5, 0.5)),
-                    button(text(&self.ticket_str).size(10).wrapping(Wrapping::Word))
-                        .on_press(AppMessage::CopyToClipboard(ticket))
-                        .padding(0)
-                        .style(button::text),
-                ],
-            );
+            header = header.push(column![
+                text("Ticket (click to copy):")
+                    .size(10)
+                    .color(Color::from_rgb(0.5, 0.5, 0.5)),
+                button(text(&self.ticket_str).size(10).wrapping(Wrapping::Word))
+                    .on_press(AppMessage::CopyToClipboard(ticket))
+                    .padding(0)
+                    .style(button::text),
+            ]);
         }
 
         header.into()

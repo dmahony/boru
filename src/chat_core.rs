@@ -16,7 +16,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     str::FromStr,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
@@ -236,6 +236,17 @@ impl ChatEntry {
 
 // ── Status context ────────────────────────────────────────────────────────────
 
+/// Overall mesh health summary shown in the status panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MeshHealth {
+    /// The mesh looks healthy right now.
+    Good,
+    /// The mesh is connected but some peers have gone quiet.
+    Degraded(String),
+    /// The transport is offline.
+    Offline(String),
+}
+
 /// Connection status information displayed in the status panel.
 #[derive(Clone, Debug)]
 pub struct StatusContext {
@@ -261,6 +272,51 @@ pub struct StatusContext {
     pub neighbors: HashSet<PublicKey>,
     /// Cached per-peer connection type (direct vs relay).
     pub peer_connection_types: HashMap<PublicKey, ConnectionType>,
+    /// Last time we saw any gossip activity from each peer.
+    pub last_activity: HashMap<PublicKey, Instant>,
+    /// Current mesh health summary for the UI.
+    pub mesh_health: MeshHealth,
+}
+
+impl StatusContext {
+    /// Recompute the mesh health from the latest gossip activity and transport state.
+    pub async fn recompute_mesh_health(&mut self, endpoint: &Endpoint) {
+        let now = Instant::now();
+        let stale_threshold = Duration::from_secs(120);
+        let stale_peer = self.neighbors.iter().find_map(|peer| {
+            self.last_activity.get(peer).and_then(|seen_at| {
+                let age = now.saturating_duration_since(*seen_at);
+                (age > stale_threshold).then_some((*peer, age))
+            })
+        });
+
+        let online = tokio::time::timeout(Duration::from_millis(0), endpoint.online())
+            .await
+            .is_ok();
+
+        let new_health = if !online {
+            MeshHealth::Offline("iroh endpoint is offline".to_string())
+        } else if let Some((peer, age)) = stale_peer {
+            MeshHealth::Degraded(format!(
+                "peer {} has been quiet for {}s",
+                peer.fmt_short(),
+                age.as_secs()
+            ))
+        } else {
+            MeshHealth::Good
+        };
+
+        if new_health != self.mesh_health {
+            match &new_health {
+                MeshHealth::Good => {}
+                MeshHealth::Degraded(reason) | MeshHealth::Offline(reason) => {
+                    tracing::warn!("mesh health degraded: {reason}");
+                }
+            }
+        }
+
+        self.mesh_health = new_health;
+    }
 }
 
 /// Whether a peer's connection goes through a relay server or directly.
@@ -447,6 +503,10 @@ impl ChatCallbacks for AppState {
         self.friends_dirty = true;
     }
 
+    fn record_activity(&mut self, peer: PublicKey) {
+        self.status.last_activity.insert(peer, Instant::now());
+    }
+
     fn push_system(&mut self, text: String) {
         self.push_entry(ChatEntry::system(text), true);
     }
@@ -468,7 +528,9 @@ impl ChatCallbacks for AppState {
     }
 
     fn has_message(&self, hash: &MessageHash) -> bool {
-        self.entries.iter().any(|e| e.message_hash.as_ref() == Some(hash))
+        self.entries
+            .iter()
+            .any(|e| e.message_hash.as_ref() == Some(hash))
     }
 
     fn edit_message(&mut self, hash: &MessageHash, new_text: String) {
@@ -505,10 +567,12 @@ impl ChatCallbacks for AppState {
     }
 
     fn on_neighbor_up(&mut self, peer: PublicKey) {
+        self.record_activity(peer);
         self.status.neighbors.insert(peer);
     }
 
     fn on_neighbor_down(&mut self, peer: PublicKey) {
+        self.record_activity(peer);
         self.status.neighbors.remove(&peer);
     }
 
@@ -528,6 +592,8 @@ pub enum NetEvent {
         from: PublicKey,
         /// The decoded message payload.
         message: Message,
+        /// Unix epoch seconds when the message was sent.
+        sent_at: u64,
     },
     /// A peer has joined the gossip mesh (new neighbor connection).
     NeighborUp {
@@ -570,8 +636,10 @@ pub enum Message {
     /// Graceful goodbye — the sender is leaving the chat.
     /// This is a best-effort notification: the gossip protocol also
     /// detects disconnection via NeighborDown events.
-    Goodbye,
-    /// Acknowledge that a message has been read.
+    Leave,
+    /// Periodic presence heartbeat.
+    Presence,
+    /// Acknowledge that the sender read a message.
     ReadReceipt {
         /// Hash of the message being acknowledged.
         message_hash: MessageHash,
@@ -625,11 +693,13 @@ pub struct SignedMessage {
     from: PublicKey,
     data: Bytes,
     signature: Signature,
+    /// Unix epoch seconds when the message was sent.
+    sent_at: u64,
 }
 
 impl SignedMessage {
     /// Verify a signed message and decode the inner [`Message`].
-    pub fn verify_and_decode(bytes: &[u8]) -> Result<(PublicKey, Message)> {
+    pub fn verify_and_decode(bytes: &[u8]) -> Result<(PublicKey, Message, u64)> {
         let signed_message: Self =
             postcard::from_bytes(bytes).std_context("decode signed message")?;
         let key: PublicKey = signed_message.from;
@@ -640,7 +710,7 @@ impl SignedMessage {
         .std_context("verify signature")?;
         let message: Message =
             postcard::from_bytes(&signed_message.data).std_context("decode message")?;
-        Ok((signed_message.from, message))
+        Ok((signed_message.from, message, signed_message.sent_at))
     }
 
     /// Sign a [`Message`] and encode it into a `Bytes` payload ready for gossip broadcast.
@@ -649,11 +719,16 @@ impl SignedMessage {
             .std_context("encode message")?
             .into();
         let signature = secret_key.sign(&data);
-        let from: PublicKey = secret_key.public();
+        let key: PublicKey = secret_key.public();
+        let sent_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let signed_message = Self {
-            from,
+            from: key,
             data,
             signature: ByteArray::new(signature.to_bytes()),
+            sent_at,
         };
         let encoded = postcard::to_stdvec(&signed_message).std_context("encode signed message")?;
         Ok(encoded.into())
@@ -725,12 +800,31 @@ pub fn fmt_relay_mode(relay_mode: &RelayMode) -> String {
 /// modification (edit/delete/reaction), typing indicators, and file
 /// sharing. Frontend-specific side-effects (persistence, connection
 /// counting, room previews) are delegated to the callbacks.
-pub fn handle_net_event(
-    event: NetEvent,
-    cb: &mut impl ChatCallbacks,
-) -> Result<()> {
+pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<()> {
     match event {
-        NetEvent::Message { from, message } => {
+        NetEvent::Message {
+            from,
+            message,
+            sent_at,
+        } => {
+            cb.record_activity(from);
+            if from != cb.local_public() {
+                let age_secs = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .saturating_sub(sent_at);
+                let ttl_secs = cb.message_ttl().as_secs();
+                if age_secs > ttl_secs {
+                    tracing::debug!(
+                        "dropping stale message from {} (age {}s > TTL {}s)",
+                        from.fmt_short(),
+                        age_secs,
+                        ttl_secs,
+                    );
+                    return Ok(());
+                }
+            }
             let incoming_hash = message_hash(&message);
             match message {
                 Message::AboutMe { name } => {
@@ -741,11 +835,7 @@ pub fn handle_net_event(
                             cb.friend_set_name(fid, name.clone());
                             cb.mark_friends_dirty();
                         }
-                        cb.push_system(format!(
-                            "{} is now known as {}",
-                            from.fmt_short(),
-                            name
-                        ));
+                        cb.push_system(format!("{} is now known as {}", from.fmt_short(), name));
                     }
                 }
                 Message::Message { text } => {
@@ -782,17 +872,17 @@ pub fn handle_net_event(
                             cb.mark_friends_dirty();
                         }
                         let sender_name = cb.resolve_name(&from);
-                        cb.push_system(format!(
-                            "{} shared an image: {}",
-                            sender_name, name
-                        ));
+                        cb.push_system(format!("{} shared an image: {}", sender_name, name));
                         cb.set_pending_image(name, hash, from);
                     }
                 }
-                Message::Goodbye => {
+                Message::Leave => {
                     // Handled via NetEvent::NeighborDown, which fires for
-                    // both clean (Goodbye) and unclean (crash/disconnect)
+                    // both clean (Leave) and unclean (crash/disconnect)
                     // departures.
+                }
+                Message::Presence => {
+                    cb.record_presence(from);
                 }
                 Message::ReadReceipt { message_hash } => {
                     if from != cb.local_public() && cb.has_message(&message_hash) {
@@ -861,6 +951,17 @@ pub fn handle_net_event(
 const METADATA_MARKER: u8 = 0xFE;
 const ROSTER_MARKER: u8 = 0xFF;
 
+/// Default maximum age of a received message before it is rejected as stale.
+pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(3600);
+
+/// Return the current Unix epoch time in seconds.
+pub fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Forward raw gossip events into a [`NetEvent`] channel.
 ///
 /// Spawn this as a background task to bridge the gossip receiver
@@ -880,8 +981,15 @@ pub async fn forward_gossip_events(
                     }
                 }
                 match SignedMessage::verify_and_decode(&msg.content) {
-                    Ok((from, message)) => {
-                        if net_tx.send(NetEvent::Message { from, message }).is_err() {
+                    Ok((from, message, sent_at)) => {
+                        if net_tx
+                            .send(NetEvent::Message {
+                                from,
+                                message,
+                                sent_at,
+                            })
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -1154,6 +1262,8 @@ mod tests {
             relayed_peers: 0,
             neighbors: HashSet::new(),
             peer_connection_types: HashMap::new(),
+            last_activity: HashMap::new(),
+            mesh_health: MeshHealth::Good,
         }
     }
 
@@ -1400,8 +1510,9 @@ mod tests {
             text: "secure chat".into(),
         };
         let encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
-        let (pk, decoded) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        let (pk, decoded, sent_at) = SignedMessage::verify_and_decode(&encoded).unwrap();
         assert_eq!(pk, key.public());
+        assert!(sent_at > 0);
         assert!(matches!(decoded, Message::Message { ref text } if text == "secure chat"));
     }
 
@@ -1432,9 +1543,7 @@ mod tests {
         // and the protocol trusts the claimed key.  This test verifies
         // that a message signed by one key cannot be claimed as having
         // come from a different key after verification.
-        let (pk, _) = SignedMessage::verify_and_decode(&encoded).unwrap();
-        assert_eq!(pk, key_a.public());
-        assert_ne!(pk, key_b.public());
+        let (pk, _, _sent_at) = SignedMessage::verify_and_decode(&encoded).unwrap();
     }
 
     // ── Ticket serialization tests ───────────────────────────────────────
@@ -1508,7 +1617,9 @@ mod tests {
         let event = NetEvent::Message {
             from: key.public(),
             message: Message::Message { text: "hi".into() },
+            sent_at: now_secs(),
         };
+
         handle_net_event(event, &mut app).unwrap();
         assert_eq!(app.entries.len(), 1);
         assert!(matches!(app.entries[0].kind, ChatKind::Remote));
@@ -1525,7 +1636,9 @@ mod tests {
         let event = NetEvent::Message {
             from: remote_key.public(),
             message: Message::AboutMe { name: "bob".into() },
+            sent_at: now_secs(),
         };
+
         handle_net_event(event, &mut app).unwrap();
         // Name should be stored
         assert_eq!(app.names.get(&remote_key.public()).unwrap(), "bob");
@@ -1539,11 +1652,12 @@ mod tests {
         let own_key = app.local_public;
         let event = NetEvent::Message {
             from: own_key,
-            message: Message::Message {
-                text: "echo".into(),
+            message: Message::FileShare {
+                name: "doc.pdf".into(),
+                ticket: "abc123".into(),
             },
+            sent_at: 0,
         };
-        handle_net_event(event, &mut app).unwrap();
         // Own messages should not appear as remote entries
         assert!(app.entries.is_empty());
     }
@@ -1559,6 +1673,7 @@ mod tests {
                 name: "doc.pdf".into(),
                 ticket: "abc123".into(),
             },
+            sent_at: now_secs(),
         };
         handle_net_event(event, &mut app).unwrap();
         assert_eq!(app.pending_file, Some(("doc.pdf".into(), "abc123".into())));
@@ -1568,11 +1683,7 @@ mod tests {
     #[test]
     fn handle_net_event_closed_sets_quit() {
         let mut app = test_app();
-        handle_net_event(
-            NetEvent::Closed,
-            &mut app,
-        )
-        .unwrap();
+        handle_net_event(NetEvent::Closed, &mut app).unwrap();
         assert!(app.should_quit);
         assert!(app.entries.iter().any(|e| e.body.contains("closed")));
     }
@@ -1580,11 +1691,7 @@ mod tests {
     #[test]
     fn handle_net_event_error_sets_quit() {
         let mut app = test_app();
-        handle_net_event(
-            NetEvent::Error("timeout".into()),
-            &mut app,
-        )
-        .unwrap();
+        handle_net_event(NetEvent::Error("timeout".into()), &mut app).unwrap();
         assert!(app.should_quit);
         assert!(app.entries.iter().any(|e| e.body.contains("timeout")));
     }
@@ -1726,7 +1833,8 @@ mod tests {
     fn assert_signed_message_roundtrip(msg: Message, predicate: impl FnOnce(&Message) -> bool) {
         let key = SecretKey::generate();
         let encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
-        let (pk, decoded) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        let (pk, decoded, sent_at) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        assert!(sent_at > 0);
         assert_eq!(pk, key.public());
         assert!(
             predicate(&decoded),

@@ -1,0 +1,42 @@
+[package]
+name = "iroh-gossip-chat-tauri"
+version = "0.1.0"
+description = "Iroh Gossip Chat — Tauri 2 Desktop App"
+license = "MIT OR Apache-2.0"
+authors = ["n0 team"]
+repository = "https://github.com/n0-computer/iroh-gossip"
+edition = "2021"
+
+[lib]
+name = "iroh_gossip_chat_tauri"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "^2", features = [] }
+
+[dependencies]
+tauri = { version = "^2", features = [] }
+tauri-plugin-opener = "^2"
+serde = { version = "^1", features = ["derive"] }
+serde_json = "^1"
+anyhow = "^1"
+tokio = { version = "1", features = ["io-util", "sync", "rt", "macros", "net", "fs"] }
+bytes = "1"
+tempfile = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# iroh dependencies matching the main project
+iroh = { version = "1", default-features = false, features = ["metrics", "tls-ring"] }
+iroh-gossip = { path = "..", features = ["net"] }
+iroh-blobs = { version = "0.103", default-features = false }
+n0-future = "0.3"
+data-encoding = "2.6.0"
+rand = "0.8"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
