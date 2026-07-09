@@ -263,6 +263,11 @@ impl ChatHistoryStore {
         self.entries.clear();
     }
 
+    /// Remove all entries for a topic.
+    pub fn remove_topic(&mut self, topic: &TopicId) {
+        self.entries.retain(|e| e.topic != *topic);
+    }
+
     /// Filter entries by topic, returning matching entries in insertion
     /// order.
     pub fn for_topic(&self, topic: &TopicId) -> Vec<&HistoryEntry> {
@@ -355,6 +360,22 @@ mod tests {
 
         store.clear();
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn remove_topic_removes_matching_entries() {
+        let dir = temp_dir("remove_topic");
+        let mut store = ChatHistoryStore::empty_at(&dir);
+
+        let ta = make_topic(0xAA);
+        let tb = make_topic(0xBB);
+        store.push(make_entry(ta, 1));
+        store.push(make_entry(tb, 2));
+        store.push(make_entry(ta, 3));
+
+        store.remove_topic(&ta);
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.entries[0].topic, tb);
     }
 
     #[test]

@@ -607,6 +607,7 @@ impl IcedChat {
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
+                let endpoint = self.endpoint.clone();
                 let local_peer_addr = self.local_peer_addr.clone();
 
                 iced::Task::perform(
@@ -614,6 +615,13 @@ impl IcedChat {
                         let ticket: Ticket = ticket_input
                             .parse()
                             .map_err(|e: n0_error::AnyError| e.to_string())?;
+                        let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
+                        if let Ok(addr_lookup) = endpoint.address_lookup() {
+                            addr_lookup.add(memory_lookup.clone());
+                        }
+                        for peer in &ticket.peers {
+                            memory_lookup.set_endpoint_info(peer.clone());
+                        }
                         let topic = ticket.topic;
                         let peers: Vec<_> = ticket.peers.iter().map(|p| p.id).collect();
 
@@ -763,9 +771,11 @@ impl IcedChat {
                             });
                         }
                     }
-                    // Remove room from history (not just go back — delete it)
+                    // Remove room and chat history (not just go back — delete it)
                     self.room_history.remove(&topic);
                     self.room_history_dirty = true;
+                    self.chat_history.remove_topic(&topic);
+                    self.chat_history_dirty = true;
                     self.persist_room_history();
                     self.try_save_chat_history();
                     // Leave the room and go back to chat list
@@ -1341,10 +1351,13 @@ impl IcedChat {
             }
 
             AppMessage::DeleteRoom(topic) => {
-                // Remove from history and persist
+                // Remove room and chat history, then persist.
                 self.room_history.remove(&topic);
                 self.room_history_dirty = true;
+                self.chat_history.remove_topic(&topic);
+                self.chat_history_dirty = true;
                 self.persist_room_history();
+                self.try_save_chat_history();
                 iced::Task::none()
             }
 
