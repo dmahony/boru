@@ -22,13 +22,14 @@ use iroh_gossip::chat_history::{ChatHistoryStore, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendsStore};
 use iroh_gossip::net::Gossip;
 use iroh_gossip::proto::TopicId;
+use iroh_gossip::room_docs::{self, RoomMetadata};
 use iroh_gossip::room_history::{RoomHistoryEntry, RoomHistoryStore};
 use n0_future::task;
 use n0_future::Stream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 
-use crate::{fmt_relay_mode, forward_gossip_events, Message, NetEvent, SignedMessage, Ticket};
+use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 
 /// Scrollable ID for the chat log — used to auto-scroll to bottom.
 const CHAT_LOG: &str = "chat_log";
@@ -484,8 +485,32 @@ impl IcedChat {
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
 
-                        // Spawn forwarding
-                        let _ = task::spawn(forward_gossip_events(receiver, net_tx));
+                        let metadata_doc = room_docs::create_metadata_doc(
+                            topic,
+                            &sender,
+                            RoomMetadata {
+                                name: Some("iroh-gossip-chat".to_string()),
+                                description: None,
+                                rules: None,
+                            },
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        let roster_doc = room_docs::create_roster_doc(
+                            topic,
+                            &sender,
+                            sk.public().to_string(),
+                            label.clone(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                        let _ = task::spawn(room_docs::forward_room_events_for_chat(
+                            metadata_doc,
+                            roster_doc,
+                            receiver,
+                            net_tx,
+                        ));
 
                         // Broadcast our presence
                         let msg = SignedMessage::sign_and_encode(
@@ -551,7 +576,32 @@ impl IcedChat {
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
 
-                        let _ = task::spawn(forward_gossip_events(receiver, net_tx));
+                        let metadata_doc = room_docs::create_metadata_doc(
+                            topic,
+                            &sender,
+                            RoomMetadata {
+                                name: Some("iroh-gossip-chat".to_string()),
+                                description: None,
+                                rules: None,
+                            },
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        let roster_doc = room_docs::create_roster_doc(
+                            topic,
+                            &sender,
+                            sk.public().to_string(),
+                            label.clone(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                        let _ = task::spawn(room_docs::forward_room_events_for_chat(
+                            metadata_doc,
+                            roster_doc,
+                            receiver,
+                            net_tx,
+                        ));
 
                         // Broadcast our presence
                         let msg = SignedMessage::sign_and_encode(
@@ -691,7 +741,28 @@ impl IcedChat {
                         };
                         let ticket_str = new_ticket.to_string();
 
-                        let _ = task::spawn(forward_gossip_events(receiver, net_tx));
+                        let metadata_doc = room_docs::create_metadata_doc(
+                            topic,
+                            &sender,
+                            RoomMetadata::empty(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        let roster_doc = room_docs::create_roster_doc(
+                            topic,
+                            &sender,
+                            sk.public().to_string(),
+                            label.clone(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                        let _ = task::spawn(room_docs::forward_room_events_for_chat(
+                            metadata_doc,
+                            roster_doc,
+                            receiver,
+                            net_tx,
+                        ));
 
                         let msg = SignedMessage::sign_and_encode(
                             &sk,

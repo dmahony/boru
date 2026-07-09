@@ -38,7 +38,7 @@ use iroh_gossip::chat_core::friend_ping::{
     DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
 };
 use iroh_gossip::chat_core::{
-    self, check_peer_connection_type, fmt_relay_mode, handle_net_event, message_hash,
+    check_peer_connection_type, fmt_relay_mode, handle_net_event, message_hash,
     update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, MeshHealth, Message,
     NetEvent, SignedMessage, StatusContext, Ticket,
 };
@@ -520,8 +520,13 @@ async fn main() -> Result<()> {
     // their respective messages; everything else goes to net_tx for chat.
     let room_forwarder_net_tx = net_tx.clone();
     task::spawn(async move {
-        forward_room_events_for_chat(metadata_doc, roster_doc, receiver, room_forwarder_net_tx)
-            .await;
+        room_docs::forward_room_events_for_chat(
+            metadata_doc,
+            roster_doc,
+            receiver,
+            room_forwarder_net_tx,
+        )
+        .await;
     });
 
     let mut names = HashMap::new();
@@ -1415,85 +1420,6 @@ async fn handle_key_event(
     }
 
     Ok(())
-}
-
-// ── Room-aware event forwarder ────────────────────────────────────────────
-
-/// Combined gossip event forwarder that dispatches room doc messages
-/// (metadata 0xFE, roster 0xFF) to the appropriate doc handles, and
-/// forwards remaining events (chat messages, NeighborUp/Down) to NetEvent.
-async fn forward_room_events_for_chat(
-    metadata_doc: room_docs::RoomMetadataDoc,
-    roster_doc: room_docs::RosterDoc,
-    mut receiver: iroh_gossip::api::GossipReceiver,
-    net_tx: tokio::sync::mpsc::UnboundedSender<chat_core::NetEvent>,
-) {
-    use iroh_gossip::api::Event as GossipEvent;
-    use iroh_gossip::chat_core::{NetEvent, SignedMessage};
-    use n0_future::StreamExt;
-
-    while let Some(event_result) = receiver.next().await {
-        let event = match event_result {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        // Check marker byte before consuming the event.
-        let is_metadata = matches!(
-            &event,
-            GossipEvent::Received(msg) if msg.content.first() == Some(&0xFE)
-        );
-        let is_roster = matches!(
-            &event,
-            GossipEvent::Received(msg) if msg.content.first() == Some(&0xFF)
-        );
-
-        if is_metadata {
-            let _ = room_docs::process_gossip_event(&metadata_doc, Ok(event)).await;
-            continue;
-        }
-
-        if is_roster {
-            let _ = room_docs::process_roster_event(&roster_doc, Ok(event)).await;
-            continue;
-        }
-
-        // Chat message or neighbor event — forward as NetEvent.
-        match event {
-            GossipEvent::Received(msg) => match SignedMessage::verify_and_decode(&msg.content) {
-                Ok((from, message, sent_at)) => {
-                    if net_tx
-                        .send(NetEvent::Message {
-                            from,
-                            message,
-                            sent_at,
-                        })
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!("forward_room_events_for_chat: decode error (dropped): {err}");
-                    continue;
-                }
-            },
-            GossipEvent::NeighborUp(id) => {
-                if net_tx.send(NetEvent::NeighborUp { peer: id }).is_err() {
-                    return;
-                }
-            }
-            GossipEvent::NeighborDown(id) => {
-                if net_tx.send(NetEvent::NeighborDown { peer: id }).is_err() {
-                    return;
-                }
-            }
-            GossipEvent::Lagged => {
-                // Not forwarded — protocol-level backpressure signal.
-            }
-        }
-    }
-    let _ = net_tx.send(NetEvent::Closed);
 }
 
 // ── Whisper event handling ──────────────────────────────────────────────────────

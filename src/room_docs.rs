@@ -763,6 +763,86 @@ pub fn spawn_room_event_forwarder(
     })
 }
 
+/// Forward one room's gossip stream into chat `NetEvent`s while applying
+/// metadata and roster document updates.
+///
+/// This is the shared room-aware event bridge used by frontends. It consumes
+/// metadata (`0xFE`) and roster (`0xFF`) messages locally, converts signed chat
+/// messages plus neighbor events into [`crate::chat_core::NetEvent`], and drops
+/// malformed non-room packets instead of treating them as fatal frontend errors.
+pub async fn forward_room_events_for_chat(
+    metadata_doc: RoomMetadataDoc,
+    roster_doc: RosterDoc,
+    mut receiver: GossipReceiver,
+    net_tx: tokio::sync::mpsc::UnboundedSender<crate::chat_core::NetEvent>,
+) {
+    use crate::chat_core::{NetEvent, SignedMessage};
+
+    while let Some(event_result) = receiver.next().await {
+        let event = match event_result {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::warn!("room event forwarder: gossip event error (dropped): {err}");
+                continue;
+            }
+        };
+
+        let is_metadata = matches!(
+            &event,
+            GossipEvent::Received(msg) if msg.content.first() == Some(&METADATA_MARKER)
+        );
+        if is_metadata {
+            let _ = process_gossip_event(&metadata_doc, Ok(event)).await;
+            continue;
+        }
+
+        let is_roster = matches!(
+            &event,
+            GossipEvent::Received(msg) if msg.content.first() == Some(&ROSTER_MARKER)
+        );
+        if is_roster {
+            let _ = process_roster_event(&roster_doc, Ok(event)).await;
+            continue;
+        }
+
+        match event {
+            GossipEvent::Received(msg) => match SignedMessage::verify_and_decode(&msg.content) {
+                Ok((from, message, sent_at)) => {
+                    if net_tx
+                        .send(NetEvent::Message {
+                            from,
+                            message,
+                            sent_at,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("room event forwarder: decode error (dropped): {err}");
+                    continue;
+                }
+            },
+            GossipEvent::NeighborUp(id) => {
+                if net_tx.send(NetEvent::NeighborUp { peer: id }).is_err() {
+                    return;
+                }
+            }
+            GossipEvent::NeighborDown(id) => {
+                if net_tx.send(NetEvent::NeighborDown { peer: id }).is_err() {
+                    return;
+                }
+            }
+            GossipEvent::Lagged => {
+                // Not forwarded — protocol-level backpressure signal.
+            }
+        }
+    }
+
+    let _ = net_tx.send(crate::chat_core::NetEvent::Closed);
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
