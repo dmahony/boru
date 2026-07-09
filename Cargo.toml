@@ -56,6 +56,7 @@ postcard = { version = "1", default-features = false, features = [
 ] }
 rand = { version = "0.10.1", features = ["std_rng"] }
 serde = { version = "1.0.164", features = ["derive"] }
+rfd = { version = "0.15", optional = true }
 
 # net dependencies (optional)
 futures-concurrency = { version = "7.6.1", optional = true }
@@ -130,8 +131,6 @@ n0-tracing-test = "0.3"
 tempfile = "3"
 url = "2.4.0"
 rand = { version = "0.10", features = ["chacha"] }
-rfd = "0.15"
-
 [features]
 default = ["net", "metrics"]
 net = [
@@ -168,7 +167,7 @@ post-quantum-tls = [
     "noq-proto?/__rustls-post-quantum-test",
 ]
 examples = ["net", "dep:ratatui", "dep:crossterm"]
-gui = ["net", "dep:iced", "dep:tokio"]
+gui = ["net", "dep:iced", "dep:tokio", "dep:rfd"]
 unstable-custom-transports = ["iroh/unstable-custom-transports"]
 tor-transport = [
     "net",
