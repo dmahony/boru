@@ -1652,12 +1652,12 @@ mod tests {
         let own_key = app.local_public;
         let event = NetEvent::Message {
             from: own_key,
-            message: Message::FileShare {
-                name: "doc.pdf".into(),
-                ticket: "abc123".into(),
+            message: Message::Message {
+                text: "echo".into(),
             },
             sent_at: 0,
         };
+        handle_net_event(event, &mut app).unwrap();
         // Own messages should not appear as remote entries
         assert!(app.entries.is_empty());
     }

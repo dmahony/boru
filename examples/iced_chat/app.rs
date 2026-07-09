@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey};
@@ -178,6 +178,8 @@ pub struct IcedChat {
     /// JoinHandle to abort the current forward_gossip_events task when
     /// switching rooms.
     forward_handle: Option<task::JoinHandle<()>>,
+    /// Pending forwarder handle waiting to be transferred into `forward_handle`.
+    forward_handle_slot: Arc<StdMutex<Option<task::JoinHandle<()>>>>,
     friends: FriendsStore,
     friends_dirty: bool,
     friend_mgr: FriendPingManager,
@@ -326,6 +328,7 @@ impl IcedChat {
             net_tx,
             backfill_handle,
             forward_handle: None,
+            forward_handle_slot: Arc::new(StdMutex::new(None)),
             friends,
             friends_dirty: false,
             friend_mgr,
@@ -366,6 +369,9 @@ impl IcedChat {
     fn leave_current_room(&mut self) {
         // Abort the forwarding task
         if let Some(handle) = self.forward_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.forward_handle_slot.lock().unwrap().take() {
             handle.abort();
         }
         self.sender = None;
@@ -475,6 +481,7 @@ impl IcedChat {
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
                 let ticket_str = self.room_ticket(topic).to_string();
+                let forward_handle_slot = self.forward_handle_slot.clone();
 
                 iced::Task::perform(
                     async move {
@@ -505,12 +512,13 @@ impl IcedChat {
                         .await
                         .map_err(|e| e.to_string())?;
 
-                        let _ = task::spawn(room_docs::forward_room_events_for_chat(
+                        let forward_handle = task::spawn(room_docs::forward_room_events_for_chat(
                             metadata_doc,
                             roster_doc,
                             receiver,
                             net_tx,
                         ));
+                        *forward_handle_slot.lock().unwrap() = Some(forward_handle);
 
                         // Broadcast our presence
                         let msg = SignedMessage::sign_and_encode(
@@ -567,6 +575,7 @@ impl IcedChat {
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
                 let ticket_str = self.room_ticket(topic).to_string();
+                let forward_handle_slot = self.forward_handle_slot.clone();
 
                 iced::Task::perform(
                     async move {
@@ -596,12 +605,13 @@ impl IcedChat {
                         .await
                         .map_err(|e| e.to_string())?;
 
-                        let _ = task::spawn(room_docs::forward_room_events_for_chat(
+                        let forward_handle = task::spawn(room_docs::forward_room_events_for_chat(
                             metadata_doc,
                             roster_doc,
                             receiver,
                             net_tx,
                         ));
+                        *forward_handle_slot.lock().unwrap() = Some(forward_handle);
 
                         // Broadcast our presence
                         let msg = SignedMessage::sign_and_encode(
@@ -631,6 +641,7 @@ impl IcedChat {
             } => {
                 self.pending_topic = None;
                 self.sender = Some(sender);
+                self.forward_handle = self.forward_handle_slot.lock().unwrap().take();
 
                 self.screen = Screen::Chat { topic };
                 self.topic = topic;
@@ -714,6 +725,7 @@ impl IcedChat {
                 let label = self.local_label.clone();
                 let endpoint = self.endpoint.clone();
                 let local_peer_addr = self.local_peer_addr.clone();
+                let forward_handle_slot = self.forward_handle_slot.clone();
 
                 iced::Task::perform(
                     async move {
@@ -757,12 +769,13 @@ impl IcedChat {
                         .await
                         .map_err(|e| e.to_string())?;
 
-                        let _ = task::spawn(room_docs::forward_room_events_for_chat(
+                        let forward_handle = task::spawn(room_docs::forward_room_events_for_chat(
                             metadata_doc,
                             roster_doc,
                             receiver,
                             net_tx,
                         ));
+                        *forward_handle_slot.lock().unwrap() = Some(forward_handle);
 
                         let msg = SignedMessage::sign_and_encode(
                             &sk,
