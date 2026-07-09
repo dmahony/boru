@@ -27,19 +27,27 @@
 
     <!-- Chat screen -->
     <div id="chat" class="screen hidden">
-      <div id="chat-header">
-        <span id="chat-title">Chat Room</span>
-        <span id="connection-status" class="badge offline">Offline</span>
-        <span id="peer-count" class="badge">0 peers</span>
-        <div class="header-actions">
-          <button id="copy-ticket-btn" class="btn small" title="Copy ticket">Copy Ticket</button>
-          <button id="settings-btn" class="btn small" title="Settings">Settings</button>
+      <div id="chat-layout">
+        <div id="chat-main">
+          <div id="chat-header">
+            <span id="chat-title">Chat Room</span>
+            <span id="connection-status" class="badge offline">Offline</span>
+            <span id="peer-count" class="badge">0 peers</span>
+            <div class="header-actions">
+              <button id="copy-ticket-btn" class="btn small" title="Copy ticket">Copy Ticket</button>
+              <button id="settings-btn" class="btn small" title="Settings">Settings</button>
+            </div>
+          </div>
+          <div id="message-list"></div>
+          <div id="chat-input-area">
+            <input id="message-input" type="text" placeholder="Type a message..." autocomplete="off">
+            <button id="send-btn" class="btn primary">Send</button>
+          </div>
         </div>
-      </div>
-      <div id="message-list"></div>
-      <div id="chat-input-area">
-        <input id="message-input" type="text" placeholder="Type a message..." autocomplete="off">
-        <button id="send-btn" class="btn primary">Send</button>
+        <div id="chat-sidebar">
+          <div id="online-users-header">Online Users</div>
+          <div id="online-users-list"></div>
+        </div>
       </div>
     </div>
 

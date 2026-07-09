@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, RelayMode, RelayUrl,
-    SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, RelayMode,
+    RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 use iroh_gossip::backfill::{
@@ -161,7 +161,7 @@ fn main() -> Result<()> {
     let data_dir = get_data_dir(args.data_dir.clone());
     let runtime = tokio::runtime::Runtime::new().std_context("failed to create tokio runtime")?;
     // Determine if there's an initial room to connect to
-    let initial_topic: Option<TopicId> = runtime.block_on(async {
+    let initial_room: Option<(TopicId, Vec<EndpointAddr>)> = runtime.block_on(async {
         match &args.command {
             Some(Command::Open { topic }) => {
                 let t = match topic {
@@ -182,7 +182,7 @@ fn main() -> Result<()> {
                         }
                     },
                 };
-                Some(t)
+                Some((t, vec![]))
             }
             Some(Command::Join { ticket }) => {
                 let ticket: Ticket = match Ticket::from_str(ticket) {
@@ -193,7 +193,7 @@ fn main() -> Result<()> {
                     }
                 };
                 println!("> joining chat room for topic {}", ticket.topic);
-                Some(ticket.topic)
+                Some((ticket.topic, ticket.peers))
             }
             None => {
                 println!("> no subcommand — showing chat list");
@@ -414,6 +414,8 @@ fn main() -> Result<()> {
         ))
     })?;
 
+    let initial_topic = initial_room.as_ref().map(|r| r.0);
+
     let app_cell = std::sync::Mutex::new(Some((
         IcedChat::new(
             secret_key,
@@ -432,11 +434,10 @@ fn main() -> Result<()> {
             friend_mgr,
             Arc::clone(&friend_events_rx),
             tor_reconnect_rx_opt,
-            initial_topic,
+            initial_room,
             notice,
             chat_history,
             backfill_handle,
-            
         ),
         initial_topic,
     )));

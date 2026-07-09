@@ -27,6 +27,7 @@ const connectionStatus = document.getElementById('connection-status');
 const peerCount = document.getElementById('peer-count');
 const statusMsg = document.getElementById('status-msg');
 const toastContainer = document.getElementById('toast-container');
+const onlineUsersList = document.getElementById('online-users-list');
 
 // Frontend state
 let state = {
@@ -34,6 +35,7 @@ let state = {
   entries: [],
   nickname: null,
   initialized: false,
+  onlineUsers: [],
 };
 
 // ── Init ──
@@ -63,6 +65,7 @@ async function init() {
     listen('chat-nickname', (e) => onNickname(e.payload));
     listen('chat-disconnected', () => onDisconnected());
     listen('chat-error', (e) => onError(e.payload));
+    listen('chat-online-users', (e) => onOnlineUsers(e.payload));
   }
 }
 
@@ -105,6 +108,51 @@ function onDisconnected() {
 function onError(payload) {
   if (!payload || !payload.message) return;
   showToast('error', payload.message);
+}
+
+function onOnlineUsers(payload) {
+  if (!payload) return;
+  // serde(tag = "type") serializes as { type: "OnlineUserList", users: [...] }
+  const list = payload.users || [];
+  state.onlineUsers = list;
+  renderOnlineUsers();
+}
+
+// ── Online Users ──
+
+function renderOnlineUsers() {
+  const users = state.onlineUsers || [];
+  if (!onlineUsersList) return;
+
+  if (users.length === 0) {
+    onlineUsersList.innerHTML = '<div id="online-users-empty">No peers connected yet</div>';
+    return;
+  }
+
+  let html = '';
+  // Sort: direct first, then relayed, then unknown
+  const sorted = [...users].sort((a, b) => {
+    const order = { direct: 0, relayed: 1, unknown: 2 };
+    return (order[a.connection_type] ?? 2) - (order[b.connection_type] ?? 2);
+  });
+
+  for (const user of sorted) {
+    const ctype = user.connection_type || 'unknown';
+    const label = user.label || user.public_key?.slice(0, 16) || 'Unknown';
+    const ctypeLabel = ctype === 'direct' ? 'Direct' : ctype === 'relayed' ? 'Relay' : '';
+    html += `<div class="online-user">
+      <span class="status-dot ${ctype}"></span>
+      <span class="user-label" title="${label}">${escHtml(label)}</span>
+      ${ctypeLabel ? `<span class="user-ctype">${ctypeLabel}</span>` : ''}
+    </div>`;
+  }
+  onlineUsersList.innerHTML = html;
+}
+
+function escHtml(str) {
+  const div = document.createElement('div');
+  div.appendChild(document.createTextNode(str));
+  return div.innerHTML;
 }
 
 // ── UI Helpers ──
@@ -177,6 +225,13 @@ async function doCreateRoom() {
       connectionStatus.className = `badge ${status.connected ? 'online' : 'offline'}`;
     }
 
+    // Load initial online users
+    try {
+      const peers = await invoke('get_online_peers');
+      state.onlineUsers = peers;
+      renderOnlineUsers();
+    } catch (_) { /* not critical */ }
+
     switchToChat();
     showToast('success', 'Room created! Share the ticket with others.');
   } catch (e) {
@@ -210,6 +265,13 @@ async function doJoinRoom() {
       connectionStatus.textContent = status.connected ? 'Connected' : 'Disconnected';
       connectionStatus.className = `badge ${status.connected ? 'online' : 'offline'}`;
     }
+
+    // Load initial online users
+    try {
+      const peers = await invoke('get_online_peers');
+      state.onlineUsers = peers;
+      renderOnlineUsers();
+    } catch (_) { /* not critical */ }
 
     switchToChat();
     showToast('success', 'Joined room!');

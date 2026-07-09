@@ -52,6 +52,7 @@ pub fn run() {
             ipc::get_ticket,
             ipc::get_entries,
             ipc::get_status,
+            ipc::get_online_peers,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

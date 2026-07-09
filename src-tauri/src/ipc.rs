@@ -2,7 +2,7 @@
 
 use tauri::{AppHandle, Manager as _};
 
-use crate::backend::{ChatBackend, FrontendEvent, IpcResult, StatusSnapshot};
+use crate::backend::{ChatBackend, FrontendEvent, IpcResult, OnlineUserInfo, StatusSnapshot};
 use crate::state::AppState as TauriState;
 
 use crate::chat_entry::ChatEntryJson;
@@ -57,6 +57,9 @@ pub async fn init_backend(
                 }
                 FrontendEvent::Error { .. } => {
                     let _ = handle.emit("chat-error", &event);
+                }
+                FrontendEvent::OnlineUserList { .. } => {
+                    let _ = handle.emit("chat-online-users", &event);
                 }
             }
         }
@@ -145,4 +148,15 @@ pub async fn get_status(
     let backend = backend_lock.as_ref()
         .ok_or_else(|| "backend not initialized".to_string())?;
     Ok(backend.get_status().await)
+}
+
+/// Get the list of online peers with their display names.
+#[tauri::command]
+pub async fn get_online_peers(
+    state: tauri::State<'_, TauriState>,
+) -> IpcResult<Vec<OnlineUserInfo>> {
+    let backend_lock = state.backend.lock().await;
+    let backend = backend_lock.as_ref()
+        .ok_or_else(|| "backend not initialized".to_string())?;
+    Ok(backend.get_online_peers().await)
 }

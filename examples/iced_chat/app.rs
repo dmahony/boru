@@ -14,6 +14,7 @@ use iroh_gossip::api::GossipSender;
 use iroh_gossip::backfill::BackfillHandle;
 use iroh_gossip::chat_callbacks::ChatCallbacks;
 use iroh_gossip::chat_core::handle_net_event as chat_net_event;
+use iced::widget::text_editor;
 use iroh_gossip::chat_core::{
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     MessageHash,
@@ -59,31 +60,37 @@ struct ChatEntry {
     /// Cached image handle to avoid re-decoding every frame.
     #[allow(clippy::rc_clone_in_vec_init)]
     image_handle: Option<iced::widget::image::Handle>,
+    /// Selectable text content for the message body.
+    content: text_editor::Content,
 }
 
 impl ChatEntry {
     fn system(text: impl Into<String>) -> Self {
+        let body = text.into();
         Self {
             kind: ChatKind::System,
             label: "System".into(),
-            body: text.into(),
+            body: body.clone(),
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
             image_bytes: None,
             image_handle: None,
+            content: text_editor::Content::with_text(&body),
         }
     }
     fn local(label: impl Into<String>, text: impl Into<String>) -> Self {
+        let body = text.into();
         Self {
             kind: ChatKind::Local,
             label: label.into(),
-            body: text.into(),
+            body: body.clone(),
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
             image_bytes: None,
             image_handle: None,
+            content: text_editor::Content::with_text(&body),
         }
     }
     fn remote(
@@ -91,15 +98,17 @@ impl ChatEntry {
         text: impl Into<String>,
         hash: Option<MessageHash>,
     ) -> Self {
+        let body = text.into();
         Self {
             kind: ChatKind::Remote,
             label: label.into(),
-            body: text.into(),
+            body: body.clone(),
             message_hash: hash,
             edited: false,
             reactions: Vec::new(),
             image_bytes: None,
             image_handle: None,
+            content: text_editor::Content::with_text(&body),
         }
     }
     fn image(
@@ -108,16 +117,18 @@ impl ChatEntry {
         image_bytes: Vec<u8>,
         hash: Option<MessageHash>,
     ) -> Self {
+        let body_str = body.into();
         let handle = iced::widget::image::Handle::from_bytes(image_bytes.clone());
         Self {
             kind: ChatKind::Remote,
             label: label.into(),
-            body: body.into(),
+            body: body_str.clone(),
             message_hash: hash,
             edited: false,
             reactions: Vec::new(),
             image_bytes: Some(image_bytes),
             image_handle: Some(handle),
+            content: text_editor::Content::with_text(&body_str),
         }
     }
 }
@@ -209,6 +220,9 @@ pub struct IcedChat {
     /// on every room-navigation event.
     history_saved_count: usize,
     online_friends: HashMap<PublicKey, String>,
+    /// Bootstrap peer addresses from the initial join ticket (if any).
+    /// Used only for the first room subscription; cleared after use.
+    initial_bootstrap_peers: Vec<EndpointAddr>,
 }
 
 #[derive(Debug, Clone)]
@@ -273,6 +287,8 @@ pub enum AppMessage {
     CopyToClipboard(String),
     /// Open a direct chat with an online friend.
     OpenFriendChat(PublicKey),
+    /// A text editor action (selection, click, etc.) for a message entry.
+    TextEditorAction(usize, text_editor::Action),
 }
 
 impl IcedChat {
@@ -294,11 +310,13 @@ impl IcedChat {
         friend_mgr: FriendPingManager,
         friend_events_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
         tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
-        initial_topic: Option<TopicId>,
+        initial_room: Option<(TopicId, Vec<EndpointAddr>)>,
         notice: String,
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
         backfill_handle: BackfillHandle,
     ) -> Self {
+        let (initial_topic, initial_bootstrap) = initial_room
+            .unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
         Self {
             screen: Screen::ChatList,
             pending_topic: None,
@@ -312,7 +330,7 @@ impl IcedChat {
             pending_file: None,
             pending_image: None,
             names: HashMap::new(),
-            topic: initial_topic.unwrap_or(TopicId::from_bytes([0u8; 32])),
+            topic: initial_topic,
             ticket_str: String::new(),
             secret_key,
             gossip,
@@ -345,6 +363,7 @@ impl IcedChat {
             chat_history_dirty: false,
             history_saved_count: 0,
             online_friends: HashMap::new(),
+            initial_bootstrap_peers: initial_bootstrap,
         }
     }
 
@@ -577,11 +596,17 @@ impl IcedChat {
                 let label = self.local_label.clone();
                 let ticket_str = self.room_ticket(topic).to_string();
                 let forward_handle_slot = self.forward_handle_slot.clone();
+                // Extract bootstrap peers from ticket (if any) and clear them
+                // so room switching doesn't reuse them.
+                let bootstrap_peers: Vec<_> = self.initial_bootstrap_peers
+                    .drain(..)
+                    .map(|addr| addr.id)
+                    .collect();
 
                 iced::Task::perform(
                     async move {
                         let sub = gossip
-                            .subscribe(topic, vec![])
+                            .subscribe(topic, bootstrap_peers)
                             .await
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
@@ -1552,6 +1577,13 @@ impl IcedChat {
             AppMessage::CopyToClipboard(text) => {
                 return iced::clipboard::write(text);
             }
+
+            AppMessage::TextEditorAction(index, action) => {
+                if let Some(entry) = self.entries.get_mut(index) {
+                    entry.content.perform(action);
+                }
+                iced::Task::none()
+            }
         }
     }
 
@@ -1714,8 +1746,11 @@ impl ChatCallbacks for IcedChat {
             .iter_mut()
             .find(|e| e.message_hash.as_ref() == Some(hash))
         {
-            entry.body = new_text;
+            entry.body = new_text.clone();
             entry.edited = true;
+            // Update the selectable text content to reflect the edit
+            let edited_text = format!("{} (edited)", new_text);
+            entry.content = text_editor::Content::with_text(&edited_text);
         }
     }
 
@@ -2041,12 +2076,12 @@ impl IcedChat {
 
     fn view_chat_log(&self) -> iced::widget::Scrollable<'_, AppMessage> {
         use iced::widget::text::Wrapping;
-        use iced::widget::{scrollable, text, Column, Row};
-        use iced::{Color, Length};
+        use iced::widget::{scrollable, text_editor, text, Column, Row};
+        use iced::{Background, Border, Color, Length};
 
         let mut col = Column::new().spacing(2).width(Length::Fill);
 
-        for entry in &self.entries {
+        for (idx, entry) in self.entries.iter().enumerate() {
             let (label_c, body_c) = match entry.kind {
                 ChatKind::System => (
                     Color::from_rgb(0.5, 0.5, 0.5),
@@ -2061,22 +2096,44 @@ impl IcedChat {
                     Color::from_rgb(0.8, 0.8, 0.8),
                 ),
             };
-            let body_text = if entry.edited {
-                format!(" {} (edited)", entry.body)
-            } else {
-                format!(" {}", entry.body)
-            };
-            let line = Row::new()
+
+            let label = Row::new()
                 .push(text(format!("[{}]", entry.label)).color(label_c))
                 .push(
-                    text(body_text)
-                        .color(body_c)
-                        .wrapping(Wrapping::Word)
-                        .width(Length::Fill),
+                    text_editor(&entry.content)
+                        .on_action(move |action| AppMessage::TextEditorAction(idx, action))
+                        .key_binding(|keypress| {
+                            use text_editor::Binding;
+                            match Binding::from_key_press(keypress) {
+                                Some(binding @ (Binding::Copy
+                                    | Binding::SelectAll
+                                    | Binding::SelectWord
+                                    | Binding::SelectLine)) => Some(binding),
+                                Some(Binding::Move(motion)) => {
+                                    Some(Binding::Select(motion))
+                                }
+                                Some(Binding::Select(motion)) => {
+                                    Some(Binding::Select(motion))
+                                }
+                                _ => None,
+                            }
+                        })
+                        .style(move |_theme, _status| text_editor::Style {
+                            background: Background::Color(Color::TRANSPARENT),
+                            border: Border {
+                                radius: 0.0.into(),
+                                width: 0.0,
+                                color: Color::TRANSPARENT,
+                            },
+                            placeholder: Color::TRANSPARENT,
+                            value: body_c,
+                            selection: Color::from_rgba(0.3, 0.5, 0.8, 0.3),
+                        })
+                        .padding(0),
                 )
                 .spacing(0)
                 .width(Length::Fill);
-            col = col.push(line);
+            col = col.push(label);
 
             // ── Image ──
             if let Some(ref handle) = entry.image_handle {

@@ -64,6 +64,18 @@ pub enum FrontendEvent {
     Disconnected,
     /// An error message.
     Error { message: String },
+    /// Updated online user/peer list.
+    OnlineUserList {
+        users: Vec<OnlineUserInfo>,
+    },
+}
+
+/// Serializable info about a single online peer for the frontend.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OnlineUserInfo {
+    pub public_key: String,
+    pub label: String,
+    pub connection_type: String, // "direct", "relayed", or "unknown"
 }
 
 /// Manages the iroh node lifecycle and chat room state.
@@ -352,6 +364,12 @@ impl ChatBackend {
         }
     }
 
+    /// Get the list of online peers with their display names and connection types.
+    pub async fn get_online_peers(&self) -> Vec<OnlineUserInfo> {
+        let state = self.app_state.lock().await;
+        build_online_user_list(&state)
+    }
+
     /// Shut down the iroh node cleanly.
     pub async fn shutdown(self) {
         if let Err(e) = self.router.shutdown().await {
@@ -372,6 +390,37 @@ pub struct StatusSnapshot {
     pub topic: String,
     pub identity_label: String,
     pub transport_status: String,
+}
+
+/// Build an online user list from the current chat state.
+fn build_online_user_list(state: &ChatAppState) -> Vec<OnlineUserInfo> {
+    state
+        .status
+        .neighbors
+        .iter()
+        .map(|pk| {
+            let label = state
+                .names
+                .get(pk)
+                .cloned()
+                .unwrap_or_else(|| pk.fmt_short().to_string());
+            let ctype = state
+                .status
+                .peer_connection_types
+                .get(pk)
+                .map(|ct| match ct {
+                    chat_core::ConnectionType::Direct => "direct",
+                    chat_core::ConnectionType::Relayed => "relayed",
+                    chat_core::ConnectionType::Unknown => "unknown",
+                })
+                .unwrap_or("unknown");
+            OnlineUserInfo {
+                public_key: pk.to_string(),
+                label,
+                connection_type: ctype.to_string(),
+            }
+        })
+        .collect()
 }
 
 /// Process net events from the gossip receiver, update state, and forward to frontend.
@@ -415,6 +464,9 @@ async fn process_net_events(
             last_peer_count = current_ncount;
             let mut state2 = app_state.lock().await;
             chat_core::update_connection_counts(&endpoint, &mut state2.status).await;
+            // Build and emit the online user list
+            let online_list = build_online_user_list(&state2);
+            let _ = event_tx.send(FrontendEvent::OnlineUserList { users: online_list });
             let _ = event_tx.send(FrontendEvent::StatusUpdate {
                 connected: state2.status.connected,
                 peer_count: state2.status.peer_count,
