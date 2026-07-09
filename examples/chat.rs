@@ -698,6 +698,7 @@ async fn main() -> Result<()> {
     }
 
     router.shutdown().await.anyerr()?;
+    endpoint.close().await;
 
     Ok(())
 }
@@ -1527,7 +1528,7 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
         ])
         .split(frame.area());
 
-    let body_area = layout[2];
+    let body_area = layout[1];
     let body_layout = if body_area.width >= 100 {
         Layout::default()
             .direction(Direction::Horizontal)
@@ -1597,8 +1598,8 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
-    let composer_inner = composer_block.inner(layout[3]);
-    frame.render_widget(composer_block, layout[3]);
+    let composer_inner = composer_block.inner(layout[2]);
+    frame.render_widget(composer_block, layout[2]);
     let prompt = "> ";
     let composer_line = Line::from(vec![
         Span::styled(
@@ -2039,6 +2040,40 @@ mod tests {
             .collect();
         assert!(rendered.iter().any(|line| line.contains("No friends yet.")));
         assert!(rendered.iter().any(|line| line.contains("/friend add")));
+    }
+
+    #[test]
+    fn render_app_does_not_panic_on_normal_terminal_size() {
+        let status = StatusContext {
+            transport_status: "Direct iroh transport is ready.".into(),
+            topic: TopicId::from_bytes([7u8; 32]),
+            relay_mode: RelayMode::Disabled,
+            connected: true,
+            peer_count: 1,
+            identity_label: "alice".into(),
+            transport_notice: "transport notice".into(),
+            direct_peers: 0,
+            relayed_peers: 0,
+            neighbors: HashSet::new(),
+            peer_connection_types: HashMap::new(),
+            last_activity: HashMap::new(),
+            mesh_health: MeshHealth::Good,
+        };
+        let mut app = AppState::new(
+            status,
+            FriendsStore::empty_at(
+                std::env::temp_dir()
+                    .join(format!("iroh-chat-render-test-{}", rand::random::<u64>())),
+            ),
+            SecretKey::generate().public(),
+            Some("alice".into()),
+        );
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| render_app(frame, &mut app))
+            .expect("render should not panic");
     }
 
     #[test]
