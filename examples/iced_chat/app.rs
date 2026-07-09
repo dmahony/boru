@@ -2040,18 +2040,34 @@ impl IcedChat {
                     .map(|r| r.display_label(&fid))
                     .unwrap_or_else(|| peer.fmt_short().to_string());
 
+                // Only show system messages for runtime transitions, not the
+                // initial scan. A friend with no last_seen_at or last_offline_at
+                // is being heard from for the first time.
+                let has_been_seen = self
+                    .friends
+                    .get(&fid)
+                    .map(|r| {
+                        r.status.last_seen_at_unix_ms.is_some()
+                            || r.status.last_offline_at_unix_ms.is_some()
+                    })
+                    .unwrap_or(false);
+
                 match status {
                     FriendStatus::Online => {
                         self.friends.mark_online(fid);
                         self.friends_dirty = true;
                         self.online_friends.insert(peer, label.clone());
-                        self.push_system(format!("Friend {label} is now ONLINE"));
+                        if has_been_seen {
+                            self.push_system(format!("Friend {label} is now ONLINE"));
+                        }
                     }
                     FriendStatus::Offline => {
                         self.friends.mark_offline(fid);
                         self.friends_dirty = true;
                         self.online_friends.remove(&peer);
-                        self.push_system(format!("Friend {label} is now offline"));
+                        if has_been_seen {
+                            self.push_system(format!("Friend {label} is now offline"));
+                        }
                     }
                     FriendStatus::Unknown => {}
                 }

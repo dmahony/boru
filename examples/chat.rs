@@ -1662,16 +1662,32 @@ fn handle_friend_event(event: FriendEvent, app: &mut AppState) {
                 .and_then(|r| r.display_label(&fid).into())
                 .unwrap_or_else(|| peer.fmt_short().to_string());
 
+            // Only show system messages for runtime transitions, not the
+            // initial scan. A friend with no last_seen_at or last_offline_at
+            // is being heard from for the first time.
+            let has_been_seen = app
+                .friends
+                .get(&fid)
+                .map(|r| {
+                    r.status.last_seen_at_unix_ms.is_some()
+                        || r.status.last_offline_at_unix_ms.is_some()
+                })
+                .unwrap_or(false);
+
             match status {
                 FriendStatus::Online => {
                     app.friends.mark_online(fid);
                     app.friends_dirty = true;
-                    app.push_system(format!("Friend {label} is now ONLINE"));
+                    if has_been_seen {
+                        app.push_system(format!("Friend {label} is now ONLINE"));
+                    }
                 }
                 FriendStatus::Offline => {
                     app.friends.mark_offline(fid);
                     app.friends_dirty = true;
-                    app.push_system(format!("Friend {label} is now offline"));
+                    if has_been_seen {
+                        app.push_system(format!("Friend {label} is now offline"));
+                    }
                 }
                 FriendStatus::Unknown => {
                     // No transition to display for Unknown

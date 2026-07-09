@@ -321,8 +321,11 @@ impl FriendPingActor {
         };
 
         if let Some(state) = self.friends.get_mut(&peer) {
-            if state.status != new_status && state.status != FriendStatus::Unknown {
-                // Emit event only on actual transitions, not on the first scan.
+            if state.status != new_status {
+                // Emit event on every transition including the first scan.
+                // Frontends suppress the "is now ONLINE/OFFLINE" system message
+                // for friends that have no prior history in the store, avoiding
+                // a startup notification burst.
                 let _ = self.event_tx.send(FriendEvent::StatusChanged {
                     peer,
                     status: new_status,
@@ -606,13 +609,29 @@ mod tests {
 
         mgr.add_friend(pk2, Some(ep2.addr())).await?;
 
-        // First ping: Unknown → Online (no event emitted — first-scan suppression).
+        // First ping: Unknown → Online (event IS emitted on first scan).
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(
             mgr.friend_status(&pk2).await?,
             Some(FriendStatus::Online),
             "should be online after first ping"
         );
+
+        // Read the first-scan Online event.
+        let first_event = tokio::time::timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("should receive first-scan online event within timeout")
+            .expect("event channel should not be closed");
+        match first_event {
+            FriendEvent::StatusChanged { peer, status } => {
+                assert_eq!(peer, pk2);
+                assert_eq!(
+                    status,
+                    FriendStatus::Online,
+                    "first-scan event should report Online"
+                );
+            }
+        }
 
         // Drop the router and endpoint so the peer becomes unreachable.
         drop(_router2);
@@ -641,9 +660,9 @@ mod tests {
         Ok(())
     }
 
-    /// Test: no event is emitted on the first scan (Unknown → Online/Offline is suppressed).
+    /// Test: an event IS emitted on the first scan (Unknown → Online/Offline now fires).
     #[tokio::test]
-    async fn test_no_event_on_first_scan() -> Result<()> {
+    async fn test_event_emitted_on_first_scan() -> Result<()> {
         let sk = SecretKey::generate();
         let ep = Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
             .secret_key(sk)
@@ -655,7 +674,7 @@ mod tests {
         let (mgr, mut events) =
             FriendPingManager::spawn(ep, Duration::from_millis(100), Duration::from_millis(500));
 
-        // Add a peer with a bogus address — first scan yields Offline but no event.
+        // Add a peer with a bogus address — first scan yields Offline but emits event.
         let peer = SecretKey::generate().public();
         let addr = EndpointAddr::new(peer);
         mgr.add_friend(peer, Some(addr)).await?;
@@ -670,16 +689,20 @@ mod tests {
             "should be offline after first ping"
         );
 
-        // No event should have been emitted (first scan is suppressed).
-        match tokio::time::timeout(Duration::from_millis(200), events.recv()).await {
-            Ok(Some(event)) => {
-                panic!("unexpected event on first scan: {event:?}");
-            }
-            Ok(None) => {
-                // Channel closed — acceptable, actor stopped.
-            }
-            Err(_) => {
-                // Timeout — expected. No event was emitted on first scan.
+        // An event SHOULD be emitted on the first scan.
+        let event = tokio::time::timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("should receive event within timeout")
+            .expect("event channel should not be closed");
+
+        match event {
+            FriendEvent::StatusChanged { peer: p, status } => {
+                assert_eq!(p, peer);
+                assert_eq!(
+                    status,
+                    FriendStatus::Offline,
+                    "event should report Offline for unreachable peer"
+                );
             }
         }
 
