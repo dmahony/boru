@@ -17,7 +17,7 @@ use iroh_gossip::chat_core::{
     MessageHash,
 };
 use iroh_gossip::chat_core::handle_net_event as chat_net_event;
-use iroh_gossip::chat_history::ChatHistoryStore;
+use iroh_gossip::chat_history::{ChatHistoryStore, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendsStore};
 use iroh_gossip::net::Gossip;
 use iroh_gossip::proto::TopicId;
@@ -364,6 +364,33 @@ impl IcedChat {
             self.room_history.update_preview(&topic, &preview);
         }
         self.room_history_dirty = true;
+
+        // Persist chat messages to durable history
+        for entry in &self.entries {
+            let kind = match entry.kind {
+                ChatKind::System => "system",
+                ChatKind::Local => "text",
+                ChatKind::Remote => "text",
+            };
+            let preview = if entry.body.len() > 120 {
+                format!("{}…", &entry.body[..120])
+            } else {
+                entry.body.clone()
+            };
+            let sender = match entry.kind {
+                ChatKind::Local => hex::encode(self.local_public.as_bytes()),
+                _ => String::new(),
+            };
+            let history_entry = HistoryEntry::new(
+                topic,
+                sender,
+                Vec::new(), // signed bytes not available here
+                kind,
+                preview,
+            );
+            self.chat_history.push(history_entry);
+        }
+        self.chat_history_dirty = true;
     }
 }
 
