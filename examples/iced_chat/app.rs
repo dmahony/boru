@@ -366,7 +366,6 @@ impl IcedChat {
         self.room_history_dirty = true;
 
         // Persist chat messages to durable history
-        eprintln!(">>> save_room_to_history: pushing {} entries for topic {}", self.entries.len(), topic);
         for entry in &self.entries {
             let kind = match entry.kind {
                 ChatKind::System => "system",
@@ -542,6 +541,24 @@ impl IcedChat {
                 ));
                 self.push_system("Type a message and press Enter to send.  /help for commands.");
                 self.push_system(format!("Ticket to join this room: {ticket}"));
+
+                // Replay chat history for this topic
+                let history_entries: Vec<_> = self
+                    .chat_history
+                    .for_topic(&topic)
+                    .into_iter()
+                    .map(|e| e.summary())
+                    .collect();
+                if !history_entries.is_empty() {
+                    self.push_system(format!(
+                        "--- {} previous messages ---",
+                        history_entries.len()
+                    ));
+                    for summary in history_entries {
+                        self.push_system(summary);
+                    }
+                    self.push_system("--- end of history ---");
+                }
 
                 // Update room history
                 self.room_history.upsert(topic, &self.local_label, true);
@@ -1426,11 +1443,7 @@ impl IcedChat {
 
     fn try_save_chat_history(&mut self) {
         if self.chat_history_dirty {
-            eprintln!(">>> saving chat history to {}", self.chat_history.file_path().display());
-            match self.chat_history.save() {
-                Ok(path) => eprintln!(">>> saved {} entries", self.chat_history.len()),
-                Err(e) => eprintln!(">>> chat history save failed: {e}"),
-            }
+            let _ = self.chat_history.save();
             self.chat_history_dirty = false;
         }
     }
