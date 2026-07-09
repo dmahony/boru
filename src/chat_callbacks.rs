@@ -67,12 +67,6 @@ pub trait ChatCallbacks {
     /// The frontend should automatically download and render the image.
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey);
 
-    /// Mark a peer as currently typing.
-    fn set_typing(&mut self, peer: PublicKey);
-
-    /// Clear the typing indicator for a peer (stale entry expired).
-    fn clear_typing(&mut self, peer: PublicKey);
-
     /// Check whether any chat entry has the given protocol message hash.
     fn has_message(&self, hash: &MessageHash) -> bool;
 

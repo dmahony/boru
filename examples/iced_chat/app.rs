@@ -179,10 +179,6 @@ pub struct IcedChat {
     conn_refresh_counter: u32,
     /// Optional receiver for Tor reconnection status updates.
     tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
-    /// Peers that have recently (within ~5s) broadcast a typing indicator.
-    typing_peers: HashMap<PublicKey, Instant>,
-    /// Last time we broadcast a typing indicator, for throttling.
-    last_typing_sent: Option<Instant>,
     /// Whether to auto-scroll to the latest message.
     follow_latest: bool,
     /// Whether dark mode is enabled.
