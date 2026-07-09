@@ -419,6 +419,7 @@ impl IcedChat {
                 // Save current room to history
                 self.save_room_to_history();
                 self.persist_room_history();
+                self.try_save_chat_history();
 
                 // Leave the current room
                 self.leave_current_room();
@@ -475,6 +476,7 @@ impl IcedChat {
             AppMessage::OpenRoom(topic) => {
                 // Save the current room first
                 self.save_room_to_history();
+                self.try_save_chat_history();
                 self.leave_current_room();
 
                 let gossip = self.gossip.clone();
@@ -544,6 +546,7 @@ impl IcedChat {
                 self.room_history.upsert(topic, &self.local_label, true);
                 self.room_history_dirty = true;
                 self.persist_room_history();
+                self.try_save_chat_history();
 
                 iced::Task::none()
             }
@@ -747,6 +750,7 @@ impl IcedChat {
                     self.room_history.remove(&topic);
                     self.room_history_dirty = true;
                     self.persist_room_history();
+                    self.try_save_chat_history();
                     // Leave the room and go back to chat list
                     self.leave_current_room();
                     self.screen = Screen::ChatList;
