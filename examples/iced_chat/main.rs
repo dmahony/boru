@@ -8,12 +8,15 @@
 use iroh::Watcher;
 
 mod app;
+mod log_viewer;
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use clap::Parser;
+use tracing::{info, warn};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, RelayMode,
     RelayUrl, SecretKey,
@@ -88,6 +91,8 @@ enum Command {
     Open { topic: Option<TopicId> },
     /// Join an existing chat room via ticket.
     Join { ticket: String },
+    /// Open the standalone log viewer for this profile.
+    Logs,
 }
 
 // ── Message protocol ──────────────────────────────────────────────────
@@ -154,14 +159,73 @@ fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf
     }
 }
 
+fn init_logging(data_dir: &Path) -> Result<()> {
+    let log_path = log_viewer::log_file_path(data_dir);
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent).std_context("failed to create log directory")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    use std::fs::OpenOptions;
+    use std::sync::{Arc, Mutex};
+
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .std_context("failed to open log file")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    struct FileMakeWriter(Arc<Mutex<std::fs::File>>);
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FileMakeWriter {
+        type Writer = FileWriterGuard<'a>;
+        fn make_writer(&'a self) -> Self::Writer {
+            FileWriterGuard(self.0.lock().expect("log file mutex poisoned"))
+        }
+    }
+    struct FileWriterGuard<'a>(std::sync::MutexGuard<'a, std::fs::File>);
+    impl std::io::Write for FileWriterGuard<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            std::io::Write::write(&mut *self.0, buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            std::io::Write::flush(&mut *self.0)
+        }
+    }
+
+    let writer = FileMakeWriter(Arc::new(Mutex::new(file)));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(writer).with_ansi(false))
+        .try_init();
+    Ok(())
+}
+
 // ── Entry point ───────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
     let args = Args::parse();
     ensure_graphical_session();
 
     let data_dir = get_data_dir(args.data_dir.clone());
+
+    if matches!(&args.command, Some(Command::Logs)) {
+        return log_viewer::run(log_viewer::log_file_path(&data_dir));
+    }
+
+    init_logging(&data_dir)?;
+    info!(data_dir = %data_dir.display(), "starting iced chat");
+
     let runtime = tokio::runtime::Runtime::new().std_context("failed to create tokio runtime")?;
     // Determine if there's an initial room to connect to
     let initial_room: Option<(TopicId, Vec<EndpointAddr>)> = runtime.block_on(async {
@@ -173,9 +237,9 @@ fn main() -> Result<()> {
                         Some(store) => {
                             let n_peers = store.peers.len();
                             if n_peers > 0 {
-                                println!("> reusing saved room topic {} with {n_peers} saved bootstrap peer(s)", store.topic);
+                                info!(topic = %store.topic, peers = n_peers, "reusing saved room topic");
                             } else {
-                                println!("> reusing saved room topic {}", store.topic);
+                                info!(topic = %store.topic, "reusing saved room topic");
                             }
                             // Pass saved bootstrap peers so the GUI can seed
                             // its address lookup before subscribing.
@@ -183,10 +247,10 @@ fn main() -> Result<()> {
                         }
                         None => {
                             let t = TopicId::from_bytes(rand::random());
-                            println!("> opening new chat room for topic {t}");
+                            info!(topic = %t, "opening new chat room");
                             let room = RoomStore::new(&data_dir, t);
                             if let Err(err) = room.save() {
-                                eprintln!("warning: failed to save room metadata: {err}");
+                                warn!(error = %err, "failed to save room metadata");
                             }
                             (t, vec![])
                         }
@@ -198,15 +262,16 @@ fn main() -> Result<()> {
                 let ticket: Ticket = match Ticket::from_str(ticket) {
                     Ok(t) => t,
                     Err(e) => {
-                        eprintln!("error: failed to parse ticket: {e}");
+                        warn!(error = %e, "failed to parse ticket");
                         return None;
                     }
                 };
-                println!("> joining chat room for topic {}", ticket.topic);
+                info!(topic = %ticket.topic, "joining chat room");
                 Some((ticket.topic, ticket.peers))
             }
+            Some(Command::Logs) => None,
             None => {
-                println!("> no subcommand — showing chat list");
+                info!("showing chat list");
                 None
             }
         }
@@ -217,8 +282,8 @@ fn main() -> Result<()> {
         Some(key) => (key.parse()?, PathBuf::from("<passed via cli flag>")),
     };
     let local_public = secret_key.public();
-    println!("> our public key: {local_public}");
-    println!("> identity file: {}", key_path.display());
+    info!("> our public key: {local_public}");
+    info!("> identity file: {}", key_path.display());
 
     let local_label = args
         .name
@@ -242,7 +307,7 @@ fn main() -> Result<()> {
         (false, false, None) => RelayMode::Default,
         (_, false, Some(url)) => RelayMode::Custom(url.into()),
     };
-    println!("> relay: {}", fmt_relay_mode(&relay_mode));
+    info!("> relay: {}", fmt_relay_mode(&relay_mode));
 
     // ── Tor reconnection monitor channel ──────────────────────────────
     #[allow(unused)]
@@ -296,7 +361,7 @@ fn main() -> Result<()> {
                     monitor_tor_health(monitor_client, monitor_tx).await;
                 });
 
-                println!("> Tor bootstrap finished: {tor_status_message}");
+                info!("> Tor bootstrap finished: {tor_status_message}");
                 (endpoint, local_peer_addr)
             } else {
                 let ep_builder = if matches!(relay_mode, RelayMode::Disabled) {
@@ -340,7 +405,7 @@ fn main() -> Result<()> {
 
             }
         };
-        println!("> endpoint: {}", endpoint.id());
+        info!("> endpoint: {}", endpoint.id());
 
         // Add mDNS local address lookup for LAN peer discovery
         if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
@@ -384,7 +449,7 @@ fn main() -> Result<()> {
         // Load chat message history (needed before Router for backfill)
         let chat_history = ChatHistoryStore::load_or_default(&data_dir);
         if !chat_history.is_empty() {
-            println!(
+            info!(
                 "> loaded {} chat message(s) from history (durable local state in chat_history.json; use /leave to clear the active room, or delete the file to clear all rooms)",
                 chat_history.len()
             );
@@ -415,13 +480,13 @@ fn main() -> Result<()> {
         // Load or create the persistent friends list
         let friends = FriendsStore::load_or_default(&data_dir);
         if friends.len() > 0 {
-            println!("> loaded {} friend(s) from disk", friends.len());
+            info!("> loaded {} friend(s) from disk", friends.len());
         }
 
         // Load room history
         let room_history = RoomHistoryStore::load_or_default(&data_dir);
         if !room_history.is_empty() {
-            println!("> loaded {} room(s) from history", room_history.len());
+            info!("> loaded {} room(s) from history", room_history.len());
         }
 
         // Create the network event channel (shared across rooms)
@@ -532,7 +597,7 @@ fn main() -> Result<()> {
     })
     .run()
     .unwrap_or_else(|err| {
-        eprintln!("Failed to launch iced GUI: {err}");
+        warn!("Failed to launch iced GUI: {err}");
         std::process::exit(1);
     });
 

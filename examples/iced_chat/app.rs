@@ -4,6 +4,7 @@
 //! with dynamic room switching — like Telegram/Signal.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -30,8 +31,9 @@ use n0_future::task;
 use n0_future::Stream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
+use tracing::debug;
 
-use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
+use crate::{fmt_relay_mode, log_viewer, Message, NetEvent, SignedMessage, Ticket};
 use iced::Color;
 
 /// Scrollable ID for the chat log — used to auto-scroll to bottom.
@@ -420,6 +422,7 @@ pub struct IcedChat {
     pub dark_mode: bool,
     /// Transport notice displayed in the header (e.g. "Direct iroh transport is operational").
     pub notice: String,
+    data_dir: PathBuf,
     /// Persistent chat message history (loaded on startup, saved on each message).
     chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
     /// Whether chat history has unsaved changes.
@@ -504,6 +507,8 @@ pub enum AppMessage {
     TorReconnect(String),
     /// Toggle dark mode on/off.
     ToggleDark(bool),
+    /// Open the separate log viewer window.
+    OpenLogsWindow,
     /// Internal no-op for async task completions that should not change UI state.
     Noop,
     /// Copy text to the system clipboard.
@@ -523,7 +528,7 @@ impl IcedChat {
         local_public: PublicKey,
         local_peer_addr: EndpointAddr,
         relay_mode: RelayMode,
-        _data_dir: std::path::PathBuf,
+        data_dir: std::path::PathBuf,
         runtime_handle: tokio::runtime::Handle,
         net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
         net_tx: UnboundedSender<NetEvent>,
@@ -594,6 +599,7 @@ impl IcedChat {
             follow_latest: true,
             dark_mode: false,
             notice,
+            data_dir,
             chat_history,
             chat_history_dirty: false,
             history_saved_count: 0,
@@ -616,6 +622,47 @@ impl IcedChat {
     }
     fn push_local(&mut self, text: impl Into<String>) {
         self.entries.push(ChatEntry::local(&self.local_label, text));
+    }
+
+    fn log_variant(message: &AppMessage) -> &'static str {
+        match message {
+            AppMessage::GoToChatList => "GoToChatList",
+            AppMessage::OpenRoom(_) => "OpenRoom",
+            AppMessage::RoomOpened { .. } => "RoomOpened",
+            AppMessage::CreateNewRoom => "CreateNewRoom",
+            AppMessage::JoinFromTicket => "JoinFromTicket",
+            AppMessage::RoomJoinFailed(_) => "RoomJoinFailed",
+            AppMessage::JoinTicketInputChanged(_) => "JoinTicketInputChanged",
+            AppMessage::NewChatCreated => "NewChatCreated",
+            AppMessage::RoomSelected(_) => "RoomSelected",
+            AppMessage::InputChanged(_) => "InputChanged",
+            AppMessage::SendPressed => "SendPressed",
+            AppMessage::AttachPressed => "AttachPressed",
+            AppMessage::ToggleHelp => "ToggleHelp",
+            AppMessage::NetEvent(_) => "NetEvent",
+            AppMessage::FriendEvent(_) => "FriendEvent",
+            AppMessage::WhisperEvent(_) => "WhisperEvent",
+            AppMessage::MessageSent(_) => "MessageSent",
+            AppMessage::FileSent(_) => "FileSent",
+            AppMessage::DownloadDone(_) => "DownloadDone",
+            AppMessage::ErrorMsg(_) => "ErrorMsg",
+            AppMessage::ExecuteFileSend(_) => "ExecuteFileSend",
+            AppMessage::ExecuteDownload => "ExecuteDownload",
+            AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
+            AppMessage::ImageDownloaded { .. } => "ImageDownloaded",
+            AppMessage::FriendAdded { .. } => "FriendAdded",
+            AppMessage::FriendRemoved { .. } => "FriendRemoved",
+            AppMessage::FriendListResult(_) => "FriendListResult",
+            AppMessage::DeleteRoom(_) => "DeleteRoom",
+            AppMessage::ConnMonitorTick => "ConnMonitorTick",
+            AppMessage::MeshWatchdogTick => "MeshWatchdogTick",
+            AppMessage::TorReconnect(_) => "TorReconnect",
+            AppMessage::ToggleDark(_) => "ToggleDark",
+            AppMessage::OpenLogsWindow => "OpenLogsWindow",
+            AppMessage::Noop => "Noop",
+            AppMessage::CopyToClipboard(_) => "CopyToClipboard",
+            AppMessage::OpenFriendChat(_) => "OpenFriendChat",
+        }
     }
 }
 
@@ -816,6 +863,7 @@ fn private_topic(a: &PublicKey, b: &PublicKey) -> TopicId {
 
 impl IcedChat {
     pub fn update(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
+        debug!(message = Self::log_variant(&message), "app update");
         match message {
             // ── Navigation ────────────────────────────────────────────
             AppMessage::GoToChatList => {
@@ -985,10 +1033,15 @@ impl IcedChat {
                                 memory_lookup.set_endpoint_info(addr.clone());
                             }
                         }
-                        let sub = gossip
-                            .subscribe(topic, bootstrap_peers)
-                            .await
-                            .map_err(|e| e.to_string())?;
+                        // Wait for at least one gossip neighbor if we have bootstrap
+                        // peers — matching the TUI behavior.  Without bootstrap
+                        // peers (room creator) use subscribe() so we don't hang.
+                        let sub = if bootstrap_peers.is_empty() {
+                            gossip.subscribe(topic, bootstrap_peers).await
+                        } else {
+                            gossip.subscribe_and_join(topic, bootstrap_peers).await
+                        }
+                        .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
 
                         let metadata_doc = room_docs::create_metadata_doc(
@@ -1150,10 +1203,17 @@ impl IcedChat {
                         let topic = ticket.topic;
                         let peers: Vec<_> = ticket.peers.iter().map(|p| p.id).collect();
 
-                        let sub = gossip
-                            .subscribe(topic, peers)
-                            .await
-                            .map_err(|e| e.to_string())?;
+                        // Use subscribe_and_join so we wait for at least one gossip
+                        // neighbor to connect before proceeding — matching the TUI
+                        // behavior.  If no bootstrap peers are given (unlikely here
+                        // since JoinFromTicket always has ticket.peers) fall back to
+                        // subscribe() to avoid hanging forever.
+                        let sub = if peers.is_empty() {
+                            gossip.subscribe(topic, peers).await
+                        } else {
+                            gossip.subscribe_and_join(topic, peers).await
+                        }
+                        .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
                         let new_ticket = Ticket {
                             topic,
@@ -2250,6 +2310,17 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::OpenLogsWindow => {
+                let data_dir = self.data_dir.clone();
+                iced::Task::perform(
+                    async move { log_viewer::spawn(&data_dir) },
+                    |result| match result {
+                        Ok(()) => AppMessage::Noop,
+                        Err(err) => AppMessage::ErrorMsg(err),
+                    },
+                )
+            }
+
             AppMessage::Noop => iced::Task::none(),
 
             AppMessage::CopyToClipboard(text) => {
@@ -2941,6 +3012,9 @@ impl IcedChat {
                     .size(TYPO_LG)
                     .width(Length::Fill)
                     .wrapping(Wrapping::Word),
+                button(text("Logs").size(TYPO_MD))
+                    .on_press(AppMessage::OpenLogsWindow)
+                    .padding(SPACE_4),
                 button(text(if self.dark_mode { "☀" } else { "🌙" }).size(TYPO_MD))
                     .on_press(AppMessage::ToggleDark(!self.dark_mode))
                     .padding(SPACE_4),

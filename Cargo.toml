@@ -110,6 +110,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 toml = { version = "1.1.2", optional = true }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
+    "fmt",
 ], optional = true }
 serde_json = { version = "1", optional = true }
 rayon = { version = "1.10.0", optional = true }
@@ -167,7 +168,7 @@ simulator = [
 ]
 metrics = ["iroh-metrics/metrics"]
 examples = ["net", "dep:ratatui", "dep:crossterm"]
-gui = ["net", "dep:iced", "dep:tokio", "dep:rfd"]
+gui = ["net", "dep:iced", "dep:tokio", "dep:rfd", "dep:tracing-subscriber"]
 unstable-custom-transports = ["iroh/unstable-custom-transports"]
 tor-transport = [
     "net",
