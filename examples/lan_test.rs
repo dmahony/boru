@@ -26,7 +26,7 @@ use n0_future::{StreamExt, time::sleep};
 
 
 /// How long to wait for a peer to connect (seconds).
-const CONNECT_TIMEOUT: f64 = 60.0;
+const CONNECT_TIMEOUT: f64 = 30.0;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -51,7 +51,12 @@ enum Command {
     /// Open a new room (creator).
     Open,
     /// Join an existing room via ticket (topic hex string).
-    Join { ticket: String },
+    Join {
+        ticket: String,
+        /// Bootstrap peer endpoint ID (hex string of the opener).
+        #[clap(short, long)]
+        bootstrap: Option<String>,
+    },
 }
 
 /// Tracks neighbor state and reports events.
@@ -205,9 +210,9 @@ async fn main() -> Result<()> {
             let topic = TopicId::from_bytes(rand::random());
             println!("\n--- OPENING ROOM ---");
             println!("Topic: {topic}");
-            println!("\nThe ticket to share is the topic hex string above.");
+            println!("\nThe ticket to share is the topic hex string and the opener's endpoint ID.");
             println!("Paste it as: cargo run --features examples --example lan_test -- \\");
-            println!("  --relay {relay_url} join {topic}");
+            println!("  --relay {relay_url} join {topic} --bootstrap {eid}");
             println!();
 
             let sub = gossip.subscribe(topic, vec![]).await?;
@@ -310,13 +315,21 @@ async fn main() -> Result<()> {
             println!("  Messages exchanged: {}", if received_any { "YES ✓" } else { "NO ✗" });
             println!("═══════════════════════════════════════");
         }
-        Command::Join { ticket } => {
+        Command::Join { ticket, bootstrap } => {
             let topic: TopicId = ticket.parse().expect("valid topic hex string");
             println!("\n--- JOINING ROOM ---");
             println!("Topic: {topic}");
 
-            // Subscribe with empty bootstrap, rely on relay for discovery
-            let sub = gossip.subscribe(topic, vec![]).await?;
+            // Parse bootstrap peers
+            let bootstrap_peers: Vec<EndpointId> = if let Some(b) = bootstrap {
+                let id: EndpointId = b.parse().expect("valid endpoint ID hex");
+                vec![id]
+            } else {
+                vec![]
+            };
+
+            // Subscribe with optional bootstrap peers
+            let sub = gossip.subscribe(topic, bootstrap_peers).await?;
             let (sender, mut receiver) = sub.split();
 
             // Broadcast AboutMe so the opener can map us
