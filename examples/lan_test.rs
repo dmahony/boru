@@ -348,8 +348,22 @@ async fn main() -> Result<()> {
                 vec![]
             };
 
-            // Subscribe and join (waits for connection to bootstrap peer)
-            let sub = gossip.subscribe_and_join(topic, bootstrap_peers).await?;
+            // Subscribe with optional bootstrap peers.
+            // We use subscribe() + manual joined() so we can capture
+            // the first NeighborUp that subscribe_and_join would consume.
+            let mut sub = gossip.subscribe(topic, bootstrap_peers.clone()).await?;
+            // Wait for at least one connection to form, but record it
+            // in our state so neighbor tracking is correct.
+            if !bootstrap_peers.is_empty() {
+                // joined() blocks until the first connection; after this
+                // the consumed NeighborUp won't arrive in our event stream,
+                // so we manually add the bootstrap peer as "seen".
+                let _first = sub.joined().await?;
+                println!("  [JOINED] connected to topic, waiting for peers...");
+                // The bootstrap peer's endpoint ID was consumed by joined();
+                // we can't add it to state because we don't know the peer's
+                // PublicKey yet. Message events will map it for us.
+            }
             let (sender, mut receiver) = sub.split();
 
             // Broadcast AboutMe so the opener can map us
