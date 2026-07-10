@@ -1,7 +1,6 @@
-//! End-to-end interop test: three peers joining the same gossip room,
-//! simulating the TUI, monolithic GUI, and modular GUI frontends.
+//! End-to-end three-peer gossip mesh test.
 //!
-//! Tests the full gossip path that all three frontends use:
+//! Tests the full gossip path used by all chat frontends:
 //!   - A opens a room, B and C join the same topic
 //!   - Messages broadcast from each peer reach all others
 //!   - Metadata and roster sync across peers
@@ -9,7 +8,7 @@
 //!   --no-relay mode (direct connections only)
 //!
 //! Each peer is isolated (separate secret key, separate endpoint) and
-//! participates in the same gossip topic, exactly as the frontends do.
+//! participates in the same gossip topic, exactly as real chat peers do.
 
 use std::time::Duration;
 
@@ -94,7 +93,7 @@ async fn interop_three_peers_message_flow() -> Result<()> {
     let (relay_map, relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
     let memory = MemoryLookup::new();
 
-    // ── Create 3 peers: A (TUI), B (monolithic GUI), C (modular GUI) ──
+    // ── Create 3 peers ──
     let ep_a = create_endpoint(
         &mut rng,
         relay_map.clone(),
@@ -120,9 +119,9 @@ async fn interop_three_peers_message_flow() -> Result<()> {
     let pk_a = ep_a.secret_key().public();
     let pk_b = ep_b.secret_key().public();
     let pk_c = ep_c.secret_key().public();
-    println!(">> Peer A (TUI):      {pk_a}");
-    println!(">> Peer B (mono GUI): {pk_b}");
-    println!(">> Peer C (mod GUI):  {pk_c}");
+    println!(">> Peer A:      {pk_a}");
+    println!(">> Peer B: {pk_b}");
+    println!(">> Peer C:  {pk_c}");
     println!(">> Relay:             {relay_url}");
 
     // ── Register gossip on all endpoints ───────────────────────────────
@@ -439,7 +438,7 @@ async fn interop_three_peers_message_flow() -> Result<()> {
     );
     println!("   ✓ Connection types detected for all pairs");
 
-    println!("\n✓✓✓ ALL INTEROP TESTS PASSED ✓✓✓");
+    println!("\n✓✓✓ ALL THREE-PEER MESH TESTS PASSED ✓✓✓");
     Ok(())
 }
 
@@ -552,6 +551,6 @@ async fn interop_no_relay_direct_connect() -> Result<()> {
     );
     println!("   ✓ Connection type detected");
 
-    println!("\n✓✓✓ DIRECT-CONNECT INTEROP TEST PASSED ✓✓✓");
+    println!("\n✓✓✓ DIRECT-CONNECT MESH TEST PASSED ✓✓✓");
     Ok(())
 }

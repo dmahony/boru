@@ -216,8 +216,8 @@ name = "doctor"
 required-features = ["net"]
 
 [[test]]
-name = "interop_two_frontends"
-path = "tests/interop_two_frontends.rs"
+name = "three_peer_mesh"
+path = "tests/test_three_peer_mesh.rs"
 required-features = ["net", "test-utils"]
 
 [[test]]

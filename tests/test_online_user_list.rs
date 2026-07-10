@@ -6,9 +6,9 @@
 //! 3. The list correctly reflects the current set of neighbors.
 //! 4. Regression: after a peer leaves (count → 0) and a new peer joins
 //!    (count → 1 again), the new peer appears in the list. This was
-//!    broken in the Tauri backend's `process_net_events` which had a
-//!    `current_ncount > 0` guard that prevented re-emitting after the
-//!    count dropped to 0.
+//!    broken by a `current_ncount > 0` guard in a previous backend
+//!    implementation that prevented re-emitting after the count
+//!    dropped to 0.
 
 use std::collections::{HashMap, HashSet};
 
