@@ -15,7 +15,10 @@ use std::time::Duration;
 
 use clap::Parser;
 use iroh::{
-    Endpoint, PublicKey, RelayMode, RelayUrl, SecretKey, EndpointId, endpoint::presets,
+    Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl, SecretKey,
+    EndpointId, TransportAddr,
+    address_lookup::memory::MemoryLookup,
+    endpoint::presets,
 };
 use iroh_gossip::api::Event;
 use iroh_gossip::chat_core::{check_peer_connection_type, ConnectionType, Message, SignedMessage};
@@ -320,16 +323,33 @@ async fn main() -> Result<()> {
             println!("\n--- JOINING ROOM ---");
             println!("Topic: {topic}");
 
-            // Parse bootstrap peers
+            // Parse bootstrap peers and seed the address lookup
             let bootstrap_peers: Vec<EndpointId> = if let Some(b) = bootstrap {
                 let id: EndpointId = b.parse().expect("valid endpoint ID hex");
+
+                // Seed the address lookup with the bootstrap peer's relay URL
+                // so the gossip layer can resolve the endpoint ID to a relay address.
+                let memory_lookup = MemoryLookup::new();
+                let relay_url: RelayUrl = relay_url.parse().expect("valid relay URL");
+                let addr = EndpointAddr::from_parts(
+                    id,
+                    [TransportAddr::Relay(relay_url)],
+                );
+                memory_lookup.add_endpoint_info(addr);
+                if let Ok(als) = endpoint.address_lookup() {
+                    als.add(memory_lookup);
+                } else {
+                    eprintln!("  [WARN] no address lookup services on endpoint");
+                }
+                println!("  [ADDR_LOOKUP] seeded bootstrap {} with relay {}", fmt_id(&id), args.relay);
+
                 vec![id]
             } else {
                 vec![]
             };
 
-            // Subscribe with optional bootstrap peers
-            let sub = gossip.subscribe(topic, bootstrap_peers).await?;
+            // Subscribe and join (waits for connection to bootstrap peer)
+            let sub = gossip.subscribe_and_join(topic, bootstrap_peers).await?;
             let (sender, mut receiver) = sub.split();
 
             // Broadcast AboutMe so the opener can map us
