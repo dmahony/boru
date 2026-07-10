@@ -49,6 +49,20 @@ const TYPO_SM: f32 = 13.0; // Secondary body, previews, entry labels
 const TYPO_XS: f32 = 11.0; // Metadata, identity info, secondary labels
 const TYPO_XXS: f32 = 10.0; // Fine print, ticket, instruction text
 
+/// Build the wire representation used for all GUI file shares.
+///
+/// A content hash by itself is insufficient: the receiver also needs the
+/// sender's endpoint address and the blob format to construct a downloader
+/// request. Keeping this in one helper prevents the gossip and whisper paths
+/// from drifting into incompatible ticket formats.
+fn blob_ticket_string(
+    addr: EndpointAddr,
+    hash: iroh_blobs::Hash,
+    format: iroh_blobs::BlobFormat,
+) -> String {
+    BlobTicket::new(addr, hash, format).to_string()
+}
+
 // ── Spacing units (4px base) ─────────────────────────────────────────
 const SPACE_2: f32 = 2.0;
 const SPACE_4: f32 = 4.0;
@@ -1915,6 +1929,7 @@ impl IcedChat {
                     }
                     let blob_store = self.blob_store.clone();
                     let whisper_handle = self.whisper_handle.clone();
+                    let endpoint = self.endpoint.clone();
                     let fname = filename.clone();
                     self.push_system(format!("[Whisper] Hashing file: {filename}..."));
                     return iced::Task::perform(
@@ -1924,7 +1939,11 @@ impl IcedChat {
                                 .add_path(abs_path)
                                 .await
                                 .map_err(|e| format!("Failed to hash file: {e}"))?;
-                            let ticket = tag.hash.to_string();
+                            let ticket = blob_ticket_string(
+                                endpoint.watch_addr().get(),
+                                tag.hash,
+                                tag.format,
+                            );
                             whisper_handle
                                 .send_file(peer_key, fname.clone(), ticket)
                                 .await
@@ -2143,6 +2162,7 @@ impl IcedChat {
                 let blob_store = self.blob_store.clone();
                 let sender = self.sender.clone();
                 let secret_key = self.secret_key.clone();
+                let endpoint = self.endpoint.clone();
                 let fname = filename.clone();
 
                 iced::Task::perform(
@@ -2152,7 +2172,11 @@ impl IcedChat {
                             .add_path(std::path::PathBuf::from(&abs_path))
                             .await
                             .map_err(|e| format!("Failed to hash file: {e}"))?;
-                        let ticket_str = format!("blob:{:?}", tag.hash);
+                        let ticket_str = blob_ticket_string(
+                            endpoint.watch_addr().get(),
+                            tag.hash,
+                            tag.format,
+                        );
                         let msg = crate::Message::FileShare {
                             name: filename.clone(),
                             ticket: ticket_str,
@@ -3659,5 +3683,29 @@ impl IcedChat {
                 |(rx, friend_rx, whisper_rx)| subscription_stream(&rx, &friend_rx, &whisper_rx),
             ),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gui_file_share_ticket_is_parseable_and_has_sender_address() {
+        let key = SecretKey::generate();
+        let addr = EndpointAddr::new(key.public());
+        let hash = iroh_blobs::Hash::from_bytes([7; 32]);
+
+        let ticket = blob_ticket_string(addr, hash, iroh_blobs::BlobFormat::Raw);
+        let parsed: BlobTicket = ticket.parse().expect("GUI ticket must be parseable");
+
+        assert_eq!(parsed.addr().id, key.public());
+        assert_eq!(parsed.hash(), hash);
+    }
+
+    #[test]
+    fn hash_only_file_share_value_is_not_a_blob_ticket() {
+        let hash = iroh_blobs::Hash::from_bytes([7; 32]);
+        assert!(hash.to_string().parse::<BlobTicket>().is_err());
     }
 }
