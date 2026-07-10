@@ -109,6 +109,9 @@ pub trait ChatCallbacks {
     /// Record a presence heartbeat from a peer — updates the last-seen timestamp.
     fn record_presence(&mut self, _peer: PublicKey) {}
 
+    /// Record the ticket a peer advertises for starting a chat with them.
+    fn record_peer_ticket(&mut self, _peer: PublicKey, _ticket: String) {}
+
     /// Request the frontend to quit (gossip receiver closed or error).
     fn request_quit(&mut self);
 }

@@ -205,7 +205,12 @@ fn init_logging(data_dir: &Path) -> Result<()> {
 
     let writer = FileMakeWriter(Arc::new(Mutex::new(file)));
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
-    let subscriber = build_logging_subscriber(writer, std::io::stderr, std::io::stderr().is_terminal(), filter);
+    let subscriber = build_logging_subscriber(
+        writer,
+        std::io::stderr,
+        std::io::stderr().is_terminal(),
+        filter,
+    );
     let _ = tracing::subscriber::set_global_default(subscriber);
     Ok(())
 }
@@ -337,8 +342,9 @@ fn main() -> Result<()> {
             }
             Some(Command::Logs) => None,
             None => {
-                info!("showing chat list");
-                None
+                let topic = app::IcedChat::default_lobby_topic();
+                info!(topic = %topic, "opening default discovery lobby");
+                Some((topic, vec![]))
             }
         }
     });
@@ -625,6 +631,7 @@ fn main() -> Result<()> {
             notice,
             chat_history,
             backfill_handle,
+            initial_topic.is_some() && args.command.is_none(),
         ),
         initial_topic,
     )));

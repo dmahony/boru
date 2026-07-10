@@ -437,6 +437,10 @@ pub struct IcedChat {
     /// Bootstrap peer addresses from the initial join ticket (if any).
     /// Used only for the first room subscription; cleared after use.
     initial_bootstrap_peers: Vec<EndpointAddr>,
+    /// Tickets advertised by peers in the current room.
+    peer_tickets: HashMap<PublicKey, String>,
+    /// Whether the initial default lobby should leave the UI on the chat list.
+    return_to_chat_list_after_open: bool,
     /// Handle for sending whisper/private messages.
     whisper_handle: WhisperHandle,
     /// Receiver for incoming whisper events.
@@ -544,6 +548,7 @@ impl IcedChat {
         notice: String,
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
         backfill_handle: BackfillHandle,
+        return_to_chat_list_after_open: bool,
     ) -> Self {
         let (initial_topic, initial_bootstrap) =
             initial_room.unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
@@ -606,6 +611,8 @@ impl IcedChat {
             history_saved_count: 0,
             friend_online_cache,
             initial_bootstrap_peers: initial_bootstrap,
+            peer_tickets: HashMap::new(),
+            return_to_chat_list_after_open,
             whisper_handle,
             whisper_events_rx,
         }
@@ -616,6 +623,23 @@ impl IcedChat {
             topic,
             peers: vec![self.local_peer_addr.clone()],
         }
+    }
+
+    /// Stable room used as the default lobby for discovering online users.
+    pub fn default_lobby_topic() -> TopicId {
+        TopicId::from_bytes(*blake3::hash(b"iroh-gossip-chat/default-lobby/v1").as_bytes())
+    }
+
+    /// Stable personal room advertised by this identity.
+    fn personal_room_topic(&self) -> TopicId {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"iroh-gossip-chat/personal-room/v1");
+        hasher.update(self.local_public.as_bytes());
+        TopicId::from_bytes(*hasher.finalize().as_bytes())
+    }
+
+    fn personal_room_ticket(&self) -> String {
+        self.room_ticket(self.personal_room_topic()).to_string()
     }
 
     fn push_system(&mut self, text: impl Into<String>) {
@@ -683,6 +707,8 @@ impl IcedChat {
         self.names.clear();
         self.pending_file = None;
         self.pending_image = None;
+        self.neighbors.clear();
+        self.peer_tickets.clear();
         self.history_saved_count = 0;
     }
 
@@ -920,6 +946,7 @@ impl IcedChat {
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
                 let ticket_str = self.room_ticket(topic).to_string();
+                let personal_ticket = self.personal_room_ticket();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
                 let local_peer_addr = self.local_peer_addr.clone();
@@ -969,6 +996,14 @@ impl IcedChat {
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
+                        let presence = SignedMessage::sign_and_encode(
+                            &sk,
+                            &crate::Message::PresenceWithTicket {
+                                ticket: personal_ticket,
+                            },
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let _ = sender.broadcast(presence).await;
 
                         let room = RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);
                         let _ = room.save();
@@ -1020,13 +1055,15 @@ impl IcedChat {
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
                 let ticket_str = self.room_ticket(topic).to_string();
+                let personal_ticket = self.personal_room_ticket();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let endpoint = self.endpoint.clone();
                 let data_dir = self.data_dir.clone();
                 let local_peer_addr = self.local_peer_addr.clone();
                 // Extract bootstrap peer addresses from the one-shot initial room
                 // or from the saved RoomStore for this topic.
-                let mut initial_addrs: Vec<EndpointAddr> = self.initial_bootstrap_peers.drain(..).collect();
+                let mut initial_addrs: Vec<EndpointAddr> =
+                    self.initial_bootstrap_peers.drain(..).collect();
                 if initial_addrs.is_empty() {
                     initial_addrs = RoomStore::load_or_none(&data_dir)
                         .filter(|room| room.topic == topic)
@@ -1098,6 +1135,14 @@ impl IcedChat {
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
+                        let presence = SignedMessage::sign_and_encode(
+                            &sk,
+                            &crate::Message::PresenceWithTicket {
+                                ticket: personal_ticket,
+                            },
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let _ = sender.broadcast(presence).await;
 
                         let saved_peers = if initial_addrs_for_save.is_empty() {
                             vec![local_peer_addr]
@@ -1134,6 +1179,7 @@ impl IcedChat {
                 self.ticket_str = ticket.clone();
                 self.entries.clear();
                 self.names.clear();
+                self.peer_tickets.clear();
                 self.composer_text.clear();
                 self.push_system(format!(
                     "Connected as {}.  Topic: {topic}",
@@ -1194,6 +1240,11 @@ impl IcedChat {
                 self.persist_room_history();
                 self.try_save_chat_history();
 
+                if self.return_to_chat_list_after_open {
+                    self.return_to_chat_list_after_open = false;
+                    return iced::Task::done(AppMessage::GoToChatList);
+                }
+
                 iced::Task::none()
             }
 
@@ -1205,11 +1256,16 @@ impl IcedChat {
             }
 
             AppMessage::JoinFromTicket => {
+                self.save_room_to_history();
+                self.persist_room_history();
+                self.try_save_chat_history();
+                self.leave_current_room();
                 let ticket_input = self.join_ticket_input.clone();
                 let gossip = self.gossip.clone();
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
+                let personal_ticket = self.personal_room_ticket();
                 let endpoint = self.endpoint.clone();
                 let local_peer_addr = self.local_peer_addr.clone();
                 let forward_handle_slot = self.forward_handle_slot.clone();
@@ -1275,6 +1331,14 @@ impl IcedChat {
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
+                        let presence = SignedMessage::sign_and_encode(
+                            &sk,
+                            &crate::Message::PresenceWithTicket {
+                                ticket: personal_ticket,
+                            },
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let _ = sender.broadcast(presence).await;
 
                         let room = RoomStore::with_peers(&data_dir, topic, ticket.peers.clone());
                         let _ = room.save();
@@ -1298,16 +1362,25 @@ impl IcedChat {
             }
 
             AppMessage::OpenFriendChat(peer) => {
+                let Some(ticket_str) = self.peer_tickets.get(&peer).cloned() else {
+                    return iced::Task::done(AppMessage::ErrorMsg(
+                        "This user has not advertised a chat ticket yet.".to_string(),
+                    ));
+                };
+                let Ok(ticket) = ticket_str.parse::<Ticket>() else {
+                    return iced::Task::done(AppMessage::ErrorMsg(
+                        "The advertised chat ticket is invalid.".to_string(),
+                    ));
+                };
                 let topic = private_topic(&self.local_public, &peer);
-                // Send a whisper notification to alert the peer that a
-                // private chat room has been opened for them.
+                let room = RoomStore::with_peers(&self.data_dir, topic, ticket.peers);
+                let _ = room.save();
                 let whisper_handle = self.whisper_handle.clone();
+                let invite = format!("\x00PRIVATE_CHAT:{ticket_str}");
                 iced::Task::batch(vec![
                     iced::Task::perform(
                         async move {
-                            let _ = whisper_handle
-                                .send_dm(peer, "\x00PRIVATE_CHAT".to_string())
-                                .await;
+                            let _ = whisper_handle.send_dm(peer, invite).await;
                         },
                         |_| AppMessage::Noop,
                     ),
@@ -1922,23 +1995,34 @@ impl IcedChat {
                             .cloned()
                             .unwrap_or_else(|| from.fmt_short().to_string());
 
-                        // Check if this is a private chat invitation marker.
-                        let is_invite = text == "\x00PRIVATE_CHAT";
+                        // A ticket-bearing invite gives the recipient the
+                        // route needed to bootstrap the deterministic private room.
+                        let invite_ticket = text
+                            .strip_prefix("\x00PRIVATE_CHAT:")
+                            .and_then(|raw| raw.parse::<Ticket>().ok());
+                        let is_invite = invite_ticket.is_some() || text == "\x00PRIVATE_CHAT";
                         if is_invite {
                             self.push_system(format!("{label} opened a private chat with you."));
                         }
 
-                        // If the sender is a tracked friend, auto-open the
-                        // private gossip room so the receiving user sees the
-                        // conversation immediately.
                         let fid = FriendId::from_public_key(from);
-                        if self.friends.get(&fid).is_some() {
+                        let should_open_private = is_invite || self.friends.get(&fid).is_some();
+                        if should_open_private {
                             let private_topic = private_topic(&self.local_public, &from);
-                            let already_on_topic = matches!(self.screen, Screen::Chat { topic } if topic == private_topic);
-                            if !already_on_topic && !is_invite {
-                                // Save current room before switching
+                            if let Some(ticket) = invite_ticket {
+                                let room = RoomStore::with_peers(
+                                    &self.data_dir,
+                                    private_topic,
+                                    ticket.peers,
+                                );
+                                let _ = room.save();
+                            }
+                            let already_on_topic = matches!(
+                                self.screen,
+                                Screen::Chat { topic } if topic == private_topic
+                            );
+                            if !already_on_topic {
                                 self.save_room_to_history();
-                                // Navigate to the private chat room
                                 return iced::Task::done(AppMessage::OpenRoom(private_topic));
                             }
                         }
@@ -2241,12 +2325,14 @@ impl IcedChat {
                     self.presence_counter = 5;
                     if let Some(ref sender) = self.sender {
                         let sk = self.secret_key.clone();
+                        let ticket = self.personal_room_ticket();
                         let s = sender.clone();
                         tasks.push(iced::Task::perform(
                             async move {
-                                if let Ok(encoded) =
-                                    SignedMessage::sign_and_encode(&sk, &crate::Message::Presence)
-                                {
+                                if let Ok(encoded) = SignedMessage::sign_and_encode(
+                                    &sk,
+                                    &crate::Message::PresenceWithTicket { ticket },
+                                ) {
                                     s.broadcast(encoded).await.ok();
                                 }
                             },
@@ -2611,6 +2697,12 @@ impl ChatCallbacks for IcedChat {
         self.neighbors.insert(peer);
     }
 
+    fn record_peer_ticket(&mut self, peer: PublicKey, ticket: String) {
+        if peer != self.local_public && ticket.parse::<Ticket>().is_ok() {
+            self.peer_tickets.insert(peer, ticket);
+        }
+    }
+
     fn request_quit(&mut self) {
         // IcedChat handles window close through the iced framework.
     }
@@ -2680,6 +2772,27 @@ impl IcedChat {
             .padding(SPACE_12)
             .style(move |t| container_surface(t)),
         );
+
+        // ── Default lobby ticket ──
+        if self.topic == Self::default_lobby_topic() && !self.ticket_str.is_empty() {
+            content = content.push(
+                container(
+                    row![
+                        text("Lobby ticket (share once with another user):")
+                            .size(TYPO_SM)
+                            .width(Length::Fill),
+                        button("Copy ticket")
+                            .on_press(AppMessage::CopyToClipboard(self.ticket_str.clone()))
+                            .padding(SPACE_4),
+                    ]
+                    .spacing(SPACE_8)
+                    .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding(SPACE_12)
+                .style(move |t| container_surface(t)),
+            );
+        }
 
         // Small visual pause before action buttons
         content = content.push(Space::new().height(Length::Fixed(SPACE_4)));
@@ -2821,7 +2934,7 @@ impl IcedChat {
             .filter(|peer| *peer != self.local_public)
             .filter(|peer| {
                 let fid = FriendId::from_public_key(*peer);
-                self.friends.get(&fid).is_none()
+                self.friends.get(&fid).is_none() && self.peer_tickets.contains_key(peer)
             })
             .map(|peer| (peer, self.resolve_name(&peer)))
             .collect();

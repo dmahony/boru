@@ -777,6 +777,14 @@ pub enum Message {
     Leave,
     /// Periodic presence heartbeat.
     Presence,
+    /// Presence heartbeat plus a ticket for opening a chat with this peer.
+    ///
+    /// This is additive to [`Message::Presence`] so older peers can still
+    /// participate in the presence protocol without understanding tickets.
+    PresenceWithTicket {
+        /// Serialized chat-room ticket advertised by the sender.
+        ticket: String,
+    },
     /// Acknowledge that the sender read a message.
     ReadReceipt {
         /// Hash of the message being acknowledged.
@@ -1090,6 +1098,10 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                 }
                 Message::Presence => {
                     cb.record_presence(from);
+                }
+                Message::PresenceWithTicket { ticket } => {
+                    cb.record_presence(from);
+                    cb.record_peer_ticket(from, ticket);
                 }
                 Message::Heartbeat => {
                     // Heartbeat is invisible — record activity to update
