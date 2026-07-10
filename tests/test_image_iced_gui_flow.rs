@@ -58,7 +58,7 @@ impl ChatCallbacks for IcedTestPeer {
     fn push_system(&mut self, text: String) {
         self.entries.push(ChatEntry::system(text));
     }
-    fn push_remote(&mut self, label: String, text: String, _hash: Option<MessageHash>) {
+    fn push_remote(&mut self, label: String, text: String, _hash: Option<MessageHash>, _sent_at: Option<u64>) {
         self.entries.push(ChatEntry::remote(label, text));
     }
     fn set_pending_file(&mut self, name: String, ticket: String) {

@@ -67,7 +67,8 @@ pub trait ChatCallbacks {
     /// Append a remote (incoming) message to the chat log.
     ///
     /// `hash` is the protocol message content hash, if available.
-    fn push_remote(&mut self, label: String, text: String, hash: Option<MessageHash>);
+    /// `sent_at` is the protocol's Unix epoch seconds timestamp, if available.
+    fn push_remote(&mut self, label: String, text: String, hash: Option<MessageHash>, sent_at: Option<u64>);
 
     /// Record a pending file download: `(filename, ticket_string)`.
     fn set_pending_file(&mut self, name: String, ticket: String);

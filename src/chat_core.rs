@@ -645,7 +645,7 @@ impl ChatCallbacks for AppState {
         self.push_entry(ChatEntry::system(text), true);
     }
 
-    fn push_remote(&mut self, label: String, text: String, hash: Option<MessageHash>) {
+    fn push_remote(&mut self, label: String, text: String, hash: Option<MessageHash>, _sent_at: Option<u64>) {
         let mut entry = ChatEntry::remote(label, text);
         if let Some(h) = hash {
             entry = entry.with_message_hash(h);
@@ -1048,7 +1048,7 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                             // (FriendPingManager), not by gossip activity.
                         }
                         let display_name = cb.resolve_name(&from);
-                        cb.push_remote(display_name, text, Some(incoming_hash));
+                        cb.push_remote(display_name, text, Some(incoming_hash), Some(sent_at));
                     }
                 }
                 Message::FileShare { name, ticket } => {

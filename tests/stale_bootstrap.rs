@@ -59,7 +59,7 @@ impl ChatCallbacks for SimChat {
         self.received_messages.push(format!("[sys] {text}"));
         self.entries.push(ChatEntry::system(text));
     }
-    fn push_remote(&mut self, label: String, text: String, _hash: Option<iroh_gossip::chat_core::MessageHash>) {
+    fn push_remote(&mut self, label: String, text: String, _hash: Option<iroh_gossip::chat_core::MessageHash>, _sent_at: Option<u64>) {
         self.received_messages.push(format!("[{label}] {text}"));
         self.entries.push(ChatEntry::remote(label, text));
     }

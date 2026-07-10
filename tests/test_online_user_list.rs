@@ -65,7 +65,7 @@ impl ChatCallbacks for OnlineUserTracker {
     fn friend_set_name(&mut self, _fid: FriendId, _name: String) {}
     fn mark_friends_dirty(&mut self) {}
     fn push_system(&mut self, _text: String) {}
-    fn push_remote(&mut self, _label: String, _text: String, _hash: Option<MessageHash>) {}
+    fn push_remote(&mut self, _label: String, _text: String, _hash: Option<MessageHash>, _sent_at: Option<u64>) {}
     fn set_pending_file(&mut self, _name: String, _ticket: String) {}
     fn set_pending_image(&mut self, _name: String, _hash: MessageHash, _from: PublicKey) {}
     fn has_message(&self, _hash: &MessageHash) -> bool { false }

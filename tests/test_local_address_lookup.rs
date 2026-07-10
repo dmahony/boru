@@ -395,7 +395,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         fn push_system(&mut self, text: String) {
             self.received.push(format!("[sys] {text}"));
         }
-        fn push_remote(&mut self, label: String, text: String, _hash: Option<iroh_gossip::chat_core::MessageHash>) {
+        fn push_remote(&mut self, label: String, text: String, _hash: Option<iroh_gossip::chat_core::MessageHash>, _sent_at: Option<u64>) {
             self.received.push(format!("[{label}] {text}"));
         }
         fn set_pending_file(&mut self, _name: String, _ticket: String) {}
