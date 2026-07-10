@@ -207,12 +207,17 @@ fn init_logging(data_dir: &Path) -> Result<()> {
     // very high-volume discovery and DNS diagnostics at DEBUG; leaving that
     // level enabled made a single GUI session grow iced_chat.log to tens of
     // megabytes.  Operators can still opt into the full trace with RUST_LOG.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let file_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // These are expected during normal endpoint startup and address
+    // discovery. Keep them in the persistent log, but avoid making the GUI
+    // terminal noisy. More severe events from either target remain visible.
+    let terminal_filter = EnvFilter::new("info,swarm_discovery=warn,iroh::net_report=error");
     let subscriber = build_logging_subscriber(
         writer,
         std::io::stderr,
         std::io::stderr().is_terminal(),
-        filter,
+        file_filter,
+        terminal_filter,
     );
     let _ = tracing::subscriber::set_global_default(subscriber);
     Ok(())
@@ -269,19 +274,21 @@ fn build_logging_subscriber<F, T>(
     file_writer: F,
     terminal_writer: T,
     tee_to_terminal: bool,
-    filter: EnvFilter,
+    file_filter: EnvFilter,
+    terminal_filter: EnvFilter,
 ) -> impl tracing::Subscriber + Send + Sync
 where
     F: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
     T: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
 {
     tracing_subscriber::registry()
-        .with(filter)
+        .with(file_filter)
         .with(fmt::layer().with_writer(file_writer).with_ansi(false))
         .with(
             fmt::layer()
+                .with_ansi(false)
                 .with_writer(ConditionalMakeWriter::new(terminal_writer, tee_to_terminal))
-                .with_ansi(false),
+                .with_filter(terminal_filter),
         )
 }
 
@@ -394,6 +401,7 @@ fn main() -> Result<()> {
         endpoint,
         memory_lookup,
         gossip,
+        router,
         blob_store,
         net_rx,
         net_tx,
@@ -536,7 +544,7 @@ fn main() -> Result<()> {
         let whisper_handler = whisper_builder.protocol_handler();
         let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn().await;
 
-        let _router = iroh::protocol::Router::builder(endpoint.clone())
+        let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol.clone())
             .accept(FRIEND_PING_ALPN, PingHandler)
@@ -588,6 +596,7 @@ fn main() -> Result<()> {
             endpoint,
             memory_lookup,
             gossip,
+            router,
             blob_store,
             net_rx,
             net_tx,
@@ -610,6 +619,7 @@ fn main() -> Result<()> {
         IcedChat::new(
             secret_key,
             gossip,
+            router,
             blob_store,
             endpoint.clone(),
             memory_lookup,
@@ -729,6 +739,7 @@ mod tests {
             BufferWriter(term_buf.clone()),
             true,
             EnvFilter::new("info"),
+            EnvFilter::new("info"),
         );
 
         with_default(subscriber, || {
@@ -748,6 +759,7 @@ mod tests {
             BufferWriter(term_buf.clone()),
             false,
             EnvFilter::new("info"),
+            EnvFilter::new("info"),
         );
 
         with_default(subscriber, || {
@@ -756,5 +768,34 @@ mod tests {
 
         assert!(buffer_to_string(&file_buf).contains("hidden message"));
         assert!(buffer_to_string(&term_buf).is_empty());
+    }
+
+    #[test]
+    fn terminal_filter_suppresses_expected_discovery_diagnostics_only() {
+        let file_buf = Arc::new(Mutex::new(Vec::new()));
+        let term_buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = build_logging_subscriber(
+            BufferWriter(file_buf.clone()),
+            BufferWriter(term_buf.clone()),
+            true,
+            EnvFilter::new("trace"),
+            EnvFilter::new("trace,swarm_discovery=warn,iroh::net_report=error"),
+        );
+
+        with_default(subscriber, || {
+            tracing::info!(target: "swarm_discovery::sender", "no addresses for peer, not announcing");
+            tracing::warn!(target: "iroh::net_report::report", "IPv4 address detected by QAD varies by destination");
+            tracing::error!(target: "iroh::net_report::report", "endpoint network report failed");
+            tracing::warn!(target: "application", "actionable application warning");
+        });
+
+        let file = buffer_to_string(&file_buf);
+        let terminal = buffer_to_string(&term_buf);
+        assert!(file.contains("no addresses for peer"));
+        assert!(file.contains("IPv4 address detected by QAD"));
+        assert!(terminal.contains("endpoint network report failed"));
+        assert!(terminal.contains("actionable application warning"));
+        assert!(!terminal.contains("no addresses for peer"));
+        assert!(!terminal.contains("IPv4 address detected by QAD"));
     }
 }

@@ -378,6 +378,9 @@ pub struct IcedChat {
     // ── Shared network state ──
     secret_key: SecretKey,
     gossip: Gossip,
+    /// Keeps the protocol router alive for the lifetime of the GUI. Dropping
+    /// the router stops accepting incoming gossip connections.
+    _router: iroh::protocol::Router,
     sender: Option<GossipSender>,
     blob_store: MemStore,
     endpoint: iroh::Endpoint,
@@ -528,6 +531,7 @@ impl IcedChat {
     pub fn new(
         secret_key: SecretKey,
         gossip: Gossip,
+        router: iroh::protocol::Router,
         blob_store: MemStore,
         endpoint: iroh::Endpoint,
         memory_lookup: MemoryLookup,
@@ -577,6 +581,7 @@ impl IcedChat {
             ticket_str: String::new(),
             secret_key,
             gossip,
+            _router: router,
             sender: None,
             blob_store,
             endpoint,

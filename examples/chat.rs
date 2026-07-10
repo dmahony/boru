@@ -9,7 +9,6 @@
 use std::{
     collections::{HashMap, HashSet},
     env, io,
-    io::IsTerminal,
     net::{Ipv4Addr, SocketAddrV4},
     path::{Path, PathBuf},
     str::FromStr,
@@ -193,7 +192,7 @@ fn log_file_path(data_dir: &Path) -> PathBuf {
     data_dir.join("logs").join(LOG_FILE_NAME)
 }
 
-/// Initialise persistent file-based tracing logging alongside stderr output.
+/// Initialise persistent file-based tracing logging.
 ///
 /// Logs are written to `{data_dir}/logs/chat.log` with `0600` permissions.
 /// The log level defaults to `debug` and can be controlled via `RUST_LOG`.
@@ -248,62 +247,11 @@ fn init_logging(data_dir: &Path) -> Result<()> {
 
     let file_writer = FileMakeWriter(Arc::new(Mutex::new(file)));
 
-    // A simple wrapper that switches between a real writer and `io::sink`
-    // based on a boolean flag (tee only when stderr is a terminal).
-    struct ConditionalMakeWriter<W> {
-        inner: W,
-        enabled: bool,
-    }
-    impl<W> ConditionalMakeWriter<W> {
-        fn new(inner: W, enabled: bool) -> Self {
-            Self { inner, enabled }
-        }
-    }
-    enum ConditionalWrite<W> {
-        Inner(W),
-        Sink(std::io::Sink),
-    }
-    impl<W: std::io::Write> std::io::Write for ConditionalWrite<W> {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            match self {
-                Self::Inner(w) => w.write(buf),
-                Self::Sink(w) => w.write(buf),
-            }
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            match self {
-                Self::Inner(w) => w.flush(),
-                Self::Sink(w) => w.flush(),
-            }
-        }
-    }
-    impl<'a, W> tracing_subscriber::fmt::MakeWriter<'a> for ConditionalMakeWriter<W>
-    where
-        W: tracing_subscriber::fmt::MakeWriter<'a>,
-    {
-        type Writer = ConditionalWrite<W::Writer>;
-        fn make_writer(&'a self) -> Self::Writer {
-            if self.enabled {
-                ConditionalWrite::Inner(self.inner.make_writer())
-            } else {
-                ConditionalWrite::Sink(std::io::sink())
-            }
-        }
-    }
-
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
 
     let subscriber = tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer().with_writer(file_writer).with_ansi(false))
-        .with(
-            fmt::layer()
-                .with_writer(ConditionalMakeWriter::new(
-                    std::io::stderr,
-                    std::io::stderr().is_terminal(),
-                ))
-                .with_ansi(false),
-        );
+        .with(fmt::layer().with_writer(file_writer).with_ansi(false));
 
     let _ = tracing::subscriber::set_global_default(subscriber);
     Ok(())
@@ -313,7 +261,7 @@ fn init_logging(data_dir: &Path) -> Result<()> {
 async fn main() -> Result<()> {
     let data_dir = get_data_dir();
     init_logging(&data_dir)?;
-    println!("> log file: {}", log_file_path(&data_dir).display());
+    tracing::info!(path = %log_file_path(&data_dir).display(), "logging to file");
     let args = Args::parse();
 
     #[cfg(feature = "tor-transport")]
@@ -339,16 +287,16 @@ async fn main() -> Result<()> {
                             } else {
                                 String::new()
                             };
-                            println!("> reusing saved room topic {}{peer_info}", store.topic);
+                            tracing::info!(topic = %store.topic, peer_info = %peer_info, "reusing saved room topic");
                             (store.topic, store.peers.clone())
                         }
                         None => {
                             let t = TopicId::from_bytes(rand::random());
-                            println!("> opening new chat room for topic {t}");
+                            tracing::info!(topic = %t, "opening new chat room");
                             // Persist the new topic so reopening reuses it.
                             let room = RoomStore::new(&data_dir, t);
                             if let Err(err) = room.save() {
-                                eprintln!("warning: failed to save room metadata: {err}");
+                                tracing::warn!(error = %err, "failed to save room metadata");
                             }
                             (t, vec![])
                         }
@@ -359,7 +307,7 @@ async fn main() -> Result<()> {
         }
         Command::Join { ticket } => {
             let Ticket { topic, peers } = Ticket::from_str(ticket)?;
-            println!("> joining chat room for topic {topic}");
+            tracing::info!(topic = %topic, "joining chat room");
             (topic, peers)
         }
     };
@@ -374,15 +322,14 @@ async fn main() -> Result<()> {
             (key, PathBuf::from("<passed via cli flag>"))
         }
     };
-    println!("> our public key: {}", secret_key.public());
-    println!("> identity file: {}", key_path.display());
+    tracing::info!(public_key = %secret_key.public(), identity_file = %key_path.display(), "loaded local identity");
 
     // load or create the persistent friends list
     let data_dir = get_data_dir();
     let friends = FriendsStore::load_or_default(&data_dir);
     let friend_count = friends.len();
     if friend_count > 0 {
-        println!("> loaded {friend_count} friend(s) from disk");
+        tracing::info!(count = friend_count, "loaded friends from disk");
     }
 
     // configure our relay map
@@ -395,7 +342,7 @@ async fn main() -> Result<()> {
         (false, false, None) => RelayMode::Default,
         (_, false, Some(url)) => RelayMode::Custom(url.into()),
     };
-    println!("> using relay servers: {}", fmt_relay_mode(&relay_mode));
+    tracing::info!(relay = %fmt_relay_mode(&relay_mode), "configured relay servers");
 
     // create a memory lookup to pass in endpoint addresses to
     let memory_lookup = MemoryLookup::new();
@@ -504,7 +451,7 @@ async fn main() -> Result<()> {
             )
         }
     };
-    println!("> our endpoint id: {}", endpoint.id());
+    tracing::info!(endpoint_id = %endpoint.id(), "endpoint ready");
 
     // Add mDNS local address lookup for LAN peer discovery
     if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
@@ -546,7 +493,7 @@ async fn main() -> Result<()> {
         topic,
         peers: vec![local_peer_addr.clone()],
     };
-    println!("> ticket to join us: {ticket}");
+    tracing::info!(ticket = %ticket, "created room ticket");
 
     // setup router with the gossip protocol, blob protocol, friend ping,
     // and whisper protocol
@@ -558,9 +505,9 @@ async fn main() -> Result<()> {
     // are removed by the loader and are never replayed.
     let chat_history = ChatHistoryStore::load_or_default(&data_dir);
     if !chat_history.is_empty() {
-        println!(
-            "> retained {} active-session chat message(s) in memory (history is never saved to disk)",
-            chat_history.len()
+        tracing::info!(
+            count = chat_history.len(),
+            "retained active-session chat messages in memory (history is never saved to disk)"
         );
     }
     let chat_history = Arc::new(Mutex::new(chat_history));
@@ -591,15 +538,15 @@ async fn main() -> Result<()> {
         memory_lookup.set_endpoint_info(addr.clone());
     }
     if peer_ids.is_empty() {
-        println!("> waiting for peers to join us...");
+        tracing::info!("waiting for peers to join us");
     } else {
-        println!("> trying to connect to {} peers...", addr_material.len());
+        tracing::info!(count = addr_material.len(), "trying to connect to peers");
     };
     let (sender, receiver) = gossip
         .subscribe_and_join(topic, peer_ids.clone())
         .await?
         .split();
-    println!("> connected!");
+    tracing::info!("connected");
 
     // Refresh the stored bootstrap peers from the just-connected peers so
     // future reopen/rejoin has up-to-date addresses even if the original
@@ -611,11 +558,11 @@ async fn main() -> Result<()> {
             neighbor_set.insert(endpoint.id());
             if refresh_bootstrap_peers(&mut room, &neighbor_set, &endpoint).await {
                 if let Err(err) = room.save() {
-                    eprintln!("warning: failed to save refreshed bootstrap peers: {err}");
+                    tracing::warn!(error = %err, "failed to save refreshed bootstrap peers");
                 } else {
-                    println!(
-                        "> refreshed {} bootstrap peer(s) for future reconnections",
-                        room.peers.len()
+                    tracing::info!(
+                        count = room.peers.len(),
+                        "refreshed bootstrap peers for future reconnections"
                     );
                 }
             }
@@ -890,7 +837,7 @@ async fn main() -> Result<()> {
                     history_saved_count = app.entries.len();
                     drop(store);
                     if let Err(err) = chat_history.lock().unwrap().save() {
-                        eprintln!("warning: failed to save chat history: {err}");
+                        tracing::warn!(error = %err, "failed to save chat history");
                     }
                 }
             }
@@ -961,7 +908,7 @@ async fn main() -> Result<()> {
                     history_saved_count = app.entries.len();
                     drop(store);
                     if let Err(err) = chat_history.lock().unwrap().save() {
-                        eprintln!("warning: failed to save chat history: {err}");
+                        tracing::warn!(error = %err, "failed to save chat history");
                     }
                 }
                 terminal.draw(|frame| render_app(frame, &mut app))?;
@@ -1013,7 +960,7 @@ async fn main() -> Result<()> {
 
     // Save chat history before shutdown.
     if let Err(err) = chat_history.lock().unwrap().save() {
-        eprintln!("warning: failed to save chat history: {err}");
+        tracing::warn!(error = %err, "failed to save chat history");
     }
 
     router.shutdown().await.anyerr()?;
