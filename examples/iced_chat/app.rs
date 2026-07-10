@@ -9,16 +9,17 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher};
+use iroh::{
+    address_lookup::memory::MemoryLookup, EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher,
+};
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket};
 use iroh_gossip::api::GossipSender;
 use iroh_gossip::backfill::BackfillHandle;
 use iroh_gossip::chat_callbacks::ChatCallbacks;
-use iroh_gossip::chat_core::handle_net_event as chat_net_event;
 use iroh_gossip::chat_core::{
-    download_candidates,
+    collect_bootstrap_peers, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
-    MeshHealth, MessageHash,
+    handle_net_event as chat_net_event, seed_memory_lookup, MeshHealth, MessageHash,
 };
 use iroh_gossip::chat_history::{ChatHistoryStore, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendsStore};
@@ -380,9 +381,9 @@ pub struct IcedChat {
     sender: Option<GossipSender>,
     blob_store: MemStore,
     endpoint: iroh::Endpoint,
+    memory_lookup: MemoryLookup,
     local_label: String,
     local_public: PublicKey,
-    local_peer_addr: EndpointAddr,
     relay_mode: RelayMode,
     runtime_handle: tokio::runtime::Handle,
     pub net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
@@ -529,9 +530,9 @@ impl IcedChat {
         gossip: Gossip,
         blob_store: MemStore,
         endpoint: iroh::Endpoint,
+        memory_lookup: MemoryLookup,
         local_label: String,
         local_public: PublicKey,
-        local_peer_addr: EndpointAddr,
         relay_mode: RelayMode,
         data_dir: std::path::PathBuf,
         runtime_handle: tokio::runtime::Handle,
@@ -579,9 +580,9 @@ impl IcedChat {
             sender: None,
             blob_store,
             endpoint,
+            memory_lookup,
             local_label,
             local_public,
-            local_peer_addr,
             relay_mode,
             runtime_handle,
             net_rx,
@@ -621,7 +622,7 @@ impl IcedChat {
     fn room_ticket(&self, topic: TopicId) -> Ticket {
         Ticket {
             topic,
-            peers: vec![self.local_peer_addr.clone()],
+            peers: vec![self.endpoint.watch_addr().get()],
         }
     }
 
@@ -640,6 +641,23 @@ impl IcedChat {
 
     fn personal_room_ticket(&self) -> String {
         self.room_ticket(self.personal_room_topic()).to_string()
+    }
+
+    /// Refresh the displayed room ticket when iroh learns a new relay or
+    /// direct address asynchronously. The current endpoint address is read
+    /// by `room_ticket`, so this also detects changes without stale state.
+    fn refresh_local_peer_addr(&mut self) -> bool {
+        if self.ticket_str.is_empty() {
+            return false;
+        }
+
+        let current_ticket = self.room_ticket(self.topic).to_string();
+        if current_ticket == self.ticket_str {
+            return false;
+        }
+
+        self.ticket_str = current_ticket;
+        true
     }
 
     fn push_system(&mut self, text: impl Into<String>) {
@@ -712,9 +730,7 @@ impl IcedChat {
         self.history_saved_count = 0;
     }
 
-    /// Save any new entries in the current room to durable history.
-    /// Only saves entries that have not yet been persisted (tracked by
-    /// `history_saved_count`), avoiding duplication on room navigation.
+    /// Copy new entries into the active-session store without persistence.
     fn save_room_to_history(&mut self) {
         let topic = self.topic;
         let current_count = self.entries.len();
@@ -722,7 +738,7 @@ impl IcedChat {
             return;
         }
 
-        // Persist chat messages to durable history — only the new ones.
+        // Keep chat messages available to the active session only.
         for entry in &self.entries[self.history_saved_count..] {
             let kind = match entry.kind {
                 ChatKind::System => "system",
@@ -1067,18 +1083,18 @@ impl IcedChat {
                 let personal_topic = self.personal_room_topic();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let endpoint = self.endpoint.clone();
+                let memory_lookup = self.memory_lookup.clone();
                 let data_dir = self.data_dir.clone();
                 // Extract bootstrap peer addresses from the one-shot initial room
                 // or from the saved RoomStore for this topic.
-                let mut initial_addrs: Vec<EndpointAddr> =
+                let initial_addrs: Vec<EndpointAddr> =
                     self.initial_bootstrap_peers.drain(..).collect();
-                if initial_addrs.is_empty() {
-                    initial_addrs = RoomStore::load_or_none(&data_dir)
-                        .filter(|room| room.topic == topic)
-                        .map(|room| room.peers)
-                        .unwrap_or_default();
-                }
-                let bootstrap_peers: Vec<_> = initial_addrs.iter().map(|addr| addr.id).collect();
+                let saved_addrs = RoomStore::load_or_none(&data_dir)
+                    .filter(|room| room.topic == topic)
+                    .map(|room| room.peers)
+                    .unwrap_or_default();
+                let (bootstrap_peers, initial_addrs) =
+                    collect_bootstrap_peers([&initial_addrs, &saved_addrs]);
                 let initial_addrs_for_save = initial_addrs.clone();
 
                 iced::Task::perform(
@@ -1087,15 +1103,7 @@ impl IcedChat {
                         // addresses so the endpoint can resolve them by their
                         // transport info (relay URL, direct addresses) from the
                         // ticket or RoomStore — not just by public key.
-                        if !initial_addrs.is_empty() {
-                            let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
-                            if let Ok(addr_lookup) = endpoint.address_lookup() {
-                                addr_lookup.add(memory_lookup.clone());
-                            }
-                            for addr in &initial_addrs {
-                                memory_lookup.set_endpoint_info(addr.clone());
-                            }
-                        }
+                        seed_memory_lookup(&memory_lookup, &initial_addrs);
                         // Wait for at least one gossip neighbor if we have bootstrap
                         // peers — matching the TUI behavior.  Without bootstrap
                         // peers (room creator) use subscribe() so we don't hang.
@@ -1308,20 +1316,20 @@ impl IcedChat {
                 let label = self.local_label.clone();
                 let personal_topic = self.personal_room_topic();
                 let endpoint = self.endpoint.clone();
+                let memory_lookup = self.memory_lookup.clone();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
 
                 iced::Task::perform(
                     async move {
-                        let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
-                        if let Ok(addr_lookup) = endpoint.address_lookup() {
-                            addr_lookup.add(memory_lookup.clone());
-                        }
-                        for peer in &ticket.peers {
-                            memory_lookup.set_endpoint_info(peer.clone());
-                        }
                         let topic = ticket.topic;
-                        let peers: Vec<_> = ticket.peers.iter().map(|p| p.id).collect();
+                        let saved_addrs = RoomStore::load_or_none(&data_dir)
+                            .filter(|room| room.topic == topic)
+                            .map(|room| room.peers)
+                            .unwrap_or_default();
+                        let (peers, bootstrap_addrs) =
+                            collect_bootstrap_peers([&ticket.peers, &saved_addrs]);
+                        seed_memory_lookup(&memory_lookup, &bootstrap_addrs);
 
                         // Use subscribe_and_join so we wait for at least one gossip
                         // neighbor to connect before proceeding — matching the TUI
@@ -1387,7 +1395,7 @@ impl IcedChat {
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(presence).await;
 
-                        let room = RoomStore::with_peers(&data_dir, topic, ticket.peers.clone());
+                        let room = RoomStore::with_peers(&data_dir, topic, bootstrap_addrs);
                         let _ = room.save();
 
                         Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
@@ -2368,6 +2376,28 @@ impl IcedChat {
 
                 // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
                 let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
+                // Relay selection and direct addresses are learned asynchronously.
+                // Keep the room ticket shown in the UI (and therefore copied to the
+                // clipboard) aligned with the endpoint's current address, and
+                // immediately advertise the new personal ticket to peers.
+                if self.refresh_local_peer_addr() {
+                    if let Some(ref sender) = self.sender {
+                        let sk = self.secret_key.clone();
+                        let ticket = self.personal_room_ticket();
+                        let s = sender.clone();
+                        tasks.push(iced::Task::perform(
+                            async move {
+                                if let Ok(encoded) = SignedMessage::sign_and_encode(
+                                    &sk,
+                                    &crate::Message::PresenceWithTicket { ticket },
+                                ) {
+                                    s.broadcast(encoded).await.ok();
+                                }
+                            },
+                            |_| AppMessage::Noop,
+                        ));
+                    }
+                }
                 if self.presence_counter == 0 {
                     self.presence_counter = 5;
                     if let Some(ref sender) = self.sender {

@@ -554,11 +554,12 @@ async fn main() -> Result<()> {
     let whisper_handler = whisper_builder.protocol_handler();
     let (whisper_handle, mut whisper_events) = whisper_builder.spawn().await;
 
-    // Load persistent chat message history (needed before Router for backfill)
+    // Keep chat history transient for this process only. Legacy history files
+    // are removed by the loader and are never replayed.
     let chat_history = ChatHistoryStore::load_or_default(&data_dir);
     if !chat_history.is_empty() {
         println!(
-            "> loaded {} chat message(s) from history (durable local state in chat_history.json; use /leave to clear the active room, or delete the file to clear all rooms)",
+            "> retained {} active-session chat message(s) in memory (history is never saved to disk)",
             chat_history.len()
         );
     }
@@ -667,7 +668,8 @@ async fn main() -> Result<()> {
         app.push_system(format!("You announced yourself as {name}."));
     }
 
-    // Replay persistent chat history into the current room's UI.
+    // Start each process with an empty chat log; previous messages are never
+    // loaded from disk.
     let mut names = HashMap::new();
     names.insert(local_public, local_label.clone());
     {

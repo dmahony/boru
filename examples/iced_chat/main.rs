@@ -5,8 +5,6 @@
 //!   cargo run --features gui --example iced_chat open   # open new room
 //!   cargo run --features gui --example iced_chat join <ticket>  # join room
 
-use iroh::Watcher;
-
 mod app;
 mod log_viewer;
 
@@ -69,7 +67,8 @@ struct Args {
     relay: Option<RelayUrl>,
     #[clap(long)]
     no_relay: bool,
-    /// Directory for persistent state (secret key, chat history, room history).
+    /// Directory for persistent identity and friend state. Chat and room
+    /// history are kept in memory only.
     /// Defaults to IROH_GOSSIP_CHAT_DATA_DIR env var, or ~/.local/share/iroh-gossip-chat/.
     #[clap(long)]
     data_dir: Option<PathBuf>,
@@ -204,7 +203,11 @@ fn init_logging(data_dir: &Path) -> Result<()> {
     }
 
     let writer = FileMakeWriter(Arc::new(Mutex::new(file)));
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+    // Keep the persistent log useful by default.  The iroh endpoint emits
+    // very high-volume discovery and DNS diagnostics at DEBUG; leaving that
+    // level enabled made a single GUI session grow iced_chat.log to tens of
+    // megabytes.  Operators can still opt into the full trace with RUST_LOG.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let subscriber = build_logging_subscriber(
         writer,
         std::io::stderr,
@@ -389,7 +392,7 @@ fn main() -> Result<()> {
 
     let (
         endpoint,
-        local_peer_addr,
+        memory_lookup,
         gossip,
         blob_store,
         net_rx,
@@ -408,7 +411,7 @@ fn main() -> Result<()> {
         let memory_lookup = MemoryLookup::new();
         use std::net::{Ipv4Addr, SocketAddrV4};
 
-        let (endpoint, local_peer_addr) = {
+        let endpoint = {
             #[cfg(feature = "tor-transport")]
             if use_tor {
                 let tor_dirs = TorStorageDirs::new()?;
@@ -424,8 +427,6 @@ fn main() -> Result<()> {
                     .bind()
                     .await?;
                 endpoint.online().await;
-                let local_peer_addr = tor_transport.watch_local_peer_addr().initialized().await.endpoint_addr();
-
                 // Spawn the Tor health-monitor background task
                 let monitor_client = Arc::clone(&tor_client);
                 let monitor_tx = tor_reconnect_tx.clone();
@@ -434,7 +435,7 @@ fn main() -> Result<()> {
                 });
 
                 info!("> Tor bootstrap finished: {tor_status_message}");
-                (endpoint, local_peer_addr)
+                endpoint
             } else {
                 let ep_builder = if matches!(relay_mode, RelayMode::Disabled) {
                     Endpoint::builder(presets::N0DisableRelay)
@@ -451,8 +452,7 @@ fn main() -> Result<()> {
                 if !matches!(relay_mode, RelayMode::Disabled) {
                     endpoint.online().await;
                 }
-                let local_peer_addr = endpoint.addr();
-                (endpoint, local_peer_addr)
+                endpoint
 
             }
             #[cfg(not(feature = "tor-transport"))]
@@ -472,8 +472,7 @@ fn main() -> Result<()> {
                 if !matches!(relay_mode, RelayMode::Disabled) {
                     endpoint.online().await;
                 }
-                let local_peer_addr = endpoint.addr();
-                (endpoint, local_peer_addr)
+                endpoint
 
             }
         };
@@ -518,11 +517,12 @@ fn main() -> Result<()> {
         let blob_store = MemStore::new();
         let blobs_protocol = BlobsProtocol::new(&blob_store, None);
 
-        // Load chat message history (needed before Router for backfill)
+        // Keep chat history transient for this process only. Legacy history
+        // files are removed by the loader and are never replayed.
         let chat_history = ChatHistoryStore::load_or_default(&data_dir);
         if !chat_history.is_empty() {
             info!(
-                "> loaded {} chat message(s) from history (durable local state in chat_history.json; use /leave to clear the active room, or delete the file to clear all rooms)",
+                "> retained {} active-session chat message(s) in memory (history is never saved to disk)",
                 chat_history.len()
             );
         }
@@ -586,7 +586,7 @@ fn main() -> Result<()> {
 
         Result::<_>::Ok((
             endpoint,
-            local_peer_addr,
+            memory_lookup,
             gossip,
             blob_store,
             net_rx,
@@ -612,9 +612,9 @@ fn main() -> Result<()> {
             gossip,
             blob_store,
             endpoint.clone(),
+            memory_lookup,
             local_label,
             local_public,
-            local_peer_addr,
             relay_mode,
             data_dir,
             runtime.handle().clone(),
@@ -674,6 +674,12 @@ fn main() -> Result<()> {
         std::process::exit(1);
     });
 
+    // The GUI owns clones of the endpoint, but iced drops the application
+    // state before returning here.  Close the original endpoint explicitly
+    // before dropping the runtime so iroh can shut down its discovery and
+    // transport tasks cleanly instead of logging "Endpoint dropped without
+    // calling Endpoint::close".
+    runtime.block_on(endpoint.close());
     let _keep_runtime_alive = runtime;
     Ok(())
 }

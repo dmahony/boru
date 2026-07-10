@@ -1,27 +1,11 @@
-//! Durable chat message history for iroh-gossip-chat.
+//! Transient chat message state for iroh-gossip-chat.
 //!
-//! Stores each signed message as a persistent entry so that late-joiners
-//! can catch up and messages survive restarts.  Every message is also
-//! content-addressed: its blake3 hash acts as a stable key that peers
-//! can use to request and verify the raw bytes via iroh blobs.
+//! Chat messages are intentionally never persisted.  This type remains as a
+//! small in-memory compatibility layer for the active-session backfill code;
+//! its disk-facing methods discard legacy files and never write new ones.
 //!
-//! History is saved as a JSON file (`chat_history.json`) alongside the
-//! identity key — one per data directory.  The file is written atomically
-//! (write to .tmp, fsync, rename) so partial writes never corrupt the log.
-//!
-//! ## Gossip-level sync (out of band)
-//!
-//! This module provides the local persistent store.  The gossip protocol
-//! is extended with a `Message::HistoryTip { hash }` variant so peers
-//! can announce the latest blob hash.  Callers (forward_gossip_events /
-//! handle_net_event) are responsible for:
-//!
-//! 1. Storing every outgoing and incoming signed message via [`add_entry`].
-//! 2. Broadcasting a `HistoryTip` after each message so others learn the
-//!    latest hash.
-//! 3. On `NeighborUp`, requesting the missing chain from the new peer
-//!    and replaying any blobs they don't yet have locally.
-//! 4. Loading history on room open and replaying it into the UI.
+//! Callers may use the in-memory entries while the process is running. No
+//! state survives process exit and no history is replayed on room open.
 
 use std::{
     fs,
@@ -29,7 +13,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::chat_core::atomic_write::atomic_write_json;
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
@@ -132,20 +115,10 @@ impl HistoryEntry {
 
 // ── Persistent store ───────────────────────────────────────────────────
 
-/// Persistent, append-only chat message history.
+/// In-memory chat message entries for the active process only.
 ///
-/// Saved as a JSON array at `chat_history.json`.  The file is rewritten
-/// atomically on every call to [`save`](Self::save).  This is safe for
-/// the moderate message volumes of a chat application (thousands, not
-/// millions), but would not scale to high-throughput logging.
-///
-/// ## Limitations
-///
-/// - The entire file is rewritten on every save.  For very large chat
-///   logs (10k+ messages) this could become slow.  A future optimisation
-///   would switch to an append-only log format.
-/// - No deduplication: if the same message is received twice (e.g. from
-///   two peers relaying it), two entries will be stored.
+/// The `data_dir` field is retained only to preserve the API used by the
+/// frontends; it is never used for writing chat data.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatHistoryStore {
     /// Format version for future migrations.
@@ -173,32 +146,19 @@ impl ChatHistoryStore {
         history_file_path(&self.data_dir)
     }
 
-    /// Load the history store from disk.
+    /// Discard a legacy on-disk history file and return no history.
     ///
-    /// - Missing file → `Ok(None)`
-    /// - Corrupt JSON → error
+    /// Existing `chat_history.json` files are deleted on discovery so old
+    /// chat content is not retained or replayed after upgrading.
     pub fn load(data_dir: impl AsRef<Path>) -> Result<Option<Self>> {
         let data_dir = data_dir.as_ref();
         let path = history_file_path(data_dir);
-        if !path.exists() {
-            return Ok(None);
+        if path.exists() {
+            fs::remove_file(&path).with_std_context(|_| {
+                format!("failed to remove legacy history file {}", path.display())
+            })?;
         }
-
-        let raw = fs::read_to_string(&path)
-            .with_std_context(|_| format!("failed to read history file {}", path.display()))?;
-        let mut store: Self = serde_json::from_str(&raw)
-            .with_std_context(|_| format!("failed to parse history file {}", path.display()))?;
-
-        if store.schema_version != SCHEMA_VERSION {
-            return Err(n0_error::anyerr!(
-                "unsupported history schema version {} in {}",
-                store.schema_version,
-                path.display()
-            ));
-        }
-
-        store.data_dir = data_dir.to_path_buf();
-        Ok(Some(store))
+        Ok(None)
     }
 
     /// Load history, falling back to an empty store on any failure.
@@ -217,7 +177,10 @@ impl ChatHistoryStore {
         }
     }
 
-    /// Persist the history store atomically to `chat_history.json`.
+    /// Do not persist chat history.
+    ///
+    /// The path is returned for API compatibility, but no file or temporary
+    /// file is created.
     pub fn save(&self) -> Result<PathBuf> {
         let data_dir = &self.data_dir;
         if data_dir.as_os_str().is_empty() {
@@ -225,9 +188,7 @@ impl ChatHistoryStore {
                 "chat history store has no data directory bound to it",
             ));
         }
-        let path = self.file_path();
-        atomic_write_json(&path, self, "chat history store")?;
-        Ok(path)
+        Ok(self.file_path())
     }
 
     /// Append a new entry.  Does **not** automatically save — call
@@ -326,7 +287,19 @@ mod tests {
     }
 
     #[test]
-    fn save_then_load_preserves_entries() {
+    fn load_removes_legacy_history_file() {
+        let dir = temp_dir("legacy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(HISTORY_FILE_NAME);
+        std::fs::write(&path, b"legacy chat content").unwrap();
+
+        let store = ChatHistoryStore::load_or_default(&dir);
+        assert!(store.is_empty());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn save_does_not_persist_entries() {
         let dir = temp_dir("roundtrip");
         let mut store = ChatHistoryStore::empty_at(&dir);
 
@@ -335,10 +308,9 @@ mod tests {
         store.push(make_entry(topic, 2));
         store.save().expect("save");
 
+        assert!(!store.file_path().exists());
         let loaded = ChatHistoryStore::load_or_default(&dir);
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded.entries[0].kind, "text");
-        assert_eq!(loaded.entries[1].text_preview, "hello 2");
+        assert!(loaded.is_empty());
     }
 
     #[test]
@@ -418,26 +390,19 @@ mod tests {
     }
 
     #[test]
-    fn save_is_atomic() {
+    fn save_does_not_create_history_file() {
         let dir = temp_dir("atomic");
         let topic = make_topic(0xAA);
         let mut store = ChatHistoryStore::empty_at(&dir);
 
         store.push(make_entry(topic, 1));
         let path = store.save().expect("first save");
+        assert_eq!(path, dir.join(HISTORY_FILE_NAME));
+        assert!(!path.exists());
 
-        // Verify the file is valid JSON
-        let raw = fs::read_to_string(&path).expect("read saved");
-        let parsed: ChatHistoryStore = serde_json::from_str(&raw).expect("valid JSON");
-        assert_eq!(parsed.len(), 1);
-
-        // Overwrite
         store.push(make_entry(topic, 2));
         store.save().expect("second save");
-
-        let raw2 = fs::read_to_string(&path).expect("re-read");
-        let parsed2: ChatHistoryStore = serde_json::from_str(&raw2).expect("valid JSON");
-        assert_eq!(parsed2.len(), 2);
+        assert!(!path.exists());
     }
 
     #[test]

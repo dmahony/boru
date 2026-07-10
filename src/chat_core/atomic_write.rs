@@ -1,7 +1,7 @@
 //! Atomic file update with pre-commit validation.
 //!
 //! Writing config / state to disk is a common operation across all the
-//! persistent stores (friends, room, chat history, room history).  Every
+//! persistent stores (friends and room metadata). Every
 //! store was duplicating the same ~35-line pattern:
 //!
 //! 1. Serialize to JSON

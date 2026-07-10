@@ -51,17 +51,14 @@ pub mod friends;
 #[cfg(feature = "net")]
 pub mod room;
 
-/// Durable multi-room history for the chat frontends.
+/// Transient multi-room state for the chat frontends.
 ///
-/// Stores a list of known rooms so the GUI can show a recent-chat list
-/// on startup — like Telegram/Signal's conversation list.
+/// Stores the current process's room list for navigation; it is never
+/// restored from or written to disk.
 #[cfg(feature = "net")]
 pub mod room_history;
 
-/// Durable chat message history for the chat frontends.
-///
-/// Stores every signed gossip message so late-joiners can catch up
-/// and messages survive restarts.
+/// Active-session chat message state. No chat messages are persisted.
 #[cfg(feature = "net")]
 pub mod chat_history;
 

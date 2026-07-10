@@ -1,9 +1,8 @@
-//! Durable multi-room history for iroh-gossip-chat.
+//! Transient multi-room state for iroh-gossip-chat.
 //!
-//! Stores a list of known chat rooms (topics) the user has joined or
-//! created, along with a display name and last-active timestamp so the
-//! UI can show a recent-chat list on startup — the way Telegram and
-//! Signal show your conversation list before you join a specific chat.
+//! Room history is intentionally not retained across process restarts.  The
+//! in-memory list is used only for the current process; legacy `rooms.json`
+//! files are deleted when discovered and no replacement is written.
 
 use std::{
     fs,
@@ -11,7 +10,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::chat_core::atomic_write::atomic_write_json;
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
@@ -79,10 +77,7 @@ impl RoomHistoryEntry {
     }
 }
 
-/// Persistent store for the user's room/chat history.
-///
-/// Saved as `rooms.json` alongside the secret key and single-room
-/// metadata.  Loaded at startup to populate the chat list.
+/// In-memory room list for the current process only.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RoomHistoryStore {
     /// Format version for future migrations.
@@ -110,29 +105,19 @@ impl RoomHistoryStore {
         rooms_file_path(&self.data_dir)
     }
 
-    /// Load room history from disk.  Missing file returns `None`.
+    /// Delete a legacy room-history file and return no persisted rooms.
     pub fn load(data_dir: impl AsRef<Path>) -> Result<Option<Self>> {
         let data_dir = data_dir.as_ref();
         let path = rooms_file_path(data_dir);
-        if !path.exists() {
-            return Ok(None);
+        if path.exists() {
+            fs::remove_file(&path).with_std_context(|_| {
+                format!(
+                    "failed to remove legacy room history file {}",
+                    path.display()
+                )
+            })?;
         }
-
-        let raw = fs::read_to_string(&path)
-            .with_std_context(|_| format!("failed to read rooms file {}", path.display()))?;
-        let mut store: Self = serde_json::from_str(&raw)
-            .with_std_context(|_| format!("failed to parse rooms file {}", path.display()))?;
-
-        if store.schema_version != SCHEMA_VERSION {
-            return Err(n0_error::anyerr!(
-                "unsupported rooms schema version {} in {}",
-                store.schema_version,
-                path.display()
-            ));
-        }
-
-        store.data_dir = data_dir.to_path_buf();
-        Ok(Some(store))
+        Ok(None)
     }
 
     /// Load room history, falling back to empty store on failure.
@@ -151,7 +136,8 @@ impl RoomHistoryStore {
         }
     }
 
-    /// Persist the room history atomically to `rooms.json`.
+    /// Do not persist room history.  Returns the legacy path for API
+    /// compatibility without creating it.
     pub fn save(&self) -> Result<PathBuf> {
         let data_dir = &self.data_dir;
         if data_dir.as_os_str().is_empty() {
@@ -159,9 +145,7 @@ impl RoomHistoryStore {
                 "room history store has no data directory bound to it",
             ));
         }
-        let path = self.file_path();
-        atomic_write_json(&path, self, "room history store")?;
-        Ok(path)
+        Ok(self.file_path())
     }
 
     /// Find a room by topic, or return `None`.
@@ -244,7 +228,19 @@ mod tests {
     }
 
     #[test]
-    fn save_then_load_preserves_rooms() {
+    fn load_removes_legacy_room_history_file() {
+        let dir = temp_dir("legacy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(ROOM_HISTORY_FILE_NAME);
+        std::fs::write(&path, b"legacy room content").unwrap();
+
+        let store = RoomHistoryStore::load_or_default(&dir);
+        assert!(store.is_empty());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn save_does_not_persist_rooms() {
         let dir = temp_dir("roundtrip");
         let mut store = RoomHistoryStore::empty_at(&dir);
 
@@ -254,10 +250,9 @@ mod tests {
         store.upsert(t2, "Work Chat", false);
         store.save().expect("save");
 
+        assert!(!store.file_path().exists());
         let loaded = RoomHistoryStore::load_or_default(&dir);
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded.find(&t1).unwrap().display_name(), "Friends Chat");
-        assert_eq!(loaded.find(&t2).unwrap().display_name(), "Work Chat");
+        assert!(loaded.is_empty());
     }
 
     #[test]

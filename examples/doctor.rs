@@ -414,17 +414,15 @@ fn check_room_history(data_dir: &Path) -> Check {
     }
 
     match RoomHistoryStore::load(data_dir) {
-        Ok(maybe) => match maybe {
-            Some(store) => Check {
-                name,
-                severity: Severity::Pass,
-                message: format!("loaded OK ({} room(s))", store.len()),
-            },
-            None => Check {
-                name,
-                severity: Severity::Pass,
-                message: "room history file empty but loadable".to_string(),
-            },
+        Ok(None) if !path.exists() => Check {
+            name,
+            severity: Severity::Pass,
+            message: "removed legacy room history file; no rooms are retained".to_string(),
+        },
+        Ok(_) => Check {
+            name,
+            severity: Severity::Fail,
+            message: "room history remains present after cleanup".to_string(),
         },
         Err(e) => Check {
             name,
@@ -447,17 +445,15 @@ fn check_chat_history(data_dir: &Path) -> Check {
     }
 
     match ChatHistoryStore::load(data_dir) {
-        Ok(maybe) => match maybe {
-            Some(store) => Check {
-                name,
-                severity: Severity::Pass,
-                message: format!("loaded OK ({} entry(ies))", store.len()),
-            },
-            None => Check {
-                name,
-                severity: Severity::Pass,
-                message: "chat history file empty but loadable".to_string(),
-            },
+        Ok(None) if !path.exists() => Check {
+            name,
+            severity: Severity::Pass,
+            message: "removed legacy chat history file; no messages are retained".to_string(),
+        },
+        Ok(_) => Check {
+            name,
+            severity: Severity::Fail,
+            message: "chat history remains present after cleanup".to_string(),
         },
         Err(e) => Check {
             name,
