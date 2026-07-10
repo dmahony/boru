@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey};
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket};
@@ -1256,11 +1256,33 @@ impl IcedChat {
             }
 
             AppMessage::JoinFromTicket => {
+                // Validate before leaving the current room or starting an
+                // asynchronous task.  Previously an empty/malformed field
+                // was parsed inside the task, so clicking the button gave no
+                // immediate feedback and looked like a no-op.
+                let ticket_input = self.join_ticket_input.trim();
+                if ticket_input.is_empty() {
+                    self.chat_list_error = "Paste a ticket before joining a room.".to_string();
+                    self.screen = Screen::ChatList;
+                    return iced::Task::none();
+                }
+                let ticket: Ticket = match ticket_input.parse() {
+                    Ok(ticket) => ticket,
+                    Err(e) => {
+                        self.chat_list_error = format!("Invalid ticket: {e}");
+                        self.screen = Screen::ChatList;
+                        return iced::Task::none();
+                    }
+                };
+
+                // Show progress while subscribe_and_join waits for the
+                // bootstrap peer.  Any connection error is converted to
+                // RoomJoinFailed below and rendered in this same location.
+                self.chat_list_error = "Joining room…".to_string();
                 self.save_room_to_history();
                 self.persist_room_history();
                 self.try_save_chat_history();
                 self.leave_current_room();
-                let ticket_input = self.join_ticket_input.clone();
                 let gossip = self.gossip.clone();
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
@@ -1273,9 +1295,6 @@ impl IcedChat {
 
                 iced::Task::perform(
                     async move {
-                        let ticket: Ticket = ticket_input
-                            .parse()
-                            .map_err(|e: n0_error::AnyError| e.to_string())?;
                         let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
                         if let Ok(addr_lookup) = endpoint.address_lookup() {
                             addr_lookup.add(memory_lookup.clone());
@@ -1291,11 +1310,15 @@ impl IcedChat {
                         // behavior.  If no bootstrap peers are given (unlikely here
                         // since JoinFromTicket always has ticket.peers) fall back to
                         // subscribe() to avoid hanging forever.
-                        let sub = if peers.is_empty() {
-                            gossip.subscribe(topic, peers).await
-                        } else {
-                            gossip.subscribe_and_join(topic, peers).await
-                        }
+                        let sub = tokio::time::timeout(Duration::from_secs(30), async {
+                            if peers.is_empty() {
+                                gossip.subscribe(topic, peers).await
+                            } else {
+                                gossip.subscribe_and_join(topic, peers).await
+                            }
+                        })
+                        .await
+                        .map_err(|_| "timed out waiting for a peer to join the room".to_string())?
                         .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
                         let new_ticket = Ticket {
