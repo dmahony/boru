@@ -1126,8 +1126,7 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
             let fid = FriendId::from_public_key(peer);
             if cb.is_friend(&peer) {
                 cb.friend_mark_online(fid);
-                // NOT mark_friends_dirty — friend ping manager is the
-                // authority for online status, not gossip neighbor state.
+                cb.mark_friends_dirty();
             }
             let name = cb.resolve_name(&peer);
             cb.push_system(format!("{name} joined the chat"));

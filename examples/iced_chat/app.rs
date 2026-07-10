@@ -541,7 +541,13 @@ impl IcedChat {
     ) -> Self {
         let (initial_topic, initial_bootstrap) = initial_room
             .unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
-        let friend_online_cache = HashSet::new();
+        // Seed the online cache from persisted friends who were online at last save,
+        // so they show the correct status immediately instead of starting as offline.
+        let friend_online_cache: HashSet<PublicKey> = friends
+            .iter()
+            .filter(|(_, record)| record.status.online)
+            .filter_map(|(id, _)| id.parse_public_key().ok())
+            .collect();
         Self {
             screen: Screen::ChatList,
             pending_topic: None,
@@ -849,6 +855,11 @@ impl IcedChat {
             }
 
             AppMessage::CreateNewRoom => {
+                // Leave the current room first — abort forward_handle, clear
+                // sender + entries — so we don't have a zombie forward_handle
+                // or broadcast to the wrong topic during the async gap.
+                self.leave_current_room();
+
                 let topic = TopicId::from_bytes(rand::random());
                 let gossip = self.gossip.clone();
                 let net_tx = self.net_tx.clone();
@@ -2472,15 +2483,31 @@ impl ChatCallbacks for IcedChat {
 
     fn on_neighbor_up(&mut self, peer: PublicKey) {
         self.neighbors.insert(peer);
+        self.friend_online_cache.insert(peer);
         self.recompute_connection_counts();
     }
 
     fn on_neighbor_down(&mut self, peer: PublicKey) {
         self.neighbors.remove(&peer);
+        self.friend_online_cache.remove(&peer);
         self.recompute_connection_counts();
     }
 
-    fn record_activity(&mut self, _peer: PublicKey) {}
+    fn record_activity(&mut self, peer: PublicKey) {
+        // Update mesh health timestamp for this peer so the mesh
+        // watchdog doesn't falsely flag them as stale.
+        self.friend_online_cache.insert(peer);
+        self.neighbors.insert(peer);
+    }
+
+    fn record_presence(&mut self, peer: PublicKey) {
+        // A Presence heartbeat proves the peer is still alive and
+        // connected.  Update the online cache so the friend list
+        // shows them as online, and ensure they're tracked as a
+        // neighbor for mesh health purposes.
+        self.friend_online_cache.insert(peer);
+        self.neighbors.insert(peer);
+    }
 
     fn request_quit(&mut self) {
         // IcedChat handles window close through the iced framework.
