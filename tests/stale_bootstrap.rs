@@ -18,15 +18,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint,
-    PublicKey, RelayMode, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
+    RelayMode, SecretKey,
 };
 use iroh_gossip::{
+    chat_callbacks::ChatCallbacks,
     chat_core::{
         self, forward_gossip_events, refresh_bootstrap_peers, seed_memory_lookup, ChatEntry,
         Message, NetEvent, SignedMessage,
     },
-    chat_callbacks::ChatCallbacks,
     friends::FriendId,
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
@@ -35,7 +35,7 @@ use iroh_gossip::{
 use n0_error::Result;
 use n0_future::{task, time::sleep, StreamExt};
 use rand::{RngExt, SeedableRng};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 
 // ── SimChat ───────────────────────────────────────────────────────
 
@@ -48,9 +48,15 @@ struct SimChat {
 }
 
 impl ChatCallbacks for SimChat {
-    fn local_public(&self) -> PublicKey { self.local_public }
-    fn set_name(&mut self, peer: PublicKey, name: String) { self.names.insert(peer, name); }
-    fn is_friend(&self, _peer: &PublicKey) -> bool { false }
+    fn local_public(&self) -> PublicKey {
+        self.local_public
+    }
+    fn set_name(&mut self, peer: PublicKey, name: String) {
+        self.names.insert(peer, name);
+    }
+    fn is_friend(&self, _peer: &PublicKey) -> bool {
+        false
+    }
     fn friend_mark_online(&mut self, _fid: FriendId) {}
     fn friend_mark_offline(&mut self, _fid: FriendId) {}
     fn friend_set_name(&mut self, _fid: FriendId, _name: String) {}
@@ -59,20 +65,38 @@ impl ChatCallbacks for SimChat {
         self.received_messages.push(format!("[sys] {text}"));
         self.entries.push(ChatEntry::system(text));
     }
-    fn push_remote(&mut self, label: String, text: String, _hash: Option<iroh_gossip::chat_core::MessageHash>, _sent_at: Option<u64>) {
+    fn push_remote(
+        &mut self,
+        label: String,
+        text: String,
+        _hash: Option<iroh_gossip::chat_core::MessageHash>,
+        _sent_at: Option<u64>,
+    ) {
         self.received_messages.push(format!("[{label}] {text}"));
         self.entries.push(ChatEntry::remote(label, text));
     }
     fn set_pending_file(&mut self, _name: String, _ticket: String) {}
-    fn set_pending_image(&mut self, _name: String, _hash: iroh_gossip::chat_core::MessageHash, _from: PublicKey) {}
+    fn set_pending_image(
+        &mut self,
+        _name: String,
+        _hash: iroh_gossip::chat_core::MessageHash,
+        _from: PublicKey,
+    ) {
+    }
     fn has_message(&self, hash: &iroh_gossip::chat_core::MessageHash) -> bool {
-        self.entries.iter().any(|e| e.message_hash.as_ref() == Some(hash))
+        self.entries
+            .iter()
+            .any(|e| e.message_hash.as_ref() == Some(hash))
     }
     fn edit_message(&mut self, _hash: &iroh_gossip::chat_core::MessageHash, _new_text: String) {}
     fn delete_message(&mut self, _hash: &iroh_gossip::chat_core::MessageHash) {}
     fn add_reaction(&mut self, _hash: &iroh_gossip::chat_core::MessageHash, _emoji: String) {}
-    fn on_neighbor_up(&mut self, peer: PublicKey) { self.neighbors.insert(peer); }
-    fn on_neighbor_down(&mut self, peer: PublicKey) { self.neighbors.remove(&peer); }
+    fn on_neighbor_up(&mut self, peer: PublicKey) {
+        self.neighbors.insert(peer);
+    }
+    fn on_neighbor_down(&mut self, peer: PublicKey) {
+        self.neighbors.remove(&peer);
+    }
     fn record_activity(&mut self, _peer: PublicKey) {}
     fn request_quit(&mut self) {}
 }
@@ -81,7 +105,9 @@ fn drain_net(rx: &Arc<Mutex<mpsc::UnboundedReceiver<NetEvent>>>, sim: &mut SimCh
     loop {
         let item = rx.try_lock().unwrap().try_recv();
         match item {
-            Ok(event) => { let _ = chat_core::handle_net_event(event, sim); }
+            Ok(event) => {
+                let _ = chat_core::handle_net_event(event, sim);
+            }
             Err(_) => break,
         }
     }
@@ -184,9 +210,7 @@ async fn test_stale_bootstrap_does_not_block_rejoin() -> Result<()> {
     }
 
     // Forward C's events to a sink so the gossip actor's event channel doesn't fill up
-    let _c_drain = task::spawn(async move {
-        while let Some(_) = recv_c.next().await {}
-    });
+    let _c_drain = task::spawn(async move { while let Some(_) = recv_c.next().await {} });
 
     let (net_tx_b, net_rx_b) = mpsc::unbounded_channel();
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
@@ -201,14 +225,20 @@ async fn test_stale_bootstrap_does_not_block_rejoin() -> Result<()> {
     };
 
     // Send a message from C through the mesh to confirm B receives it
-    let msg = SignedMessage::sign_and_encode(&sk_c, &Message::Message {
-        text: "hello from C".into(),
-    })?;
+    let msg = SignedMessage::sign_and_encode(
+        &sk_c,
+        &Message::Message {
+            text: "hello from C".into(),
+        },
+    )?;
     sender_c.broadcast(msg.clone()).await?;
     sleep(Duration::from_millis(1000)).await;
     drain_net(&net_rx_b, &mut sim_b);
     assert!(
-        sim_b.received_messages.iter().any(|m| m.contains("hello from C")),
+        sim_b
+            .received_messages
+            .iter()
+            .any(|m| m.contains("hello from C")),
         "B should receive message from C"
     );
     println!("  ✓ Message routed through mesh (C → B)");
@@ -226,12 +256,22 @@ async fn test_stale_bootstrap_does_not_block_rejoin() -> Result<()> {
         "> Refresh: changed={changed}, stored {} peer(s)",
         room.peers.len()
     );
-    assert!(!room.peers.is_empty(), "RoomStore must have peers after refresh");
+    assert!(
+        !room.peers.is_empty(),
+        "RoomStore must have peers after refresh"
+    );
 
     // Each stored addr must have a relay URL (the key info for reconnection)
     for addr in &room.peers {
-        let has_relay = addr.addrs.iter().any(|a| matches!(a, iroh::TransportAddr::Relay(_)));
-        assert!(has_relay, "saved EndpointAddr for {} must include relay URL", addr.id.fmt_short());
+        let has_relay = addr
+            .addrs
+            .iter()
+            .any(|a| matches!(a, iroh::TransportAddr::Relay(_)));
+        assert!(
+            has_relay,
+            "saved EndpointAddr for {} must include relay URL",
+            addr.id.fmt_short()
+        );
     }
     println!("  ✓ All saved peers have relay URLs");
 
@@ -248,7 +288,10 @@ async fn test_stale_bootstrap_does_not_block_rejoin() -> Result<()> {
     // because sender_c is still alive)
     drain_net(&net_rx_b, &mut sim_b);
     let has_c = sim_b.neighbors.contains(&pk_c);
-    println!("  > B still has neighbor(s): {} (C alive: {has_c})", sim_b.neighbors.len());
+    println!(
+        "  > B still has neighbor(s): {} (C alive: {has_c})",
+        sim_b.neighbors.len()
+    );
 
     // ── Phase 4: B re-subscribes using saved RoomStore peers ──
     let room_b2 = RoomStore::load_or_none(tmp_dir.path()).expect("RoomStore must persist");
@@ -272,19 +315,23 @@ async fn test_stale_bootstrap_does_not_block_rejoin() -> Result<()> {
     seed_memory_lookup(&new_memory, &room_b2.peers);
 
     // B re-subscribes using saved peers (A stale, C live)
-    let mut sub_b2 = gossip_b
-        .subscribe(topic, bootstrap_ids)
-        .await?;
+    let mut sub_b2 = gossip_b.subscribe(topic, bootstrap_ids).await?;
     println!("  ✓ Phase 4: re-subscribed using saved bootstrap peers");
 
     // Wait for B to reconnect — should connect to C
     let c_reached = wait_joined(&mut sub_b2, 80).await;
-    assert!(c_reached, "B should reconnect to C via saved bootstrap peers");
+    assert!(
+        c_reached,
+        "B should reconnect to C via saved bootstrap peers"
+    );
     println!("  ✓ B reconnected to C (A is stale but C is live)");
 
     // ── Check that refreshed addresses are persisted ──
     let room_b3 = RoomStore::load_or_none(tmp_dir.path()).expect("RoomStore after restart");
-    assert!(!room_b3.peers.is_empty(), "RoomStore peers persist across reload");
+    assert!(
+        !room_b3.peers.is_empty(),
+        "RoomStore peers persist across reload"
+    );
     println!(
         "  ✓ RoomStore persists {} bootstrap peer(s) across restart",
         room_b3.peers.len()

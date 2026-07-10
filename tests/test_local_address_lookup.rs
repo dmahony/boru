@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use iroh::{
     address_lookup::{memory::MemoryLookup, AddressLookup, EndpointData},
-    endpoint::presets, protocol::Router, Endpoint, RelayMode, SecretKey, TransportAddr,
+    endpoint::presets,
+    protocol::Router,
+    Endpoint, RelayMode, SecretKey, TransportAddr,
 };
 use iroh_gossip::{
     api::{Event as GossipEvent, GossipTopic},
@@ -20,7 +22,7 @@ use iroh_gossip::{
 };
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_error::Result;
-use n0_future::{StreamExt, task, time::sleep};
+use n0_future::{task, time::sleep, StreamExt};
 use rand::{RngExt, SeedableRng};
 use tokio::sync::Mutex;
 use tracing::info;
@@ -95,7 +97,10 @@ async fn test_mdns_added_to_endpoint() -> Result<()> {
     // Add mDNS
     let mdns = MdnsAddressLookup::builder().build(ep.id())?;
     let address_lookup = ep.address_lookup();
-    assert!(address_lookup.is_ok(), "endpoint should have an address lookup");
+    assert!(
+        address_lookup.is_ok(),
+        "endpoint should have an address lookup"
+    );
     address_lookup.as_ref().unwrap().add(mdns);
 
     info!(
@@ -131,10 +136,7 @@ async fn test_mdns_creation_and_subscribe() -> Result<()> {
     (&advertiser as &dyn AddressLookup).publish(&endpoint_data);
 
     let event_found = tokio::time::timeout(Duration::from_secs(5), events.next()).await;
-    assert!(
-        event_found.is_ok(),
-        "Should receive a DiscoveryEvent"
-    );
+    assert!(event_found.is_ok(), "Should receive a DiscoveryEvent");
 
     let event = event_found.unwrap();
     match event {
@@ -194,10 +196,8 @@ async fn test_gossip_with_memory_lookup_bootstrap() -> Result<()> {
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(48);
 
     // Spawn two peers with mDNS enabled
-    let (_router_a, ep_a, sk_a, gossip_a, _mem_a) =
-        spawn_relay_endpoint(&mut rng, 0).await?;
-    let (_router_b, ep_b, sk_b, gossip_b, _mem_b) =
-        spawn_relay_endpoint(&mut rng, 0).await?;
+    let (_router_a, ep_a, sk_a, gossip_a, _mem_a) = spawn_relay_endpoint(&mut rng, 0).await?;
+    let (_router_b, ep_b, sk_b, gossip_b, _mem_b) = spawn_relay_endpoint(&mut rng, 0).await?;
 
     info!("Peer A: {}", ep_a.id().fmt_short());
     info!("Peer B: {}", ep_b.id().fmt_short());
@@ -227,7 +227,11 @@ async fn test_gossip_with_memory_lookup_bootstrap() -> Result<()> {
             break;
         }
         if i % 10 == 9 {
-            info!("tick {i}: A joined={} B joined={}", sub_a.is_joined(), sub_b.is_joined());
+            info!(
+                "tick {i}: A joined={} B joined={}",
+                sub_a.is_joined(),
+                sub_b.is_joined()
+            );
         }
     }
     assert!(joined, "Peers should have joined the topic");
@@ -237,7 +241,9 @@ async fn test_gossip_with_memory_lookup_bootstrap() -> Result<()> {
 
     // A sends a message to B
     info!("A broadcasts to B");
-    let msg = Message::Message { text: "hello from A".into() };
+    let msg = Message::Message {
+        text: "hello from A".into(),
+    };
     let encoded = SignedMessage::sign_and_encode(&sk_a, &msg).expect("sign");
     sub_a.broadcast(encoded).await?;
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -257,7 +263,9 @@ async fn test_gossip_with_memory_lookup_bootstrap() -> Result<()> {
 
     // B sends a message to A
     info!("B broadcasts to A");
-    let msg = Message::Message { text: "hello from B".into() };
+    let msg = Message::Message {
+        text: "hello from B".into(),
+    };
     let encoded = SignedMessage::sign_and_encode(&sk_b, &msg).expect("sign");
     sub_b.broadcast(encoded).await?;
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -358,7 +366,9 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
     // A broadcasts AboutMe
     let about_a = SignedMessage::sign_and_encode(
         &sk_a,
-        &Message::AboutMe { name: "Alice".into() },
+        &Message::AboutMe {
+            name: "Alice".into(),
+        },
     )?;
     sender_a.broadcast(about_a).await?;
 
@@ -372,10 +382,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
     task::spawn(forward_gossip_events(receiver_b, net_tx_b));
 
-    let about_b = SignedMessage::sign_and_encode(
-        &sk_b,
-        &Message::AboutMe { name: "Bob".into() },
-    )?;
+    let about_b = SignedMessage::sign_and_encode(&sk_b, &Message::AboutMe { name: "Bob".into() })?;
     sender_b.broadcast(about_b).await?;
 
     // Wait for neighborhood formation
@@ -385,9 +392,13 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         received: Vec<String>,
     }
     impl iroh_gossip::chat_callbacks::ChatCallbacks for TestChat {
-        fn local_public(&self) -> iroh::PublicKey { self.local_public }
+        fn local_public(&self) -> iroh::PublicKey {
+            self.local_public
+        }
         fn set_name(&mut self, _peer: iroh::PublicKey, _name: String) {}
-        fn is_friend(&self, _peer: &iroh::PublicKey) -> bool { false }
+        fn is_friend(&self, _peer: &iroh::PublicKey) -> bool {
+            false
+        }
         fn friend_mark_online(&mut self, _fid: iroh_gossip::friends::FriendId) {}
         fn friend_mark_offline(&mut self, _fid: iroh_gossip::friends::FriendId) {}
         fn friend_set_name(&mut self, _fid: iroh_gossip::friends::FriendId, _name: String) {}
@@ -395,13 +406,28 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         fn push_system(&mut self, text: String) {
             self.received.push(format!("[sys] {text}"));
         }
-        fn push_remote(&mut self, label: String, text: String, _hash: Option<iroh_gossip::chat_core::MessageHash>, _sent_at: Option<u64>) {
+        fn push_remote(
+            &mut self,
+            label: String,
+            text: String,
+            _hash: Option<iroh_gossip::chat_core::MessageHash>,
+            _sent_at: Option<u64>,
+        ) {
             self.received.push(format!("[{label}] {text}"));
         }
         fn set_pending_file(&mut self, _name: String, _ticket: String) {}
-        fn set_pending_image(&mut self, _name: String, _hash: iroh_gossip::chat_core::MessageHash, _from: iroh::PublicKey) {}
-        fn has_message(&self, _hash: &iroh_gossip::chat_core::MessageHash) -> bool { false }
-        fn edit_message(&mut self, _hash: &iroh_gossip::chat_core::MessageHash, _new_text: String) {}
+        fn set_pending_image(
+            &mut self,
+            _name: String,
+            _hash: iroh_gossip::chat_core::MessageHash,
+            _from: iroh::PublicKey,
+        ) {
+        }
+        fn has_message(&self, _hash: &iroh_gossip::chat_core::MessageHash) -> bool {
+            false
+        }
+        fn edit_message(&mut self, _hash: &iroh_gossip::chat_core::MessageHash, _new_text: String) {
+        }
         fn delete_message(&mut self, _hash: &iroh_gossip::chat_core::MessageHash) {}
         fn add_reaction(&mut self, _hash: &iroh_gossip::chat_core::MessageHash, _emoji: String) {}
         fn on_neighbor_up(&mut self, peer: iroh::PublicKey) {
@@ -425,10 +451,15 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         received: vec![],
     };
 
-    fn drain_net(rx: &Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<iroh_gossip::chat_core::NetEvent>>>, sim: &mut TestChat) {
+    fn drain_net(
+        rx: &Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<iroh_gossip::chat_core::NetEvent>>>,
+        sim: &mut TestChat,
+    ) {
         loop {
             match rx.try_lock().unwrap().try_recv() {
-                Ok(event) => { let _ = iroh_gossip::chat_core::handle_net_event(event, sim); }
+                Ok(event) => {
+                    let _ = iroh_gossip::chat_core::handle_net_event(event, sim);
+                }
                 Err(_) => break,
             }
         }
@@ -444,7 +475,11 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
             break;
         }
         if i % 10 == 9 {
-            info!("tick {i}: A neighbors={} B neighbors={}", sim_a.neighbors.len(), sim_b.neighbors.len());
+            info!(
+                "tick {i}: A neighbors={} B neighbors={}",
+                sim_a.neighbors.len(),
+                sim_b.neighbors.len()
+            );
         }
     }
 
@@ -473,7 +508,9 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
 
     // A sends a message to B
     info!("A broadcasts via gossip (mDNS-discovered peer)");
-    let msg = Message::Message { text: "hello from A over mDNS!".into() };
+    let msg = Message::Message {
+        text: "hello from A over mDNS!".into(),
+    };
     let encoded = SignedMessage::sign_and_encode(&sk_a, &msg)?;
     sender_a.broadcast(encoded).await?;
     sleep(Duration::from_secs(3)).await;
@@ -483,11 +520,16 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
     info!("B received: {:?}", sim_b.received);
 
     let b_got_a = sim_b.received.iter().any(|m| m.contains("hello from A"));
-    assert!(b_got_a, "B should receive A's message via mDNS-discovered connection");
+    assert!(
+        b_got_a,
+        "B should receive A's message via mDNS-discovered connection"
+    );
 
     // B sends a message to A
     info!("B broadcasts via gossip (mDNS-discovered peer)");
-    let msg = Message::Message { text: "hello from B over mDNS!".into() };
+    let msg = Message::Message {
+        text: "hello from B over mDNS!".into(),
+    };
     let encoded = SignedMessage::sign_and_encode(&sk_b, &msg)?;
     sender_b.broadcast(encoded).await?;
     sleep(Duration::from_secs(3)).await;
@@ -496,7 +538,10 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
     info!("A received: {:?}", sim_a.received);
 
     let a_got_b = sim_a.received.iter().any(|m| m.contains("hello from B"));
-    assert!(a_got_b, "A should receive B's message via mDNS-discovered connection");
+    assert!(
+        a_got_b,
+        "A should receive B's message via mDNS-discovered connection"
+    );
 
     drop(sender_a);
     drop(sender_b);

@@ -20,13 +20,14 @@ use iroh_gossip::chat_core::{
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     MeshHealth, MessageHash,
 };
-use iroh_gossip::whisper::{WhisperEvent, WhisperHandle};
 use iroh_gossip::chat_history::{ChatHistoryStore, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendsStore};
 use iroh_gossip::net::Gossip;
 use iroh_gossip::proto::TopicId;
+use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_docs::{self, RoomMetadata};
 use iroh_gossip::room_history::{RoomHistoryEntry, RoomHistoryStore};
+use iroh_gossip::whisper::{WhisperEvent, WhisperHandle};
 use n0_future::task;
 use n0_future::Stream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -40,12 +41,12 @@ use iced::Color;
 const CHAT_LOG: &str = "chat_log";
 
 // ── Typography scale (minor-second ratio ~1.125) ─────────────────────
-const TYPO_XL: f32 = 24.0;   // Primary heading (chat list title)
-const TYPO_LG: f32 = 18.0;   // Secondary heading (room name, help title)
-const TYPO_MD: f32 = 15.0;   // Body / section headers / button labels
-const TYPO_SM: f32 = 13.0;   // Secondary body, previews, entry labels
-const TYPO_XS: f32 = 11.0;   // Metadata, identity info, secondary labels
-const TYPO_XXS: f32 = 10.0;  // Fine print, ticket, instruction text
+const TYPO_XL: f32 = 24.0; // Primary heading (chat list title)
+const TYPO_LG: f32 = 18.0; // Secondary heading (room name, help title)
+const TYPO_MD: f32 = 15.0; // Body / section headers / button labels
+const TYPO_SM: f32 = 13.0; // Secondary body, previews, entry labels
+const TYPO_XS: f32 = 11.0; // Metadata, identity info, secondary labels
+const TYPO_XXS: f32 = 10.0; // Fine print, ticket, instruction text
 
 // ── Spacing units (4px base) ─────────────────────────────────────────
 const SPACE_2: f32 = 2.0;
@@ -61,9 +62,9 @@ const SPACE_24: f32 = 24.0;
 /// Return the muted secondary color for labels, previews, and counts.
 fn text_muted(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.6, 0.6, 0.6)   // ~#999, ~4.5:1 on dark bg ✓ AA
+        Color::from_rgb(0.6, 0.6, 0.6) // ~#999, ~4.5:1 on dark bg ✓ AA
     } else {
-        Color::from_rgb(0.4, 0.4, 0.4)   // ~#666, ~5.2:1 on white ✓ AA
+        Color::from_rgb(0.4, 0.4, 0.4) // ~#666, ~5.2:1 on white ✓ AA
     }
 }
 
@@ -72,7 +73,7 @@ fn text_system(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
         Color::from_rgb(0.5, 0.5, 0.5)
     } else {
-        Color::from_rgb(0.35, 0.35, 0.35)  // #595959, ~6.5:1 ✓ AA
+        Color::from_rgb(0.35, 0.35, 0.35) // #595959, ~6.5:1 ✓ AA
     }
 }
 
@@ -81,7 +82,7 @@ fn text_local_label(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
         Color::from_rgb(0.2, 0.8, 0.2)
     } else {
-        Color::from_rgb(0.0, 0.45, 0.0)     // #0073, ~5.8:1 ✓ AA
+        Color::from_rgb(0.0, 0.45, 0.0) // #0073, ~5.8:1 ✓ AA
     }
 }
 
@@ -90,16 +91,16 @@ fn text_local_body(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
         Color::from_rgb(0.3, 0.9, 0.3)
     } else {
-        Color::from_rgb(0.0, 0.35, 0.0)     // #0059, ~6.5:1 ✓ AA
+        Color::from_rgb(0.0, 0.35, 0.0) // #0059, ~6.5:1 ✓ AA
     }
 }
 
 /// Color for remote message label (nickname).
 fn text_remote_label(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.4, 0.65, 1.0)     // light blue on dark
+        Color::from_rgb(0.4, 0.65, 1.0) // light blue on dark
     } else {
-        Color::from_rgb(0.0, 0.33, 0.66)    // #0054A8, ~5.5:1 ✓ AA
+        Color::from_rgb(0.0, 0.33, 0.66) // #0054A8, ~5.5:1 ✓ AA
     }
 }
 
@@ -108,7 +109,7 @@ fn text_remote_body(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
         Color::from_rgb(0.8, 0.8, 0.8)
     } else {
-        Color::from_rgb(0.13, 0.13, 0.13)   // #222, ~11.5:1 ✓ AA
+        Color::from_rgb(0.13, 0.13, 0.13) // #222, ~11.5:1 ✓ AA
     }
 }
 
@@ -140,63 +141,63 @@ fn bg_primary(theme: &iced::Theme) -> Color {
 /// Surface/card background (slightly lighter than primary).
 fn bg_surface(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.16, 0.16, 0.24)  // #2a2a3e
+        Color::from_rgb(0.16, 0.16, 0.24) // #2a2a3e
     } else {
-        Color::from_rgb(1.0, 1.0, 1.0)     // #ffffff
+        Color::from_rgb(1.0, 1.0, 1.0) // #ffffff
     }
 }
 
 /// Input field background.
 fn bg_input(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.13, 0.13, 0.22)  // #222238
+        Color::from_rgb(0.13, 0.13, 0.22) // #222238
     } else {
-        Color::from_rgb(0.94, 0.94, 0.96)  // #f0f0f4
+        Color::from_rgb(0.94, 0.94, 0.96) // #f0f0f4
     }
 }
 
 /// Hover-state background for rows and interactive surfaces.
 fn bg_hover(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.20, 0.20, 0.30)  // #33334d
+        Color::from_rgb(0.20, 0.20, 0.30) // #33334d
     } else {
-        Color::from_rgb(0.90, 0.90, 0.95)  // #e6e6f2
+        Color::from_rgb(0.90, 0.90, 0.95) // #e6e6f2
     }
 }
 
 /// Subtle border for surfaces and cards.
 fn border_muted(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.22, 0.22, 0.32)  // #383852
+        Color::from_rgb(0.22, 0.22, 0.32) // #383852
     } else {
-        Color::from_rgb(0.85, 0.85, 0.88)  // #d9d9e0
+        Color::from_rgb(0.85, 0.85, 0.88) // #d9d9e0
     }
 }
 
 /// Primary accent (blue).
 fn accent_primary(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.29, 0.62, 1.0)   // #4a9eff
+        Color::from_rgb(0.29, 0.62, 1.0) // #4a9eff
     } else {
-        Color::from_rgb(0.18, 0.44, 0.80)  // #2e70cc
+        Color::from_rgb(0.18, 0.44, 0.80) // #2e70cc
     }
 }
 
 /// Success / online indicator (green).
 fn accent_green(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.24, 0.86, 0.52)  // #3ddc84
+        Color::from_rgb(0.24, 0.86, 0.52) // #3ddc84
     } else {
-        Color::from_rgb(0.10, 0.55, 0.20)  // #1a8c33
+        Color::from_rgb(0.10, 0.55, 0.20) // #1a8c33
     }
 }
 
 /// Error / destructive colour.
 fn color_error(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.90, 0.25, 0.25)  // #e64040
+        Color::from_rgb(0.90, 0.25, 0.25) // #e64040
     } else {
-        Color::from_rgb(0.75, 0.15, 0.15)  // #bf2626
+        Color::from_rgb(0.75, 0.15, 0.15) // #bf2626
     }
 }
 
@@ -544,8 +545,8 @@ impl IcedChat {
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
         backfill_handle: BackfillHandle,
     ) -> Self {
-        let (initial_topic, initial_bootstrap) = initial_room
-            .unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
+        let (initial_topic, initial_bootstrap) =
+            initial_room.unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
         // Seed the online cache from persisted friends who were online at last save,
         // so they show the correct status immediately instead of starting as offline.
         let friend_online_cache: HashSet<PublicKey> = friends
@@ -734,11 +735,7 @@ fn format_last_seen(last_seen_ms: Option<u64>) -> String {
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let elapsed_secs = if now_ms > ms {
-        (now_ms - ms) / 1000
-    } else {
-        0
-    };
+    let elapsed_secs = if now_ms > ms { (now_ms - ms) / 1000 } else { 0 };
 
     if elapsed_secs < 60 {
         if elapsed_secs <= 5 {
@@ -837,9 +834,18 @@ fn format_message_time(timestamp_ms: i64) -> String {
         }
         let day_of_month = yday - accum + 1;
         let month_name = match month {
-            1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
-            5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
-            9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+            1 => "Jan",
+            2 => "Feb",
+            3 => "Mar",
+            4 => "Apr",
+            5 => "May",
+            6 => "Jun",
+            7 => "Jul",
+            8 => "Aug",
+            9 => "Sep",
+            10 => "Oct",
+            11 => "Nov",
+            12 => "Dec",
             _ => "?",
         };
         format!("{month_name} {day_of_month}")
@@ -915,6 +921,8 @@ impl IcedChat {
                 let label = self.local_label.clone();
                 let ticket_str = self.room_ticket(topic).to_string();
                 let forward_handle_slot = self.forward_handle_slot.clone();
+                let data_dir = self.data_dir.clone();
+                let local_peer_addr = self.local_peer_addr.clone();
 
                 iced::Task::perform(
                     async move {
@@ -961,6 +969,9 @@ impl IcedChat {
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
+
+                        let room = RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);
+                        let _ = room.save();
 
                         Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
                     },
@@ -1011,12 +1022,19 @@ impl IcedChat {
                 let ticket_str = self.room_ticket(topic).to_string();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let endpoint = self.endpoint.clone();
-                // Extract bootstrap peer addresses from ticket/RoomStore (if any)
-                // and clear them so room switching doesn't reuse them.
-                let initial_addrs: Vec<EndpointAddr> = self.initial_bootstrap_peers
-                    .drain(..)
-                    .collect();
+                let data_dir = self.data_dir.clone();
+                let local_peer_addr = self.local_peer_addr.clone();
+                // Extract bootstrap peer addresses from the one-shot initial room
+                // or from the saved RoomStore for this topic.
+                let mut initial_addrs: Vec<EndpointAddr> = self.initial_bootstrap_peers.drain(..).collect();
+                if initial_addrs.is_empty() {
+                    initial_addrs = RoomStore::load_or_none(&data_dir)
+                        .filter(|room| room.topic == topic)
+                        .map(|room| room.peers)
+                        .unwrap_or_default();
+                }
                 let bootstrap_peers: Vec<_> = initial_addrs.iter().map(|addr| addr.id).collect();
+                let initial_addrs_for_save = initial_addrs.clone();
 
                 iced::Task::perform(
                     async move {
@@ -1080,6 +1098,14 @@ impl IcedChat {
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
+
+                        let saved_peers = if initial_addrs_for_save.is_empty() {
+                            vec![local_peer_addr]
+                        } else {
+                            initial_addrs_for_save.clone()
+                        };
+                        let room = RoomStore::with_peers(&data_dir, topic, saved_peers);
+                        let _ = room.save();
 
                         Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
                     },
@@ -1187,6 +1213,7 @@ impl IcedChat {
                 let endpoint = self.endpoint.clone();
                 let local_peer_addr = self.local_peer_addr.clone();
                 let forward_handle_slot = self.forward_handle_slot.clone();
+                let data_dir = self.data_dir.clone();
 
                 iced::Task::perform(
                     async move {
@@ -1221,13 +1248,10 @@ impl IcedChat {
                         };
                         let ticket_str = new_ticket.to_string();
 
-                        let metadata_doc = room_docs::create_metadata_doc(
-                            topic,
-                            &sender,
-                            RoomMetadata::empty(),
-                        )
-                        .await
-                        .map_err(|e| e.to_string())?;
+                        let metadata_doc =
+                            room_docs::create_metadata_doc(topic, &sender, RoomMetadata::empty())
+                                .await
+                                .map_err(|e| e.to_string())?;
                         let roster_doc = room_docs::create_roster_doc(
                             topic,
                             &sender,
@@ -1251,6 +1275,9 @@ impl IcedChat {
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
+
+                        let room = RoomStore::with_peers(&data_dir, topic, ticket.peers.clone());
+                        let _ = room.save();
 
                         Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
                     },
@@ -1898,9 +1925,7 @@ impl IcedChat {
                         // Check if this is a private chat invitation marker.
                         let is_invite = text == "\x00PRIVATE_CHAT";
                         if is_invite {
-                            self.push_system(format!(
-                                "{label} opened a private chat with you."
-                            ));
+                            self.push_system(format!("{label} opened a private chat with you."));
                         }
 
                         // If the sender is a tracked friend, auto-open the
@@ -2312,13 +2337,12 @@ impl IcedChat {
 
             AppMessage::OpenLogsWindow => {
                 let data_dir = self.data_dir.clone();
-                iced::Task::perform(
-                    async move { log_viewer::spawn(&data_dir) },
-                    |result| match result {
+                iced::Task::perform(async move { log_viewer::spawn(&data_dir) }, |result| {
+                    match result {
                         Ok(()) => AppMessage::Noop,
                         Err(err) => AppMessage::ErrorMsg(err),
-                    },
-                )
+                    }
+                })
             }
 
             AppMessage::Noop => iced::Task::none(),
@@ -2501,8 +2525,15 @@ impl ChatCallbacks for IcedChat {
         self.entries.push(ChatEntry::system(text));
     }
 
-    fn push_remote(&mut self, label: String, text: String, hash: Option<MessageHash>, sent_at: Option<u64>) {
-        self.entries.push(ChatEntry::remote(label, text, hash, sent_at));
+    fn push_remote(
+        &mut self,
+        label: String,
+        text: String,
+        hash: Option<MessageHash>,
+        sent_at: Option<u64>,
+    ) {
+        self.entries
+            .push(ChatEntry::remote(label, text, hash, sent_at));
     }
 
     fn set_pending_file(&mut self, name: String, ticket: String) {
@@ -2665,9 +2696,12 @@ impl IcedChat {
                     .on_press(AppMessage::NewChatCreated)
                     .padding(SPACE_8),
                     button(
-                        row![text(" 🔗 ").size(TYPO_MD), text("Join via Ticket").size(TYPO_MD),]
-                            .align_y(Alignment::Center)
-                            .spacing(SPACE_4),
+                        row![
+                            text(" 🔗 ").size(TYPO_MD),
+                            text("Join via Ticket").size(TYPO_MD),
+                        ]
+                        .align_y(Alignment::Center)
+                        .spacing(SPACE_4),
                     )
                     .on_press(AppMessage::JoinFromTicket)
                     .padding(SPACE_8),
@@ -2813,7 +2847,8 @@ impl IcedChat {
             } else {
                 let mut discovered_list = Column::new().spacing(SPACE_2).width(Length::Fill);
                 for (pk, label) in discovered_users {
-                    discovered_list = discovered_list.push(self.view_discovered_user_row(pk, &label));
+                    discovered_list =
+                        discovered_list.push(self.view_discovered_user_row(pk, &label));
                 }
                 section = section.push(scrollable(discovered_list).height(Length::Shrink));
             }
@@ -2862,9 +2897,7 @@ impl IcedChat {
             row![
                 text(status_emoji).size(TYPO_XS),
                 text(label).size(TYPO_MD).width(Length::Fill),
-                text(last_seen_str)
-                    .size(TYPO_XS)
-                    .color(status_color),
+                text(last_seen_str).size(TYPO_XS).color(status_color),
                 button("💬 Chat")
                     .on_press(AppMessage::OpenFriendChat(pk))
                     .padding(SPACE_4),
@@ -2928,24 +2961,24 @@ impl IcedChat {
         let btn = button(
             row![
                 column![
-                row![text(display_name)
-                    .size(TYPO_MD)
-                    .width(Length::Fill)
-                    .wrapping(Wrapping::Word),],
-                row![text(preview)
-                    .size(TYPO_XS)
-                    .color(self.color_muted())
-                    .width(Length::Fill)
-                    .wrapping(Wrapping::Word),],
+                    row![text(display_name)
+                        .size(TYPO_MD)
+                        .width(Length::Fill)
+                        .wrapping(Wrapping::Word),],
+                    row![text(preview)
+                        .size(TYPO_XS)
+                        .color(self.color_muted())
+                        .width(Length::Fill)
+                        .wrapping(Wrapping::Word),],
                 ]
                 .spacing(SPACE_2)
                 .padding(SPACE_8)
                 .width(Length::Fill),
                 button("✕")
-                .on_press(AppMessage::DeleteRoom(topic))
-                .padding(SPACE_4),
-                ]
-                .spacing(SPACE_4)
+                    .on_press(AppMessage::DeleteRoom(topic))
+                    .padding(SPACE_4),
+            ]
+            .spacing(SPACE_4)
             .align_y(iced::Alignment::Center),
         )
         .on_press(AppMessage::RoomSelected(topic))
@@ -3036,10 +3069,14 @@ impl IcedChat {
         if !self.ticket_str.is_empty() {
             let ticket = self.ticket_str.clone();
             header = header.push(
-                button(text(&self.ticket_str).size(TYPO_XXS).wrapping(Wrapping::Word))
-                    .on_press(AppMessage::CopyToClipboard(ticket))
-                    .padding(0)
-                    .style(button::text),
+                button(
+                    text(&self.ticket_str)
+                        .size(TYPO_XXS)
+                        .wrapping(Wrapping::Word),
+                )
+                .on_press(AppMessage::CopyToClipboard(ticket))
+                .padding(0)
+                .style(button::text),
             );
         }
 
@@ -3068,11 +3105,7 @@ impl IcedChat {
                     let sep_text = format!(" — {date_label} — ");
                     let sep = Row::new()
                         .push(space::horizontal())
-                        .push(
-                            text(sep_text)
-                                .size(TYPO_XS)
-                                .color(text_system(&theme)),
-                        )
+                        .push(text(sep_text).size(TYPO_XS).color(text_system(&theme)))
                         .push(space::horizontal())
                         .width(Length::Fill)
                         .padding([SPACE_8, 0.0]);
@@ -3122,25 +3155,21 @@ impl IcedChat {
                 .color(body_color);
 
             // The speech bubble container
-            let bubble = container(body_el)
-                .padding([SPACE_4, SPACE_8])
-                .style(move |t: &iced::Theme| {
-                    let mut s = iced::widget::container::Style::default();
-                    if let Some(bg) = bubble_bg(t, entry.kind) {
-                        s.background = Some(bg);
-                    }
-                    s.border.radius = (8.0_f32).into();
-                    s
-                });
+            let bubble =
+                container(body_el)
+                    .padding([SPACE_4, SPACE_8])
+                    .style(move |t: &iced::Theme| {
+                        let mut s = iced::widget::container::Style::default();
+                        if let Some(bg) = bubble_bg(t, entry.kind) {
+                            s.background = Some(bg);
+                        }
+                        s.border.radius = (8.0_f32).into();
+                        s
+                    });
 
             // Timestamp label (small, muted, right-aligned)
-            let ts_text = entry
-                .timestamp
-                .map(format_message_time)
-                .unwrap_or_default();
-            let ts_el = text(ts_text)
-                .size(TYPO_XXS)
-                .color(text_muted(&theme));
+            let ts_text = entry.timestamp.map(format_message_time).unwrap_or_default();
+            let ts_el = text(ts_text).size(TYPO_XXS).color(text_muted(&theme));
 
             // Column: label above, bubble in middle, timestamp below
             let bubble_col = Column::new()
@@ -3251,7 +3280,7 @@ impl IcedChat {
                     let accent = if matches!(t, iced::Theme::Dark) {
                         Color::from_rgb(0.20, 0.72, 0.20)
                     } else {
-                        Color::from_rgb(0.05, 0.50, 0.05)   // #0d800d
+                        Color::from_rgb(0.05, 0.50, 0.05) // #0d800d
                     };
                     s.background = Some(iced::Background::Color(accent));
                     s.text_color = Color::WHITE;
@@ -3271,13 +3300,9 @@ impl IcedChat {
             .padding([SPACE_4, SPACE_8]);
 
         // ── Action button group ── tighter spacing, secondary + primary + tertiary
-        let actions = row![
-            attach_btn,
-            send_btn,
-            help_btn,
-        ]
-        .spacing(SPACE_2)
-        .align_y(Alignment::Center);
+        let actions = row![attach_btn, send_btn, help_btn,]
+            .spacing(SPACE_2)
+            .align_y(Alignment::Center);
 
         // ── Main composer row ──
         let composer = row![
@@ -3305,13 +3330,11 @@ impl IcedChat {
                     },
                     radius: 8.0.into(),
                 };
-                s.background = Some(iced::Background::Color(
-                    if matches!(t, iced::Theme::Dark) {
-                        Color::from_rgb(0.10, 0.10, 0.12)
-                    } else {
-                        Color::from_rgb(0.97, 0.97, 0.98)
-                    },
-                ));
+                s.background = Some(iced::Background::Color(if matches!(t, iced::Theme::Dark) {
+                    Color::from_rgb(0.10, 0.10, 0.12)
+                } else {
+                    Color::from_rgb(0.97, 0.97, 0.98)
+                }));
                 s
             })
             .into()
@@ -3328,17 +3351,11 @@ impl IcedChat {
             .push(text("/send <path>    Share a file with peers").size(TYPO_SM))
             .push(text("/image <path>   Share an image inline").size(TYPO_SM))
             .push(text("/download       Fetch the last shared file").size(TYPO_SM))
-            .push(text(
-                "/leave          Leave this room and delete from history",
-            ).size(TYPO_SM))
+            .push(text("/leave          Leave this room and delete from history").size(TYPO_SM))
             .push(text("/help           Toggle this menu").size(TYPO_SM))
-            .push(text(
-                "/friend add <pk> [alias]  Track a friend's online status",
-            ).size(TYPO_SM))
+            .push(text("/friend add <pk> [alias]  Track a friend's online status").size(TYPO_SM))
             .push(text("/friend remove <pk|alias> Stop tracking a friend").size(TYPO_SM))
-            .push(text(
-                "/friend list    List tracked friends and their status",
-            ).size(TYPO_SM))
+            .push(text("/friend list    List tracked friends and their status").size(TYPO_SM))
             .push(Space::new().height(Length::Fixed(SPACE_8)))
             .push(text("/react <idx> <emoji>  Add a reaction to a message").size(TYPO_SM))
             .push(text("/edit <idx> <text>   Edit a message").size(TYPO_SM))
@@ -3346,9 +3363,7 @@ impl IcedChat {
             .push(Space::new().height(Length::Fixed(SPACE_8)))
             .push(text("Type a message and press Enter to send.").size(TYPO_SM))
             .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(text(
-                "Tip: click ✕ on a room in the chat list to remove it.",
-            ).size(TYPO_SM))
+            .push(text("Tip: click ✕ on a room in the chat list to remove it.").size(TYPO_SM))
             .push(Space::new().height(Length::Fixed(SPACE_8)))
             .push(button("❌").on_press(AppMessage::ToggleHelp))
             .spacing(SPACE_6)
@@ -3441,7 +3456,11 @@ impl IcedChat {
             iced::time::every(std::time::Duration::from_secs(30))
                 .map(|_| AppMessage::MeshWatchdogTick),
             iced::Subscription::run_with(
-                (RxHandle(rx), FriendRxHandle(friend_rx), WhisperRxHandle(whisper_rx)),
+                (
+                    RxHandle(rx),
+                    FriendRxHandle(friend_rx),
+                    WhisperRxHandle(whisper_rx),
+                ),
                 |(rx, friend_rx, whisper_rx)| subscription_stream(&rx, &friend_rx, &whisper_rx),
             ),
         ])

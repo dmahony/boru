@@ -63,7 +63,13 @@ impl ChatCallbacks for RxTestPeer {
         self.log.push(format!("[sys] {text}"));
         self.entries.push(ChatEntry::system(text));
     }
-    fn push_remote(&mut self, label: String, text: String, _hash: Option<MessageHash>, _sent_at: Option<u64>) {
+    fn push_remote(
+        &mut self,
+        label: String,
+        text: String,
+        _hash: Option<MessageHash>,
+        _sent_at: Option<u64>,
+    ) {
         self.log.push(format!("[{label}] {text}"));
         self.entries.push(ChatEntry::remote(label, text));
     }
@@ -120,7 +126,14 @@ async fn spawn_peer_with_blobs(
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(iroh_blobs::ALPN, blobs_protocol.clone())
         .spawn();
-    Ok((router, ep.clone(), ep.secret_key().clone(), gossip, pk, blob_store))
+    Ok((
+        router,
+        ep.clone(),
+        ep.secret_key().clone(),
+        gossip,
+        pk,
+        blob_store,
+    ))
 }
 
 /// Process ONE NetEvent from the channel, exactly like the Iced GUI does.
@@ -196,7 +209,10 @@ async fn process_one_event(
 }
 
 fn count_image_entries(entries: &[ChatEntry]) -> usize {
-    entries.iter().filter(|e| e.body.starts_with("[Image:" )).count()
+    entries
+        .iter()
+        .filter(|e| e.body.starts_with("[Image:"))
+        .count()
 }
 
 #[tokio::test]
@@ -220,8 +236,7 @@ async fn test_receiver_downloads_image_entry() -> Result<()> {
     let (net_tx_a, net_rx_a) = tokio::sync::mpsc::unbounded_channel();
     let net_rx_a = Arc::new(Mutex::new(net_rx_a));
     task::spawn(iroh_gossip::chat_core::forward_gossip_events(
-        receiver_a,
-        net_tx_a,
+        receiver_a, net_tx_a,
     ));
 
     let about_me = SignedMessage::sign_and_encode(
@@ -245,17 +260,11 @@ async fn test_receiver_downloads_image_entry() -> Result<()> {
     let (net_tx_b, net_rx_b) = tokio::sync::mpsc::unbounded_channel();
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
     task::spawn(iroh_gossip::chat_core::forward_gossip_events(
-        receiver_b,
-        net_tx_b,
+        receiver_b, net_tx_b,
     ));
 
-    let about_me_b = SignedMessage::sign_and_encode(
-        &sk_b,
-        &Message::AboutMe {
-            name: "Bob".into(),
-        },
-    )
-    .unwrap();
+    let about_me_b =
+        SignedMessage::sign_and_encode(&sk_b, &Message::AboutMe { name: "Bob".into() }).unwrap();
     _sender_b.broadcast(about_me_b).await?;
 
     // Create receiver peer state

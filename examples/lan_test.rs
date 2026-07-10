@@ -15,19 +15,16 @@ use std::time::Duration;
 
 use clap::Parser;
 use iroh::{
-    Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl, SecretKey,
-    EndpointId, TransportAddr,
-    address_lookup::memory::MemoryLookup,
-    endpoint::presets,
+    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, EndpointId,
+    PublicKey, RelayMode, RelayUrl, SecretKey, TransportAddr,
 };
-use iroh_mainline_address_lookup::DhtAddressLookup;
 use iroh_gossip::api::Event;
 use iroh_gossip::chat_core::{check_peer_connection_type, ConnectionType, Message, SignedMessage};
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
-use n0_error::{Result, bail_any};
-use n0_future::{StreamExt, time::sleep};
-
+use iroh_mainline_address_lookup::DhtAddressLookup;
+use n0_error::{bail_any, Result};
+use n0_future::{time::sleep, StreamExt};
 
 /// How long to wait for a peer to connect (seconds).
 const CONNECT_TIMEOUT: f64 = 30.0;
@@ -108,11 +105,7 @@ impl PeerState {
     }
 
     fn neighbor_list(&self) -> Vec<String> {
-        let mut keys: Vec<String> = self
-            .neighbors
-            .iter()
-            .map(|k| fmt_id(k))
-            .collect();
+        let mut keys: Vec<String> = self.neighbors.iter().map(|k| fmt_id(k)).collect();
         keys.sort();
         keys
     }
@@ -135,7 +128,10 @@ impl PeerState {
             } else {
                 // Try resolving anyway — check_peer_connection_type might work
                 // by looking up the endpoint id
-                println!("  [TRANSPORT] → {}: no public key mapping yet", fmt_id(peer_id));
+                println!(
+                    "  [TRANSPORT] → {}: no public key mapping yet",
+                    fmt_id(peer_id)
+                );
             }
         }
         if self.neighbors.is_empty() {
@@ -147,20 +143,16 @@ impl PeerState {
 fn fmt_id(id: &EndpointId) -> String {
     let s = id.to_string();
     if s.len() > 12 {
-        format!("{}…{}", &s[..6], &s[s.len()-6..])
+        format!("{}…{}", &s[..6], &s[s.len() - 6..])
     } else {
         s
     }
 }
 
 /// Create and bind an iroh endpoint.
-async fn create_endpoint(
-    relay_url_str: &str,
-    bind_port: u16,
-) -> Result<(Endpoint, SecretKey)> {
+async fn create_endpoint(relay_url_str: &str, bind_port: u16) -> Result<(Endpoint, SecretKey)> {
     let secret_key = SecretKey::generate();
-    let url: RelayUrl = relay_url_str.parse()
-        .expect("valid relay URL");
+    let url: RelayUrl = relay_url_str.parse().expect("valid relay URL");
     let relay_map = url.into();
 
     let ep = Endpoint::builder(presets::Minimal)
@@ -323,7 +315,10 @@ async fn main() -> Result<()> {
             for m in &state.received_messages {
                 println!("    {m}");
             }
-            println!("  Messages exchanged: {}", if received_any { "YES ✓" } else { "NO ✗" });
+            println!(
+                "  Messages exchanged: {}",
+                if received_any { "YES ✓" } else { "NO ✗" }
+            );
             println!("═══════════════════════════════════════");
         }
         Command::Join { ticket, bootstrap } => {
@@ -339,17 +334,18 @@ async fn main() -> Result<()> {
                 // so the gossip layer can resolve the endpoint ID to a relay address.
                 let memory_lookup = MemoryLookup::new();
                 let relay_url: RelayUrl = relay_url.parse().expect("valid relay URL");
-                let addr = EndpointAddr::from_parts(
-                    id,
-                    [TransportAddr::Relay(relay_url)],
-                );
+                let addr = EndpointAddr::from_parts(id, [TransportAddr::Relay(relay_url)]);
                 memory_lookup.add_endpoint_info(addr);
                 if let Ok(als) = endpoint.address_lookup() {
                     als.add(memory_lookup);
                 } else {
                     eprintln!("  [WARN] no address lookup services on endpoint");
                 }
-                println!("  [ADDR_LOOKUP] seeded bootstrap {} with relay {}", fmt_id(&id), args.relay);
+                println!(
+                    "  [ADDR_LOOKUP] seeded bootstrap {} with relay {}",
+                    fmt_id(&id),
+                    args.relay
+                );
 
                 vec![id]
             } else {
@@ -475,7 +471,10 @@ async fn main() -> Result<()> {
             for m in &state.received_messages {
                 println!("    {m}");
             }
-            println!("  Messages exchanged: {}", if received_any { "YES ✓" } else { "NO ✗" });
+            println!(
+                "  Messages exchanged: {}",
+                if received_any { "YES ✓" } else { "NO ✗" }
+            );
             println!("═══════════════════════════════════════");
         }
     }

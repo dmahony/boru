@@ -632,7 +632,8 @@ impl Actor {
                 }
 
                 if !sender_dead {
-                    let subscriber_fut = topic_subscriber_loop(topic_id, tx, event_sender.subscribe());
+                    let subscriber_fut =
+                        topic_subscriber_loop(topic_id, tx, event_sender.subscribe());
                     let fut = async move {
                         subscriber_fut.await;
                         topic_id

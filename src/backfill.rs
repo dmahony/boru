@@ -485,8 +485,8 @@ async fn do_backfill_request(
             .await
             .map_err(|e| n0_error::anyerr!("backfill: read response body: {e}"))?;
 
-        let response: BackfillResponse =
-            postcard::from_bytes(&resp_buf).map_err(|e| n0_error::anyerr!("decode response: {e}"))?;
+        let response: BackfillResponse = postcard::from_bytes(&resp_buf)
+            .map_err(|e| n0_error::anyerr!("decode response: {e}"))?;
 
         let count = response.messages.len() as u32;
         debug!(
@@ -684,10 +684,8 @@ mod tests {
             .await
             .expect("bind requester endpoint");
 
-        let addr = EndpointAddr::from_parts(
-            sk_responder.public(),
-            ep_responder.addr().addrs.clone(),
-        );
+        let addr =
+            EndpointAddr::from_parts(sk_responder.public(), ep_responder.addr().addrs.clone());
 
         let (net_tx, _) = tokio::sync::mpsc::unbounded_channel();
 
@@ -695,14 +693,7 @@ mod tests {
         // We need to advance by at least BACKFILL_REQUEST_TIMEOUT + some margin.
         tokio::time::advance(BACKFILL_REQUEST_TIMEOUT + Duration::from_secs(1)).await;
 
-        let result = do_backfill_request(
-            &ep_requester,
-            addr,
-            0,
-            10,
-            net_tx,
-        )
-        .await;
+        let result = do_backfill_request(&ep_requester, addr, 0, 10, net_tx).await;
 
         let err = result.expect_err("slow backfill should time out");
         let err_msg = err.to_string();
@@ -745,24 +736,19 @@ mod tests {
             .await
             .expect("bind requester endpoint");
 
-        let addr = EndpointAddr::from_parts(
-            sk_responder.public(),
-            ep_responder.addr().addrs.clone(),
-        );
+        let addr =
+            EndpointAddr::from_parts(sk_responder.public(), ep_responder.addr().addrs.clone());
 
         let (net_tx, _) = tokio::sync::mpsc::unbounded_channel();
 
-        let result = do_backfill_request(
-            &ep_requester,
-            addr,
-            0,
-            10,
-            net_tx,
-        )
-        .await;
+        let result = do_backfill_request(&ep_requester, addr, 0, 10, net_tx).await;
 
         // Even with an empty store, the backfill should succeed (returning 0 messages).
-        assert!(result.is_ok(), "normal backfill should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "normal backfill should succeed: {:?}",
+            result.err()
+        );
         let count = result.unwrap();
         assert_eq!(count, 0, "empty store should return 0 messages");
     }

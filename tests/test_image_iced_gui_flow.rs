@@ -50,7 +50,9 @@ impl ChatCallbacks for IcedTestPeer {
     fn set_name(&mut self, peer: PublicKey, name: String) {
         self.names.insert(peer, name);
     }
-    fn is_friend(&self, _peer: &PublicKey) -> bool { false }
+    fn is_friend(&self, _peer: &PublicKey) -> bool {
+        false
+    }
     fn friend_mark_online(&mut self, _fid: FriendId) {}
     fn friend_mark_offline(&mut self, _fid: FriendId) {}
     fn friend_set_name(&mut self, _fid: FriendId, _name: String) {}
@@ -58,7 +60,13 @@ impl ChatCallbacks for IcedTestPeer {
     fn push_system(&mut self, text: String) {
         self.entries.push(ChatEntry::system(text));
     }
-    fn push_remote(&mut self, label: String, text: String, _hash: Option<MessageHash>, _sent_at: Option<u64>) {
+    fn push_remote(
+        &mut self,
+        label: String,
+        text: String,
+        _hash: Option<MessageHash>,
+        _sent_at: Option<u64>,
+    ) {
         self.entries.push(ChatEntry::remote(label, text));
     }
     fn set_pending_file(&mut self, name: String, ticket: String) {
@@ -67,7 +75,9 @@ impl ChatCallbacks for IcedTestPeer {
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
         self.pending_image = Some((name, hash, from));
     }
-    fn has_message(&self, _hash: &MessageHash) -> bool { false }
+    fn has_message(&self, _hash: &MessageHash) -> bool {
+        false
+    }
     fn edit_message(&mut self, _hash: &MessageHash, _new_text: String) {}
     fn delete_message(&mut self, _hash: &MessageHash) {}
     fn add_reaction(&mut self, _hash: &MessageHash, _emoji: String) {}
@@ -83,7 +93,14 @@ impl ChatCallbacks for IcedTestPeer {
 
 async fn spawn_peer_with_blobs(
     rng: &mut impl rand::Rng,
-) -> Result<(Router, iroh::Endpoint, SecretKey, Gossip, PublicKey, MemStore)> {
+) -> Result<(
+    Router,
+    iroh::Endpoint,
+    SecretKey,
+    Gossip,
+    PublicKey,
+    MemStore,
+)> {
     let ep = iroh::Endpoint::builder(presets::N0)
         .secret_key(SecretKey::from_bytes(&rng.random()))
         .address_lookup(MemoryLookup::new())
@@ -100,7 +117,14 @@ async fn spawn_peer_with_blobs(
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(iroh_blobs::ALPN, blobs_protocol.clone())
         .spawn();
-    Ok((router, ep.clone(), ep.secret_key().clone(), gossip, pk, blob_store))
+    Ok((
+        router,
+        ep.clone(),
+        ep.secret_key().clone(),
+        gossip,
+        pk,
+        blob_store,
+    ))
 }
 
 /// Drain all available NetEvents from rx, processing each through
@@ -167,8 +191,11 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
     // Peer A announces presence
     let about_me = SignedMessage::sign_and_encode(
         &sk_a,
-        &Message::AboutMe { name: "Alice".into() },
-    ).unwrap();
+        &Message::AboutMe {
+            name: "Alice".into(),
+        },
+    )
+    .unwrap();
     sender_a.broadcast(about_me).await?;
 
     // ── Peer B: subscribe with A as bootstrap ──
@@ -260,7 +287,10 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
     let image_data: Vec<u8> = b"fake-png-bytes-1234567890-abcdef".to_vec();
 
     use iroh_blobs::api::proto::TagInfo;
-    let tag_info = blob_store_a.blobs().add_bytes(image_data.clone()).await
+    let tag_info = blob_store_a
+        .blobs()
+        .add_bytes(image_data.clone())
+        .await
         .map_err(|e| format!("add_bytes error: {e}"))
         .unwrap();
     let blob_hash = tag_info.hash;
@@ -285,10 +315,17 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
     assert!(
         pending.is_some(),
         "B should have pending_image after ImageShare. B received: {:?}",
-        sim_b.entries.iter().map(|e| e.body.clone()).collect::<Vec<_>>()
+        sim_b
+            .entries
+            .iter()
+            .map(|e| e.body.clone())
+            .collect::<Vec<_>>()
     );
     let (img_name, img_hash, sender_pk) = pending.unwrap();
-    println!("  B pending_image: name={img_name:?}, sender={}", sender_pk.fmt_short());
+    println!(
+        "  B pending_image: name={img_name:?}, sender={}",
+        sender_pk.fmt_short()
+    );
 
     // ── Download exactly like Iced GUI's AppMessage::NetEvent handler ──
     println!("\n--- B: downloading blob (exact Iced GUI path) ---");
@@ -297,19 +334,32 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
 
     let download_result = blob_store_b
         .downloader(&ep_b)
-        .download(blob_hash_dl, download_candidates(sender_pk, &sim_b.neighbors))
+        .download(
+            blob_hash_dl,
+            download_candidates(sender_pk, &sim_b.neighbors),
+        )
         .await;
-    assert!(download_result.is_ok(), "Download should succeed, got: {:?}", download_result);
+    assert!(
+        download_result.is_ok(),
+        "Download should succeed, got: {:?}",
+        download_result
+    );
     println!("  Download completed ✓");
 
     // Read back the blob
     use tokio::io::AsyncReadExt;
     let mut reader = blob_store_b.blobs().reader(blob_hash_dl);
     let mut downloaded = Vec::new();
-    reader.read_to_end(&mut downloaded).await.map_err(|e| format!("Read: {e}"))?;
+    reader
+        .read_to_end(&mut downloaded)
+        .await
+        .map_err(|e| format!("Read: {e}"))?;
     println!("  Read {} bytes ✓", downloaded.len());
 
-    assert_eq!(downloaded, image_data, "Downloaded bytes must match original");
+    assert_eq!(
+        downloaded, image_data,
+        "Downloaded bytes must match original"
+    );
     println!("✓ Bytes match!");
 
     // ── Now also test: use add_path (like the Iced GUI sender does) ──
@@ -321,7 +371,10 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
     std::fs::write(&tmp_file, &real_image_data).unwrap();
 
     println!("\n--- Testing add_path (like Iced GUI's ExecuteImageSend) ---");
-    let tag = blob_store_a.blobs().add_path(&tmp_file).await
+    let tag = blob_store_a
+        .blobs()
+        .add_path(&tmp_file)
+        .await
         .map_err(|e| format!("add_path error: {e}"))
         .unwrap();
     println!("  add_path hash: {}", tag.hash);
@@ -340,7 +393,10 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
     println!("  B drained {b_count2} events (2nd round)");
 
     let pending2 = sim_b.pending_image.take();
-    assert!(pending2.is_some(), "B should have pending_image for add_path image");
+    assert!(
+        pending2.is_some(),
+        "B should have pending_image for add_path image"
+    );
     let (img_name2, img_hash2, sender_pk2) = pending2.unwrap();
     println!("  B pending_image(2): name={img_name2:?}");
 
@@ -348,17 +404,26 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
     let blob_hash_dl2: iroh_blobs::Hash = img_hash2.into();
     let download_result2 = blob_store_b
         .downloader(&ep_b)
-        .download(blob_hash_dl2, download_candidates(sender_pk2, &sim_b.neighbors))
+        .download(
+            blob_hash_dl2,
+            download_candidates(sender_pk2, &sim_b.neighbors),
+        )
         .await;
     assert!(download_result2.is_ok(), "2nd download should succeed");
     println!("  2nd Download completed ✓");
 
     let mut reader2 = blob_store_b.blobs().reader(blob_hash_dl2);
     let mut downloaded2 = Vec::new();
-    reader2.read_to_end(&mut downloaded2).await.map_err(|e| format!("Read: {e}"))?;
+    reader2
+        .read_to_end(&mut downloaded2)
+        .await
+        .map_err(|e| format!("Read: {e}"))?;
     println!("  Read {} bytes ✓", downloaded2.len());
 
-    assert_eq!(downloaded2, real_image_data, "add_path image bytes must match");
+    assert_eq!(
+        downloaded2, real_image_data,
+        "add_path image bytes must match"
+    );
     println!("✓ add_path image bytes match!");
 
     // Cleanup

@@ -362,10 +362,7 @@ mod tests {
         let ts = timestamp();
         // Expect something like "2026-07-09T21:00:00.123456Z"
         // Check that it ends with Z and contains the expected separators.
-        assert!(
-            ts.ends_with('Z'),
-            "timestamp should end with Z: {ts}"
-        );
+        assert!(ts.ends_with('Z'), "timestamp should end with Z: {ts}");
         assert_eq!(&ts[4..5], "-", "expected - after year: {ts}");
         assert_eq!(&ts[7..8], "-", "expected - after month: {ts}");
         assert_eq!(&ts[10..11], "T", "expected T after date: {ts}");

@@ -53,7 +53,13 @@ impl ChatCallbacks for TestPeer {
         self.received_messages.push(format!("[sys] {text}"));
         self.entries.push(ChatEntry::system(text));
     }
-    fn push_remote(&mut self, label: String, text: String, _hash: Option<MessageHash>, _sent_at: Option<u64>) {
+    fn push_remote(
+        &mut self,
+        label: String,
+        text: String,
+        _hash: Option<MessageHash>,
+        _sent_at: Option<u64>,
+    ) {
         self.received_messages.push(format!("[{label}] {text}"));
         self.entries.push(ChatEntry::remote(label, text));
     }

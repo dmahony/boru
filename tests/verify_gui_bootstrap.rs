@@ -22,10 +22,8 @@ use iroh::{
     RelayMode, SecretKey,
 };
 use iroh_gossip::{
-    chat_core::{
-        forward_gossip_events, ChatEntry, Message, MessageHash, NetEvent, SignedMessage,
-    },
     chat_callbacks::ChatCallbacks,
+    chat_core::{forward_gossip_events, ChatEntry, Message, MessageHash, NetEvent, SignedMessage},
     friends::{FriendId, FriendsStore},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
@@ -33,7 +31,7 @@ use iroh_gossip::{
 use n0_error::Result;
 use n0_future::{task, time::sleep, StreamExt};
 use rand::{RngExt, SeedableRng};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 
 // ── SimChat as used by test_iced_chat_flow.rs ──────────────
 
@@ -50,9 +48,15 @@ struct SimChat {
 }
 
 impl ChatCallbacks for SimChat {
-    fn local_public(&self) -> PublicKey { self.local_public }
-    fn set_name(&mut self, peer: PublicKey, name: String) { self.names.insert(peer, name); }
-    fn is_friend(&self, _peer: &PublicKey) -> bool { false }
+    fn local_public(&self) -> PublicKey {
+        self.local_public
+    }
+    fn set_name(&mut self, peer: PublicKey, name: String) {
+        self.names.insert(peer, name);
+    }
+    fn is_friend(&self, _peer: &PublicKey) -> bool {
+        false
+    }
     fn friend_mark_online(&mut self, _fid: FriendId) {}
     fn friend_mark_offline(&mut self, _fid: FriendId) {}
     fn friend_set_name(&mut self, _fid: FriendId, _name: String) {}
@@ -61,20 +65,32 @@ impl ChatCallbacks for SimChat {
         self.received_messages.push(format!("[sys] {text}"));
         self.entries.push(ChatEntry::system(text));
     }
-    fn push_remote(&mut self, label: String, text: String, _hash: Option<MessageHash>, _sent_at: Option<u64>) {
+    fn push_remote(
+        &mut self,
+        label: String,
+        text: String,
+        _hash: Option<MessageHash>,
+        _sent_at: Option<u64>,
+    ) {
         self.received_messages.push(format!("[{label}] {text}"));
         self.entries.push(ChatEntry::remote(label, text));
     }
     fn set_pending_file(&mut self, _name: String, _ticket: String) {}
     fn set_pending_image(&mut self, _name: String, _hash: MessageHash, _from: PublicKey) {}
     fn has_message(&self, hash: &MessageHash) -> bool {
-        self.entries.iter().any(|e| e.message_hash.as_ref() == Some(hash))
+        self.entries
+            .iter()
+            .any(|e| e.message_hash.as_ref() == Some(hash))
     }
     fn edit_message(&mut self, _hash: &MessageHash, _new_text: String) {}
     fn delete_message(&mut self, _hash: &MessageHash) {}
     fn add_reaction(&mut self, _hash: &MessageHash, _emoji: String) {}
-    fn on_neighbor_up(&mut self, peer: PublicKey) { self.neighbors.insert(peer); }
-    fn on_neighbor_down(&mut self, peer: PublicKey) { self.neighbors.remove(&peer); }
+    fn on_neighbor_up(&mut self, peer: PublicKey) {
+        self.neighbors.insert(peer);
+    }
+    fn on_neighbor_down(&mut self, peer: PublicKey) {
+        self.neighbors.remove(&peer);
+    }
     fn record_activity(&mut self, _peer: PublicKey) {}
     fn request_quit(&mut self) {}
 }
@@ -146,9 +162,14 @@ async fn test_gui_bootstrap_plumbing() -> Result<()> {
     let extracted_peer_ids: Vec<_> = extracted_peers.iter().map(|a| a.id).collect();
 
     // Verify peers were extracted (this is what the fix ensures)
-    assert!(!extracted_peer_ids.is_empty(),
-        "CRITICAL: bootstrap peers were lost from ticket! This is the old bug.");
-    println!("> Extracted {} bootstrap peer(s) from ticket", extracted_peer_ids.len());
+    assert!(
+        !extracted_peer_ids.is_empty(),
+        "CRITICAL: bootstrap peers were lost from ticket! This is the old bug."
+    );
+    println!(
+        "> Extracted {} bootstrap peer(s) from ticket",
+        extracted_peer_ids.len()
+    );
 
     // ── Peer B (joiner) — subscribes with bootstrap peers from ticket ──
     let (router_b, ep_b, pk_b, gossip_b) =
@@ -164,7 +185,10 @@ async fn test_gui_bootstrap_plumbing() -> Result<()> {
     // B joins using the bootstrap peers from the parsed ticket — THE FIX IN ACTION
     // Old (broken) code would have passed vec![] here.
     // New (fixed) code passes extracted_peer_ids — the peers from the ticket.
-    let (sender_b, rx_b) = gossip_b.subscribe_and_join(topic, extracted_peer_ids).await?.split();
+    let (sender_b, rx_b) = gossip_b
+        .subscribe_and_join(topic, extracted_peer_ids)
+        .await?
+        .split();
 
     // ── Bridge gossip events to NetEvent channels ──
     let (net_tx_a, net_rx_a) = mpsc::unbounded_channel();
@@ -212,15 +236,25 @@ async fn test_gui_bootstrap_plumbing() -> Result<()> {
             break;
         }
         if i % 10 == 9 {
-            println!("  tick {}: A neighbors={}, B neighbors={}", i,
-                sim_a.neighbors.len(), sim_b.neighbors.len());
+            println!(
+                "  tick {}: A neighbors={}, B neighbors={}",
+                i,
+                sim_a.neighbors.len(),
+                sim_b.neighbors.len()
+            );
         }
     }
 
     let a_has_neighbors = sim_a.neighbors.len() > 0;
     let b_has_neighbors = sim_b.neighbors.len() > 0;
-    assert!(a_has_neighbors, "A should have neighbors (via bootstrap from ticket)");
-    assert!(b_has_neighbors, "B should have neighbors (via bootstrap from ticket)");
+    assert!(
+        a_has_neighbors,
+        "A should have neighbors (via bootstrap from ticket)"
+    );
+    assert!(
+        b_has_neighbors,
+        "B should have neighbors (via bootstrap from ticket)"
+    );
     println!("  ✓ Both peers have gossip neighbors");
 
     // ── Message exchange: A → B ──
@@ -228,39 +262,67 @@ async fn test_gui_bootstrap_plumbing() -> Result<()> {
     drain_net(&net_rx_a, &mut sim_a);
     drain_net(&net_rx_b, &mut sim_b);
 
-    let msg_a = SignedMessage::sign_and_encode(&sk_a, &Message::Message {
-        text: "hello from Alice via bootstrap ticket!".into(),
-    }).unwrap();
+    let msg_a = SignedMessage::sign_and_encode(
+        &sk_a,
+        &Message::Message {
+            text: "hello from Alice via bootstrap ticket!".into(),
+        },
+    )
+    .unwrap();
     sender_a.broadcast(msg_a).await?;
 
     for _ in 0..30 {
         sleep(Duration::from_millis(200)).await;
         drain_net(&net_rx_b, &mut sim_b);
-        if sim_b.received_messages.iter().any(|m| m.contains("hello from Alice")) {
+        if sim_b
+            .received_messages
+            .iter()
+            .any(|m| m.contains("hello from Alice"))
+        {
             break;
         }
     }
 
-    let b_got_message = sim_b.received_messages.iter().any(|m| m.contains("hello from Alice"));
-    assert!(b_got_message, "B must receive message from A via bootstrap-peered connection");
+    let b_got_message = sim_b
+        .received_messages
+        .iter()
+        .any(|m| m.contains("hello from Alice"));
+    assert!(
+        b_got_message,
+        "B must receive message from A via bootstrap-peered connection"
+    );
     println!("  ✓ B received message from A");
 
     // ── Message exchange: B → A ──
-    let msg_b = SignedMessage::sign_and_encode(&sk_b, &Message::Message {
-        text: "hey Alice, Bob here via bootstrap!".into(),
-    }).unwrap();
+    let msg_b = SignedMessage::sign_and_encode(
+        &sk_b,
+        &Message::Message {
+            text: "hey Alice, Bob here via bootstrap!".into(),
+        },
+    )
+    .unwrap();
     sender_b.broadcast(msg_b).await?;
 
     for _ in 0..30 {
         sleep(Duration::from_millis(200)).await;
         drain_net(&net_rx_a, &mut sim_a);
-        if sim_a.received_messages.iter().any(|m| m.contains("hey Alice")) {
+        if sim_a
+            .received_messages
+            .iter()
+            .any(|m| m.contains("hey Alice"))
+        {
             break;
         }
     }
 
-    let a_got_message = sim_a.received_messages.iter().any(|m| m.contains("hey Alice"));
-    assert!(a_got_message, "A must receive message from B via bootstrap-peered connection");
+    let a_got_message = sim_a
+        .received_messages
+        .iter()
+        .any(|m| m.contains("hey Alice"));
+    assert!(
+        a_got_message,
+        "A must receive message from B via bootstrap-peered connection"
+    );
     println!("  ✓ A received message from B");
 
     // ── Cleanup ──

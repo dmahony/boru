@@ -14,9 +14,7 @@ use std::collections::{HashMap, HashSet};
 
 use iroh::PublicKey;
 use iroh_gossip::{
-    chat_core::{
-        handle_net_event, ChatCallbacks, MessageHash, NetEvent,
-    },
+    chat_core::{handle_net_event, ChatCallbacks, MessageHash, NetEvent},
     friends::FriendId,
 };
 use rand::SeedableRng;
@@ -59,16 +57,27 @@ impl ChatCallbacks for OnlineUserTracker {
         self.local_public
     }
     fn set_name(&mut self, _peer: PublicKey, _name: String) {}
-    fn is_friend(&self, _peer: &PublicKey) -> bool { false }
+    fn is_friend(&self, _peer: &PublicKey) -> bool {
+        false
+    }
     fn friend_mark_online(&mut self, _fid: FriendId) {}
     fn friend_mark_offline(&mut self, _fid: FriendId) {}
     fn friend_set_name(&mut self, _fid: FriendId, _name: String) {}
     fn mark_friends_dirty(&mut self) {}
     fn push_system(&mut self, _text: String) {}
-    fn push_remote(&mut self, _label: String, _text: String, _hash: Option<MessageHash>, _sent_at: Option<u64>) {}
+    fn push_remote(
+        &mut self,
+        _label: String,
+        _text: String,
+        _hash: Option<MessageHash>,
+        _sent_at: Option<u64>,
+    ) {
+    }
     fn set_pending_file(&mut self, _name: String, _ticket: String) {}
     fn set_pending_image(&mut self, _name: String, _hash: MessageHash, _from: PublicKey) {}
-    fn has_message(&self, _hash: &MessageHash) -> bool { false }
+    fn has_message(&self, _hash: &MessageHash) -> bool {
+        false
+    }
     fn edit_message(&mut self, _hash: &MessageHash, _new_text: String) {}
     fn delete_message(&mut self, _hash: &MessageHash) {}
     fn add_reaction(&mut self, _hash: &MessageHash, _emoji: String) {}
@@ -110,11 +119,8 @@ async fn test_online_list_tracks_peer_lifecycle() {
     let mut tracker = OnlineUserTracker::new(local_pk);
 
     // Phase 1: NeighborUp for peer A — count 0→1
-    handle_net_event(
-        NetEvent::NeighborUp { peer: peer_a },
-        &mut tracker,
-    )
-    .expect("handle NeighborUp");
+    handle_net_event(NetEvent::NeighborUp { peer: peer_a }, &mut tracker)
+        .expect("handle NeighborUp");
     tracker.snapshot();
 
     assert!(
@@ -127,11 +133,8 @@ async fn test_online_list_tracks_peer_lifecycle() {
     );
 
     // Phase 2: NeighborDown for peer A — count 1→0
-    handle_net_event(
-        NetEvent::NeighborDown { peer: peer_a },
-        &mut tracker,
-    )
-    .expect("handle NeighborDown");
+    handle_net_event(NetEvent::NeighborDown { peer: peer_a }, &mut tracker)
+        .expect("handle NeighborDown");
     tracker.snapshot();
 
     assert!(
@@ -140,11 +143,8 @@ async fn test_online_list_tracks_peer_lifecycle() {
     );
 
     // Phase 3: NeighborUp for peer B — count 0→1 again (REGRESSION TEST)
-    handle_net_event(
-        NetEvent::NeighborUp { peer: peer_b },
-        &mut tracker,
-    )
-    .expect("handle NeighborUp");
+    handle_net_event(NetEvent::NeighborUp { peer: peer_b }, &mut tracker)
+        .expect("handle NeighborUp");
     tracker.snapshot();
 
     assert!(
@@ -200,11 +200,8 @@ async fn test_online_list_multiple_peers() {
 
     // Three peers join one by one
     for peer in &[peer_a, peer_b, peer_c] {
-        handle_net_event(
-            NetEvent::NeighborUp { peer: *peer },
-            &mut tracker,
-        )
-        .expect("handle NeighborUp");
+        handle_net_event(NetEvent::NeighborUp { peer: *peer }, &mut tracker)
+            .expect("handle NeighborUp");
     }
 
     assert_eq!(
@@ -217,11 +214,8 @@ async fn test_online_list_multiple_peers() {
     assert!(tracker.neighbors.contains(&peer_c));
 
     // One leaves
-    handle_net_event(
-        NetEvent::NeighborDown { peer: peer_b },
-        &mut tracker,
-    )
-    .expect("handle NeighborDown");
+    handle_net_event(NetEvent::NeighborDown { peer: peer_b }, &mut tracker)
+        .expect("handle NeighborDown");
 
     assert_eq!(
         tracker.neighbors.len(),
@@ -244,16 +238,9 @@ async fn test_online_list_duplicate_neighbor_up() {
     let mut tracker = OnlineUserTracker::new(local_pk);
 
     // Same peer sends NeighborUp twice
-    handle_net_event(
-        NetEvent::NeighborUp { peer },
-        &mut tracker,
-    )
-    .expect("first NeighborUp");
-    handle_net_event(
-        NetEvent::NeighborUp { peer },
-        &mut tracker,
-    )
-    .expect("second NeighborUp (duplicate)");
+    handle_net_event(NetEvent::NeighborUp { peer }, &mut tracker).expect("first NeighborUp");
+    handle_net_event(NetEvent::NeighborUp { peer }, &mut tracker)
+        .expect("second NeighborUp (duplicate)");
 
     assert_eq!(
         tracker.neighbors.len(),

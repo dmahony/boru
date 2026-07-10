@@ -10,20 +10,17 @@ use iroh::Watcher;
 mod app;
 mod log_viewer;
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use clap::Parser;
-use tracing::{info, warn};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, RelayMode,
     RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
-use iroh_mdns_address_lookup::MdnsAddressLookup;
-use iroh_mainline_address_lookup::DhtAddressLookup;
 use iroh_gossip::backfill::{
     BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN, BACKFILL_TRIGGER_THRESHOLD,
 };
@@ -37,11 +34,15 @@ use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_history::RoomHistoryStore;
-use iroh_gossip::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
 #[cfg(feature = "tor-transport")]
 use iroh_gossip::tor_transport::{bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport};
+use iroh_gossip::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
+use iroh_mainline_address_lookup::DhtAddressLookup;
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use n0_error::{bail_any, Result, StdResultExt};
 use tokio::sync::Mutex;
+use tracing::{info, warn};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use app::IcedChat;
 
@@ -204,11 +205,76 @@ fn init_logging(data_dir: &Path) -> Result<()> {
 
     let writer = FileMakeWriter(Arc::new(Mutex::new(file)));
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(writer).with_ansi(false))
-        .try_init();
+    let subscriber = build_logging_subscriber(writer, std::io::stderr, std::io::stderr().is_terminal(), filter);
+    let _ = tracing::subscriber::set_global_default(subscriber);
     Ok(())
+}
+
+struct ConditionalMakeWriter<W> {
+    inner: W,
+    enabled: bool,
+}
+
+impl<W> ConditionalMakeWriter<W> {
+    fn new(inner: W, enabled: bool) -> Self {
+        Self { inner, enabled }
+    }
+}
+
+enum ConditionalWrite<W> {
+    Inner(W),
+    Sink(std::io::Sink),
+}
+
+impl<W: std::io::Write> std::io::Write for ConditionalWrite<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Inner(writer) => writer.write(buf),
+            Self::Sink(writer) => writer.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Inner(writer) => writer.flush(),
+            Self::Sink(writer) => writer.flush(),
+        }
+    }
+}
+
+impl<'a, W> tracing_subscriber::fmt::MakeWriter<'a> for ConditionalMakeWriter<W>
+where
+    W: tracing_subscriber::fmt::MakeWriter<'a>,
+{
+    type Writer = ConditionalWrite<W::Writer>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        if self.enabled {
+            ConditionalWrite::Inner(self.inner.make_writer())
+        } else {
+            ConditionalWrite::Sink(std::io::sink())
+        }
+    }
+}
+
+fn build_logging_subscriber<F, T>(
+    file_writer: F,
+    terminal_writer: T,
+    tee_to_terminal: bool,
+    filter: EnvFilter,
+) -> impl tracing::Subscriber + Send + Sync
+where
+    F: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+    T: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(file_writer).with_ansi(false))
+        .with(
+            fmt::layer()
+                .with_writer(ConditionalMakeWriter::new(terminal_writer, tee_to_terminal))
+                .with_ansi(false),
+        )
 }
 
 // ── Entry point ───────────────────────────────────────────────────────
@@ -603,4 +669,79 @@ fn main() -> Result<()> {
 
     let _keep_runtime_alive = runtime;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::EnvFilter;
+
+    #[derive(Clone, Default)]
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct BufferGuard<'a>(std::sync::MutexGuard<'a, Vec<u8>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufferWriter {
+        type Writer = BufferGuard<'a>;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            BufferGuard(self.0.lock().expect("buffer mutex poisoned"))
+        }
+    }
+
+    impl Write for BufferGuard<'_> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.0.flush()
+        }
+    }
+
+    fn buffer_to_string(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(buffer.lock().expect("buffer mutex poisoned").clone())
+            .expect("log output should be valid utf-8")
+    }
+
+    #[test]
+    fn logs_are_ted_to_terminal_when_terminal_is_available() {
+        let file_buf = Arc::new(Mutex::new(Vec::new()));
+        let term_buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = build_logging_subscriber(
+            BufferWriter(file_buf.clone()),
+            BufferWriter(term_buf.clone()),
+            true,
+            EnvFilter::new("info"),
+        );
+
+        with_default(subscriber, || {
+            tracing::info!("terminal-visible message");
+        });
+
+        assert!(buffer_to_string(&file_buf).contains("terminal-visible message"));
+        assert!(buffer_to_string(&term_buf).contains("terminal-visible message"));
+    }
+
+    #[test]
+    fn logs_do_not_write_to_terminal_when_no_tty_is_present() {
+        let file_buf = Arc::new(Mutex::new(Vec::new()));
+        let term_buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = build_logging_subscriber(
+            BufferWriter(file_buf.clone()),
+            BufferWriter(term_buf.clone()),
+            false,
+            EnvFilter::new("info"),
+        );
+
+        with_default(subscriber, || {
+            tracing::info!("hidden message");
+        });
+
+        assert!(buffer_to_string(&file_buf).contains("hidden message"));
+        assert!(buffer_to_string(&term_buf).is_empty());
+    }
 }

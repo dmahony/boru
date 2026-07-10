@@ -18,9 +18,7 @@ use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, EndpointAddr,
     PublicKey, RelayMode, RelayUrl, SecretKey,
 };
-use iroh_gossip::chat_core::{
-    collect_bootstrap_peers, seed_memory_lookup,
-};
+use iroh_gossip::chat_core::{collect_bootstrap_peers, seed_memory_lookup};
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
@@ -47,7 +45,7 @@ fn test_collect_bootstrap_peers_dedup() {
         .with_relay_url("https://relay-3.example.com".parse::<RelayUrl>().unwrap());
 
     let ticket_peers = vec![addr1.clone(), addr2.clone()];
-    let room_peers = vec![addr1_dup.clone()];  // same pk1, different relay
+    let room_peers = vec![addr1_dup.clone()]; // same pk1, different relay
 
     let (peer_ids, all_addrs) = collect_bootstrap_peers(&[&ticket_peers[..], &room_peers[..]]);
 
@@ -62,7 +60,9 @@ fn test_collect_bootstrap_peers_dedup() {
     let addr1_found = all_addrs.iter().find(|a| a.id == pk1).unwrap();
     let relay_urls_1: Vec<_> = addr1_found.relay_urls().collect();
     assert!(
-        relay_urls_1.iter().any(|u| u.to_string().contains("relay-1")),
+        relay_urls_1
+            .iter()
+            .any(|u| u.to_string().contains("relay-1")),
         "first source's relay URL should be preserved"
     );
 
@@ -80,14 +80,20 @@ fn test_seed_memory_lookup_populates() {
     let sk = SecretKey::from_bytes(&rng.random());
     let pk = sk.public();
 
-    let addr = EndpointAddr::new(pk)
-        .with_relay_url("https://relay-test.example.com".parse::<RelayUrl>().unwrap());
+    let addr = EndpointAddr::new(pk).with_relay_url(
+        "https://relay-test.example.com"
+            .parse::<RelayUrl>()
+            .unwrap(),
+    );
 
     let lookup = MemoryLookup::new();
     seed_memory_lookup(&lookup, &[addr.clone()]);
 
     let resolved = lookup.get_endpoint_info(pk);
-    assert!(resolved.is_some(), "seed_memory_lookup should add the address");
+    assert!(
+        resolved.is_some(),
+        "seed_memory_lookup should add the address"
+    );
     let resolved_addr = resolved.unwrap().into_endpoint_addr();
     assert_eq!(resolved_addr.id, pk, "resolved ID should match");
 }
@@ -112,8 +118,7 @@ fn test_room_store_peers_roundtrip() -> Result<()> {
     store.set_peers(vec![addr.clone()])?;
 
     // Reload from disk
-    let loaded = RoomStore::load(dir.path())?
-        .expect("should load saved room store");
+    let loaded = RoomStore::load(dir.path())?.expect("should load saved room store");
     assert_eq!(loaded.topic, topic, "topic should survive roundtrip");
     assert_eq!(loaded.peers.len(), 1, "should have 1 peer");
     assert_eq!(loaded.peers[0].id, pk, "peer ID should survive roundtrip");
@@ -121,8 +126,7 @@ fn test_room_store_peers_roundtrip() -> Result<()> {
     // Clear peers
     let mut reloaded = loaded;
     reloaded.clear_peers()?;
-    let cleared = RoomStore::load(dir.path())?
-        .expect("should load cleared store");
+    let cleared = RoomStore::load(dir.path())?.expect("should load cleared store");
     assert!(cleared.peers.is_empty(), "cleared store has empty peers");
 
     // Load a v1-format file (no peers field) — currently the store
@@ -133,8 +137,7 @@ fn test_room_store_peers_roundtrip() -> Result<()> {
         "schema_version": 1,
         "topic": topic_bytes
     });
-    std::fs::write(&v1_path, v1_json.to_string())
-        .map_err(|e| n0_error::anyerr!("{e}"))?;
+    std::fs::write(&v1_path, v1_json.to_string()).map_err(|e| n0_error::anyerr!("{e}"))?;
     let v1_result = RoomStore::load(dir.path());
     assert!(
         v1_result.is_err(),
@@ -144,7 +147,7 @@ fn test_room_store_peers_roundtrip() -> Result<()> {
     Ok(())
 }
 
-// ── Test 4: Stale bootstrap scenario — 
+// ── Test 4: Stale bootstrap scenario —
 //    can a newcomer still join when the original bootstrap peer is gone?
 //    This uses the relay to mediate the connection, same pattern as
 //    test_no_bootstrap.
@@ -202,9 +205,11 @@ async fn test_stale_bootstrap_peer_does_not_block_join() -> Result<()> {
     let shared_memory = MemoryLookup::new();
 
     // ── Phase 1: A and B connect ─────────────────────────────────────
-    let (router_a, ep_a, _sk_a, gossip_a, pk_a) = spawn_peer(&mut rng, relay_map.clone(), shared_memory.clone()).await?;
+    let (router_a, ep_a, _sk_a, gossip_a, pk_a) =
+        spawn_peer(&mut rng, relay_map.clone(), shared_memory.clone()).await?;
     shared_memory.add_endpoint_info(ep_a.addr().with_relay_url(relay_url.clone()));
-    let (router_b, ep_b, _sk_b, gossip_b, pk_b) = spawn_peer(&mut rng, relay_map.clone(), shared_memory.clone()).await?;
+    let (router_b, ep_b, _sk_b, gossip_b, pk_b) =
+        spawn_peer(&mut rng, relay_map.clone(), shared_memory.clone()).await?;
     shared_memory.add_endpoint_info(ep_b.addr().with_relay_url(relay_url.clone()));
 
     println!("A: {}\nB: {}", pk_a.fmt_short(), pk_b.fmt_short());
@@ -301,7 +306,10 @@ async fn test_stale_bootstrap_peer_does_not_block_join() -> Result<()> {
             println!("  tick {i}: C joined={}", recv_c.is_joined());
         }
     }
-    assert!(c_joined, "C should eventually connect even with stale bootstrap");
+    assert!(
+        c_joined,
+        "C should eventually connect even with stale bootstrap"
+    );
 
     // ── Phase 4: C communicates with B ────────────────────────────────
     // Send a message from B to C
@@ -351,13 +359,13 @@ fn test_room_store_peers_flow_into_collect_bootstrap_peers() {
     assert_eq!(peer_ids.len(), 2, "should merge ticket + room store peers");
     assert_eq!(all_addrs.len(), 2, "should have both addresses");
     assert!(peer_ids.contains(&pk_a), "ticket peer should be present");
-    assert!(peer_ids.contains(&pk_b), "room store peer should be present");
+    assert!(
+        peer_ids.contains(&pk_b),
+        "room store peer should be present"
+    );
 
     // If both sources have the same peer — dedup
-    let duplicate = vec![
-        EndpointAddr::new(pk_a),
-        EndpointAddr::new(pk_a),
-    ];
+    let duplicate = vec![EndpointAddr::new(pk_a), EndpointAddr::new(pk_a)];
     let (ids, addrs) = collect_bootstrap_peers(&[&duplicate[..]]);
     assert_eq!(ids.len(), 1, "duplicate peer IDs should be deduped");
     assert_eq!(addrs.len(), 1, "duplicate addresses should be deduped");

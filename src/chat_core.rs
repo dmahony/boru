@@ -97,7 +97,8 @@ pub async fn refresh_bootstrap_peers(
             continue;
         }
         if let Some(info) = endpoint.remote_info(*pk).await {
-            let addr = iroh::EndpointAddr::from_parts(info.id(), info.into_addrs().map(|a| a.into_addr()));
+            let addr =
+                iroh::EndpointAddr::from_parts(info.id(), info.into_addrs().map(|a| a.into_addr()));
             refreshed.push(addr);
         }
     }
@@ -411,10 +412,7 @@ impl StatusContext {
     /// The caller should display the returned message to the user (e.g. as a
     /// system notification in the chat log) and persist the updated
     /// `last_health` for future calls.
-    pub fn check_mesh_quiescence(
-        &self,
-        last_health: &mut Option<MeshHealth>,
-    ) -> Option<String> {
+    pub fn check_mesh_quiescence(&self, last_health: &mut Option<MeshHealth>) -> Option<String> {
         let current_health = &self.mesh_health;
         let notification = match (last_health.as_ref(), current_health) {
             // Good → Degraded: warn the user
@@ -645,7 +643,13 @@ impl ChatCallbacks for AppState {
         self.push_entry(ChatEntry::system(text), true);
     }
 
-    fn push_remote(&mut self, label: String, text: String, hash: Option<MessageHash>, _sent_at: Option<u64>) {
+    fn push_remote(
+        &mut self,
+        label: String,
+        text: String,
+        hash: Option<MessageHash>,
+        _sent_at: Option<u64>,
+    ) {
         let mut entry = ChatEntry::remote(label, text);
         if let Some(h) = hash {
             entry = entry.with_message_hash(h);
@@ -957,9 +961,8 @@ const DEDUP_SWEEP_THRESHOLD: usize = 10_000;
 ///
 /// The value is the [`Instant`] when we first saw the message, used for TTL-based
 /// eviction.  Entries older than [`DEDUP_TTL`] are periodically pruned.
-static SEEN_MESSAGES: LazyLock<Mutex<HashMap<DedupKey, Instant>>> = LazyLock::new(|| {
-    Mutex::new(HashMap::new())
-});
+static SEEN_MESSAGES: LazyLock<Mutex<HashMap<DedupKey, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Prune entries older than [`DEDUP_TTL`] from the seen-messages set.
 fn prune_seen_messages() {
@@ -1266,10 +1269,7 @@ pub async fn update_connection_counts(endpoint: &Endpoint, status: &mut StatusCo
 ///
 /// The original sender is always placed first so the primary peer is tried
 /// before fallback candidates.
-pub fn download_candidates(
-    original: PublicKey,
-    neighbors: &HashSet<PublicKey>,
-) -> Vec<PublicKey> {
+pub fn download_candidates(original: PublicKey, neighbors: &HashSet<PublicKey>) -> Vec<PublicKey> {
     let mut candidates: Vec<PublicKey> = Vec::with_capacity(neighbors.len() + 1);
     candidates.push(original);
     for n in neighbors {
@@ -2104,7 +2104,9 @@ mod tests {
 
         let event = NetEvent::Message {
             from: key.public(),
-            message: Message::Message { text: "hello".into() },
+            message: Message::Message {
+                text: "hello".into(),
+            },
             sent_at: now_secs(),
         };
 
@@ -2129,12 +2131,16 @@ mod tests {
 
         let event_a = NetEvent::Message {
             from: key.public(),
-            message: Message::Message { text: "first".into() },
+            message: Message::Message {
+                text: "first".into(),
+            },
             sent_at: now_secs(),
         };
         let event_b = NetEvent::Message {
             from: key.public(),
-            message: Message::Message { text: "second".into() },
+            message: Message::Message {
+                text: "second".into(),
+            },
             sent_at: now_secs() + 1,
         };
 
@@ -2168,7 +2174,9 @@ mod tests {
         };
         let event_b = NetEvent::Message {
             from: key_b.public(),
-            message: Message::Message { text: identical_text },
+            message: Message::Message {
+                text: identical_text,
+            },
             sent_at: now_secs(),
         };
 
@@ -2191,12 +2199,16 @@ mod tests {
         // legitimate re-send and should NOT be deduped.
         let event_t1 = NetEvent::Message {
             from: key.public(),
-            message: Message::Message { text: "hello".into() },
+            message: Message::Message {
+                text: "hello".into(),
+            },
             sent_at: now_secs(),
         };
         let event_t2 = NetEvent::Message {
             from: key.public(),
-            message: Message::Message { text: "hello".into() },
+            message: Message::Message {
+                text: "hello".into(),
+            },
             sent_at: now_secs() + 2,
         };
 
@@ -2248,9 +2260,7 @@ mod tests {
 
         let event = NetEvent::Message {
             from: key.public(),
-            message: Message::AboutMe {
-                name: "bob".into(),
-            },
+            message: Message::AboutMe { name: "bob".into() },
             sent_at: now_secs(),
         };
 
@@ -2305,8 +2315,7 @@ mod tests {
             .insert(remote_key.public(), "session_bob".to_string());
         // Add as friend with last_announced_name but no label.
         let fid = FriendId::from_public_key(remote_key.public());
-        app.friends
-            .set_last_announced_name(fid, "friend_bob");
+        app.friends.set_last_announced_name(fid, "friend_bob");
 
         let display = app.resolve_name(&remote_key.public());
         assert_eq!(
@@ -2320,7 +2329,8 @@ mod tests {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
         let fid = FriendId::from_public_key(remote_key.public());
-        app.friends.set_last_announced_name(fid.clone(), "auto_name");
+        app.friends
+            .set_last_announced_name(fid.clone(), "auto_name");
         app.friends.set_label(fid, "Label");
 
         let display = app.resolve_name(&remote_key.public());
@@ -2425,10 +2435,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(app
-            .entries
-            .iter()
-            .any(|e| e.body == "Pal left the chat"));
+        assert!(app.entries.iter().any(|e| e.body == "Pal left the chat"));
     }
 
     // ── SignedMessage roundtrip helper ──────────────────────────────────
@@ -2711,7 +2718,10 @@ mod tests {
         seed_memory_lookup(&lookup, &[addr]);
 
         let resolved = lookup.get_endpoint_info(pk);
-        assert!(resolved.is_some(), "seed_memory_lookup should add the address");
+        assert!(
+            resolved.is_some(),
+            "seed_memory_lookup should add the address"
+        );
     }
 
     #[test]
@@ -2719,6 +2729,8 @@ mod tests {
         let lookup = iroh::address_lookup::memory::MemoryLookup::new();
         seed_memory_lookup(&lookup, &[]);
         // Should not panic — verify by checking nothing was added
-        assert!(lookup.get_endpoint_info(SecretKey::generate().public()).is_none());
+        assert!(lookup
+            .get_endpoint_info(SecretKey::generate().public())
+            .is_none());
     }
 }

@@ -62,7 +62,13 @@ impl ChatCallbacks for ImageTestPeer {
         self.received_messages.push(format!("[sys] {text}"));
         self.entries.push(ChatEntry::system(text));
     }
-    fn push_remote(&mut self, label: String, text: String, _hash: Option<MessageHash>, _sent_at: Option<u64>) {
+    fn push_remote(
+        &mut self,
+        label: String,
+        text: String,
+        _hash: Option<MessageHash>,
+        _sent_at: Option<u64>,
+    ) {
         self.received_messages.push(format!("[{label}] {text}"));
         self.entries.push(ChatEntry::remote(label, text));
     }
@@ -114,7 +120,14 @@ async fn spawn_peer_with_blobs(
         .accept(GOSSIP_ALPN, gossip.clone())
         .accept(iroh_blobs::ALPN, blobs_protocol.clone())
         .spawn();
-    Ok((router, ep.clone(), ep.secret_key().clone(), gossip, pk, blob_store))
+    Ok((
+        router,
+        ep.clone(),
+        ep.secret_key().clone(),
+        gossip,
+        pk,
+        blob_store,
+    ))
 }
 
 fn drain_net(
@@ -159,8 +172,11 @@ async fn test_image_send_and_download() -> Result<()> {
 
     let about_me = SignedMessage::sign_and_encode(
         &sk_a,
-        &Message::AboutMe { name: "Alice".into() },
-    ).unwrap();
+        &Message::AboutMe {
+            name: "Alice".into(),
+        },
+    )
+    .unwrap();
     sender_a.broadcast(about_me).await?;
 
     // ── Peer B: subscribe with A as bootstrap ──
@@ -239,7 +255,10 @@ async fn test_image_send_and_download() -> Result<()> {
 
     // add_bytes returns AddProgress which implements IntoFuture -> RequestResult<TagInfo>
     use iroh_blobs::api::proto::TagInfo;
-    let tag_info = blob_store_a.blobs().add_bytes(image_data.clone()).await
+    let tag_info = blob_store_a
+        .blobs()
+        .add_bytes(image_data.clone())
+        .await
         .map_err(|e| format!("add_bytes error: {e}"))
         .unwrap();
     let blob_hash = tag_info.hash;

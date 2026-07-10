@@ -225,10 +225,7 @@ fn check_data_dir(data_dir: &Path) -> Check {
             return Check {
                 name,
                 severity: Severity::Fail,
-                message: format!(
-                    "cannot stat data directory {}: {e}",
-                    data_dir.display()
-                ),
+                message: format!("cannot stat data directory {}: {e}", data_dir.display()),
             };
         }
     };
@@ -296,7 +293,10 @@ fn check_secret_key(data_dir: &Path) -> Check {
         return Check {
             name,
             severity: Severity::Fail,
-            message: format!("secret key path exists but is not a file: {}", path.display()),
+            message: format!(
+                "secret key path exists but is not a file: {}",
+                path.display()
+            ),
         };
     }
 
@@ -325,11 +325,7 @@ fn check_secret_key(data_dir: &Path) -> Check {
                 Ok(key) => Check {
                     name,
                     severity: Severity::Pass,
-                    message: format!(
-                        "valid key (public: {}) at {}",
-                        key.public(),
-                        path.display()
-                    ),
+                    message: format!("valid key (public: {}) at {}", key.public(), path.display()),
                 },
                 Err(e) => Check {
                     name,

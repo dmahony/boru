@@ -30,8 +30,6 @@ use iroh::{
     RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
-use iroh_mdns_address_lookup::MdnsAddressLookup;
-use iroh_mainline_address_lookup::DhtAddressLookup;
 use iroh_gossip::backfill::{
     BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN, BACKFILL_TRIGGER_THRESHOLD,
 };
@@ -59,6 +57,8 @@ use iroh_gossip::{
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
+use iroh_mainline_address_lookup::DhtAddressLookup;
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use n0_error::{bail_any, Result, StdResultExt};
 use n0_future::task;
 use ratatui::{
@@ -465,7 +465,10 @@ async fn main() -> Result<()> {
     } else {
         println!("> trying to connect to {} peers...", addr_material.len());
     };
-    let (sender, receiver) = gossip.subscribe_and_join(topic, peer_ids.clone()).await?.split();
+    let (sender, receiver) = gossip
+        .subscribe_and_join(topic, peer_ids.clone())
+        .await?
+        .split();
     println!("> connected!");
 
     // Refresh the stored bootstrap peers from the just-connected peers so
@@ -556,10 +559,16 @@ async fn main() -> Result<()> {
                     ChatKind::Remote => {
                         if let Ok(pk) = PublicKey::from_str(&entry.sender) {
                             names.get(&pk).cloned().unwrap_or_else(|| {
-                                format!("..{}", &entry.sender[entry.sender.len().saturating_sub(8)..])
+                                format!(
+                                    "..{}",
+                                    &entry.sender[entry.sender.len().saturating_sub(8)..]
+                                )
                             })
                         } else {
-                            format!("..{}", &entry.sender[entry.sender.len().saturating_sub(8)..])
+                            format!(
+                                "..{}",
+                                &entry.sender[entry.sender.len().saturating_sub(8)..]
+                            )
                         }
                     }
                 };

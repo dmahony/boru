@@ -5,7 +5,10 @@ use std::{
     time::Duration,
 };
 
-use iced::{widget::{button, column, container, row, scrollable, text}, Element, Length};
+use iced::{
+    widget::{button, column, container, row, scrollable, text},
+    Element, Length,
+};
 use n0_error::{Result as NResult, StdResultExt};
 
 #[derive(Debug, Clone)]
@@ -63,15 +66,18 @@ pub fn log_file_path(data_dir: &Path) -> PathBuf {
 }
 
 pub fn spawn(data_dir: &Path) -> std::result::Result<(), String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("failed to locate current executable: {e}"))?;
-    Command::new(exe)
-        .arg("logs")
-        .arg("--data-dir")
-        .arg(data_dir)
+    build_spawn_command(data_dir)?
         .spawn()
         .map_err(|e| format!("failed to launch log viewer: {e}"))?;
     Ok(())
+}
+
+fn build_spawn_command(data_dir: &Path) -> std::result::Result<Command, String> {
+    let exe =
+        std::env::current_exe().map_err(|e| format!("failed to locate current executable: {e}"))?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("logs").env("IROH_GOSSIP_CHAT_DATA_DIR", data_dir);
+    Ok(cmd)
 }
 
 pub fn run(log_path: PathBuf) -> NResult<()> {
@@ -99,4 +105,30 @@ fn view(state: &LogViewer) -> Element<'_, Message> {
 
 fn read_log(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|_| String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn build_spawn_command_sets_data_dir_env_and_keeps_logs_as_the_only_argument() {
+        let data_dir = Path::new("/tmp/iroh-gossip-chat");
+        let cmd = build_spawn_command(data_dir).expect("command should build");
+
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["logs"]);
+
+        let env_value = cmd
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new("IROH_GOSSIP_CHAT_DATA_DIR"))
+            .and_then(|(_, value)| value)
+            .expect("data dir env should be set");
+        assert_eq!(env_value, data_dir.as_os_str());
+        assert!(!args.iter().any(|arg| arg == "--data-dir"));
+    }
 }
