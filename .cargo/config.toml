@@ -4,7 +4,25 @@
 #            cargo chat join <ticket>
 #            cargo iced-chat open
 #            cargo iced-chat join <ticket>
+#
 
 [alias]
 chat = "run --features examples --example chat --"
 iced-chat = "run --features gui --example iced_chat --"
+
+# ── Edition note ─────────────────────────────────────────────────────────
+#
+# The project Cargo.toml sets edition = "2021".  Running `cargo build`,
+# `cargo clippy`, etc. always passes the correct --edition.
+#
+# DO NOT run `clippy-driver src/foo.rs` directly on individual files — it
+# defaults to **edition 2015** and produces misleading errors like:
+#
+#   error[E0670]: `async fn` is not permitted in Rust 2015
+#
+# Instead use:
+#   cargo clippy               (correct edition, knows all dependencies)
+#   ./scripts/lint.sh          (convenience wrapper)
+#
+# If you really need standalone clippy on a single file, pass --edition:
+#   clippy-driver --edition 2021 src/foo.rs

@@ -1,6 +1,20 @@
 [package]
 name = "iroh-gossip"
 version = "0.101.0"
+# ── EDITION ─────────────────────────────────────────────────────────
+# edition = "2021" ← correct.  If you see "Rust 2015" in an error message
+# from clippy-driver/rustc, you are running the linter directly on a
+# source file WITHOUT the --edition flag, which defaults to 2015.
+#
+#   ✔ cargo clippy          (correct — Cargo passes our edition)
+#   ✔ cargo clippy --fix
+#   ✔ ./scripts/lint.sh     (wrapper that handles both cargo and standalone)
+#   ✗ clippy-driver src/foo.rs    (defaults to Rust 2015!)
+#   ✗ rustc src/foo.rs            (defaults to Rust 2015!)
+#
+# To run clippy on a single file outside cargo:
+#   clippy-driver --edition 2021 src/foo.rs
+# ──────────────────────────────────────────────────────────────────────
 edition = "2021"
 readme = "README.md"
 description = "gossip messages over broadcast trees"
@@ -68,6 +82,7 @@ arti-client = { version = "0.44.0", optional = true, default-features = false, f
 ] }
 iroh = { version = "1", default-features = false, optional = true }
 iroh-mdns-address-lookup = { version = "0.4", optional = true }
+iroh-mainline-address-lookup = { version = "0.4", optional = true }
 tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt", "macros"] }
 n0-watcher = { version = "1.0.0", optional = true }
 noq-udp = { version = "1.0.0", optional = true }
@@ -134,6 +149,7 @@ net = [
     "dep:irpc",
     "dep:iroh",
     "dep:iroh-mdns-address-lookup",
+    "dep:iroh-mainline-address-lookup",
     "dep:tokio",
     "dep:tokio-util",
     "dep:futures-concurrency",

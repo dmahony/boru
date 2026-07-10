@@ -140,6 +140,111 @@ sharing (`/send <path>`, `/download`), dark mode toggle, and a
 scrolling chat log.  Networking runs in background tokio tasks with
 events flowing into the iced event loop via a channel.
 
+## Address Lookup Methods
+
+iroh-gossip-chat uses a layered address lookup system to discover peer
+addressing information.  Each method has different tradeoffs:
+
+### DNS/Pkarr (default, enabled by `presets::N0`)
+
+**How it works:** The endpoint publishes signed records (EndpointID + relay URL)
+to a DNS server run by n0.computer.  Other endpoints resolve by querying
+`_iroh.<z32-endpoint-id>.dns.iroh.link` for a TXT record.
+
+**When to use:** Everywhere.  Fast, simple, works out of the box with the
+default iroh preset.  Requires trust that the DNS server is available and
+honest (signatures protect record integrity, but a compromised server could
+withhold records).
+
+**Limitations:** Single point of dependency on n0's infrastructure.  No
+discovery inside a LAN without internet access.
+
+### mDNS (enabled manually)
+
+**How it works:** mDNS address lookup broadcasts endpoint info on the local
+network.  Other endpoints on the same subnet receive it without any relay or
+server.
+
+**When to use:** LAN-only scenarios — same office, home network, conference
+WiFi.  No internet needed.  Fastest local discovery.
+
+**Limitations:** Does not cross subnets or work over VPNs that don't forward
+multicast.  Not suitable for global peer discovery.
+
+### DHT — Mainline BitTorrent DHT (enabled manually)
+
+**How it works:** Uses the [BitTorrent Mainline DHT](https://en.wikipedia.org/wiki/Mainline_DHT)
+to publish and resolve signed endpoint records (same record format as DNS/Pkarr).
+No central server required — any endpoint can publish and resolve directly on
+the DHT.
+
+**When to use:**
+- Global peer discovery **without depending on n0's DNS server**
+- Censorship-resistant / air-gapped deployments where a DNS server isn't
+  reachable (DHT runs over UDP directly)
+- Combined with [mDNS](#mdns-enabled-manually) for fully decentralized
+  address lookup (local via mDNS, global via DHT)
+
+**Limitations:**
+- **Slower than DNS** — DHT lookups are iterative (query several nodes before
+  finding the record).  Expect 500ms–5s for a fresh lookup vs ~100ms for DNS.
+- **Publish lag** — publishing a record to the DHT also takes time (~seconds).
+  If the endpoint changes relays, there's a window where old DHT records point
+  to a stale relay.
+- **Network filtering** — some corporate or ISP firewalls rate-limit or block
+  DHT traffic (UDP on a wide port range).
+- **Not default** — must be explicitly added via
+  `DhtAddressLookup::builder()`, which both examples already do.
+
+### MemoryLookup (programmatic)
+
+**How it works:** An in-memory table of (EndpointID → addressing info) that
+your code populates directly.  Used to bootstrap known peers before they can
+be discovered via other methods.
+
+**When to use:** Bootstrap — when joining a room you already know the relay
+address of a bootstrap peer.  Also used internally by `GossipAddressLookup`
+to distribute gossip-learned addresses.
+
+### GossipAddressLookup (internal)
+
+**How it works:** The gossip protocol itself distributes endpoint addressing
+information via `Join` and `ForwardJoin` messages.  When a peer joins a topic,
+everyone it connects to learns its addressing info.  This is automatic and
+always active.
+
+**When to use:** Always active — no configuration needed.  Complements other
+methods by seeding addresses that were learned through gossip.
+
+### Ticket (out-of-band)
+
+**How it works:** A base32-encoded ticket containing the topic, relay URL, and
+direct addresses of the room creator.
+
+**When to use:** Joining a room for the first time before any discovery
+method has data on that peer.
+
+**Limitations:** Expires — if the peer changes network or relay, old tickets
+can't find them.  Must be shared through a side channel (copy-paste, QR code,
+etc.).
+
+### Summary
+
+| Method                | Scope   | Server needed | Speed     | Requires config |
+| --------------------- | ------- | ------------- | --------- | --------------- |
+| DNS/Pkarr             | Global  | Yes (n0)      | Fast      | No (default)    |
+| mDNS                  | Local   | No            | Instant   | Yes             |
+| DHT (Mainline)        | Global  | No            | Slow      | Yes             |
+| MemoryLookup          | Manual  | No            | Instant   | Yes (code)      |
+| GossipAddressLookup   | Swarm   | No            | Real-time | No              |
+| Ticket                | One-off | No            | Instant   | Yes (side ch.)  |
+
+Both examples (`chat` and `iced_chat`) enable **mDNS** and **DHT** alongside
+the default DNS/Pkarr.  mDNS is gated on `iroh_mdns_address_lookup`
+building successfully (it may fail in headless/container environments).  DHT
+is gated on the `net` feature flag, which is automatically enabled by
+`examples` and `gui`.
+
 # License
 
 This project is licensed under either of

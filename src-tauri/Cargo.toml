@@ -28,6 +28,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # iroh dependencies matching the main project
 iroh = { version = "1", default-features = false, features = ["metrics", "tls-ring"] }
+iroh-mainline-address-lookup = "0.4"
 iroh-gossip = { path = "..", features = ["net"] }
 iroh-blobs = { version = "0.103", default-features = false }
 n0-future = "0.3"

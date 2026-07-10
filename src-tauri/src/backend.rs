@@ -16,6 +16,7 @@ use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
     SecretKey,
 };
+use iroh_mainline_address_lookup::DhtAddressLookup;
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 use iroh_gossip::{
     chat_core::{
@@ -131,6 +132,16 @@ impl ChatBackend {
             .await
             .context("bind endpoint")?;
         endpoint.online().await;
+
+        // Add DHT address lookup for global peer discovery via Mainline DHT
+        if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
+            if let Ok(dht) = DhtAddressLookup::builder()
+                .secret_key(endpoint.secret_key().clone())
+                .build()
+            {
+                addr_lookup.add(dht);
+            }
+        }
 
         let my_addr = endpoint.addr();
         let endpoint_id = endpoint.id();

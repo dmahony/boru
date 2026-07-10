@@ -1,4 +1,14 @@
 # Use cargo-make to run tasks here: https://crates.io/crates/cargo-make
+#
+# ── Edition note ──────────────────────────────────────────────────────
+# The project Cargo.toml sets edition = "2021".  All cargo-make tasks
+# inherit the edition correctly.  Do NOT run `clippy-driver` directly on
+# individual source files — it defaults to edition 2015.
+#
+#   ✔ cargo make lint         (correct edition via Cargo)
+#   ✔ ./scripts/lint.sh       (wrapper that handles standalone files)
+#   ✗ clippy-driver src/foo.rs   (defaults to edition 2015!)
+#
 
 [tasks.format]
 workspace = false
@@ -26,3 +36,26 @@ args = [
      "--config",
      "imports_granularity=Crate,group_imports=StdExternalCrate,reorder_imports=true",
 ]
+
+# ── Lint ──────────────────────────────────────────────────────────────
+# Runs clippy via Cargo (the only way that respects Cargo.toml edition).
+# Use this instead of bare clippy-driver on individual files.
+#
+#   cargo make lint           # normal check
+#   cargo make lint-fix       # auto-fix
+#   cargo make lint-all       # check all features
+#
+[tasks.lint]
+workspace = false
+command = "cargo"
+args = ["clippy", "--all-features"]
+
+[tasks.lint-fix]
+workspace = false
+command = "cargo"
+args = ["clippy", "--fix", "--all-features", "--", "--allow-staged"]
+
+[tasks.lint-all]
+workspace = false
+command = "cargo"
+args = ["clippy", "--all-features", "--", "-D", "warnings"]

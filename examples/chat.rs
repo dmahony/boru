@@ -31,6 +31,7 @@ use iroh::{
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
+use iroh_mainline_address_lookup::DhtAddressLookup;
 use iroh_gossip::backfill::{
     BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN, BACKFILL_TRIGGER_THRESHOLD,
 };
@@ -380,6 +381,28 @@ async fn main() -> Result<()> {
     if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
         if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
             addr_lookup.add(mdns);
+        }
+    }
+
+    // Add DHT address lookup for global peer discovery via Mainline DHT.
+    //
+    // Enables peer discovery by EndpointID alone, without depending on
+    // n0's DNS server.  Tradeoffs versus DNS/Pkarr:
+    //
+    //   + No central dependency — fully decentralized
+    //   + Works in censorship-resistant or air-gapped setups
+    //   - Slower lookups (500ms–5s vs ~100ms for DNS)
+    //   - May be blocked by corporate/ISP firewalls (wide UDP port range)
+    //   - Publishing a record takes time (~seconds)
+    //
+    // DHT supplement DNS/Pkarr: if DNS fails, DHT may still resolve.
+    // Both are used alongside the default DNS/Pkarr from `presets::N0`.
+    if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
+        if let Ok(dht) = DhtAddressLookup::builder()
+            .secret_key(endpoint.secret_key().clone())
+            .build()
+        {
+            addr_lookup.add(dht);
         }
     }
 

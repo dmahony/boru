@@ -20,6 +20,7 @@ use iroh::{
     address_lookup::memory::MemoryLookup,
     endpoint::presets,
 };
+use iroh_mainline_address_lookup::DhtAddressLookup;
 use iroh_gossip::api::Event;
 use iroh_gossip::chat_core::{check_peer_connection_type, ConnectionType, Message, SignedMessage};
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
@@ -200,6 +201,13 @@ async fn main() -> Result<()> {
     let eid: EndpointId = endpoint.id();
     println!("Public key:    {pk}");
     println!("Endpoint ID:   {eid}");
+
+    // Add DHT address lookup for global peer discovery via Mainline DHT
+    if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
+        if let Ok(dht_lookup) = DhtAddressLookup::builder().build() {
+            addr_lookup.add(dht_lookup);
+        }
+    }
 
     let gossip = Gossip::builder().spawn(endpoint.clone());
     let _router = iroh::protocol::Router::builder(endpoint.clone())
