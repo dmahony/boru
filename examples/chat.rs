@@ -9,6 +9,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env, io,
+    io::IsTerminal,
     net::{Ipv4Addr, SocketAddrV4},
     path::{Path, PathBuf},
     str::FromStr,
@@ -69,6 +70,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 /// Chat over iroh-gossip
 ///
@@ -182,9 +184,136 @@ fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf
     }
 }
 
+// ── Persistent logging ───────────────────────────────────────────────
+
+const LOG_FILE_NAME: &str = "chat.log";
+
+/// Complete path to the persistent log file.
+fn log_file_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("logs").join(LOG_FILE_NAME)
+}
+
+/// Initialise persistent file-based tracing logging alongside stderr output.
+///
+/// Logs are written to `{data_dir}/logs/chat.log` with `0600` permissions.
+/// The log level defaults to `debug` and can be controlled via `RUST_LOG`.
+///
+/// When troubleshooting startup / connection problems, check the log file
+/// at the path printed at startup.
+fn init_logging(data_dir: &Path) -> Result<()> {
+    let log_path = log_file_path(data_dir);
+
+    // Create parent directory with 0700 permissions.
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent).std_context("failed to create log directory")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    // Open (or create) the log file, append-only.
+    use std::fs::OpenOptions;
+    use std::sync::{Arc, Mutex};
+
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .std_context("failed to open log file")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    /// A `MakeWriter` that writes to a shared file behind a mutex.
+    struct FileMakeWriter(Arc<Mutex<std::fs::File>>);
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FileMakeWriter {
+        type Writer = FileWriterGuard<'a>;
+        fn make_writer(&'a self) -> Self::Writer {
+            FileWriterGuard(self.0.lock().expect("log file mutex poisoned"))
+        }
+    }
+    struct FileWriterGuard<'a>(std::sync::MutexGuard<'a, std::fs::File>);
+    impl std::io::Write for FileWriterGuard<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            std::io::Write::write(&mut *self.0, buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            std::io::Write::flush(&mut *self.0)
+        }
+    }
+
+    let file_writer = FileMakeWriter(Arc::new(Mutex::new(file)));
+
+    // A simple wrapper that switches between a real writer and `io::sink`
+    // based on a boolean flag (tee only when stderr is a terminal).
+    struct ConditionalMakeWriter<W> {
+        inner: W,
+        enabled: bool,
+    }
+    impl<W> ConditionalMakeWriter<W> {
+        fn new(inner: W, enabled: bool) -> Self {
+            Self { inner, enabled }
+        }
+    }
+    enum ConditionalWrite<W> {
+        Inner(W),
+        Sink(std::io::Sink),
+    }
+    impl<W: std::io::Write> std::io::Write for ConditionalWrite<W> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            match self {
+                Self::Inner(w) => w.write(buf),
+                Self::Sink(w) => w.write(buf),
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            match self {
+                Self::Inner(w) => w.flush(),
+                Self::Sink(w) => w.flush(),
+            }
+        }
+    }
+    impl<'a, W> tracing_subscriber::fmt::MakeWriter<'a> for ConditionalMakeWriter<W>
+    where
+        W: tracing_subscriber::fmt::MakeWriter<'a>,
+    {
+        type Writer = ConditionalWrite<W::Writer>;
+        fn make_writer(&'a self) -> Self::Writer {
+            if self.enabled {
+                ConditionalWrite::Inner(self.inner.make_writer())
+            } else {
+                ConditionalWrite::Sink(std::io::sink())
+            }
+        }
+    }
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+
+    let subscriber = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(file_writer).with_ansi(false))
+        .with(
+            fmt::layer()
+                .with_writer(ConditionalMakeWriter::new(
+                    std::io::stderr,
+                    std::io::stderr().is_terminal(),
+                ))
+                .with_ansi(false),
+        );
+
+    let _ = tracing::subscriber::set_global_default(subscriber);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let data_dir = get_data_dir();
+    init_logging(&data_dir)?;
+    println!("> log file: {}", log_file_path(&data_dir).display());
     let args = Args::parse();
 
     #[cfg(feature = "tor-transport")]

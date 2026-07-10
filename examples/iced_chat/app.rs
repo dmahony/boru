@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey};
+use iroh::{EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher};
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket};
 use iroh_gossip::api::GossipSender;
 use iroh_gossip::backfill::BackfillHandle;
@@ -945,11 +945,10 @@ impl IcedChat {
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
-                let ticket_str = self.room_ticket(topic).to_string();
-                let personal_ticket = self.personal_room_ticket();
+                let personal_topic = self.personal_room_topic();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
-                let local_peer_addr = self.local_peer_addr.clone();
+                let endpoint = self.endpoint.clone();
 
                 iced::Task::perform(
                     async move {
@@ -959,6 +958,17 @@ impl IcedChat {
                             .await
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
+                        let local_peer_addr = endpoint.watch_addr().get();
+                        let ticket_str = Ticket {
+                            topic,
+                            peers: vec![local_peer_addr.clone()],
+                        }
+                        .to_string();
+                        let personal_ticket = Ticket {
+                            topic: personal_topic,
+                            peers: vec![local_peer_addr.clone()],
+                        }
+                        .to_string();
 
                         let metadata_doc = room_docs::create_metadata_doc(
                             topic,
@@ -1054,12 +1064,10 @@ impl IcedChat {
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
-                let ticket_str = self.room_ticket(topic).to_string();
-                let personal_ticket = self.personal_room_ticket();
+                let personal_topic = self.personal_room_topic();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let endpoint = self.endpoint.clone();
                 let data_dir = self.data_dir.clone();
-                let local_peer_addr = self.local_peer_addr.clone();
                 // Extract bootstrap peer addresses from the one-shot initial room
                 // or from the saved RoomStore for this topic.
                 let mut initial_addrs: Vec<EndpointAddr> =
@@ -1098,6 +1106,17 @@ impl IcedChat {
                         }
                         .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
+                        let local_peer_addr = endpoint.watch_addr().get();
+                        let ticket_str = Ticket {
+                            topic,
+                            peers: vec![local_peer_addr.clone()],
+                        }
+                        .to_string();
+                        let personal_ticket = Ticket {
+                            topic: personal_topic,
+                            peers: vec![local_peer_addr.clone()],
+                        }
+                        .to_string();
 
                         let metadata_doc = room_docs::create_metadata_doc(
                             topic,
@@ -1287,9 +1306,8 @@ impl IcedChat {
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
-                let personal_ticket = self.personal_room_ticket();
+                let personal_topic = self.personal_room_topic();
                 let endpoint = self.endpoint.clone();
-                let local_peer_addr = self.local_peer_addr.clone();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
 
@@ -1321,11 +1339,17 @@ impl IcedChat {
                         .map_err(|_| "timed out waiting for a peer to join the room".to_string())?
                         .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
+                        let local_peer_addr = endpoint.watch_addr().get();
                         let new_ticket = Ticket {
                             topic,
-                            peers: vec![local_peer_addr],
+                            peers: vec![local_peer_addr.clone()],
                         };
                         let ticket_str = new_ticket.to_string();
+                        let personal_ticket = Ticket {
+                            topic: personal_topic,
+                            peers: vec![local_peer_addr.clone()],
+                        }
+                        .to_string();
 
                         let metadata_doc =
                             room_docs::create_metadata_doc(topic, &sender, RoomMetadata::empty())
