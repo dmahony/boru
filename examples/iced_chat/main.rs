@@ -36,6 +36,7 @@ use iroh_gossip::room_history::RoomHistoryStore;
 use iroh_gossip::tor_transport::{bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport};
 use iroh_gossip::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
+#[cfg(feature = "gui")]
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use n0_error::{bail_any, Result, StdResultExt};
 use tokio::sync::Mutex;
@@ -428,13 +429,17 @@ fn main() -> Result<()> {
                     TorTransport::new(secret_key.public(), Arc::clone(&tor_client), args.bind_port);
                 let endpoint = Endpoint::builder(presets::N0DisableRelay)
                     .secret_key(secret_key.clone())
-                    .address_lookup(memory_lookup.clone())
+                    .address_lookup(MdnsAddressLookup::builder())
                     .relay_mode(relay_mode.clone())
                     .add_custom_transport(Arc::new(tor_transport.clone()))
                     .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
                     .bind()
                     .await?;
                 endpoint.online().await;
+                #[allow(unused)]
+                endpoint.address_lookup()?.add(memory_lookup.clone());
+                let local_peer_addr = tor_transport.watch_local_peer_addr().initialized().await.endpoint_addr();
+
                 // Spawn the Tor health-monitor background task
                 let monitor_client = Arc::clone(&tor_client);
                 let monitor_tx = tor_reconnect_tx.clone();
@@ -452,11 +457,13 @@ fn main() -> Result<()> {
                 };
                 let endpoint = ep_builder
                     .secret_key(secret_key.clone())
-                    .address_lookup(memory_lookup.clone())
+                    .address_lookup(MdnsAddressLookup::builder())
                     .relay_mode(relay_mode.clone())
                     .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
                     .bind()
                     .await?;
+                #[allow(unused)]
+                endpoint.address_lookup()?.add(memory_lookup.clone());
                 if !matches!(relay_mode, RelayMode::Disabled) {
                     endpoint.online().await;
                 }
@@ -472,11 +479,13 @@ fn main() -> Result<()> {
                 };
                 let endpoint = ep_builder
                     .secret_key(secret_key.clone())
-                    .address_lookup(memory_lookup.clone())
+                    .address_lookup(MdnsAddressLookup::builder())
                     .relay_mode(relay_mode.clone())
                     .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
                     .bind()
                     .await?;
+                #[allow(unused)]
+                endpoint.address_lookup()?.add(memory_lookup.clone());
                 if !matches!(relay_mode, RelayMode::Disabled) {
                     endpoint.online().await;
                 }

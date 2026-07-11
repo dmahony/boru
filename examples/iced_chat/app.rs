@@ -241,6 +241,30 @@ fn container_hover(theme: &iced::Theme) -> iced::widget::container::Style {
     }
 }
 
+/// Closures passed to `text().style()` need this static-compatible form.
+fn text_muted_style(theme: &iced::Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(if matches!(theme, iced::Theme::Dark) {
+            Color::from_rgb(0.6, 0.6, 0.6)
+        } else {
+            Color::from_rgb(0.4, 0.4, 0.4)
+        }),
+    }
+}
+
+/// Container style for a card — surface background, muted border, rounded.
+fn container_card(theme: &iced::Theme) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        background: Some(iced::Background::Color(bg_surface(theme))),
+        border: iced::Border {
+            color: border_muted(theme),
+            width: 1.0,
+            radius: SPACE_8.into(),
+        },
+        ..Default::default()
+    }
+}
+
 // ── Chat entry types ──────────────────────────────────────────────────
 
 /// Current time as Unix epoch milliseconds.
@@ -359,6 +383,8 @@ pub enum Screen {
     ChatList,
     /// An individual chat room with a given topic.
     Chat { topic: TopicId },
+    /// Application settings screen.
+    Settings,
 }
 
 // ── Application state ─────────────────────────────────────────────────
@@ -369,6 +395,8 @@ pub struct IcedChat {
     /// Pending topic we're connecting to (used during the async handoff
     /// from clicking a room to actually subscribing).
     pending_topic: Option<TopicId>,
+    /// Screen to return to when closing the settings page.
+    settings_return_to: Option<Screen>,
 
     // ── ChatList state ──
     room_history: RoomHistoryStore,
@@ -439,6 +467,10 @@ pub struct IcedChat {
     follow_latest: bool,
     /// Whether dark mode is enabled.
     pub dark_mode: bool,
+    /// Whether notification sounds are enabled.
+    sound_enabled: bool,
+    /// Whether the "clear history" confirmation is shown.
+    history_confirm_clear: bool,
     /// Transport notice displayed in the header (e.g. "Direct iroh transport is operational").
     pub notice: String,
     data_dir: PathBuf,
@@ -495,6 +527,8 @@ pub enum AppMessage {
     SendPressed,
     AttachPressed,
     ToggleHelp,
+    OpenSettings,
+    CloseSettings,
     NetEvent(NetEvent),
     FriendEvent(FriendEvent),
     /// An event from the whisper (DM) protocol.
@@ -530,6 +564,8 @@ pub enum AppMessage {
     TorReconnect(String),
     /// Toggle dark mode on/off.
     ToggleDark(bool),
+    /// Update the local display name (nickname).
+    SetNickname(String),
     /// Open the separate log viewer window.
     OpenLogsWindow,
     /// Internal no-op for async task completions that should not change UI state.
@@ -538,6 +574,12 @@ pub enum AppMessage {
     CopyToClipboard(String),
     /// Open a direct chat with an online friend.
     OpenFriendChat(PublicKey),
+    /// Toggle notification sounds on/off.
+    ToggleSound(bool),
+    /// User requested to clear chat history — show confirmation.
+    ClearHistoryRequested,
+    /// User confirmed the clear history action.
+    ConfirmClearHistory,
 }
 
 impl IcedChat {
@@ -590,6 +632,7 @@ impl IcedChat {
             help_visible: false,
             pending_file: None,
             pending_image: None,
+            settings_return_to: None,
             names: HashMap::new(),
             topic: initial_topic,
             ticket_str: String::new(),
@@ -624,6 +667,8 @@ impl IcedChat {
             tor_reconnect_rx,
             follow_latest: true,
             dark_mode: false,
+            sound_enabled: true,
+            history_confirm_clear: false,
             notice,
             data_dir,
             chat_history,
@@ -701,6 +746,8 @@ impl IcedChat {
             AppMessage::SendPressed => "SendPressed",
             AppMessage::AttachPressed => "AttachPressed",
             AppMessage::ToggleHelp => "ToggleHelp",
+            AppMessage::OpenSettings => "OpenSettings",
+            AppMessage::CloseSettings => "CloseSettings",
             AppMessage::NetEvent(_) => "NetEvent",
             AppMessage::FriendEvent(_) => "FriendEvent",
             AppMessage::WhisperEvent(_) => "WhisperEvent",
@@ -720,10 +767,14 @@ impl IcedChat {
             AppMessage::MeshWatchdogTick => "MeshWatchdogTick",
             AppMessage::TorReconnect(_) => "TorReconnect",
             AppMessage::ToggleDark(_) => "ToggleDark",
+            AppMessage::SetNickname(_) => "SetNickname",
             AppMessage::OpenLogsWindow => "OpenLogsWindow",
             AppMessage::Noop => "Noop",
             AppMessage::CopyToClipboard(_) => "CopyToClipboard",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
+            AppMessage::ToggleSound(_) => "ToggleSound",
+            AppMessage::ClearHistoryRequested => "ClearHistoryRequested",
+            AppMessage::ConfirmClearHistory => "ConfirmClearHistory",
         }
     }
 }
@@ -924,6 +975,18 @@ fn private_topic(a: &PublicKey, b: &PublicKey) -> TopicId {
     hasher.update(pk2.as_bytes());
     let hash = hasher.finalize();
     TopicId::from_bytes(*hash.as_bytes())
+}
+
+fn online_friends_from_store(friends: &FriendsStore) -> HashMap<PublicKey, String> {
+    friends
+        .iter()
+        .filter(|(_, record)| record.status.online)
+        .filter_map(|(id, record)| {
+            id.parse_public_key()
+                .ok()
+                .map(|pk| (pk, record.display_label(id)))
+        })
+        .collect()
 }
 
 // ── Update ────────────────────────────────────────────────────────────
@@ -1549,6 +1612,11 @@ impl IcedChat {
                     self.help_visible = !self.help_visible;
                     return iced::Task::none();
                 }
+                if trimmed == "/settings" {
+                    self.settings_return_to = Some(self.screen.clone());
+                    self.screen = Screen::Settings;
+                    return iced::Task::none();
+                }
 
                 // ── Leave room / delete from history ──
                 if trimmed == "/leave" {
@@ -2017,6 +2085,19 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::OpenSettings => {
+                if !matches!(self.screen, Screen::Settings) {
+                    self.settings_return_to = Some(self.screen.clone());
+                    self.screen = Screen::Settings;
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::CloseSettings => {
+                self.screen = self.settings_return_to.take().unwrap_or(Screen::ChatList);
+                iced::Task::none()
+            }
+
             AppMessage::NetEvent(event) => {
                 self.update_room_preview(&event);
                 let _ = chat_net_event(event, self);
@@ -2172,11 +2253,8 @@ impl IcedChat {
                             .add_path(std::path::PathBuf::from(&abs_path))
                             .await
                             .map_err(|e| format!("Failed to hash file: {e}"))?;
-                        let ticket_str = blob_ticket_string(
-                            endpoint.watch_addr().get(),
-                            tag.hash,
-                            tag.format,
-                        );
+                        let ticket_str =
+                            blob_ticket_string(endpoint.watch_addr().get(), tag.hash, tag.format);
                         let msg = crate::Message::FileShare {
                             name: filename.clone(),
                             ticket: ticket_str,
@@ -2527,6 +2605,11 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::SetNickname(name) => {
+                self.local_label = name;
+                iced::Task::none()
+            }
+
             AppMessage::OpenLogsWindow => {
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(async move { log_viewer::spawn(&data_dir) }, |result| {
@@ -2541,6 +2624,23 @@ impl IcedChat {
 
             AppMessage::CopyToClipboard(text) => {
                 return iced::clipboard::write(text);
+            }
+
+            AppMessage::ToggleSound(enabled) => {
+                self.sound_enabled = enabled;
+                iced::Task::none()
+            }
+
+            AppMessage::ClearHistoryRequested => {
+                self.history_confirm_clear = !self.history_confirm_clear;
+                iced::Task::none()
+            }
+
+            AppMessage::ConfirmClearHistory => {
+                self.history_confirm_clear = false;
+                self.chat_history.lock().unwrap().clear();
+                self.chat_history_dirty = true;
+                iced::Task::none()
             }
         }
     }
@@ -2839,6 +2939,7 @@ impl IcedChat {
         let inner: iced::Element<'_, AppMessage> = match self.screen {
             Screen::ChatList => self.view_chat_list().into(),
             Screen::Chat { .. } => self.view_chat_screen().into(),
+            Screen::Settings => self.view_settings_screen().into(),
         };
         // Every view is wrapped in the primary background so the entire
         // window responds to the theme toggle — not just text colors.
@@ -2862,7 +2963,16 @@ impl IcedChat {
         content = content.push(
             container(
                 Column::new()
-                    .push(row![text("Iroh Gossip Chat").size(TYPO_XL),].spacing(SPACE_8))
+                    .push(
+                        row![
+                            text("Iroh Gossip Chat").size(TYPO_XL).width(Length::Fill),
+                            button(text("⚙").size(TYPO_MD))
+                                .on_press(AppMessage::OpenSettings)
+                                .padding(SPACE_4),
+                        ]
+                        .spacing(SPACE_8)
+                        .align_y(Alignment::Center),
+                    )
                     .push(
                         text(format!(
                             "Identity: {}  |  Relay: {}",
@@ -3270,6 +3380,9 @@ impl IcedChat {
                 button(text(if self.dark_mode { "☀" } else { "🌙" }).size(TYPO_MD))
                     .on_press(AppMessage::ToggleDark(!self.dark_mode))
                     .padding(SPACE_4),
+                button(text("⚙").size(TYPO_MD))
+                    .on_press(AppMessage::OpenSettings)
+                    .padding(SPACE_4),
             ]
             .spacing(SPACE_4),
             text(format!(
@@ -3595,6 +3708,311 @@ impl IcedChat {
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .style(move |t| container_surface(t))
+            .into()
+    }
+
+    fn view_settings_screen(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{
+            button, container, row, rule, scrollable, text, text_input, Column, Row, Space,
+        };
+        use iced::{Alignment, Length};
+        use iroh_gossip::chat_core::MeshHealth;
+
+        // ── Section card helper ──
+        fn section_card<'a>(
+            title: &'a str,
+            children: Vec<iced::Element<'a, AppMessage>>,
+        ) -> iced::Element<'a, AppMessage> {
+            let body = Column::new()
+                .push(
+                    text(title.to_string())
+                        .size(TYPO_XS)
+                        .style(text_muted_style),
+                )
+                .push(rule::horizontal(1).style(iced::widget::rule::weak))
+                .push(Space::new().height(Length::Fixed(SPACE_8)));
+            let body = children
+                .into_iter()
+                .fold(body, |col, child| col.push(child));
+            container(body)
+                .padding([SPACE_12, SPACE_16])
+                .width(Length::Fill)
+                .style(container_card)
+                .into()
+        }
+
+        // ── Identity section ──
+        let nickname_input = container(
+            text_input("Your display name…", &self.local_label)
+                .on_input(AppMessage::SetNickname)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .padding(SPACE_4);
+
+        let identity_card = section_card("👤  IDENTITY", vec![nickname_input.into()]);
+
+        // ── Appearance section ──
+        let appearance_theme = if self.dark_mode { "Dark" } else { "Light" };
+
+        let appearance_row = Row::new()
+            .push(
+                Column::new()
+                    .push(text(appearance_theme).size(TYPO_MD))
+                    .push(
+                        text("Switch between dark and light colour themes.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(
+                button(
+                    text(if self.dark_mode {
+                        "☀ Light"
+                    } else {
+                        "🌙 Dark"
+                    })
+                    .size(TYPO_SM),
+                )
+                .on_press(AppMessage::ToggleDark(!self.dark_mode))
+                .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        let appearance_card = section_card("🎨  APPEARANCE", vec![appearance_row.into()]);
+
+        // ── Notifications section ──
+        let sound_label = if self.sound_enabled {
+            "Sound on"
+        } else {
+            "Sound off"
+        };
+        let notifications_row = Row::new()
+            .push(
+                Column::new()
+                    .push(text(sound_label).size(TYPO_MD))
+                    .push(
+                        text("Play a notification sound when a new message arrives.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(
+                button(
+                    text(if self.sound_enabled {
+                        "🔇 Mute"
+                    } else {
+                        "🔊 Unmute"
+                    })
+                    .size(TYPO_SM),
+                )
+                .on_press(AppMessage::ToggleSound(!self.sound_enabled))
+                .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        let notifications_card = section_card("🔔  NOTIFICATIONS", vec![notifications_row.into()]);
+
+        // ── Network section ──
+        let network_info = row![text(format!(
+            "{} direct · {} relay · {} neighbors",
+            self.direct_peers,
+            self.relayed_peers,
+            self.neighbors.len(),
+        ))
+        .size(TYPO_SM),]
+        .spacing(SPACE_4);
+
+        let mesh_status = row![text(match &self.mesh_health {
+            MeshHealth::Good => "Mesh: healthy".into(),
+            MeshHealth::Degraded(reason) => format!("Mesh: degraded — {reason}"),
+            MeshHealth::Offline(reason) => format!("Mesh: offline — {reason}"),
+        })
+        .size(TYPO_SM),]
+        .spacing(SPACE_4);
+
+        let network_card =
+            section_card("🌐  NETWORK", vec![network_info.into(), mesh_status.into()]);
+
+        // ── Relay section ──
+        let relay_info =
+            row![text(format!("Mode: {}", fmt_relay_mode(&self.relay_mode))).size(TYPO_SM),]
+                .spacing(SPACE_4);
+
+        let relay_note = text("Relay mode is set at startup and cannot be changed at runtime.")
+            .size(TYPO_XS)
+            .style(text_muted_style);
+
+        let relay_card = section_card("📡  RELAY", vec![relay_info.into(), relay_note.into()]);
+
+        // ── Logs & Diagnostics section ──
+        let data_dir_str = self.data_dir.to_string_lossy().to_string();
+
+        let logs_row = Row::new()
+            .push(
+                Column::new()
+                    .push(text("Open logs").size(TYPO_MD))
+                    .push(
+                        text("View application logs in a separate window.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(
+                button(text("Open").size(TYPO_SM))
+                    .on_press(AppMessage::OpenLogsWindow)
+                    .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        let data_dir_label = Row::new()
+            .push(
+                Column::new()
+                    .push(text("Data directory").size(TYPO_MD))
+                    .push(
+                        text(data_dir_str.clone())
+                            .size(TYPO_XXS)
+                            .style(text_muted_style)
+                            .wrapping(iced::widget::text::Wrapping::Word),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        let logs_card = section_card(
+            "📋  LOGS & DIAGNOSTICS",
+            vec![logs_row.into(), data_dir_label.into()],
+        );
+
+        // ── Data Management section ──
+        let clear_history_row = if self.history_confirm_clear {
+            Row::new()
+                .push(
+                    Column::new()
+                        .push(text("Clear all history?").size(TYPO_MD).style(|t| {
+                            iced::widget::text::Style {
+                                color: Some(if matches!(t, iced::Theme::Dark) {
+                                    Color::from_rgb(0.9, 0.3, 0.3)
+                                } else {
+                                    Color::from_rgb(0.8, 0.2, 0.2)
+                                }),
+                            }
+                        }))
+                        .push(
+                            text("This will delete all stored chat messages permanently.")
+                                .size(TYPO_XS)
+                                .style(text_muted_style),
+                        )
+                        .spacing(SPACE_2)
+                        .width(Length::Fill)
+                        .align_x(Alignment::Start),
+                )
+                .push(
+                    button(text("Confirm").size(TYPO_SM))
+                        .on_press(AppMessage::ConfirmClearHistory)
+                        .padding([SPACE_6, SPACE_12]),
+                )
+                .push(
+                    button(text("Cancel").size(TYPO_SM))
+                        .on_press(AppMessage::ClearHistoryRequested)
+                        .padding([SPACE_6, SPACE_12]),
+                )
+                .spacing(SPACE_8)
+                .align_y(Alignment::Center)
+        } else {
+            Row::new()
+                .push(
+                    Column::new()
+                        .push(text("Clear history").size(TYPO_MD))
+                        .push(
+                            text("Delete all stored chat messages permanently.")
+                                .size(TYPO_XS)
+                                .style(text_muted_style),
+                        )
+                        .spacing(SPACE_2)
+                        .width(Length::Fill)
+                        .align_x(Alignment::Start),
+                )
+                .push(
+                    button(text("Clear").size(TYPO_SM))
+                        .on_press(AppMessage::ClearHistoryRequested)
+                        .padding([SPACE_6, SPACE_12]),
+                )
+                .spacing(SPACE_12)
+                .align_y(Alignment::Center)
+        };
+
+        let data_card = section_card("💾  DATA", vec![clear_history_row.into()]);
+
+        // ── Bottom navigation ──
+        let nav_row = Row::new()
+            .push(
+                button(text("← Back").size(TYPO_MD))
+                    .on_press(AppMessage::CloseSettings)
+                    .style(|t, _status| {
+                        let mut s = iced::widget::button::Style::default();
+                        s.background = Some(iced::Background::Color(bg_surface(t)));
+                        s.border = iced::Border {
+                            color: border_muted(t),
+                            width: 1.0,
+                            radius: SPACE_8.into(),
+                        };
+                        s.text_color = text_muted_style(t)
+                            .color
+                            .unwrap_or(iced::Color::from_rgb(0.6, 0.6, 0.6));
+                        s
+                    })
+                    .padding([SPACE_8, SPACE_16]),
+            )
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center);
+
+        // ── Assemble page ──
+        let content = Column::new()
+            .push(text("Settings").size(TYPO_XL))
+            .push(Space::new().height(Length::Fixed(SPACE_16)))
+            .push(identity_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(appearance_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(notifications_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(network_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(relay_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(logs_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(data_card)
+            .push(Space::new().height(Length::Fixed(SPACE_16)))
+            .push(nav_row)
+            .spacing(SPACE_6)
+            .padding(SPACE_24)
+            .align_x(Alignment::Start)
+            .width(Length::Fill)
+            .max_width(520.0);
+
+        let scrollable = scrollable(content).width(Length::Fill).height(Length::Fill);
+
+        container(scrollable)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |t| container_primary(t))
             .into()
     }
 }

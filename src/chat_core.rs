@@ -950,6 +950,8 @@ pub fn fmt_relay_mode(relay_mode: &RelayMode) -> String {
     }
 }
 
+// ── Bootstrap peer resolution ─────────────────────────────────────────────────
+
 // ── Network event dispatch ───────────────────────────────────────────────────
 
 /// Key used for message deduplication: (sender, content_hash, sent_at_seconds).

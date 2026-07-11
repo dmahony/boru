@@ -27,6 +27,7 @@ use iroh_gossip::{
         RoomMetadata, RoomMetadataUpdate,
     },
 };
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};
 use rand::{RngExt, SeedableRng};
@@ -46,15 +47,16 @@ async fn create_endpoint(
     relay_mode: RelayMode,
     memory: Option<MemoryLookup>,
 ) -> Result<Endpoint> {
-    let mut builder = Endpoint::builder(presets::Minimal)
+    let builder = Endpoint::builder(presets::Minimal)
         .relay_mode(relay_mode)
         .secret_key(SecretKey::from_bytes(&rng.random()))
         .alpns(vec![GOSSIP_ALPN.to_vec()])
-        .ca_tls_config(CaTlsConfig::insecure_skip_verify());
-    if let Some(m) = memory {
-        builder = builder.address_lookup(m);
-    }
+        .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+        .address_lookup(MdnsAddressLookup::builder());
     let ep = builder.bind().await?;
+    if let Some(m) = memory {
+        ep.address_lookup()?.add(m);
+    }
     ep.online().await;
     Ok(ep)
 }
@@ -77,6 +79,68 @@ async fn drain_events(
             _ => return,
         }
     }
+}
+
+// ── Test: mDNS address lookup ────────────────────────────────────────────
+
+/// Verify that endpoints can be created with mDNS address lookup enabled
+/// and that they bind and report local addresses correctly.
+///
+/// This tests the plumbing (mDNS does not require a real multicast network
+/// to initialize), not multi-peer discovery over the LAN.
+#[tokio::test]
+#[n0_tracing_test::traced_test]
+async fn mdns_endpoint_creation_and_local_address() -> Result<()> {
+    let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(99);
+    let (relay_map, _relay_url, _guard) = iroh::test_utils::run_relay_server().await.unwrap();
+
+    // Create two endpoints side by side with mDNS enabled.
+    let ep_a = create_endpoint(
+        &mut rng,
+        relay_map.clone(),
+        RelayMode::Custom(relay_map.clone()),
+        None,
+    )
+    .await?;
+    let ep_b = create_endpoint(
+        &mut rng,
+        relay_map.clone(),
+        RelayMode::Custom(relay_map.clone()),
+        None,
+    )
+    .await?;
+
+    // Both should have their own unique public key.
+    assert_ne!(ep_a.id(), ep_b.id(), "peers must have distinct identities");
+
+    // The address lookup manager should be alive and the mDNS lookup
+    // registered — querying it should not panic or error.
+    let addr_a = ep_a.address_lookup();
+    assert!(
+        addr_a.is_ok(),
+        "ep_a address lookup manager must be reachable"
+    );
+
+    let addr_b = ep_b.address_lookup();
+    assert!(
+        addr_b.is_ok(),
+        "ep_b address lookup manager must be reachable"
+    );
+
+    // Endpoints report a local addr.
+    let ep_a_info = ep_a.addr();
+    let ep_b_info = ep_b.addr();
+    assert!(
+        !ep_a_info.is_empty(),
+        "ep_a must report at least one local address"
+    );
+    assert!(
+        !ep_b_info.is_empty(),
+        "ep_b must report at least one local address"
+    );
+
+    // Endpoints are dropped here (cleanup via Drop).
+    Ok(())
 }
 
 /// Register gossip on an endpoint's router and spawn it.
