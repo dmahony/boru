@@ -51,8 +51,8 @@ impl ChatCallbacks for SimChat {
     fn local_public(&self) -> PublicKey {
         self.local_public
     }
-    fn set_name(&mut self, peer: PublicKey, name: String) {
-        self.names.insert(peer, name);
+    fn set_name(&mut self, peer: PublicKey, name: String) -> Option<String> {
+        self.names.insert(peer, name)
     }
     fn is_friend(&self, _peer: &PublicKey) -> bool {
         false
@@ -67,6 +67,7 @@ impl ChatCallbacks for SimChat {
     }
     fn push_remote(
         &mut self,
+        _peer: PublicKey,
         label: String,
         text: String,
         _hash: Option<iroh_gossip::chat_core::MessageHash>,

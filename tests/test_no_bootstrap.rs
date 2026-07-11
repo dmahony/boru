@@ -87,8 +87,13 @@ async fn test_no_bootstrap_peer_still_receives() -> Result<()> {
 
     // Wait for both to join
     let short = Duration::from_millis(50);
+    let tick_delay = Duration::from_millis(200);
     let max_ticks = 60;
     for i in 0..max_ticks {
+        // Give the gossip actor wall-clock time to process connection events.
+        // Without this sleep, the drain loop can outrun the Join/Neighbor handshake,
+        // causing the test to fail intermittently.
+        sleep(tick_delay).await;
         drain_events(&mut sub_a, short).await;
         drain_events(&mut sub_b, short).await;
         if sub_a.is_joined() && sub_b.is_joined() {
