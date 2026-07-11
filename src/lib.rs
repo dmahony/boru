@@ -61,6 +61,10 @@ pub mod room;
 #[cfg(feature = "net")]
 pub mod room_history;
 
+/// Room-level cleanup helpers for deleting a room's local history and metadata.
+#[cfg(feature = "net")]
+pub mod room_cleanup;
+
 /// Active-session chat message state. No chat messages are persisted.
 #[cfg(feature = "net")]
 pub mod chat_history;

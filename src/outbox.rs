@@ -457,7 +457,9 @@ impl OutboxStore {
     }
 
     /// Remove all entries for a specific topic.
-    pub fn remove_topic(&mut self, topic: &TopicId) {
+    ///
+    /// Returns the number of entries removed.
+    pub fn remove_topic(&mut self, topic: &TopicId) -> usize {
         let to_remove: Vec<u64> = self
             .ordered_ids
             .iter()
@@ -472,6 +474,7 @@ impl OutboxStore {
             self.entries.remove(id);
         }
         self.ordered_ids.retain(|id| !to_remove.contains(id));
+        to_remove.len()
     }
 
     /// Set a custom TTL.  The next call to [`expire`](Self::expire) or

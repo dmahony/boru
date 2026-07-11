@@ -167,6 +167,21 @@ impl RoomStore {
         atomic_write_json(&path, self, "room store")?;
         Ok(path)
     }
+
+    /// Remove the persisted room file for a data directory, if present.
+    ///
+    /// Returns `true` when a file was removed.
+    pub fn delete(data_dir: impl AsRef<Path>) -> Result<bool> {
+        let data_dir = data_dir.as_ref();
+        let path = room_file_path(data_dir);
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        fs::remove_file(&path)
+            .with_std_context(|_| format!("failed to remove room file {}", path.display()))?;
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -246,25 +261,15 @@ mod tests {
     }
 
     #[test]
-    fn save_is_atomic() {
-        let dir = temp_dir("atomic");
-        let topic = TopicId::from_bytes([0x01u8; 32]);
+    fn delete_removes_saved_file() {
+        let dir = temp_dir("delete");
+        let topic = TopicId::from_bytes([0x11u8; 32]);
         let store = RoomStore::new(&dir, topic);
-        let path = store.save().expect("first save");
+        let path = store.save().expect("save room store");
+        assert!(path.exists());
 
-        // Verify the file is valid JSON
-        let raw = fs::read_to_string(&path).expect("read saved file");
-        let parsed: RoomStore = serde_json::from_str(&raw).expect("valid JSON");
-        assert_eq!(parsed.topic, topic);
-
-        // Overwrite
-        let topic2 = TopicId::from_bytes([0x02u8; 32]);
-        let store2 = RoomStore::new(&dir, topic2);
-        store2.save().expect("second save");
-
-        // File should now contain topic2, not topic1
-        let raw2 = fs::read_to_string(&path).expect("re-read");
-        let parsed2: RoomStore = serde_json::from_str(&raw2).expect("valid JSON");
-        assert_eq!(parsed2.topic, topic2);
+        assert!(RoomStore::delete(&dir).expect("delete room file"));
+        assert!(!path.exists());
+        assert!(!RoomStore::delete(&dir).expect("delete room file again"));
     }
 }

@@ -212,6 +212,22 @@ impl FriendRecord {
         self.mailbox_public_key = Some(mailbox);
     }
 
+    /// Remove all room references associated with a topic.
+    ///
+    /// Returns `true` if any room metadata was removed.
+    pub fn remove_room(&mut self, topic: &TopicId) -> bool {
+        let mut changed = self.rooms.remove(topic).is_some();
+        if self
+            .direct_conversation
+            .as_ref()
+            .is_some_and(|conversation| conversation.topic == *topic)
+        {
+            self.direct_conversation = None;
+            changed = true;
+        }
+        changed
+    }
+
     /// Human-friendly label for display.
     pub fn display_label(&self, id: &FriendId) -> String {
         self.label
@@ -352,6 +368,19 @@ impl FriendsStore {
     /// Remove a friend by id.
     pub fn remove(&mut self, id: &FriendId) -> Option<FriendRecord> {
         self.friends.remove(id)
+    }
+
+    /// Remove all room references associated with a topic.
+    ///
+    /// Returns the number of friend records that were modified.
+    pub fn remove_room(&mut self, topic: &TopicId) -> usize {
+        let mut changed = 0;
+        for record in self.friends.values_mut() {
+            if record.remove_room(topic) {
+                changed += 1;
+            }
+        }
+        changed
     }
 
     /// Get a friend record by id.

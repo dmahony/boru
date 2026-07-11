@@ -424,8 +424,12 @@ impl ChatHistoryStore {
     }
 
     /// Remove all entries for a topic.
-    pub fn remove_topic(&mut self, topic: &TopicId) {
+    ///
+    /// Returns the number of entries removed.
+    pub fn remove_topic(&mut self, topic: &TopicId) -> usize {
+        let before = self.entries.len();
         self.entries.retain(|e| e.topic != *topic);
+        before - self.entries.len()
     }
 
     /// Return entries that are our own outgoing messages (Queued or Sent state)

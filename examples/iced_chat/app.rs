@@ -31,6 +31,7 @@ use iroh_gossip::net::Gossip;
 use iroh_gossip::outbox::{OutboxEntry, OutboxStore};
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
+use iroh_gossip::room_cleanup::delete_room_history;
 use iroh_gossip::room_docs::{self, RoomMetadata};
 use iroh_gossip::room_history::{RoomHistoryEntry, RoomHistoryStore};
 use iroh_gossip::whisper::{WhisperEvent, WhisperHandle};
@@ -869,11 +870,24 @@ impl IcedChat {
         true
     }
 
+    /// Keep the virtualized chat log anchored to the latest entry when the
+    /// user is already following the conversation.  The custom windowed
+    /// renderer uses `f32::MAX` as its bottom sentinel; retaining the old
+    /// finite offset after an image changes the content height leaves the
+    /// Iced scrollable's viewport stranded above newly appended messages.
+    fn keep_latest_visible(&mut self) {
+        if self.follow_latest {
+            self.scroll_offset = f32::MAX;
+        }
+    }
+
     fn push_system(&mut self, text: impl Into<String>) {
         self.entries.push(ChatEntry::system(text));
+        self.keep_latest_visible();
     }
     fn push_local(&mut self, text: impl Into<String>) {
         self.entries.push(ChatEntry::local(&self.local_label, text));
+        self.keep_latest_visible();
     }
 
     fn log_variant(message: &AppMessage) -> &'static str {
@@ -2322,6 +2336,7 @@ impl IcedChat {
                 local_entry.event_id = event_id;
                 local_entry.message_hash = Some(msg_hash);
                 self.entries.push(local_entry);
+                self.keep_latest_visible();
                 if let Some(sender) = self.sender.clone() {
                     iced::Task::perform(
                         async move {
@@ -3042,6 +3057,7 @@ impl IcedChat {
                     None,
                     Some(sender),
                 ));
+                self.keep_latest_visible();
                 iced::Task::none()
             }
             AppMessage::ProfileImageDownloaded(peer, image_bytes) => {
@@ -3105,13 +3121,9 @@ impl IcedChat {
             }
 
             AppMessage::DeleteRoom(topic) => {
-                // Remove room and chat history, then persist.
-                self.room_history.remove(&topic);
-                self.room_history_dirty = true;
-                self.chat_history.lock().unwrap().remove_topic(&topic);
-                self.chat_history_dirty = true;
-                self.persist_room_history();
-                self.try_save_chat_history();
+                if let Err(err) = self.purge_room_history(topic) {
+                    self.push_system(format!("Could not delete room history: {err}"));
+                }
                 iced::Task::none()
             }
 
@@ -3525,13 +3537,9 @@ impl IcedChat {
 
             AppMessage::ConfirmDeleteRoom(topic) => {
                 self.room_delete_confirm_topic = None;
-                // Remove room and chat history, then persist.
-                self.room_history.remove(&topic);
-                self.room_history_dirty = true;
-                self.chat_history.lock().unwrap().remove_topic(&topic);
-                self.chat_history_dirty = true;
-                self.persist_room_history();
-                self.try_save_chat_history();
+                if let Err(err) = self.purge_room_history(topic) {
+                    self.push_system(format!("Could not delete room history: {err}"));
+                }
                 iced::Task::none()
             }
 
@@ -3553,6 +3561,56 @@ impl IcedChat {
                 iced::Task::none()
             }
         }
+    }
+
+    /// Purge every persisted and in-memory store associated with a room.
+    ///
+    /// Room deletion is deliberately centralized in the core cleanup helper:
+    /// removing only the visible room-list entry leaves chat history, queued
+    /// messages, friend room metadata, or the active-room file behind.
+    fn purge_room_history(&mut self, topic: TopicId) -> Result<(), String> {
+        let report = {
+            let mut chat_history = self.chat_history.lock().unwrap();
+            let mut outbox = self.outbox.lock().unwrap();
+            delete_room_history(
+                &self.data_dir,
+                topic,
+                &mut self.room_history,
+                &mut chat_history,
+                Some(&mut outbox),
+                Some(&mut self.friends),
+            )
+            .map_err(|err| err.to_string())?
+        };
+
+        // The cleanup helper mutates the stores first; persist each store whose
+        // contents changed so a restart cannot resurrect the deleted room data.
+        if report.chat_entries_removed > 0 {
+            self.chat_history_dirty = true;
+            self.chat_history
+                .lock()
+                .unwrap()
+                .save()
+                .map_err(|err| err.to_string())?;
+            self.chat_history_dirty = false;
+        }
+        if report.outbox_entries_removed > 0 {
+            self.outbox
+                .lock()
+                .unwrap()
+                .save()
+                .map_err(|err| err.to_string())?;
+        }
+        if report.friend_records_updated > 0 {
+            self.friends_dirty = true;
+            self.friends.save().map_err(|err| err.to_string())?;
+            self.friends_dirty = false;
+        }
+
+        // RoomHistoryStore::save is intentionally a no-op for the removed
+        // legacy file; the core helper has already removed the active-room file.
+        self.room_history_dirty = false;
+        Ok(())
     }
 
     fn persist_room_history(&mut self) {
@@ -3771,6 +3829,7 @@ impl ChatCallbacks for IcedChat {
 
     fn push_system(&mut self, text: String) {
         self.entries.push(ChatEntry::system(text));
+        self.keep_latest_visible();
     }
 
     fn push_remote(
@@ -3783,6 +3842,7 @@ impl ChatCallbacks for IcedChat {
     ) {
         self.entries
             .push(ChatEntry::remote(label, text, hash, sent_at, Some(peer)));
+        self.keep_latest_visible();
     }
 
     fn set_pending_file(&mut self, name: String, ticket: String) {

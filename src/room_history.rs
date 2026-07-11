@@ -120,6 +120,23 @@ impl RoomHistoryStore {
         Ok(None)
     }
 
+    /// Delete a legacy room-history file and return whether anything was removed.
+    pub fn delete_legacy_file(data_dir: impl AsRef<Path>) -> Result<bool> {
+        let data_dir = data_dir.as_ref();
+        let path = rooms_file_path(data_dir);
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        fs::remove_file(&path).with_std_context(|_| {
+            format!(
+                "failed to remove legacy room history file {}",
+                path.display()
+            )
+        })?;
+        Ok(true)
+    }
+
     /// Load room history, falling back to empty store on failure.
     pub fn load_or_default(data_dir: impl AsRef<Path>) -> Self {
         let data_dir = data_dir.as_ref();
@@ -185,8 +202,12 @@ impl RoomHistoryStore {
     }
 
     /// Remove a room from history.
-    pub fn remove(&mut self, topic: &TopicId) {
+    ///
+    /// Returns `true` when a matching room existed.
+    pub fn remove(&mut self, topic: &TopicId) -> bool {
+        let before = self.rooms.len();
         self.rooms.retain(|r| r.topic != *topic);
+        before != self.rooms.len()
     }
 
     /// Number of rooms in history.
