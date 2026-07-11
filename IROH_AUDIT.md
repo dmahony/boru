@@ -99,9 +99,9 @@ Evidence:
 - Both add `MemoryLookup` for ticket/persisted addresses and mDNS/DHT lookups as optional supplemental services (`examples/chat.rs:457-483`; GUI `examples/iced_chat/main.rs:498-525`).
 - The current mDNS docs show adding mDNS on top of `presets::N0`, and the DNS docs identify `N0` as the default DNS/Pkarr lookup preset.
 
-No outdated Endpoint/Relay API usage was found. The repeated builder code is verbose but semantically consistent with the current documentation. `RelayMode::Disabled` for Tor mode is deliberate because Tor is installed as a custom transport.
+No outdated Endpoint/Relay API usage was found. The repeated builder code is verbose but semantically consistent with the current documentation. Relay disabling remains an explicit operator choice; the application uses standard iroh transports only.
 
-Relevant docs: https://docs.iroh.computer/connecting/creating-endpoint.md, https://docs.iroh.computer/connecting/dns-address-lookup.md, https://docs.iroh.computer/connecting/local-address-lookup.md, https://docs.iroh.computer/concepts/relays.md, and https://docs.iroh.computer/transports/tor.md.
+Relevant docs: https://docs.iroh.computer/connecting/creating-endpoint.md, https://docs.iroh.computer/connecting/dns-address-lookup.md, https://docs.iroh.computer/connecting/local-address-lookup.md, and https://docs.iroh.computer/concepts/relays.md.
 
 ### F-07 — Correct: protocol registration and ALPN routing
 
@@ -127,7 +127,7 @@ Evidence:
 
 Router/endpoint ordering is correct and agrees with the docs' clean-shutdown guidance. Auxiliary task lifetime is ambiguous: runtime teardown will eventually drop them, but deterministic cancellation is preferable and avoids relying on process/runtime shutdown to stop background work.
 
-Minimal recommendation: add explicit shutdown/cancellation handles for backfill, friend ping, whisper, and Tor monitor tasks, and invoke them before endpoint close. Keep the existing router-before-endpoint ordering.
+Minimal recommendation: add explicit shutdown/cancellation handles for backfill, friend ping, and whisper tasks, and invoke them before endpoint close. Keep the existing router-before-endpoint ordering.
 
 Focused verification: run the relevant e2e tests under `RUST_LOG=warn` and assert no background-task or “endpoint dropped without calling close” diagnostics after the process exits.
 

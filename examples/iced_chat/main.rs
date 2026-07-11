@@ -19,9 +19,7 @@ use iroh::{
     RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
-use iroh_gossip::backfill::{
-    BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN, BACKFILL_TRIGGER_THRESHOLD,
-};
+use iroh_gossip::backfill::{BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN};
 use iroh_gossip::chat_core::friend_ping::{
     FriendPingManager, PingHandler, DEFAULT_CONNECT_TIMEOUT, DEFAULT_PING_INTERVAL,
     FRIEND_PING_ALPN,
@@ -35,7 +33,7 @@ use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_history::RoomHistoryStore;
 
-use iroh_gossip::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
+use iroh_gossip::whisper::{WhisperBuilder, WHISPER_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
 #[cfg(feature = "gui")]
 use iroh_mdns_address_lookup::MdnsAddressLookup;
@@ -379,7 +377,6 @@ fn main() -> Result<()> {
     };
     info!("> relay: {}", fmt_relay_mode(&relay_mode));
 
-
     // ── Build the endpoint, gossip, and router (no topic subscription yet) ──
 
     let (
@@ -614,7 +611,7 @@ fn main() -> Result<()> {
             Arc::clone(&whisper_events_rx),
             inbox_events_rx,
             whisper_handle.clone(),
-                initial_room,
+            initial_room,
             notice,
             chat_history,
             backfill_handle,
@@ -667,13 +664,6 @@ fn main() -> Result<()> {
     // before dropping the runtime so iroh can shut down its discovery and
     // transport tasks cleanly instead of logging "Endpoint dropped without
     // calling Endpoint::close".
-    //
-    // Abort the Tor health-monitor task explicitly before endpoint close
-    // so the monitor doesn't try to reconnect while the transport is shunting
-    // down.
-    if let Some(handle) = tor_monitor_handle.take() {
-        handle.abort();
-    }
     runtime.block_on(endpoint.close());
     let _keep_runtime_alive = runtime;
     Ok(())

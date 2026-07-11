@@ -471,8 +471,7 @@ fn check_features() -> Check {
     features.push("net");
     #[cfg(feature = "metrics")]
     features.push("metrics");
-    #[cfg(feature = "tor-transport")]
-    features.push("tor-transport");
+
     #[cfg(feature = "examples")]
     features.push("examples");
     #[cfg(feature = "gui")]

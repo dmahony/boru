@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use iroh::{
     address_lookup::memory::MemoryLookup, EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher,
@@ -667,6 +667,9 @@ pub enum AppMessage {
     RemoveProfileImage,
     /// A remote peer's profile image blob was downloaded and decoded.
     ProfileImageDownloaded(PublicKey, Vec<u8>),
+    /// A remote peer's profile image download failed — clear cached ticket so
+    /// the next periodic AboutMe broadcast can retry.
+    ProfileImageDownloadFailed(PublicKey),
     /// User requested to clear chat history — show confirmation.
     ClearHistoryRequested,
     /// User confirmed the clear history action.
@@ -794,7 +797,7 @@ impl IcedChat {
             presence_counter: 5,
             heartbeat_counter: 2,
             self_sent_events: HashMap::new(),
-            tor_reconnect_rx,
+
             follow_latest: true,
             total_content_height: std::cell::Cell::new(0.0),
             scroll_offset: f32::MAX,
@@ -908,7 +911,7 @@ impl IcedChat {
             AppMessage::DeleteRoom(_) => "DeleteRoom",
             AppMessage::ConnMonitorTick => "ConnMonitorTick",
             AppMessage::MeshWatchdogTick => "MeshWatchdogTick",
-            AppMessage::TorReconnect(_) => "TorReconnect",
+
             AppMessage::ToggleDark(_) => "ToggleDark",
             AppMessage::SetNickname(_) => "SetNickname",
             AppMessage::OpenLogsWindow => "OpenLogsWindow",
@@ -921,6 +924,7 @@ impl IcedChat {
             AppMessage::ProfileImageUploaded(_) => "ProfileImageUploaded",
             AppMessage::RemoveProfileImage => "RemoveProfileImage",
             AppMessage::ProfileImageDownloaded(..) => "ProfileImageDownloaded",
+            AppMessage::ProfileImageDownloadFailed(..) => "ProfileImageDownloadFailed",
             AppMessage::ClearHistoryRequested => "ClearHistoryRequested",
             AppMessage::ConfirmClearHistory => "ConfirmClearHistory",
             AppMessage::DeleteRoomRequested(_) => "DeleteRoomRequested",
@@ -2522,6 +2526,7 @@ impl IcedChat {
                     let endpoint = self.endpoint.clone();
                     let memory_lookup = self.memory_lookup.clone();
                     let neighbors = self.neighbors.clone();
+                    let failed_peer = peer.clone();
                     return iced::Task::perform(
                         async move {
                             let ticket: BlobTicket = ticket_str
@@ -2550,7 +2555,7 @@ impl IcedChat {
                         },
                         move |r: Result<(PublicKey, Vec<u8>), String>| match r {
                             Ok((peer, data)) => AppMessage::ProfileImageDownloaded(peer, data),
-                            Err(e) => AppMessage::ErrorMsg(e),
+                            Err(_) => AppMessage::ProfileImageDownloadFailed(failed_peer),
                         },
                     );
                 }
@@ -3041,13 +3046,25 @@ impl IcedChat {
             }
             AppMessage::ProfileImageDownloaded(peer, image_bytes) => {
                 if image_bytes.is_empty() || image_bytes.len() > 2 * 1024 * 1024 {
-                    // Ignore empty or oversized images (>2MB)
+                    // Ignore empty or oversized images (>2MB) and clear cached ticket
+                    // so the next AboutMe broadcast can retry.
+                    self.friend_image_tickets.remove(&peer);
                     return iced::Task::none();
                 }
                 let handle = iced::widget::image::Handle::from_bytes(image_bytes);
                 self.friend_image_handles.insert(peer, Some(handle));
                 // Trigger UI re-draw by marking friends dirty (the renderer
                 // reads friend_image_handles each frame).
+                iced::Task::none()
+            }
+            AppMessage::ProfileImageDownloadFailed(peer) => {
+                // Download failed (e.g. peer temporarily unreachable).  Remove
+                // the cached ticket so the next periodic AboutMe re-broadcast
+                // can retry the download.  Without this, the dedup guard in
+                // record_profile_image_ticket would skip all future AboutMe
+                // messages with the same ticket string, leaving the avatar
+                // stuck on the 👤 fallback permanently.
+                self.friend_image_tickets.remove(&peer);
                 iced::Task::none()
             }
             AppMessage::ErrorMsg(msg) => {
@@ -3118,13 +3135,6 @@ impl IcedChat {
                 } else {
                     self.conn_refresh_counter -= 1;
                 }
-
-                // Poll Tor reconnection status updates
-                if let Some(ref rx) = self.tor_reconnect_rx {
-                    let msgs: Vec<String> = match rx.try_lock() {
-                        Ok(mut guard) => {
-                            let mut msgs = Vec::new();
-                            loop {
 
                 // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
                 let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
@@ -3218,6 +3228,7 @@ impl IcedChat {
                     let endpoint = self.endpoint.clone();
                     let memory_lookup = self.memory_lookup.clone();
                     let neighbors = self.neighbors.clone();
+                    let failed_peer = peer.clone();
                     tasks.push(iced::Task::perform(
                         async move {
                             let ticket: BlobTicket = ticket_str
@@ -3242,7 +3253,7 @@ impl IcedChat {
                         },
                         move |r: Result<(PublicKey, Vec<u8>), String>| match r {
                             Ok((peer, data)) => AppMessage::ProfileImageDownloaded(peer, data),
-                            Err(e) => AppMessage::ErrorMsg(e),
+                            Err(_) => AppMessage::ProfileImageDownloadFailed(failed_peer),
                         },
                     ));
                 }
@@ -3304,11 +3315,6 @@ impl IcedChat {
                     self.push_system(msg);
                 }
 
-                iced::Task::none()
-            }
-
-            AppMessage::TorReconnect(msg) => {
-                self.push_system(msg);
                 iced::Task::none()
             }
 

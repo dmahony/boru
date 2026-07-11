@@ -262,7 +262,6 @@ async fn main() -> Result<()> {
     tracing::info!(path = %log_file_path(&data_dir).display(), "logging to file");
     let args = Args::parse();
 
-
     // parse the cli command
     let (topic, peers) = match &args.command {
         Command::Open { topic } => {
@@ -328,7 +327,7 @@ async fn main() -> Result<()> {
 
     // Configure the standard iroh relay/discovery path.
     let relay_mode = match (args.no_relay, args.relay.clone()) {
-        (_, true, Some(_)) => bail_any!("You cannot set --no-relay and --relay at the same time"),
+        (true, Some(_)) => bail_any!("You cannot set --no-relay and --relay at the same time"),
         (true, None) => RelayMode::Disabled,
         (false, None) => RelayMode::Default,
         (false, Some(url)) => RelayMode::Custom(url.into()),
@@ -418,7 +417,6 @@ async fn main() -> Result<()> {
     // envelopes stored locally for the requesting peer.
     {
         let mailbox_dir = data_dir.clone();
-        let endpoint = endpoint.clone();
         inbox_handle
             .set_pending_fn(Some(Arc::new(move |requester, _since_ms| {
                 let mut store = MailboxStore::load(&mailbox_dir)
@@ -752,7 +750,6 @@ async fn main() -> Result<()> {
     });
 
     while !app.should_quit {
-
         tokio::select! {
             Some(event) = ui_rx.recv() => {
                 let redraw = handle_ui_event(
@@ -2737,15 +2734,6 @@ mod tests {
     use iroh::EndpointAddr;
     use iroh_gossip::chat_core::Composer;
 
-    #[cfg(feature = "tor-transport")]
-    #[test]
-    fn formats_bootstrap_status_line_with_tor_prefix() {
-        assert_eq!(
-            format_tor_bootstrap_status_line("31%: bootstrapping"),
-            "> Tor bootstrap status: 31%: bootstrapping"
-        );
-    }
-
     #[test]
     fn ticket_roundtrips_through_base32() {
         let ticket = Ticket {
@@ -2935,18 +2923,6 @@ mod tests {
     fn cli_parses_direct_mode_by_default() {
         let args = Args::try_parse_from(["chat", "open"]).expect("direct mode should parse");
         assert!(matches!(args.command, Command::Open { .. }));
-    }
-
-    #[cfg(feature = "tor-transport")]
-    #[test]
-    fn tor_transport_notice_mentions_tor_operational() {}
-
-    #[cfg(feature = "tor-transport")]
-    #[test]
-    fn tor_client_config_builds_direct_tor_configuration() {
-        let tor_dirs = TorStorageDirs::new().expect("test tor dirs should be creatable");
-        let config = tor_client_config(&tor_dirs).expect("direct tor config should build");
-        let _ = config;
     }
 
     // ── Identity persistence tests ────────────────────────────────────────

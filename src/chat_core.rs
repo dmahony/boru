@@ -2095,13 +2095,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(app.names.get(&remote_key.public()).map(String::as_str), Some("bob"));
+        assert_eq!(
+            app.names.get(&remote_key.public()).map(String::as_str),
+            Some("bob")
+        );
         assert_eq!(
             app.entries
                 .iter()
                 .filter(|entry| {
-                    entry.body
-                        == format!("{} is now known as bob", remote_key.public().fmt_short())
+                    entry.body == format!("{} is now known as bob", remote_key.public().fmt_short())
                 })
                 .count(),
             0,
