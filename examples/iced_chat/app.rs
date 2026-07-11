@@ -101,7 +101,7 @@ const INLINE_IMAGE_QUALITY: u8 = 75;
 /// smaller than the threshold — avoids crashing on corrupt files or tiny icons.
 #[cfg(feature = "gui")]
 fn compress_image(raw: &[u8]) -> Vec<u8> {
-    use image::GenericImageView;
+    use image::{codecs::jpeg::JpegEncoder, GenericImageView, ImageEncoder};
     let img = match image::load_from_memory(raw) {
         Ok(img) => img,
         Err(_) => return raw.to_vec(),
@@ -114,8 +114,10 @@ fn compress_image(raw: &[u8]) -> Vec<u8> {
     let new_w = (w as f64 * ratio).round() as u32;
     let new_h = (h as f64 * ratio).round() as u32;
     let resized = img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
+    let rgb = resized.to_rgb8();
     let mut buf = std::io::Cursor::new(Vec::new());
-    let _ = resized.write_to(&mut buf, image::ImageFormat::Jpeg);
+    let mut encoder = JpegEncoder::new_with_quality(&mut buf, INLINE_IMAGE_QUALITY);
+    let _ = encoder.write_image(rgb.as_raw(), new_w, new_h, image::ExtendedColorType::Rgb8);
     buf.into_inner()
 }
 
