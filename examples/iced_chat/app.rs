@@ -1602,16 +1602,22 @@ impl IcedChat {
 
             AppMessage::OpenFriendChat(peer) => {
                 let fid = FriendId::from_public_key(peer);
-                let Some(ticket) = self
-                    .friends
-                    .get(&fid)
-                    .and_then(|record| record.rooms.values().next().cloned())
-                else {
+                let Some(record) = self.friends.get(&fid) else {
                     return iced::Task::done(AppMessage::ErrorMsg(
-                        "No shared chat ticket is known for this friend yet.".to_string(),
+                        "This peer is not a known friend.".to_string(),
                     ));
                 };
-                let topic = ticket.topic;
+                let Some(conversation) = record.direct_conversation() else {
+                    return iced::Task::done(AppMessage::ErrorMsg(
+                        "No direct conversation is known for this friend yet.".to_string(),
+                    ));
+                };
+                let Some(ticket) = record.rooms.get(&conversation.topic).cloned() else {
+                    return iced::Task::done(AppMessage::ErrorMsg(
+                        "No room ticket is known for this direct conversation yet.".to_string(),
+                    ));
+                };
+                let topic = conversation.topic;
                 let ticket_str = ticket.to_string();
                 let room = RoomStore::with_peers(&self.data_dir, topic, ticket.peers.clone());
                 let _ = room.save();

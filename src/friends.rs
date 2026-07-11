@@ -17,7 +17,7 @@ use iroh::{EndpointAddr, PublicKey};
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const MAX_KNOWN_ADDRS: usize = 5;
 /// Name of the on-disk friends list file (lives beside `secret_key.txt`).
 pub const FRIENDS_FILE_NAME: &str = "friends.json";
@@ -78,6 +78,28 @@ pub struct FriendStatus {
     pub last_offline_at_unix_ms: Option<u64>,
 }
 
+/// State of the designated one-to-one conversation with a friend.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DirectConversationState {
+    /// A conversation topic is known locally but negotiation is not complete.
+    #[default]
+    Pending,
+    /// Both peers have accepted the conversation and may use its topic.
+    Active,
+    /// The conversation is retained for history but should not be used for new messages.
+    Archived,
+}
+
+/// Durable identity and state for a friend's one-to-one conversation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectConversation {
+    /// The designated gossip topic for this friend-to-friend conversation.
+    pub topic: TopicId,
+    /// Whether the conversation is still being negotiated or is usable.
+    #[serde(default)]
+    pub state: DirectConversationState,
+}
+
 /// Persisted friend metadata.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FriendRecord {
@@ -102,6 +124,13 @@ pub struct FriendRecord {
     /// Rooms for which we have exchanged a ticket with this friend.
     #[serde(default, with = "topic_ticket_map")]
     pub rooms: BTreeMap<TopicId, Ticket>,
+    /// The explicit one-to-one conversation for this stable friend identity.
+    ///
+    /// This is intentionally separate from `rooms`: room tickets are retained
+    /// for backwards-compatible manual joins and shared rooms, while this
+    /// field identifies the contact's direct conversation unambiguously.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_conversation: Option<DirectConversation>,
 }
 
 mod topic_ticket_map {
@@ -155,6 +184,23 @@ impl FriendRecord {
     /// Record a room ticket exchanged with this friend.
     pub fn record_room(&mut self, topic: TopicId, ticket: Ticket) {
         self.rooms.insert(topic, ticket);
+    }
+
+    /// Set or replace the designated one-to-one conversation.
+    pub fn set_direct_conversation(
+        &mut self,
+        topic: TopicId,
+        state: DirectConversationState,
+    ) -> &mut DirectConversation {
+        self.direct_conversation = Some(DirectConversation { topic, state });
+        self.direct_conversation
+            .as_mut()
+            .expect("direct conversation was just inserted")
+    }
+
+    /// Return the designated one-to-one conversation, if negotiated or known.
+    pub fn direct_conversation(&self) -> Option<&DirectConversation> {
+        self.direct_conversation.as_ref()
     }
 
     /// Human-friendly label for display.
@@ -225,7 +271,7 @@ impl FriendsStore {
         let mut store: Self = serde_json::from_str(&raw)
             .with_std_context(|_| format!("failed to parse friends file {}", path.display()))?;
 
-        if store.schema_version != 1 && store.schema_version != SCHEMA_VERSION {
+        if !(1..=SCHEMA_VERSION).contains(&store.schema_version) {
             return Err(n0_error::anyerr!(
                 "unsupported friends schema version {} in {}",
                 store.schema_version,
@@ -455,6 +501,46 @@ mod tests {
         let record = loaded.get(&id).expect("friend");
         assert_eq!(record.known_addrs, ticket.peers);
         assert_eq!(record.rooms.get(&topic), Some(&ticket));
+    }
+
+    #[test]
+    fn save_then_load_preserves_direct_conversation() {
+        let dir = temp_dir("direct-conversation-roundtrip");
+        let mut store = FriendsStore::empty_at(&dir);
+        let pk = iroh::SecretKey::generate().public();
+        let id = FriendId::from_public_key(pk);
+        let topic = TopicId::from_bytes([9; 32]);
+        store
+            .ensure_friend(id.clone())
+            .set_direct_conversation(topic, DirectConversationState::Active);
+
+        store.save().expect("save");
+        let loaded = FriendsStore::load(&dir).expect("load");
+        let conversation = loaded
+            .get(&id)
+            .and_then(FriendRecord::direct_conversation)
+            .expect("direct conversation");
+        assert_eq!(conversation.topic, topic);
+        assert_eq!(conversation.state, DirectConversationState::Active);
+    }
+
+    #[test]
+    fn schema_v2_without_direct_conversation_still_loads() {
+        let dir = temp_dir("direct-conversation-migration");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let pk = iroh::SecretKey::generate().public();
+        let raw = serde_json::json!({
+            "schema_version": 2,
+            "friends": { pk.to_string(): { "label": "Legacy" } }
+        });
+        fs::write(friends_file_path(&dir), raw.to_string()).expect("write old file");
+
+        let store = FriendsStore::load(&dir).expect("load legacy friends file");
+        let record = store
+            .get(&FriendId::from_public_key(pk))
+            .expect("friend exists");
+        assert!(record.direct_conversation().is_none());
+        assert_eq!(store.schema_version, SCHEMA_VERSION);
     }
 
     #[test]
