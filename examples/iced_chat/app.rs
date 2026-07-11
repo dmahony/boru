@@ -4,6 +4,7 @@
 //! with dynamic room switching — like Telegram/Signal.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -72,6 +73,26 @@ const SPACE_10: f32 = 10.0;
 const SPACE_12: f32 = 12.0;
 const SPACE_16: f32 = 16.0;
 const SPACE_24: f32 = 24.0;
+
+const PROFILE_IMAGE_FILE: &str = "profile-image";
+const PROFILE_IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
+
+fn supported_profile_image(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+    )
+}
+
+fn save_profile_image(data_dir: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    fs::create_dir_all(data_dir)?;
+    let temporary = data_dir.join(format!("{PROFILE_IMAGE_FILE}.tmp"));
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, data_dir.join(PROFILE_IMAGE_FILE))
+}
 
 // ── Theme-aware chat colors ──────────────────────────────────────────
 /// Return the muted secondary color for labels, previews, and counts.
@@ -495,6 +516,8 @@ pub struct IcedChat {
     whisper_handle: WhisperHandle,
     /// Receiver for incoming whisper events.
     pub whisper_events_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
+    /// Locally selected profile image, persisted below the application data directory.
+    profile_image_handle: Option<iced::widget::image::Handle>,
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +599,12 @@ pub enum AppMessage {
     OpenFriendChat(PublicKey),
     /// Toggle notification sounds on/off.
     ToggleSound(bool),
+    /// Open the native picker for a local profile image.
+    PickProfileImage,
+    /// Result of reading the selected profile image.
+    ProfileImagePicked(Result<Vec<u8>, String>),
+    /// Remove the currently configured profile image.
+    RemoveProfileImage,
     /// User requested to clear chat history — show confirmation.
     ClearHistoryRequested,
     /// User confirmed the clear history action.
@@ -620,6 +649,10 @@ impl IcedChat {
             .filter(|(_, record)| record.status.online)
             .filter_map(|(id, _)| id.parse_public_key().ok())
             .collect();
+        let profile_image_handle = fs::read(data_dir.join(PROFILE_IMAGE_FILE))
+            .ok()
+            .filter(|bytes| !bytes.is_empty() && bytes.len() <= PROFILE_IMAGE_MAX_BYTES)
+            .map(iced::widget::image::Handle::from_bytes);
         Self {
             screen: Screen::ChatList,
             pending_topic: None,
@@ -680,6 +713,7 @@ impl IcedChat {
             return_to_chat_list_after_open,
             whisper_handle,
             whisper_events_rx,
+            profile_image_handle,
         }
     }
 
@@ -773,6 +807,9 @@ impl IcedChat {
             AppMessage::CopyToClipboard(_) => "CopyToClipboard",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
             AppMessage::ToggleSound(_) => "ToggleSound",
+            AppMessage::PickProfileImage => "PickProfileImage",
+            AppMessage::ProfileImagePicked(_) => "ProfileImagePicked",
+            AppMessage::RemoveProfileImage => "RemoveProfileImage",
             AppMessage::ClearHistoryRequested => "ClearHistoryRequested",
             AppMessage::ConfirmClearHistory => "ConfirmClearHistory",
         }
@@ -2631,6 +2668,68 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::PickProfileImage => iced::Task::perform(
+                async {
+                    let file = rfd::AsyncFileDialog::new()
+                        .set_title("Choose profile image")
+                        .pick_file()
+                        .await;
+                    match file {
+                        Some(file) => {
+                            if !supported_profile_image(file.path()) {
+                                return Err("Unsupported profile image type. Use PNG, JPEG, GIF, WEBP, or BMP.".to_string());
+                            }
+                            let bytes = file.read().await;
+                            if bytes.is_empty() {
+                                Err("Profile image is empty.".to_string())
+                            } else if bytes.len() > PROFILE_IMAGE_MAX_BYTES {
+                                Err("Profile image must be 5 MiB or smaller.".to_string())
+                            } else {
+                                Ok(bytes)
+                            }
+                        }
+                        None => Err("No profile image selected.".to_string()),
+                    }
+                },
+                AppMessage::ProfileImagePicked,
+            ),
+
+            AppMessage::ProfileImagePicked(result) => {
+                match result {
+                    Ok(bytes) => {
+                        if let Err(err) = save_profile_image(&self.data_dir, &bytes) {
+                            self.push_system(format!("Could not save profile image: {err}"));
+                        } else {
+                            self.profile_image_handle =
+                                Some(iced::widget::image::Handle::from_bytes(bytes));
+                            self.push_system("Profile image updated.");
+                        }
+                    }
+                    Err(err) if err != "No profile image selected." => self.push_system(err),
+                    Err(_) => {}
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::RemoveProfileImage => {
+                if self.profile_image_handle.is_some() {
+                    match fs::remove_file(self.data_dir.join(PROFILE_IMAGE_FILE)) {
+                        Ok(()) => {
+                            self.profile_image_handle = None;
+                            self.push_system("Profile image removed.");
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                            self.profile_image_handle = None;
+                            self.push_system("Profile image removed.");
+                        }
+                        Err(err) => {
+                            self.push_system(format!("Could not remove profile image: {err}"));
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
+
             AppMessage::ClearHistoryRequested => {
                 self.history_confirm_clear = !self.history_confirm_clear;
                 iced::Task::none()
@@ -3505,10 +3604,27 @@ impl IcedChat {
                 .spacing(SPACE_2)
                 .max_width(480.0);
 
-            // Align: received → left, sent → right
+            // Align: received → left, sent → right. Local messages include the
+            // persisted profile avatar; the fallback keeps the layout stable.
             let msg_row = match entry.kind {
                 ChatKind::Remote => Row::new().push(bubble_col).push(space::horizontal()),
-                ChatKind::Local => Row::new().push(space::horizontal()).push(bubble_col),
+                ChatKind::Local => {
+                    let avatar: iced::Element<'_, AppMessage> =
+                        if let Some(ref handle) = self.profile_image_handle {
+                            iced::widget::image(handle.clone())
+                                .content_fit(iced::ContentFit::ScaleDown)
+                                .width(Length::Fixed(28.0))
+                                .height(Length::Fixed(28.0))
+                                .into()
+                        } else {
+                            text("👤").size(TYPO_LG).into()
+                        };
+                    Row::new()
+                        .push(space::horizontal())
+                        .push(bubble_col)
+                        .push(avatar)
+                        .spacing(SPACE_6)
+                }
                 _ => unreachable!(),
             }
             .width(Length::Fill);
@@ -3744,7 +3860,52 @@ impl IcedChat {
         .width(Length::Fill)
         .padding(SPACE_4);
 
-        let identity_card = section_card("👤  IDENTITY", vec![nickname_input.into()]);
+        let profile_preview: iced::Element<'_, AppMessage> =
+            if let Some(ref handle) = self.profile_image_handle {
+                iced::widget::image(handle.clone())
+                    .content_fit(iced::ContentFit::ScaleDown)
+                    .width(Length::Fixed(48.0))
+                    .height(Length::Fixed(48.0))
+                    .into()
+            } else {
+                text("👤").size(TYPO_XL).into()
+            };
+        let mut profile_row = Row::new()
+            .push(
+                Column::new()
+                    .push(profile_preview)
+                    .push(text("Profile image").size(TYPO_MD))
+                    .push(
+                        text(if self.profile_image_handle.is_some() {
+                            "Shown beside your messages"
+                        } else {
+                            "No image selected (using a person icon)"
+                        })
+                        .size(TYPO_XS)
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(
+                button(text("Choose image").size(TYPO_SM))
+                    .on_press(AppMessage::PickProfileImage)
+                    .padding([SPACE_6, SPACE_12]),
+            );
+        if self.profile_image_handle.is_some() {
+            profile_row = profile_row.push(
+                button(text("Remove").size(TYPO_SM))
+                    .on_press(AppMessage::RemoveProfileImage)
+                    .padding([SPACE_6, SPACE_12]),
+            );
+        }
+        let profile_row = profile_row.spacing(SPACE_12).align_y(Alignment::Center);
+
+        let identity_card = section_card(
+            "👤  IDENTITY",
+            vec![nickname_input.into(), profile_row.into()],
+        );
 
         // ── Appearance section ──
         let appearance_theme = if self.dark_mode { "Dark" } else { "Light" };
