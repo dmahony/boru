@@ -631,6 +631,14 @@ impl ChatCallbacks for AppState {
             .unwrap_or_else(|| peer.fmt_short().to_string())
     }
 
+    fn last_announced_name(&self, peer: &PublicKey) -> Option<String> {
+        let fid = FriendId::from_public_key(*peer);
+        self.friends
+            .get(&fid)
+            .and_then(|record| record.last_announced_name.clone())
+            .or_else(|| self.names.get(peer).cloned())
+    }
+
     fn set_name(&mut self, peer: PublicKey, name: String) -> Option<String> {
         self.names.insert(peer, name)
     }
@@ -1096,7 +1104,9 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                     name,
                     profile_image_ticket,
                 } => {
+                    let prior_announced_name = cb.last_announced_name(&from);
                     let old_name = cb.set_name(from, name.clone());
+                    let old_name = prior_announced_name.or(old_name);
                     match profile_image_ticket {
                         Some(ticket) => cb.record_profile_image_ticket(from, ticket),
                         None => cb.clear_profile_image(from),
@@ -2019,6 +2029,84 @@ mod tests {
         assert_eq!(app.names.get(&remote_key.public()).unwrap(), "bob");
         // Should have a system notification about the name
         assert!(app.entries.iter().any(|e| e.body.contains("bob")));
+    }
+
+    #[test]
+    fn handle_net_event_about_me_same_name_suppresses_duplicate_system_message() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+
+        let msg = Message::AboutMe {
+            name: "bob".into(),
+            profile_image_ticket: None,
+        };
+
+        handle_net_event(
+            NetEvent::Message {
+                from: remote_key.public(),
+                message: msg.clone(),
+                sent_at: now_secs(),
+            },
+            &mut app,
+        )
+        .unwrap();
+        handle_net_event(
+            NetEvent::Message {
+                from: remote_key.public(),
+                message: msg,
+                sent_at: now_secs(),
+            },
+            &mut app,
+        )
+        .unwrap();
+
+        let matching = app
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.body == format!("{} is now known as bob", remote_key.public().fmt_short())
+            })
+            .count();
+        assert_eq!(
+            matching, 1,
+            "same AboutMe should only emit one name-change notice"
+        );
+        assert_eq!(app.names.get(&remote_key.public()).unwrap(), "bob");
+    }
+
+    #[test]
+    fn handle_net_event_about_me_reconnect_uses_persisted_friend_name_to_skip_duplicate_notice() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends.set_last_announced_name(fid.clone(), "bob");
+        app.names.clear();
+
+        handle_net_event(
+            NetEvent::Message {
+                from: remote_key.public(),
+                message: Message::AboutMe {
+                    name: "bob".into(),
+                    profile_image_ticket: None,
+                },
+                sent_at: now_secs(),
+            },
+            &mut app,
+        )
+        .unwrap();
+
+        assert_eq!(app.names.get(&remote_key.public()).map(String::as_str), Some("bob"));
+        assert_eq!(
+            app.entries
+                .iter()
+                .filter(|entry| {
+                    entry.body
+                        == format!("{} is now known as bob", remote_key.public().fmt_short())
+                })
+                .count(),
+            0,
+            "persisted friend name should suppress reconnect duplicate notice"
+        );
     }
 
     #[test]

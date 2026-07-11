@@ -5,8 +5,6 @@ use std::{
 };
 
 use iroh::{endpoint::presets, protocol::Router, Endpoint, SecretKey};
-#[cfg(feature = "tor-transport")]
-use iroh_gossip::tor_transport::TorTransport;
 use iroh_gossip::{net::Gossip, ALPN};
 use n0_error::{Result, StdResultExt};
 

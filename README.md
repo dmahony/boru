@@ -75,7 +75,7 @@ fn bootstrap_peers() -> Vec<EndpointId> {
 }
 ```
 
-The `examples/chat.rs` demo runs over direct iroh connectivity by default. It prints a base32 ticket containing the topic and endpoint addresses, so peers can join without Tor. If you want Tor hidden services instead, build with `--features tor-transport` and pass `--tor`.
+The `examples/chat.rs` demo runs over direct iroh connectivity. It prints a base32 ticket containing the topic and endpoint addresses for peers to join.
 
 ## Identity Persistence
 
@@ -117,8 +117,8 @@ cargo chat join <ticket>
 # Long form (also works without the alias)
 cargo run --example chat -- open
 
-# Optional Tor mode
-cargo run --features "examples tor-transport" --example chat -- --tor open
+# Direct iroh mode (the only supported transport)
+cargo run --features examples --example chat -- open
 ```
 
 ## GUI frontend (iced)

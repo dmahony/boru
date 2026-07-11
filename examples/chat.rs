@@ -24,8 +24,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-#[cfg(feature = "tor-transport")]
-use iroh::Watcher;
+
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, PublicKey, RelayMode,
     RelayUrl, SecretKey,
@@ -53,8 +52,7 @@ use iroh_gossip::room_docs::{
     self, create_metadata_doc, create_roster_doc, list_members, read_metadata, RoomDocs,
     RoomMetadata,
 };
-#[cfg(feature = "tor-transport")]
-use iroh_gossip::tor_transport::{bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport};
+
 use iroh_gossip::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
 use iroh_gossip::{
     net::{Gossip, GOSSIP_ALPN},
@@ -96,10 +94,7 @@ struct Args {
     /// Disable relay completely.
     #[clap(long)]
     no_relay: bool,
-    /// Use Tor hidden services instead of direct iroh connectivity.
-    #[cfg(feature = "tor-transport")]
-    #[clap(long)]
-    tor: bool,
+
     /// Set your nickname.
     #[clap(short, long)]
     name: Option<String>,
@@ -267,10 +262,6 @@ async fn main() -> Result<()> {
     tracing::info!(path = %log_file_path(&data_dir).display(), "logging to file");
     let args = Args::parse();
 
-    #[cfg(feature = "tor-transport")]
-    let use_tor = args.tor;
-    #[cfg(not(feature = "tor-transport"))]
-    let use_tor = false;
 
     // parse the cli command
     let (topic, peers) = match &args.command {
@@ -335,129 +326,39 @@ async fn main() -> Result<()> {
         tracing::info!(count = friend_count, "loaded friends from disk");
     }
 
-    // configure our relay map
-    // When Tor is used, default to disabled relays — Tor hidden services provide direct
-    // connectivity without needing the iroh relay infrastructure.
-    let relay_mode = match (use_tor, args.no_relay, args.relay.clone()) {
+    // Configure the standard iroh relay/discovery path.
+    let relay_mode = match (args.no_relay, args.relay.clone()) {
         (_, true, Some(_)) => bail_any!("You cannot set --no-relay and --relay at the same time"),
-        (_, true, None) => RelayMode::Disabled,
-        (true, false, None) => RelayMode::Disabled,
-        (false, false, None) => RelayMode::Default,
-        (_, false, Some(url)) => RelayMode::Custom(url.into()),
+        (true, None) => RelayMode::Disabled,
+        (false, None) => RelayMode::Default,
+        (false, Some(url)) => RelayMode::Custom(url.into()),
     };
     tracing::info!(relay = %fmt_relay_mode(&relay_mode), "configured relay servers");
 
     // create a memory lookup to pass in endpoint addresses to
     let memory_lookup = MemoryLookup::new();
 
-    // ── Tor reconnection monitor channel ──────────────────────────────
-    // Created unconditionally so the event loop always compiles.
-    // The monitor task is only spawned in Tor mode; otherwise the
-    // sender is never cloned and sits dormant.
-    #[allow(unused)]
-    let (tor_reconnect_tx, mut tor_reconnect_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    /// Handle to the Tor health-monitor background task, stored so we can
-    /// abort it during clean shutdown before closing the router/endpoint.
-    #[allow(unused)]
-    let mut tor_monitor_handle: Option<tokio::task::JoinHandle<()>> = None;
-
-    // build our iroh endpoint
-    let (endpoint, transport_status_message, transport_notice_text, local_peer_addr) = {
-        #[cfg(feature = "tor-transport")]
-        if use_tor {
-            let tor_dirs = TorStorageDirs::new()?;
-            let (tor_client, tor_status_message) = bootstrap_tor(&tor_dirs).await?;
-            let tor_transport =
-                TorTransport::new(secret_key.public(), Arc::clone(&tor_client), args.bind_port);
-            let endpoint = Endpoint::builder(presets::N0DisableRelay)
-                .secret_key(secret_key.clone())
-                .address_lookup(memory_lookup.clone())
-                .relay_mode(relay_mode.clone())
-                .add_custom_transport(Arc::new(tor_transport.clone()))
-                .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
-                .bind()
-                .await?;
-            endpoint.online().await;
-            let local_peer_addr = tor_transport.watch_local_peer_addr().initialized().await;
-
-            // Spawn the Tor health-monitor background task to detect
-            // and reconnect with exponential backoff if Tor drops after
-            // the initial bootstrap.
-            let monitor_client = Arc::clone(&tor_client);
-            let monitor_tx = tor_reconnect_tx.clone();
-            tor_monitor_handle = Some(tokio::spawn(async move {
-                monitor_tor_health(monitor_client, monitor_tx).await;
-            }));
-
-            (
-                endpoint,
-                format!("Tor bootstrap finished: {tor_status_message}"),
-                "Tor-backed custom transport is operational. Gossip messages are relayed over Tor hidden services."
-                    .to_string(),
-                local_peer_addr.endpoint_addr(),
-            )
-        } else {
-            let endpoint = if matches!(relay_mode, RelayMode::Disabled) {
-                Endpoint::builder(presets::N0DisableRelay)
-                    .secret_key(secret_key.clone())
-                    .address_lookup(memory_lookup.clone())
-                    .relay_mode(relay_mode.clone())
-                    .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
-                    .bind()
-                    .await?
-            } else {
-                Endpoint::builder(presets::N0)
-                    .secret_key(secret_key.clone())
-                    .address_lookup(memory_lookup.clone())
-                    .relay_mode(relay_mode.clone())
-                    .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
-                    .bind()
-                    .await?
-            };
-            if !matches!(relay_mode, RelayMode::Disabled) {
-                endpoint.online().await;
-            }
-            let local_peer_addr = endpoint.addr();
-            (
-                endpoint,
-                "> Direct iroh transport is ready.".to_string(),
-                "Direct iroh transport is operational. Gossip messages use standard iroh connectivity."
-                    .to_string(),
-                local_peer_addr,
-            )
-        }
-        #[cfg(not(feature = "tor-transport"))]
-        {
-            let endpoint = if matches!(relay_mode, RelayMode::Disabled) {
-                Endpoint::builder(presets::N0DisableRelay)
-                    .secret_key(secret_key.clone())
-                    .address_lookup(memory_lookup.clone())
-                    .relay_mode(relay_mode.clone())
-                    .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
-                    .bind()
-                    .await?
-            } else {
-                Endpoint::builder(presets::N0)
-                    .secret_key(secret_key.clone())
-                    .address_lookup(memory_lookup.clone())
-                    .relay_mode(relay_mode.clone())
-                    .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
-                    .bind()
-                    .await?
-            };
-            if !matches!(relay_mode, RelayMode::Disabled) {
-                endpoint.online().await;
-            }
-            let local_peer_addr = endpoint.addr();
-            (
-                endpoint,
-                "> Direct iroh transport is ready.".to_string(),
-                "Direct iroh transport is operational. Gossip messages use standard iroh connectivity."
-                    .to_string(),
-                local_peer_addr,
-            )
-        }
+    // Build the endpoint using only standard iroh transports.
+    let endpoint = if matches!(relay_mode, RelayMode::Disabled) {
+        Endpoint::builder(presets::N0DisableRelay)
+            .secret_key(secret_key.clone())
+            .address_lookup(memory_lookup.clone())
+            .relay_mode(relay_mode.clone())
+            .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
+            .bind()
+            .await?
+    } else {
+        Endpoint::builder(presets::N0)
+            .secret_key(secret_key.clone())
+            .address_lookup(memory_lookup.clone())
+            .relay_mode(relay_mode.clone())
+            .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
+            .bind()
+            .await?
     };
+    if !matches!(relay_mode, RelayMode::Disabled) {
+        endpoint.online().await;
+    }
     tracing::info!(endpoint_id = %endpoint.id(), "endpoint ready");
 
     // Add mDNS local address lookup for LAN peer discovery
@@ -498,7 +399,7 @@ async fn main() -> Result<()> {
 
     let ticket = Ticket {
         topic,
-        peers: vec![local_peer_addr.clone()],
+        peers: vec![endpoint.addr()],
     };
     tracing::info!(ticket = %ticket, "created room ticket");
 
@@ -643,13 +544,13 @@ async fn main() -> Result<()> {
 
     let mut app = AppState::new(
         StatusContext {
-            transport_status: transport_status_message.clone(),
+            transport_status: "> Direct iroh transport is ready.".to_string(),
             topic,
             relay_mode: relay_mode.clone(),
             connected: true,
             peer_count,
             identity_label: local_label.clone(),
-            transport_notice: transport_notice_text.clone(),
+            transport_notice: "Direct iroh transport is operational. Gossip messages use standard iroh connectivity.".to_string(),
             direct_peers: 0,
             relayed_peers: 0,
             neighbors: HashSet::new(),
@@ -851,11 +752,6 @@ async fn main() -> Result<()> {
     });
 
     while !app.should_quit {
-        // Non-blocking check for Tor reconnection status updates
-        // (infrequent messages only — every poll is cheap with try_recv)
-        while let Ok(status_msg) = tor_reconnect_rx.try_recv() {
-            app.push_system(status_msg);
-        }
 
         tokio::select! {
             Some(event) = ui_rx.recv() => {
@@ -1320,10 +1216,6 @@ async fn main() -> Result<()> {
     drop(friend_mgr);
     drop(whisper_events);
     drop(friend_events);
-    #[cfg(feature = "tor-transport")]
-    if let Some(handle) = tor_monitor_handle.take() {
-        handle.abort();
-    }
 
     router.shutdown().await.anyerr()?;
     endpoint.close().await;

@@ -44,6 +44,14 @@ pub trait ChatCallbacks {
         peer.fmt_short().to_string()
     }
 
+    /// Return the most recent announced raw display name we already know for this peer.
+    ///
+    /// Frontends with persistent friend metadata can override this so repeated AboutMe
+    /// broadcasts survive reconnects and room refreshes.
+    fn last_announced_name(&self, _peer: &PublicKey) -> Option<String> {
+        None
+    }
+
     /// Record a peer's announced display name for later resolution.
     fn set_name(&mut self, peer: PublicKey, name: String) -> Option<String>;
 

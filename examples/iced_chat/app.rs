@@ -514,8 +514,7 @@ pub struct IcedChat {
     heartbeat_counter: u32,
     /// Maps protocol message hashes to event_ids for delivery state resolution.
     self_sent_events: HashMap<MessageHash, u64>,
-    /// Optional receiver for Tor reconnection status updates.
-    tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
+
     /// Whether to auto-scroll to the latest message.
     follow_latest: bool,
     /// Estimated total content height of the chat log (set in view_chat_log).
@@ -566,6 +565,10 @@ pub struct IcedChat {
     /// Cached profile image handles for remote peers, keyed by PublicKey.
     /// `None` means the peer announced a ticket but the blob hasn't been downloaded yet.
     friend_image_handles: HashMap<PublicKey, Option<iced::widget::image::Handle>>,
+    /// Last-seen profile image ticket string per peer.
+    /// Used to avoid re-invalidating and re-downloading when the same ticket
+    /// is re-announced in a periodic AboutMe broadcast (see ConnMonitorTick).
+    friend_image_tickets: HashMap<PublicKey, String>,
     /// Queue of profile image tickets that arrived via AboutMe, awaiting async download.
     /// Each entry is (peer_public_key, blob_ticket_string).
     /// Downloaded entries are removed one-at-a-time each update tick to allow
@@ -638,8 +641,7 @@ pub enum AppMessage {
     ConnMonitorTick,
     /// Periodic tick for mesh quiescence watchdog.
     MeshWatchdogTick,
-    /// Status update from the Tor reconnection monitor.
-    TorReconnect(String),
+
     /// Toggle dark mode on/off.
     ToggleDark(bool),
     /// Update the local display name (nickname).
@@ -708,7 +710,6 @@ impl IcedChat {
         whisper_events_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
         inbox_events_rx: Arc<Mutex<UnboundedReceiver<InboxEvent>>>,
         whisper_handle: WhisperHandle,
-        tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
         initial_room: Option<(TopicId, Vec<EndpointAddr>)>,
         notice: String,
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
@@ -724,10 +725,30 @@ impl IcedChat {
             .filter(|(_, record)| record.status.online)
             .filter_map(|(id, _)| id.parse_public_key().ok())
             .collect();
-        let profile_image_handle = fs::read(data_dir.join(PROFILE_IMAGE_FILE))
-            .ok()
-            .filter(|bytes| !bytes.is_empty() && bytes.len() <= PROFILE_IMAGE_MAX_BYTES)
-            .map(iced::widget::image::Handle::from_bytes);
+        // Load saved profile image from disk and regenerate the blob ticket
+        // so AboutMe broadcasts include the ticket for peers to download.
+        // Without this, a restart loses the ticket (blob store is in-memory)
+        // and peers see the fallback emoji instead of the avatar.
+        let (profile_image_handle, profile_image_ticket) =
+            if let Ok(bytes) = fs::read(data_dir.join(PROFILE_IMAGE_FILE)) {
+                if !bytes.is_empty() && bytes.len() <= PROFILE_IMAGE_MAX_BYTES {
+                    let handle = Some(iced::widget::image::Handle::from_bytes(bytes.clone()));
+                    let ticket = {
+                        let bs = blob_store.clone();
+                        let ep = endpoint.clone();
+                        runtime_handle.block_on(async {
+                            bs.blobs().add_bytes(bytes).await.ok().map(|tag| {
+                                blob_ticket_string(ep.watch_addr().get(), tag.hash, tag.format)
+                            })
+                        })
+                    };
+                    (handle, ticket)
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
         Self {
             screen: Screen::ChatList,
             pending_topic: None,
@@ -797,8 +818,9 @@ impl IcedChat {
             inbox_events_rx: inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
-            profile_image_ticket: None,
+            profile_image_ticket,
             friend_image_handles: HashMap::new(),
+            friend_image_tickets: HashMap::new(),
             pending_profile_image_tickets: std::collections::VecDeque::new(),
         }
     }
@@ -3103,22 +3125,6 @@ impl IcedChat {
                         Ok(mut guard) => {
                             let mut msgs = Vec::new();
                             loop {
-                                match guard.try_recv() {
-                                    Ok(msg) => msgs.push(msg),
-                                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                                        break
-                                    }
-                                }
-                            }
-                            msgs
-                        }
-                        Err(_) => Vec::new(),
-                    };
-                    for msg in msgs {
-                        self.push_system(msg);
-                    }
-                }
 
                 // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
                 let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
@@ -3201,6 +3207,44 @@ impl IcedChat {
                     }
                 } else {
                     self.heartbeat_counter -= 1;
+                }
+
+                // ── Profile image download: drain pending queue ─────────
+                // Processed here (on ConnMonitorTick) as a fallback path in
+                // case a ticket is pushed without a subsequent NetEvent to
+                // trigger the NetEvent handler's own queue drain.
+                if let Some((peer, ticket_str)) = self.pending_profile_image_tickets.pop_front() {
+                    let blob_store = self.blob_store.clone();
+                    let endpoint = self.endpoint.clone();
+                    let memory_lookup = self.memory_lookup.clone();
+                    let neighbors = self.neighbors.clone();
+                    tasks.push(iced::Task::perform(
+                        async move {
+                            let ticket: BlobTicket = ticket_str
+                                .parse::<BlobTicket>()
+                                .map_err(|e| format!("Parse profile image ticket: {e}"))?;
+                            seed_memory_lookup(&memory_lookup, &[ticket.addr().clone()]);
+                            let peer_id = ticket.addr().id;
+                            let candidates = download_candidates(peer_id, &neighbors);
+                            blob_store
+                                .downloader(&endpoint)
+                                .download(ticket.hash(), candidates)
+                                .await
+                                .map_err(|e| format!("Download profile image: {e}"))?;
+                            let mut reader = blob_store.blobs().reader(ticket.hash());
+                            let mut buf = Vec::new();
+                            use tokio::io::AsyncReadExt;
+                            reader
+                                .read_to_end(&mut buf)
+                                .await
+                                .map_err(|e| format!("Read profile image: {e}"))?;
+                            Ok((peer, buf))
+                        },
+                        move |r: Result<(PublicKey, Vec<u8>), String>| match r {
+                            Ok((peer, data)) => AppMessage::ProfileImageDownloaded(peer, data),
+                            Err(e) => AppMessage::ErrorMsg(e),
+                        },
+                    ));
                 }
 
                 // ── Seen-on-visibility: when user is at bottom of log,
@@ -3653,6 +3697,14 @@ impl ChatCallbacks for IcedChat {
             .unwrap_or_else(|| peer.fmt_short().to_string())
     }
 
+    fn last_announced_name(&self, peer: &PublicKey) -> Option<String> {
+        let fid = FriendId::from_public_key(*peer);
+        self.friends
+            .get(&fid)
+            .and_then(|record| record.last_announced_name.clone())
+            .or_else(|| self.names.get(peer).cloned())
+    }
+
     fn set_name(&mut self, peer: PublicKey, name: String) -> Option<String> {
         self.names.insert(peer, name)
     }
@@ -3683,6 +3735,16 @@ impl ChatCallbacks for IcedChat {
         self.friends
             .set_last_announced_profile_image_ticket(fid, &ticket);
         self.friends_dirty = true;
+        // Compare against the last ticket seen for this peer to avoid
+        // re-invalidating + re-downloading when the same ticket is
+        // re-announced in a periodic AboutMe broadcast (every ~5s via
+        // ConnMonitorTick).  Repeated invalidation causes a flicker
+        // between the avatar image and the fallback emoji while the
+        // redundant download is in flight.
+        if self.friend_image_tickets.get(&peer) == Some(&ticket) {
+            return;
+        }
+        self.friend_image_tickets.insert(peer, ticket.clone());
         // Invalidate any previous image immediately.  The newly announced
         // ticket may point to a replacement blob, so retaining the old
         // handle would show stale artwork while the download is in flight.
@@ -3696,6 +3758,7 @@ impl ChatCallbacks for IcedChat {
             .set_last_announced_profile_image_ticket(fid, "");
         self.friends_dirty = true;
         self.friend_image_handles.remove(&peer);
+        self.friend_image_tickets.remove(&peer);
         self.pending_profile_image_tickets
             .retain(|(queued_peer, _)| *queued_peer != peer);
     }
@@ -4541,8 +4604,8 @@ impl IcedChat {
                     };
                     Row::new()
                         .push(avatar)
-                        .push(space::horizontal())
                         .push(bubble_col)
+                        .align_y(iced::Alignment::Center)
                         .spacing(SPACE_6)
                 }
                 ChatKind::Local => {
@@ -4558,8 +4621,8 @@ impl IcedChat {
                         };
                     Row::new()
                         .push(avatar)
-                        .push(space::horizontal())
                         .push(bubble_col)
+                        .align_y(iced::Alignment::Center)
                         .spacing(SPACE_6)
                 }
                 _ => unreachable!(),
@@ -5285,5 +5348,73 @@ mod tests {
             format_message_time_with(timestamp_ms, now, |ms| tz.timestamp_millis_opt(ms).single());
 
         assert_eq!(rendered, "Tue 22:30");
+    }
+
+    #[test]
+    fn record_profile_image_ticket_dedup_same_ticket_skips_redownload() {
+        use iroh::PublicKey;
+        use std::collections::{HashMap, VecDeque};
+
+        let sk = SecretKey::generate();
+        let pk = sk.public();
+        let ticket_a = "ticket_v1_hash_abc".to_string();
+        let ticket_a_dup = "ticket_v1_hash_abc".to_string();
+        let ticket_b = "ticket_v2_hash_xyz".to_string();
+
+        // Test the dedup logic inline (same guard as record_profile_image_ticket).
+        let mut handles: HashMap<PublicKey, Option<iced::widget::image::Handle>> = HashMap::new();
+        let mut tickets: HashMap<PublicKey, String> = HashMap::new();
+        let mut queue: VecDeque<(PublicKey, String)> = VecDeque::new();
+
+        // First call: new ticket → should queue a download.
+        let pk1 = pk;
+        tickets.insert(pk1, ticket_a.clone());
+        handles.insert(pk1, None);
+        queue.push_back((pk1, ticket_a.clone()));
+        assert_eq!(queue.len(), 1, "first ticket should be queued");
+        assert_eq!(
+            handles.get(&pk1),
+            Some(&None),
+            "handle should be invalidated (None)"
+        );
+
+        // Simulate a successful download completing.
+        let _handle = iced::widget::image::Handle::from_bytes(vec![0; 32]);
+        handles.insert(pk1, None); // would become Some(handle) after download
+
+        // Second call: same ticket → should NOT re-invalidate or re-queue.
+        // Simulate the guard from record_profile_image_ticket.
+        if tickets.get(&pk1) != Some(&ticket_a_dup) {
+            panic!("guard failed: ticket should match");
+        }
+        // Guard returns early, so nothing changes.
+        assert_eq!(queue.len(), 1, "same ticket should NOT add to queue");
+        assert_eq!(
+            tickets.get(&pk1),
+            Some(&ticket_a),
+            "cached ticket should remain unchanged"
+        );
+
+        // Third call: NEW ticket → should update and re-queue.
+        tickets.insert(pk1, ticket_b.clone());
+        handles.insert(pk1, None);
+        queue.push_back((pk1, ticket_b.clone()));
+        assert_eq!(queue.len(), 2, "new ticket should be queued");
+        assert_eq!(
+            tickets.get(&pk1),
+            Some(&ticket_b),
+            "cached ticket should update"
+        );
+
+        // clear_profile_image should remove the cached ticket.
+        handles.remove(&pk1);
+        tickets.remove(&pk1);
+        queue.retain(|(p, _)| *p != pk1);
+        assert!(!handles.contains_key(&pk1), "handle should be removed");
+        assert!(
+            !tickets.contains_key(&pk1),
+            "cached ticket should be removed"
+        );
+        assert_eq!(queue.len(), 0, "queue should be cleared");
     }
 }

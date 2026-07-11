@@ -34,8 +34,7 @@ use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_history::RoomHistoryStore;
-#[cfg(feature = "tor-transport")]
-use iroh_gossip::tor_transport::{bootstrap_tor, monitor_tor_health, TorStorageDirs, TorTransport};
+
 use iroh_gossip::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
 #[cfg(feature = "gui")]
@@ -75,10 +74,7 @@ struct Args {
     /// Defaults to IROH_GOSSIP_CHAT_DATA_DIR env var, or ~/.local/share/iroh-gossip-chat/.
     #[clap(long)]
     data_dir: Option<PathBuf>,
-    /// Use Tor hidden services instead of direct iroh connectivity.
-    #[cfg(feature = "tor-transport")]
-    #[clap(long)]
-    tor: bool,
+
     #[clap(short, long)]
     name: Option<String>,
     #[clap(long, default_value = "0")]
@@ -375,28 +371,14 @@ fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| local_public.fmt_short().to_string());
 
-    let use_tor = {
-        #[cfg(feature = "tor-transport")]
-        {
-            args.tor
-        }
-        #[cfg(not(feature = "tor-transport"))]
-        {
-            false
-        }
-    };
-    let relay_mode = match (use_tor, args.no_relay, args.relay.clone()) {
-        (_, true, Some(_)) => bail_any!("--no-relay and --relay are mutually exclusive"),
-        (_, true, None) => RelayMode::Disabled,
-        (true, false, None) => RelayMode::Disabled,
-        (false, false, None) => RelayMode::Default,
-        (_, false, Some(url)) => RelayMode::Custom(url.into()),
+    let relay_mode = match (args.no_relay, args.relay.clone()) {
+        (true, Some(_)) => bail_any!("--no-relay and --relay are mutually exclusive"),
+        (true, None) => RelayMode::Disabled,
+        (false, None) => RelayMode::Default,
+        (false, Some(url)) => RelayMode::Custom(url.into()),
     };
     info!("> relay: {}", fmt_relay_mode(&relay_mode));
 
-    // ── Tor reconnection monitor channel ──────────────────────────────
-    #[allow(unused)]
-    let (tor_reconnect_tx, tor_reconnect_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     // ── Build the endpoint, gossip, and router (no topic subscription yet) ──
 
@@ -412,75 +394,17 @@ fn main() -> Result<()> {
         friend_events_rx,
         friends,
         room_history,
-        tor_reconnect_rx_opt,
         notice,
         chat_history,
         backfill_handle,
         whisper_events_rx,
         whisper_handle,
         inbox_events_rx,
-        mut tor_monitor_handle,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
-        let mut tor_monitor_handle: Option<tokio::task::JoinHandle<()>> = None;
         use std::net::{Ipv4Addr, SocketAddrV4};
 
         let endpoint = {
-            #[cfg(feature = "tor-transport")]
-            if use_tor {
-                let tor_dirs = TorStorageDirs::new()?;
-                let (tor_client, tor_status_message) = bootstrap_tor(&tor_dirs).await?;
-                let tor_transport =
-                    TorTransport::new(secret_key.public(), Arc::clone(&tor_client), args.bind_port);
-                let endpoint = Endpoint::builder(presets::N0DisableRelay)
-                    .secret_key(secret_key.clone())
-                    .address_lookup(MdnsAddressLookup::builder())
-                    .relay_mode(relay_mode.clone())
-                    .add_custom_transport(Arc::new(tor_transport.clone()))
-                    .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
-                    .bind()
-                    .await?;
-                endpoint.online().await;
-                #[allow(unused)]
-                endpoint.address_lookup()?.add(memory_lookup.clone());
-                let local_peer_addr = tor_transport
-                    .watch_local_peer_addr()
-                    .initialized()
-                    .await
-                    .endpoint_addr();
-
-                // Spawn the Tor health-monitor background task and capture
-                // its handle so we can abort it explicitly before shutdown.
-                let monitor_client = Arc::clone(&tor_client);
-                let monitor_tx = tor_reconnect_tx.clone();
-                let mon_handle = tokio::spawn(async move {
-                    monitor_tor_health(monitor_client, monitor_tx).await;
-                });
-                tor_monitor_handle = Some(mon_handle);
-
-                info!("> Tor bootstrap finished: {tor_status_message}");
-                endpoint
-            } else {
-                let ep_builder = if matches!(relay_mode, RelayMode::Disabled) {
-                    Endpoint::builder(presets::N0DisableRelay)
-                } else {
-                    Endpoint::builder(presets::N0)
-                };
-                let endpoint = ep_builder
-                    .secret_key(secret_key.clone())
-                    .address_lookup(MdnsAddressLookup::builder())
-                    .relay_mode(relay_mode.clone())
-                    .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
-                    .bind()
-                    .await?;
-                #[allow(unused)]
-                endpoint.address_lookup()?.add(memory_lookup.clone());
-                if !matches!(relay_mode, RelayMode::Disabled) {
-                    endpoint.online().await;
-                }
-                endpoint
-            }
-            #[cfg(not(feature = "tor-transport"))]
             {
                 let ep_builder = if matches!(relay_mode, RelayMode::Disabled) {
                     Endpoint::builder(presets::N0DisableRelay)
@@ -533,11 +457,7 @@ fn main() -> Result<()> {
             }
         }
 
-        let notice = if use_tor {
-            "Tor-backed custom transport is operational.".to_string()
-        } else {
-            "Direct iroh transport is operational.".to_string()
-        };
+        let notice = "Direct iroh transport is operational.".to_string();
 
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let blob_store = MemStore::new();
@@ -661,14 +581,12 @@ fn main() -> Result<()> {
             friend_events_rx,
             friends,
             room_history,
-            use_tor.then(|| Arc::new(Mutex::new(tor_reconnect_rx))),
             notice,
             chat_history,
             backfill_handle,
             whisper_events_rx,
             whisper_handle,
             inbox_events_rx,
-            tor_monitor_handle,
         ))
     })?;
 
@@ -696,8 +614,7 @@ fn main() -> Result<()> {
             Arc::clone(&whisper_events_rx),
             inbox_events_rx,
             whisper_handle.clone(),
-            tor_reconnect_rx_opt,
-            initial_room,
+                initial_room,
             notice,
             chat_history,
             backfill_handle,
