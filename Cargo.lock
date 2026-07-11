@@ -3335,6 +3335,7 @@ dependencies = [
  "hex",
  "humantime-serde",
  "iced",
+ "image",
  "indexmap",
  "iroh",
  "iroh-base",

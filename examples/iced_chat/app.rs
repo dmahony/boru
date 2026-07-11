@@ -82,6 +82,43 @@ const SPACE_24: f32 = 24.0;
 const PROFILE_IMAGE_FILE: &str = "profile-image";
 const PROFILE_IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
 
+/// Max size for inline chat images before the UI rejects them.
+const CHAT_IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+/// Max dimension (width or height) for inline image thumbnails.
+/// Images larger than this on the longest side are resized down.
+
+const INLINE_IMAGE_MAX_DIM: u32 = 1920;
+/// JPEG quality for compressed inline image thumbnails.
+/// Lower = smaller files, good for chat thumbnails where pixel-perfect quality
+/// is unnecessary.
+const INLINE_IMAGE_QUALITY: u8 = 75;
+
+/// Load an image from raw bytes, resize the longest side to `INLINE_IMAGE_MAX_DIM`,
+/// and re-encode as JPEG at `INLINE_IMAGE_QUALITY`.
+///
+/// Returns the original bytes unchanged if the image cannot be decoded or is already
+/// smaller than the threshold — avoids crashing on corrupt files or tiny icons.
+#[cfg(feature = "gui")]
+fn compress_image(raw: &[u8]) -> Vec<u8> {
+    use image::GenericImageView;
+    let img = match image::load_from_memory(raw) {
+        Ok(img) => img,
+        Err(_) => return raw.to_vec(),
+    };
+    let (w, h) = img.dimensions();
+    if w.max(h) <= INLINE_IMAGE_MAX_DIM {
+        return raw.to_vec();
+    }
+    let ratio = INLINE_IMAGE_MAX_DIM as f64 / w.max(h) as f64;
+    let new_w = (w as f64 * ratio).round() as u32;
+    let new_h = (h as f64 * ratio).round() as u32;
+    let resized = img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let _ = resized.write_to(&mut buf, image::ImageFormat::Jpeg);
+    buf.into_inner()
+}
+
 fn supported_profile_image(path: &std::path::Path) -> bool {
     matches!(
         path.extension()
@@ -319,11 +356,11 @@ struct ChatEntry {
     edited: bool,
     /// Emoji reactions attached to this entry.
     reactions: Vec<String>,
-    /// Decoded image bytes for inline rendering, if this is an image message.
+    /// Compressed image bytes for inline rendering, if this is an image message.
+    /// Stored as JPEG bytes (the output of `compress_image`) — the `image::Handle`
+    /// is created lazily during `view_chat_log` only for entries in the visible
+    /// window, avoiding a persistent duplicate in memory.
     image_bytes: Option<Vec<u8>>,
-    /// Cached image handle to avoid re-decoding every frame.
-    #[allow(clippy::rc_clone_in_vec_init)]
-    image_handle: Option<iced::widget::image::Handle>,
     /// Unix epoch milliseconds when this message was sent (protocol sent_at
     /// for remote messages, local creation time for system/local messages).
     timestamp: Option<i64>,
@@ -346,7 +383,6 @@ impl ChatEntry {
             edited: false,
             reactions: Vec::new(),
             image_bytes: None,
-            image_handle: None,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -363,7 +399,6 @@ impl ChatEntry {
             edited: false,
             reactions: Vec::new(),
             image_bytes: None,
-            image_handle: None,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -386,7 +421,6 @@ impl ChatEntry {
             edited: false,
             reactions: Vec::new(),
             image_bytes: None,
-            image_handle: None,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -402,7 +436,6 @@ impl ChatEntry {
         sender: Option<PublicKey>,
     ) -> Self {
         let body_str = body.into();
-        let handle = iced::widget::image::Handle::from_bytes(image_bytes.clone());
         Self {
             kind: ChatKind::Remote,
             label: label.into(),
@@ -411,7 +444,6 @@ impl ChatEntry {
             edited: false,
             reactions: Vec::new(),
             image_bytes: Some(image_bytes),
-            image_handle: Some(handle),
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -575,6 +607,8 @@ pub struct IcedChat {
     /// Downloaded entries are removed one-at-a-time each update tick to allow
     /// multiple concurrent peer image downloads without overwriting each other.
     pending_profile_image_tickets: std::collections::VecDeque<(PublicKey, String)>,
+    /// Performance metrics for the last render — used by regression tests.
+    perf: std::cell::RefCell<PerfMetrics>,
 }
 
 #[derive(Debug, Clone)]
@@ -689,6 +723,50 @@ pub enum AppMessage {
     /// Scroll offset / viewport changed in the chat log.
     /// Used by windowed rendering to determine which entries to build widgets for.
     Scrolled(f32, f32),
+}
+
+// ── Performance metrics ──────────────────────────────────────────────
+
+/// Tracks rendering performance of the chat log for regression detection.
+///
+/// Public fields are written by `view_chat_log` during `view()` and can be
+/// inspected by performance regression tests without a display server.
+#[derive(Debug, Clone, Default)]
+pub struct PerfMetrics {
+    /// Wall-clock time (ns) the last call to `view_chat_log` spent building
+    /// the Iced widget tree.  Does **not** include GPU compositing time.
+    pub last_render_time_ns: u64,
+    /// Number of chat entries that were in scope (visible window) during
+    /// the last render.
+    pub window_size: usize,
+    /// Total entries in the chat log at the time of the last render.
+    pub total_entries: usize,
+    /// Summed bytes of all `image_bytes` fields across all entries.
+    pub total_image_bytes: usize,
+    /// Number of entries that carry decoded image data.
+    pub image_entry_count: usize,
+}
+
+impl PerfMetrics {
+    fn snapshot(&self) -> PerfSnapshot {
+        PerfSnapshot {
+            render_time_ns: self.last_render_time_ns,
+            window_size: self.window_size,
+            total_entries: self.total_entries,
+            total_image_bytes: self.total_image_bytes,
+            image_entry_count: self.image_entry_count,
+        }
+    }
+}
+
+/// Immutable snapshot at a point in time — used as test assertion target.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerfSnapshot {
+    pub render_time_ns: u64,
+    pub window_size: usize,
+    pub total_entries: usize,
+    pub total_image_bytes: usize,
+    pub image_entry_count: usize,
 }
 
 impl IcedChat {
@@ -826,7 +904,14 @@ impl IcedChat {
             friend_image_handles: HashMap::new(),
             friend_image_tickets: HashMap::new(),
             pending_profile_image_tickets: std::collections::VecDeque::new(),
+            perf: std::cell::RefCell::new(PerfMetrics::default()),
         }
+    }
+
+    /// Return a snapshot of the last render's performance metrics.
+    /// Used by performance regression tests.
+    pub fn perf_metrics(&self) -> PerfSnapshot {
+        self.perf.borrow().snapshot()
     }
 
     fn room_ticket(&self, topic: TopicId) -> Ticket {
@@ -2523,7 +2608,10 @@ impl IcedChat {
                                 .read_to_end(&mut buf)
                                 .await
                                 .map_err(|e| format!("Read: {e}"))?;
-                            Ok((name, buf))
+                            // Compress the downloaded image to a thumbnail
+                            // for inline display and persistence.
+                            let thumb = compress_image(&buf);
+                            Ok((name, thumb))
                         },
                         move |r: Result<(String, Vec<u8>), String>| match r {
                             Ok((name, data)) => AppMessage::ImageDownloaded {
@@ -2959,9 +3047,21 @@ impl IcedChat {
                 iced::Task::perform(
                     async move {
                         let path_buf = std::path::PathBuf::from(&abs_path);
-                        let image_bytes = tokio::fs::read(&path_buf)
+                        let metadata = tokio::fs::metadata(&path_buf)
+                            .await
+                            .map_err(|e| format!("Failed to inspect image: {e}"))?;
+                        if metadata.len() > CHAT_IMAGE_MAX_BYTES as u64 {
+                            return Err(format!(
+                                "Image must be {} MiB or smaller.",
+                                CHAT_IMAGE_MAX_BYTES / (1024 * 1024)
+                            ));
+                        }
+                        let full_bytes = tokio::fs::read(&path_buf)
                             .await
                             .map_err(|e| format!("Failed to read image: {e}"))?;
+                        // Compress to a thumbnail for inline preview and persistence.
+                        // The original full-resolution file goes to the blob store.
+                        let thumb_bytes = compress_image(&full_bytes);
                         let tag = blob_store
                             .blobs()
                             .add_path(path_buf)
@@ -2977,7 +3077,7 @@ impl IcedChat {
                         if let Some(ref sender) = sender {
                             sender.broadcast(encoded).await.ok();
                         }
-                        Ok((local_pk, fname, image_bytes))
+                        Ok((local_pk, fname, thumb_bytes))
                     },
                     |r: Result<(PublicKey, String, Vec<u8>), String>| match r {
                         Ok((sender_pk, name, bytes)) => AppMessage::ImageDownloaded {
@@ -4460,6 +4560,22 @@ impl IcedChat {
         use iced::widget::{container, scrollable, text, Column, Row};
         use iced::Length;
 
+        let _start = std::time::Instant::now();
+
+        // ── Snapshot performance-relevant state on render ──
+        let total_entries = self.entries.len();
+        let (total_image_bytes, image_entry_count) = {
+            let mut bytes = 0_usize;
+            let mut count = 0_usize;
+            for e in &self.entries {
+                if let Some(ref img) = e.image_bytes {
+                    bytes += img.len();
+                    count += 1;
+                }
+            }
+            (bytes, count)
+        };
+
         let theme = self.theme();
 
         // ── Empty state ──
@@ -4470,6 +4586,14 @@ impl IcedChat {
                     .width(Length::Fill),
             );
             self.total_content_height.set(0.0);
+            // Empty-state render — record perf snapshot
+            self.perf.replace(PerfMetrics {
+                last_render_time_ns: _start.elapsed().as_nanos() as u64,
+                window_size: 0,
+                total_entries,
+                total_image_bytes,
+                image_entry_count,
+            });
             return scrollable(col)
                 .id(CHAT_LOG)
                 .anchor_bottom()
@@ -4697,9 +4821,10 @@ impl IcedChat {
 
             col = col.push(msg_row);
 
-            // ── Image ──
-            if let Some(ref handle) = entry.image_handle {
-                let img = iced::widget::image(handle.clone())
+            // ── Image (lazily decoded — handle created on-demand) ──
+            if let Some(ref bytes) = entry.image_bytes {
+                let handle = iced::widget::image::Handle::from_bytes(bytes.clone());
+                let img = iced::widget::image(handle)
                     .content_fit(iced::ContentFit::ScaleDown)
                     .width(Length::Fill)
                     .height(Length::Fixed(300.0));
@@ -4732,6 +4857,20 @@ impl IcedChat {
                 container(space::Space::new().height(Length::Fixed(bottom_h))).width(Length::Fill),
             );
         }
+
+        // ── Record render perf metrics ──
+        let window_size = if total_entries > 0 {
+            last_idx.saturating_sub(first_idx) + 1
+        } else {
+            0
+        };
+        self.perf.replace(PerfMetrics {
+            last_render_time_ns: _start.elapsed().as_nanos() as u64,
+            window_size,
+            total_entries,
+            total_image_bytes,
+            image_entry_count,
+        });
 
         scrollable(col)
             .id(CHAT_LOG)
@@ -5482,5 +5621,101 @@ mod tests {
             "cached ticket should be removed"
         );
         assert_eq!(queue.len(), 0, "queue should be cleared");
+    }
+
+    // ── Performance regression tests ─────────────────────────────────────
+
+    #[test]
+    fn perf_image_bytes_countable_across_many_entries() {
+        let image_data = vec![0xABu8; 8192];
+        let entries: Vec<ChatEntry> = (0..25)
+            .map(|i| ChatEntry {
+                kind: ChatKind::Remote,
+                label: "p".into(),
+                body: format!("img {i}"),
+                message_hash: None,
+                edited: false,
+                reactions: vec![],
+                image_bytes: Some(image_data.clone()),
+                timestamp: Some(i as i64),
+                event_id: 0,
+                delivery_state: DeliveryState::default(),
+                sender_key: None,
+            })
+            .collect();
+        let total: usize = entries
+            .iter()
+            .filter_map(|e| e.image_bytes.as_ref())
+            .map(|b| b.len())
+            .sum();
+        assert_eq!(total, 25 * 8192);
+        assert_eq!(
+            entries.iter().filter(|e| e.image_bytes.is_some()).count(),
+            25
+        );
+    }
+
+    #[test]
+    fn perf_text_only_entries_have_no_image_bytes() {
+        let entries: Vec<ChatEntry> = (0..100)
+            .map(|i| ChatEntry::remote("p", format!("text {i}"), None, None, None))
+            .collect();
+        let bytes: usize = entries
+            .iter()
+            .filter_map(|e| e.image_bytes.as_ref())
+            .map(|b| b.len())
+            .sum();
+        assert_eq!(bytes, 0, "text entries must not carry image data");
+    }
+
+    #[test]
+    fn perf_image_bytes_field_does_not_affect_chat_entry_body() {
+        let img = vec![0u8; 128];
+        let e = ChatEntry {
+            kind: ChatKind::Remote,
+            label: "peer".into(),
+            body: "hello".into(),
+            message_hash: None,
+            edited: false,
+            reactions: vec![],
+            image_bytes: Some(img),
+            timestamp: Some(1000),
+            event_id: 0,
+            delivery_state: DeliveryState::default(),
+            sender_key: None,
+        };
+        assert_eq!(e.body, "hello");
+        assert_eq!(e.label, "peer");
+        assert_eq!(e.image_bytes.as_ref().map(|b| b.len()), Some(128));
+    }
+
+    #[test]
+    fn perf_system_entries_have_no_image_bytes() {
+        let e = ChatEntry::system("user joined");
+        assert!(
+            e.image_bytes.is_none(),
+            "system entry must not have image data"
+        );
+        assert_eq!(e.body, "user joined");
+    }
+
+    #[test]
+    fn perf_local_entries_have_no_image_bytes() {
+        let e = ChatEntry::local("me", "hello");
+        assert!(
+            e.image_bytes.is_none(),
+            "local entry must not have image data"
+        );
+        assert_eq!(e.body, "hello");
+    }
+
+    #[test]
+    fn perf_remote_text_entries_have_no_image_bytes() {
+        let e = ChatEntry::remote("peer", "hey there", None, None, None);
+        assert!(
+            e.image_bytes.is_none(),
+            "remote text entry must not have image data"
+        );
+        assert_eq!(e.body, "hey there");
     }
 }

@@ -110,6 +110,7 @@ comfy-table = { version = "7.1.4", optional = true }
 ratatui = { version = "0.28.1", default-features = false, features = ["crossterm"], optional = true }
 crossterm = { version = "0.28.1", optional = true }
 iced = { version = "0.14", default-features = false, features = ["tokio", "x11", "wayland", "tiny-skia", "image"], optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 
 
 [dev-dependencies]
@@ -160,7 +161,7 @@ simulator = [
 ]
 metrics = ["iroh-metrics/metrics"]
 examples = ["net", "dep:ratatui", "dep:crossterm"]
-gui = ["net", "dep:iced", "dep:tokio", "dep:rfd", "dep:tracing-subscriber"]
+gui = ["net", "dep:iced", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:image"]
 
 
 [[test]]
