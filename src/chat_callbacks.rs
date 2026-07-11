@@ -13,6 +13,7 @@ use std::time::Duration;
 use iroh::PublicKey;
 
 use crate::chat_core::MessageHash;
+use crate::chat_history::DeliveryState;
 use crate::friends::FriendId;
 
 /// Callbacks invoked by [`crate::chat_core::handle_net_event`] to react to
@@ -114,4 +115,21 @@ pub trait ChatCallbacks {
 
     /// Request the frontend to quit (gossip receiver closed or error).
     fn request_quit(&mut self);
+
+    // ── Delivery state callbacks ─────────────────────────────────────
+
+    /// Look up the stable event id for a previously sent message by its content hash.
+    ///
+    /// Returns `None` if the hash is not tracked (not a self-sent message or
+    /// already evicted).
+    fn event_id_for_hash(&self, _hash: &MessageHash) -> Option<u64> {
+        None
+    }
+
+    /// Advance the delivery state of a local message identified by `event_id`.
+    ///
+    /// The state transition must be valid per [`DeliveryState::can_transition_to`].
+    /// This is a no-op by default (frontends that want delivery-state tracking
+    /// should override both this and [`event_id_for_hash`](Self::event_id_for_hash)).
+    fn update_delivery_state(&mut self, _event_id: u64, _state: DeliveryState) {}
 }

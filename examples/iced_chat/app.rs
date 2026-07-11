@@ -3374,12 +3374,6 @@ impl IcedChat {
                     .size(TYPO_LG)
                     .width(Length::Fill)
                     .wrapping(Wrapping::Word),
-                button(text("Logs").size(TYPO_MD))
-                    .on_press(AppMessage::OpenLogsWindow)
-                    .padding(SPACE_4),
-                button(text(if self.dark_mode { "☀" } else { "🌙" }).size(TYPO_MD))
-                    .on_press(AppMessage::ToggleDark(!self.dark_mode))
-                    .padding(SPACE_4),
                 button(text("⚙").size(TYPO_MD))
                     .on_press(AppMessage::OpenSettings)
                     .padding(SPACE_4),

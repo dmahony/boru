@@ -16,6 +16,7 @@ use std::{
     time::Duration,
 };
 
+use bytes::Bytes;
 use clap::Parser;
 use crossterm::{
     cursor::{Hide, Show},
@@ -43,7 +44,7 @@ use iroh_gossip::chat_core::{
     update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, MeshHealth, Message,
     NetEvent, SignedMessage, StatusContext, Ticket,
 };
-use iroh_gossip::chat_history::{ChatHistoryStore, HistoryEntry};
+use iroh_gossip::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendRecord, FriendsStore};
 use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_docs::{
@@ -657,6 +658,8 @@ async fn main() -> Result<()> {
                     message_hash: None,
                     edited: false,
                     reactions: Vec::new(),
+                    event_id: entry.event_id,
+                    delivery_state: entry.delivery_state.clone(),
                 });
             }
         }
@@ -802,6 +805,8 @@ async fn main() -> Result<()> {
                     &friend_mgr,
                     &room_docs,
                     &whisper_handle,
+                    &chat_history,
+                    topic,
                 ).await?;
                 if app.friends_dirty {
                     if let Err(err) = app.friends.save() {
@@ -817,6 +822,10 @@ async fn main() -> Result<()> {
                     let local_hex = hex::encode(local_public.as_bytes());
                     let mut store = chat_history.lock().unwrap();
                     for entry in &app.entries[history_saved_count..] {
+                        // Skip entries already tracked via the send handler (have event_id)
+                        if entry.event_id > 0 {
+                            continue;
+                        }
                         let kind = match entry.kind {
                             ChatKind::System => "system",
                             ChatKind::Local => "text",
@@ -842,8 +851,94 @@ async fn main() -> Result<()> {
                 }
             }
             Some(event) = net_rx.recv() => {
-                handle_net_event(event.clone(), &mut app)?;
-                if let NetEvent::NeighborUp { peer } = event {
+                // ── Echo handling: our own messages returning via gossip ──
+                // When we receive our own broadcast echo, it confirms the
+                // message propagated through the mesh → mark as Delivered.
+                if let NetEvent::Message {
+                    from,
+                    ref message,
+                    ..
+                } = &event
+                {
+                    if *from == local_public {
+                        let msg_hash = message_hash(message);
+                        // Update delivery state in the UI entry
+                        if let Some(entry) = app
+                            .entries
+                            .iter_mut()
+                            .find(|e| e.message_hash == Some(msg_hash))
+                        {
+                            if entry.delivery_state == DeliveryState::Sent {
+                                entry.delivery_state = DeliveryState::Delivered;
+                                // Also update history store
+                                if entry.event_id > 0 {
+                                    let mut store = chat_history.lock().unwrap();
+                                    let _ = store.update_delivery_state(
+                                        entry.event_id,
+                                        DeliveryState::Delivered,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // ── Process the event through the standard handler ──
+                let event_clone = event.clone();
+                handle_net_event(event_clone, &mut app)?;
+
+                // ── Reconnection replay: re-broadcast pending messages ──
+                if let NetEvent::NeighborUp { peer } = &event {
+                    let peer_owned = *peer;
+                    // Replay messages that are still Queued or Sent
+                    let replayed = {
+                        let mut store = chat_history.lock().unwrap();
+                        let pending_ids: Vec<u64> = store
+                            .entries()
+                            .iter()
+                            .filter(|e| {
+                                matches!(
+                                    e.delivery_state,
+                                    DeliveryState::Queued | DeliveryState::Sent
+                                )
+                            })
+                            .map(|e| e.event_id)
+                            .collect();
+                        let mut replayed_count = 0u32;
+                        for eid in &pending_ids {
+                            if let Some(entry) = store.get_by_event_id(*eid) {
+                                if let Ok(pk) =
+                                    iroh::PublicKey::from_str(&entry.sender)
+                                {
+                                    if pk == local_public {
+                                        let raw = entry.signed_bytes.clone();
+                                        if !raw.is_empty() {
+                                            if sender
+                                                .broadcast(Bytes::from(raw))
+                                                .await
+                                                .is_ok()
+                                            {
+                                                // After re-broadcast, mark as Sent
+                                                let _ = store.update_delivery_state(
+                                                    *eid,
+                                                    DeliveryState::Sent,
+                                                );
+                                                replayed_count += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        replayed_count
+                    };
+                    if replayed > 0 {
+                        tracing::info!(
+                            count = replayed,
+                            "replayed pending messages on reconnection"
+                        );
+                    }
+
+                    // Original backfill trigger for joining peers
                     if chat_history.lock().unwrap().len() < BACKFILL_TRIGGER_THRESHOLD {
                         let handle = backfill_handle.clone();
                         let endpoint = endpoint.clone();
@@ -853,7 +948,7 @@ async fn main() -> Result<()> {
                             let _ = handle
                                 .try_backfill_from_peer(
                                     &endpoint,
-                                    peer,
+                                    peer_owned,
                                     local_history_count,
                                     net_tx,
                                 )
@@ -861,6 +956,91 @@ async fn main() -> Result<()> {
                         });
                     }
                 }
+
+                // ── NeighborDown → mark pending messages as Failed ──
+                if let NetEvent::NeighborDown { .. } = &event {
+                    let failed_ids: Vec<u64> = {
+                        let mut store = chat_history.lock().unwrap();
+                        store
+                            .entries
+                            .iter_mut()
+                            .filter(|e| {
+                                matches!(
+                                    e.delivery_state,
+                                    DeliveryState::Queued | DeliveryState::Sent
+                                )
+                            })
+                            .map(|e| {
+                                e.delivery_state = DeliveryState::Failed;
+                                e.event_id
+                            })
+                            .collect()
+                    };
+                    for ui_entry in app.entries.iter_mut() {
+                        if failed_ids.contains(&ui_entry.event_id) {
+                            ui_entry.delivery_state = DeliveryState::Failed;
+                        }
+                    }
+                }
+
+                // ── ReadReceipt handling → mark as Seen ──
+                if let NetEvent::Message {
+                    message: Message::ReadReceipt { message_hash: receipt_hash },
+                    from: receipt_from,
+                    ..
+                } = &event
+                {
+                    if *receipt_from != local_public {
+                        // Look up the message by its content hash in the history store
+                        // using the blake3 hash of the signed bytes. We need to match
+                        // against the `hash` field (blake3 of signed bytes).
+                        // For this we iterate entries and check the message content hash.
+                        if let Some(entry) = app
+                            .entries
+                            .iter_mut()
+                            .find(|e| e.message_hash == Some(*receipt_hash))
+                        {
+                            if entry.delivery_state.can_transition_to(&DeliveryState::Seen) {
+                                entry.delivery_state = DeliveryState::Seen;
+                                if entry.event_id > 0 {
+                                    let mut store = chat_history.lock().unwrap();
+                                    let _ = store.update_delivery_state(
+                                        entry.event_id,
+                                        DeliveryState::Seen,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // ── Seen trigger: send ReadReceipt when viewing remote messages ──
+                // When the user is at the bottom of the chat (follow_latest = true,
+                // meaning the conversation is visible), send ReadReceipt for remote
+                // messages and mark them as Seen locally.
+                if app.follow_latest {
+                    if let NetEvent::Message {
+                        message: Message::Message { .. },
+                        from: msg_from,
+                        ..
+                    } = &event
+                    {
+                        if *msg_from != local_public {
+                            if let NetEvent::Message { ref message, .. } = &event {
+                                let msg_hash = message_hash(message);
+                                // Send a ReadReceipt
+                                let receipt = Message::ReadReceipt {
+                                    message_hash: msg_hash,
+                                };
+                                if let Ok(encoded) =
+                                    SignedMessage::sign_and_encode(&secret_key, &receipt)
+                                {
+                                    let _ = sender.broadcast(encoded).await;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Auto-download pending image (ImageShare received)
                 if let Some((name, hash, sender_pk)) = app.pending_image.take() {
                     let blob_hash: iroh_blobs::Hash = hash.into();
@@ -888,6 +1068,10 @@ async fn main() -> Result<()> {
                     let local_hex = hex::encode(local_public.as_bytes());
                     let mut store = chat_history.lock().unwrap();
                     for entry in &app.entries[history_saved_count..] {
+                        // Skip entries already tracked via the send handler
+                        if entry.event_id > 0 {
+                            continue;
+                        }
                         let kind = match entry.kind {
                             ChatKind::System => "system",
                             ChatKind::Local => "text",
@@ -911,6 +1095,24 @@ async fn main() -> Result<()> {
                         tracing::warn!(error = %err, "failed to save chat history");
                     }
                 }
+
+                // ── Seen-on-visibility: when user is at bottom of log, mark Delivered entries as Seen ──
+                if app.follow_latest {
+                    let mut store = chat_history.lock().unwrap();
+                    for ui_entry in app.entries.iter_mut() {
+                        if ui_entry.delivery_state == DeliveryState::Delivered
+                            && ui_entry.event_id > 0
+                        {
+                            ui_entry.delivery_state = DeliveryState::Seen;
+                            let _ = store.update_delivery_state(
+                                ui_entry.event_id,
+                                DeliveryState::Seen,
+                            );
+                        }
+                    }
+                    drop(store);
+                }
+
                 terminal.draw(|frame| render_app(frame, &mut app))?;
             }
             Some(event) = friend_events.recv() => {
@@ -1036,6 +1238,8 @@ async fn handle_ui_event(
     friend_mgr: &FriendPingManager,
     room_docs: &Arc<RwLock<Option<RoomDocs>>>,
     whisper_handle: &WhisperHandle,
+    chat_history: &Arc<Mutex<ChatHistoryStore>>,
+    topic: TopicId,
 ) -> Result<bool> {
     match event {
         UiEvent::Key(key) => {
@@ -1050,6 +1254,8 @@ async fn handle_ui_event(
                 friend_mgr,
                 room_docs,
                 whisper_handle,
+                chat_history,
+                topic,
             )
             .await?;
             Ok(true)
@@ -1073,6 +1279,8 @@ async fn handle_key_event(
     friend_mgr: &FriendPingManager,
     room_docs: &Arc<RwLock<Option<RoomDocs>>>,
     whisper_handle: &WhisperHandle,
+    chat_history: &Arc<Mutex<ChatHistoryStore>>,
+    topic: TopicId,
 ) -> Result<()> {
     let visible_height = app.last_log_height;
     match key {
@@ -1643,8 +1851,41 @@ async fn handle_key_event(
                 text: trimmed.clone(),
             };
             let encoded_message = SignedMessage::sign_and_encode(secret_key, &message)?;
-            sender.broadcast(encoded_message).await?;
-            app.push_local(local_label.to_string(), trimmed);
+            let msg_hash = message_hash(&message);
+            let local_hex = hex::encode(secret_key.public().as_bytes());
+            let event_id = {
+                let mut store = chat_history.lock().unwrap();
+                let mut entry = HistoryEntry::new(
+                    app.status.topic,
+                    local_hex.clone(),
+                    encoded_message.to_vec(),
+                    "text",
+                    trimmed.clone(),
+                );
+                let id = store.push_with_id(entry);
+                // Mark as Sent immediately after broadcast in the history.
+                let _ = store.update_delivery_state(id, DeliveryState::Sent);
+                id
+            };
+            // Register in self_sent_events for delivery-state resolution
+            app.self_sent_events.insert(msg_hash, event_id);
+            match sender.broadcast(encoded_message.clone()).await {
+                Ok(()) => {
+                    let mut entry = ChatEntry::local(local_label.to_string(), trimmed);
+                    entry.message_hash = Some(msg_hash);
+                    entry.event_id = event_id;
+                    entry.delivery_state = DeliveryState::Sent;
+                    app.push_entry(entry, true);
+                }
+                Err(e) => {
+                    // Mark as Failed in history store
+                    {
+                        let mut store = chat_history.lock().unwrap();
+                        let _ = store.update_delivery_state(event_id, DeliveryState::Failed);
+                    }
+                    app.push_system(format!("Send failed: {e}"));
+                }
+            }
         }
         KeyEvent {
             code: KeyCode::Backspace,
@@ -1938,11 +2179,13 @@ fn entry_to_line(entry: &ChatEntry) -> Vec<Line<'static>> {
         ChatKind::Local => Style::default().fg(Color::Green),
         ChatKind::Remote => Style::default().fg(Color::Blue),
     };
+    let label = if matches!(entry.kind, ChatKind::Local) && entry.event_id > 0 {
+        format!("[{} {}]", entry.label, entry.delivery_state.display_icon())
+    } else {
+        format!("[{}]", entry.label)
+    };
     let mut lines = vec![Line::from(vec![
-        Span::styled(
-            format!("[{}]", entry.label),
-            style.add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(label, style.add_modifier(Modifier::BOLD)),
         Span::raw(" "),
         Span::raw(if entry.edited {
             format!("{} ✎", entry.body)

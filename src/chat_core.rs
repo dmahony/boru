@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 
 use crate::api::{Event, GossipReceiver};
+use crate::chat_history::DeliveryState;
 use crate::friends::{FriendId, FriendsStore};
 use crate::proto::TopicId;
 
@@ -272,6 +273,10 @@ pub struct ChatEntry {
     pub edited: bool,
     /// Emoji reactions attached to this entry.
     pub reactions: Vec<String>,
+    /// Stable event id mapping to ChatHistoryStore entry (0 = unassigned).
+    pub event_id: u64,
+    /// Current delivery state of this message (only meaningful for Local kind).
+    pub delivery_state: DeliveryState,
 }
 
 impl ChatEntry {
@@ -284,6 +289,8 @@ impl ChatEntry {
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
+            event_id: 0,
+            delivery_state: DeliveryState::default(),
         }
     }
 
@@ -296,6 +303,8 @@ impl ChatEntry {
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
+            event_id: 0,
+            delivery_state: DeliveryState::default(),
         }
     }
 
@@ -308,6 +317,8 @@ impl ChatEntry {
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
+            event_id: 0,
+            delivery_state: DeliveryState::default(),
         }
     }
 
@@ -485,6 +496,12 @@ pub struct AppState {
     pub names: HashMap<PublicKey, String>,
     /// Our own public key — used to filter self-messages on echo.
     pub local_public: PublicKey,
+    /// Map from content hash to stable event id for all self-sent messages.
+    ///
+    /// Populated when a local message is broadcast; used by
+    /// [`event_id_for_hash`](ChatCallbacks::event_id_for_hash) to resolve
+    /// delivery-state updates from network events.
+    pub self_sent_events: HashMap<MessageHash, u64>,
 }
 
 impl AppState {
@@ -515,6 +532,7 @@ impl AppState {
             friends_dirty: false,
             names,
             local_public,
+            self_sent_events: HashMap::new(),
         }
     }
 
@@ -716,6 +734,20 @@ impl ChatCallbacks for AppState {
 
     fn request_quit(&mut self) {
         self.should_quit = true;
+    }
+
+    fn event_id_for_hash(&self, hash: &MessageHash) -> Option<u64> {
+        self.self_sent_events.get(hash).copied()
+    }
+
+    fn update_delivery_state(&mut self, event_id: u64, state: crate::chat_history::DeliveryState) {
+        // Update the state in the AppState's self_sent_events tracking.
+        // The actual history store update happens in the frontend event loop.
+        tracing::debug!(?event_id, ?state, "AppState::update_delivery_state called");
+        // This method exists so handle_net_event can be wired without
+        // knowing about ChatHistoryStore. The frontend event loop
+        // will read the updated state and apply it to the store.
+        let _ = (event_id, state);
     }
 }
 

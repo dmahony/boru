@@ -62,6 +62,14 @@ pub mod room_history;
 #[cfg(feature = "net")]
 pub mod chat_history;
 
+/// Durable encrypted outbox storage for outgoing messages.
+///
+/// Persists signed (encrypted) outgoing messages before sending so they
+/// survive crashes and restarts.  Supports expiry of old entries and
+/// duplicate suppression via stable event IDs.
+#[cfg(feature = "net")]
+pub mod outbox;
+
 /// Whisper protocol — direct QUIC channels for private 1:1 messaging and file transfer.
 #[cfg(feature = "net")]
 pub mod whisper;

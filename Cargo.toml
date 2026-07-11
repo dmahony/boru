@@ -226,6 +226,11 @@ name = "stale_bootstrap"
 path = "tests/stale_bootstrap.rs"
 required-features = ["net", "test-utils"]
 
+[[test]]
+name = "test_message_lifecycle"
+path = "tests/test_message_lifecycle.rs"
+required-features = ["net", "test-utils"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
