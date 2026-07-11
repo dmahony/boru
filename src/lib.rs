@@ -75,6 +75,10 @@ pub mod chat_history;
 #[cfg(feature = "net")]
 pub mod outbox;
 
+/// Encrypted recipient-hosted mailbox for offline direct-message delivery.
+#[cfg(feature = "net")]
+pub mod mailbox;
+
 /// Whisper protocol — direct QUIC channels for private 1:1 messaging and file transfer.
 #[cfg(feature = "net")]
 pub mod whisper;

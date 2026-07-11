@@ -47,6 +47,8 @@ unused-async = "warn"
 
 [dependencies]
 blake3 = "1.8"
+aes-gcm = "0.10.3"
+getrandom = "0.3"
 bytes = { version = "1.7", features = ["serde"] }
 data-encoding = "2.6.0"
 derive_more = { version = "2.0.1", features = [
@@ -100,6 +102,7 @@ irpc = { version = "0.17.0", optional = true, default-features = false, features
 ] }
 n0-error = { version = "1", features = ["anyhow"] }
 serde-byte-array = "0.1.2"
+x25519-dalek = { version = "2.0.1", features = ["getrandom", "static_secrets"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # test-utils dependencies (optional)

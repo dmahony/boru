@@ -1704,6 +1704,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
+ "rand_core 0.6.4",
  "typenum",
 ]
 
@@ -4186,6 +4187,7 @@ dependencies = [
 name = "iroh-gossip"
 version = "0.101.0"
 dependencies = [
+ "aes-gcm",
  "arti-client",
  "blake3",
  "bytes",
@@ -4197,6 +4199,7 @@ dependencies = [
  "derive_more",
  "futures",
  "futures-concurrency",
+ "getrandom 0.3.4",
  "hex",
  "humantime-serde",
  "iced",
@@ -4233,6 +4236,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "x25519-dalek",
 ]
 
 [[package]]
