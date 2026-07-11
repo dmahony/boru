@@ -538,14 +538,11 @@ fn main() -> Result<()> {
         let blob_store = MemStore::new();
         let blobs_protocol = BlobsProtocol::new(&blob_store, None);
 
-        // Keep chat history transient for this process only. Legacy history
-        // files are removed by the loader and are never replayed.
+        // Load durable chat history. Outbox entries are loaded by IcedChat
+        // alongside this store so queued messages can be replayed on reconnect.
         let chat_history = ChatHistoryStore::load_or_default(&data_dir);
         if !chat_history.is_empty() {
-            info!(
-                "> retained {} active-session chat message(s) in memory (history is never saved to disk)",
-                chat_history.len()
-            );
+            info!("> loaded {} chat message(s) from history", chat_history.len());
         }
         let chat_history = Arc::new(std::sync::Mutex::new(chat_history));
 
@@ -602,10 +599,11 @@ fn main() -> Result<()> {
             .iter()
             .filter_map(|(id, _)| id.parse_public_key().ok())
         {
-            let addr = friends
+            let addrs = friends
                 .get(&FriendId::from_public_key(peer))
-                .and_then(|record| record.known_addrs.first().cloned());
-            let _ = friend_mgr.add_friend(peer, addr).await;
+                .map(|record| record.known_addrs.clone())
+                .unwrap_or_default();
+            let _ = friend_mgr.add_friend_addrs(peer, addrs).await;
         }
 
         Result::<_>::Ok((

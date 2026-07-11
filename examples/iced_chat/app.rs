@@ -23,6 +23,7 @@ use iroh_gossip::chat_core::{
     handle_net_event as chat_net_event, message_hash, seed_memory_lookup, MeshHealth, MessageHash,
 };
 use iroh_gossip::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
+use iroh_gossip::outbox::{OutboxEntry, OutboxStore};
 use iroh_gossip::contact::{direct_topic, ContactAction, SignedContactMessage};
 use iroh_gossip::friends::{DirectConversationState, FriendId, FriendsStore};
 use iroh_gossip::net::Gossip;
@@ -526,6 +527,8 @@ pub struct IcedChat {
     data_dir: PathBuf,
     /// Persistent chat message history (loaded on startup, saved on each message).
     chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
+    /// Durable outgoing messages, shared with the active room lifecycle.
+    outbox: Arc<std::sync::Mutex<OutboxStore>>,
     /// Whether chat history has unsaved changes.
     chat_history_dirty: bool,
     /// Number of entries that have already been saved to chat_history
@@ -746,8 +749,9 @@ impl IcedChat {
             sound_enabled: true,
             history_confirm_clear: false,
             notice,
-            data_dir,
+            data_dir: data_dir.clone(),
             chat_history,
+            outbox: Arc::new(std::sync::Mutex::new(OutboxStore::load_or_default(&data_dir))),
             chat_history_dirty: false,
             history_saved_count: 0,
             friend_online_cache,
@@ -1224,6 +1228,12 @@ impl IcedChat {
                 let (bootstrap_peers, initial_addrs) =
                     collect_bootstrap_peers([&initial_addrs, &saved_addrs]);
                 let initial_addrs_for_save = initial_addrs.clone();
+                let direct_conversation = self.friends.iter().any(|(_, record)| {
+                    record
+                        .direct_conversation
+                        .as_ref()
+                        .is_some_and(|conversation| conversation.topic == topic)
+                });
 
                 iced::Task::perform(
                     async move {
@@ -1237,7 +1247,7 @@ impl IcedChat {
                         // peers (room creator) use subscribe() so we don't hang.
                         // Stale bootstrap peers are protected by a 30s timeout
                         // to avoid blocking the UI indefinitely.
-                        let sub: GossipTopic = if bootstrap_peers.is_empty() {
+                        let sub: GossipTopic = if direct_conversation || bootstrap_peers.is_empty() {
                             gossip
                                 .subscribe(topic, bootstrap_peers)
                                 .await
@@ -1344,7 +1354,7 @@ impl IcedChat {
                 sender,
             } => {
                 self.pending_topic = None;
-                self.sender = Some(sender);
+                self.sender = Some(sender.clone());
                 self.forward_handle = self.forward_handle_slot.lock().unwrap().take();
 
                 self.screen = Screen::Chat { topic };
@@ -1436,6 +1446,34 @@ impl IcedChat {
                             }
                         }
                     }
+                }
+
+                // Replay queued or previously-sent messages after a reconnect.
+                // The signed bytes are reused verbatim, so retries cannot create
+                // a second logical message or invalidate message-hash dedup.
+                let replay = {
+                    let outbox = self.outbox.lock().unwrap();
+                    outbox
+                        .pending()
+                        .into_iter()
+                        .filter(|entry| entry.topic == topic)
+                        .map(|entry| (entry.event_id, entry.signed_bytes.clone()))
+                        .collect::<Vec<_>>()
+                };
+                if !replay.is_empty() {
+                    let sender = sender.clone();
+                    let ids = replay.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+                    for id in &ids {
+                        let _ = self.outbox.lock().unwrap().update_delivery_state(*id, DeliveryState::Sent);
+                        let _ = self.chat_history.lock().unwrap().update_delivery_state(*id, DeliveryState::Sent);
+                    }
+                    let _ = self.outbox.lock().unwrap().save();
+                    let _ = self.chat_history.lock().unwrap().save();
+                    task::spawn(async move {
+                        for (_, bytes) in replay {
+                            let _ = sender.broadcast(bytes.into()).await;
+                        }
+                    });
                 }
 
                 // Update room history
@@ -2152,33 +2190,45 @@ impl IcedChat {
                 let msg = crate::Message::Message { text: trimmed };
                 let msg_hash = message_hash(&msg);
                 let local_hex = hex::encode(self.local_public.as_bytes());
+                // Sign before touching either store: the exact bytes are the
+                // durable replay payload and the content-addressed identity.
+                let encoded = match SignedMessage::sign_and_encode(&self.secret_key, &msg) {
+                    Ok(encoded) => encoded,
+                    Err(e) => return iced::Task::done(AppMessage::ErrorMsg(e.to_string())),
+                };
                 let event_id = {
                     let mut store = self.chat_history.lock().unwrap();
-                    let entry =
-                        HistoryEntry::new(self.topic, local_hex, Vec::new(), "text", text.clone());
+                    let entry = HistoryEntry::new(
+                        self.topic,
+                        local_hex,
+                        encoded.to_vec(),
+                        "text",
+                        text.clone(),
+                    );
                     let id = store.push_with_id(entry);
-                    let _ = store.update_delivery_state(id, DeliveryState::Sent);
+                    let _ = store.save();
                     id
                 };
+                {
+                    let mut outbox = self.outbox.lock().unwrap();
+                    let _ = outbox.push(OutboxEntry::new(event_id, self.topic, encoded.to_vec()));
+                    let _ = outbox.save();
+                }
                 self.self_sent_events.insert(msg_hash, event_id);
-                match SignedMessage::sign_and_encode(&self.secret_key, &msg) {
-                    Ok(encoded) => {
-                        if let Some(ref sender) = self.sender {
-                            let sender = sender.clone();
-                            iced::Task::perform(
-                                async move {
-                                    sender.broadcast(encoded).await.ok();
-                                    (text, event_id, msg_hash)
-                                },
-                                |(t, eid, mh)| AppMessage::MessageSent(t, eid, mh),
-                            )
-                        } else {
-                            iced::Task::done(AppMessage::ErrorMsg(
-                                "Not connected to any room.".into(),
-                            ))
-                        }
-                    }
-                    Err(e) => iced::Task::done(AppMessage::ErrorMsg(e.to_string())),
+                let mut local_entry = ChatEntry::local(&self.local_label, &text);
+                local_entry.event_id = event_id;
+                local_entry.message_hash = Some(msg_hash);
+                self.entries.push(local_entry);
+                if let Some(sender) = self.sender.clone() {
+                    iced::Task::perform(
+                        async move {
+                            sender.broadcast(encoded).await.ok();
+                            (text, event_id, msg_hash)
+                        },
+                        |(t, eid, mh)| AppMessage::MessageSent(t, eid, mh),
+                    )
+                } else {
+                    iced::Task::none()
                 }
             }
 
@@ -2249,6 +2299,11 @@ impl IcedChat {
                                     let mut store = self.chat_history.lock().unwrap();
                                     let _ = store
                                         .update_delivery_state(event_id, DeliveryState::Delivered);
+                                    let _ = store.save();
+                                    let mut outbox = self.outbox.lock().unwrap();
+                                    let _ = outbox
+                                        .update_delivery_state(event_id, DeliveryState::Delivered);
+                                    let _ = outbox.save();
                                 }
                             }
                         }
@@ -2563,12 +2618,17 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::MessageSent(text, event_id, msg_hash) => {
-                let mut entry = ChatEntry::local(&self.local_label, text);
-                entry.event_id = event_id;
-                entry.delivery_state = DeliveryState::Sent;
-                entry.message_hash = Some(msg_hash);
-                self.entries.push(entry);
+            AppMessage::MessageSent(_text, event_id, msg_hash) => {
+                if let Some(entry) = self.entries.iter_mut().find(|e| e.event_id == event_id) {
+                    entry.delivery_state = DeliveryState::Sent;
+                    entry.message_hash = Some(msg_hash);
+                }
+                let mut history = self.chat_history.lock().unwrap();
+                let _ = history.update_delivery_state(event_id, DeliveryState::Sent);
+                let _ = history.save();
+                let mut outbox = self.outbox.lock().unwrap();
+                let _ = outbox.update_delivery_state(event_id, DeliveryState::Sent);
+                let _ = outbox.save();
                 iced::Task::none()
             }
 
@@ -3246,7 +3306,6 @@ impl IcedChat {
                     .get(&fid)
                     .map(|r| r.display_label(&fid))
                     .unwrap_or_else(|| peer.fmt_short().to_string());
-
                 // Only show system messages for runtime transitions, not the
                 // initial scan. A friend with no last_seen_at or last_offline_at
                 // is being heard from for the first time.
@@ -3278,6 +3337,10 @@ impl IcedChat {
                     }
                     FriendStatus::Unknown => {}
                 }
+            }
+            FriendEvent::AddressUpdated { peer, addr } => {
+                self.friends.ensure_friend(FriendId::from_public_key(peer)).record_addrs([addr]);
+                self.friends_dirty = true;
             }
         }
     }

@@ -1,12 +1,8 @@
-//! Transient chat message state for iroh-gossip-chat.
+//! Durable chat history storage for iroh-gossip-chat.
 //!
-//! Chat messages are intentionally never persisted.  This type remains as a
-//! small in-memory compatibility layer for the active-session backfill code;
-//! its disk-facing methods discard legacy files and never write new ones.
-//!
-//! Callers may use the in-memory entries while the process is running. No
-//! state survives process exit and no history is replayed on room open.
-
+//! Chat messages are persisted atomically so room history remains available
+//! after restart. Outgoing messages additionally live in the durable outbox
+//! until transport delivery has been observed.
 use std::{
     fmt, fs,
     path::{Path, PathBuf},
@@ -16,6 +12,7 @@ use std::{
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
+use crate::chat_core::atomic_write::atomic_write_json;
 use crate::proto::TopicId;
 
 /// Current schema version — bump on breaking format changes.
@@ -277,19 +274,33 @@ impl ChatHistoryStore {
         history_file_path(&self.data_dir)
     }
 
-    /// Discard a legacy on-disk history file and return no history.
-    ///
-    /// Existing `chat_history.json` files are deleted on discovery so old
-    /// chat content is not retained or replayed after upgrading.
+    /// Load the persisted chat history, if present.
     pub fn load(data_dir: impl AsRef<Path>) -> Result<Option<Self>> {
         let data_dir = data_dir.as_ref();
         let path = history_file_path(data_dir);
-        if path.exists() {
-            fs::remove_file(&path).with_std_context(|_| {
-                format!("failed to remove legacy history file {}", path.display())
-            })?;
+        if !path.exists() {
+            return Ok(None);
         }
-        Ok(None)
+        let raw = fs::read_to_string(&path)
+            .with_std_context(|_| format!("failed to read history file {}", path.display()))?;
+        let mut store: Self = serde_json::from_str(&raw)
+            .with_std_context(|_| format!("failed to parse history file {}", path.display()))?;
+        if store.schema_version != SCHEMA_VERSION {
+            return Err(n0_error::anyerr!(
+                "unsupported history schema version {} in {}",
+                store.schema_version,
+                path.display()
+            ));
+        }
+        store.data_dir = data_dir.to_path_buf();
+        store.next_event_id = store
+            .entries
+            .iter()
+            .map(|entry| entry.event_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        Ok(Some(store))
     }
 
     /// Load history, falling back to an empty store on any failure.
@@ -308,10 +319,7 @@ impl ChatHistoryStore {
         }
     }
 
-    /// Do not persist chat history.
-    ///
-    /// The path is returned for API compatibility, but no file or temporary
-    /// file is created.
+    /// Persist chat history using an atomic replacement.
     pub fn save(&self) -> Result<PathBuf> {
         let data_dir = &self.data_dir;
         if data_dir.as_os_str().is_empty() {
@@ -319,7 +327,9 @@ impl ChatHistoryStore {
                 "chat history store has no data directory bound to it",
             ));
         }
-        Ok(self.file_path())
+        let path = self.file_path();
+        atomic_write_json(&path, self, "chat history")?;
+        Ok(path)
     }
 
     /// Append a new entry.  Does **not** automatically save — call
@@ -993,20 +1003,9 @@ mod tests {
     }
 
     #[test]
-    fn load_removes_legacy_history_file() {
-        let dir = temp_dir("legacy");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(HISTORY_FILE_NAME);
-        std::fs::write(&path, b"legacy chat content").unwrap();
-
-        let store = ChatHistoryStore::load_or_default(&dir);
-        assert!(store.is_empty());
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn save_does_not_persist_entries() {
+    fn load_roundtrip_preserves_entries() {
         let dir = temp_dir("roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
         let mut store = ChatHistoryStore::empty_at(&dir);
 
         let topic = make_topic(0xAA);
@@ -1014,9 +1013,9 @@ mod tests {
         store.push(make_entry(topic, 2));
         store.save().expect("save");
 
-        assert!(!store.file_path().exists());
         let loaded = ChatHistoryStore::load_or_default(&dir);
-        assert!(loaded.is_empty());
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.entries()[0].text_preview, "hello 1");
     }
 
     #[test]
@@ -1096,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn save_does_not_create_history_file() {
+    fn save_persists_entries() {
         let dir = temp_dir("atomic");
         let topic = make_topic(0xAA);
         let mut store = ChatHistoryStore::empty_at(&dir);
@@ -1104,11 +1103,12 @@ mod tests {
         store.push(make_entry(topic, 1));
         let path = store.save().expect("first save");
         assert_eq!(path, dir.join(HISTORY_FILE_NAME));
-        assert!(!path.exists());
+        assert!(path.exists());
 
         store.push(make_entry(topic, 2));
         store.save().expect("second save");
-        assert!(!path.exists());
+        let loaded = ChatHistoryStore::load_or_default(&dir);
+        assert_eq!(loaded.len(), 2);
     }
 
     #[test]
