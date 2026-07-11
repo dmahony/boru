@@ -64,6 +64,8 @@ enum WhisperWireMessage {
         /// BlobTicket serialized to string.
         ticket: String,
     },
+    /// Signed contact/control-plane message.
+    Control { payload: Vec<u8> },
 }
 
 // ── Public event types ─────────────────────────────────────────────────────────
@@ -86,6 +88,13 @@ pub enum WhisperEvent {
         name: String,
         /// BlobTicket string.
         ticket: String,
+    },
+    /// A signed contact/control-plane message. The receiver must verify it.
+    Control {
+        /// Public key of the sender.
+        from: PublicKey,
+        /// Signed control payload.
+        content: Bytes,
     },
     /// A peer has connected (ready for whispers).
     Connected {
@@ -111,6 +120,11 @@ pub(crate) enum Cmd {
         peer: PublicKey,
         name: String,
         ticket: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SendControl {
+        peer: PublicKey,
+        payload: Bytes,
         reply: oneshot::Sender<Result<()>>,
     },
     ConnectTo {
@@ -191,6 +205,21 @@ impl WhisperHandle {
                 peer,
                 name,
                 ticket,
+                reply,
+            })
+            .await
+            .map_err(|_| n0_error::anyerr!("whisper actor dropped"))?;
+        rx.await
+            .map_err(|_| n0_error::anyerr!("whisper reply dropped"))?
+    }
+
+    /// Send a signed contact/control message to a peer.
+    pub async fn send_control(&self, peer: PublicKey, payload: Bytes) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::SendControl {
+                peer,
+                payload,
                 reply,
             })
             .await
@@ -376,6 +405,12 @@ async fn run_actor(
                         ).await;
                         let _ = reply.send(result);
                     }
+                    Some(Cmd::SendControl { peer, payload, reply }) => {
+                        let result = send_control_message(
+                            &endpoint, &peer, payload, &connected, &msg_tx,
+                        ).await;
+                        let _ = reply.send(result);
+                    }
                     Some(Cmd::ConnectTo { peer, addr, reply }) => {
                         let result = connect_to_peer(
                             &endpoint, peer, addr, &connected, &event_tx, &msg_tx,
@@ -425,6 +460,12 @@ async fn run_actor(
                                     from,
                                     name,
                                     ticket,
+                                });
+                            }
+                            Ok(WhisperWireMessage::Control { payload }) => {
+                                let _ = event_tx.send(WhisperEvent::Control {
+                                    from,
+                                    content: Bytes::from(payload),
                                 });
                             }
                             Err(_) => {
@@ -600,6 +641,25 @@ async fn send_file_message(
     let wire = WhisperWireMessage::FileTransfer { name, ticket };
 
     write_framed_message(&conn, &wire).await
+}
+
+/// Send an opaque signed control message without interpreting it in transport.
+async fn send_control_message(
+    endpoint: &Endpoint,
+    peer: &PublicKey,
+    payload: Bytes,
+    connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
+    msg_tx: &mpsc::UnboundedSender<ConnectionEvent>,
+) -> Result<()> {
+    let (dummy_tx, _) = mpsc::unbounded_channel();
+    let conn = get_or_connect(endpoint, peer, connected, &dummy_tx, msg_tx).await?;
+    write_framed_message(
+        &conn,
+        &WhisperWireMessage::Control {
+            payload: payload.to_vec(),
+        },
+    )
+    .await
 }
 
 // ── Connection reader ──────────────────────────────────────────────────────────

@@ -23,7 +23,8 @@ use iroh_gossip::chat_core::{
     handle_net_event as chat_net_event, message_hash, seed_memory_lookup, MeshHealth, MessageHash,
 };
 use iroh_gossip::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
-use iroh_gossip::friends::{FriendId, FriendsStore};
+use iroh_gossip::contact::{direct_topic, ContactAction, SignedContactMessage};
+use iroh_gossip::friends::{DirectConversationState, FriendId, FriendsStore};
 use iroh_gossip::net::Gossip;
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
@@ -1014,12 +1015,7 @@ where
 /// Both peers derive the same topic by sorting their public keys
 /// before hashing, so either side can initiate a private chat.
 fn private_topic(a: &PublicKey, b: &PublicKey) -> TopicId {
-    let (pk1, pk2) = if a <= b { (a, b) } else { (b, a) };
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(pk1.as_bytes());
-    hasher.update(pk2.as_bytes());
-    let hash = hasher.finalize();
-    TopicId::from_bytes(*hash.as_bytes())
+    direct_topic(a, b)
 }
 
 fn online_friends_from_store(friends: &FriendsStore) -> HashMap<PublicKey, String> {
@@ -1421,7 +1417,8 @@ impl IcedChat {
                                 let is_self =
                                     sender_pk.map(|pk| pk == self.local_public).unwrap_or(false);
                                 if is_self {
-                                    let mut e = ChatEntry::local(&self.local_label, &entry.text_preview);
+                                    let mut e =
+                                        ChatEntry::local(&self.local_label, &entry.text_preview);
                                     e = e.with_timestamp(Some(entry.timestamp as i64));
                                     self.entries.push(e);
                                 } else {
@@ -1602,31 +1599,37 @@ impl IcedChat {
 
             AppMessage::OpenFriendChat(peer) => {
                 let fid = FriendId::from_public_key(peer);
-                let Some(record) = self.friends.get(&fid) else {
-                    return iced::Task::done(AppMessage::ErrorMsg(
-                        "This peer is not a known friend.".to_string(),
-                    ));
-                };
-                let Some(conversation) = record.direct_conversation() else {
-                    return iced::Task::done(AppMessage::ErrorMsg(
-                        "No direct conversation is known for this friend yet.".to_string(),
-                    ));
-                };
-                let Some(ticket) = record.rooms.get(&conversation.topic).cloned() else {
-                    return iced::Task::done(AppMessage::ErrorMsg(
-                        "No room ticket is known for this direct conversation yet.".to_string(),
-                    ));
-                };
-                let topic = conversation.topic;
-                let ticket_str = ticket.to_string();
-                let room = RoomStore::with_peers(&self.data_dir, topic, ticket.peers.clone());
+                let topic = direct_topic(&self.local_public, &peer);
+                let known_addrs = self
+                    .friends
+                    .get(&fid)
+                    .map(|record| record.known_addrs.clone())
+                    .unwrap_or_default();
+                let record = self.friends.ensure_friend(fid);
+                record.set_direct_conversation(topic, DirectConversationState::Pending);
+                let room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                 let _ = room.save();
+                self.try_save_friends();
+
+                let secret_key = self.secret_key.clone();
                 let whisper_handle = self.whisper_handle.clone();
-                let invite = format!("\x00PRIVATE_CHAT:{ticket_str}");
+                let local_addr = self.endpoint.addr();
+                let action = ContactAction::ConversationInvite {
+                    topic,
+                    addrs: vec![local_addr],
+                };
+                let payload = match SignedContactMessage::sign(&secret_key, &action) {
+                    Ok(payload) => payload.into(),
+                    Err(err) => {
+                        return iced::Task::done(AppMessage::ErrorMsg(format!(
+                            "Could not create contact invite: {err}"
+                        )));
+                    }
+                };
                 iced::Task::batch(vec![
                     iced::Task::perform(
                         async move {
-                            let _ = whisper_handle.send_dm(peer, invite).await;
+                            let _ = whisper_handle.send_control(peer, payload).await;
                         },
                         |_| AppMessage::Noop,
                     ),
@@ -2408,6 +2411,77 @@ impl IcedChat {
 
             AppMessage::WhisperEvent(event) => {
                 match event {
+                    iroh_gossip::whisper::WhisperEvent::Control { from, content } => {
+                        match SignedContactMessage::verify(&content, Some(from)) {
+                            Ok((sender, ContactAction::ContactRequest { name })) => {
+                                let record = self
+                                    .friends
+                                    .ensure_friend(FriendId::from_public_key(sender));
+                                if name.is_some() {
+                                    record.last_announced_name = name;
+                                }
+                                self.try_save_friends();
+                                let payload = SignedContactMessage::sign(
+                                    &self.secret_key,
+                                    &ContactAction::ContactAccept,
+                                );
+                                if let Ok(payload) = payload {
+                                    let whisper_handle = self.whisper_handle.clone();
+                                    return iced::Task::perform(
+                                        async move {
+                                            let _ = whisper_handle
+                                                .send_control(sender, payload.into())
+                                                .await;
+                                        },
+                                        |_| AppMessage::Noop,
+                                    );
+                                }
+                            }
+                            Ok((sender, ContactAction::ContactAccept)) => {
+                                if let Some(record) =
+                                    self.friends.get_mut(&FriendId::from_public_key(sender))
+                                {
+                                    if let Some(conversation) = record.direct_conversation.as_mut()
+                                    {
+                                        conversation.state = DirectConversationState::Active;
+                                    }
+                                }
+                                self.try_save_friends();
+                            }
+                            Ok((sender, ContactAction::ConversationInvite { topic, addrs }))
+                                if addrs.iter().all(|addr| addr.id == sender) =>
+                            {
+                                let fid = FriendId::from_public_key(sender);
+                                let record = self.friends.ensure_friend(fid);
+                                record.record_addrs(addrs.clone());
+                                record.set_direct_conversation(
+                                    topic,
+                                    DirectConversationState::Active,
+                                );
+                                let room = RoomStore::with_peers(&self.data_dir, topic, addrs);
+                                let _ = room.save();
+                                self.try_save_friends();
+                                return iced::Task::done(AppMessage::OpenRoom(topic));
+                            }
+                            Ok((sender, ContactAction::AddressUpdate { addrs }))
+                                if addrs.iter().all(|addr| addr.id == sender) =>
+                            {
+                                let record = self
+                                    .friends
+                                    .ensure_friend(FriendId::from_public_key(sender));
+                                record.record_addrs(addrs);
+                                self.try_save_friends();
+                            }
+                            Ok((_sender, _action)) => {
+                                self.push_system(
+                                    "Rejected invalid contact control message.".to_string(),
+                                );
+                            }
+                            Err(err) => {
+                                debug!("invalid contact control message: {err:#}");
+                            }
+                        }
+                    }
                     iroh_gossip::whisper::WhisperEvent::Message { from, content } => {
                         let text = String::from_utf8_lossy(&content).to_string();
                         let label = self
@@ -3276,7 +3350,8 @@ impl ChatCallbacks for IcedChat {
             .set_last_announced_profile_image_ticket(fid, "");
         self.friends_dirty = true;
         self.friend_image_handles.remove(&peer);
-        self.pending_profile_image_tickets.retain(|(queued_peer, _)| *queued_peer != peer);
+        self.pending_profile_image_tickets
+            .retain(|(queued_peer, _)| *queued_peer != peer);
     }
 
     fn push_system(&mut self, text: String) {
@@ -4698,9 +4773,8 @@ mod tests {
             .expect("valid utc timestamp")
             .timestamp_millis();
 
-        let rendered = format_message_time_with(timestamp_ms, now, |ms| {
-            tz.timestamp_millis_opt(ms).single()
-        });
+        let rendered =
+            format_message_time_with(timestamp_ms, now, |ms| tz.timestamp_millis_opt(ms).single());
 
         assert_eq!(rendered, "02:30");
     }
@@ -4718,9 +4792,8 @@ mod tests {
             .expect("valid utc timestamp")
             .timestamp_millis();
 
-        let rendered = format_message_time_with(timestamp_ms, now, |ms| {
-            tz.timestamp_millis_opt(ms).single()
-        });
+        let rendered =
+            format_message_time_with(timestamp_ms, now, |ms| tz.timestamp_millis_opt(ms).single());
 
         assert_eq!(rendered, "Tue 22:30");
     }

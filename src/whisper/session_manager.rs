@@ -285,6 +285,10 @@ impl SessionManagerActor {
             }
             Cmd::WhisperEvent(event) => {
                 match event {
+                    WhisperEvent::Control { .. } => {
+                        // Control messages are consumed by the frontend and do not
+                        // affect the transport session state.
+                    }
                     WhisperEvent::Connected { peer } => {
                         if peer == self.local_public {
                             return;

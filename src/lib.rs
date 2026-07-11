@@ -32,6 +32,10 @@ pub mod tor_transport;
 #[cfg(feature = "net")]
 pub mod chat_core;
 
+/// Signed contact and direct-conversation negotiation messages.
+#[cfg(feature = "net")]
+pub mod contact;
+
 /// Frontend callback trait — decoupled from the core state machine.
 ///
 /// The [`ChatCallbacks`] trait is the interface that frontend state structs
