@@ -28,6 +28,7 @@ use iroh_gossip::chat_core::friend_ping::{
 };
 use iroh_gossip::chat_history::ChatHistoryStore;
 use iroh_gossip::friends::{FriendId, FriendsStore};
+use iroh_gossip::inbox::{InboxHandle, InboxProtocol, INBOX_ALPN};
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
@@ -559,13 +560,27 @@ fn main() -> Result<()> {
         let whisper_handler = whisper_builder.protocol_handler();
         let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
 
+        // ── Inbox protocol ────────────────────────────────────────────
+        // Direct offline-message delivery via /iroh-chat-inbox/1.
+        let (inbox_handle, mut inbox_events) = InboxHandle::new();
+        let inbox_handler = InboxProtocol::new(inbox_handle.inner());
+
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol.clone())
             .accept(FRIEND_PING_ALPN, PingHandler)
             .accept(BACKFILL_ALPN, backfill_handler)
             .accept(WHISPER_ALPN, whisper_handler)
+            .accept(INBOX_ALPN, inbox_handler)
             .spawn();
+
+        // Subscribe to the personal inbox gossip topic so peers can always
+        // deliver offline messages, independent of the visible chat room.
+        let inbox_topic = InboxHandle::inbox_topic(secret_key.public());
+        if let Err(e) = gossip.subscribe(inbox_topic, Vec::new()).await {
+            warn!(error = %e, "failed to subscribe to inbox topic");
+        }
+        info!("subscribed to personal inbox topic");
 
         // Spawn the backfill background actor for requesting history
         let backfill_handle = BackfillHandle::spawn(endpoint.clone());

@@ -1155,13 +1155,9 @@ impl IcedChat {
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
-                        let presence = SignedMessage::sign_and_encode(
-                            &sk,
-                            &crate::Message::PresenceWithTicket {
-                                ticket: personal_ticket,
-                            },
-                        )
-                        .map_err(|e| e.to_string())?;
+                        let presence =
+                            SignedMessage::sign_and_encode(&sk, &crate::Message::Presence)
+                                .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(presence).await;
 
                         let room = RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);
@@ -1321,13 +1317,9 @@ impl IcedChat {
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
-                        let presence = SignedMessage::sign_and_encode(
-                            &sk,
-                            &crate::Message::PresenceWithTicket {
-                                ticket: personal_ticket,
-                            },
-                        )
-                        .map_err(|e| e.to_string())?;
+                        let presence =
+                            SignedMessage::sign_and_encode(&sk, &crate::Message::Presence)
+                                .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(presence).await;
 
                         let saved_peers = if initial_addrs_for_save.is_empty() {
@@ -2908,19 +2900,18 @@ impl IcedChat {
                 let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
                 // Relay selection and direct addresses are learned asynchronously.
                 // Keep the room ticket shown in the UI (and therefore copied to the
-                // clipboard) aligned with the endpoint's current address, and
-                // immediately advertise the new personal ticket to peers.
+                // clipboard) aligned with the endpoint's current address.
+                // Personal-room tickets are no longer broadcast publicly;
+                // they must be shared through direct (whisper) channels.
                 if self.refresh_local_peer_addr() {
                     if let Some(ref sender) = self.sender {
                         let sk = self.secret_key.clone();
-                        let ticket = self.personal_room_ticket();
                         let s = sender.clone();
                         tasks.push(iced::Task::perform(
                             async move {
-                                if let Ok(encoded) = SignedMessage::sign_and_encode(
-                                    &sk,
-                                    &crate::Message::PresenceWithTicket { ticket },
-                                ) {
+                                if let Ok(encoded) =
+                                    SignedMessage::sign_and_encode(&sk, &crate::Message::Presence)
+                                {
                                     s.broadcast(encoded).await.ok();
                                 }
                             },

@@ -83,7 +83,15 @@ pub mod mailbox;
 #[cfg(feature = "net")]
 pub mod whisper;
 
-/// History backfill protocol — lets late-joining peers request message history
+/// `/iroh-chat-inbox/1` direct QUIC protocol for offline-message delivery.
+///
+/// Uses signed, timestamped messages with authorization checks and replay
+/// protection.  The inbox topic is subscribed at startup and kept alive
+/// independently of the visible chat room.
+#[cfg(feature = "net")]
+pub mod inbox;
+
+/// Backfill protocol — lets late-joining peers request message history
 /// from existing peers via a dedicated QUIC ALPN.
 #[cfg(feature = "net")]
 pub mod backfill;

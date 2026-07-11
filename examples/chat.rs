@@ -46,6 +46,7 @@ use iroh_gossip::chat_core::{
 };
 use iroh_gossip::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendRecord, FriendsStore};
+use iroh_gossip::inbox::{InboxHandle, InboxProtocol, INBOX_ALPN};
 use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_docs::{
     self, create_metadata_doc, create_roster_doc, list_members, read_metadata, RoomDocs,
@@ -501,10 +502,14 @@ async fn main() -> Result<()> {
     tracing::info!(ticket = %ticket, "created room ticket");
 
     // setup router with the gossip protocol, blob protocol, friend ping,
-    // and whisper protocol
+    // whisper protocol, and inbox protocol
     let whisper_builder = WhisperBuilder::new(endpoint.clone(), endpoint.secret_key().clone());
     let whisper_handler = whisper_builder.protocol_handler();
     let (whisper_handle, mut whisper_events) = whisper_builder.spawn();
+
+    // Inbox protocol — direct offline-message delivery with auth.
+    let (inbox_handle, mut inbox_events) = InboxHandle::new();
+    let inbox_handler = InboxProtocol::new(inbox_handle.inner());
 
     // Keep chat history transient for this process only. Legacy history files
     // are removed by the loader and are never replayed.
@@ -525,7 +530,16 @@ async fn main() -> Result<()> {
         .accept(FRIEND_PING_ALPN, PingHandler)
         .accept(WHISPER_ALPN, whisper_handler)
         .accept(BACKFILL_ALPN, backfill_handler)
+        .accept(INBOX_ALPN, inbox_handler)
         .spawn();
+
+    // Subscribe to the personal inbox gossip topic so peers can always
+    // deliver offline messages, independent of the visible chat room.
+    let inbox_topic = InboxHandle::inbox_topic(endpoint.secret_key().public());
+    if let Err(e) = gossip.subscribe(inbox_topic, Vec::new()).await {
+        tracing::warn!(error = %e, "failed to subscribe to inbox topic");
+    }
+    tracing::info!("subscribed to personal inbox topic");
 
     // Merge peers from the join command (ticket or saved RoomStore) with any
     // previously saved RoomStore bootstrap peers, so the address lookup has
