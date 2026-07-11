@@ -518,12 +518,17 @@ pub struct IcedChat {
     tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
     /// Whether to auto-scroll to the latest message.
     follow_latest: bool,
+    /// Estimated total content height of the chat log (set in view_chat_log).
+    /// Cell interior mutability allows &self reads in view().
+    total_content_height: std::cell::Cell<f32>,
     /// Whether dark mode is enabled.
     pub dark_mode: bool,
     /// Whether notification sounds are enabled.
     sound_enabled: bool,
     /// Whether the "clear history" confirmation is shown.
     history_confirm_clear: bool,
+    /// Topic awaiting delete confirmation (None = no confirm pending).
+    room_delete_confirm_topic: Option<TopicId>,
     /// Transport notice displayed in the header (e.g. "Direct iroh transport is operational").
     pub notice: String,
     data_dir: PathBuf,
@@ -537,6 +542,10 @@ pub struct IcedChat {
     /// for the current room. Used to avoid re-saving the same entries
     /// on every room-navigation event.
     history_saved_count: usize,
+    /// Current Y scroll offset of the chat log, in pixels.
+    scroll_offset: f32,
+    /// Current viewport height of the chat log, in pixels.
+    viewport_height: f32,
     /// Cache of friend PublicKey -> is_online for quick lookup in the UI.
     friend_online_cache: HashSet<PublicKey>,
     /// Bootstrap peer addresses from the initial join ticket (if any).
@@ -660,6 +669,10 @@ pub enum AppMessage {
     ClearHistoryRequested,
     /// User confirmed the clear history action.
     ConfirmClearHistory,
+    /// User requested to delete a room — show confirmation.
+    DeleteRoomRequested(TopicId),
+    /// User confirmed deletion of a room.
+    ConfirmDeleteRoom(TopicId),
     /// Results of a mailbox sync triggered on whisper reconnect.
     MailboxReplayed {
         /// Peer whose envelopes were replayed.
@@ -667,6 +680,9 @@ pub enum AppMessage {
         /// Accepted entries: (message_id, plaintext).
         texts: Vec<(String, String)>,
     },
+    /// Scroll offset / viewport changed in the chat log.
+    /// Used by windowed rendering to determine which entries to build widgets for.
+    Scrolled(f32, f32),
 }
 
 impl IcedChat {
@@ -759,9 +775,13 @@ impl IcedChat {
             self_sent_events: HashMap::new(),
             tor_reconnect_rx,
             follow_latest: true,
+            total_content_height: std::cell::Cell::new(0.0),
+            scroll_offset: f32::MAX,
+            viewport_height: 0.0,
             dark_mode: false,
             sound_enabled: true,
             history_confirm_clear: false,
+            room_delete_confirm_topic: None,
             notice,
             data_dir: data_dir.clone(),
             chat_history,
@@ -881,7 +901,10 @@ impl IcedChat {
             AppMessage::ProfileImageDownloaded(..) => "ProfileImageDownloaded",
             AppMessage::ClearHistoryRequested => "ClearHistoryRequested",
             AppMessage::ConfirmClearHistory => "ConfirmClearHistory",
+            AppMessage::DeleteRoomRequested(_) => "DeleteRoomRequested",
+            AppMessage::ConfirmDeleteRoom(_) => "ConfirmDeleteRoom",
             AppMessage::MailboxReplayed { .. } => "MailboxReplayed",
+            AppMessage::Scrolled(..) => "Scrolled",
         }
     }
 }
@@ -3267,6 +3290,21 @@ impl IcedChat {
 
             AppMessage::Noop => iced::Task::none(),
 
+            AppMessage::Scrolled(offset, vp_h) => {
+                self.scroll_offset = offset;
+                self.viewport_height = vp_h;
+                // Detect whether the user is at the bottom of the chat log.
+                // total_content_height is set during view_chat_log() each frame
+                // via Cell interior mutability (allows &self reads in view()).
+                let total = self.total_content_height.get();
+                if total > 0.0 && offset + vp_h >= total - 10.0 {
+                    self.follow_latest = true;
+                } else if total > 0.0 {
+                    self.follow_latest = false;
+                }
+                iced::Task::none()
+            }
+
             AppMessage::CopyToClipboard(text) => {
                 return iced::clipboard::write(text);
             }
@@ -3422,6 +3460,28 @@ impl IcedChat {
                 self.history_confirm_clear = false;
                 self.chat_history.lock().unwrap().clear();
                 self.chat_history_dirty = true;
+                iced::Task::none()
+            }
+
+            AppMessage::DeleteRoomRequested(topic) => {
+                // Toggle confirmation for this topic.
+                self.room_delete_confirm_topic = if self.room_delete_confirm_topic == Some(topic) {
+                    None
+                } else {
+                    Some(topic)
+                };
+                iced::Task::none()
+            }
+
+            AppMessage::ConfirmDeleteRoom(topic) => {
+                self.room_delete_confirm_topic = None;
+                // Remove room and chat history, then persist.
+                self.room_history.remove(&topic);
+                self.room_history_dirty = true;
+                self.chat_history.lock().unwrap().remove_topic(&topic);
+                self.chat_history_dirty = true;
+                self.persist_room_history();
+                self.try_save_chat_history();
                 iced::Task::none()
             }
 
@@ -4109,6 +4169,29 @@ impl IcedChat {
         let topic = room.topic;
         let display_name = room.display_name();
 
+        if self.room_delete_confirm_topic == Some(topic) {
+            // ── Confirmation state ──
+            let confirm_row = row![
+                text("Delete this room?")
+                    .size(TYPO_SM)
+                    .width(Length::Fill),
+                button(text("Yes").size(TYPO_SM))
+                    .on_press(AppMessage::ConfirmDeleteRoom(topic))
+                    .padding([SPACE_4, SPACE_8]),
+                button(text("No").size(TYPO_SM))
+                    .on_press(AppMessage::DeleteRoomRequested(topic))
+                    .padding([SPACE_4, SPACE_8]),
+            ]
+            .spacing(SPACE_4)
+            .align_y(iced::Alignment::Center)
+            .padding(SPACE_8);
+
+            return container(confirm_row)
+                .width(Length::Fill)
+                .style(move |t| container_surface(t))
+                .into();
+        }
+
         let preview = if room.last_preview.is_empty() {
             if room.is_owner {
                 "Created this room".to_string()
@@ -4136,7 +4219,7 @@ impl IcedChat {
                 .padding(SPACE_8)
                 .width(Length::Fill),
                 button("✕")
-                    .on_press(AppMessage::DeleteRoom(topic))
+                    .on_press(AppMessage::DeleteRoomRequested(topic))
                     .padding(SPACE_4),
             ]
             .spacing(SPACE_4)
@@ -4250,11 +4333,114 @@ impl IcedChat {
         use iced::widget::{container, scrollable, text, Column, Row};
         use iced::Length;
 
-        let mut col = Column::new().spacing(SPACE_4).width(Length::Fill);
         let theme = self.theme();
-        let mut prev_day: Option<i64> = None;
+
+        // ── Empty state ──
+        if self.entries.is_empty() {
+            let col = Column::new()
+                .push(
+                    container(text("No messages yet.").color(self.color_muted()))
+                        .padding([0.0, SPACE_8])
+                        .width(Length::Fill),
+                );
+            self.total_content_height.set(0.0);
+            return scrollable(col)
+                .id(CHAT_LOG)
+                .anchor_bottom()
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .on_scroll(|v: scrollable::Viewport| {
+                    AppMessage::Scrolled(v.absolute_offset().y, v.bounds().height)
+                });
+        }
+
+        // ── Height estimation constants (pixels per entry type) ──
+        const DATE_SEP_H: f32 = 32.0;
+        const SYSTEM_H: f32 = 24.0;
+        const MSG_BASE_H: f32 = 76.0;
+        const IMAGE_EXTRA: f32 = 304.0;
+        const REACTION_EXTRA: f32 = 22.0;
+        /// Over-scan buffer in pixels — extra entries above/below viewport
+        /// so scroll-jumps don't flash empty space under estimation error.
+        const OVERSCAN: f32 = 800.0;
+
+        // ── First pass: compute per-entry estimated heights ──
+        let total = self.entries.len();
+        let mut heights: Vec<f32> = Vec::with_capacity(total);
+        let mut prev_day_ht: Option<i64> = None;
 
         for entry in self.entries.iter() {
+            let mut h = 0.0;
+            let day = entry.timestamp.map(|ts| ts / 86400000);
+            if let Some(d) = day {
+                if prev_day_ht.map_or(true, |prev| prev != d) {
+                    h += DATE_SEP_H;
+                }
+                prev_day_ht = Some(d);
+            }
+            match entry.kind {
+                ChatKind::System => h += SYSTEM_H,
+                _ => {
+                    h += MSG_BASE_H;
+                    if entry.image_bytes.is_some() {
+                        h += IMAGE_EXTRA;
+                    }
+                    if !entry.reactions.is_empty() {
+                        h += REACTION_EXTRA;
+                    }
+                }
+            }
+            heights.push(h);
+        }
+
+        let mut cum: Vec<f32> = Vec::with_capacity(total);
+        let mut running = 0.0_f32;
+        for &h in &heights {
+            cum.push(running);
+            running += h;
+        }
+        let total_height = running;
+        self.total_content_height.set(total_height);
+
+        // ── Determine visible window ──
+        let so = if self.scroll_offset >= f32::MAX / 2.0 {
+            (total_height - self.viewport_height.max(200.0)).max(0.0)
+        } else {
+            self.scroll_offset
+        };
+        let view_top = so.max(0.0);
+        let view_bot = view_top + self.viewport_height.max(200.0);
+
+        let range_top = (view_top - OVERSCAN).max(0.0);
+        let range_bot = (view_bot + OVERSCAN).min(total_height);
+
+        let first_idx = cum.partition_point(|&c| c < range_top);
+        let last_idx = cum
+            .partition_point(|&c| c <= range_bot)
+            .saturating_sub(1)
+            .min(total.saturating_sub(1));
+        let first_idx = first_idx.min(total.saturating_sub(1));
+        let last_idx = last_idx.max(first_idx);
+
+        // ── Build windowed content column ──
+        let mut col = Column::new().spacing(SPACE_4).width(Length::Fill);
+
+        let top_space_h = cum[first_idx];
+        if top_space_h > 0.0 {
+            col = col.push(container(space::Space::new().height(Length::Fixed(top_space_h))).width(Length::Fill));
+        }
+
+        let mut prev_day: Option<i64> = if first_idx > 0 {
+            self.entries[first_idx - 1]
+                .timestamp
+                .map(|ts| ts / 86400000)
+        } else {
+            None
+        };
+
+        for i in first_idx..=last_idx {
+            let entry = &self.entries[i];
+
             // ── Date separator ──
             let entry_day = entry.timestamp.map(|ts| ts / 86400000);
             if let Some(day) = entry_day {
@@ -4300,7 +4486,6 @@ impl IcedChat {
                 _ => unreachable!(),
             };
 
-            // Nickname label sits above the bubble (Signal/WhatsApp style)
             let label_text = if matches!(entry.kind, ChatKind::Local) && entry.event_id > 0 {
                 format!("[{} {}]", entry.label, entry.delivery_state.display_icon())
             } else {
@@ -4308,31 +4493,26 @@ impl IcedChat {
             };
             let label_el = text(label_text).size(TYPO_XS).color(label_color);
 
-            // Body text inside the bubble
             let body_el = text(&entry.body)
                 .size(TYPO_SM)
                 .wrapping(Wrapping::Word)
                 .width(Length::Fill)
                 .color(body_color);
 
-            // The speech bubble container
-            let bubble =
-                container(body_el)
-                    .padding([SPACE_4, SPACE_8])
-                    .style(move |t: &iced::Theme| {
-                        let mut s = iced::widget::container::Style::default();
-                        if let Some(bg) = bubble_bg(t, entry.kind) {
-                            s.background = Some(bg);
-                        }
-                        s.border.radius = (8.0_f32).into();
-                        s
-                    });
+            let bubble = container(body_el)
+                .padding([SPACE_4, SPACE_8])
+                .style(move |t: &iced::Theme| {
+                    let mut s = iced::widget::container::Style::default();
+                    if let Some(bg) = bubble_bg(t, entry.kind) {
+                        s.background = Some(bg);
+                    }
+                    s.border.radius = (8.0_f32).into();
+                    s
+                });
 
-            // Timestamp label (small, muted, right-aligned)
             let ts_text = entry.timestamp.map(format_message_time).unwrap_or_default();
             let ts_el = text(ts_text).size(TYPO_XXS).color(text_muted(&theme));
 
-            // Column: label above, bubble in middle, timestamp below
             let bubble_col = Column::new()
                 .push(label_el)
                 .push(bubble)
@@ -4340,10 +4520,6 @@ impl IcedChat {
                 .spacing(SPACE_2)
                 .max_width(480.0);
 
-            // Align: received → left, sent → right. Both include the
-            // sender's profile avatar (local from profile_image_handle,
-            // remote from friend_image_handles); the fallback emoji keeps
-            // the layout stable.
             let msg_row = match entry.kind {
                 ChatKind::Remote => {
                     let avatar: iced::Element<'_, AppMessage> = {
@@ -4379,9 +4555,6 @@ impl IcedChat {
                         } else {
                             text("👤").size(TYPO_LG).into()
                         };
-                    // Keep the local avatar on the left as well, matching the
-                    // received-message layout and the user's profile-picture
-                    // placement expectation.
                     Row::new()
                         .push(avatar)
                         .push(space::horizontal())
@@ -4421,12 +4594,11 @@ impl IcedChat {
             }
         }
 
-        if self.entries.is_empty() {
-            col = col.push(
-                container(text("No messages yet.").color(self.color_muted()))
-                    .padding([0.0, SPACE_8])
-                    .width(Length::Fill),
-            );
+        // Bottom spacer
+        let bottom_start = cum[last_idx] + heights[last_idx];
+        let bottom_h = total_height - bottom_start;
+        if bottom_h > 0.0 {
+            col = col.push(container(space::Space::new().height(Length::Fixed(bottom_h))).width(Length::Fill));
         }
 
         scrollable(col)
@@ -4434,6 +4606,9 @@ impl IcedChat {
             .anchor_bottom()
             .width(iced::Length::Fill)
             .height(iced::Length::Fill)
+            .on_scroll(|v: scrollable::Viewport| {
+                AppMessage::Scrolled(v.absolute_offset().y, v.bounds().height)
+            })
     }
 
     fn view_composer(&self) -> iced::Element<'_, AppMessage> {
