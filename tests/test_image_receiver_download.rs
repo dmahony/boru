@@ -48,8 +48,8 @@ impl ChatCallbacks for RxTestPeer {
     fn local_public(&self) -> PublicKey {
         self.local_public
     }
-    fn set_name(&mut self, peer: PublicKey, name: String) {
-        self.names.insert(peer, name);
+    fn set_name(&mut self, peer: PublicKey, name: String) -> Option<String> {
+        self.names.insert(peer, name)
     }
     fn is_friend(&self, _peer: &PublicKey) -> bool {
         false

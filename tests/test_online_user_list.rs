@@ -56,7 +56,9 @@ impl ChatCallbacks for OnlineUserTracker {
     fn local_public(&self) -> PublicKey {
         self.local_public
     }
-    fn set_name(&mut self, _peer: PublicKey, _name: String) {}
+    fn set_name(&mut self, _peer: PublicKey, _name: String) -> Option<String> {
+        None
+    }
     fn is_friend(&self, _peer: &PublicKey) -> bool {
         false
     }

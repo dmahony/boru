@@ -30,7 +30,9 @@ impl ChatCallbacks for TestFrontend {
         self.local_public
     }
 
-    fn set_name(&mut self, _peer: PublicKey, _name: String) {}
+    fn set_name(&mut self, _peer: PublicKey, _name: String) -> Option<String> {
+        None
+    }
 
     fn is_friend(&self, peer: &PublicKey) -> bool {
         self.friends

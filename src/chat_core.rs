@@ -631,8 +631,8 @@ impl ChatCallbacks for AppState {
             .unwrap_or_else(|| peer.fmt_short().to_string())
     }
 
-    fn set_name(&mut self, peer: PublicKey, name: String) {
-        self.names.insert(peer, name);
+    fn set_name(&mut self, peer: PublicKey, name: String) -> Option<String> {
+        self.names.insert(peer, name)
     }
 
     fn is_friend(&self, peer: &PublicKey) -> bool {
@@ -1096,7 +1096,7 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                     name,
                     profile_image_ticket,
                 } => {
-                    cb.set_name(from, name.clone());
+                    let old_name = cb.set_name(from, name.clone());
                     match profile_image_ticket {
                         Some(ticket) => cb.record_profile_image_ticket(from, ticket),
                         None => cb.clear_profile_image(from),
@@ -1107,7 +1107,13 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                             cb.friend_set_name(fid, name.clone());
                             cb.mark_friends_dirty();
                         }
-                        cb.push_system(format!("{} is now known as {}", from.fmt_short(), name));
+                        if old_name.as_deref() != Some(&name) {
+                            cb.push_system(format!(
+                                "{} is now known as {}",
+                                from.fmt_short(),
+                                name
+                            ));
+                        }
                     }
                 }
                 Message::Message { text } => {

@@ -402,7 +402,9 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         fn local_public(&self) -> iroh::PublicKey {
             self.local_public
         }
-        fn set_name(&mut self, _peer: iroh::PublicKey, _name: String) {}
+        fn set_name(&mut self, _peer: iroh::PublicKey, _name: String) -> Option<String> {
+            None
+        }
         fn is_friend(&self, _peer: &iroh::PublicKey) -> bool {
             false
         }

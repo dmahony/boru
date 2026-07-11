@@ -45,7 +45,7 @@ pub trait ChatCallbacks {
     }
 
     /// Record a peer's announced display name for later resolution.
-    fn set_name(&mut self, peer: PublicKey, name: String);
+    fn set_name(&mut self, peer: PublicKey, name: String) -> Option<String>;
 
     /// Check whether `peer` is a tracked friend.
     fn is_friend(&self, peer: &PublicKey) -> bool;

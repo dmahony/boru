@@ -3653,8 +3653,8 @@ impl ChatCallbacks for IcedChat {
             .unwrap_or_else(|| peer.fmt_short().to_string())
     }
 
-    fn set_name(&mut self, peer: PublicKey, name: String) {
-        self.names.insert(peer, name);
+    fn set_name(&mut self, peer: PublicKey, name: String) -> Option<String> {
+        self.names.insert(peer, name)
     }
 
     fn is_friend(&self, peer: &PublicKey) -> bool {
@@ -4172,9 +4172,7 @@ impl IcedChat {
         if self.room_delete_confirm_topic == Some(topic) {
             // ── Confirmation state ──
             let confirm_row = row![
-                text("Delete this room?")
-                    .size(TYPO_SM)
-                    .width(Length::Fill),
+                text("Delete this room?").size(TYPO_SM).width(Length::Fill),
                 button(text("Yes").size(TYPO_SM))
                     .on_press(AppMessage::ConfirmDeleteRoom(topic))
                     .padding([SPACE_4, SPACE_8]),
@@ -4337,12 +4335,11 @@ impl IcedChat {
 
         // ── Empty state ──
         if self.entries.is_empty() {
-            let col = Column::new()
-                .push(
-                    container(text("No messages yet.").color(self.color_muted()))
-                        .padding([0.0, SPACE_8])
-                        .width(Length::Fill),
-                );
+            let col = Column::new().push(
+                container(text("No messages yet.").color(self.color_muted()))
+                    .padding([0.0, SPACE_8])
+                    .width(Length::Fill),
+            );
             self.total_content_height.set(0.0);
             return scrollable(col)
                 .id(CHAT_LOG)
@@ -4427,7 +4424,10 @@ impl IcedChat {
 
         let top_space_h = cum[first_idx];
         if top_space_h > 0.0 {
-            col = col.push(container(space::Space::new().height(Length::Fixed(top_space_h))).width(Length::Fill));
+            col = col.push(
+                container(space::Space::new().height(Length::Fixed(top_space_h)))
+                    .width(Length::Fill),
+            );
         }
 
         let mut prev_day: Option<i64> = if first_idx > 0 {
@@ -4499,16 +4499,17 @@ impl IcedChat {
                 .width(Length::Fill)
                 .color(body_color);
 
-            let bubble = container(body_el)
-                .padding([SPACE_4, SPACE_8])
-                .style(move |t: &iced::Theme| {
-                    let mut s = iced::widget::container::Style::default();
-                    if let Some(bg) = bubble_bg(t, entry.kind) {
-                        s.background = Some(bg);
-                    }
-                    s.border.radius = (8.0_f32).into();
-                    s
-                });
+            let bubble =
+                container(body_el)
+                    .padding([SPACE_4, SPACE_8])
+                    .style(move |t: &iced::Theme| {
+                        let mut s = iced::widget::container::Style::default();
+                        if let Some(bg) = bubble_bg(t, entry.kind) {
+                            s.background = Some(bg);
+                        }
+                        s.border.radius = (8.0_f32).into();
+                        s
+                    });
 
             let ts_text = entry.timestamp.map(format_message_time).unwrap_or_default();
             let ts_el = text(ts_text).size(TYPO_XXS).color(text_muted(&theme));
@@ -4598,7 +4599,9 @@ impl IcedChat {
         let bottom_start = cum[last_idx] + heights[last_idx];
         let bottom_h = total_height - bottom_start;
         if bottom_h > 0.0 {
-            col = col.push(container(space::Space::new().height(Length::Fixed(bottom_h))).width(Length::Fill));
+            col = col.push(
+                container(space::Space::new().height(Length::Fixed(bottom_h))).width(Length::Fill),
+            );
         }
 
         scrollable(col)
