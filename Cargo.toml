@@ -100,7 +100,7 @@ irpc = { version = "0.17.0", optional = true, default-features = false, features
 ] }
 n0-error = { version = "1", features = ["anyhow"] }
 serde-byte-array = "0.1.2"
-
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # test-utils dependencies (optional)
 humantime-serde = { version = "1.1.1", optional = true }
@@ -240,4 +240,13 @@ debug = true
 
 [profile.release]
 debug = true
+
+# ── Windows 11 DNS fix ─────────────────────────────────────────────────
+# iroh-dns-1.0.0 uses hickory-resolver which sends plain UDP DNS queries.
+# Windows 11 configures DNS over HTTPS (DoH) by default, silently dropping
+# UDP queries.  The patched version adds Cloudflare/Google DoH nameservers
+# as fallback resolvers and increases the DNS timeout from 3s to 5s.
+# See patched/iroh-dns/src/dns.rs for the actual changes.
+[patch.crates-io]
+iroh-dns = { path = "patched/iroh-dns" }
 

@@ -4163,8 +4163,6 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754f7e0c1f67938e1d671007264ffef158f14a9f795a7cc219ea68ea09a9d4c9"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -4191,6 +4189,7 @@ dependencies = [
  "arti-client",
  "blake3",
  "bytes",
+ "chrono",
  "clap",
  "comfy-table",
  "crossterm 0.28.1",

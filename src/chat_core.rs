@@ -268,6 +268,9 @@ pub struct ChatEntry {
     pub event_id: u64,
     /// Current delivery state of this message (only meaningful for Local kind).
     pub delivery_state: DeliveryState,
+    /// Unix epoch milliseconds when this entry was created (UTC).
+    /// None for entries created before this field was added.
+    pub timestamp: Option<u64>,
 }
 
 impl ChatEntry {
@@ -282,6 +285,7 @@ impl ChatEntry {
             reactions: Vec::new(),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            timestamp: Some(crate::chat_core::now_ms()),
         }
     }
 
@@ -296,6 +300,7 @@ impl ChatEntry {
             reactions: Vec::new(),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            timestamp: Some(crate::chat_core::now_ms()),
         }
     }
 
@@ -310,12 +315,19 @@ impl ChatEntry {
             reactions: Vec::new(),
             event_id: 0,
             delivery_state: DeliveryState::default(),
+            timestamp: Some(crate::chat_core::now_ms()),
         }
     }
 
     /// Attach a protocol message hash to this entry.
     pub fn with_message_hash(mut self, hash: MessageHash) -> Self {
         self.message_hash = Some(hash);
+        self
+    }
+
+    /// Override the timestamp with a specific Unix epoch millisecond value.
+    pub fn with_timestamp(mut self, timestamp_ms: Option<u64>) -> Self {
+        self.timestamp = timestamp_ms;
         self
     }
 }
@@ -666,9 +678,14 @@ impl ChatCallbacks for AppState {
         label: String,
         text: String,
         hash: Option<MessageHash>,
-        _sent_at: Option<u64>,
+        sent_at_secs: Option<u64>,
     ) {
         let mut entry = ChatEntry::remote(label, text);
+        // Override the default local-time timestamp with the protocol's
+        // sent_at value (Unix epoch seconds, UTC) converted to milliseconds.
+        if let Some(secs) = sent_at_secs {
+            entry = entry.with_timestamp(Some(secs * 1000));
+        }
         if let Some(h) = hash {
             entry = entry.with_message_hash(h);
         }
@@ -1233,6 +1250,14 @@ pub fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Return the current Unix epoch time in milliseconds.
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Forward raw gossip events into a [`NetEvent`] channel.

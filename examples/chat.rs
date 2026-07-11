@@ -681,6 +681,7 @@ async fn main() -> Result<()> {
                     reactions: Vec::new(),
                     event_id: entry.event_id,
                     delivery_state: entry.delivery_state.clone(),
+                    timestamp: Some(entry.timestamp),
                 });
             }
         }
@@ -2225,10 +2226,14 @@ fn entry_to_line(entry: &ChatEntry) -> Vec<Line<'static>> {
         ChatKind::Local => Style::default().fg(Color::Green),
         ChatKind::Remote => Style::default().fg(Color::Blue),
     };
+    let time_tag = entry
+        .timestamp
+        .map(|ms| format_epoch_ms_utc(ms))
+        .unwrap_or_default();
     let label = if matches!(entry.kind, ChatKind::Local) && entry.event_id > 0 {
-        format!("[{} {}]", entry.label, entry.delivery_state.display_icon())
+        format!("[{} {}]{}", entry.label, entry.delivery_state.display_icon(), time_tag)
     } else {
-        format!("[{}]", entry.label)
+        format!("[{}]{}", entry.label, time_tag)
     };
     let mut lines = vec![Line::from(vec![
         Span::styled(label, style.add_modifier(Modifier::BOLD)),
@@ -2492,6 +2497,79 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+/// Format a Unix epoch millisecond timestamp as ISO 8601 UTC time label.
+///
+/// Produces " HH:MM" (UTC) for messages from today, or " YYYY-MM-DD"
+/// for older dates.  The leading space keeps it visually separated from
+/// the label brackets.
+fn format_epoch_ms_utc(ms: u64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let ts_secs = ms / 1000;
+    let now_secs = now_ms / 1000;
+    let days_since_epoch = |secs: u64| secs / 86400;
+
+    let today = days_since_epoch(now_secs);
+    let ts_day = days_since_epoch(ts_secs);
+
+    if ts_day == today {
+        // Same day: show HH:MM (UTC)
+        let hour = (ts_secs % 86400) / 3600;
+        let min = (ts_secs % 3600) / 60;
+        format!(" {:02}:{:02}Z", hour, min)
+    } else {
+        // Different day: show ISO 8601 date
+        format_iso8601_date_utc(ms)
+    }
+}
+
+/// Convert Unix epoch milliseconds to " YYYY-MM-DD" ISO 8601 date (UTC).
+fn format_iso8601_date_utc(ms: u64) -> String {
+    let secs = ms / 1000;
+    // Days since Unix epoch
+    let days = secs / 86400;
+    let remaining = days;
+
+    // Year calculation (valid 1970–2099)
+    let mut year = 1970u64;
+    let mut d = remaining;
+    loop {
+        let days_in_year = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+            366
+        } else {
+            365
+        };
+        if d < days_in_year {
+            break;
+        }
+        d -= days_in_year;
+        year += 1;
+    }
+
+    // Month/day from day-of-year (0-indexed)
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let mdays: [u64; 12] = if leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut month = 1u64;
+    let mut day = d + 1;
+    for &md in &mdays {
+        if day <= md {
+            break;
+        }
+        day -= md;
+        month += 1;
+    }
+
+    format!(" {year:04}-{month:02}-{day:02}")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

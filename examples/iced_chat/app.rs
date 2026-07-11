@@ -413,6 +413,12 @@ impl ChatEntry {
             sender_key: sender,
         }
     }
+
+    /// Override the timestamp with a specific Unix epoch millisecond value.
+    fn with_timestamp(mut self, ms: Option<i64>) -> Self {
+        self.timestamp = ms;
+        self
+    }
 }
 
 // ── Screen navigation ─────────────────────────────────────────────────
@@ -950,98 +956,56 @@ fn format_last_seen(last_seen_ms: Option<u64>) -> String {
 
 /// Format a Unix-millis timestamp into a message time label.
 ///
+/// The API stores message timestamps in UTC; the UI renders them in the
+/// user's local timezone before applying the usual "today / this week / older"
+/// label rules.
+///
 /// - Today:    "12:34"
-/// - This week (same year): "Mon 12:34"
+/// - This week: "Mon 12:34"
 /// - Older:    "Jan 5"
 fn format_message_time(timestamp_ms: i64) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    // Both in millis; seconds = ms / 1000
-    let ts_secs = timestamp_ms / 1000;
-    let now_secs = now_ms / 1000;
+    use chrono::{Local, TimeZone};
 
-    // Use chrono-like math from unix epoch
-    let days_since_epoch = |secs: i64| secs / 86400;
-    let today = days_since_epoch(now_secs);
-    let ts_day = days_since_epoch(ts_secs);
+    let now = Local::now();
+    let to_local = |ms: i64| Local.timestamp_millis_opt(ms).single();
+    format_message_time_with(timestamp_ms, now, to_local)
+}
 
-    // Day-of-week from unix epoch. 1970-01-05 was Monday (Mon=1..Sun=7).
-    let dow = |secs: i64| {
-        let day = days_since_epoch(secs).rem_euclid(7);
-        match day {
-            0 => "Thu",
-            1 => "Fri",
-            2 => "Sat",
-            3 => "Sun",
-            4 => "Mon",
-            5 => "Tue",
-            6 => "Wed",
-            _ => unreachable!(),
-        }
+fn format_message_time_with<Tz, F>(
+    timestamp_ms: i64,
+    now: chrono::DateTime<Tz>,
+    mut to_local: F,
+) -> String
+where
+    Tz: chrono::TimeZone,
+    F: FnMut(i64) -> Option<chrono::DateTime<Tz>>,
+{
+    use chrono::{Datelike, Timelike};
+
+    let Some(timestamp) = to_local(timestamp_ms) else {
+        return String::new();
     };
 
-    // Hour/minute in 24h format
-    let hour = (ts_secs % 86400) / 3600;
-    let min = (ts_secs % 3600) / 60;
+    let today = now.date_naive();
+    let message_day = timestamp.date_naive();
+    let hour = timestamp.hour();
+    let minute = timestamp.minute();
 
-    if ts_day == today {
-        // Today: show time only
-        format!("{:02}:{:02}", hour, min)
-    } else if ts_day >= today - 6 {
-        // This week (within last 7 days): "Mon 12:34"
-        format!("{} {:02}:{:02}", dow(ts_secs), hour, min)
+    if message_day == today {
+        format!("{:02}:{:02}", hour, minute)
+    } else if message_day >= today - chrono::TimeDelta::days(6) {
+        format!(
+            "{} {:02}:{:02}",
+            timestamp.naive_local().format("%a"),
+            hour,
+            minute
+        )
     } else {
-        // Older: "Jan 5"
-        let days_off = ts_day;
-        // Approximate: every 4 years has ~1461 days
-        let y4 = days_off / 1461;
-        let rem = days_off % 1461;
-        let year = 1970 + y4 * 4 + (if rem >= 366 { 1 + (rem - 366) / 365 } else { 0 });
-        let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-        let yday = (ts_secs - {
-            let mut y = 1970i64;
-            let mut s = 0i64;
-            while y < year {
-                let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-                s += if leap { 366 } else { 365 };
-                y += 1;
-            }
-            s * 86400
-        }) / 86400;
-        let month_days = if is_leap {
-            [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        } else {
-            [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        };
-        let mut accum = 0i64;
-        let mut month = 1usize;
-        for (i, &md) in month_days.iter().enumerate() {
-            if accum + md as i64 > yday {
-                month = i + 1;
-                break;
-            }
-            accum += md as i64;
-        }
-        let day_of_month = yday - accum + 1;
-        let month_name = match month {
-            1 => "Jan",
-            2 => "Feb",
-            3 => "Mar",
-            4 => "Apr",
-            5 => "May",
-            6 => "Jun",
-            7 => "Jul",
-            8 => "Aug",
-            9 => "Sep",
-            10 => "Oct",
-            11 => "Nov",
-            12 => "Dec",
-            _ => "?",
-        };
-        format!("{month_name} {day_of_month}")
+        format!(
+            "{} {}",
+            timestamp.naive_local().format("%b"),
+            timestamp.day()
+        )
     }
 }
 
@@ -1436,7 +1400,7 @@ impl IcedChat {
                                     &entry.text_preview,
                                     entry.image_bytes.clone().unwrap(),
                                     None,
-                                    None,
+                                    Some(entry.timestamp / 1000),
                                     sender_pk,
                                 ));
                             }
@@ -1457,7 +1421,9 @@ impl IcedChat {
                                 let is_self =
                                     sender_pk.map(|pk| pk == self.local_public).unwrap_or(false);
                                 if is_self {
-                                    self.push_local(&entry.text_preview);
+                                    let mut e = ChatEntry::local(&self.local_label, &entry.text_preview);
+                                    e = e.with_timestamp(Some(entry.timestamp as i64));
+                                    self.entries.push(e);
                                 } else {
                                     let label = sender_pk
                                         .map(|pk| pk.fmt_short().to_string())
@@ -1466,7 +1432,7 @@ impl IcedChat {
                                         &label,
                                         &entry.text_preview,
                                         None,
-                                        None, // history entries don't carry sent_at
+                                        Some(entry.timestamp / 1000),
                                         sender_pk,
                                     ));
                                 }
@@ -4674,6 +4640,7 @@ impl IcedChat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{FixedOffset, TimeZone, Utc};
 
     #[test]
     fn gui_file_share_ticket_is_parseable_and_has_sender_address() {
@@ -4692,5 +4659,45 @@ mod tests {
     fn hash_only_file_share_value_is_not_a_blob_ticket() {
         let hash = iroh_blobs::Hash::from_bytes([7; 32]);
         assert!(hash.to_string().parse::<BlobTicket>().is_err());
+    }
+
+    #[test]
+    fn format_message_time_converts_utc_into_local_today_time() {
+        let tz = FixedOffset::east_opt(2 * 3600).expect("valid offset");
+        let now = tz
+            .with_ymd_and_hms(2024, 1, 3, 12, 0, 0)
+            .single()
+            .expect("valid local now");
+        let timestamp_ms = Utc
+            .with_ymd_and_hms(2024, 1, 3, 0, 30, 0)
+            .single()
+            .expect("valid utc timestamp")
+            .timestamp_millis();
+
+        let rendered = format_message_time_with(timestamp_ms, now, |ms| {
+            tz.timestamp_millis_opt(ms).single()
+        });
+
+        assert_eq!(rendered, "02:30");
+    }
+
+    #[test]
+    fn format_message_time_converts_utc_into_local_weekday() {
+        let tz = FixedOffset::east_opt(2 * 3600).expect("valid offset");
+        let now = tz
+            .with_ymd_and_hms(2024, 1, 3, 12, 0, 0)
+            .single()
+            .expect("valid local now");
+        let timestamp_ms = Utc
+            .with_ymd_and_hms(2024, 1, 2, 20, 30, 0)
+            .single()
+            .expect("valid utc timestamp")
+            .timestamp_millis();
+
+        let rendered = format_message_time_with(timestamp_ms, now, |ms| {
+            tz.timestamp_millis_opt(ms).single()
+        });
+
+        assert_eq!(rendered, "Tue 22:30");
     }
 }
