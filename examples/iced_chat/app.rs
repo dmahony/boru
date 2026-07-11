@@ -543,8 +543,11 @@ pub struct IcedChat {
     /// Cached profile image handles for remote peers, keyed by PublicKey.
     /// `None` means the peer announced a ticket but the blob hasn't been downloaded yet.
     friend_image_handles: HashMap<PublicKey, Option<iced::widget::image::Handle>>,
-    /// Pending profile image ticket that arrived via AboutMe, awaiting async download.
-    pending_profile_image_ticket: Option<(PublicKey, String)>,
+    /// Queue of profile image tickets that arrived via AboutMe, awaiting async download.
+    /// Each entry is (peer_public_key, blob_ticket_string).
+    /// Downloaded entries are removed one-at-a-time each update tick to allow
+    /// multiple concurrent peer image downloads without overwriting each other.
+    pending_profile_image_tickets: std::collections::VecDeque<(PublicKey, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -748,7 +751,7 @@ impl IcedChat {
             profile_image_handle,
             profile_image_ticket: None,
             friend_image_handles: HashMap::new(),
-            pending_profile_image_ticket: None,
+            pending_profile_image_tickets: std::collections::VecDeque::new(),
         }
     }
 
@@ -2385,15 +2388,21 @@ impl IcedChat {
                     );
                 }
                 // Check if a profile image ticket arrived from a remote peer
-                if let Some((peer, ticket_str)) = self.pending_profile_image_ticket.take() {
+                if let Some((peer, ticket_str)) = self.pending_profile_image_tickets.pop_front() {
                     let blob_store = self.blob_store.clone();
                     let endpoint = self.endpoint.clone();
+                    let memory_lookup = self.memory_lookup.clone();
                     let neighbors = self.neighbors.clone();
                     return iced::Task::perform(
                         async move {
                             let ticket: BlobTicket = ticket_str
                                 .parse::<BlobTicket>()
                                 .map_err(|e| format!("Parse profile image ticket: {e}"))?;
+                            // The profile ticket is the authoritative transport
+                            // address for the blob provider.  Register it before
+                            // downloading; using only the public key leaves iroh
+                            // with no relay/direct addresses to resolve.
+                            seed_memory_lookup(&memory_lookup, &[ticket.addr().clone()]);
                             let peer_id = ticket.addr().id;
                             let candidates = download_candidates(peer_id, &neighbors);
                             blob_store
@@ -3267,8 +3276,20 @@ impl ChatCallbacks for IcedChat {
         self.friends
             .set_last_announced_profile_image_ticket(fid, &ticket);
         self.friends_dirty = true;
-        self.friend_image_handles.entry(peer).or_insert(None);
-        self.pending_profile_image_ticket = Some((peer, ticket));
+        // Invalidate any previous image immediately.  The newly announced
+        // ticket may point to a replacement blob, so retaining the old
+        // handle would show stale artwork while the download is in flight.
+        self.friend_image_handles.insert(peer, None);
+        self.pending_profile_image_tickets.push_back((peer, ticket));
+    }
+
+    fn clear_profile_image(&mut self, peer: PublicKey) {
+        let fid = FriendId::from_public_key(peer);
+        self.friends
+            .set_last_announced_profile_image_ticket(fid, "");
+        self.friends_dirty = true;
+        self.friend_image_handles.remove(&peer);
+        self.pending_profile_image_tickets.retain(|(queued_peer, _)| *queued_peer != peer);
     }
 
     fn push_system(&mut self, text: String) {
@@ -3981,8 +4002,9 @@ impl IcedChat {
                         let cached = entry
                             .sender_key
                             .and_then(|pk| self.friend_image_handles.get(&pk))
-                            .and_then(|opt| opt.as_ref());
-                        if let Some(ref handle) = cached {
+                            .and_then(|opt| opt.as_ref())
+                            .cloned();
+                        if let Some(handle) = cached {
                             iced::widget::image(handle.clone())
                                 .content_fit(iced::ContentFit::ScaleDown)
                                 .width(Length::Fixed(28.0))

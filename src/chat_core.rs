@@ -1080,8 +1080,9 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                     profile_image_ticket,
                 } => {
                     cb.set_name(from, name.clone());
-                    if let Some(ticket) = profile_image_ticket {
-                        cb.record_profile_image_ticket(from, ticket);
+                    match profile_image_ticket {
+                        Some(ticket) => cb.record_profile_image_ticket(from, ticket),
+                        None => cb.clear_profile_image(from),
                     }
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);

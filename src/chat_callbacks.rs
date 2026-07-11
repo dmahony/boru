@@ -131,6 +131,12 @@ pub trait ChatCallbacks {
     /// Record a profile image ticket for a peer. (Default no-op).
     fn record_profile_image_ticket(&mut self, _peer: PublicKey, _ticket: String) {}
 
+    /// Clear a peer's previously advertised profile image. (Default no-op).
+    ///
+    /// Called when a peer broadcasts an `AboutMe` with
+    /// `profile_image_ticket: None`, signalling the image was removed.
+    fn clear_profile_image(&mut self, _peer: PublicKey) {}
+
     /// Merge a parsed peer ticket into frontend-owned durable state.
     /// Returns whether the frontend accepted the ticket.
     fn store_peer_ticket(&mut self, _peer: PublicKey, _ticket: Ticket) -> bool {
