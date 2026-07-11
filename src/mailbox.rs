@@ -353,6 +353,10 @@ impl MailboxStore {
         self.expire();
         self.entries.len()
     }
+    /// Whether the store is empty (after applying retention).
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 #[cfg(test)]

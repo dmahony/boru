@@ -413,10 +413,10 @@ fn main() -> Result<()> {
         tor_reconnect_rx_opt,
         notice,
         chat_history,
-            backfill_handle,
-            whisper_events_rx,
-            whisper_handle,
-            mut tor_monitor_handle,
+        backfill_handle,
+        whisper_events_rx,
+        whisper_handle,
+        mut tor_monitor_handle,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
         let mut tor_monitor_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -440,7 +440,11 @@ fn main() -> Result<()> {
                 endpoint.online().await;
                 #[allow(unused)]
                 endpoint.address_lookup()?.add(memory_lookup.clone());
-                let local_peer_addr = tor_transport.watch_local_peer_addr().initialized().await.endpoint_addr();
+                let local_peer_addr = tor_transport
+                    .watch_local_peer_addr()
+                    .initialized()
+                    .await
+                    .endpoint_addr();
 
                 // Spawn the Tor health-monitor background task and capture
                 // its handle so we can abort it explicitly before shutdown.
@@ -472,7 +476,6 @@ fn main() -> Result<()> {
                     endpoint.online().await;
                 }
                 endpoint
-
             }
             #[cfg(not(feature = "tor-transport"))]
             {
@@ -494,7 +497,6 @@ fn main() -> Result<()> {
                     endpoint.online().await;
                 }
                 endpoint
-
             }
         };
         info!("> endpoint: {}", endpoint.id());
@@ -542,7 +544,10 @@ fn main() -> Result<()> {
         // alongside this store so queued messages can be replayed on reconnect.
         let chat_history = ChatHistoryStore::load_or_default(&data_dir);
         if !chat_history.is_empty() {
-            info!("> loaded {} chat message(s) from history", chat_history.len());
+            info!(
+                "> loaded {} chat message(s) from history",
+                chat_history.len()
+            );
         }
         let chat_history = Arc::new(std::sync::Mutex::new(chat_history));
 

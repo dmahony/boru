@@ -1823,7 +1823,7 @@ mod tests {
         let bytes = postcard::to_stdvec(&msg).unwrap();
         let decoded: Message = postcard::from_bytes(&bytes).unwrap();
         assert!(
-            matches!(decoded, Message::AboutMe { name: ref name, profile_image_ticket: _ } if name == "alice")
+            matches!(decoded, Message::AboutMe { ref name, profile_image_ticket: _ } if name == "alice")
         );
     }
 

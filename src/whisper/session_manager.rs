@@ -289,6 +289,14 @@ impl SessionManagerActor {
                         // Control messages are consumed by the frontend and do not
                         // affect the transport session state.
                     }
+                    WhisperEvent::MailboxEnvelope { .. } => {
+                        // Mailbox envelopes are decrypted and processed by the
+                        // mailbox store — the transport session just forwards them.
+                    }
+                    WhisperEvent::MailboxAck { .. } => {
+                        // Mailbox acknowledgements are verified and removed by the
+                        // mailbox store — the transport session just forwards them.
+                    }
                     WhisperEvent::Connected { peer } => {
                         if peer == self.local_public {
                             return;

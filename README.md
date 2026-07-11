@@ -245,6 +245,133 @@ building successfully (it may fail in headless/container environments).  DHT
 is gated on the `net` feature flag, which is automatically enabled by
 `examples` and `gui`.
 
+## Contact Negotiation and Direct Conversations
+
+The `contact` module provides signed control-plane messages that run over
+the encrypted whisper channel.  Messages carry an additional layer signature
+so they remain verifiable when replayed from offline mailbox storage.
+
+### ContactAction Messages
+
+| Action             | Purpose                                           |
+|--------------------|---------------------------------------------------|
+| `ContactRequest`   | Ask a peer to add you as a contact                |
+| `ContactAccept`    | Accept a pending contact request                  |
+| `ConversationInvite` | Agree on a stable one-to-one gossip topic       |
+| `AddressUpdate`    | Refresh bootstrap addresses for a direct session  |
+
+All messages are signed with the sender's identity key and include a
+wall-clock timestamp that is validated against a 24-hour replay window.
+
+### Direct Topic Derivation
+
+The stable one-to-one gossip topic shared by two contacts is derived
+deterministically and order-independently:
+
+```text
+topic = blake3("iroh-gossip-chat/direct/v1" || min(a, b) || max(a, b))
+```
+
+This means both sides derive the same topic without any negotiation — the
+topic is a function of the two peer identities alone.
+
+## Offline Mailbox (Store-and-Forward)
+
+The `mailbox` module implements encrypted recipient-hosted storage for
+direct messages when the recipient is offline.  Key design points:
+
+- **Never decrypts.**  The mailbox only stores opaque ciphertext.  It
+  never has access to plaintext.
+- **X25519 + AES-256-GCM.**  Each envelope uses an ephemeral X25519 key
+  per message, with a symmetric key derived via blake3 for AES-GCM.
+- **Sender signatures.**  Every envelope is signed by the sender and
+  verified by the recipient before decryption.
+- **Authorization.**  The recipient controls an allow-list of senders.
+  Unauthorized envelopes are rejected without consuming storage.
+- **Idempotent acknowledgements.**  The recipient signs an acknowledgement
+  after successfully processing each message.  Acknowledgements are signed
+  and verified; duplicate ack removal is idempotent.
+- **TTL expiration.**  Unacknowledged envelopes expire after the configured
+  retention period (default 7 days).
+- **Atomic persistence.**  The mailbox is persisted atomically via
+  `atomic_write_json` so partial writes never corrupt state.
+
+### Mailbox Identity
+
+The encryption identity is derived from the node's iroh secret key and is
+advertised alongside the signing public key:
+
+```rust,norun
+let mailbox_id = MailboxIdentity::from_secret(&secret_key);
+let pub_key = mailbox_id.public_key();        // MailboxPublicKey { identity, encryption }
+```
+
+Senders use `MailboxPublicKey.encryption` to seal envelopes; the recipient
+uses its private key to open them.
+
+### Mailbox Flow
+
+1. **Sender** encrypts and signs the payload, producing a `MailboxEnvelope`.
+2. **Sender** delivers the envelope over the whisper channel (or queues it
+   in the outbox if the recipient is offline).
+3. **Recipient** receives the envelope, verifies the sender signature,
+   decrypts, processes the message, and signs a `MailboxAck`.
+4. **Recipient** sends the `MailboxAck` back to the sender.
+5. **Sender** or **mailbox** removes the envelope after receiving a valid
+   acknowledgement.
+
+Both the whisper transport (`WhisperWireMessage::MailboxEnvelope` /
+`MailboxAck`) and the mailbox store support this lifecycle.
+
+## Stale Address Behavior and Bootstrap
+
+When a peer's cached address fails to connect, the system falls back
+through a layered resolution chain:
+
+1. **Cached addresses** from the FriendsStore or the most recent
+   `AddressUpdate` message.
+2. **Endpoint remote info** — addresses learned from the current
+   iroh endpoint's connection state.
+3. **DNS/Pkarr** — default iroh discovery (presets::N0).
+4. **DHT** — Mainline BitTorrent DHT (if configured).
+5. **GossipAddressLookup** — addresses learned via gossip protocol.
+6. **ID-only lookup** — the endpoint resolves using all configured
+   discovery mechanisms without any explicit address.
+
+The friend ping system sends periodic probes through all candidates using
+750ms per-attempt timeouts.  Address updates discovered through this
+process are emitted as `FriendEvent::AddressUpdated` events so the
+frontend can persist fresher addresses.
+
+### Bootstrap
+
+Room bootstrap requires at least one address to join.  When no bootstrap
+addresses are available (e.g., after all cached peers are stale), the
+room creator must provide an updated ticket.  The timeout for bootstrap
+connection is 30 seconds, after which the room is subscribed but the user
+is warned that addresses may be stale.
+
+### First-Contact Requirement
+
+A first-contact handshake (`ContactRequest` / `ContactAccept`) is required
+to establish a direct conversation.  Until a contact accepts, the
+initiator's messages are queued in the outbox but not delivered to the
+direct topic.  The recipient must be online at least briefly for the
+initial handshake to complete.
+
+## Outbox and Delivery Lifecycle
+
+Outgoing direct messages are durably stored in the `OutboxStore` until
+transport delivery is observed.  On restart, the outbox is replayed:
+
+- Messages with `DeliveryState::Pending` are re-sent over the whisper
+  channel.
+- Messages with `DeliveryState::Sent` are skipped (already delivered).
+- On successful delivery, the state transitions from `Pending` -> `Sent`.
+
+The chat history is also persisted (via `ChatHistoryStore`) so room
+transcripts survive process restarts.
+
 # License
 
 This project is licensed under either of

@@ -34,6 +34,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, trace, warn};
 
+use crate::mailbox::{MailboxAck, MailboxEnvelope};
+
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 /// ALPN for whisper direct connections.
@@ -66,6 +68,10 @@ enum WhisperWireMessage {
     },
     /// Signed contact/control-plane message.
     Control { payload: Vec<u8> },
+    /// Encrypted offline-mailbox envelope. The transport never decrypts it.
+    MailboxEnvelope { envelope: MailboxEnvelope },
+    /// Recipient acknowledgement for a previously accepted envelope.
+    MailboxAck { ack: MailboxAck },
 }
 
 // ── Public event types ─────────────────────────────────────────────────────────
@@ -96,6 +102,20 @@ pub enum WhisperEvent {
         /// Signed control payload.
         content: Bytes,
     },
+    /// An encrypted mailbox envelope received from a peer.
+    MailboxEnvelope {
+        /// Public key of the transport peer that delivered the envelope.
+        from: PublicKey,
+        /// Opaque envelope; the application must validate and decrypt it.
+        envelope: MailboxEnvelope,
+    },
+    /// A recipient acknowledgement received from a peer.
+    MailboxAck {
+        /// Public key of the transport peer that delivered the acknowledgement.
+        from: PublicKey,
+        /// Signed acknowledgement; the sender must validate it before removal.
+        ack: MailboxAck,
+    },
     /// A peer has connected (ready for whispers).
     Connected {
         /// Public key of the connected peer.
@@ -125,6 +145,16 @@ pub(crate) enum Cmd {
     SendControl {
         peer: PublicKey,
         payload: Bytes,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SendMailboxEnvelope {
+        peer: PublicKey,
+        envelope: MailboxEnvelope,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    SendMailboxAck {
+        peer: PublicKey,
+        ack: MailboxAck,
         reply: oneshot::Sender<Result<()>>,
     },
     ConnectTo {
@@ -222,6 +252,37 @@ impl WhisperHandle {
                 payload,
                 reply,
             })
+            .await
+            .map_err(|_| n0_error::anyerr!("whisper actor dropped"))?;
+        rx.await
+            .map_err(|_| n0_error::anyerr!("whisper reply dropped"))?
+    }
+
+    /// Send an encrypted mailbox envelope after a Whisper session is live.
+    /// The transport never decrypts or acknowledges the envelope.
+    pub async fn send_mailbox_envelope(
+        &self,
+        peer: PublicKey,
+        envelope: MailboxEnvelope,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::SendMailboxEnvelope {
+                peer,
+                envelope,
+                reply,
+            })
+            .await
+            .map_err(|_| n0_error::anyerr!("whisper actor dropped"))?;
+        rx.await
+            .map_err(|_| n0_error::anyerr!("whisper reply dropped"))?
+    }
+
+    /// Send a signed acknowledgement for an accepted mailbox envelope.
+    pub async fn send_mailbox_ack(&self, peer: PublicKey, ack: MailboxAck) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::SendMailboxAck { peer, ack, reply })
             .await
             .map_err(|_| n0_error::anyerr!("whisper actor dropped"))?;
         rx.await
@@ -411,6 +472,18 @@ async fn run_actor(
                         ).await;
                         let _ = reply.send(result);
                     }
+                    Some(Cmd::SendMailboxEnvelope { peer, envelope, reply }) => {
+                        let result = send_mailbox_envelope(
+                            &endpoint, &peer, envelope, &connected, &msg_tx,
+                        ).await;
+                        let _ = reply.send(result);
+                    }
+                    Some(Cmd::SendMailboxAck { peer, ack, reply }) => {
+                        let result = send_mailbox_ack(
+                            &endpoint, &peer, ack, &connected, &msg_tx,
+                        ).await;
+                        let _ = reply.send(result);
+                    }
                     Some(Cmd::ConnectTo { peer, addr, reply }) => {
                         let result = connect_to_peer(
                             &endpoint, peer, addr, &connected, &event_tx, &msg_tx,
@@ -466,6 +539,18 @@ async fn run_actor(
                                 let _ = event_tx.send(WhisperEvent::Control {
                                     from,
                                     content: Bytes::from(payload),
+                                });
+                            }
+                            Ok(WhisperWireMessage::MailboxEnvelope { envelope }) => {
+                                let _ = event_tx.send(WhisperEvent::MailboxEnvelope {
+                                    from,
+                                    envelope,
+                                });
+                            }
+                            Ok(WhisperWireMessage::MailboxAck { ack }) => {
+                                let _ = event_tx.send(WhisperEvent::MailboxAck {
+                                    from,
+                                    ack,
                                 });
                             }
                             Err(_) => {
@@ -662,6 +747,30 @@ async fn send_control_message(
     .await
 }
 
+async fn send_mailbox_envelope(
+    endpoint: &Endpoint,
+    peer: &PublicKey,
+    envelope: MailboxEnvelope,
+    connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
+    msg_tx: &mpsc::UnboundedSender<ConnectionEvent>,
+) -> Result<()> {
+    let (dummy_tx, _) = mpsc::unbounded_channel();
+    let conn = get_or_connect(endpoint, peer, connected, &dummy_tx, msg_tx).await?;
+    write_framed_message(&conn, &WhisperWireMessage::MailboxEnvelope { envelope }).await
+}
+
+async fn send_mailbox_ack(
+    endpoint: &Endpoint,
+    peer: &PublicKey,
+    ack: MailboxAck,
+    connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
+    msg_tx: &mpsc::UnboundedSender<ConnectionEvent>,
+) -> Result<()> {
+    let (dummy_tx, _) = mpsc::unbounded_channel();
+    let conn = get_or_connect(endpoint, peer, connected, &dummy_tx, msg_tx).await?;
+    write_framed_message(&conn, &WhisperWireMessage::MailboxAck { ack }).await
+}
+
 // ── Connection reader ──────────────────────────────────────────────────────────
 
 /// Read framed messages from a connection and send them to the actor.
@@ -723,6 +832,7 @@ async fn read_connection_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mailbox::MailboxIdentity;
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
     use n0_future::time::{sleep, Duration};
@@ -892,6 +1002,46 @@ mod tests {
             }
         };
         assert!(b_got_file, "B should receive a file transfer notification");
+
+        router_a.shutdown().await.unwrap();
+        router_b.shutdown().await.unwrap();
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[n0_tracing_test::traced_test]
+    async fn test_whisper_mailbox_envelope_and_ack_roundtrip() -> Result<()> {
+        let (router_a, ep_a, sk_a, handle_a, _events_a) = create_node().await?;
+        let (router_b, ep_b, sk_b, handle_b, mut events_b) = create_node().await?;
+        let peer_a = ep_a.secret_key().public();
+        let peer_b = ep_b.secret_key().public();
+        handle_a.set_peer_authorized(peer_b, true);
+        handle_b.set_peer_authorized(peer_a, true);
+        handle_a.connect_to(peer_b, ep_b.addr()).await?;
+        sleep(Duration::from_millis(200)).await;
+
+        let identity_b = MailboxIdentity::from_secret(&sk_b);
+        let envelope = identity_b.seal(&sk_a, b"offline hello")?;
+        let message_id = envelope.message_id();
+        handle_a.send_mailbox_envelope(peer_b, envelope).await?;
+
+        let received = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(WhisperEvent::MailboxEnvelope { from, envelope }) =
+                    events_b.recv().await
+                {
+                    assert_eq!(from, peer_a);
+                    assert_eq!(envelope.open(&sk_b).unwrap(), b"offline hello");
+                    break envelope;
+                }
+            }
+        })
+        .await
+        .map_err(|_| n0_error::anyerr!("mailbox envelope timed out"))?;
+        handle_b
+            .send_mailbox_ack(peer_a, MailboxAck::sign(&sk_b, received.message_id()))
+            .await?;
+        assert_eq!(received.message_id(), message_id);
 
         router_a.shutdown().await.unwrap();
         router_b.shutdown().await.unwrap();

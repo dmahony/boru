@@ -548,22 +548,28 @@ async fn main() -> Result<()> {
     // inbound joins — don't call subscribe_and_join which blocks on joined().
     let sub = if peer_ids.is_empty() {
         tracing::info!("waiting for peers to join us");
-        gossip.subscribe(topic, peer_ids).await
+        gossip.subscribe(topic, peer_ids.clone()).await
     } else {
         tracing::info!(count = addr_material.len(), "trying to connect to peers");
-        tokio::time::timeout(Duration::from_secs(30), async {
-            gossip.subscribe_and_join(topic, peer_ids).await
+        let timeout_result = tokio::time::timeout(Duration::from_secs(30), async {
+            gossip.subscribe_and_join(topic, peer_ids.clone()).await
         })
-        .await
-        .map_err(|_| {
-            bail_any!(
-                "timed out after 30s waiting for bootstrap peer(s) — \
-                 the ticket or saved addresses may be stale; the room is \
-                 still subscribed, so any peer that connects later will work"
-            )
-        })?
-    }
-    .map_err(|e| bail_any!("failed to join gossip topic: {e}"))?;
+        .await;
+        match timeout_result {
+            Ok(result) => result,
+            Err(_) => {
+                bail_any!(
+                    "timed out after 30s waiting for bootstrap peer(s) — \
+                     the ticket or saved addresses may be stale; the room is \
+                     still subscribed, so any peer that connects later will work"
+                )
+            }
+        }
+    };
+    let sub = match sub {
+        Ok(topic) => topic,
+        Err(e) => bail_any!("failed to join gossip topic: {e}"),
+    };
     let (sender, receiver) = sub.split();
     tracing::info!("connected");
 
@@ -755,11 +761,12 @@ async fn main() -> Result<()> {
         .iter()
         .filter_map(|(id, _)| id.parse_public_key().ok())
     {
-        let addr = app
+        let addrs = app
             .friends
             .get(&FriendId::from_public_key(peer))
-            .and_then(|record| record.known_addrs.first().cloned());
-        let _ = friend_mgr.add_friend(peer, addr).await;
+            .map(|record| record.known_addrs.clone())
+            .unwrap_or_default();
+        let _ = friend_mgr.add_friend_addrs(peer, addrs).await;
     }
 
     let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2044,6 +2051,19 @@ fn handle_whisper_event(event: WhisperEvent, app: &mut AppState) {
                 .unwrap_or_else(|| peer.fmt_short().to_string());
             app.push_system(format!("[Whisper] Disconnected from {label}"));
         }
+        WhisperEvent::Control { .. } => {
+            // Control messages are signed contact-protocol payloads consumed
+            // by the contact/session manager.  The simple CLI chat doesn't
+            // process them.
+        }
+        WhisperEvent::MailboxEnvelope { .. } => {
+            // Mailbox envelopes are encrypted and processed by the mailbox
+            // store — the simple CLI chat does not interpret them.
+        }
+        WhisperEvent::MailboxAck { .. } => {
+            // Mailbox acknowledgements are verified and removed by the
+            // mailbox store — the simple CLI chat does not interpret them.
+        }
     }
 }
 
@@ -2091,6 +2111,12 @@ fn handle_friend_event(event: FriendEvent, app: &mut AppState) {
                     // No transition to display for Unknown
                 }
             }
+        }
+        FriendEvent::AddressUpdated { peer, addr } => {
+            app.friends
+                .ensure_friend(FriendId::from_public_key(peer))
+                .record_addrs([addr]);
+            app.friends_dirty = true;
         }
     }
 }
@@ -2231,7 +2257,12 @@ fn entry_to_line(entry: &ChatEntry) -> Vec<Line<'static>> {
         .map(|ms| format_epoch_ms_utc(ms))
         .unwrap_or_default();
     let label = if matches!(entry.kind, ChatKind::Local) && entry.event_id > 0 {
-        format!("[{} {}]{}", entry.label, entry.delivery_state.display_icon(), time_tag)
+        format!(
+            "[{} {}]{}",
+            entry.label,
+            entry.delivery_state.display_icon(),
+            time_tag
+        )
     } else {
         format!("[{}]{}", entry.label, time_tag)
     };

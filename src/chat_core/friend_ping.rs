@@ -71,6 +71,13 @@ pub enum FriendEvent {
         /// The new status.
         status: FriendStatus,
     },
+    /// A connection succeeded using a fresh transport address.
+    AddressUpdated {
+        /// The peer whose address was refreshed.
+        peer: PublicKey,
+        /// The address that succeeded.
+        addr: EndpointAddr,
+    },
 }
 
 // ── Internal commands ──────────────────────────────────────────────────────────
@@ -79,6 +86,11 @@ enum Cmd {
     AddFriend {
         peer: PublicKey,
         addr: Option<EndpointAddr>,
+        reply: oneshot::Sender<bool>,
+    },
+    AddFriendAddrs {
+        peer: PublicKey,
+        addrs: Vec<EndpointAddr>,
         reply: oneshot::Sender<bool>,
     },
     RemoveFriend {
@@ -176,6 +188,20 @@ impl FriendPingManager {
             .map_err(|_| n0_error::anyerr!("friend ping actor dropped reply channel"))
     }
 
+    /// Add a friend using all persisted address candidates.
+    pub async fn add_friend_addrs(
+        &self,
+        peer: PublicKey,
+        addrs: Vec<EndpointAddr>,
+    ) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::AddFriendAddrs { peer, addrs, reply })
+            .map_err(|_| n0_error::anyerr!("friend ping actor stopped"))?;
+        rx.await
+            .map_err(|_| n0_error::anyerr!("friend ping actor dropped reply channel"))
+    }
+
     /// Remove a friend from tracking.
     ///
     /// Returns `true` if the friend was being tracked, `false` otherwise.
@@ -224,14 +250,14 @@ impl FriendPingManager {
 #[derive(Debug)]
 struct FriendState {
     status: FriendStatus,
-    addr: Option<EndpointAddr>,
+    addrs: Vec<EndpointAddr>,
 }
 
 impl FriendState {
     fn new(addr: Option<EndpointAddr>) -> Self {
         Self {
             status: FriendStatus::Unknown,
-            addr,
+            addrs: addr.into_iter().collect(),
         }
     }
 }
@@ -264,6 +290,14 @@ impl FriendPingActor {
                             let already_present = self.friends.contains_key(&peer);
                             if !already_present {
                                 self.friends.insert(peer, FriendState::new(addr));
+                                trace!(%peer, "added friend for ping tracking");
+                            }
+                            let _ = reply.send(!already_present);
+                        }
+                        Cmd::AddFriendAddrs { peer, addrs, reply } => {
+                            let already_present = self.friends.contains_key(&peer);
+                            if !already_present {
+                                self.friends.insert(peer, FriendState { status: FriendStatus::Unknown, addrs });
                                 trace!(%peer, "added friend for ping tracking");
                             }
                             let _ = reply.send(!already_present);
@@ -311,7 +345,7 @@ impl FriendPingActor {
             }
         };
 
-        let connected = self.try_connect(peer, &addrs).await;
+        let (connected, successful_addr) = self.try_connect(peer, &addrs).await;
 
         let new_status = if connected {
             FriendStatus::Online
@@ -331,71 +365,88 @@ impl FriendPingActor {
                 });
             }
             state.status = new_status;
+            if let Some(addr) = successful_addr.filter(|addr| !addr.addrs.is_empty()) {
+                let changed = state.addrs.first() != Some(&addr);
+                state.addrs.retain(|old| old != &addr);
+                state.addrs.insert(0, addr.clone());
+                if changed {
+                    let _ = self
+                        .event_tx
+                        .send(FriendEvent::AddressUpdated { peer, addr });
+                }
+            }
         }
     }
 
     /// Try to resolve address information for a peer.
     async fn resolve_addrs(&self, peer: PublicKey) -> Option<EndpointAddr> {
-        // 1. Use a cached address if available.
-        if let Some(state) = self.friends.get(&peer) {
-            if state.addr.is_some() {
-                return state.addr.clone();
+        let mut candidates = self
+            .friends
+            .get(&peer)
+            .map(|state| state.addrs.clone())
+            .unwrap_or_default();
+        if let Some(info) = self.endpoint.remote_info(peer).await {
+            let addr = EndpointAddr {
+                id: peer,
+                addrs: info
+                    .addrs()
+                    .map(|a| a.addr().clone())
+                    .collect::<BTreeSet<_>>(),
+            };
+            if !addr.addrs.is_empty() && !candidates.contains(&addr) {
+                candidates.push(addr);
             }
         }
-
-        // 2. Try to discover addresses from the local endpoint's remote info.
-        let info = self.endpoint.remote_info(peer).await?;
-        let transport_addrs: BTreeSet<_> = info.addrs().map(|a| a.addr().clone()).collect();
-
-        if transport_addrs.is_empty() {
-            return None;
-        }
-
+        // ID-only resolution delegates to configured DNS/Pkarr, mDNS, DHT,
+        // gossip lookup, and relay-aware discovery after cached candidates.
+        candidates.push(EndpointAddr::new(peer));
         Some(EndpointAddr {
             id: peer,
-            addrs: transport_addrs,
+            addrs: candidates.into_iter().flat_map(|addr| addr.addrs).collect(),
         })
     }
 
     /// Try to connect to the peer and report success/failure.
-    async fn try_connect(&self, peer: PublicKey, addrs: &EndpointAddr) -> bool {
-        if addrs.addrs.is_empty() {
-            return false;
-        }
-
-        // Wrap the connect call with a global timeout so we don't hang on misbehaving peers.
-        let connect_fut =
-            self.endpoint
-                .connect_with_opts(addrs.clone(), FRIEND_PING_ALPN, Default::default());
-
-        match tokio::time::timeout(self.connect_timeout, connect_fut).await {
-            Ok(Ok(connecting)) => {
-                // Wait for the handshake to complete (with the same timeout).
-                match tokio::time::timeout(self.connect_timeout, connecting).await {
-                    Ok(Ok(conn)) => {
-                        // Connection established — close it immediately.
-                        conn.close(0u32.into(), b"ping");
-                        true
-                    }
-                    Ok(Err(err)) => {
-                        trace!(%peer, "ping handshake failed: {err:#}");
-                        false
-                    }
-                    Err(_) => {
-                        trace!(%peer, "ping handshake timed out");
-                        false
+    async fn try_connect(
+        &self,
+        peer: PublicKey,
+        addrs: &EndpointAddr,
+    ) -> (bool, Option<EndpointAddr>) {
+        let mut candidates: Vec<_> = if addrs.addrs.is_empty() {
+            vec![EndpointAddr::new(peer)]
+        } else {
+            addrs
+                .addrs
+                .iter()
+                .cloned()
+                .map(|transport| EndpointAddr::from_parts(peer, [transport]))
+                .collect()
+        };
+        // Always try the configured lookup chain after cached transports.
+        candidates.push(EndpointAddr::new(peer));
+        let attempt_timeout = self.connect_timeout.min(Duration::from_millis(750));
+        for candidate in candidates {
+            let connect_fut = self.endpoint.connect_with_opts(
+                candidate.clone(),
+                FRIEND_PING_ALPN,
+                Default::default(),
+            );
+            match tokio::time::timeout(attempt_timeout, connect_fut).await {
+                Ok(Ok(connecting)) => {
+                    match tokio::time::timeout(attempt_timeout, connecting).await {
+                        Ok(Ok(conn)) => {
+                            conn.close(0u32.into(), b"ping");
+                            return (true, Some(candidate));
+                        }
+                        Ok(Err(err)) => trace!(%peer, "ping handshake failed: {err:#}"),
+                        Err(_) => trace!(%peer, "ping handshake timed out"),
                     }
                 }
-            }
-            Ok(Err(err)) => {
-                trace!(%peer, "ping connect_with_opts failed: {err:#}");
-                false
-            }
-            Err(_) => {
-                trace!(%peer, "ping connect_with_opts timed out");
-                false
+                Ok(Err(err)) => trace!(%peer, "ping connect_with_opts failed: {err:#}"),
+                Err(_) => trace!(%peer, "ping connect_with_opts timed out"),
             }
         }
+        (false, None)
     }
 }
 
@@ -593,14 +644,14 @@ mod tests {
         let peer = SecretKey::generate().public();
         mgr.add_friend(peer, None).await?;
 
-        // Wait for ping — since no addresses are known, status stays Unknown.
+        // With ID-only lookup fallback, an unknown peer is actively probed
+        // and becomes Offline when no discovery source resolves it.
         tokio::time::sleep(Duration::from_millis(300)).await;
-
         let status = mgr.friend_status(&peer).await?;
         assert_eq!(
             status,
-            Some(FriendStatus::Unknown),
-            "peer with no addresses should remain Unknown"
+            Some(FriendStatus::Offline),
+            "unreachable unknown peer should be Offline after lookup fallback"
         );
 
         Ok(())
@@ -693,6 +744,7 @@ mod tests {
                     "first-scan event should report Online"
                 );
             }
+            FriendEvent::AddressUpdated { .. } => {}
         }
 
         // Drop the router and endpoint so the peer becomes unreachable.
@@ -717,6 +769,7 @@ mod tests {
                     "event should report Offline after peer disappears"
                 );
             }
+            FriendEvent::AddressUpdated { .. } => {}
         }
 
         Ok(())
@@ -766,6 +819,7 @@ mod tests {
                     "event should report Offline for unreachable peer"
                 );
             }
+            FriendEvent::AddressUpdated { .. } => {}
         }
 
         Ok(())
@@ -802,10 +856,9 @@ mod tests {
         assert!(keys.contains(&p3));
 
         for (_key, status) in &list {
-            assert_eq!(
-                *status,
-                FriendStatus::Unknown,
-                "all friends should be Unknown before any ping"
+            assert!(
+                matches!(*status, FriendStatus::Unknown | FriendStatus::Offline),
+                "friends begin Unknown and transition to Offline through lookup"
             );
         }
 

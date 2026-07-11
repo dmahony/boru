@@ -23,10 +23,10 @@ use iroh_gossip::chat_core::{
     handle_net_event as chat_net_event, message_hash, seed_memory_lookup, MeshHealth, MessageHash,
 };
 use iroh_gossip::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
-use iroh_gossip::outbox::{OutboxEntry, OutboxStore};
 use iroh_gossip::contact::{direct_topic, ContactAction, SignedContactMessage};
 use iroh_gossip::friends::{DirectConversationState, FriendId, FriendsStore};
 use iroh_gossip::net::Gossip;
+use iroh_gossip::outbox::{OutboxEntry, OutboxStore};
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_docs::{self, RoomMetadata};
@@ -751,7 +751,9 @@ impl IcedChat {
             notice,
             data_dir: data_dir.clone(),
             chat_history,
-            outbox: Arc::new(std::sync::Mutex::new(OutboxStore::load_or_default(&data_dir))),
+            outbox: Arc::new(std::sync::Mutex::new(OutboxStore::load_or_default(
+                &data_dir,
+            ))),
             chat_history_dirty: false,
             history_saved_count: 0,
             friend_online_cache,
@@ -1247,7 +1249,8 @@ impl IcedChat {
                         // peers (room creator) use subscribe() so we don't hang.
                         // Stale bootstrap peers are protected by a 30s timeout
                         // to avoid blocking the UI indefinitely.
-                        let sub: GossipTopic = if direct_conversation || bootstrap_peers.is_empty() {
+                        let sub: GossipTopic = if direct_conversation || bootstrap_peers.is_empty()
+                        {
                             gossip
                                 .subscribe(topic, bootstrap_peers)
                                 .await
@@ -1464,8 +1467,16 @@ impl IcedChat {
                     let sender = sender.clone();
                     let ids = replay.iter().map(|(id, _)| *id).collect::<Vec<_>>();
                     for id in &ids {
-                        let _ = self.outbox.lock().unwrap().update_delivery_state(*id, DeliveryState::Sent);
-                        let _ = self.chat_history.lock().unwrap().update_delivery_state(*id, DeliveryState::Sent);
+                        let _ = self
+                            .outbox
+                            .lock()
+                            .unwrap()
+                            .update_delivery_state(*id, DeliveryState::Sent);
+                        let _ = self
+                            .chat_history
+                            .lock()
+                            .unwrap()
+                            .update_delivery_state(*id, DeliveryState::Sent);
                     }
                     let _ = self.outbox.lock().unwrap().save();
                     let _ = self.chat_history.lock().unwrap().save();
@@ -3339,7 +3350,9 @@ impl IcedChat {
                 }
             }
             FriendEvent::AddressUpdated { peer, addr } => {
-                self.friends.ensure_friend(FriendId::from_public_key(peer)).record_addrs([addr]);
+                self.friends
+                    .ensure_friend(FriendId::from_public_key(peer))
+                    .record_addrs([addr]);
                 self.friends_dirty = true;
             }
         }
