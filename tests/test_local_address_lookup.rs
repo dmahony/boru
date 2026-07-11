@@ -368,6 +368,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         &sk_a,
         &Message::AboutMe {
             name: "Alice".into(),
+            profile_image_ticket: None,
         },
     )?;
     sender_a.broadcast(about_a).await?;
@@ -382,7 +383,13 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
     task::spawn(forward_gossip_events(receiver_b, net_tx_b));
 
-    let about_b = SignedMessage::sign_and_encode(&sk_b, &Message::AboutMe { name: "Bob".into() })?;
+    let about_b = SignedMessage::sign_and_encode(
+        &sk_b,
+        &Message::AboutMe {
+            name: "Bob".into(),
+            profile_image_ticket: None,
+        },
+    )?;
     sender_b.broadcast(about_b).await?;
 
     // Wait for neighborhood formation
@@ -408,6 +415,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         }
         fn push_remote(
             &mut self,
+            _peer: iroh::PublicKey,
             label: String,
             text: String,
             _hash: Option<iroh_gossip::chat_core::MessageHash>,

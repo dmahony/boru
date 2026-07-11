@@ -55,6 +55,7 @@ impl ChatCallbacks for TestPeer {
     }
     fn push_remote(
         &mut self,
+        _peer: PublicKey,
         label: String,
         text: String,
         _hash: Option<MessageHash>,
@@ -145,6 +146,7 @@ async fn repro_two_peers_different_keys() -> Result<()> {
         &sk_a,
         &Message::AboutMe {
             name: "Alice".into(),
+            profile_image_ticket: None,
         },
     )
     .unwrap();
@@ -164,8 +166,14 @@ async fn repro_two_peers_different_keys() -> Result<()> {
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
     task::spawn(forward_gossip_events(receiver_b, net_tx_b));
 
-    let about_me_b =
-        SignedMessage::sign_and_encode(&sk_b, &Message::AboutMe { name: "Bob".into() }).unwrap();
+    let about_me_b = SignedMessage::sign_and_encode(
+        &sk_b,
+        &Message::AboutMe {
+            name: "Bob".into(),
+            profile_image_ticket: None,
+        },
+    )
+    .unwrap();
     sender_b.broadcast(about_me_b).await?;
 
     // Wait for connection
@@ -327,6 +335,7 @@ async fn repro_two_peers_same_key() -> Result<()> {
         &shared_sk,
         &Message::AboutMe {
             name: "Alice".into(),
+            profile_image_ticket: None,
         },
     )
     .unwrap();
@@ -340,9 +349,14 @@ async fn repro_two_peers_same_key() -> Result<()> {
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
     task::spawn(forward_gossip_events(receiver_b, net_tx_b));
 
-    let about_me_b =
-        SignedMessage::sign_and_encode(&shared_sk, &Message::AboutMe { name: "Bob".into() })
-            .unwrap();
+    let about_me_b = SignedMessage::sign_and_encode(
+        &shared_sk,
+        &Message::AboutMe {
+            name: "Bob".into(),
+            profile_image_ticket: None,
+        },
+    )
+    .unwrap();
     sender_b.broadcast(about_me_b).await?;
 
     // Wait and see what happens

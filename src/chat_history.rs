@@ -187,6 +187,10 @@ pub struct HistoryEntry {
     /// Current delivery state of this message.
     #[serde(default)]
     pub delivery_state: DeliveryState,
+    /// Decoded image bytes for inline rendering, if this is an image message.
+    /// Stored so images persist when switching rooms within the same session.
+    #[serde(default)]
+    pub image_bytes: Option<Vec<u8>>,
 }
 
 impl HistoryEntry {
@@ -214,6 +218,7 @@ impl HistoryEntry {
             text_preview: text_preview.into(),
             signed_bytes,
             delivery_state: DeliveryState::Queued,
+            image_bytes: None,
         }
     }
 

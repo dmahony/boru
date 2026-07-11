@@ -57,6 +57,7 @@ impl ChatCallbacks for SimChat {
     }
     fn push_remote(
         &mut self,
+        _peer: PublicKey,
         label: String,
         text: String,
         _hash: Option<MessageHash>,
@@ -146,6 +147,7 @@ async fn test_full_chat_list_flow() -> Result<()> {
         &sk_a,
         &Message::AboutMe {
             name: "Alice".into(),
+            profile_image_ticket: None,
         },
     )
     .unwrap();
@@ -184,8 +186,14 @@ async fn test_full_chat_list_flow() -> Result<()> {
     let net_rx_b = Arc::new(tokio::sync::Mutex::new(net_rx_b));
     task::spawn(forward_gossip_events(receiver_b, net_tx_b));
 
-    let am_b =
-        SignedMessage::sign_and_encode(&sk_b, &Message::AboutMe { name: "Bob".into() }).unwrap();
+    let am_b = SignedMessage::sign_and_encode(
+        &sk_b,
+        &Message::AboutMe {
+            name: "Bob".into(),
+            profile_image_ticket: None,
+        },
+    )
+    .unwrap();
     sender_b.broadcast(am_b).await?;
     println!("  B subscribed and broadcast AboutMe");
 

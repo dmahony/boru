@@ -541,7 +541,6 @@ mod tests {
         }
         // We broke out of the loop above only on Disconnected.
 
-
         // Now feed a Connected event — this simulates a successful connection.
         mgr.notice_whisper_event(WhisperEvent::Connected { peer })
             .await;

@@ -52,6 +52,7 @@ impl ChatCallbacks for TestChat {
     }
     fn push_remote(
         &mut self,
+        _peer: PublicKey,
         label: String,
         text: String,
         _hash: Option<MessageHash>,
@@ -136,6 +137,7 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
         &sk_a,
         &Message::AboutMe {
             name: "Alice".into(),
+            profile_image_ticket: None,
         },
     )
     .unwrap();
@@ -150,8 +152,14 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
     task::spawn(forward_gossip_events(receiver_b, net_tx_b));
 
-    let about_me_b =
-        SignedMessage::sign_and_encode(&sk_b, &Message::AboutMe { name: "Bob".into() }).unwrap();
+    let about_me_b = SignedMessage::sign_and_encode(
+        &sk_b,
+        &Message::AboutMe {
+            name: "Bob".into(),
+            profile_image_ticket: None,
+        },
+    )
+    .unwrap();
     sender_b.broadcast(about_me_b).await?;
 
     // ── Wait for both to connect ──

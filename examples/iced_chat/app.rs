@@ -14,15 +14,15 @@ use iroh::{
     address_lookup::memory::MemoryLookup, EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket};
-use iroh_gossip::api::GossipSender;
+use iroh_gossip::api::{GossipSender, GossipTopic};
 use iroh_gossip::backfill::BackfillHandle;
 use iroh_gossip::chat_callbacks::ChatCallbacks;
 use iroh_gossip::chat_core::{
     collect_bootstrap_peers, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
-    handle_net_event as chat_net_event, seed_memory_lookup, MeshHealth, MessageHash,
+    handle_net_event as chat_net_event, message_hash, seed_memory_lookup, MeshHealth, MessageHash,
 };
-use iroh_gossip::chat_history::{ChatHistoryStore, HistoryEntry};
+use iroh_gossip::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendsStore};
 use iroh_gossip::net::Gossip;
 use iroh_gossip::proto::TopicId;
@@ -322,6 +322,12 @@ struct ChatEntry {
     /// Unix epoch milliseconds when this message was sent (protocol sent_at
     /// for remote messages, local creation time for system/local messages).
     timestamp: Option<i64>,
+    /// Stable event id for delivery state tracking (0 = unassigned).
+    event_id: u64,
+    /// Current delivery state of this message (only meaningful for Local kind).
+    delivery_state: DeliveryState,
+    /// PublicKey of the sender (None for local/system messages).
+    sender_key: Option<PublicKey>,
 }
 
 impl ChatEntry {
@@ -337,6 +343,9 @@ impl ChatEntry {
             image_bytes: None,
             image_handle: None,
             timestamp: Some(now_ms()),
+            event_id: 0,
+            delivery_state: DeliveryState::default(),
+            sender_key: None,
         }
     }
     fn local(label: impl Into<String>, text: impl Into<String>) -> Self {
@@ -351,6 +360,9 @@ impl ChatEntry {
             image_bytes: None,
             image_handle: None,
             timestamp: Some(now_ms()),
+            event_id: 0,
+            delivery_state: DeliveryState::default(),
+            sender_key: None,
         }
     }
     fn remote(
@@ -358,6 +370,7 @@ impl ChatEntry {
         text: impl Into<String>,
         hash: Option<MessageHash>,
         sent_at_secs: Option<u64>,
+        sender: Option<PublicKey>,
     ) -> Self {
         let body = text.into();
         Self {
@@ -370,6 +383,9 @@ impl ChatEntry {
             image_bytes: None,
             image_handle: None,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
+            event_id: 0,
+            delivery_state: DeliveryState::default(),
+            sender_key: sender,
         }
     }
     fn image(
@@ -378,6 +394,7 @@ impl ChatEntry {
         image_bytes: Vec<u8>,
         hash: Option<MessageHash>,
         sent_at_secs: Option<u64>,
+        sender: Option<PublicKey>,
     ) -> Self {
         let body_str = body.into();
         let handle = iced::widget::image::Handle::from_bytes(image_bytes.clone());
@@ -391,6 +408,9 @@ impl ChatEntry {
             image_bytes: Some(image_bytes),
             image_handle: Some(handle),
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
+            event_id: 0,
+            delivery_state: DeliveryState::default(),
+            sender_key: sender,
         }
     }
 }
@@ -482,6 +502,8 @@ pub struct IcedChat {
     /// Counter for periodic invisible keepalive heartbeat (decremented per
     /// ConnMonitorTick, broadcasts Message::Heartbeat when it hits 0, resets to 2).
     heartbeat_counter: u32,
+    /// Maps protocol message hashes to event_ids for delivery state resolution.
+    self_sent_events: HashMap<MessageHash, u64>,
     /// Optional receiver for Tor reconnection status updates.
     tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
     /// Whether to auto-scroll to the latest message.
@@ -516,6 +538,13 @@ pub struct IcedChat {
     pub whisper_events_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
     /// Locally selected profile image, persisted below the application data directory.
     profile_image_handle: Option<iced::widget::image::Handle>,
+    /// Ticket for the locally selected profile image, for broadcasting to peers.
+    profile_image_ticket: Option<String>,
+    /// Cached profile image handles for remote peers, keyed by PublicKey.
+    /// `None` means the peer announced a ticket but the blob hasn't been downloaded yet.
+    friend_image_handles: HashMap<PublicKey, Option<iced::widget::image::Handle>>,
+    /// Pending profile image ticket that arrived via AboutMe, awaiting async download.
+    pending_profile_image_ticket: Option<(PublicKey, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -554,7 +583,7 @@ pub enum AppMessage {
     FriendEvent(FriendEvent),
     /// An event from the whisper (DM) protocol.
     WhisperEvent(WhisperEvent),
-    MessageSent(String),
+    MessageSent(String, u64, MessageHash),
     FileSent(String),
     DownloadDone(String),
     ErrorMsg(String),
@@ -601,8 +630,13 @@ pub enum AppMessage {
     PickProfileImage,
     /// Result of reading the selected profile image.
     ProfileImagePicked(Result<Vec<u8>, String>),
+    /// The profile image was uploaded to the local blob store; carries the
+    /// BlobTicket string peers use to download it.
+    ProfileImageUploaded(String),
     /// Remove the currently configured profile image.
     RemoveProfileImage,
+    /// A remote peer's profile image blob was downloaded and decoded.
+    ProfileImageDownloaded(PublicKey, Vec<u8>),
     /// User requested to clear chat history — show confirmation.
     ClearHistoryRequested,
     /// User confirmed the clear history action.
@@ -695,6 +729,7 @@ impl IcedChat {
             last_mesh_health: None,
             presence_counter: 5,
             heartbeat_counter: 2,
+            self_sent_events: HashMap::new(),
             tor_reconnect_rx,
             follow_latest: true,
             dark_mode: false,
@@ -711,6 +746,9 @@ impl IcedChat {
             whisper_handle,
             whisper_events_rx,
             profile_image_handle,
+            profile_image_ticket: None,
+            friend_image_handles: HashMap::new(),
+            pending_profile_image_ticket: None,
         }
     }
 
@@ -782,7 +820,7 @@ impl IcedChat {
             AppMessage::NetEvent(_) => "NetEvent",
             AppMessage::FriendEvent(_) => "FriendEvent",
             AppMessage::WhisperEvent(_) => "WhisperEvent",
-            AppMessage::MessageSent(_) => "MessageSent",
+            AppMessage::MessageSent(..) => "MessageSent",
             AppMessage::FileSent(_) => "FileSent",
             AppMessage::DownloadDone(_) => "DownloadDone",
             AppMessage::ErrorMsg(_) => "ErrorMsg",
@@ -806,7 +844,9 @@ impl IcedChat {
             AppMessage::ToggleSound(_) => "ToggleSound",
             AppMessage::PickProfileImage => "PickProfileImage",
             AppMessage::ProfileImagePicked(_) => "ProfileImagePicked",
+            AppMessage::ProfileImageUploaded(_) => "ProfileImageUploaded",
             AppMessage::RemoveProfileImage => "RemoveProfileImage",
+            AppMessage::ProfileImageDownloaded(..) => "ProfileImageDownloaded",
             AppMessage::ClearHistoryRequested => "ClearHistoryRequested",
             AppMessage::ConfirmClearHistory => "ConfirmClearHistory",
         }
@@ -845,21 +885,26 @@ impl IcedChat {
         for entry in &self.entries[self.history_saved_count..] {
             let kind = match entry.kind {
                 ChatKind::System => "system",
-                ChatKind::Local => "text",
-                ChatKind::Remote => "text",
+                _ if entry.image_bytes.is_some() => "image",
+                _ => "text",
             };
             let body_text = entry.body.clone();
             let sender = match entry.kind {
                 ChatKind::Local => hex::encode(self.local_public.as_bytes()),
                 _ => String::new(),
             };
-            let history_entry = HistoryEntry::new(
+            let mut history_entry = HistoryEntry::new(
                 topic,
                 sender,
                 Vec::new(), // signed bytes not available here
                 kind,
                 body_text,
             );
+            // Preserve image bytes so images render when replaying after
+            // room switch within the same session.
+            if let Some(ref img_bytes) = entry.image_bytes {
+                history_entry.image_bytes = Some(img_bytes.clone());
+            }
             self.chat_history.lock().unwrap().push(history_entry);
         }
         self.history_saved_count = current_count;
@@ -1080,6 +1125,7 @@ impl IcedChat {
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
                 let endpoint = self.endpoint.clone();
+                let profile_image_ticket = self.profile_image_ticket.clone();
 
                 iced::Task::perform(
                     async move {
@@ -1133,7 +1179,10 @@ impl IcedChat {
                         // handled by ConnMonitorTick).
                         let msg = SignedMessage::sign_and_encode(
                             &sk,
-                            &crate::Message::AboutMe { name: label },
+                            &crate::Message::AboutMe {
+                                name: label,
+                                profile_image_ticket: profile_image_ticket,
+                            },
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
@@ -1200,6 +1249,7 @@ impl IcedChat {
                 let endpoint = self.endpoint.clone();
                 let memory_lookup = self.memory_lookup.clone();
                 let data_dir = self.data_dir.clone();
+                let profile_image_ticket = self.profile_image_ticket.clone();
                 // Extract bootstrap peer addresses from the one-shot initial room
                 // or from the saved RoomStore for this topic.
                 let initial_addrs: Vec<EndpointAddr> =
@@ -1222,12 +1272,27 @@ impl IcedChat {
                         // Wait for at least one gossip neighbor if we have bootstrap
                         // peers — matching the TUI behavior.  Without bootstrap
                         // peers (room creator) use subscribe() so we don't hang.
-                        let sub = if bootstrap_peers.is_empty() {
-                            gossip.subscribe(topic, bootstrap_peers).await
+                        // Stale bootstrap peers are protected by a 30s timeout
+                        // to avoid blocking the UI indefinitely.
+                        let sub: GossipTopic = if bootstrap_peers.is_empty() {
+                            gossip
+                                .subscribe(topic, bootstrap_peers)
+                                .await
+                                .map_err(|e| e.to_string())?
                         } else {
-                            gossip.subscribe_and_join(topic, bootstrap_peers).await
-                        }
-                        .map_err(|e| e.to_string())?;
+                            tokio::time::timeout(Duration::from_secs(30), async {
+                                gossip.subscribe_and_join(topic, bootstrap_peers).await
+                            })
+                            .await
+                            .map_err(|_| {
+                                "timed out waiting for a peer to join the room — \
+                                 the saved addresses may be stale; the room is \
+                                 still subscribed, so any peer that connects \
+                                 later will work"
+                                    .to_string()
+                            })?
+                            .map_err(|e| e.to_string())?
+                        };
                         let (sender, receiver) = sub.split();
                         let local_peer_addr = endpoint.watch_addr().get();
                         let ticket_str = Ticket {
@@ -1273,7 +1338,10 @@ impl IcedChat {
                         // handled by ConnMonitorTick).
                         let msg = SignedMessage::sign_and_encode(
                             &sk,
-                            &crate::Message::AboutMe { name: label },
+                            &crate::Message::AboutMe {
+                                name: label,
+                                profile_image_ticket: profile_image_ticket,
+                            },
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
@@ -1344,30 +1412,59 @@ impl IcedChat {
                             "system" => {
                                 self.push_system(&entry.text_preview);
                             }
-                            _ => {
-                                // Parse sender from hex, use short display
-                                let label = if entry.sender.is_empty() {
-                                    "peer".to_string()
+                            "image" if entry.image_bytes.is_some() => {
+                                let sender_pk = if entry.sender.is_empty() {
+                                    None
                                 } else if let Ok(bytes) = hex::decode(&entry.sender) {
                                     if bytes.len() == 32 {
                                         let arr: [u8; 32] = bytes.try_into().unwrap();
-                                        PublicKey::from_bytes(&arr)
-                                            .map(|pk| pk.fmt_short().to_string())
-                                            .unwrap_or_else(|_| "local".to_string())
+                                        PublicKey::from_bytes(&arr).ok()
                                     } else {
-                                        "local".to_string()
+                                        None
                                     }
                                 } else {
-                                    "local".to_string()
+                                    None
                                 };
-                                if label == self.local_public.fmt_short().to_string() {
+                                let label = sender_pk
+                                    .map(|pk| pk.fmt_short().to_string())
+                                    .unwrap_or_else(|| "local".to_string());
+                                self.entries.push(ChatEntry::image(
+                                    &label,
+                                    &entry.text_preview,
+                                    entry.image_bytes.clone().unwrap(),
+                                    None,
+                                    None,
+                                    sender_pk,
+                                ));
+                            }
+                            _ => {
+                                // Parse sender from hex, use short display
+                                let sender_pk = if entry.sender.is_empty() {
+                                    None
+                                } else if let Ok(bytes) = hex::decode(&entry.sender) {
+                                    if bytes.len() == 32 {
+                                        let arr: [u8; 32] = bytes.try_into().unwrap();
+                                        PublicKey::from_bytes(&arr).ok()
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                                let is_self =
+                                    sender_pk.map(|pk| pk == self.local_public).unwrap_or(false);
+                                if is_self {
                                     self.push_local(&entry.text_preview);
                                 } else {
+                                    let label = sender_pk
+                                        .map(|pk| pk.fmt_short().to_string())
+                                        .unwrap_or_else(|| "peer".to_string());
                                     self.entries.push(ChatEntry::remote(
                                         &label,
                                         &entry.text_preview,
                                         None,
                                         None, // history entries don't carry sent_at
+                                        sender_pk,
                                     ));
                                 }
                             }
@@ -1433,6 +1530,7 @@ impl IcedChat {
                 let memory_lookup = self.memory_lookup.clone();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
+                let profile_image_ticket = self.profile_image_ticket.clone();
 
                 iced::Task::perform(
                     async move {
@@ -1496,7 +1594,10 @@ impl IcedChat {
 
                         let msg = SignedMessage::sign_and_encode(
                             &sk,
-                            &crate::Message::AboutMe { name: label },
+                            &crate::Message::AboutMe {
+                                name: label,
+                                profile_image_ticket: profile_image_ticket,
+                            },
                         )
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(msg).await;
@@ -1712,7 +1813,9 @@ impl IcedChat {
                                         was_new,
                                     }
                                 }
-                                None => AppMessage::ErrorMsg(format!("Invalid public key: {key_part}")),
+                                None => {
+                                    AppMessage::ErrorMsg(format!("Invalid public key: {key_part}"))
+                                }
                             }
                         },
                         |msg| msg,
@@ -2068,19 +2171,28 @@ impl IcedChat {
 
                 // Normal text message
                 let text = trimmed.clone();
-                match SignedMessage::sign_and_encode(
-                    &self.secret_key,
-                    &crate::Message::Message { text: trimmed },
-                ) {
+                let msg = crate::Message::Message { text: trimmed };
+                let msg_hash = message_hash(&msg);
+                let local_hex = hex::encode(self.local_public.as_bytes());
+                let event_id = {
+                    let mut store = self.chat_history.lock().unwrap();
+                    let entry =
+                        HistoryEntry::new(self.topic, local_hex, Vec::new(), "text", text.clone());
+                    let id = store.push_with_id(entry);
+                    let _ = store.update_delivery_state(id, DeliveryState::Sent);
+                    id
+                };
+                self.self_sent_events.insert(msg_hash, event_id);
+                match SignedMessage::sign_and_encode(&self.secret_key, &msg) {
                     Ok(encoded) => {
                         if let Some(ref sender) = self.sender {
                             let sender = sender.clone();
                             iced::Task::perform(
                                 async move {
                                     sender.broadcast(encoded).await.ok();
-                                    text
+                                    (text, event_id, msg_hash)
                                 },
-                                AppMessage::MessageSent,
+                                |(t, eid, mh)| AppMessage::MessageSent(t, eid, mh),
                             )
                         } else {
                             iced::Task::done(AppMessage::ErrorMsg(
@@ -2141,7 +2253,102 @@ impl IcedChat {
 
             AppMessage::NetEvent(event) => {
                 self.update_room_preview(&event);
-                let _ = chat_net_event(event, self);
+                let _ = chat_net_event(event.clone(), self);
+                // ── Delivery state transitions ──
+                // Echo: our own broadcast returning via gossip → Delivered
+                if let NetEvent::Message {
+                    from, ref message, ..
+                } = &event
+                {
+                    if *from == self.local_public {
+                        let msg_hash = message_hash(message);
+                        if let Some(&event_id) = self.self_sent_events.get(&msg_hash) {
+                            if let Some(entry) =
+                                self.entries.iter_mut().find(|e| e.event_id == event_id)
+                            {
+                                if entry.delivery_state == DeliveryState::Sent {
+                                    entry.delivery_state = DeliveryState::Delivered;
+                                    let mut store = self.chat_history.lock().unwrap();
+                                    let _ = store
+                                        .update_delivery_state(event_id, DeliveryState::Delivered);
+                                }
+                            }
+                        }
+                    }
+                }
+                // ── Auto ReadReceipt: when user is viewing the chat,
+                // send ReadReceipt for incoming remote text messages ──
+                if self.follow_latest {
+                    if let NetEvent::Message {
+                        from, ref message, ..
+                    } = &event
+                    {
+                        if *from != self.local_public {
+                            if let crate::Message::Message { .. } = message {
+                                let msg_hash = message_hash(message);
+                                if let Some(ref sender) = self.sender {
+                                    let sk = self.secret_key.clone();
+                                    let s = sender.clone();
+                                    return iced::Task::perform(
+                                        async move {
+                                            if let Ok(encoded) = SignedMessage::sign_and_encode(
+                                                &sk,
+                                                &crate::Message::ReadReceipt {
+                                                    message_hash: msg_hash,
+                                                },
+                                            ) {
+                                                s.broadcast(encoded).await.ok();
+                                            }
+                                        },
+                                        |_| AppMessage::Noop,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // ReadReceipt from peer → Seen
+                if let NetEvent::Message {
+                    message:
+                        Message::ReadReceipt {
+                            message_hash: receipt_hash,
+                        },
+                    from: receipt_from,
+                    ..
+                } = &event
+                {
+                    if *receipt_from != self.local_public {
+                        if let Some(&event_id) = self.self_sent_events.get(receipt_hash) {
+                            if let Some(entry) =
+                                self.entries.iter_mut().find(|e| e.event_id == event_id)
+                            {
+                                if entry.delivery_state.can_transition_to(&DeliveryState::Seen) {
+                                    entry.delivery_state = DeliveryState::Seen;
+                                    let mut store = self.chat_history.lock().unwrap();
+                                    let _ =
+                                        store.update_delivery_state(event_id, DeliveryState::Seen);
+                                }
+                            }
+                        }
+                    }
+                }
+                // NeighborDown → mark pending messages as Failed
+                if let NetEvent::NeighborDown { .. } = &event {
+                    for entry in self.entries.iter_mut() {
+                        if matches!(entry.kind, ChatKind::Local)
+                            && entry.event_id > 0
+                            && matches!(
+                                entry.delivery_state,
+                                DeliveryState::Queued | DeliveryState::Sent
+                            )
+                        {
+                            entry.delivery_state = DeliveryState::Failed;
+                            let eid = entry.event_id;
+                            let mut store = self.chat_history.lock().unwrap();
+                            let _ = store.update_delivery_state(eid, DeliveryState::Failed);
+                        }
+                    }
+                }
                 self.try_save_friends();
                 self.try_save_chat_history();
                 // Check if an ImageShare was just received and auto-download
@@ -2173,6 +2380,38 @@ impl IcedChat {
                                 name,
                                 image_bytes: data,
                             },
+                            Err(e) => AppMessage::ErrorMsg(e),
+                        },
+                    );
+                }
+                // Check if a profile image ticket arrived from a remote peer
+                if let Some((peer, ticket_str)) = self.pending_profile_image_ticket.take() {
+                    let blob_store = self.blob_store.clone();
+                    let endpoint = self.endpoint.clone();
+                    let neighbors = self.neighbors.clone();
+                    return iced::Task::perform(
+                        async move {
+                            let ticket: BlobTicket = ticket_str
+                                .parse::<BlobTicket>()
+                                .map_err(|e| format!("Parse profile image ticket: {e}"))?;
+                            let peer_id = ticket.addr().id;
+                            let candidates = download_candidates(peer_id, &neighbors);
+                            blob_store
+                                .downloader(&endpoint)
+                                .download(ticket.hash(), candidates)
+                                .await
+                                .map_err(|e| format!("Download profile image: {e}"))?;
+                            let mut reader = blob_store.blobs().reader(ticket.hash());
+                            let mut buf = Vec::new();
+                            use tokio::io::AsyncReadExt;
+                            reader
+                                .read_to_end(&mut buf)
+                                .await
+                                .map_err(|e| format!("Read profile image: {e}"))?;
+                            Ok((peer, buf))
+                        },
+                        move |r: Result<(PublicKey, Vec<u8>), String>| match r {
+                            Ok((peer, data)) => AppMessage::ProfileImageDownloaded(peer, data),
                             Err(e) => AppMessage::ErrorMsg(e),
                         },
                     );
@@ -2234,6 +2473,7 @@ impl IcedChat {
                                 text,
                                 None,
                                 None, // whisper events carry no sent_at
+                                Some(from),
                             ));
                         }
                     }
@@ -2268,8 +2508,12 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::MessageSent(text) => {
-                self.push_local(text);
+            AppMessage::MessageSent(text, event_id, msg_hash) => {
+                let mut entry = ChatEntry::local(&self.local_label, text);
+                entry.event_id = event_id;
+                entry.delivery_state = DeliveryState::Sent;
+                entry.message_hash = Some(msg_hash);
+                self.entries.push(entry);
                 iced::Task::none()
             }
 
@@ -2427,7 +2671,19 @@ impl IcedChat {
                     image_bytes,
                     None,
                     None,
+                    Some(sender),
                 ));
+                iced::Task::none()
+            }
+            AppMessage::ProfileImageDownloaded(peer, image_bytes) => {
+                if image_bytes.is_empty() || image_bytes.len() > 2 * 1024 * 1024 {
+                    // Ignore empty or oversized images (>2MB)
+                    return iced::Task::none();
+                }
+                let handle = iced::widget::image::Handle::from_bytes(image_bytes);
+                self.friend_image_handles.insert(peer, Some(handle));
+                // Trigger UI re-draw by marking friends dirty (the renderer
+                // reads friend_image_handles each frame).
                 iced::Task::none()
             }
             AppMessage::ErrorMsg(msg) => {
@@ -2591,6 +2847,21 @@ impl IcedChat {
                     self.heartbeat_counter -= 1;
                 }
 
+                // ── Seen-on-visibility: when user is at bottom of log,
+                // mark Delivered entries as Seen ──
+                if self.follow_latest {
+                    for ui_entry in self.entries.iter_mut() {
+                        if ui_entry.delivery_state == DeliveryState::Delivered
+                            && ui_entry.event_id > 0
+                        {
+                            ui_entry.delivery_state = DeliveryState::Seen;
+                            let mut store = self.chat_history.lock().unwrap();
+                            let _ =
+                                store.update_delivery_state(ui_entry.event_id, DeliveryState::Seen);
+                        }
+                    }
+                }
+
                 if tasks.is_empty() {
                     iced::Task::none()
                 } else {
@@ -2703,16 +2974,68 @@ impl IcedChat {
                     Ok(bytes) => {
                         if let Err(err) = save_profile_image(&self.data_dir, &bytes) {
                             self.push_system(format!("Could not save profile image: {err}"));
-                        } else {
-                            self.profile_image_handle =
-                                Some(iced::widget::image::Handle::from_bytes(bytes));
-                            self.push_system("Profile image updated.");
+                            return iced::Task::none();
                         }
+                        self.profile_image_handle =
+                            Some(iced::widget::image::Handle::from_bytes(bytes.clone()));
+                        self.push_system("Profile image updated.");
+
+                        // Upload the image to the local blob store so peers can
+                        // download it via the BlobTicket advertised in AboutMe.
+                        let blob_store = self.blob_store.clone();
+                        let endpoint = self.endpoint.clone();
+                        iced::Task::perform(
+                            async move {
+                                let tag =
+                                    blob_store.blobs().add_bytes(bytes).await.map_err(|e| {
+                                        format!("Failed to store profile image: {e}")
+                                    })?;
+                                let ticket_str = blob_ticket_string(
+                                    endpoint.watch_addr().get(),
+                                    tag.hash,
+                                    tag.format,
+                                );
+                                Ok(ticket_str)
+                            },
+                            |r: Result<String, String>| match r {
+                                Ok(ticket) => AppMessage::ProfileImageUploaded(ticket),
+                                Err(e) => AppMessage::ErrorMsg(e),
+                            },
+                        )
                     }
-                    Err(err) if err != "No profile image selected." => self.push_system(err),
-                    Err(_) => {}
+                    Err(err) if err != "No profile image selected." => {
+                        self.push_system(err);
+                        iced::Task::none()
+                    }
+                    Err(_) => iced::Task::none(),
                 }
-                iced::Task::none()
+            }
+
+            AppMessage::ProfileImageUploaded(ticket) => {
+                self.profile_image_ticket = Some(ticket);
+                // Broadcast the updated AboutMe so peers fetch our new image.
+                if let Some(ref sender) = self.sender {
+                    let sk = self.secret_key.clone();
+                    let label = self.local_label.clone();
+                    let ticket = self.profile_image_ticket.clone();
+                    let s = sender.clone();
+                    iced::Task::perform(
+                        async move {
+                            if let Ok(encoded) = SignedMessage::sign_and_encode(
+                                &sk,
+                                &crate::Message::AboutMe {
+                                    name: label,
+                                    profile_image_ticket: ticket,
+                                },
+                            ) {
+                                s.broadcast(encoded).await.ok();
+                            }
+                        },
+                        |_| AppMessage::Noop,
+                    )
+                } else {
+                    iced::Task::none()
+                }
             }
 
             AppMessage::RemoveProfileImage => {
@@ -2720,10 +3043,33 @@ impl IcedChat {
                     match fs::remove_file(self.data_dir.join(PROFILE_IMAGE_FILE)) {
                         Ok(()) => {
                             self.profile_image_handle = None;
+                            self.profile_image_ticket = None;
                             self.push_system("Profile image removed.");
+                            // Re-broadcast AboutMe with no ticket so peers stop
+                            // showing our old image.
+                            if let Some(ref sender) = self.sender {
+                                let sk = self.secret_key.clone();
+                                let label = self.local_label.clone();
+                                let s = sender.clone();
+                                return iced::Task::perform(
+                                    async move {
+                                        if let Ok(encoded) = SignedMessage::sign_and_encode(
+                                            &sk,
+                                            &crate::Message::AboutMe {
+                                                name: label,
+                                                profile_image_ticket: None,
+                                            },
+                                        ) {
+                                            s.broadcast(encoded).await.ok();
+                                        }
+                                    },
+                                    |_| AppMessage::Noop,
+                                );
+                            }
                         }
                         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                             self.profile_image_handle = None;
+                            self.profile_image_ticket = None;
                             self.push_system("Profile image removed.");
                         }
                         Err(err) => {
@@ -2916,19 +3262,29 @@ impl ChatCallbacks for IcedChat {
         self.friends_dirty = true;
     }
 
+    fn record_profile_image_ticket(&mut self, peer: PublicKey, ticket: String) {
+        let fid = FriendId::from_public_key(peer);
+        self.friends
+            .set_last_announced_profile_image_ticket(fid, &ticket);
+        self.friends_dirty = true;
+        self.friend_image_handles.entry(peer).or_insert(None);
+        self.pending_profile_image_ticket = Some((peer, ticket));
+    }
+
     fn push_system(&mut self, text: String) {
         self.entries.push(ChatEntry::system(text));
     }
 
     fn push_remote(
         &mut self,
+        peer: PublicKey,
         label: String,
         text: String,
         hash: Option<MessageHash>,
         sent_at: Option<u64>,
     ) {
         self.entries
-            .push(ChatEntry::remote(label, text, hash, sent_at));
+            .push(ChatEntry::remote(label, text, hash, sent_at, Some(peer)));
     }
 
     fn set_pending_file(&mut self, name: String, ticket: String) {
@@ -3576,9 +3932,12 @@ impl IcedChat {
             };
 
             // Nickname label sits above the bubble (Signal/WhatsApp style)
-            let label_el = text(format!("[{}]", entry.label))
-                .size(TYPO_XS)
-                .color(label_color);
+            let label_text = if matches!(entry.kind, ChatKind::Local) && entry.event_id > 0 {
+                format!("[{} {}]", entry.label, entry.delivery_state.display_icon())
+            } else {
+                format!("[{}]", entry.label)
+            };
+            let label_el = text(label_text).size(TYPO_XS).color(label_color);
 
             // Body text inside the bubble
             let body_el = text(&entry.body)
@@ -3612,10 +3971,33 @@ impl IcedChat {
                 .spacing(SPACE_2)
                 .max_width(480.0);
 
-            // Align: received → left, sent → right. Local messages include the
-            // persisted profile avatar; the fallback keeps the layout stable.
+            // Align: received → left, sent → right. Both include the
+            // sender's profile avatar (local from profile_image_handle,
+            // remote from friend_image_handles); the fallback emoji keeps
+            // the layout stable.
             let msg_row = match entry.kind {
-                ChatKind::Remote => Row::new().push(bubble_col).push(space::horizontal()),
+                ChatKind::Remote => {
+                    let avatar: iced::Element<'_, AppMessage> = {
+                        let cached = entry
+                            .sender_key
+                            .and_then(|pk| self.friend_image_handles.get(&pk))
+                            .and_then(|opt| opt.as_ref());
+                        if let Some(ref handle) = cached {
+                            iced::widget::image(handle.clone())
+                                .content_fit(iced::ContentFit::ScaleDown)
+                                .width(Length::Fixed(28.0))
+                                .height(Length::Fixed(28.0))
+                                .into()
+                        } else {
+                            text("👤").size(TYPO_LG).into()
+                        }
+                    };
+                    Row::new()
+                        .push(avatar)
+                        .push(space::horizontal())
+                        .push(bubble_col)
+                        .spacing(SPACE_6)
+                }
                 ChatKind::Local => {
                     let avatar: iced::Element<'_, AppMessage> =
                         if let Some(ref handle) = self.profile_image_handle {

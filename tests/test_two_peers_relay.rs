@@ -105,6 +105,7 @@ async fn test_two_peers_with_relay() -> Result<()> {
     println!("\nPeer A broadcasting AboutMe...");
     let msg = Message::AboutMe {
         name: "PeerA".into(),
+        profile_image_ticket: None,
     };
     let encoded = SignedMessage::sign_and_encode(&sk_a, &msg).expect("sign");
     println!("  encoded {} bytes", encoded.len());
@@ -135,7 +136,9 @@ async fn test_two_peers_with_relay() -> Result<()> {
     }
     loop {
         match timeout(Duration::from_millis(300), sub_a.try_next()).await {
-            Ok(Ok(Some(GossipEvent::NeighborUp(id)))) => println!("  A: NeighborUp {}", id.fmt_short()),
+            Ok(Ok(Some(GossipEvent::NeighborUp(id)))) => {
+                println!("  A: NeighborUp {}", id.fmt_short())
+            }
             Ok(Ok(Some(_))) => {}
             Ok(Ok(None)) | Err(_) => break,
             Ok(Err(e)) => return Err(e.into()),

@@ -128,7 +128,6 @@ pub struct Composer {
     cursor: usize,
 }
 
-
 impl From<&str> for Composer {
     fn from(text: &str) -> Self {
         Self {
@@ -663,6 +662,7 @@ impl ChatCallbacks for AppState {
 
     fn push_remote(
         &mut self,
+        _peer: PublicKey,
         label: String,
         text: String,
         hash: Option<MessageHash>,
@@ -790,6 +790,9 @@ pub enum Message {
     AboutMe {
         /// The new display name.
         name: String,
+        /// Optional BlobTicket for the profile image.
+        #[serde(default)]
+        profile_image_ticket: Option<String>,
     },
     /// A regular text message.
     Message {
@@ -1072,8 +1075,14 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                 }
             }
             match message {
-                Message::AboutMe { name } => {
+                Message::AboutMe {
+                    name,
+                    profile_image_ticket,
+                } => {
                     cb.set_name(from, name.clone());
+                    if let Some(ticket) = profile_image_ticket {
+                        cb.record_profile_image_ticket(from, ticket);
+                    }
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) {
@@ -1093,7 +1102,13 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                             // (FriendPingManager), not by gossip activity.
                         }
                         let display_name = cb.resolve_name(&from);
-                        cb.push_remote(display_name, text, Some(incoming_hash), Some(sent_at));
+                        cb.push_remote(
+                            from,
+                            display_name,
+                            text,
+                            Some(incoming_hash),
+                            Some(sent_at),
+                        );
                     }
                 }
                 Message::FileShare { name, ticket } => {
@@ -1777,10 +1792,13 @@ mod tests {
     fn message_serialization_roundtrip_about_me() {
         let msg = Message::AboutMe {
             name: "alice".into(),
+            profile_image_ticket: None,
         };
         let bytes = postcard::to_stdvec(&msg).unwrap();
         let decoded: Message = postcard::from_bytes(&bytes).unwrap();
-        assert!(matches!(decoded, Message::AboutMe { ref name } if name == "alice"));
+        assert!(
+            matches!(decoded, Message::AboutMe { name: ref name, profile_image_ticket: _ } if name == "alice")
+        );
     }
 
     #[test]
@@ -1957,7 +1975,10 @@ mod tests {
 
         let event = NetEvent::Message {
             from: remote_key.public(),
-            message: Message::AboutMe { name: "bob".into() },
+            message: Message::AboutMe {
+                name: "bob".into(),
+                profile_image_ticket: None,
+            },
             sent_at: now_secs(),
         };
 
@@ -2349,7 +2370,10 @@ mod tests {
 
         let event = NetEvent::Message {
             from: key.public(),
-            message: Message::AboutMe { name: "bob".into() },
+            message: Message::AboutMe {
+                name: "bob".into(),
+                profile_image_ticket: None,
+            },
             sent_at: now_secs(),
         };
 

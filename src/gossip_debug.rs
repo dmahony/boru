@@ -42,7 +42,6 @@ static DEBUG_STATE: OnceLock<Mutex<DebugLog>> = OnceLock::new();
 struct DebugLog {
     file: File,
     local_id: String,
-
 }
 
 // ---------------------------------------------------------------------------
@@ -96,11 +95,7 @@ pub fn init(local_id: &str) {
         let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
     }
 
-    let log = DebugLog {
-        file,
-        local_id,
-
-    };
+    let log = DebugLog { file, local_id };
 
     // `OnceLock` guarantees we only do this once.
     let _ = DEBUG_STATE.set(Mutex::new(log));

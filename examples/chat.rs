@@ -40,9 +40,9 @@ use iroh_gossip::chat_core::friend_ping::{
 };
 use iroh_gossip::chat_core::{
     check_peer_connection_type, collect_bootstrap_peers, download_candidates, fmt_relay_mode,
-    handle_net_event, message_hash, refresh_bootstrap_peers,
-    update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, MeshHealth, Message,
-    NetEvent, SignedMessage, StatusContext, Ticket,
+    handle_net_event, message_hash, refresh_bootstrap_peers, update_connection_counts, AppState,
+    ChatEntry, ChatKind, ConnectionType, MeshHealth, Message, NetEvent, SignedMessage,
+    StatusContext, Ticket,
 };
 use iroh_gossip::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendRecord, FriendsStore};
@@ -354,6 +354,10 @@ async fn main() -> Result<()> {
     // sender is never cloned and sits dormant.
     #[allow(unused)]
     let (tor_reconnect_tx, mut tor_reconnect_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    /// Handle to the Tor health-monitor background task, stored so we can
+    /// abort it during clean shutdown before closing the router/endpoint.
+    #[allow(unused)]
+    let mut tor_monitor_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // build our iroh endpoint
     let (endpoint, transport_status_message, transport_notice_text, local_peer_addr) = {
@@ -379,9 +383,9 @@ async fn main() -> Result<()> {
             // the initial bootstrap.
             let monitor_client = Arc::clone(&tor_client);
             let monitor_tx = tor_reconnect_tx.clone();
-            tokio::spawn(async move {
+            tor_monitor_handle = Some(tokio::spawn(async move {
                 monitor_tor_health(monitor_client, monitor_tx).await;
-            });
+            }));
 
             (
                 endpoint,
@@ -538,15 +542,29 @@ async fn main() -> Result<()> {
     for addr in &addr_material {
         memory_lookup.set_endpoint_info(addr.clone());
     }
-    if peer_ids.is_empty() {
+    // If we have bootstrap peers, wait for at least one gossip neighbor
+    // before proceeding (with a timeout to avoid hanging on stale addrs).
+    // Without bootstrap peers (room creator), just subscribe and wait for
+    // inbound joins — don't call subscribe_and_join which blocks on joined().
+    let sub = if peer_ids.is_empty() {
         tracing::info!("waiting for peers to join us");
+        gossip.subscribe(topic, peer_ids).await
     } else {
         tracing::info!(count = addr_material.len(), "trying to connect to peers");
-    };
-    let (sender, receiver) = gossip
-        .subscribe_and_join(topic, peer_ids.clone())
-        .await?
-        .split();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            gossip.subscribe_and_join(topic, peer_ids).await
+        })
+        .await
+        .map_err(|_| {
+            bail_any!(
+                "timed out after 30s waiting for bootstrap peer(s) — \
+                 the ticket or saved addresses may be stale; the room is \
+                 still subscribed, so any peer that connects later will work"
+            )
+        })?
+    }
+    .map_err(|e| bail_any!("failed to join gossip topic: {e}"))?;
+    let (sender, receiver) = sub.split();
     tracing::info!("connected");
 
     // Refresh the stored bootstrap peers from the just-connected peers so
@@ -577,7 +595,10 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| local_public.fmt_short().to_string());
 
     if let Some(name) = args.name.clone() {
-        let message = Message::AboutMe { name };
+        let message = Message::AboutMe {
+            name,
+            profile_image_ticket: None,
+        };
         let encoded_message = SignedMessage::sign_and_encode(endpoint.secret_key(), &message)?;
         sender.broadcast(encoded_message).await?;
     }
@@ -1166,6 +1187,23 @@ async fn main() -> Result<()> {
     // Save chat history before shutdown.
     if let Err(err) = chat_history.lock().unwrap().save() {
         tracing::warn!(error = %err, "failed to save chat history");
+    }
+
+    // Explicitly stop background tasks before router/endpoint shutdown
+    // so we don't rely on runtime teardown for clean ordering.
+    //
+    // Drop command senders first so the actor loops exit naturally
+    // (cmd_rx returns None → actor breaks its event loop).  Drop
+    // event receivers next so any select! branches reading them
+    // finish promptly.
+    drop(backfill_handle);
+    drop(whisper_handle);
+    drop(friend_mgr);
+    drop(whisper_events);
+    drop(friend_events);
+    #[cfg(feature = "tor-transport")]
+    if let Some(handle) = tor_monitor_handle.take() {
+        handle.abort();
     }
 
     router.shutdown().await.anyerr()?;

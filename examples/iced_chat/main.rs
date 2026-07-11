@@ -416,8 +416,10 @@ fn main() -> Result<()> {
             backfill_handle,
             whisper_events_rx,
             whisper_handle,
+            mut tor_monitor_handle,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
+        let mut tor_monitor_handle: Option<tokio::task::JoinHandle<()>> = None;
         use std::net::{Ipv4Addr, SocketAddrV4};
 
         let endpoint = {
@@ -440,12 +442,14 @@ fn main() -> Result<()> {
                 endpoint.address_lookup()?.add(memory_lookup.clone());
                 let local_peer_addr = tor_transport.watch_local_peer_addr().initialized().await.endpoint_addr();
 
-                // Spawn the Tor health-monitor background task
+                // Spawn the Tor health-monitor background task and capture
+                // its handle so we can abort it explicitly before shutdown.
                 let monitor_client = Arc::clone(&tor_client);
                 let monitor_tx = tor_reconnect_tx.clone();
-                tokio::spawn(async move {
+                let mon_handle = tokio::spawn(async move {
                     monitor_tor_health(monitor_client, monitor_tx).await;
                 });
+                tor_monitor_handle = Some(mon_handle);
 
                 info!("> Tor bootstrap finished: {tor_status_message}");
                 endpoint
@@ -622,6 +626,7 @@ fn main() -> Result<()> {
             backfill_handle,
             whisper_events_rx,
             whisper_handle,
+            tor_monitor_handle,
         ))
     })?;
 
@@ -701,6 +706,13 @@ fn main() -> Result<()> {
     // before dropping the runtime so iroh can shut down its discovery and
     // transport tasks cleanly instead of logging "Endpoint dropped without
     // calling Endpoint::close".
+    //
+    // Abort the Tor health-monitor task explicitly before endpoint close
+    // so the monitor doesn't try to reconnect while the transport is shunting
+    // down.
+    if let Some(handle) = tor_monitor_handle.take() {
+        handle.abort();
+    }
     runtime.block_on(endpoint.close());
     let _keep_runtime_alive = runtime;
     Ok(())

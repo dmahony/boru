@@ -87,6 +87,9 @@ pub struct FriendRecord {
     /// Most recently announced self-name from the peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_announced_name: Option<String>,
+    /// Most recently announced profile image ticket from the peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_announced_profile_image_ticket: Option<String>,
     /// Durably stored online/offline observations.
     #[serde(default)]
     pub status: FriendStatus,
@@ -342,6 +345,17 @@ impl FriendsStore {
     ) -> &mut FriendRecord {
         let record = self.ensure_friend(id);
         record.last_announced_name = Some(name.into());
+        record
+    }
+
+    /// Update the last announced profile image ticket from a peer.
+    pub fn set_last_announced_profile_image_ticket(
+        &mut self,
+        id: FriendId,
+        ticket: impl Into<String>,
+    ) -> &mut FriendRecord {
+        let record = self.ensure_friend(id);
+        record.last_announced_profile_image_ticket = Some(ticket.into());
         record
     }
 }

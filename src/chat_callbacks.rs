@@ -71,6 +71,7 @@ pub trait ChatCallbacks {
     /// `sent_at` is the protocol's Unix epoch seconds timestamp, if available.
     fn push_remote(
         &mut self,
+        peer: PublicKey,
         label: String,
         text: String,
         hash: Option<MessageHash>,
@@ -126,6 +127,9 @@ pub trait ChatCallbacks {
             self.mark_friends_dirty();
         }
     }
+
+    /// Record a profile image ticket for a peer. (Default no-op).
+    fn record_profile_image_ticket(&mut self, _peer: PublicKey, _ticket: String) {}
 
     /// Merge a parsed peer ticket into frontend-owned durable state.
     /// Returns whether the frontend accepted the ticket.

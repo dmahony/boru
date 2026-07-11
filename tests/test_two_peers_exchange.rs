@@ -125,6 +125,7 @@ async fn test_two_peers_exchange_messages() -> Result<()> {
     println!("\nA broadcasting AboutMe...");
     let msg = Message::AboutMe {
         name: "Alice".into(),
+        profile_image_ticket: None,
     };
     let encoded = SignedMessage::sign_and_encode(&sk_a, &msg).expect("sign");
     println!("  encoded {} bytes", encoded.len());

@@ -262,7 +262,7 @@ async fn main() -> Result<()> {
                                                     Message::Message { text } => {
                                                         format!("[msg from {}] {}", sender_pk.fmt_short(), text)
                                                     }
-                                                    Message::AboutMe { name } => {
+                                                                                   Message::AboutMe { name, profile_image_ticket: _ } => {
                                                         format!("[AboutMe from {}] {}", sender_pk.fmt_short(), name)
                                                     }
                                                     Message::Presence => "[Presence]".to_string(),
@@ -374,6 +374,7 @@ async fn main() -> Result<()> {
             // Broadcast AboutMe so the opener can map us
             let about = Message::AboutMe {
                 name: args.name.clone(),
+                profile_image_ticket: None,
             };
             let encoded = SignedMessage::sign_and_encode(&secret_key, &about)?;
             sender.broadcast(encoded).await?;
@@ -419,7 +420,7 @@ async fn main() -> Result<()> {
                                                     Message::Message { text } => {
                                                         format!("[msg from {}] {}", sender_pk.fmt_short(), text)
                                                     }
-                                                    Message::AboutMe { name } => {
+                                                                                   Message::AboutMe { name, profile_image_ticket: _ } => {
                                                         format!("[AboutMe from {}] {}", sender_pk.fmt_short(), name)
                                                     }
                                                     Message::Presence => "[Presence]".to_string(),

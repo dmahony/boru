@@ -512,6 +512,70 @@ mod tests {
         Ok(())
     }
 
+    /// Test: startup registration using persisted known addresses.
+    ///
+    /// This simulates the startup sequence where the app loads a FriendsStore
+    /// and registers friends into the FriendPingManager using their persisted addresses.
+    #[tokio::test]
+    async fn test_startup_registration_uses_persisted_known_address() -> Result<()> {
+        use crate::friends::{FriendId, FriendsStore};
+        use tempfile::tempdir;
+
+        let sk1 = SecretKey::generate();
+        let sk2 = SecretKey::generate();
+        let pk2 = sk2.public();
+
+        let ep1 = Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+            .secret_key(sk1)
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddrV4>().unwrap())
+            .unwrap()
+            .bind()
+            .await?;
+
+        let ep2 = Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+            .secret_key(sk2)
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddrV4>().unwrap())
+            .unwrap()
+            .bind()
+            .await?;
+
+        let _router2 = iroh::protocol::Router::builder(ep2.clone())
+            .accept(FRIEND_PING_ALPN, AcceptCloseHandler)
+            .spawn();
+
+        // 1. Setup a persisted store with a known address for pk2
+        let tmp_dir = tempdir()?;
+        let mut store = FriendsStore::empty_at(tmp_dir.path());
+        let record = store.ensure_friend(FriendId::from_public_key(pk2));
+        record.record_addrs(std::iter::once(ep2.addr()));
+        store.save()?;
+
+        // 2. Simulate startup: reload store and register friends
+        let reloaded_store = FriendsStore::load(tmp_dir.path())?;
+        let (mgr, _events) = FriendPingManager::spawn(
+            ep1.clone(),
+            Duration::from_millis(100),
+            Duration::from_secs(2),
+        );
+
+        for (id, record) in reloaded_store.iter() {
+            let pk = id.parse_public_key()?;
+            let addr = record.known_addrs.first().cloned();
+            mgr.add_friend(pk, addr).await?;
+        }
+
+        // 3. Verify that the manager successfully pings the persisted address
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let status = mgr.friend_status(&pk2).await?;
+        assert_eq!(
+            status,
+            Some(FriendStatus::Online),
+            "friend registered from persisted address should be Online"
+        );
+
+        Ok(())
+    }
+
     /// Test: adding a friend with no known addresses stays Unknown (no address info to ping).
     #[tokio::test]
     async fn test_ping_unknown_peer_stays_unknown() -> Result<()> {

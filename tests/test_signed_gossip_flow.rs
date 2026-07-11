@@ -66,6 +66,7 @@ async fn test_signed_message_gossip_flow() -> Result<()> {
     // Peer A sends a signed AboutMe (identical to what chat-gui does)
     let msg = Message::AboutMe {
         name: "PeerA".to_string(),
+        profile_image_ticket: None,
     };
     let encoded = SignedMessage::sign_and_encode(&sk_a, &msg).expect("sign_and_encode should work");
     println!("Peer A broadcasts {} bytes of AboutMe", encoded.len());

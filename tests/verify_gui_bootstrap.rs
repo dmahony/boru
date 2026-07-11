@@ -68,6 +68,7 @@ impl ChatCallbacks for SimChat {
     }
     fn push_remote(
         &mut self,
+        _peer: PublicKey,
         label: String,
         text: String,
         _hash: Option<MessageHash>,

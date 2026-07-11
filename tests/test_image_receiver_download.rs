@@ -18,8 +18,7 @@ use iroh::{
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 use iroh_gossip::chat_callbacks::ChatCallbacks;
 use iroh_gossip::chat_core::{
-    download_candidates, handle_net_event, ChatEntry, Message, MessageHash, NetEvent,
-    SignedMessage,
+    download_candidates, handle_net_event, ChatEntry, Message, MessageHash, NetEvent, SignedMessage,
 };
 use iroh_gossip::friends::FriendId;
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
@@ -65,6 +64,7 @@ impl ChatCallbacks for RxTestPeer {
     }
     fn push_remote(
         &mut self,
+        _peer: PublicKey,
         label: String,
         text: String,
         _hash: Option<MessageHash>,
@@ -243,6 +243,7 @@ async fn test_receiver_downloads_image_entry() -> Result<()> {
         &sk_a,
         &Message::AboutMe {
             name: "Alice".into(),
+            profile_image_ticket: None,
         },
     )
     .unwrap();
@@ -263,8 +264,14 @@ async fn test_receiver_downloads_image_entry() -> Result<()> {
         receiver_b, net_tx_b,
     ));
 
-    let about_me_b =
-        SignedMessage::sign_and_encode(&sk_b, &Message::AboutMe { name: "Bob".into() }).unwrap();
+    let about_me_b = SignedMessage::sign_and_encode(
+        &sk_b,
+        &Message::AboutMe {
+            name: "Bob".into(),
+            profile_image_ticket: None,
+        },
+    )
+    .unwrap();
     _sender_b.broadcast(about_me_b).await?;
 
     // Create receiver peer state

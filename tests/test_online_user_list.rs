@@ -67,6 +67,7 @@ impl ChatCallbacks for OnlineUserTracker {
     fn push_system(&mut self, _text: String) {}
     fn push_remote(
         &mut self,
+        _peer: PublicKey,
         _label: String,
         _text: String,
         _hash: Option<MessageHash>,
