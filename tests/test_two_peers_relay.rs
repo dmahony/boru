@@ -13,7 +13,7 @@ use iroh_gossip::{
 };
 use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};
-use rand::{Rng, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -44,7 +44,7 @@ async fn test_two_peers_with_relay() -> Result<()> {
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
     let (router_a, ep_a, sk_a, gossip_a) = spawn_peer_relay(&mut rng).await?;
-    let (router_b, ep_b, sk_b, gossip_b) = spawn_peer_relay(&mut rng).await?;
+    let (router_b, ep_b, _sk_b, gossip_b) = spawn_peer_relay(&mut rng).await?;
 
     println!("Peer A id: {}", ep_a.id().fmt_short());
     println!("Peer B id: {}", ep_b.id().fmt_short());
@@ -135,10 +135,8 @@ async fn test_two_peers_with_relay() -> Result<()> {
     }
     loop {
         match timeout(Duration::from_millis(300), sub_a.try_next()).await {
-            Ok(Ok(Some(ev))) => match ev {
-                GossipEvent::NeighborUp(id) => println!("  A: NeighborUp {}", id.fmt_short()),
-                _ => {}
-            },
+            Ok(Ok(Some(GossipEvent::NeighborUp(id)))) => println!("  A: NeighborUp {}", id.fmt_short()),
+            Ok(Ok(Some(_))) => {}
             Ok(Ok(None)) | Err(_) => break,
             Ok(Err(e)) => return Err(e.into()),
         }

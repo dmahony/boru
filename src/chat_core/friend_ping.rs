@@ -110,12 +110,11 @@ enum Cmd {
 pub struct PingHandler;
 
 impl iroh::protocol::ProtocolHandler for PingHandler {
-    fn accept(
+    async fn accept(
         &self,
         _connection: iroh::endpoint::Connection,
-    ) -> impl std::future::Future<Output = std::result::Result<(), iroh::protocol::AcceptError>>
-           + std::marker::Send {
-        async move { Ok(()) }
+    ) -> std::result::Result<(), iroh::protocol::AcceptError> {
+        Ok(())
     }
 }
 
@@ -458,12 +457,11 @@ mod tests {
     struct AcceptCloseHandler;
 
     impl iroh::protocol::ProtocolHandler for AcceptCloseHandler {
-        fn accept(
+        async fn accept(
             &self,
             _connection: iroh::endpoint::Connection,
-        ) -> impl std::future::Future<Output = std::result::Result<(), iroh::protocol::AcceptError>>
-               + std::marker::Send {
-            async move { Ok(()) }
+        ) -> std::result::Result<(), iroh::protocol::AcceptError> {
+            Ok(())
         }
     }
 

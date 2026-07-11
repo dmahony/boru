@@ -8,6 +8,7 @@
 //! [iroh]: https://docs.rs/iroh
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 #![cfg_attr(iroh_docsrs, feature(doc_cfg))]
+#![allow(unexpected_cfgs)]
 
 #[cfg(feature = "net")]
 pub use net::Gossip;

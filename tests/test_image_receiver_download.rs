@@ -18,7 +18,7 @@ use iroh::{
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 use iroh_gossip::chat_callbacks::ChatCallbacks;
 use iroh_gossip::chat_core::{
-    download_candidates, handle_net_event, ChatEntry, ChatKind, Message, MessageHash, NetEvent,
+    download_candidates, handle_net_event, ChatEntry, Message, MessageHash, NetEvent,
     SignedMessage,
 };
 use iroh_gossip::friends::FriendId;
@@ -234,7 +234,7 @@ async fn test_receiver_downloads_image_entry() -> Result<()> {
     let sub_a = gossip_a.subscribe(topic, vec![]).await?;
     let (sender_a, receiver_a) = sub_a.split();
     let (net_tx_a, net_rx_a) = tokio::sync::mpsc::unbounded_channel();
-    let net_rx_a = Arc::new(Mutex::new(net_rx_a));
+    let _net_rx_a = Arc::new(Mutex::new(net_rx_a));
     task::spawn(iroh_gossip::chat_core::forward_gossip_events(
         receiver_a, net_tx_a,
     ));
@@ -268,7 +268,7 @@ async fn test_receiver_downloads_image_entry() -> Result<()> {
     _sender_b.broadcast(about_me_b).await?;
 
     // Create receiver peer state
-    let mut sim = RxTestPeer {
+    let sim = RxTestPeer {
         local_public: pk_b,
         entries: Vec::new(),
         names: HashMap::new(),
@@ -289,7 +289,7 @@ async fn test_receiver_downloads_image_entry() -> Result<()> {
     for i in 0..60 {
         sleep(Duration::from_millis(200)).await;
         while process_one_event(&net_rx, &mut rx_sim).await {}
-        if rx_sim.neighbors.len() > 0 {
+        if !rx_sim.neighbors.is_empty() {
             println!("  B connected at tick {i}");
             connected = true;
             break;
@@ -310,6 +310,7 @@ async fn test_receiver_downloads_image_entry() -> Result<()> {
     println!("\n--- A: adding image and broadcasting ImageShare ---");
     let image_data: Vec<u8> = b"fake-png-bytes-1234567890-abcdef".to_vec();
 
+    #[expect(unused_imports)]
     use iroh_blobs::api::proto::TagInfo;
     let tag_info = blob_store_a
         .blobs()

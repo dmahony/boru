@@ -222,7 +222,7 @@ impl SessionManagerActor {
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
                         None => break,
-                        Some(cmd) => self.handle_cmd(cmd).await,
+                        Some(cmd) => self.handle_cmd(cmd),
                     }
                 }
             }
@@ -230,7 +230,7 @@ impl SessionManagerActor {
         debug!("session manager actor stopped");
     }
 
-    async fn handle_cmd(&mut self, cmd: Cmd) {
+    fn handle_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::StartSession { peer } => {
                 // Avoid dialing our own public key.
@@ -358,7 +358,7 @@ impl SessionManagerActor {
                                                         // Connected event will transition us via the normal path.
                                                         break;
                                                     }
-                                                    Err(e) => {
+                                                    Err(_e) => {
                                                         attempts += 1;
                                                         if attempts >= remaining_attempts {
                                                             warn!(%peer, "reconnect exhausted after {attempts} retries");
@@ -470,7 +470,7 @@ mod tests {
         let sk = SecretKey::generate();
         let pk = sk.public();
         // A peer should never collide with itself.
-        assert!(!(pk.as_bytes() < pk.as_bytes()));
+        assert!(pk.as_bytes() >= pk.as_bytes());
         assert_eq!(pk.as_bytes(), pk.as_bytes());
     }
 
@@ -496,14 +496,14 @@ mod tests {
 
         // The lower-key peer should win the collision.
         // This is purely a logical test — no network needed.
-        let (winner_is_a, _winner_is_b) = if a_lower {
+        let (winner_is_a, winner_is_b) = if a_lower {
             (true, false)
         } else {
             (false, true)
         };
         // In the collision handler, the lower-key peer keeps its
         // outgoing connection and closes the incoming one.
-        assert!(winner_is_a || !winner_is_a); // exercised
+        assert!(winner_is_a || winner_is_b, "collision must pick a winner");
     }
 
     /// Verify Connected event correctly resets backoff state.
@@ -518,7 +518,6 @@ mod tests {
         // start_session spawns a send_dm which will fail (no real peer),
         // producing a Disconnected event. Drain all events until we
         // see the Disconnected.
-        let mut saw_disconnected = false;
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             match rx.try_recv() {
@@ -530,7 +529,6 @@ mod tests {
                     state: SessionState::Disconnected,
                     ..
                 }) => {
-                    saw_disconnected = true;
                     break;
                 }
                 Ok(_) => continue,
@@ -541,10 +539,8 @@ mod tests {
                 }
             }
         }
-        assert!(
-            saw_disconnected,
-            "should have received Disconnected after failed start_session"
-        );
+        // We broke out of the loop above only on Disconnected.
+
 
         // Now feed a Connected event — this simulates a successful connection.
         mgr.notice_whisper_event(WhisperEvent::Connected { peer })
@@ -771,7 +767,7 @@ mod tests {
         });
 
         let builder = WhisperBuilder::new(endpoint.clone(), sk);
-        let (handle, event_rx) = builder.spawn().await;
+        let (handle, event_rx) = builder.spawn();
         (handle, event_rx)
     }
 }

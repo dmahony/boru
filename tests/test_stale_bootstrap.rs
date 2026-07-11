@@ -44,10 +44,10 @@ fn test_collect_bootstrap_peers_dedup() {
     let addr1_dup = EndpointAddr::new(pk1)
         .with_relay_url("https://relay-3.example.com".parse::<RelayUrl>().unwrap());
 
-    let ticket_peers = vec![addr1.clone(), addr2.clone()];
-    let room_peers = vec![addr1_dup.clone()]; // same pk1, different relay
+    let ticket_peers = [addr1.clone(), addr2.clone()];
+    let room_peers = [addr1_dup.clone()]; // same pk1, different relay
 
-    let (peer_ids, all_addrs) = collect_bootstrap_peers(&[&ticket_peers[..], &room_peers[..]]);
+    let (peer_ids, all_addrs) = collect_bootstrap_peers([&ticket_peers[..], &room_peers[..]]);
 
     // Should have 2 unique peer IDs (pk1, pk2)
     assert_eq!(peer_ids.len(), 2, "should have 2 unique peer IDs");
@@ -67,7 +67,7 @@ fn test_collect_bootstrap_peers_dedup() {
     );
 
     // Empty sources
-    let (ids, addrs) = collect_bootstrap_peers(&[&[] as &[EndpointAddr]]);
+    let (ids, addrs) = collect_bootstrap_peers([&[] as &[EndpointAddr]]);
     assert!(ids.is_empty(), "empty sources → empty peer_ids");
     assert!(addrs.is_empty(), "empty sources → empty addrs");
 }
@@ -87,7 +87,7 @@ fn test_seed_memory_lookup_populates() {
     );
 
     let lookup = MemoryLookup::new();
-    seed_memory_lookup(&lookup, &[addr.clone()]);
+    seed_memory_lookup(&lookup, std::slice::from_ref(&addr));
 
     let resolved = lookup.get_endpoint_info(pk);
     assert!(
@@ -349,11 +349,11 @@ fn test_room_store_peers_flow_into_collect_bootstrap_peers() {
     let pk_b = sk_b.public();
 
     // Simulate ticket with peer A only
-    let ticket_peers = vec![EndpointAddr::new(pk_a)];
+    let ticket_peers = [EndpointAddr::new(pk_a)];
     // Simulate RoomStore with peer B
-    let room_peers = vec![EndpointAddr::new(pk_b)];
+    let room_peers = [EndpointAddr::new(pk_b)];
 
-    let (peer_ids, all_addrs) = collect_bootstrap_peers(&[&ticket_peers[..], &room_peers[..]]);
+    let (peer_ids, all_addrs) = collect_bootstrap_peers([&ticket_peers[..], &room_peers[..]]);
 
     // Should have both peers from both sources
     assert_eq!(peer_ids.len(), 2, "should merge ticket + room store peers");
@@ -365,8 +365,8 @@ fn test_room_store_peers_flow_into_collect_bootstrap_peers() {
     );
 
     // If both sources have the same peer — dedup
-    let duplicate = vec![EndpointAddr::new(pk_a), EndpointAddr::new(pk_a)];
-    let (ids, addrs) = collect_bootstrap_peers(&[&duplicate[..]]);
+    let duplicate = [EndpointAddr::new(pk_a), EndpointAddr::new(pk_a)];
+    let (ids, addrs) = collect_bootstrap_peers([&duplicate[..]]);
     assert_eq!(ids.len(), 1, "duplicate peer IDs should be deduped");
     assert_eq!(addrs.len(), 1, "duplicate addresses should be deduped");
 }

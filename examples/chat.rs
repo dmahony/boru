@@ -40,7 +40,7 @@ use iroh_gossip::chat_core::friend_ping::{
 };
 use iroh_gossip::chat_core::{
     check_peer_connection_type, collect_bootstrap_peers, download_candidates, fmt_relay_mode,
-    handle_net_event, message_hash, refresh_bootstrap_peers, seed_memory_lookup,
+    handle_net_event, message_hash, refresh_bootstrap_peers,
     update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, MeshHealth, Message,
     NetEvent, SignedMessage, StatusContext, Ticket,
 };
@@ -500,7 +500,7 @@ async fn main() -> Result<()> {
     // and whisper protocol
     let whisper_builder = WhisperBuilder::new(endpoint.clone(), endpoint.secret_key().clone());
     let whisper_handler = whisper_builder.protocol_handler();
-    let (whisper_handle, mut whisper_events) = whisper_builder.spawn().await;
+    let (whisper_handle, mut whisper_events) = whisper_builder.spawn();
 
     // Keep chat history transient for this process only. Legacy history files
     // are removed by the loader and are never replayed.
@@ -527,10 +527,10 @@ async fn main() -> Result<()> {
     // previously saved RoomStore bootstrap peers, so the address lookup has
     // the best possible coverage for reconnection.
     let (peer_ids, addr_material) = {
-        let room_peers = RoomStore::load_or_none(&get_data_dir())
+        let room_peers = RoomStore::load_or_none(get_data_dir())
             .map(|s| s.peers)
             .unwrap_or_default();
-        collect_bootstrap_peers(&[&peers[..], &room_peers[..]])
+        collect_bootstrap_peers([&peers[..], &room_peers[..]])
     };
     let peer_count = peer_ids.len();
 
@@ -553,7 +553,7 @@ async fn main() -> Result<()> {
     // future reopen/rejoin has up-to-date addresses even if the original
     // ticket creator is offline.
     {
-        if let Some(mut room) = RoomStore::load_or_none(&get_data_dir()) {
+        if let Some(mut room) = RoomStore::load_or_none(get_data_dir()) {
             let mut neighbor_set: HashSet<_> = peer_ids.iter().copied().collect();
             // Also note our own peer id so room creators can rejoin themselves.
             neighbor_set.insert(endpoint.id());
@@ -733,7 +733,11 @@ async fn main() -> Result<()> {
         .iter()
         .filter_map(|(id, _)| id.parse_public_key().ok())
     {
-        let _ = friend_mgr.add_friend(peer, None).await;
+        let addr = app
+            .friends
+            .get(&FriendId::from_public_key(peer))
+            .and_then(|record| record.known_addrs.first().cloned());
+        let _ = friend_mgr.add_friend(peer, addr).await;
     }
 
     let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -759,7 +763,7 @@ async fn main() -> Result<()> {
             presence_interval.tick().await;
             let msg = Message::Presence;
             if let Ok(encoded) = SignedMessage::sign_and_encode(&presence_secret_key, &msg) {
-                if presence_sender.broadcast(encoded.into()).await.is_err() {
+                if presence_sender.broadcast(encoded).await.is_err() {
                     break;
                 }
             }
@@ -778,7 +782,7 @@ async fn main() -> Result<()> {
             heartbeat_interval.tick().await;
             let msg = Message::Heartbeat;
             if let Ok(encoded) = SignedMessage::sign_and_encode(&heartbeat_secret_key, &msg) {
-                if heartbeat_sender.broadcast(encoded.into()).await.is_err() {
+                if heartbeat_sender.broadcast(encoded).await.is_err() {
                     break;
                 }
             }
@@ -890,9 +894,11 @@ async fn main() -> Result<()> {
                 if let NetEvent::NeighborUp { peer } = &event {
                     let peer_owned = *peer;
                     // Replay messages that are still Queued or Sent
-                    let replayed = {
-                        let mut store = chat_history.lock().unwrap();
-                        let pending_ids: Vec<u64> = store
+                    // Collect pending data under the lock, then broadcast outside it
+                    // to avoid holding the MutexGuard across .await.
+                    let pending: Vec<(u64, Bytes)> = {
+                        let store = chat_history.lock().unwrap();
+                        let ids: Vec<u64> = store
                             .entries()
                             .iter()
                             .filter(|e| {
@@ -903,37 +909,34 @@ async fn main() -> Result<()> {
                             })
                             .map(|e| e.event_id)
                             .collect();
-                        let mut replayed_count = 0u32;
-                        for eid in &pending_ids {
+                        let mut result = Vec::new();
+                        for eid in &ids {
                             if let Some(entry) = store.get_by_event_id(*eid) {
                                 if let Ok(pk) =
                                     iroh::PublicKey::from_str(&entry.sender)
                                 {
-                                    if pk == local_public {
-                                        let raw = entry.signed_bytes.clone();
-                                        if !raw.is_empty() {
-                                            if sender
-                                                .broadcast(Bytes::from(raw))
-                                                .await
-                                                .is_ok()
-                                            {
-                                                // After re-broadcast, mark as Sent
-                                                let _ = store.update_delivery_state(
-                                                    *eid,
-                                                    DeliveryState::Sent,
-                                                );
-                                                replayed_count += 1;
-                                            }
-                                        }
+                                    if pk == local_public && !entry.signed_bytes.is_empty() {
+                                        result.push((*eid, Bytes::from(entry.signed_bytes.clone())));
                                     }
                                 }
                             }
                         }
-                        replayed_count
+                        result
                     };
-                    if replayed > 0 {
+                    let mut replayed_count = 0u32;
+                    for (eid, raw) in &pending {
+                        if sender.broadcast(raw.clone()).await.is_ok() {
+                            // After re-broadcast, mark as Sent
+                            let _ = chat_history
+                                .lock()
+                                .unwrap()
+                                .update_delivery_state(*eid, DeliveryState::Sent);
+                            replayed_count += 1;
+                        }
+                    }
+                    if replayed_count > 0 {
                         tracing::info!(
-                            count = replayed,
+                            count = replayed_count,
                             "replayed pending messages on reconnection"
                         );
                     }
@@ -1227,6 +1230,7 @@ fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
 
 // ── UI event handling ─────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_ui_event(
     event: UiEvent,
     app: &mut AppState,
@@ -1268,6 +1272,7 @@ async fn handle_ui_event(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_key_event(
     key: KeyEvent,
     app: &mut AppState,
@@ -1280,7 +1285,7 @@ async fn handle_key_event(
     room_docs: &Arc<RwLock<Option<RoomDocs>>>,
     whisper_handle: &WhisperHandle,
     chat_history: &Arc<Mutex<ChatHistoryStore>>,
-    topic: TopicId,
+    _topic: TopicId,
 ) -> Result<()> {
     let visible_height = app.last_log_height;
     match key {
@@ -1428,7 +1433,11 @@ async fn handle_key_event(
                         }
                         app.friends_dirty = true;
 
-                        match friend_mgr.add_friend(peer, None).await {
+                        let addr = app
+                            .friends
+                            .get(&fid)
+                            .and_then(|record| record.known_addrs.first().cloned());
+                        match friend_mgr.add_friend(peer, addr).await {
                             Ok(_) => {
                                 if was_new {
                                     let label = if let Some(ref alias_text) = alias {
@@ -1557,29 +1566,28 @@ async fn handle_key_event(
             }
 
             if trimmed == "/room info" {
-                let docs = room_docs.read().unwrap();
-                match docs.as_ref() {
-                    None => {
-                        app.push_system("No room docs available (room not initialised).");
-                    }
-                    Some(docs) => {
-                        let md = read_metadata(&docs.metadata).await;
-                        let members = list_members(&docs.roster).await;
+                let has_docs = room_docs.read().unwrap().as_ref().is_some();
+                if !has_docs {
+                    app.push_system("No room docs available (room not initialised).");
+                } else {
+                    let metadata_doc = room_docs.read().unwrap().as_ref().unwrap().metadata.clone();
+                    let roster = room_docs.read().unwrap().as_ref().unwrap().roster.clone();
+                    let md = read_metadata(&metadata_doc).await;
+                    let members = list_members(&roster).await;
+                    app.push_system(format!(
+                        "Room: {} | Description: {} | Rules: {}",
+                        md.name.as_deref().unwrap_or("unnamed"),
+                        md.description.as_deref().unwrap_or("none"),
+                        md.rules.as_deref().unwrap_or("none"),
+                    ));
+                    app.push_system(format!("Members ({}):", members.len()));
+                    for (pk, member) in &members {
                         app.push_system(format!(
-                            "Room: {} | Description: {} | Rules: {}",
-                            md.name.as_deref().unwrap_or("unnamed"),
-                            md.description.as_deref().unwrap_or("none"),
-                            md.rules.as_deref().unwrap_or("none"),
+                            "  {} ({}) — joined at {}",
+                            member.display_name,
+                            &pk[..16],
+                            member.joined_at,
                         ));
-                        app.push_system(format!("Members ({}):", members.len()));
-                        for (pk, member) in &members {
-                            app.push_system(format!(
-                                "  {} ({}) — joined at {}",
-                                member.display_name,
-                                &pk[..16],
-                                member.joined_at,
-                            ));
-                        }
                     }
                 }
                 return Ok(());
@@ -1855,7 +1863,7 @@ async fn handle_key_event(
             let local_hex = hex::encode(secret_key.public().as_bytes());
             let event_id = {
                 let mut store = chat_history.lock().unwrap();
-                let mut entry = HistoryEntry::new(
+                let entry = HistoryEntry::new(
                     app.status.topic,
                     local_hex.clone(),
                     encoded_message.to_vec(),

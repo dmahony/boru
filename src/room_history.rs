@@ -173,7 +173,8 @@ impl RoomHistoryStore {
                 .push(RoomHistoryEntry::new(topic, name, is_owner));
         }
         // Sort: newest first
-        self.rooms.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        self.rooms
+            .sort_by_key(|entry| std::cmp::Reverse(entry.last_seen));
     }
 
     /// Update the last message preview for a room.
@@ -305,7 +306,9 @@ mod tests {
         // Touching t1 should move it to front
         std::thread::sleep(std::time::Duration::from_millis(2));
         let _ = store.find_mut(&t1).map(|r| r.touch());
-        store.rooms.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        store
+            .rooms
+            .sort_by_key(|entry| std::cmp::Reverse(entry.last_seen));
         assert_eq!(store.rooms[0].topic, t1);
     }
 }

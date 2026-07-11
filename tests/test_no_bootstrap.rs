@@ -19,7 +19,7 @@ use iroh_gossip::{
 };
 use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};
-use rand::{Rng, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::time::Duration;
 
 fn make_sk(rng: &mut impl rand::Rng) -> SecretKey {

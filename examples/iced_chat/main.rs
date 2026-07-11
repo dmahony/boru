@@ -27,7 +27,7 @@ use iroh_gossip::chat_core::friend_ping::{
     FRIEND_PING_ALPN,
 };
 use iroh_gossip::chat_history::ChatHistoryStore;
-use iroh_gossip::friends::FriendsStore;
+use iroh_gossip::friends::{FriendId, FriendsStore};
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
@@ -551,7 +551,7 @@ fn main() -> Result<()> {
         // Direct QUIC channels for private 1:1 messaging and file transfer.
         let whisper_builder = WhisperBuilder::new(endpoint.clone(), secret_key.clone());
         let whisper_handler = whisper_builder.protocol_handler();
-        let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn().await;
+        let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
@@ -598,7 +598,10 @@ fn main() -> Result<()> {
             .iter()
             .filter_map(|(id, _)| id.parse_public_key().ok())
         {
-            let _ = friend_mgr.add_friend(peer, None).await;
+            let addr = friends
+                .get(&FriendId::from_public_key(peer))
+                .and_then(|record| record.known_addrs.first().cloned());
+            let _ = friend_mgr.add_friend(peer, addr).await;
         }
 
         Result::<_>::Ok((

@@ -42,8 +42,7 @@ static DEBUG_STATE: OnceLock<Mutex<DebugLog>> = OnceLock::new();
 struct DebugLog {
     file: File,
     local_id: String,
-    /// Cached path so we can re-print it in error messages.
-    path: PathBuf,
+
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +99,7 @@ pub fn init(local_id: &str) {
     let log = DebugLog {
         file,
         local_id,
-        path,
+
     };
 
     // `OnceLock` guarantees we only do this once.
@@ -224,7 +223,7 @@ fn timestamp() -> String {
         .unwrap_or_default();
 
     let secs = now.as_secs();
-    let micros = now.subsec_nanos() / 1_000;
+    let micros = now.subsec_micros();
 
     // Format the seconds portion manually to avoid pulling in chrono.
     // We use the same approach as `chrono`: split into date & time.
@@ -304,7 +303,7 @@ fn days_to_date(mut days: u64) -> (u64, u32, u32) {
 }
 
 fn is_leap(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 // ---------------------------------------------------------------------------

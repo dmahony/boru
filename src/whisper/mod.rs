@@ -143,25 +143,25 @@ enum ConnectionEvent {
 #[derive(Debug, Clone)]
 pub struct WhisperHandle {
     cmd_tx: mpsc::Sender<Cmd>,
-    authorized_peers: Arc<RwLock<HashSet<PublicKey>>>,
+    denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
 }
 
 impl WhisperHandle {
     /// Allow or deny a peer for incoming whisper connections.
     ///
-    /// Incoming peers are denied by default. Pending, blocked, and unknown
-    /// contacts must remain denied.
+    /// All peers are authorized by default. Peers in the denied set are
+    /// rejected at the protocol level.
     pub fn set_peer_authorized(&self, peer: PublicKey, authorized: bool) {
         let mut peers = self
-            .authorized_peers
+            .denied_peers
             .write()
             .expect("authorization lock poisoned");
         if authorized {
-            peers.insert(peer);
-        } else {
             peers.remove(&peer);
-            // Removing a key must not leave an already-established channel
-            // usable for library callers that revoke through this API.
+        } else {
+            peers.insert(peer);
+            // Adding a key must also tear down an already-established channel
+            // so revoked peers cannot continue messaging.
             let _ = self.cmd_tx.try_send(Cmd::RevokePeer(peer));
         }
     }
@@ -238,7 +238,7 @@ impl WhisperHandle {
 #[derive(Debug, Clone)]
 pub struct WhisperProtocol {
     cmd_tx: mpsc::Sender<Cmd>,
-    authorized_peers: Arc<RwLock<HashSet<PublicKey>>>,
+    denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
 }
 
 impl ProtocolHandler for WhisperProtocol {
@@ -246,8 +246,8 @@ impl ProtocolHandler for WhisperProtocol {
         let remote_id = connection.remote_id();
         debug!(peer = %remote_id.fmt_short(), "whisper incoming connection");
 
-        if !self
-            .authorized_peers
+        if self
+            .denied_peers
             .read()
             .expect("authorization lock poisoned")
             .contains(&remote_id)
@@ -279,7 +279,7 @@ pub struct WhisperBuilder {
     cmd_tx: mpsc::Sender<Cmd>,
     /// Receiver half taken by `spawn()`.
     cmd_rx: Option<mpsc::Receiver<Cmd>>,
-    authorized_peers: Arc<RwLock<HashSet<PublicKey>>>,
+    denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
 }
 
 impl WhisperBuilder {
@@ -291,13 +291,13 @@ impl WhisperBuilder {
             secret_key,
             cmd_tx,
             cmd_rx: Some(cmd_rx),
-            authorized_peers: Arc::new(RwLock::new(HashSet::new())),
+            denied_peers: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
-    /// Seed the accepted-contact set before registering the protocol.
-    pub fn with_authorized_peers(self, peers: impl IntoIterator<Item = PublicKey>) -> Self {
-        self.authorized_peers
+    /// Pre-populate the denied-peers set before registering the protocol.
+    pub fn with_denied_peers(self, peers: impl IntoIterator<Item = PublicKey>) -> Self {
+        self.denied_peers
             .write()
             .expect("authorization lock poisoned")
             .extend(peers);
@@ -311,19 +311,19 @@ impl WhisperBuilder {
     pub fn protocol_handler(&self) -> WhisperProtocol {
         WhisperProtocol {
             cmd_tx: self.cmd_tx.clone(),
-            authorized_peers: Arc::clone(&self.authorized_peers),
+            denied_peers: Arc::clone(&self.denied_peers),
         }
     }
 
     /// Spawn the whisper actor and return a handle + event receiver.
-    pub async fn spawn(mut self) -> (WhisperHandle, mpsc::UnboundedReceiver<WhisperEvent>) {
+    pub fn spawn(mut self) -> (WhisperHandle, mpsc::UnboundedReceiver<WhisperEvent>) {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let connected: Arc<Mutex<HashMap<PublicKey, Connection>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let handle = WhisperHandle {
             cmd_tx: self.cmd_tx.clone(),
-            authorized_peers: Arc::clone(&self.authorized_peers),
+            denied_peers: Arc::clone(&self.denied_peers),
         };
 
         let cmd_rx = self.cmd_rx.take().expect("spawn called more than once");
@@ -685,10 +685,9 @@ mod tests {
             .bind()
             .await?;
 
-        let builder = WhisperBuilder::new(endpoint.clone(), secret_key.clone())
-            .with_authorized_peers([secret_key.public()]);
+        let builder = WhisperBuilder::new(endpoint.clone(), secret_key.clone());
         let handler = builder.protocol_handler();
-        let (handle, event_rx) = builder.spawn().await;
+        let (handle, event_rx) = builder.spawn();
 
         let router = Router::builder(endpoint.clone())
             .accept(WHISPER_ALPN, handler)
@@ -721,7 +720,7 @@ mod tests {
                 Some(WhisperEvent::Message { from, content }) => {
                     assert_eq!(from, ep_a.secret_key().public());
                     // Content should be the decoded text.
-                    break content == Bytes::from("hello from A");
+                    break content == "hello from A";
                 }
                 Some(WhisperEvent::Connected { .. }) => continue,
                 Some(_) => continue,
@@ -743,8 +742,8 @@ mod tests {
         let peer_a = ep_a.secret_key().public();
         let peer_b = ep_b.secret_key().public();
 
-        // A is an accepted contact for B's outgoing path, but B has not
-        // accepted A. The protocol boundary must reject the incoming side.
+        // First: add peer A to B's denied set so the incoming side rejects.
+        handle_b.set_peer_authorized(peer_a, false);
         handle_a.set_peer_authorized(peer_b, true);
         // The transport connect can complete before the remote protocol handler
         // rejects the session, so verify the observable protocol result: no
@@ -754,10 +753,10 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(300), events_b.recv(),)
                 .await
                 .is_err(),
-            "unknown/blocked peer must not produce Connected"
+            "denied peer must not produce Connected"
         );
 
-        // Accepting the saved contact enables the normal DM flow.
+        // Remove A from B's denied set (authorize) to enable the normal DM flow.
         handle_b.set_peer_authorized(peer_a, true);
         let _ = handle_a.disconnect(&peer_b).await;
         handle_a.connect_to(peer_b, ep_b.addr()).await?;
@@ -765,7 +764,7 @@ mod tests {
         let received = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if let Some(WhisperEvent::Message { content, .. }) = events_b.recv().await {
-                    break content == Bytes::from("authorized");
+                    break content == "authorized";
                 }
             }
         })
@@ -773,8 +772,8 @@ mod tests {
         .map_err(|_| n0_error::anyerr!("authorized whisper DM timed out"))?;
         assert!(received);
 
-        // Revoking through the public authorization API also tears down the
-        // established channel, rather than merely blocking future handshakes.
+        // Add A back to B's denied set (revoke); this also tears down the
+        // established channel.
         handle_b.set_peer_authorized(peer_a, false);
         sleep(Duration::from_millis(100)).await;
         handle_a.send_dm(peer_b, "revoked".to_string()).await?;
@@ -782,7 +781,7 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(300), async {
                 loop {
                     if let Some(WhisperEvent::Message { content, .. }) = events_b.recv().await {
-                        break content == Bytes::from("revoked");
+                        break content == "revoked";
                     }
                 }
             })

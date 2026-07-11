@@ -11,12 +11,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::chat_core::atomic_write::atomic_write_json;
-use iroh::PublicKey;
+use crate::chat_core::{atomic_write::atomic_write_json, Ticket};
+use crate::proto::TopicId;
+use iroh::{EndpointAddr, PublicKey};
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
+const MAX_KNOWN_ADDRS: usize = 5;
 /// Name of the on-disk friends list file (lives beside `secret_key.txt`).
 pub const FRIENDS_FILE_NAME: &str = "friends.json";
 
@@ -88,9 +90,70 @@ pub struct FriendRecord {
     /// Durably stored online/offline observations.
     #[serde(default)]
     pub status: FriendStatus,
+    /// Recently observed endpoint addresses, newest first.
+    #[serde(default)]
+    pub known_addrs: Vec<EndpointAddr>,
+    /// Last time the durable address list changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addrs_updated_at_unix_ms: Option<u64>,
+    /// Rooms for which we have exchanged a ticket with this friend.
+    #[serde(default, with = "topic_ticket_map")]
+    pub rooms: BTreeMap<TopicId, Ticket>,
+}
+
+mod topic_ticket_map {
+    use super::*;
+
+    pub fn serialize<S>(
+        map: &BTreeMap<TopicId, Ticket>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        map.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<BTreeMap<TopicId, Ticket>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let entries = Vec::<(TopicId, Ticket)>::deserialize(deserializer)?;
+        Ok(entries.into_iter().collect())
+    }
 }
 
 impl FriendRecord {
+    /// Merge observed endpoint addresses, keeping newest entries first and bounded.
+    pub fn record_addrs(&mut self, addrs: impl IntoIterator<Item = EndpointAddr>) {
+        let mut merged = Vec::new();
+        for addr in addrs {
+            if !merged
+                .iter()
+                .any(|existing: &EndpointAddr| existing == &addr)
+            {
+                merged.push(addr);
+            }
+        }
+        for addr in self.known_addrs.drain(..) {
+            if !merged.iter().any(|existing| existing == &addr) {
+                merged.push(addr);
+            }
+        }
+        merged.truncate(MAX_KNOWN_ADDRS);
+        if merged != self.known_addrs {
+            self.known_addrs = merged;
+            self.addrs_updated_at_unix_ms = Some(now_unix_ms());
+        }
+    }
+
+    /// Record a room ticket exchanged with this friend.
+    pub fn record_room(&mut self, topic: TopicId, ticket: Ticket) {
+        self.rooms.insert(topic, ticket);
+    }
+
     /// Human-friendly label for display.
     pub fn display_label(&self, id: &FriendId) -> String {
         self.label
@@ -127,9 +190,10 @@ impl Default for FriendsStore {
 impl FriendsStore {
     /// Construct an empty store bound to a data directory.
     pub fn empty_at(data_dir: impl Into<PathBuf>) -> Self {
-        let mut store = Self::default();
-        store.data_dir = data_dir.into();
-        store
+        Self {
+            data_dir: data_dir.into(),
+            ..Self::default()
+        }
     }
 
     /// Return the data directory used by this store.
@@ -158,13 +222,16 @@ impl FriendsStore {
         let mut store: Self = serde_json::from_str(&raw)
             .with_std_context(|_| format!("failed to parse friends file {}", path.display()))?;
 
-        if store.schema_version != SCHEMA_VERSION {
+        if store.schema_version != 1 && store.schema_version != SCHEMA_VERSION {
             return Err(n0_error::anyerr!(
                 "unsupported friends schema version {} in {}",
                 store.schema_version,
                 path.display()
             ));
         }
+        // Version 1 had no durable addressing or room fields. They are
+        // serde-defaulted above; normalise the version on the next save.
+        store.schema_version = SCHEMA_VERSION;
 
         for id in store.friends.keys() {
             id.parse_public_key().with_std_context(|_| {
@@ -318,6 +385,62 @@ mod tests {
         assert_eq!(record.label.as_deref(), Some("Bob"));
         assert!(record.status.online);
         assert!(record.status.last_seen_at_unix_ms.is_some());
+    }
+
+    #[test]
+    fn known_addrs_are_deduplicated_and_capped() {
+        let mut record = FriendRecord::default();
+        let addrs: Vec<_> = (0..7)
+            .map(|_| EndpointAddr::new(iroh::SecretKey::generate().public()))
+            .collect();
+        record.record_addrs(addrs[..5].iter().cloned());
+        record.record_addrs(addrs[4..].iter().cloned());
+        assert_eq!(record.known_addrs.len(), 5);
+        assert_eq!(record.known_addrs[0], addrs[4]);
+        assert!(record.addrs_updated_at_unix_ms.is_some());
+    }
+
+    #[test]
+    fn old_schema_without_new_fields_loads() {
+        let dir = temp_dir("migration");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let pk = iroh::SecretKey::generate().public();
+        let raw = serde_json::json!({
+            "schema_version": 1,
+            "friends": { pk.to_string(): { "label": "Old" } }
+        });
+        fs::write(friends_file_path(&dir), raw.to_string()).expect("write old file");
+        let store = FriendsStore::load(&dir).expect("load old friends file");
+        let record = store
+            .get(&FriendId::from_public_key(pk))
+            .expect("friend exists");
+        assert!(record.known_addrs.is_empty());
+        assert!(record.rooms.is_empty());
+        assert_eq!(store.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn save_then_load_preserves_address_and_room_data() {
+        let dir = temp_dir("rich-roundtrip");
+        let mut store = FriendsStore::empty_at(&dir);
+        let pk = iroh::SecretKey::generate().public();
+        let id = FriendId::from_public_key(pk);
+        let topic = TopicId::from_bytes([7; 32]);
+        let ticket = Ticket {
+            topic,
+            peers: vec![EndpointAddr::new(pk)],
+        };
+        store
+            .ensure_friend(id.clone())
+            .record_addrs(ticket.peers.clone());
+        store
+            .ensure_friend(id.clone())
+            .record_room(topic, ticket.clone());
+        store.save().expect("save");
+        let loaded = FriendsStore::load(&dir).expect("load");
+        let record = loaded.get(&id).expect("friend");
+        assert_eq!(record.known_addrs, ticket.peers);
+        assert_eq!(record.rooms.get(&topic), Some(&ticket));
     }
 
     #[test]

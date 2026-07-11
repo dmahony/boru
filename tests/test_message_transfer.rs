@@ -102,14 +102,9 @@ fn drain_net(
     sim: &mut TestChat,
 ) -> usize {
     let mut count = 0;
-    loop {
-        match rx.try_lock().unwrap().try_recv() {
-            Ok(event) => {
-                count += 1;
-                let _ = handle_net_event(event, sim);
-            }
-            Err(_) => break,
-        }
+    while let Ok(event) = rx.try_lock().unwrap().try_recv() {
+        count += 1;
+        let _ = handle_net_event(event, sim);
     }
     count
 }
@@ -179,7 +174,7 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
         sleep(Duration::from_millis(200)).await;
         drain_net(&net_rx_a, &mut sim_a);
         drain_net(&net_rx_b, &mut sim_b);
-        if sim_a.neighbors.len() > 0 && sim_b.neighbors.len() > 0 {
+        if !sim_a.neighbors.is_empty() && !sim_b.neighbors.is_empty() {
             println!("  Both connected at tick {i}");
             break;
         }
@@ -194,11 +189,11 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
     }
 
     assert!(
-        sim_a.neighbors.len() > 0,
+        !sim_a.neighbors.is_empty(),
         "A has no neighbors after waiting"
     );
     assert!(
-        sim_b.neighbors.len() > 0,
+        !sim_b.neighbors.is_empty(),
         "B has no neighbors after waiting"
     );
     println!("✓ Both peers connected");

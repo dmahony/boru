@@ -29,12 +29,13 @@ use iroh_gossip::{
     proto::TopicId,
 };
 use n0_error::Result;
-use n0_future::{task, time::sleep, StreamExt};
+use n0_future::{task, time::sleep};
 use rand::{RngExt, SeedableRng};
 use tokio::sync::{mpsc, Mutex};
 
 // ── SimChat as used by test_iced_chat_flow.rs ──────────────
 
+#[expect(dead_code)]
 struct SimChat {
     local_public: PublicKey,
     entries: Vec<ChatEntry>,
@@ -231,7 +232,7 @@ async fn test_gui_bootstrap_plumbing() -> Result<()> {
         sleep(Duration::from_millis(250)).await;
         drain_net(&net_rx_a, &mut sim_a);
         drain_net(&net_rx_b, &mut sim_b);
-        if sim_a.neighbors.len() > 0 && sim_b.neighbors.len() > 0 {
+        if !sim_a.neighbors.is_empty() && !sim_b.neighbors.is_empty() {
             println!("  ✓ Both connected at tick {i}");
             break;
         }
@@ -245,8 +246,8 @@ async fn test_gui_bootstrap_plumbing() -> Result<()> {
         }
     }
 
-    let a_has_neighbors = sim_a.neighbors.len() > 0;
-    let b_has_neighbors = sim_b.neighbors.len() > 0;
+    let a_has_neighbors = !sim_a.neighbors.is_empty();
+    let b_has_neighbors = !sim_b.neighbors.is_empty();
     assert!(
         a_has_neighbors,
         "A should have neighbors (via bootstrap from ticket)"

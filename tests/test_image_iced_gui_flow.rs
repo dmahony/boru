@@ -32,7 +32,8 @@ use tokio::sync::Mutex;
 
 // ── Test peer that mirrors IcedChat field layout ─────────
 
-struct IcedTestPeer {
+#[expect(dead_code)]
+struct ImageTestPeer {
     local_public: PublicKey,
     entries: Vec<ChatEntry>,
     names: HashMap<PublicKey, String>,
@@ -43,7 +44,7 @@ struct IcedTestPeer {
     endpoint: iroh::Endpoint,
 }
 
-impl ChatCallbacks for IcedTestPeer {
+impl ChatCallbacks for ImageTestPeer {
     fn local_public(&self) -> PublicKey {
         self.local_public
     }
@@ -131,17 +132,12 @@ async fn spawn_peer_with_blobs(
 /// handle_net_event (like the Iced GUI does one at a time in update()).
 fn drain_events(
     rx: &Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<NetEvent>>>,
-    sim: &mut IcedTestPeer,
+    sim: &mut ImageTestPeer,
 ) -> usize {
     let mut count = 0;
-    loop {
-        match rx.try_lock().unwrap().try_recv() {
-            Ok(event) => {
-                count += 1;
-                let _ = handle_net_event(event, sim);
-            }
-            Err(_) => break,
-        }
+    while let Ok(event) = rx.try_lock().unwrap().try_recv() {
+        count += 1;
+        let _ = handle_net_event(event, sim);
     }
     count
 }
@@ -241,7 +237,7 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
     sender_b.broadcast(about_me_b).await?;
 
     // ── Set up test peers ──
-    let mut sim_a = IcedTestPeer {
+    let mut sim_a = ImageTestPeer {
         local_public: pk_a,
         entries: vec![],
         names: HashMap::new(),
@@ -251,7 +247,7 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
         blob_store: blob_store_a.clone(),
         endpoint: ep_a.clone(),
     };
-    let mut sim_b = IcedTestPeer {
+    let mut sim_b = ImageTestPeer {
         local_public: pk_b,
         entries: vec![],
         names: HashMap::new(),
@@ -268,7 +264,7 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
         sleep(Duration::from_millis(200)).await;
         drain_events(&net_rx_a, &mut sim_a);
         drain_events(&net_rx_b, &mut sim_b);
-        if sim_a.neighbors.len() > 0 && sim_b.neighbors.len() > 0 {
+        if !sim_a.neighbors.is_empty() && !sim_b.neighbors.is_empty() {
             println!("  Both connected at tick {i}");
             connected = true;
             break;
@@ -286,6 +282,7 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
 
     let image_data: Vec<u8> = b"fake-png-bytes-1234567890-abcdef".to_vec();
 
+    #[expect(unused_imports)]
     use iroh_blobs::api::proto::TagInfo;
     let tag_info = blob_store_a
         .blobs()

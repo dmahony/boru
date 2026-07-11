@@ -105,14 +105,9 @@ fn drain_net(
     sim: &mut TestPeer,
 ) -> usize {
     let mut count = 0;
-    loop {
-        match rx.try_lock().unwrap().try_recv() {
-            Ok(event) => {
-                count += 1;
-                let _ = handle_net_event(event, sim);
-            }
-            Err(_) => break,
-        }
+    while let Ok(event) = rx.try_lock().unwrap().try_recv() {
+        count += 1;
+        let _ = handle_net_event(event, sim);
     }
     count
 }
@@ -194,7 +189,7 @@ async fn repro_two_peers_different_keys() -> Result<()> {
         sleep(Duration::from_millis(200)).await;
         drain_net(&net_rx_a, &mut sim_a);
         drain_net(&net_rx_b, &mut sim_b);
-        if sim_a.neighbors.len() > 0 && sim_b.neighbors.len() > 0 {
+        if !sim_a.neighbors.is_empty() && !sim_b.neighbors.is_empty() {
             println!("  Both connected at tick {i}");
             connected = true;
             break;
@@ -371,7 +366,7 @@ async fn repro_two_peers_same_key() -> Result<()> {
         sleep(Duration::from_millis(200)).await;
         drain_net(&net_rx_a, &mut sim_a);
         drain_net(&net_rx_b, &mut sim_b);
-        if sim_a.neighbors.len() > 0 || sim_b.neighbors.len() > 0 {
+        if !sim_a.neighbors.is_empty() || !sim_b.neighbors.is_empty() {
             println!(
                 "  tick {i}: A neighbors={}, B neighbors={}",
                 sim_a.neighbors.len(),

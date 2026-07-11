@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use iroh::PublicKey;
 
-use crate::chat_core::MessageHash;
+use crate::chat_core::{MessageHash, Ticket};
 use crate::chat_history::DeliveryState;
 use crate::friends::FriendId;
 
@@ -111,7 +111,27 @@ pub trait ChatCallbacks {
     fn record_presence(&mut self, _peer: PublicKey) {}
 
     /// Record the ticket a peer advertises for starting a chat with them.
-    fn record_peer_ticket(&mut self, _peer: PublicKey, _ticket: String) {}
+    ///
+    /// Parsing, self-ticket filtering, and dirty-state handling are shared
+    /// here. Frontends provide [`store_peer_ticket`](Self::store_peer_ticket)
+    /// to merge the parsed ticket into their durable friend store.
+    fn record_peer_ticket(&mut self, peer: PublicKey, ticket: String) {
+        if peer == self.local_public() {
+            return;
+        }
+        let Ok(ticket) = ticket.parse::<Ticket>() else {
+            return;
+        };
+        if self.store_peer_ticket(peer, ticket) {
+            self.mark_friends_dirty();
+        }
+    }
+
+    /// Merge a parsed peer ticket into frontend-owned durable state.
+    /// Returns whether the frontend accepted the ticket.
+    fn store_peer_ticket(&mut self, _peer: PublicKey, _ticket: Ticket) -> bool {
+        false
+    }
 
     /// Request the frontend to quit (gossip receiver closed or error).
     fn request_quit(&mut self);

@@ -585,7 +585,7 @@ fn make_roster_entries(members: &HashMap<String, RosterMember>) -> Vec<RosterMem
             joined_at: m.joined_at,
         })
         .collect();
-    entries.sort_by(|a, b| a.joined_at.cmp(&b.joined_at));
+    entries.sort_by_key(|entry| entry.joined_at);
     entries
 }
 
@@ -730,12 +730,9 @@ pub fn spawn_room_event_forwarder(
         let mut receiver = gossip_receiver;
         while let Some(event_result) = receiver.next().await {
             // Inspect the marker byte before consuming the event.
-            let is_metadata = match &event_result {
-                Ok(GossipEvent::Received(msg)) if msg.content.first() == Some(&METADATA_MARKER) => {
-                    true
-                }
-                _ => false,
-            };
+            let is_metadata = matches!(&event_result,
+                Ok(GossipEvent::Received(msg))
+                    if msg.content.first() == Some(&METADATA_MARKER));
 
             if is_metadata {
                 let _ = process_gossip_event(&metadata_doc, event_result).await;
@@ -743,12 +740,9 @@ pub fn spawn_room_event_forwarder(
             }
 
             // Check for roster marker
-            let is_roster = match &event_result {
-                Ok(GossipEvent::Received(msg)) if msg.content.first() == Some(&ROSTER_MARKER) => {
-                    true
-                }
-                _ => false,
-            };
+            let is_roster = matches!(&event_result,
+                Ok(GossipEvent::Received(msg))
+                    if msg.content.first() == Some(&ROSTER_MARKER));
 
             if is_roster {
                 let _ = process_roster_event(&roster_doc, event_result).await;

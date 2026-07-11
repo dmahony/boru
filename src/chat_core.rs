@@ -122,20 +122,12 @@ pub use crate::chat_callbacks::ChatCallbacks;
 // ── Composer ─────────────────────────────────────────────────────────────────
 
 /// A text buffer with cursor tracking, suitable for a message composer / input line.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Composer {
     text: String,
     cursor: usize,
 }
 
-impl Default for Composer {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            cursor: 0,
-        }
-    }
-}
 
 impl From<&str> for Composer {
     fn from(text: &str) -> Self {
@@ -651,6 +643,14 @@ impl ChatCallbacks for AppState {
 
     fn mark_friends_dirty(&mut self) {
         self.friends_dirty = true;
+    }
+
+    fn store_peer_ticket(&mut self, peer: PublicKey, ticket: Ticket) -> bool {
+        let fid = FriendId::from_public_key(peer);
+        let record = self.friends.ensure_friend(fid);
+        record.record_addrs(ticket.peers.clone());
+        record.record_room(ticket.topic, ticket);
+        true
     }
 
     fn record_activity(&mut self, peer: PublicKey) {
@@ -1175,7 +1175,6 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
             let fid = FriendId::from_public_key(peer);
             if cb.is_friend(&peer) {
                 cb.friend_mark_online(fid);
-                cb.mark_friends_dirty();
             }
             let name = cb.resolve_name(&peer);
             cb.push_system(format!("{name} joined the chat"));
@@ -1616,6 +1615,52 @@ mod tests {
     }
 
     #[test]
+    fn default_record_peer_ticket_ignores_invalid_ticket() {
+        let peer = SecretKey::generate().public();
+        let mut app = test_app();
+
+        ChatCallbacks::record_peer_ticket(&mut app, peer, "not-a-ticket".into());
+
+        assert!(app.friends.is_empty());
+        assert!(!app.friends_dirty);
+    }
+
+    #[test]
+    fn default_record_peer_ticket_ignores_self_ticket() {
+        let mut app = test_app();
+        let local_public = app.local_public;
+        let ticket = Ticket {
+            topic: TopicId::from_bytes([9; 32]),
+            peers: vec![EndpointAddr::new(local_public)],
+        };
+
+        ChatCallbacks::record_peer_ticket(&mut app, local_public, ticket.to_string());
+
+        assert!(app.friends.is_empty());
+        assert!(!app.friends_dirty);
+    }
+
+    #[test]
+    fn default_record_peer_ticket_persists_valid_ticket() {
+        let peer = SecretKey::generate().public();
+        let mut app = test_app();
+        let ticket = Ticket {
+            topic: TopicId::from_bytes([8; 32]),
+            peers: vec![EndpointAddr::new(peer)],
+        };
+
+        ChatCallbacks::record_peer_ticket(&mut app, peer, ticket.to_string());
+
+        let record = app
+            .friends
+            .get(&FriendId::from_public_key(peer))
+            .expect("peer ticket creates friend record");
+        assert_eq!(record.known_addrs, ticket.peers);
+        assert_eq!(record.rooms.get(&ticket.topic), Some(&ticket));
+        assert!(app.friends_dirty);
+    }
+
+    #[test]
     fn app_state_max_scroll_offset_zero_when_fewer_entries_than_height() {
         let mut app = test_app();
         assert_eq!(app.max_scroll_offset(10), 0);
@@ -1812,7 +1857,7 @@ mod tests {
     #[test]
     fn signed_message_wrong_key_fails_verification() {
         let key_a = SecretKey::generate();
-        let key_b = SecretKey::generate();
+        let _key_b = SecretKey::generate();
         let msg = Message::Message {
             text: "secret".into(),
         };
@@ -1822,7 +1867,7 @@ mod tests {
         // and the protocol trusts the claimed key.  This test verifies
         // that a message signed by one key cannot be claimed as having
         // come from a different key after verification.
-        let (pk, _, _sent_at) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        let (_pk, _, _sent_at) = SignedMessage::verify_and_decode(&encoded).unwrap();
     }
 
     // ── Ticket serialization tests ───────────────────────────────────────
@@ -1891,7 +1936,6 @@ mod tests {
     fn handle_net_event_message_appends_remote_entry() {
         let key = SecretKey::generate();
         let mut app = test_app();
-        let mut names: HashMap<iroh::PublicKey, String> = HashMap::new();
 
         let event = NetEvent::Message {
             from: key.public(),
@@ -1908,9 +1952,8 @@ mod tests {
     #[test]
     fn handle_net_event_about_me_stores_name_and_notifies() {
         let remote_key = SecretKey::generate();
-        let local_key = SecretKey::generate();
+        let _local_key = SecretKey::generate();
         let mut app = test_app();
-        let mut names: HashMap<iroh::PublicKey, String> = HashMap::new();
 
         let event = NetEvent::Message {
             from: remote_key.public(),
@@ -2401,7 +2444,7 @@ mod tests {
     #[test]
     fn resolve_name_falls_back_to_short_pk_when_no_name_or_friend() {
         let remote_key = SecretKey::generate();
-        let mut app = test_app();
+        let app = test_app();
         // No name, no friend — should fall back to short key.
         let display = app.resolve_name(&remote_key.public());
         let short = format!("{}", remote_key.public().fmt_short());
@@ -2594,7 +2637,7 @@ mod tests {
     #[test]
     fn signed_message_roundtrip_reaction_long_emoji_string() {
         let hash = [7u8; 32];
-        let many_hearts: String = std::iter::repeat("❤️").take(50).collect();
+        let many_hearts: String = "❤️".repeat(50);
         assert_signed_message_roundtrip(
             Message::Reaction {
                 message_hash: hash,
@@ -2625,7 +2668,7 @@ mod tests {
     #[test]
     fn signed_message_roundtrip_edit_long_text() {
         let hash = [9u8; 32];
-        let long_text: String = std::iter::repeat("A").take(10_000).collect();
+        let long_text: String = "A".repeat(10_000);
         assert_signed_message_roundtrip(
             Message::Edit {
                 original_hash: hash,
@@ -2724,10 +2767,10 @@ mod tests {
         let addr2 = EndpointAddr::new(pk2);
         let addr1_dup = EndpointAddr::new(pk1); // same pk1
 
-        let ticket_peers = vec![addr1, addr2.clone()];
-        let room_peers = vec![addr1_dup];
+        let ticket_peers = [addr1, addr2.clone()];
+        let room_peers = [addr1_dup];
 
-        let (peer_ids, all_addrs) = collect_bootstrap_peers(&[&ticket_peers[..], &room_peers[..]]);
+        let (peer_ids, all_addrs) = collect_bootstrap_peers([&ticket_peers[..], &room_peers[..]]);
 
         assert_eq!(peer_ids.len(), 2, "should have 2 unique peer IDs");
         assert!(peer_ids.contains(&pk1), "pk1 should be in peer_ids");
@@ -2738,7 +2781,7 @@ mod tests {
 
     #[test]
     fn test_collect_bootstrap_peers_empty() {
-        let (ids, addrs) = collect_bootstrap_peers(&[&[] as &[EndpointAddr]]);
+        let (ids, addrs) = collect_bootstrap_peers([&[] as &[EndpointAddr]]);
         assert!(ids.is_empty(), "empty sources → empty peer_ids");
         assert!(addrs.is_empty(), "empty sources → empty addrs");
     }
@@ -2749,7 +2792,7 @@ mod tests {
         let pk = sk.public();
         let addr = EndpointAddr::new(pk);
 
-        let (ids, addrs) = collect_bootstrap_peers(&[&[addr.clone()][..]]);
+        let (ids, addrs) = collect_bootstrap_peers([&[addr.clone()][..]]);
         assert_eq!(ids, vec![pk], "single source should produce its peer ID");
         assert_eq!(addrs.len(), 1, "single source should produce its addr");
     }

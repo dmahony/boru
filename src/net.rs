@@ -4,7 +4,7 @@ use std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
     net::SocketAddr,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
 };
 
@@ -34,6 +34,7 @@ use self::{
 };
 use crate::{
     api::{self, Command, Event, GossipApi, RpcMessage},
+    friends::FriendsStore,
     metrics::Metrics,
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
 };
@@ -146,6 +147,7 @@ impl ProtocolHandler for Gossip {
 pub struct Builder {
     config: proto::Config,
     alpn: Option<Bytes>,
+    friends: Option<Arc<Mutex<FriendsStore>>>,
 }
 
 impl Builder {
@@ -180,10 +182,19 @@ impl Builder {
         self
     }
 
+    /// Persist addresses learned from gossip for known friends.
+    pub fn friends_store(mut self, friends: Arc<Mutex<FriendsStore>>) -> Self {
+        self.friends = Some(friends);
+        self
+    }
+
     /// Spawn a gossip actor and get a handle for it
     pub fn spawn(self, endpoint: Endpoint) -> Gossip {
         let metrics = Arc::new(Metrics::default());
-        let address_lookup = GossipAddressLookup::default();
+        let address_lookup = self
+            .friends
+            .map(|friends| GossipAddressLookup::with_friends(Default::default(), friends))
+            .unwrap_or_default();
 
         // `Endpoint::address_lookup` returns `Err` when the endpoint is closed.
         // In that case, the gossip actor will close too very soon for other reasons,
@@ -229,6 +240,7 @@ impl Gossip {
         Builder {
             config: Default::default(),
             alpn: None,
+            friends: None,
         }
     }
 

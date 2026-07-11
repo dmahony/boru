@@ -23,7 +23,8 @@ use rand::{RngExt, SeedableRng};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-
+#[derive(Debug)]
+#[expect(dead_code)]
 struct SimChat {
     local_public: PublicKey,
     entries: Vec<ChatEntry>,
@@ -207,7 +208,7 @@ async fn test_iced_chat_exact_flow() -> Result<()> {
     // Wait for gossip to connect
     let drain_net =
         |rx: &Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<NetEvent>>>,
-         label: &str,
+         _label: &str,
          sim: &mut SimChat| {
             let mut count = 0;
             loop {
@@ -227,7 +228,7 @@ async fn test_iced_chat_exact_flow() -> Result<()> {
         sleep(Duration::from_millis(200)).await;
         drain_net(&net_rx_a, "A", &mut sim_a);
         drain_net(&net_rx_b, "B", &mut sim_b);
-        if sim_a.neighbors.len() > 0 && sim_b.neighbors.len() > 0 {
+        if !sim_a.neighbors.is_empty() && !sim_b.neighbors.is_empty() {
             println!("  Both connected at tick {i}");
             break;
         }
@@ -241,8 +242,8 @@ async fn test_iced_chat_exact_flow() -> Result<()> {
         }
     }
 
-    assert!(sim_a.neighbors.len() > 0, "A should have neighbors");
-    assert!(sim_b.neighbors.len() > 0, "B should have neighbors");
+    assert!(!sim_a.neighbors.is_empty(), "A should have neighbors");
+    assert!(!sim_b.neighbors.is_empty(), "B should have neighbors");
 
     // Drain stale
     drain_net(&net_rx_a, "A", &mut sim_a);

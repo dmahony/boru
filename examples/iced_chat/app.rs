@@ -508,8 +508,6 @@ pub struct IcedChat {
     /// Bootstrap peer addresses from the initial join ticket (if any).
     /// Used only for the first room subscription; cleared after use.
     initial_bootstrap_peers: Vec<EndpointAddr>,
-    /// Tickets advertised by peers in the current room.
-    peer_tickets: HashMap<PublicKey, String>,
     /// Whether the initial default lobby should leave the UI on the chat list.
     return_to_chat_list_after_open: bool,
     /// Handle for sending whisper/private messages.
@@ -709,7 +707,6 @@ impl IcedChat {
             history_saved_count: 0,
             friend_online_cache,
             initial_bootstrap_peers: initial_bootstrap,
-            peer_tickets: HashMap::new(),
             return_to_chat_list_after_open,
             whisper_handle,
             whisper_events_rx,
@@ -833,7 +830,6 @@ impl IcedChat {
         self.pending_file = None;
         self.pending_image = None;
         self.neighbors.clear();
-        self.peer_tickets.clear();
         self.history_saved_count = 0;
     }
 
@@ -1325,7 +1321,6 @@ impl IcedChat {
                 self.ticket_str = ticket.clone();
                 self.entries.clear();
                 self.names.clear();
-                self.peer_tickets.clear();
                 self.composer_text.clear();
                 self.push_system(format!(
                     "Connected as {}.  Topic: {topic}",
@@ -1536,18 +1531,19 @@ impl IcedChat {
             }
 
             AppMessage::OpenFriendChat(peer) => {
-                let Some(ticket_str) = self.peer_tickets.get(&peer).cloned() else {
+                let fid = FriendId::from_public_key(peer);
+                let Some(ticket) = self
+                    .friends
+                    .get(&fid)
+                    .and_then(|record| record.rooms.values().next().cloned())
+                else {
                     return iced::Task::done(AppMessage::ErrorMsg(
-                        "This user has not advertised a chat ticket yet.".to_string(),
+                        "No shared chat ticket is known for this friend yet.".to_string(),
                     ));
                 };
-                let Ok(ticket) = ticket_str.parse::<Ticket>() else {
-                    return iced::Task::done(AppMessage::ErrorMsg(
-                        "The advertised chat ticket is invalid.".to_string(),
-                    ));
-                };
-                let topic = private_topic(&self.local_public, &peer);
-                let room = RoomStore::with_peers(&self.data_dir, topic, ticket.peers);
+                let topic = ticket.topic;
+                let ticket_str = ticket.to_string();
+                let room = RoomStore::with_peers(&self.data_dir, topic, ticket.peers.clone());
                 let _ = room.save();
                 let whisper_handle = self.whisper_handle.clone();
                 let invite = format!("\x00PRIVATE_CHAT:{ticket_str}");
@@ -1693,22 +1689,30 @@ impl IcedChat {
                         (pubkey_str, None)
                     };
                     let mgr = self.friend_mgr.clone();
+                    // Parse key and lookup address outside async block (avoids capturing self)
+                    let peer = key_part.parse::<PublicKey>().ok();
+                    let addr = peer.as_ref().and_then(|p| {
+                        let fid = FriendId::from_public_key(*p);
+                        self.friends
+                            .get(&fid)
+                            .and_then(|record| record.known_addrs.first().cloned())
+                    });
                     return iced::Task::perform(
                         async move {
-                            match key_part.parse::<PublicKey>() {
-                                Ok(peer) => {
+                            match peer {
+                                Some(peer) => {
                                     let fid = FriendId::from_public_key(peer);
                                     let label = alias
                                         .clone()
                                         .unwrap_or_else(|| peer.fmt_short().to_string());
-                                    let was_new = mgr.add_friend(peer, None).await.unwrap_or(false);
+                                    let was_new = mgr.add_friend(peer, addr).await.unwrap_or(false);
                                     AppMessage::FriendAdded {
                                         fid: fid.as_str().to_string(),
                                         label,
                                         was_new,
                                     }
                                 }
-                                Err(e) => AppMessage::ErrorMsg(format!("Invalid public key: {e}")),
+                                None => AppMessage::ErrorMsg(format!("Invalid public key: {key_part}")),
                             }
                         },
                         |msg| msg,
@@ -3002,10 +3006,12 @@ impl ChatCallbacks for IcedChat {
         self.neighbors.insert(peer);
     }
 
-    fn record_peer_ticket(&mut self, peer: PublicKey, ticket: String) {
-        if peer != self.local_public && ticket.parse::<Ticket>().is_ok() {
-            self.peer_tickets.insert(peer, ticket);
-        }
+    fn store_peer_ticket(&mut self, peer: PublicKey, ticket: Ticket) -> bool {
+        let fid = FriendId::from_public_key(peer);
+        let record = self.friends.ensure_friend(fid);
+        record.record_addrs(ticket.peers.clone());
+        record.record_room(ticket.topic, ticket);
+        true
     }
 
     fn request_quit(&mut self) {
@@ -3249,7 +3255,9 @@ impl IcedChat {
             .filter(|peer| *peer != self.local_public)
             .filter(|peer| {
                 let fid = FriendId::from_public_key(*peer);
-                self.friends.get(&fid).is_none() && self.peer_tickets.contains_key(peer)
+                self.friends
+                    .get(&fid)
+                    .is_some_and(|record| !record.rooms.is_empty())
             })
             .map(|peer| (peer, self.resolve_name(&peer)))
             .collect();

@@ -31,6 +31,7 @@ use tokio::sync::Mutex;
 
 // ── Test peer that tracks pending_image like IcedChat ─────────
 
+#[expect(dead_code)]
 struct ImageTestPeer {
     local_public: PublicKey,
     entries: Vec<ChatEntry>,
@@ -135,14 +136,9 @@ fn drain_net(
     sim: &mut ImageTestPeer,
 ) -> usize {
     let mut count = 0;
-    loop {
-        match rx.try_lock().unwrap().try_recv() {
-            Ok(event) => {
-                count += 1;
-                let _ = handle_net_event(event, sim);
-            }
-            Err(_) => break,
-        }
+    while let Ok(event) = rx.try_lock().unwrap().try_recv() {
+        count += 1;
+        let _ = handle_net_event(event, sim);
     }
     count
 }
@@ -227,7 +223,7 @@ async fn test_image_send_and_download() -> Result<()> {
         sleep(Duration::from_millis(200)).await;
         drain_net(&net_rx_a, &mut sim_a);
         drain_net(&net_rx_b, &mut sim_b);
-        if sim_a.neighbors.len() > 0 && sim_b.neighbors.len() > 0 {
+        if !sim_a.neighbors.is_empty() && !sim_b.neighbors.is_empty() {
             println!("  Both connected at tick {i}");
             connected = true;
             break;
@@ -254,6 +250,7 @@ async fn test_image_send_and_download() -> Result<()> {
     let image_data: Vec<u8> = b"fake-png-bytes-1234567890-abcdef".to_vec();
 
     // add_bytes returns AddProgress which implements IntoFuture -> RequestResult<TagInfo>
+    #[expect(unused_imports)]
     use iroh_blobs::api::proto::TagInfo;
     let tag_info = blob_store_a
         .blobs()

@@ -23,7 +23,7 @@ use iroh_gossip::chat_core::{check_peer_connection_type, ConnectionType, Message
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
 use iroh_mainline_address_lookup::DhtAddressLookup;
-use n0_error::{bail_any, Result};
+use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};
 
 /// How long to wait for a peer to connect (seconds).
@@ -62,6 +62,7 @@ enum Command {
 
 /// Tracks neighbor state and reports events.
 #[derive(Debug)]
+#[expect(dead_code)]
 struct PeerState {
     local_pk: PublicKey,
     endpoint: Endpoint,
@@ -105,7 +106,7 @@ impl PeerState {
     }
 
     fn neighbor_list(&self) -> Vec<String> {
-        let mut keys: Vec<String> = self.neighbors.iter().map(|k| fmt_id(k)).collect();
+        let mut keys: Vec<String> = self.neighbors.iter().map(fmt_id).collect();
         keys.sort();
         keys
     }
@@ -362,7 +363,7 @@ async fn main() -> Result<()> {
                 // joined() blocks until the first connection; after this
                 // the consumed NeighborUp won't arrive in our event stream,
                 // so we manually add the bootstrap peer as "seen".
-                let _first = sub.joined().await?;
+                sub.joined().await?;
                 println!("  [JOINED] connected to topic, waiting for peers...");
                 // The bootstrap peer's endpoint ID was consumed by joined();
                 // we can't add it to state because we don't know the peer's

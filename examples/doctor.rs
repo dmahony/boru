@@ -549,17 +549,17 @@ fn check_candidate_dirs() -> Check {
 // ── Runner ──────────────────────────────────────────────────────────────────
 
 fn run_checks(data_dir: &Path, _verbose: bool, offline: bool) -> Vec<Check> {
-    let mut checks = Vec::new();
-
-    checks.push(check_env_overrides());
-    checks.push(check_candidate_dirs());
-    checks.push(check_data_dir(data_dir));
-    checks.push(check_secret_key(data_dir));
-    checks.push(check_friends_store(data_dir));
-    checks.push(check_room_store(data_dir));
-    checks.push(check_room_history(data_dir));
-    checks.push(check_chat_history(data_dir));
-    checks.push(check_features());
+    let checks = vec![
+        check_env_overrides(),
+        check_candidate_dirs(),
+        check_data_dir(data_dir),
+        check_secret_key(data_dir),
+        check_friends_store(data_dir),
+        check_room_store(data_dir),
+        check_room_history(data_dir),
+        check_chat_history(data_dir),
+        check_features(),
+    ];
 
     if !offline {
         // Network-reachable checks could go here (e.g. relay connectivity)

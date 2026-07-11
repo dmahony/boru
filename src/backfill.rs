@@ -301,6 +301,9 @@ async fn serve_backfill(connection: Connection, store: &Mutex<ChatHistoryStore>)
             .finish()
             .map_err(|e| n0_error::anyerr!("backfill: finish writer: {e}"))?;
 
+        // Wait for the client to close the connection so our FIN is actually sent.
+        let _ = connection.closed().await;
+
         Ok(())
     })
     .await
@@ -660,7 +663,7 @@ mod tests {
         // Empty history store — we never get to query it anyway because
         // the delay fires first on the server side.
         let data_dir = temp_store_path("slow_timeout");
-        let mut history_store = ChatHistoryStore::empty_at(data_dir);
+        let history_store = ChatHistoryStore::empty_at(data_dir);
         // Save so the store file exists (serves backfill reads)
         let _ = history_store.save();
         let store = Arc::new(Mutex::new(history_store));

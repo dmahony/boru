@@ -16,7 +16,7 @@ use iroh_gossip::{
 };
 use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};
-use rand::{Rng, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -45,7 +45,7 @@ async fn test_signed_message_gossip_flow() -> Result<()> {
 
     // Spawn two peers
     let (router_a, ep_a, sk_a, gossip_a) = spawn_peer(&mut rng).await?;
-    let (router_b, ep_b, sk_b, gossip_b) = spawn_peer(&mut rng).await?;
+    let (router_b, ep_b, _sk_b, gossip_b) = spawn_peer(&mut rng).await?;
 
     let topic = TopicId::from_bytes(rng.random());
 

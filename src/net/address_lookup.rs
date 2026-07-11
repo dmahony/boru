@@ -2,18 +2,21 @@
 
 use std::{
     collections::{btree_map::Entry, BTreeMap},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
 use iroh::address_lookup::{self, AddressLookup, EndpointData, EndpointInfo};
-use iroh_base::EndpointId;
+use iroh::EndpointAddr;
+use iroh_base::{EndpointId, TransportAddr};
 use n0_future::{
     boxed::BoxStream,
     stream::{self, StreamExt},
     task::AbortOnDropHandle,
     time::SystemTime,
 };
+
+use crate::friends::{FriendId, FriendsStore};
 
 pub(crate) struct RetentionOpts {
     /// How long to keep received endpoint info records alive before pruning them
@@ -32,12 +35,10 @@ impl Default for RetentionOpts {
 }
 
 /// An address lookup service that expires endpoints after some time.
-///
-/// It is added to the endpoint when constructing a gossip instance, and the gossip actor
-/// then adds endpoint addresses as received with Join or ForwardJoin messages.
 #[derive(Debug, Clone)]
 pub(crate) struct GossipAddressLookup {
     endpoints: NodeMap,
+    friends: Option<Arc<Mutex<FriendsStore>>>,
     _task_handle: Arc<AbortOnDropHandle<()>>,
 }
 
@@ -58,7 +59,6 @@ impl Default for GossipAddressLookup {
 impl GossipAddressLookup {
     const PROVENANCE: &'static str = "gossip";
 
-    /// Creates a new gossip address lookup instance.
     pub(crate) fn new() -> Self {
         Self::with_opts(Default::default())
     }
@@ -84,18 +84,43 @@ impl GossipAddressLookup {
         };
         Self {
             endpoints,
+            friends: None,
             _task_handle: Arc::new(AbortOnDropHandle::new(task)),
         }
     }
 
-    /// Augments endpoint addressing information for the given endpoint ID.
-    ///
-    /// The provided addressing information is combined with the existing info in the in-memory
-    /// lookup.  Any new direct addresses are added to those already present while the
-    /// relay URL is overwritten.
+    pub(crate) fn with_friends(opts: RetentionOpts, friends: Arc<Mutex<FriendsStore>>) -> Self {
+        let mut lookup = Self::with_opts(opts);
+        lookup.friends = Some(friends);
+        lookup
+    }
+
     pub(crate) fn add(&self, endpoint_info: impl Into<EndpointInfo>) {
         let last_updated = SystemTime::now();
         let EndpointInfo { endpoint_id, data } = endpoint_info.into();
+        if let Some(friends) = &self.friends {
+            let mut addr = EndpointAddr::new(endpoint_id);
+            for transport_addr in data.addrs() {
+                match transport_addr {
+                    TransportAddr::Ip(ip) => addr = addr.with_ip_addr(*ip),
+                    TransportAddr::Relay(relay) => addr = addr.with_relay_url(relay.clone()),
+                    _ => {}
+                }
+            }
+            let mut friends = friends.lock().expect("poisoned");
+            let id = FriendId::from_public_key(endpoint_id);
+            let changed = friends
+                .get_mut(&id)
+                .map(|record| {
+                    let before = record.known_addrs.clone();
+                    record.record_addrs([addr]);
+                    before != record.known_addrs
+                })
+                .unwrap_or(false);
+            if changed {
+                let _ = friends.save();
+            }
+        }
         let mut guard = self.endpoints.write().expect("poisoned");
         match guard.entry(endpoint_id) {
             Entry::Occupied(mut entry) => {
@@ -134,13 +159,46 @@ impl AddressLookup for GossipAddressLookup {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
+    use super::{GossipAddressLookup, RetentionOpts};
+    use crate::friends::{FriendId, FriendRecord, FriendsStore};
     use iroh::{address_lookup::AddressLookup, EndpointAddr, SecretKey};
     use n0_future::StreamExt;
     use rand::{RngExt, SeedableRng};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    use super::{GossipAddressLookup, RetentionOpts};
+    #[tokio::test]
+    async fn known_friend_address_is_written_through() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let peer = SecretKey::generate().public();
+        let mut store = FriendsStore::empty_at(dir.path());
+        store.upsert(FriendId::from_public_key(peer), FriendRecord::default());
+        let shared = Arc::new(Mutex::new(store));
+        let lookup = GossipAddressLookup::with_friends(Default::default(), Arc::clone(&shared));
+        let addr = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:1234".parse().unwrap());
+        lookup.add(addr.clone());
+        let store = shared.lock().unwrap();
+        assert_eq!(
+            store
+                .get(&FriendId::from_public_key(peer))
+                .unwrap()
+                .known_addrs,
+            vec![addr]
+        );
+        assert!(store.file_path().exists());
+    }
+
+    #[tokio::test]
+    async fn unknown_peer_is_not_added_to_friends_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let peer = SecretKey::generate().public();
+        let shared = Arc::new(Mutex::new(FriendsStore::empty_at(dir.path())));
+        let lookup = GossipAddressLookup::with_friends(Default::default(), Arc::clone(&shared));
+        lookup.add(EndpointAddr::new(peer));
+        let store = shared.lock().unwrap();
+        assert!(store.is_empty());
+        assert!(!store.file_path().exists());
+    }
 
     #[tokio::test]
     async fn test_retention() {
@@ -149,27 +207,20 @@ mod tests {
             retention: Duration::from_millis(500),
         };
         let disco = GossipAddressLookup::with_opts(opts);
-
         let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(1);
         let k1 = SecretKey::from_bytes(&rng.random());
         let a1 = EndpointAddr::new(k1.public());
-
         disco.add(a1);
-
         assert!(matches!(
             disco.resolve(k1.public()).unwrap().next().await,
             Some(Ok(_))
         ));
-
         tokio::time::sleep(Duration::from_millis(200)).await;
-
         assert!(matches!(
             disco.resolve(k1.public()).unwrap().next().await,
             Some(Ok(_))
         ));
-
         tokio::time::sleep(Duration::from_millis(700)).await;
-
         assert!(disco.resolve(k1.public()).is_none());
     }
 }

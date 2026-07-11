@@ -455,13 +455,8 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         rx: &Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<iroh_gossip::chat_core::NetEvent>>>,
         sim: &mut TestChat,
     ) {
-        loop {
-            match rx.try_lock().unwrap().try_recv() {
-                Ok(event) => {
-                    let _ = iroh_gossip::chat_core::handle_net_event(event, sim);
-                }
-                Err(_) => break,
-            }
+        while let Ok(event) = rx.try_lock().unwrap().try_recv() {
+            let _ = iroh_gossip::chat_core::handle_net_event(event, sim);
         }
     }
 
@@ -470,7 +465,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         sleep(short).await;
         drain_net(&net_rx_a, &mut sim_a);
         drain_net(&net_rx_b, &mut sim_b);
-        if sim_a.neighbors.len() > 0 && sim_b.neighbors.len() > 0 {
+        if !sim_a.neighbors.is_empty() && !sim_b.neighbors.is_empty() {
             info!("Both formed neighborhoods at tick {i}");
             break;
         }
@@ -483,7 +478,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         }
     }
 
-    if sim_a.neighbors.len() == 0 || sim_b.neighbors.len() == 0 {
+    if sim_a.neighbors.is_empty() || sim_b.neighbors.is_empty() {
         // Even if direct mDNS discovery didn't work on this machine,
         // log the fact for debugging but don't fail — mDNS behavior
         // depends on network interface configuration in CI.

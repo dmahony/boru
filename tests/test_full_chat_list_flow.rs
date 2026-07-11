@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[expect(dead_code)]
 struct SimChat {
     local_public: PublicKey,
     entries: Vec<ChatEntry>,
@@ -208,13 +209,8 @@ async fn test_full_chat_list_flow() -> Result<()> {
 
     let drain = |rx: &Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<NetEvent>>>,
                  sim: &mut SimChat| {
-        loop {
-            match rx.try_lock().unwrap().try_recv() {
-                Ok(event) => {
-                    let _ = handle_net_event(event, sim);
-                }
-                Err(_) => break,
-            }
+        while let Ok(event) = rx.try_lock().unwrap().try_recv() {
+            let _ = handle_net_event(event, sim);
         }
     };
 
@@ -223,7 +219,7 @@ async fn test_full_chat_list_flow() -> Result<()> {
         sleep(Duration::from_millis(200)).await;
         drain(&net_rx_a, &mut sim_a);
         drain(&net_rx_b, &mut sim_b);
-        if sim_a.neighbors.len() > 0 && sim_b.neighbors.len() > 0 {
+        if !sim_a.neighbors.is_empty() && !sim_b.neighbors.is_empty() {
             println!("  Both connected at tick {i}");
             break;
         }
@@ -236,8 +232,8 @@ async fn test_full_chat_list_flow() -> Result<()> {
             );
         }
     }
-    assert!(sim_a.neighbors.len() > 0, "A must connect");
-    assert!(sim_b.neighbors.len() > 0, "B must connect");
+    assert!(!sim_a.neighbors.is_empty(), "A must connect");
+    assert!(!sim_b.neighbors.is_empty(), "B must connect");
 
     drain(&net_rx_a, &mut sim_a);
     drain(&net_rx_b, &mut sim_b);
