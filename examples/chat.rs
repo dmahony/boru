@@ -46,7 +46,8 @@ use iroh_gossip::chat_core::{
 };
 use iroh_gossip::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use iroh_gossip::friends::{FriendId, FriendRecord, FriendsStore};
-use iroh_gossip::inbox::{InboxHandle, InboxProtocol, INBOX_ALPN};
+use iroh_gossip::inbox::{send_sync_request, InboxEvent, InboxHandle, InboxProtocol, INBOX_ALPN};
+use iroh_gossip::mailbox::{MailboxAck, MailboxIdentity, MailboxStore};
 use iroh_gossip::room::RoomStore;
 use iroh_gossip::room_docs::{
     self, create_metadata_doc, create_roster_doc, list_members, read_metadata, RoomDocs,
@@ -509,7 +510,24 @@ async fn main() -> Result<()> {
 
     // Inbox protocol — direct offline-message delivery with auth.
     let (inbox_handle, mut inbox_events) = InboxHandle::new();
-    let inbox_handler = InboxProtocol::new(inbox_handle.inner());
+    let inbox_handler =
+        InboxProtocol::new(inbox_handle.inner()).with_secret_key(endpoint.secret_key().clone());
+
+    // Register the pending-envelopes provider so SyncRequest returns
+    // envelopes stored locally for the requesting peer.
+    {
+        let mailbox_dir = data_dir.clone();
+        let endpoint = endpoint.clone();
+        inbox_handle
+            .set_pending_fn(Some(Arc::new(move |requester, _since_ms| {
+                let mut store = MailboxStore::load(&mailbox_dir)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| MailboxStore::empty_at(&mailbox_dir));
+                store.pending_for_recipient(requester)
+            })))
+            .await;
+    }
 
     // Keep chat history transient for this process only. Legacy history files
     // are removed by the loader and are never replayed.
@@ -1174,7 +1192,86 @@ async fn main() -> Result<()> {
                 terminal.draw(|frame| render_app(frame, &mut app))?;
             }
             Some(event) = whisper_events.recv() => {
-                handle_whisper_event(event, &mut app);
+                // Handle Connected events inline so we can do async mailbox sync.
+                let is_connected = matches!(&event, WhisperEvent::Connected { .. });
+                let connected_peer = match &event {
+                    WhisperEvent::Connected { peer } => Some(*peer),
+                    _ => None,
+                };
+                // Non-Connected events go through the sync handler as before.
+                if !is_connected {
+                    handle_whisper_event(event, &mut app);
+                }
+                if let Some(peer) = connected_peer {
+                    let label = app
+                        .names
+                        .get(&peer)
+                        .cloned()
+                        .unwrap_or_else(|| peer.fmt_short().to_string());
+                    app.push_system(format!("[Whisper] Connected to {label}"));
+
+                    // On whisper reconnect, sync any offline mailbox envelopes.
+                    let has_mailbox = app
+                        .friends
+                        .get(&FriendId::from_public_key(peer))
+                        .and_then(|r| r.mailbox_public_key)
+                        .is_some();
+                    if has_mailbox {
+                        let endpoint = endpoint.clone();
+                        let sk = secret_key.clone();
+                        let dd = data_dir.clone();
+                        let label2 = label.clone();
+                        match send_sync_request(&endpoint, &sk, peer, 0).await {
+                            Ok(envelopes) => {
+                                let mut store = MailboxStore::load(&dd)
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_else(|| MailboxStore::for_recipient(&dd, sk.public()));
+                                let identity = MailboxIdentity::from_secret(&sk);
+                                for env in envelopes {
+                                    match store.accept_incoming(&identity, env, &[peer]) {
+                                        Ok((msg_id, plaintext)) => {
+                                            if let Ok(text) = String::from_utf8(plaintext) {
+                                                app.push_entry(
+                                                    ChatEntry::remote(
+                                                        format!("Offline DM from {label2}"),
+                                                        text,
+                                                    ),
+                                                    true,
+                                                );
+                                            }
+                                            let _ = store.save();
+                                            let ack =
+                                                MailboxAck::sign(&sk, &msg_id);
+                                            let _ = iroh_gossip::inbox::send_ack(
+                                                &endpoint,
+                                                &sk,
+                                                peer,
+                                                ack,
+                                            )
+                                            .await;
+                                        }
+                                        Err(e) => {
+                                            app.push_system(format!(
+                                                "[Mailbox] Failed to accept replayed envelope \
+                                                 from {label2}: {e}"
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                app.push_system(format!(
+                                    "[Mailbox] Failed to sync with {label2}: {e}"
+                                ));
+                            }
+                        }
+                    }
+                }
+                terminal.draw(|frame| render_app(frame, &mut app))?;
+            }
+            Some(event) = inbox_events.recv() => {
+                handle_inbox_event(&endpoint, event, &mut app, &data_dir, &secret_key).await;
                 terminal.draw(|frame| render_app(frame, &mut app))?;
             }
             _ = conn_monitor.tick() => {
@@ -1821,7 +1918,13 @@ async fn handle_key_event(
                         return Ok(());
                     }
                 };
-                match whisper_handle.send_dm(peer_key, message).await {
+                // Check if this peer has a mailbox key for offline delivery.
+                let mailbox_pk = FriendId::from_public_key(peer_key);
+                let mailbox_pk = app
+                    .friends
+                    .get(&mailbox_pk)
+                    .and_then(|r| r.mailbox_public_key);
+                match whisper_handle.send_dm(peer_key, message.clone()).await {
                     Ok(_) => {
                         let label = app
                             .names
@@ -1832,6 +1935,47 @@ async fn handle_key_event(
                             local_label.to_string(),
                             format!("[Whisper to {label}] {}", parts[1]),
                         );
+                    }
+                    Err(_) if mailbox_pk.is_some() => {
+                        let mailbox_pk = mailbox_pk.unwrap();
+                        let data_dir = get_data_dir();
+                        match iroh_gossip::mailbox::seal_for(
+                            secret_key,
+                            mailbox_pk,
+                            message.as_bytes(),
+                        ) {
+                            Ok(envelope) => {
+                                let mut store = MailboxStore::load(&data_dir)
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_else(|| MailboxStore::empty_at(&data_dir));
+                                match store.enqueue_outgoing(envelope) {
+                                    Ok(_) => {
+                                        if let Err(save_err) = store.save() {
+                                            app.push_system(format!(
+                                                "Failed to persist offline message: {save_err}"
+                                            ));
+                                        } else {
+                                            let label =
+                                                app.names.get(&peer_key).cloned().unwrap_or_else(
+                                                    || peer_key.fmt_short().to_string(),
+                                                );
+                                            app.push_system(format!("[Offline] Message encrypted and stored for {label}"));
+                                        }
+                                    }
+                                    Err(enq_err) => {
+                                        app.push_system(format!(
+                                            "Failed to queue offline message: {enq_err}"
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(seal_err) => {
+                                app.push_system(format!(
+                                    "Failed to encrypt offline message: {seal_err}"
+                                ));
+                            }
+                        }
                     }
                     Err(e) => {
                         app.push_system(format!("Whisper failed: {e}"));
@@ -2077,6 +2221,82 @@ fn handle_whisper_event(event: WhisperEvent, app: &mut AppState) {
         WhisperEvent::MailboxAck { .. } => {
             // Mailbox acknowledgements are verified and removed by the
             // mailbox store — the simple CLI chat does not interpret them.
+        }
+    }
+}
+
+/// Handle an [`InboxEvent`] from the inbox protocol (offline-message delivery).
+async fn handle_inbox_event(
+    endpoint: &Endpoint,
+    event: InboxEvent,
+    app: &mut AppState,
+    data_dir: &Path,
+    secret_key: &SecretKey,
+) {
+    match event {
+        InboxEvent::EnvelopeReceived { from, envelope } => {
+            let label = app
+                .names
+                .get(&from)
+                .cloned()
+                .unwrap_or_else(|| from.fmt_short().to_string());
+
+            // Load mailbox store, accept incoming (validates + persists).
+            let mut store = match MailboxStore::load(data_dir)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| MailboxStore::for_recipient(data_dir, secret_key.public()))
+            {
+                s => s,
+            };
+            let identity = MailboxIdentity::from_secret(secret_key);
+            match store.accept_incoming(&identity, envelope, &[from]) {
+                Ok((_msg_id, plaintext)) => {
+                    if let Ok(text) = String::from_utf8(plaintext) {
+                        app.push_entry(
+                            ChatEntry::remote(format!("Offline DM from {label}"), text),
+                            true,
+                        );
+                    }
+                    // Persist accepted state.
+                    let _ = store.save();
+                    // Send acknowledgement.
+                    let ack = iroh_gossip::mailbox::MailboxAck::sign(secret_key, &_msg_id);
+                    let _ = iroh_gossip::inbox::send_ack(endpoint, secret_key, from, ack).await;
+                }
+                Err(e) => {
+                    app.push_system(format!(
+                        "[Mailbox] Failed to accept envelope from {label}: {e}"
+                    ));
+                }
+            }
+        }
+        InboxEvent::AckReceived {
+            from: _from,
+            ack: _ack,
+        } => {
+            // Remove acknowledged envelope from local store.
+            let mut store = match MailboxStore::load(data_dir)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| MailboxStore::empty_at(data_dir))
+            {
+                s => s,
+            };
+            if let Ok(true) = store.acknowledge_and_save(&_ack) {
+                tracing::debug!(
+                    "mailbox: peer {} acknowledged envelope {}",
+                    _from.fmt_short(),
+                    _ack.message_id
+                );
+            }
+        }
+        InboxEvent::SyncRequested { from, since_ms } => {
+            tracing::info!(
+                "inbox: sync requested by {} since_ms={}",
+                from.fmt_short(),
+                since_ms
+            );
         }
     }
 }

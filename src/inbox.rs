@@ -166,7 +166,6 @@ fn signing_bytes(timestamp: u64, inner: &InboxPayload) -> Vec<u8> {
 // ── Inbox protocol state ───────────────────────────────────────────────────────
 
 /// Inbox protocol state shared across connections.
-#[derive(Debug)]
 pub struct InboxInner {
     /// Set of senders whose messages are currently accepted (contact/allowed peers).
     pub allowed_senders: HashSet<PublicKey>,
@@ -174,6 +173,21 @@ pub struct InboxInner {
     pub seen_message_ids: HashMap<InboxMessageId, u64>,
     /// Channel to forward received envelopes to the frontend.
     pub envelope_tx: mpsc::UnboundedSender<InboxEvent>,
+    /// Optional provider that returns pending envelopes for a SyncRequest.
+    /// The function receives (requester_public_key, since_ms) and returns
+    /// envelopes that should be delivered to the requester.
+    pub pending_fn: Option<Arc<dyn Fn(PublicKey, u64) -> Vec<MailboxEnvelope> + Send + Sync>>,
+}
+
+impl std::fmt::Debug for InboxInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InboxInner")
+            .field("allowed_senders", &self.allowed_senders)
+            .field("seen_message_ids", &self.seen_message_ids)
+            .field("envelope_tx", &self.envelope_tx)
+            .field("pending_fn", &self.pending_fn.as_ref().map(|_| "Some(...)"))
+            .finish()
+    }
 }
 
 /// Events emitted by the inbox protocol to the frontend.
@@ -218,6 +232,7 @@ impl InboxHandle {
             allowed_senders: HashSet::new(),
             seen_message_ids: HashMap::new(),
             envelope_tx,
+            pending_fn: None,
         }));
         (
             Self {
@@ -252,6 +267,18 @@ impl InboxHandle {
         self.inner.lock().await.allowed_senders = peers;
     }
 
+    /// Set a function that provides pending envelopes for SyncRequest.
+    ///
+    /// The function receives `(requester_public_key, since_ms)` and returns
+    /// envelopes that should be delivered to the requester.  Called from
+    /// the protocol handler when a SyncRequest arrives.
+    pub async fn set_pending_fn(
+        &self,
+        f: Option<Arc<dyn Fn(PublicKey, u64) -> Vec<MailboxEnvelope> + Send + Sync>>,
+    ) {
+        self.inner.lock().await.pending_fn = f;
+    }
+
     /// Inbox topic — derived from the local PublicKey for personal inbox subscriptions.
     pub fn inbox_topic(local_public: PublicKey) -> crate::proto::TopicId {
         let mut hasher = blake3::Hasher::new();
@@ -283,15 +310,36 @@ impl InboxHandle {
 /// Protocol handler for incoming inbox connections.
 ///
 /// Register on the Router with `.accept(INBOX_ALPN, inbox_handler)`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InboxProtocol {
     inner: Arc<Mutex<InboxInner>>,
+    secret_key: Option<SecretKey>,
+}
+
+impl std::fmt::Debug for InboxProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InboxProtocol")
+            .field("inner", &self.inner)
+            .field("secret_key", &self.secret_key.as_ref().map(|_| "***"))
+            .finish()
+    }
 }
 
 impl InboxProtocol {
     /// Create a protocol handler from the shared inner state.
     pub fn new(inner: Arc<Mutex<InboxInner>>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            secret_key: None,
+        }
+    }
+
+    /// Attach a secret key so the handler can sign SyncResponse messages.
+    pub fn with_secret_key(self, secret_key: SecretKey) -> Self {
+        Self {
+            secret_key: Some(secret_key),
+            ..self
+        }
     }
 }
 
@@ -309,6 +357,8 @@ impl ProtocolHandler for InboxProtocol {
                 )));
             }
         }
+
+        let secret_key = self.secret_key.clone();
 
         // Read messages from the connection.
         while let Ok((mut send, mut recv)) = connection.accept_bi().await {
@@ -328,18 +378,47 @@ impl ProtocolHandler for InboxProtocol {
                 continue;
             }
 
-            // Verify and dispatch.
-            let result = Self::handle_message(&inner, remote_id, &buf).await;
-            if let Err(ref e) = result {
-                tracing::warn!(
-                    "inbox: failed to handle message from {}: {e}",
-                    remote_id.fmt_short()
-                );
+            // Dispatch and optionally produce a response.
+            let result = Self::handle_request(&inner, remote_id, &buf).await;
+            match result {
+                Ok(Some(response_envelopes)) => {
+                    // SyncRequest: send back a SyncResponse.
+                    if let Some(ref sk) = secret_key {
+                        let payload = InboxPayload::SyncResponse {
+                            envelopes: response_envelopes,
+                        };
+                        match SignedInboxMessage::sign(sk, payload) {
+                            Ok(signed) => {
+                                let resp_len = signed.len() as u32;
+                                let _ = send.write_all(&resp_len.to_be_bytes()).await;
+                                let _ = send.write_all(&signed).await;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "inbox: failed to sign SyncResponse for {}: {e}",
+                                    remote_id.fmt_short()
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            "inbox: no secret_key configured, cannot send SyncResponse to {}",
+                            remote_id.fmt_short()
+                        );
+                    }
+                }
+                Ok(None) => {
+                    // Non-SyncRequest messages get a minimal ack.
+                    let _ = send.write_all(&[0u8; 1]).await;
+                }
+                Err(ref e) => {
+                    tracing::warn!(
+                        "inbox: failed to handle message from {}: {e}",
+                        remote_id.fmt_short()
+                    );
+                    let _ = send.write_all(&[0u8; 1]).await;
+                }
             }
-
-            // Send a minimal ack on the response stream (even on error, so the
-            // sender knows the stream was consumed).
-            let _ = send.write_all(&[0u8; 1]).await;
             let _ = send.finish();
         }
 
@@ -352,11 +431,13 @@ impl ProtocolHandler for InboxProtocol {
 }
 
 impl InboxProtocol {
-    async fn handle_message(
+    /// Dispatch a verified inbox message and return pending envelopes
+    /// when the caller should send a SyncResponse back.
+    async fn handle_request(
         inner: &Arc<Mutex<InboxInner>>,
         sender: PublicKey,
         buf: &[u8],
-    ) -> Result<()> {
+    ) -> Result<Option<Vec<MailboxEnvelope>>> {
         // Verify the signed message.
         let (verified_sender, payload, _sent_at) = SignedInboxMessage::verify(buf, Some(sender))?;
 
@@ -391,25 +472,34 @@ impl InboxProtocol {
                     from: verified_sender,
                     envelope,
                 });
+                Ok(None)
             }
             InboxPayload::Ack(ack) => {
                 let _ = guard.envelope_tx.send(InboxEvent::AckReceived {
                     from: verified_sender,
                     ack,
                 });
+                Ok(None)
             }
             InboxPayload::SyncRequest { since_ms } => {
-                let _ = guard.envelope_tx.send(InboxEvent::SyncRequested {
-                    from: verified_sender,
-                    since_ms,
-                });
+                // Try the pending_fn provider first.
+                if let Some(ref f) = guard.pending_fn {
+                    let envelopes = f(verified_sender, since_ms);
+                    Ok(Some(envelopes))
+                } else {
+                    // Fall back to emitting an event when no provider is set.
+                    let _ = guard.envelope_tx.send(InboxEvent::SyncRequested {
+                        from: verified_sender,
+                        since_ms,
+                    });
+                    Ok(None)
+                }
             }
             InboxPayload::SyncResponse { .. } => {
                 // SyncResponse is only sent, never received on the server side.
+                Ok(None)
             }
         }
-
-        Ok(())
     }
 }
 

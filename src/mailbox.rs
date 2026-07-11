@@ -127,6 +127,28 @@ impl MailboxEnvelope {
         MailboxIdentity::from_secret(recipient).open(self)
     }
 
+    /// Validate authorization, recipient identity, signature, and retention
+    /// before handing an incoming replay to the normal message pipeline.
+    pub fn validate_for(
+        &self,
+        identity: &MailboxIdentity,
+        allowed_senders: &[PublicKey],
+        ttl: Duration,
+    ) -> Result<Vec<u8>> {
+        if !allowed_senders.contains(&self.from) {
+            return Err(n0_error::anyerr!("mailbox sender is not authorized"));
+        }
+        let now = now_ms();
+        if self.created_at > now.saturating_add(60_000)
+            || now.saturating_sub(self.created_at) > ttl.as_millis() as u64
+        {
+            return Err(n0_error::anyerr!(
+                "mailbox envelope is expired or from the future"
+            ));
+        }
+        identity.open(self)
+    }
+
     fn open_with(&self, identity: &MailboxIdentity) -> Result<Vec<u8>> {
         verify_signature(self)?;
         let expected = identity.public_key();
@@ -225,7 +247,8 @@ impl MailboxAck {
             signature: ByteArray::new(recipient.sign(&data).to_bytes()),
         }
     }
-    fn verify(&self, expected: PublicKey) -> Result<()> {
+    /// Verify the acknowledgement signature against the expected recipient key.
+    pub fn verify(&self, expected: PublicKey) -> Result<()> {
         if self.recipient != expected {
             return Err(n0_error::anyerr!("mailbox acknowledgement signer mismatch"));
         }
@@ -335,10 +358,28 @@ impl MailboxStore {
         self.entries.insert(id.clone(), envelope);
         Ok(id)
     }
+    /// Store an outgoing envelope without recipient or authorization checks.
+    ///
+    /// Unlike [`enqueue`], this accepts envelopes addressed to *other* peers
+    /// (the sender's own outgoing messages).  Signature verification is
+    /// skipped because the envelope was just created locally.  Duplicate
+    /// message ids are still rejected.
+    pub fn enqueue_outgoing(&mut self, envelope: MailboxEnvelope) -> Result<String> {
+        let id = envelope.message_id();
+        if self.entries.contains_key(&id) {
+            return Err(n0_error::anyerr!("duplicate mailbox message"));
+        }
+        self.entries.insert(id.clone(), envelope);
+        Ok(id)
+    }
     /// Return pending opaque envelopes in replay order.
     pub fn pending(&mut self) -> Result<Vec<MailboxEnvelope>> {
         self.expire();
-        Ok(self.entries.values().cloned().collect())
+        let mut entries: Vec<_> = self.entries.values().cloned().collect();
+        // HashMap iteration order is unstable; deterministic replay order keeps
+        // reconnect behavior consistent across restarts.
+        entries.sort_by_key(|entry| (entry.created_at, entry.message_id()));
+        Ok(entries)
     }
     /// Remove an entry only after a valid acknowledgement signed by the recipient.
     pub fn acknowledge(&mut self, ack: &MailboxAck) -> Result<bool> {
@@ -348,6 +389,53 @@ impl MailboxStore {
         ack.verify(recipient)?;
         Ok(self.entries.remove(&ack.message_id).is_some())
     }
+
+    /// Authenticate and decrypt an incoming envelope before durably accepting
+    /// its opaque ciphertext. The returned plaintext can then be handed to the
+    /// normal signed-message pipeline by the application.
+    pub fn accept_incoming(
+        &mut self,
+        identity: &MailboxIdentity,
+        envelope: MailboxEnvelope,
+        allowed_senders: &[PublicKey],
+    ) -> Result<(String, Vec<u8>)> {
+        let payload = envelope.validate_for(identity, allowed_senders, self.ttl)?;
+        let id = envelope.message_id();
+        // Reconnects and restarts may replay an envelope.  Idempotent
+        // acceptance avoids injecting it twice while still returning the
+        // authenticated payload to the caller.
+        if !self.entries.contains_key(&id) {
+            self.enqueue(envelope, allowed_senders)?;
+            self.save()?;
+        }
+        Ok((id, payload))
+    }
+
+    /// Remove an acknowledged outgoing envelope and persist the removal.
+    pub fn acknowledge_and_save(&mut self, ack: &MailboxAck) -> Result<bool> {
+        let removed = self.acknowledge(ack)?;
+        if removed {
+            self.save()?;
+        }
+        Ok(removed)
+    }
+    /// Return pending envelopes whose recipient identity matches `who`.
+    ///
+    /// Used by the inbox SyncResponse handler to serve envelopes that
+    /// were encrypted for a specific peer and have not yet been
+    /// acknowledged.
+    pub fn pending_for_recipient(&mut self, who: PublicKey) -> Vec<MailboxEnvelope> {
+        self.expire();
+        let mut entries: Vec<_> = self
+            .entries
+            .values()
+            .filter(|e| e.recipient.identity == who)
+            .cloned()
+            .collect();
+        entries.sort_by_key(|entry| (entry.created_at, entry.message_id()));
+        entries
+    }
+
     /// Number of retained entries after applying retention.
     pub fn len(&mut self) -> usize {
         self.expire();
@@ -370,5 +458,34 @@ mod tests {
         let env = id.seal(&sender, b"private").unwrap();
         assert!(!env.ciphertext.windows(7).any(|w| w == b"private"));
         assert_eq!(env.open(&recipient).unwrap(), b"private");
+    }
+
+    #[test]
+    fn incoming_acceptance_is_idempotent_after_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let recipient = SecretKey::generate();
+        let sender = SecretKey::generate();
+        let identity = MailboxIdentity::from_secret(&recipient);
+        let mut store = MailboxStore::for_recipient(dir.path(), recipient.public());
+        let env = identity.seal(&sender, b"signed payload").unwrap();
+
+        let first = store
+            .accept_incoming(&identity, env.clone(), &[sender.public()])
+            .unwrap();
+        let second = store
+            .accept_incoming(&identity, env, &[sender.public()])
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn incoming_validation_rejects_unauthorized_sender() {
+        let recipient = SecretKey::generate();
+        let sender = SecretKey::generate();
+        let identity = MailboxIdentity::from_secret(&recipient);
+        let env = identity.seal(&sender, b"private").unwrap();
+        let result = env.validate_for(&identity, &[], DEFAULT_MAILBOX_TTL);
+        assert!(result.is_err());
     }
 }

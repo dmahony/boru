@@ -29,6 +29,7 @@ use iroh_gossip::chat_core::friend_ping::{
 use iroh_gossip::chat_history::ChatHistoryStore;
 use iroh_gossip::friends::{FriendId, FriendsStore};
 use iroh_gossip::inbox::{InboxHandle, InboxProtocol, INBOX_ALPN};
+use iroh_gossip::mailbox::MailboxStore;
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
 use iroh_gossip::room::RoomStore;
@@ -417,6 +418,7 @@ fn main() -> Result<()> {
         backfill_handle,
         whisper_events_rx,
         whisper_handle,
+        inbox_events_rx,
         mut tor_monitor_handle,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
@@ -562,8 +564,29 @@ fn main() -> Result<()> {
 
         // ── Inbox protocol ────────────────────────────────────────────
         // Direct offline-message delivery via /iroh-chat-inbox/1.
-        let (inbox_handle, mut inbox_events) = InboxHandle::new();
-        let inbox_handler = InboxProtocol::new(inbox_handle.inner());
+        let (inbox_handle, inbox_events_rx_tmp) = InboxHandle::new();
+        let inbox_handler =
+            InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
+
+        // Register the pending-envelopes provider so SyncRequest returns
+        // envelopes stored locally for the requesting peer.
+        {
+            let mailbox_dir = data_dir.clone();
+            let inbox_handle = inbox_handle.clone();
+            // Use tokio::spawn since set_pending_fn is async
+            let _ = tokio::spawn(async move {
+                inbox_handle
+                    .set_pending_fn(Some(Arc::new(move |requester, _since_ms| {
+                        let mut store = MailboxStore::load(&mailbox_dir)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| MailboxStore::empty_at(&mailbox_dir));
+                        store.pending_for_recipient(requester)
+                    })))
+                    .await;
+            });
+        }
+        let inbox_events_rx = Arc::new(Mutex::new(inbox_events_rx_tmp));
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
@@ -644,6 +667,7 @@ fn main() -> Result<()> {
             backfill_handle,
             whisper_events_rx,
             whisper_handle,
+            inbox_events_rx,
             tor_monitor_handle,
         ))
     })?;
@@ -670,6 +694,7 @@ fn main() -> Result<()> {
             friend_mgr,
             Arc::clone(&friend_events_rx),
             Arc::clone(&whisper_events_rx),
+            inbox_events_rx,
             whisper_handle.clone(),
             tor_reconnect_rx_opt,
             initial_room,
@@ -704,6 +729,7 @@ fn main() -> Result<()> {
             Arc::clone(&state.net_rx),
             Arc::clone(&state.friend_events_rx),
             Arc::clone(&state.whisper_events_rx),
+            Arc::clone(&state.inbox_events_rx),
         )
     })
     .theme(|state: &IcedChat| {

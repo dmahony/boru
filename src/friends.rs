@@ -12,6 +12,7 @@ use std::{
 };
 
 use crate::chat_core::{atomic_write::atomic_write_json, Ticket};
+use crate::mailbox::MailboxPublicKey;
 use crate::proto::TopicId;
 use iroh::{EndpointAddr, PublicKey};
 use n0_error::{Result, StdResultExt};
@@ -131,6 +132,9 @@ pub struct FriendRecord {
     /// field identifies the contact's direct conversation unambiguously.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_conversation: Option<DirectConversation>,
+    /// Mailbox key authenticated from the friend's signed control message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox_public_key: Option<MailboxPublicKey>,
 }
 
 mod topic_ticket_map {
@@ -201,6 +205,11 @@ impl FriendRecord {
     /// Return the designated one-to-one conversation, if negotiated or known.
     pub fn direct_conversation(&self) -> Option<&DirectConversation> {
         self.direct_conversation.as_ref()
+    }
+
+    /// Record a mailbox key received in a signed control message.
+    pub fn set_mailbox_public_key(&mut self, mailbox: MailboxPublicKey) {
+        self.mailbox_public_key = Some(mailbox);
     }
 
     /// Human-friendly label for display.

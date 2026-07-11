@@ -25,6 +25,8 @@ use iroh_gossip::chat_core::{
 use iroh_gossip::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use iroh_gossip::contact::{direct_topic, ContactAction, SignedContactMessage};
 use iroh_gossip::friends::{DirectConversationState, FriendId, FriendsStore};
+use iroh_gossip::inbox::{send_ack, send_sync_request, InboxEvent};
+use iroh_gossip::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
 use iroh_gossip::net::Gossip;
 use iroh_gossip::outbox::{OutboxEntry, OutboxStore};
 use iroh_gossip::proto::TopicId;
@@ -544,6 +546,8 @@ pub struct IcedChat {
     return_to_chat_list_after_open: bool,
     /// Handle for sending whisper/private messages.
     whisper_handle: WhisperHandle,
+    /// Receiver for incoming inbox events.
+    pub inbox_events_rx: Arc<Mutex<UnboundedReceiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
     pub whisper_events_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
     /// Locally selected profile image, persisted below the application data directory.
@@ -596,6 +600,8 @@ pub enum AppMessage {
     FriendEvent(FriendEvent),
     /// An event from the whisper (DM) protocol.
     WhisperEvent(WhisperEvent),
+    /// An event from the inbox (offline-message) protocol.
+    InboxEvent(InboxEvent),
     MessageSent(String, u64, MessageHash),
     FileSent(String),
     DownloadDone(String),
@@ -654,6 +660,13 @@ pub enum AppMessage {
     ClearHistoryRequested,
     /// User confirmed the clear history action.
     ConfirmClearHistory,
+    /// Results of a mailbox sync triggered on whisper reconnect.
+    MailboxReplayed {
+        /// Peer whose envelopes were replayed.
+        peer: PublicKey,
+        /// Accepted entries: (message_id, plaintext).
+        texts: Vec<(String, String)>,
+    },
 }
 
 impl IcedChat {
@@ -677,6 +690,7 @@ impl IcedChat {
         friend_mgr: FriendPingManager,
         friend_events_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
         whisper_events_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
+        inbox_events_rx: Arc<Mutex<UnboundedReceiver<InboxEvent>>>,
         whisper_handle: WhisperHandle,
         tor_reconnect_rx: Option<Arc<Mutex<UnboundedReceiver<String>>>>,
         initial_room: Option<(TopicId, Vec<EndpointAddr>)>,
@@ -760,6 +774,7 @@ impl IcedChat {
             initial_bootstrap_peers: initial_bootstrap,
             return_to_chat_list_after_open,
             whisper_handle,
+            inbox_events_rx: inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
             profile_image_ticket: None,
@@ -836,6 +851,7 @@ impl IcedChat {
             AppMessage::NetEvent(_) => "NetEvent",
             AppMessage::FriendEvent(_) => "FriendEvent",
             AppMessage::WhisperEvent(_) => "WhisperEvent",
+            AppMessage::InboxEvent(_) => "InboxEvent",
             AppMessage::MessageSent(..) => "MessageSent",
             AppMessage::FileSent(_) => "FileSent",
             AppMessage::DownloadDone(_) => "DownloadDone",
@@ -865,6 +881,7 @@ impl IcedChat {
             AppMessage::ProfileImageDownloaded(..) => "ProfileImageDownloaded",
             AppMessage::ClearHistoryRequested => "ClearHistoryRequested",
             AppMessage::ConfirmClearHistory => "ConfirmClearHistory",
+            AppMessage::MailboxReplayed { .. } => "MailboxReplayed",
         }
     }
 }
@@ -2105,17 +2122,51 @@ impl IcedChat {
                         .cloned()
                         .unwrap_or_else(|| peer_key.fmt_short().to_string());
                     self.push_system(format!("[Whisper to {label}] {message}"));
+                    // Check if this peer has a mailbox key for offline delivery.
+                    let mailbox_pk = {
+                        let fid = FriendId::from_public_key(peer_key);
+                        self.friends.get(&fid).and_then(|r| r.mailbox_public_key)
+                    };
+                    let secret_key = self.secret_key.clone();
+                    let data_dir = self.data_dir.clone();
                     return iced::Task::perform(
                         async move {
-                            whisper_handle
-                                .send_dm(peer_key, text)
-                                .await
-                                .map_err(|e| e.to_string())
+                            match whisper_handle.send_dm(peer_key, text.clone()).await {
+                                Ok(()) => AppMessage::Noop,
+                                Err(_) if mailbox_pk.is_some() => {
+                                    let pk = mailbox_pk.unwrap();
+                                    match seal_for(&secret_key, pk, text.as_bytes()) {
+                                        Ok(envelope) => {
+                                            let mut store = MailboxStore::load(&data_dir)
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or_else(|| {
+                                                    MailboxStore::empty_at(&data_dir)
+                                                });
+                                            match store.enqueue_outgoing(envelope) {
+                                                Ok(_) => {
+                                                    if let Err(save_err) = store.save() {
+                                                        AppMessage::ErrorMsg(format!(
+                                                            "Failed to persist offline message: {save_err}"
+                                                        ))
+                                                    } else {
+                                                        AppMessage::Noop
+                                                    }
+                                                }
+                                                Err(enq_err) => AppMessage::ErrorMsg(format!(
+                                                    "Failed to queue offline message: {enq_err}"
+                                                )),
+                                            }
+                                        }
+                                        Err(seal_err) => AppMessage::ErrorMsg(format!(
+                                            "Failed to encrypt offline message: {seal_err}"
+                                        )),
+                                    }
+                                }
+                                Err(e) => AppMessage::ErrorMsg(format!("Whisper failed: {e}")),
+                            }
                         },
-                        |r: Result<(), String>| match r {
-                            Ok(()) => AppMessage::Noop,
-                            Err(e) => AppMessage::ErrorMsg(format!("Whisper failed: {e}")),
-                        },
+                        |msg| msg,
                     );
                 }
 
@@ -2608,6 +2659,62 @@ impl IcedChat {
                             .cloned()
                             .unwrap_or_else(|| peer.fmt_short().to_string());
                         self.push_system(format!("[Whisper] Connected to {label}"));
+
+                        // On reconnect, sync any offline mailbox envelopes.
+                        let has_mailbox = self
+                            .friends
+                            .get(&FriendId::from_public_key(peer))
+                            .and_then(|r| r.mailbox_public_key)
+                            .is_some();
+                        if has_mailbox {
+                            let endpoint = self.endpoint.clone();
+                            let sk = self.secret_key.clone();
+                            let dd = self.data_dir.clone();
+                            let peer2 = peer;
+                            return iced::Task::perform(
+                                async move {
+                                    match send_sync_request(&endpoint, &sk, peer2, 0).await {
+                                        Ok(envelopes) => {
+                                            let mut store = MailboxStore::load(&dd)
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or_else(|| {
+                                                    MailboxStore::for_recipient(&dd, sk.public())
+                                                });
+                                            let identity = MailboxIdentity::from_secret(&sk);
+                                            let mut texts = Vec::new();
+                                            for env in envelopes {
+                                                match store.accept_incoming(
+                                                    &identity,
+                                                    env,
+                                                    &[peer2],
+                                                ) {
+                                                    Ok((msg_id, plaintext)) => {
+                                                        if let Ok(text) =
+                                                            String::from_utf8(plaintext)
+                                                        {
+                                                            texts.push((msg_id, text));
+                                                        }
+                                                    }
+                                                    Err(_) => {}
+                                                }
+                                            }
+                                            let _ = store.save();
+                                            // Send acks for accepted envelopes.
+                                            for (msg_id, _) in &texts {
+                                                let ack = MailboxAck::sign(&sk, msg_id);
+                                                let _ = send_ack(&endpoint, &sk, peer2, ack).await;
+                                            }
+                                            AppMessage::MailboxReplayed { peer: peer2, texts }
+                                        }
+                                        Err(e) => AppMessage::ErrorMsg(format!(
+                                            "Mailbox sync failed: {e}"
+                                        )),
+                                    }
+                                },
+                                std::convert::identity,
+                            );
+                        }
                     }
                     iroh_gossip::whisper::WhisperEvent::Disconnected { peer } => {
                         let label = self
@@ -2617,8 +2724,102 @@ impl IcedChat {
                             .unwrap_or_else(|| peer.fmt_short().to_string());
                         self.push_system(format!("[Whisper] Disconnected from {label}"));
                     }
+                    iroh_gossip::whisper::WhisperEvent::MailboxEnvelope { .. } => {
+                        // Mailbox envelopes are encrypted and processed by the mailbox
+                        // store — the GUI chat does not interpret them.
+                    }
+                    iroh_gossip::whisper::WhisperEvent::MailboxAck { .. } => {
+                        // Mailbox acknowledgements are verified and removed by the
+                        // mailbox store — the GUI chat does not interpret them.
+                    }
                 }
                 iced::Task::none()
+            }
+
+            AppMessage::InboxEvent(event) => {
+                match event {
+                    InboxEvent::EnvelopeReceived { from, envelope } => {
+                        let label = self
+                            .names
+                            .get(&from)
+                            .cloned()
+                            .unwrap_or_else(|| from.fmt_short().to_string());
+
+                        // Load mailbox store, accept incoming (validates + persists).
+                        let mut store = match MailboxStore::load(&self.data_dir)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| {
+                                MailboxStore::for_recipient(
+                                    &self.data_dir,
+                                    self.secret_key.public(),
+                                )
+                            }) {
+                            s => s,
+                        };
+                        let identity = MailboxIdentity::from_secret(&self.secret_key);
+                        match store.accept_incoming(&identity, envelope, &[from]) {
+                            Ok((msg_id, plaintext)) => {
+                                if let Ok(text) = String::from_utf8(plaintext) {
+                                    self.entries.push(ChatEntry::remote(
+                                        format!("Offline DM from {label}"),
+                                        text,
+                                        None,
+                                        None,
+                                        Some(from),
+                                    ));
+                                }
+                                // Persist accepted state.
+                                let _ = store.save();
+                                // Send acknowledgement via async task.
+                                let endpoint = self.endpoint.clone();
+                                let sk = self.secret_key.clone();
+                                return iced::Task::perform(
+                                    async move {
+                                        let ack = MailboxAck::sign(&sk, &msg_id);
+                                        let _ = send_ack(&endpoint, &sk, from, ack).await;
+                                    },
+                                    |_| AppMessage::Noop,
+                                );
+                            }
+                            Err(e) => {
+                                self.push_system(format!(
+                                    "[Mailbox] Failed to accept envelope from {label}: {e}"
+                                ));
+                            }
+                        }
+                        iced::Task::none()
+                    }
+                    InboxEvent::AckReceived {
+                        from: _from,
+                        ack: _ack,
+                    } => {
+                        // Remove acknowledged envelope from local store.
+                        let mut store = match MailboxStore::load(&self.data_dir)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| MailboxStore::empty_at(&self.data_dir))
+                        {
+                            s => s,
+                        };
+                        if let Ok(true) = store.acknowledge_and_save(&_ack) {
+                            debug!(
+                                "mailbox: peer {} acknowledged envelope {}",
+                                _from.fmt_short(),
+                                _ack.message_id
+                            );
+                        }
+                        iced::Task::none()
+                    }
+                    InboxEvent::SyncRequested { from, since_ms } => {
+                        debug!(
+                            "inbox: sync requested by {} since_ms={}",
+                            from.fmt_short(),
+                            since_ms
+                        );
+                        iced::Task::none()
+                    }
+                }
             }
 
             AppMessage::MessageSent(_text, event_id, msg_hash) => {
@@ -3221,6 +3422,24 @@ impl IcedChat {
                 self.history_confirm_clear = false;
                 self.chat_history.lock().unwrap().clear();
                 self.chat_history_dirty = true;
+                iced::Task::none()
+            }
+
+            AppMessage::MailboxReplayed { peer, texts } => {
+                let label = self
+                    .names
+                    .get(&peer)
+                    .cloned()
+                    .unwrap_or_else(|| peer.fmt_short().to_string());
+                for (_msg_id, text) in texts {
+                    self.entries.push(ChatEntry::remote(
+                        format!("Offline DM from {label}"),
+                        text,
+                        None,
+                        None,
+                        Some(peer),
+                    ));
+                }
                 iced::Task::none()
             }
         }
@@ -4742,38 +4961,59 @@ impl std::hash::Hash for WhisperRxHandle {
     }
 }
 
+struct InboxRxHandle(Arc<Mutex<UnboundedReceiver<InboxEvent>>>);
+
+impl std::hash::Hash for InboxRxHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
 fn subscription_stream(
     rx: &RxHandle,
     friend_rx: &FriendRxHandle,
     whisper_rx: &WhisperRxHandle,
+    inbox_rx: &InboxRxHandle,
 ) -> Pin<Box<dyn Stream<Item = AppMessage> + Send>> {
     let rx = Arc::clone(&rx.0);
     let friend_rx = Arc::clone(&friend_rx.0);
     let whisper_rx = Arc::clone(&whisper_rx.0);
+    let inbox_rx = Arc::clone(&inbox_rx.0);
     Box::pin(n0_future::stream::unfold(
-        (rx, friend_rx, whisper_rx),
-        |(rx, friend_rx, whisper_rx)| async move {
+        (rx, friend_rx, whisper_rx, inbox_rx),
+        |(rx, friend_rx, whisper_rx, inbox_rx)| async move {
             let mut rx_guard = rx.lock().await;
             let mut friend_guard = friend_rx.lock().await;
             let mut whisper_guard = whisper_rx.lock().await;
+            let mut inbox_guard = inbox_rx.lock().await;
             tokio::select! {
                 event = rx_guard.recv() => {
                     drop(whisper_guard);
                     drop(friend_guard);
+                    drop(inbox_guard);
                     drop(rx_guard);
-                    event.map(|e| (AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx)))
+                    event.map(|e| (AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx)))
                 }
                 event = friend_guard.recv() => {
                     drop(whisper_guard);
                     drop(rx_guard);
+                    drop(inbox_guard);
                     drop(friend_guard);
-                    event.map(|e| (AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx)))
+                    event.map(|e| (AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx)))
                 }
                 event = whisper_guard.recv() => {
                     drop(friend_guard);
                     drop(rx_guard);
+                    drop(inbox_guard);
                     drop(whisper_guard);
-                    event.map(|e| (AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx)))
+                    event.map(|e| (AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx)))
+                }
+                event = inbox_guard.recv() => {
+                    drop(friend_guard);
+                    drop(rx_guard);
+                    drop(whisper_guard);
+                    drop(inbox_guard);
+                    event.map(|e| (AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx)))
                 }
             }
         },
@@ -4785,6 +5025,7 @@ impl IcedChat {
         rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
         friend_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
         whisper_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
+        inbox_rx: Arc<Mutex<UnboundedReceiver<InboxEvent>>>,
     ) -> iced::Subscription<AppMessage> {
         iced::Subscription::batch(vec![
             iced::time::every(std::time::Duration::from_secs(1))
@@ -4796,8 +5037,11 @@ impl IcedChat {
                     RxHandle(rx),
                     FriendRxHandle(friend_rx),
                     WhisperRxHandle(whisper_rx),
+                    InboxRxHandle(inbox_rx),
                 ),
-                |(rx, friend_rx, whisper_rx)| subscription_stream(&rx, &friend_rx, &whisper_rx),
+                |(rx, friend_rx, whisper_rx, inbox_rx)| {
+                    subscription_stream(&rx, &friend_rx, &whisper_rx, &inbox_rx)
+                },
             ),
         ])
     }

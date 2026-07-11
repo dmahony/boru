@@ -10,7 +10,7 @@ use iroh::{PublicKey, SecretKey, Signature};
 use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 
-use crate::proto::TopicId;
+use crate::{mailbox::MailboxPublicKey, proto::TopicId};
 
 const SIGNATURE_LENGTH: usize = Signature::LENGTH;
 const MAX_CONTROL_CLOCK_SKEW_SECS: u64 = 24 * 60 * 60;
@@ -36,6 +36,14 @@ pub enum ContactAction {
     AddressUpdate {
         /// Current endpoint addresses owned by the sender.
         addrs: Vec<iroh::EndpointAddr>,
+    },
+    /// Advertise the recipient-hosted encrypted mailbox key for offline DMs.
+    ///
+    /// This is carried inside the existing signed contact channel rather than
+    /// inferred from transport metadata.
+    MailboxAdvertise {
+        /// Public identity and X25519 encryption key used by the mailbox.
+        mailbox: MailboxPublicKey,
     },
 }
 
