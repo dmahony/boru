@@ -2782,9 +2782,24 @@ impl IcedChat {
                     if let Some(ref sender) = self.sender {
                         let sk = self.secret_key.clone();
                         let ticket = self.personal_room_ticket();
+                        let profile_image_ticket = self.profile_image_ticket.clone();
+                        let label = self.local_label.clone();
                         let s = sender.clone();
                         tasks.push(iced::Task::perform(
                             async move {
+                                // PresenceWithTicket is sent frequently for liveness, but
+                                // it does not carry profile metadata. Re-announce AboutMe
+                                // here so peers that joined after the initial room
+                                // broadcast still learn (and can download) our avatar.
+                                if let Ok(encoded) = SignedMessage::sign_and_encode(
+                                    &sk,
+                                    &crate::Message::AboutMe {
+                                        name: label,
+                                        profile_image_ticket,
+                                    },
+                                ) {
+                                    s.broadcast(encoded).await.ok();
+                                }
                                 if let Ok(encoded) = SignedMessage::sign_and_encode(
                                     &sk,
                                     &crate::Message::PresenceWithTicket { ticket },
@@ -3997,10 +4012,13 @@ impl IcedChat {
                         } else {
                             text("👤").size(TYPO_LG).into()
                         };
+                    // Keep the local avatar on the left as well, matching the
+                    // received-message layout and the user's profile-picture
+                    // placement expectation.
                     Row::new()
+                        .push(avatar)
                         .push(space::horizontal())
                         .push(bubble_col)
-                        .push(avatar)
                         .spacing(SPACE_6)
                 }
                 _ => unreachable!(),
