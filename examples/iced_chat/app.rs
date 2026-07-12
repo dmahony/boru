@@ -15,9 +15,9 @@ use boru_chat::api::{GossipSender, GossipTopic};
 use boru_chat::backfill::BackfillHandle;
 use boru_chat::chat_callbacks::{ChatCallbacks, TransferId, TransferKind, TransferProgress};
 use boru_chat::chat_core::{
-    collect_bootstrap_peers, download_candidates,
+    collect_bootstrap_peers, download_blob_with_safety, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
-    handle_net_event as chat_net_event, message_hash, seed_memory_lookup, MeshHealth, MessageHash,
+    handle_net_event as chat_net_event, handle_net_event_with_safety, message_hash, seed_memory_lookup, MeshHealth, MessageHash,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
@@ -25,7 +25,7 @@ use boru_chat::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
 };
 use boru_chat::friends::{DirectConversationState, FriendId, FriendsStore};
-use boru_chat::image_optimizer::{compress_image, optimize_chat_image, CHAT_IMAGE_MAX_BYTES};
+use boru_chat::image_optimizer::{optimize_chat_image, thumbnail_image, CHAT_IMAGE_MAX_BYTES};
 use boru_chat::image_store::ImageStore;
 use boru_chat::inbox::{send_ack, send_sync_request, InboxEvent};
 use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
@@ -1766,10 +1766,9 @@ impl IcedChat {
         iced::Task::perform(
             async move {
                 use boru_chat::chat_callbacks::{TransferKind, TransferProgress};
-                use boru_chat::chat_core::download_blob_with_progress;
                 let blob_hash: iroh_blobs::Hash = hash.into();
                 let candidates = download_candidates(sender_pk, &neighbors);
-                match download_blob_with_progress(
+                match download_blob_with_safety(
                     &blob_store,
                     &endpoint,
                     blob_hash,
@@ -1777,11 +1776,13 @@ impl IcedChat {
                     name.clone(),
                     TransferKind::Image,
                     |_| {},
+                    None,
+                    sender_pk,
                 )
                 .await
                 {
                     Ok(buf) => {
-                        let thumb = compress_image(&buf);
+                        let thumb = thumbnail_image(&buf);
                         Ok((name, thumb))
                     }
                     Err(e) => Err(format!("Download: {e}")),
@@ -2433,6 +2434,7 @@ impl IcedChat {
                             roster_doc,
                             receiver,
                             net_tx,
+                            None,
                         ));
                         *forward_handle_slot.lock().unwrap() = Some(forward_handle);
 
@@ -2595,6 +2597,7 @@ impl IcedChat {
                             roster_doc,
                             receiver,
                             net_tx,
+                            None,
                         ));
                         *forward_handle_slot.lock().unwrap() = Some(forward_handle);
 
@@ -2816,6 +2819,7 @@ impl IcedChat {
                             roster_doc,
                             receiver,
                             net_tx,
+                            None,
                         ));
                         *forward_handle_slot.lock().unwrap() = Some(forward_handle);
 
@@ -3910,7 +3914,7 @@ impl IcedChat {
 
             AppMessage::NetEvent(event) => {
                 self.update_room_preview(&event);
-                let _ = chat_net_event(event.clone(), self);
+                let _ = handle_net_event_with_safety(event.clone(), self, None);
                 // ── Delivery state transitions ──
                 // Echo: our own broadcast returning via gossip → Delivered
                 if let NetEvent::Message {
@@ -4026,7 +4030,6 @@ impl IcedChat {
                     return iced::Task::perform(
                         async move {
                             use boru_chat::chat_callbacks::{TransferKind, TransferProgress};
-                            use boru_chat::chat_core::download_blob_with_progress;
                             let ticket: BlobTicket = ticket_str
                                 .parse::<BlobTicket>()
                                 .map_err(|e| format!("Parse profile image ticket: {e}"))?;
@@ -4037,7 +4040,7 @@ impl IcedChat {
                             seed_memory_lookup(&memory_lookup, &[ticket.addr().clone()]);
                             let peer_id = ticket.addr().id;
                             let candidates = download_candidates(peer_id, &neighbors);
-                            download_blob_with_progress(
+                            download_blob_with_safety(
                                 &blob_store,
                                 &endpoint,
                                 ticket.hash(),
@@ -4045,6 +4048,8 @@ impl IcedChat {
                                 "profile-image".into(),
                                 TransferKind::Image,
                                 |_| {},
+                                None,
+                                peer_id,
                             )
                             .await
                             .map_err(|e| format!("Download profile image: {e}"))?;
@@ -4578,13 +4583,12 @@ impl IcedChat {
                         iced::Task::perform(
                             async move {
                                 use boru_chat::chat_callbacks::TransferKind;
-                                use boru_chat::chat_core::download_blob_with_progress;
                                 let ticket: BlobTicket = ticket_str
                                     .parse::<BlobTicket>()
                                     .map_err(|e| format!("Parse ticket: {e}"))?;
                                 let peer_id = ticket.addr().id;
                                 let candidates = download_candidates(peer_id, &neighbors);
-                                download_blob_with_progress(
+                                download_blob_with_safety(
                                     &blob_store,
                                     &endpoint,
                                     ticket.hash(),
@@ -4599,6 +4603,8 @@ impl IcedChat {
                                             }
                                         }
                                     },
+                                    None,
+                                    peer_id,
                                 )
                                 .await
                                 .map_err(|e| format!("Download: {e}"))?;
@@ -4753,7 +4759,7 @@ impl IcedChat {
             }
             AppMessage::ErrorMsg(msg) => {
                 self.push_system(msg);
-                iced::Task::none()
+                self.start_next_pending_image_download()
             }
 
             AppMessage::FriendAdded {
@@ -4939,14 +4945,13 @@ impl IcedChat {
                     tasks.push(iced::Task::perform(
                         async move {
                             use boru_chat::chat_callbacks::{TransferKind, TransferProgress};
-                            use boru_chat::chat_core::download_blob_with_progress;
                             let ticket: BlobTicket = ticket_str
                                 .parse::<BlobTicket>()
                                 .map_err(|e| format!("Parse profile image ticket: {e}"))?;
                             seed_memory_lookup(&memory_lookup, &[ticket.addr().clone()]);
                             let peer_id = ticket.addr().id;
                             let candidates = download_candidates(peer_id, &neighbors);
-                            download_blob_with_progress(
+                            download_blob_with_safety(
                                 &blob_store,
                                 &endpoint,
                                 ticket.hash(),
@@ -4954,6 +4959,8 @@ impl IcedChat {
                                 "profile-image".into(),
                                 TransferKind::Image,
                                 |_| {},
+                                None,
+                                peer_id,
                             )
                             .await
                             .map_err(|e| format!("Download profile image: {e}"))?;
