@@ -69,7 +69,12 @@ pub mod room_cleanup;
 #[cfg(feature = "net")]
 pub mod chat_history;
 
-/// Durable friend request store — tracks pending/accepted/declined/cancelled\n/// friend requests between peers.\n#[cfg(feature = \"net\")]\npub mod friend_request;\n\n/// Durable encrypted outbox storage for outgoing messages.
+/// Durable friend request store — tracks pending/accepted/declined/cancelled
+/// friend requests between peers.
+#[cfg(feature = "net")]
+pub mod friend_request;
+
+/// Durable encrypted outbox storage for outgoing messages.
 ///
 /// Persists signed (encrypted) outgoing messages before sending so they
 /// survive crashes and restarts.  Supports expiry of old entries and
@@ -120,13 +125,6 @@ pub mod image_optimizer;
 /// no manual setup needed.
 #[cfg(feature = "net")]
 pub mod gossip_debug;
-
-/// Durable friend request data model and persistent store.
-///
-/// Owns the on-disk `friend_requests.json` file that lives beside
-/// `secret_key.txt` and `friends.json`.
-#[cfg(feature = "net")]
-pub mod friend_request;
 
 pub use proto::TopicId;
 

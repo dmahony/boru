@@ -71,6 +71,15 @@ impl ImageStore {
         set_private_dir(&user_dir);
 
         let destination = user_dir.join(format!("{content_hash}.{extension}"));
+        if destination.exists() {
+            if destination.is_symlink() {
+                return Err(invalid_input("image destination path is a symlink").into());
+            }
+            if destination.is_file() {
+                return Ok(relative);
+            }
+            return Err(invalid_input("image destination path is not a regular file").into());
+        }
         let temp = user_dir.join(format!(".{content_hash}.{extension}.tmp"));
         let mut file = OpenOptions::new()
             .write(true)
@@ -260,6 +269,23 @@ mod tests {
         assert!(store.delete_image("alice", &id).unwrap());
         assert!(!store.image_exists("alice", &id).unwrap());
         assert!(!store.delete_image("alice", &id).unwrap());
+    }
+
+    #[test]
+    fn save_image_reuses_existing_cached_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageStore::at(dir.path());
+        let id1 = store.save_image("alice", "photo.jpg", b"pixels").unwrap();
+        let path = store.resolve_absolute_path("alice", &id1).unwrap();
+        let initial_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let id2 = store.save_image("alice", "photo.jpg", b"pixels").unwrap();
+        let final_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+        assert_eq!(id1, id2);
+        assert_eq!(initial_mtime, final_mtime, "cached image should not be rewritten");
     }
 
     #[test]

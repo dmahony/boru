@@ -138,6 +138,7 @@ n0-tracing-test = "0.3"
 tempfile = "3"
 url = "2.4.0"
 rand = { version = "0.10", features = ["chacha"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 [features]
 default = ["net", "metrics"]
 net = [
@@ -210,6 +211,11 @@ required-features = ["net", "test-utils"]
 name = "test_message_lifecycle"
 path = "tests/test_message_lifecycle.rs"
 required-features = ["net", "test-utils"]
+
+[[test]]
+name = "image_optimizer_integration"
+path = "tests/image_optimizer_integration.rs"
+required-features = ["gui"]
 
 [package.metadata.docs.rs]
 all-features = true

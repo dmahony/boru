@@ -53,6 +53,13 @@ pub const OPTIMIZE_QUALITY_STEPS: &[u8] = &[80, 72, 64, 56];
 /// smallest permitted quality still exceeds the cap the image is rejected.
 ///
 /// Returns `Ok(optimized_bytes)` or `Err(user_facing_error_message)`.
+///
+/// **Limitation:** Small already-compressed images (small PNGs, tiny JPEGs, flat-color
+/// screenshots) may *increase* in size when re-encoded as JPEG due to JPEG header
+/// overhead (JFIF APP0, quantization tables, Huffman tables) and PNG's efficiency on
+/// flat-color regions.  The 2 MiB wire-size cap is always met, but the output may be
+/// larger than the input for these cases.  Callers should be aware of this trade-off
+/// rather than expecting a strict size reduction on every input.
 pub fn optimize_chat_image(raw: &[u8]) -> Result<Vec<u8>, String> {
     if raw.is_empty() {
         return Err("Image is empty.".to_string());

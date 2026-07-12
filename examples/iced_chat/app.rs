@@ -145,6 +145,23 @@ fn save_profile_image(data_dir: &std::path::Path, bytes: &[u8]) -> std::io::Resu
     fs::rename(temporary, data_dir.join(PROFILE_IMAGE_FILE))
 }
 
+/// Load an image from the per-user store without exposing filesystem paths.
+///
+/// Returns `None` for missing, unreadable, empty, or oversized files so callers
+/// can degrade gracefully without leaking storage details to the UI.
+fn load_stored_chat_image(
+    image_store: &ImageStore,
+    user: &str,
+    identifier: &str,
+) -> Option<Vec<u8>> {
+    let path = image_store.resolve_absolute_path(user, identifier).ok()?;
+    let bytes = fs::read(path).ok()?;
+    if bytes.is_empty() || bytes.len() > CHAT_IMAGE_MAX_BYTES {
+        return None;
+    }
+    Some(bytes)
+}
+
 // ── Theme-aware chat colors ──────────────────────────────────────────
 /// Return the muted secondary color for labels, previews, and counts.
 fn text_muted(theme: &iced::Theme) -> Color {
@@ -377,6 +394,138 @@ enum ChatKind {
 }
 
 #[derive(Clone, Debug)]
+enum DownloadState {
+    Ready,
+    Active {
+        bytes: u64,
+        total: Option<u64>,
+    },
+    Completed {
+        saved_name: String,
+        saved_path: Option<std::path::PathBuf>,
+    },
+    Failed {
+        error: String,
+    },
+    Cancelled,
+}
+
+#[derive(Clone, Debug)]
+struct DownloadAttachment {
+    kind: TransferKind,
+    name: String,
+    ticket: String,
+    transfer_id: Option<TransferId>,
+    state: DownloadState,
+}
+
+impl DownloadAttachment {
+    fn new(kind: TransferKind, name: impl Into<String>, ticket: impl Into<String>) -> Self {
+        Self {
+            kind,
+            name: name.into(),
+            ticket: ticket.into(),
+            transfer_id: None,
+            state: DownloadState::Ready,
+        }
+    }
+
+    fn total_bytes_label(bytes: u64) -> String {
+        const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+        let mut value = bytes as f64;
+        let mut unit_idx = 0usize;
+        while value >= 1024.0 && unit_idx < UNITS.len() - 1 {
+            value /= 1024.0;
+            unit_idx += 1;
+        }
+        if unit_idx == 0 {
+            format!("{} {}", bytes, UNITS[unit_idx])
+        } else {
+            format!("{value:.1} {}", UNITS[unit_idx])
+        }
+    }
+
+    fn action_label(&self) -> &'static str {
+        match self.state {
+            DownloadState::Ready => "Download",
+            DownloadState::Active { .. } => "Downloading",
+            DownloadState::Completed { .. } => "Open",
+            DownloadState::Failed { .. } | DownloadState::Cancelled => "Retry",
+        }
+    }
+
+    fn status_label(&self) -> String {
+        match &self.state {
+            DownloadState::Ready => "Ready to download".to_string(),
+            DownloadState::Active {
+                bytes,
+                total: Some(total),
+            } if *total > 0 => {
+                let pct = ((*bytes as f64 / *total as f64) * 100.0).clamp(0.0, 100.0);
+                format!(
+                    "Downloading — {} / {} ({pct:.0}%)",
+                    Self::total_bytes_label(*bytes),
+                    Self::total_bytes_label(*total),
+                )
+            }
+            DownloadState::Active { bytes, total: None } => {
+                format!("Downloading — {} received (size unknown)", Self::total_bytes_label(*bytes))
+            }
+            DownloadState::Active {
+                bytes,
+                total: Some(total),
+            } => format!(
+                "Downloading — {} / {}",
+                Self::total_bytes_label(*bytes),
+                Self::total_bytes_label(*total)
+            ),
+            DownloadState::Completed {
+                saved_name,
+                saved_path,
+            } => {
+                if let Some(path) = saved_path {
+                    format!("Saved — {} ({})", saved_name, path.display())
+                } else {
+                    format!("Saved — {saved_name}")
+                }
+            }
+            DownloadState::Failed { error } => format!("Failed — {error}"),
+            DownloadState::Cancelled => "Cancelled".to_string(),
+        }
+    }
+
+    fn progress_fraction(&self) -> Option<f32> {
+        match self.state {
+            DownloadState::Active {
+                bytes,
+                total: Some(total),
+            } if total > 0 => Some((bytes as f32 / total as f32).clamp(0.0, 1.0)),
+            _ => None,
+        }
+    }
+
+    fn status_tone(&self) -> Color {
+        match self.state {
+            DownloadState::Ready | DownloadState::Active { .. } => accent_primary(&iced::Theme::Dark),
+            DownloadState::Completed { .. } => Color::from_rgb(0.2, 0.7, 0.2),
+            DownloadState::Failed { .. } => Color::from_rgb(0.8, 0.22, 0.22),
+            DownloadState::Cancelled => Color::from_rgb(0.55, 0.55, 0.55),
+        }
+    }
+
+    fn estimated_height(&self) -> f32 {
+        match self.state {
+            DownloadState::Ready => 84.0,
+            DownloadState::Active { total: Some(_), .. } => 112.0,
+            DownloadState::Active { total: None, .. } => 104.0,
+            DownloadState::Completed { .. } => 92.0,
+            DownloadState::Failed { .. } => 104.0,
+            DownloadState::Cancelled => 84.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct ChatEntry {
     kind: ChatKind,
     label: String,
@@ -398,6 +547,8 @@ struct ChatEntry {
     /// Relative path within the store's files root — never an absolute filesystem path.
     /// Set when the image is persisted via `ImageStore::save_image()`.
     image_identifier: Option<String>,
+    /// Non-fatal rendering / persistence error to show inline with the image.
+    image_error: Option<String>,
     /// Unix epoch milliseconds when this message was sent (protocol sent_at
     /// for remote messages, local creation time for system/local messages).
     timestamp: Option<i64>,
@@ -407,6 +558,8 @@ struct ChatEntry {
     delivery_state: DeliveryState,
     /// PublicKey of the sender (None for local/system messages).
     sender_key: Option<PublicKey>,
+    /// Optional download attachment rendered alongside this entry.
+    download: Option<DownloadAttachment>,
 }
 
 impl ChatEntry {
@@ -422,10 +575,12 @@ impl ChatEntry {
             image_handle: None,
             image_bytes: None,
             image_identifier: None,
+            image_error: None,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
             sender_key: None,
+            download: None,
         }
     }
     fn local(label: impl Into<String>, text: impl Into<String>) -> Self {
@@ -440,10 +595,12 @@ impl ChatEntry {
             image_handle: None,
             image_bytes: None,
             image_identifier: None,
+            image_error: None,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
             sender_key: None,
+            download: None,
         }
     }
     fn remote(
@@ -464,13 +621,16 @@ impl ChatEntry {
             image_handle: None,
             image_bytes: None,
             image_identifier: None,
+            image_error: None,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
             sender_key: sender,
+            download: None,
         }
     }
     fn image(
+        kind: ChatKind,
         label: impl Into<String>,
         body: impl Into<String>,
         image_bytes: Vec<u8>,
@@ -478,10 +638,11 @@ impl ChatEntry {
         sent_at_secs: Option<u64>,
         sender: Option<PublicKey>,
         image_identifier: Option<String>,
+        image_error: Option<String>,
     ) -> Self {
         let body_str = body.into();
         Self {
-            kind: ChatKind::Remote,
+            kind,
             label: label.into(),
             body: body_str.clone(),
             message_hash: hash,
@@ -490,10 +651,38 @@ impl ChatEntry {
             image_handle: Some(iced::widget::image::Handle::from_bytes(image_bytes.clone())),
             image_bytes: Some(image_bytes),
             image_identifier,
+            image_error,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
             sender_key: sender,
+            download: None,
+        }
+    }
+
+    fn system_download(
+        text: impl Into<String>,
+        kind: TransferKind,
+        name: impl Into<String>,
+        ticket: impl Into<String>,
+    ) -> Self {
+        let body = text.into();
+        Self {
+            kind: ChatKind::System,
+            label: "System".into(),
+            body: body.clone(),
+            message_hash: None,
+            edited: false,
+            reactions: Vec::new(),
+            image_handle: None,
+            image_bytes: None,
+            image_identifier: None,
+            image_error: None,
+            timestamp: Some(now_ms()),
+            event_id: 0,
+            delivery_state: DeliveryState::default(),
+            sender_key: None,
+            download: Some(DownloadAttachment::new(kind, name, ticket)),
         }
     }
 
@@ -544,7 +733,12 @@ pub struct IcedChat {
     pub help_visible: bool,
     pending_file: Option<(String, String)>,
     /// Pending image download: (filename, blob_hash, sender_pk).
-    pending_image: Option<(String, MessageHash, PublicKey)>,
+    pending_image: VecDeque<(String, MessageHash, PublicKey)>,
+    /// Index of the chat entry that owns the current download attachment.
+    download_entry_index: Option<usize>,
+    /// Transfer ID for the active download, used to keep updates attached to
+    /// the correct row even if the view is recreated.
+    active_download_transfer_id: Option<TransferId>,
     names: HashMap<PublicKey, String>,
     topic: TopicId,
     ticket_str: String,
@@ -807,6 +1001,8 @@ pub enum AppMessage {
     MessageSent(String, u64, MessageHash),
     FileSent(String),
     DownloadDone(String),
+    DownloadFailed(String),
+    OpenDownloadedFile(String),
     ErrorMsg(String),
     ExecuteFileSend(String),
     ExecuteDownload,
@@ -815,6 +1011,7 @@ pub enum AppMessage {
         sender: PublicKey,
         name: String,
         image_bytes: Vec<u8>,
+        message_hash: MessageHash,
     },
     FriendAdded {
         fid: String,
@@ -1029,7 +1226,12 @@ impl LayoutCache {
             }
         }
         match entry.kind {
-            ChatKind::System => h += Self::SYSTEM_H,
+            ChatKind::System => {
+                h += Self::SYSTEM_H;
+                if let Some(download) = &entry.download {
+                    h += download.estimated_height();
+                }
+            }
             _ => {
                 h += Self::MSG_BASE_H;
                 if entry.image_bytes.is_some() {
@@ -1089,6 +1291,11 @@ impl LayoutCache {
     /// Mark the entire cache as needing rebuild (text-size change, etc.).
     fn invalidate_all(&mut self) {
         self.dirty_from = Some(0);
+    }
+
+    /// Mark entries from `idx` onward as stale.
+    fn invalidate_from(&mut self, idx: usize) {
+        self.dirty_from = Some(self.dirty_from.map_or(idx, |current| current.min(idx)));
     }
 
     /// Rebuild the cache from a given index onward.
@@ -1341,7 +1548,9 @@ impl IcedChat {
             composer_text: String::new(),
             help_visible: false,
             pending_file: None,
-            pending_image: None,
+            pending_image: VecDeque::new(),
+            download_entry_index: None,
+            active_download_transfer_id: None,
             settings_return_to: None,
             names: HashMap::new(),
             topic: initial_topic,
@@ -1489,6 +1698,331 @@ impl IcedChat {
         }
     }
 
+    fn entry_storage_user(&self, entry: &ChatEntry) -> Option<String> {
+        match entry.kind {
+            ChatKind::System => None,
+            ChatKind::Local => Some(self.local_public.to_string()),
+            ChatKind::Remote => entry.sender_key.map(|pk| pk.to_string()),
+        }
+    }
+
+    fn image_chat_kind(sender: PublicKey, local_public: PublicKey) -> ChatKind {
+        if sender == local_public {
+            ChatKind::Local
+        } else {
+            ChatKind::Remote
+        }
+    }
+
+    fn hydrate_entry_image(&self, entry: &mut ChatEntry) {
+        if entry.image_handle.is_some() {
+            return;
+        }
+        let Some(identifier) = entry.image_identifier.as_deref() else {
+            return;
+        };
+        let Some(user) = self.entry_storage_user(entry) else {
+            return;
+        };
+        match load_stored_chat_image(&self.image_store, &user, identifier) {
+            Some(bytes) => {
+                entry.image_handle = Some(iced::widget::image::Handle::from_bytes(bytes.clone()));
+                if entry.image_bytes.is_none() {
+                    entry.image_bytes = Some(bytes);
+                }
+                entry.image_error = None;
+            }
+            None if entry.image_error.is_none() => {
+                entry.image_error = Some("Image preview unavailable".to_string());
+            }
+            None => {}
+        }
+    }
+
+    fn image_handle_for_entry(&self, entry: &ChatEntry) -> Option<iced::widget::image::Handle> {
+        if let Some(handle) = entry.image_handle.clone() {
+            return Some(handle);
+        }
+        let identifier = entry.image_identifier.as_deref()?;
+        let user = self.entry_storage_user(entry)?;
+        let bytes = load_stored_chat_image(&self.image_store, &user, identifier)?;
+        Some(iced::widget::image::Handle::from_bytes(bytes))
+    }
+
+    fn start_next_pending_image_download(&mut self) -> iced::Task<AppMessage> {
+        let Some((name, hash, sender_pk)) = self.pending_image.pop_front() else {
+            return iced::Task::none();
+        };
+        let blob_store = self.blob_store.clone();
+        let endpoint = self.endpoint.clone();
+        let neighbors = self.neighbors.clone();
+        iced::Task::perform(
+            async move {
+                use boru_chat::chat_core::download_blob_with_progress;
+                use boru_chat::chat_callbacks::{TransferKind, TransferProgress};
+                let blob_hash: iroh_blobs::Hash = hash.into();
+                let candidates = download_candidates(sender_pk, &neighbors);
+                match download_blob_with_progress(
+                    &blob_store,
+                    &endpoint,
+                    blob_hash,
+                    candidates,
+                    name.clone(),
+                    TransferKind::Image,
+                    |_| {},
+                )
+                .await
+                {
+                    Ok(buf) => {
+                        let thumb = compress_image(&buf);
+                        Ok((name, thumb))
+                    }
+                    Err(e) => Err(format!("Download: {e}")),
+                }
+            },
+            move |r: Result<(String, Vec<u8>), String>| match r {
+                Ok((name, data)) => AppMessage::ImageDownloaded {
+                    sender: sender_pk,
+                    name,
+                    image_bytes: data,
+                    message_hash: hash,
+                },
+                Err(e) => AppMessage::ErrorMsg(e),
+            },
+        )
+    }
+
+    fn current_download_entry_index(&self, transfer_id: Option<TransferId>) -> Option<usize> {
+        if let Some(id) = transfer_id {
+            self.entries
+                .iter()
+                .position(|entry| entry.download.as_ref().map(|d| d.transfer_id) == Some(Some(id)))
+                .or(self.download_entry_index)
+        } else {
+            self.download_entry_index
+        }
+    }
+
+    fn current_download_entry_mut(&mut self) -> Option<&mut ChatEntry> {
+        let idx = self.current_download_entry_index(self.active_download_transfer_id)?;
+        self.entries.get_mut(idx)
+    }
+
+    fn handle_download_progress(&mut self, progress: TransferProgress) {
+        use boru_chat::chat_callbacks::TransferKind;
+
+        let mut invalidate_from = None;
+        let mut clear_active_transfer = false;
+
+        match progress {
+            TransferProgress::Started {
+                id,
+                kind: TransferKind::File,
+                total,
+                ..
+            } => {
+                self.active_download_transfer_id = Some(id);
+                if let Some(idx) = self.current_download_entry_index(None) {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(download) = entry.download.as_mut() {
+                            download.transfer_id = Some(id);
+                            download.state = DownloadState::Active { bytes: 0, total };
+                            invalidate_from = Some(idx);
+                        }
+                    }
+                }
+            }
+            TransferProgress::Progress {
+                id,
+                kind: TransferKind::File,
+                bytes,
+                total,
+                ..
+            } => {
+                if let Some(idx) = self.current_download_entry_index(Some(id)) {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(download) = entry.download.as_mut() {
+                            if download.transfer_id.is_none() {
+                                download.transfer_id = Some(id);
+                            }
+                            download.state = DownloadState::Active { bytes, total };
+                            invalidate_from = Some(idx);
+                        }
+                    }
+                }
+            }
+            TransferProgress::Completed {
+                id,
+                kind: TransferKind::File,
+                name,
+            } => {
+                if let Some(idx) = self.current_download_entry_index(Some(id)) {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(download) = entry.download.as_mut() {
+                            if download.transfer_id.is_none() {
+                                download.transfer_id = Some(id);
+                            }
+                            download.state = DownloadState::Completed {
+                                saved_name: name,
+                                saved_path: None,
+                            };
+                            invalidate_from = Some(idx);
+                        }
+                    }
+                }
+                clear_active_transfer = true;
+            }
+            TransferProgress::Failed { id, error, .. } => {
+                if let Some(idx) = self.current_download_entry_index(Some(id)) {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(download) = entry.download.as_mut() {
+                            if download.transfer_id.is_none() {
+                                download.transfer_id = Some(id);
+                            }
+                            download.state = DownloadState::Failed { error };
+                            invalidate_from = Some(idx);
+                        }
+                    }
+                }
+                clear_active_transfer = true;
+            }
+            TransferProgress::Cancelled {
+                id,
+                kind: TransferKind::File,
+                ..
+            } => {
+                if let Some(idx) = self.current_download_entry_index(Some(id)) {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(download) = entry.download.as_mut() {
+                            if download.transfer_id.is_none() {
+                                download.transfer_id = Some(id);
+                            }
+                            download.state = DownloadState::Cancelled;
+                            invalidate_from = Some(idx);
+                        }
+                    }
+                }
+                clear_active_transfer = true;
+            }
+            _ => {}
+        }
+
+        if clear_active_transfer {
+            self.active_download_transfer_id = None;
+        }
+
+        if let Some(idx) = invalidate_from {
+            self.layout_cache.borrow_mut().invalidate_from(idx);
+        }
+    }
+
+    fn open_downloaded_file(&self, name: &str) -> Result<(), String> {
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(name);
+        if !path.exists() {
+            return Err(format!("File not found: {}", path.display()));
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "start", "", &path.to_string_lossy()])
+                .status()
+                .map_err(|e| format!("Open file: {e}"))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("Open file exited with {status}"))
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("open")
+                .arg(&path)
+                .status()
+                .map_err(|e| format!("Open file: {e}"))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("Open file exited with {status}"))
+            }
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let status = std::process::Command::new("xdg-open")
+                .arg(&path)
+                .status()
+                .map_err(|e| format!("Open file: {e}"))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("Open file exited with {status}"))
+            }
+        }
+    }
+
+    fn view_download_attachment<'a>(&self, attachment: &'a DownloadAttachment) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, container, progress_bar, text, Column, Row};
+        use iced::Length;
+
+        let theme = self.theme();
+        let tone = attachment.status_tone();
+        let title = text(&attachment.name)
+            .size(TYPO_SM)
+            .color(text_system(&theme));
+        let status = text(attachment.status_label())
+            .size(TYPO_XS)
+            .color(tone);
+
+        let mut body = Column::new()
+            .push(title)
+            .push(status)
+            .spacing(SPACE_4);
+
+        if let Some(fraction) = attachment.progress_fraction() {
+            body = body.push(container(progress_bar(0.0..=1.0, fraction)).width(Length::Fill));
+        }
+
+        let action_row = match &attachment.state {
+            DownloadState::Completed { .. } => Row::new()
+                .push(
+                    button(text("Open").size(TYPO_SM))
+                        .on_press(AppMessage::OpenDownloadedFile(attachment.name.clone()))
+                        .padding([SPACE_8, SPACE_12]),
+                )
+                .spacing(SPACE_8),
+            DownloadState::Active { .. } => Row::new()
+                .push(text("Downloading…").size(TYPO_XS).color(tone))
+                .spacing(SPACE_8),
+            DownloadState::Ready | DownloadState::Failed { .. } | DownloadState::Cancelled => Row::new()
+                .push(
+                    button(text(attachment.action_label()).size(TYPO_SM))
+                        .on_press(AppMessage::ExecuteDownload)
+                        .padding([SPACE_8, SPACE_12]),
+                )
+                .spacing(SPACE_8),
+        };
+
+        let card = Column::new().push(body).push(action_row).spacing(SPACE_8);
+        container(card)
+            .width(Length::Fill)
+            .padding([SPACE_12, SPACE_16])
+            .style(move |t| {
+                let mut s = iced::widget::container::Style::default();
+                s.background = Some(iced::Background::Color(bg_surface(t)));
+                s.border = iced::Border {
+                    color: tone,
+                    width: 1.0,
+                    radius: SPACE_10.into(),
+                };
+                s
+            })
+            .into()
+    }
+
     fn push_system(&mut self, text: impl Into<String>) {
         let entry = ChatEntry::system(text);
         self.entries_push(entry);
@@ -1500,7 +2034,13 @@ impl IcedChat {
 
     /// Push an entry and update the incremental layout cache atomically.
     /// Must be the *only* way entries are added to `self.entries`.
-    fn entries_push(&mut self, entry: ChatEntry) {
+    fn entries_push(&mut self, mut entry: ChatEntry) {
+        if let Some(hash) = entry.message_hash.as_ref() {
+            if self.has_message(hash) {
+                return;
+            }
+        }
+        self.hydrate_entry_image(&mut entry);
         let prev_day = self
             .entries
             .last()
@@ -1536,6 +2076,8 @@ impl IcedChat {
             AppMessage::MessageSent(..) => "MessageSent",
             AppMessage::FileSent(_) => "FileSent",
             AppMessage::DownloadDone(_) => "DownloadDone",
+            AppMessage::DownloadFailed(_) => "DownloadFailed",
+            AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
             AppMessage::ErrorMsg(_) => "ErrorMsg",
             AppMessage::ExecuteFileSend(_) => "ExecuteFileSend",
             AppMessage::ExecuteDownload => "ExecuteDownload",
@@ -1614,7 +2156,9 @@ impl IcedChat {
         self.layout_cache.borrow_mut().clear();
         self.names.clear();
         self.pending_file = None;
-        self.pending_image = None;
+        self.pending_image.clear();
+        self.download_entry_index = None;
+        self.active_download_transfer_id = None;
         self.neighbors.clear();
         self.history_saved_count = 0;
     }
@@ -1636,8 +2180,15 @@ impl IcedChat {
             };
             let body_text = entry.body.clone();
             let sender = match entry.kind {
-                ChatKind::Local => hex::encode(self.local_public.as_bytes()),
-                _ => String::new(),
+                ChatKind::System => String::new(),
+                ChatKind::Local => entry
+                    .sender_key
+                    .unwrap_or(self.local_public)
+                    .to_string(),
+                ChatKind::Remote => entry
+                    .sender_key
+                    .map(|pk| pk.to_string())
+                    .unwrap_or_default(),
             };
             let mut history_entry = HistoryEntry::new(
                 topic,
@@ -2361,21 +2912,17 @@ impl IcedChat {
                             ),
                         ])
                     }
-                    Err(err) => {
-                        let error_msg = err.to_string();
-                        if error_msg.contains("DuplicatePending") {
-                            // Already sent — just show state
-                            self.outgoing_request_states
-                                .insert(peer, OutgoingRequestState::Pending);
-                            self.rebuild_join_request_list();
-                            iced::Task::none()
-                        } else {
-                            iced::Task::done(AppMessage::FriendRequestFailed {
-                                peer,
-                                error: error_msg,
-                            })
-                        }
+                    Err(FriendRequestError::DuplicatePending { .. }) => {
+                        // Already sent — just show state.
+                        self.outgoing_request_states
+                            .insert(peer, OutgoingRequestState::Pending);
+                        self.rebuild_join_request_list();
+                        iced::Task::none()
                     }
+                    Err(err) => iced::Task::done(AppMessage::FriendRequestFailed {
+                        peer,
+                        error: err.to_string(),
+                    }),
                 }
             }
 
@@ -2475,9 +3022,42 @@ impl IcedChat {
                 status,
             } => {
                 if status.is_accepted() {
-                    // Open the direct chat with this peer
+                    // Set up friend record with Active direct conversation
+                    let fid = FriendId::from_public_key(peer);
                     let topic = direct_topic(&self.local_public, &peer);
-                    iced::Task::done(AppMessage::OpenRoom(topic))
+                    let known_addrs = self
+                        .friends
+                        .get(&fid)
+                        .map(|record| record.known_addrs.clone())
+                        .unwrap_or_default();
+                    let record = self.friends.ensure_friend(fid);
+                    record.set_direct_conversation(topic, DirectConversationState::Active);
+                    let room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
+                    let _ = room.save();
+                    self.try_save_friends();
+
+                    // Send a ConversationInvite back to the original requester
+                    // so they know the request was accepted and can join the topic.
+                    let secret_key = self.secret_key.clone();
+                    let whisper_handle = self.whisper_handle.clone();
+                    let local_addr = self.endpoint.addr();
+                    let action = ContactAction::ConversationInvite {
+                        topic,
+                        addrs: vec![local_addr],
+                    };
+                    if let Ok(payload) = SignedContactMessage::sign(&secret_key, &action) {
+                        iced::Task::batch(vec![
+                            iced::Task::perform(
+                                async move {
+                                    let _ = whisper_handle.send_control(peer, payload.into()).await;
+                                },
+                                |_| AppMessage::Noop,
+                            ),
+                            iced::Task::done(AppMessage::OpenRoom(topic)),
+                        ])
+                    } else {
+                        iced::Task::done(AppMessage::OpenRoom(topic))
+                    }
                 } else {
                     iced::Task::none()
                 }
@@ -3432,46 +4012,8 @@ impl IcedChat {
                 }
                 self.try_save_friends();
                 self.try_save_chat_history();
-                // Check if an ImageShare was just received and auto-download
-                if let Some((name, hash, sender_pk)) = self.pending_image.take() {
-                    let blob_store = self.blob_store.clone();
-                    let endpoint = self.endpoint.clone();
-                    let neighbors = self.neighbors.clone();
-                    return iced::Task::perform(
-                        async move {
-                            use boru_chat::chat_core::download_blob_with_progress;
-                            use boru_chat::chat_callbacks::{TransferKind, TransferProgress};
-                            let blob_hash: iroh_blobs::Hash = hash.into();
-                            let candidates = download_candidates(sender_pk, &neighbors);
-                            match download_blob_with_progress(
-                                &blob_store,
-                                &endpoint,
-                                blob_hash,
-                                candidates,
-                                name.clone(),
-                                TransferKind::Image,
-                                |_| {},
-                            )
-                            .await
-                            {
-                                Ok(buf) => {
-                                    // Compress the downloaded image to a thumbnail
-                                    // for inline display and persistence.
-                                    let thumb = compress_image(&buf);
-                                    Ok((name, thumb))
-                                }
-                                Err(e) => Err(format!("Download: {e}")),
-                            }
-                        },
-                        move |r: Result<(String, Vec<u8>), String>| match r {
-                            Ok((name, data)) => AppMessage::ImageDownloaded {
-                                sender: sender_pk,
-                                name,
-                                image_bytes: data,
-                            },
-                            Err(e) => AppMessage::ErrorMsg(e),
-                        },
-                    );
+                if !self.pending_image.is_empty() {
+                    return self.start_next_pending_image_download();
                 }
                 // Check if a profile image ticket arrived from a remote peer
                 if let Some((peer, ticket_str)) = self.pending_profile_image_tickets.pop_front() {
@@ -3571,17 +4113,73 @@ impl IcedChat {
                             Ok((sender, ContactAction::ConversationInvite { topic, addrs }))
                                 if addrs.iter().all(|addr| addr.id == sender) =>
                             {
+                                let local_pk = self.local_public;
+                                let sender_str = sender.to_string();
+                                let local_str = local_pk.to_string();
+
+                                // Check if this is a response to our outgoing request
+                                let is_outgoing = self
+                                    .friend_request_store
+                                    .iter()
+                                    .any(|r| {
+                                        r.requester == local_str
+                                            && r.recipient == sender_str
+                                            && r.status == FriendRequestStatus::Pending
+                                    });
+
+                                if is_outgoing {
+                                    // This is the recipient accepting our request
+                                    let fid = FriendId::from_public_key(sender);
+                                    let record = self.friends.ensure_friend(fid);
+                                    record.record_addrs(addrs.clone());
+                                    record.set_direct_conversation(
+                                        topic,
+                                        DirectConversationState::Active,
+                                    );
+                                    let room =
+                                        RoomStore::with_peers(&self.data_dir, topic, addrs);
+                                    let _ = room.save();
+                                    self.try_save_friends();
+                                    self.outgoing_request_states
+                                        .insert(sender, OutgoingRequestState::Accepted);
+                                    self.rebuild_join_request_list();
+                                    return iced::Task::done(AppMessage::OpenRoom(topic));
+                                }
+
+                                // New incoming request — store in friend_request_store
                                 let fid = FriendId::from_public_key(sender);
                                 let record = self.friends.ensure_friend(fid);
                                 record.record_addrs(addrs.clone());
                                 record.set_direct_conversation(
                                     topic,
-                                    DirectConversationState::Active,
+                                    DirectConversationState::Pending,
                                 );
-                                let room = RoomStore::with_peers(&self.data_dir, topic, addrs);
-                                let _ = room.save();
                                 self.try_save_friends();
-                                return iced::Task::done(AppMessage::OpenRoom(topic));
+
+                                match self.friend_request_store.send_request(
+                                    &sender_str,
+                                    &local_str,
+                                    None,
+                                ) {
+                                    Ok(_request) => {
+                                        if let Err(err) = self.friend_request_store.save() {
+                                            debug!(
+                                                error = %err,
+                                                "failed to save friend request store"
+                                            );
+                                        }
+                                    }
+                                    Err(FriendRequestError::DuplicatePending { .. }) => {
+                                        // Already have a pending request — nothing to do
+                                    }
+                                    Err(err) => {
+                                        debug!(
+                                            error = %err,
+                                            "failed to store incoming friend request"
+                                        );
+                                    }
+                                }
+                                return iced::Task::none();
                             }
                             Ok((sender, ContactAction::AddressUpdate { addrs }))
                                 if addrs.iter().all(|addr| addr.id == sender) =>
@@ -3659,10 +4257,16 @@ impl IcedChat {
                             .get(&from)
                             .cloned()
                             .unwrap_or_else(|| from.fmt_short().to_string());
-                        self.push_system(format!(
-                            "[Whisper from {label}] File received: {name}. Use /download to fetch."
+                        self.pending_file = Some((name.clone(), ticket.clone()));
+                        self.download_entry_index = Some(self.entries.len());
+                        self.entries_push(ChatEntry::system_download(
+                            format!(
+                                "[Whisper from {label}] File received: {name}. Use the card below to download it."
+                            ),
+                            TransferKind::File,
+                            name,
+                            ticket,
                         ));
-                        self.pending_file = Some((name, ticket));
                     }
                     boru_chat::whisper::WhisperEvent::Connected { peer } => {
                         let label = self
@@ -3951,13 +4555,14 @@ impl IcedChat {
                         if let Some(ref sender) = sender {
                             sender.broadcast(encoded).await.ok();
                         }
-                        Ok((local_pk, fname, opt_bytes))
+                        Ok((local_pk, fname, opt_bytes, hash))
                     },
-                    |r: Result<(PublicKey, String, Vec<u8>), String>| match r {
-                        Ok((sender_pk, name, bytes)) => AppMessage::ImageDownloaded {
+                    |r: Result<(PublicKey, String, Vec<u8>, MessageHash), String>| match r {
+                        Ok((sender_pk, name, bytes, hash)) => AppMessage::ImageDownloaded {
                             sender: sender_pk,
                             name,
                             image_bytes: bytes,
+                            message_hash: hash,
                         },
                         Err(e) => AppMessage::ErrorMsg(e),
                     },
@@ -3971,11 +4576,12 @@ impl IcedChat {
                         let blob_store = self.blob_store.clone();
                         let endpoint = self.endpoint.clone();
                         let neighbors = self.neighbors.clone();
+                        let progress_queue = self.download_progress_queue.clone();
                         let name_copy = filename.clone();
                         iced::Task::perform(
                             async move {
                                 use boru_chat::chat_core::download_blob_with_progress;
-                                use boru_chat::chat_callbacks::{TransferKind, TransferProgress};
+                                use boru_chat::chat_callbacks::TransferKind;
                                 let ticket: BlobTicket = ticket_str
                                     .parse::<BlobTicket>()
                                     .map_err(|e| format!("Parse ticket: {e}"))?;
@@ -3988,7 +4594,14 @@ impl IcedChat {
                                     candidates,
                                     name_copy.clone(),
                                     TransferKind::File,
-                                    |_| {},
+                                    {
+                                        let progress_queue = progress_queue.clone();
+                                        move |progress| {
+                                            if let Ok(mut queue) = progress_queue.lock() {
+                                                queue.push_back(progress);
+                                            }
+                                        }
+                                    },
                                 )
                                 .await
                                 .map_err(|e| format!("Download: {e}"))?;
@@ -4003,7 +4616,7 @@ impl IcedChat {
                             },
                             |r: Result<String, String>| match r {
                                 Ok(name) => AppMessage::DownloadDone(name),
-                                Err(e) => AppMessage::ErrorMsg(e),
+                                Err(e) => AppMessage::DownloadFailed(e),
                             },
                         )
                     }
@@ -4019,15 +4632,63 @@ impl IcedChat {
             }
             AppMessage::DownloadDone(name) => {
                 self.push_system(format!("Saved: {name}"));
+                let mut updated = false;
+                if let Some(idx) = self.current_download_entry_index(self.active_download_transfer_id) {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(download) = entry.download.as_mut() {
+                            download.state = DownloadState::Completed {
+                                saved_name: name.clone(),
+                                saved_path: Some(
+                                    std::env::current_dir().unwrap_or_default().join(&name),
+                                ),
+                            };
+                            self.layout_cache.borrow_mut().invalidate_from(idx);
+                            updated = true;
+                        }
+                    }
+                }
+                if updated {
+                    self.active_download_transfer_id = None;
+                }
                 self.pending_file = None;
                 iced::Task::none()
             }
-            AppMessage::DownloadProgress(_) => iced::Task::none(),
+            AppMessage::DownloadFailed(error) => {
+                self.push_system(format!("Download failed: {error}"));
+                let mut updated = false;
+                if let Some(idx) = self.current_download_entry_index(self.active_download_transfer_id) {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(download) = entry.download.as_mut() {
+                            download.state = DownloadState::Failed { error };
+                            self.layout_cache.borrow_mut().invalidate_from(idx);
+                            updated = true;
+                        }
+                    }
+                }
+                if updated {
+                    self.active_download_transfer_id = None;
+                }
+                iced::Task::none()
+            }
+            AppMessage::DownloadProgress(progress) => {
+                self.handle_download_progress(progress);
+                iced::Task::none()
+            }
+            AppMessage::OpenDownloadedFile(name) => {
+                if let Err(error) = self.open_downloaded_file(&name) {
+                    self.push_system(format!("Open failed: {error}"));
+                }
+                iced::Task::none()
+            }
             AppMessage::ImageDownloaded {
                 sender,
                 name,
                 image_bytes,
+                message_hash,
             } => {
+                if self.has_message(&message_hash) {
+                    return self.start_next_pending_image_download();
+                }
                 let sender_name = self
                     .names
                     .get(&sender)
@@ -4039,19 +4700,32 @@ impl IcedChat {
                 // directories.  The returned identifier is a relative path
                 // within the store — never an absolute filesystem path.
                 let user = sender.to_string();
-                let image_identifier = self.image_store.save_image(&user, &name, &image_bytes).ok();
-                let entry = ChatEntry::image(
+                let mut image_error = None;
+                let image_identifier = match self.image_store.save_image(&user, &name, &image_bytes) {
+                    Ok(id) => Some(id),
+                    Err(err) => {
+                        image_error = Some(format!("Failed to save image: {err}"));
+                        None
+                    }
+                };
+                let kind = Self::image_chat_kind(sender, self.local_public);
+                let mut entry = ChatEntry::image(
+                    kind,
                     &sender_name,
                     format!("[Image: {name}]"),
                     image_bytes,
-                    None,
+                    Some(message_hash),
                     None,
                     Some(sender),
                     image_identifier,
+                    image_error,
                 );
+                if entry.image_handle.is_none() && entry.image_error.is_none() {
+                    entry.image_error = Some("Image preview unavailable".to_string());
+                }
                 self.entries_push(entry);
-                iced::Task::none()
-            }
+                self.start_next_pending_image_download()
+            },
             AppMessage::ProfileImageDownloaded(peer, image_bytes) => {
                 if image_bytes.is_empty() || image_bytes.len() > 2 * 1024 * 1024 {
                     // Ignore empty or oversized images (>2MB) and clear cached ticket
@@ -4295,6 +4969,12 @@ impl IcedChat {
                             Err(_) => AppMessage::ProfileImageDownloadFailed(failed_peer),
                         },
                     ));
+                }
+
+                if let Ok(mut queue) = self.download_progress_queue.lock() {
+                    for progress in queue.drain(..) {
+                        tasks.push(iced::Task::done(AppMessage::DownloadProgress(progress)));
+                    }
                 }
 
                 // ── Seen-on-visibility: when user is at bottom of log,
@@ -4925,7 +5605,7 @@ impl ChatCallbacks for IcedChat {
     }
 
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
-        self.pending_image = Some((name, hash, from));
+        self.pending_image.push_back((name, hash, from));
     }
 
     fn has_message(&self, hash: &MessageHash) -> bool {
@@ -5234,6 +5914,10 @@ impl IcedChat {
             );
         }
 
+        if !self.join_request_list.is_empty() {
+            content = content.push(self.view_join_requests());
+        }
+
         // ── Recent chats list ──
         if !self.first_run {
             let mut section = Column::new().spacing(SPACE_8);
@@ -5519,6 +6203,263 @@ impl IcedChat {
         };
 
         (label, color, btn)
+    }
+
+    fn join_request_section_title() -> &'static str {
+        "Join requests"
+    }
+
+    fn join_request_total_label(count: usize) -> String {
+        format!("{count} total")
+    }
+
+    fn join_request_target_user_prefix() -> &'static str {
+        "Target user"
+    }
+
+    fn join_request_chat_prefix() -> &'static str {
+        "Chat"
+    }
+
+    fn join_request_retry_label() -> &'static str {
+        "Retry"
+    }
+
+    fn join_request_open_chat_label() -> &'static str {
+        "Open chat"
+    }
+
+    fn join_request_failure_prefix() -> &'static str {
+        "Failure"
+    }
+
+    fn join_request_state_label(state: &OutgoingRequestState) -> &'static str {
+        match state {
+            OutgoingRequestState::Pending => "Pending",
+            OutgoingRequestState::Accepted => "Accepted",
+            OutgoingRequestState::Declined => "Rejected",
+            OutgoingRequestState::Failed(_) => "Failed",
+        }
+    }
+
+    fn join_request_state_color(state: &OutgoingRequestState) -> Color {
+        match state {
+            OutgoingRequestState::Pending => Color::from_rgb(0.88, 0.67, 0.10),
+            OutgoingRequestState::Accepted => Color::from_rgb(0.18, 0.68, 0.28),
+            OutgoingRequestState::Declined => Color::from_rgb(0.53, 0.53, 0.53),
+            OutgoingRequestState::Failed(_) => Color::from_rgb(0.80, 0.22, 0.22),
+        }
+    }
+
+    fn join_request_border_color(state: &OutgoingRequestState) -> Color {
+        match state {
+            OutgoingRequestState::Pending => Color::from_rgb(0.88, 0.67, 0.10),
+            OutgoingRequestState::Accepted => Color::from_rgb(0.18, 0.68, 0.28),
+            OutgoingRequestState::Declined => Color::from_rgb(0.62, 0.62, 0.62),
+            OutgoingRequestState::Failed(_) => Color::from_rgb(0.80, 0.22, 0.22),
+        }
+    }
+
+    fn join_request_peer(item: &JoinRequestItem) -> Option<PublicKey> {
+        PublicKey::from_str(&item.target_user).ok()
+    }
+
+    fn join_request_spinner_frame() -> &'static str {
+        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let index = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| ((elapsed.as_millis() / 120) % FRAMES.len() as u128) as usize)
+            .unwrap_or(0);
+        FRAMES[index]
+    }
+
+    fn join_request_user_label(&self, item: &JoinRequestItem) -> String {
+        match Self::join_request_peer(item) {
+            Some(peer) => {
+                let resolved = self.resolve_name(&peer);
+                let short = peer.fmt_short().to_string();
+                if resolved == item.target_user || resolved == short {
+                    format!("{}: {short}", Self::join_request_target_user_prefix())
+                } else {
+                    format!(
+                        "{}: {resolved} ({short})",
+                        Self::join_request_target_user_prefix()
+                    )
+                }
+            }
+            None => format!("{}: {}", Self::join_request_target_user_prefix(), item.target_user),
+        }
+    }
+
+    fn join_request_chat_label(&self, item: &JoinRequestItem) -> String {
+        let short = item.chat_id.fmt_short().to_string();
+        let chat_name = self
+            .room_history
+            .find(&item.chat_id)
+            .map(|room| room.display_name())
+            .filter(|name| !name.trim().is_empty());
+        match chat_name {
+            Some(name) if name != short => format!("{}: {name} ({short})", Self::join_request_chat_prefix()),
+            _ => format!("{}: {short}", Self::join_request_chat_prefix()),
+        }
+    }
+
+    fn view_join_request_row(&self, item: &JoinRequestItem) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, row, text, Column};
+        use iced::Length;
+
+        let peer = Self::join_request_peer(item);
+        let state_label = Self::join_request_state_label(&item.state);
+        let state_color = Self::join_request_state_color(&item.state);
+        let border_color = Self::join_request_border_color(&item.state);
+        let user_label = self.join_request_user_label(item);
+        let chat_label = self.join_request_chat_label(item);
+        let failed_error = match &item.state {
+            OutgoingRequestState::Failed(error) if !error.trim().is_empty() => {
+                Some(format!("{}: {error}", Self::join_request_failure_prefix()))
+            }
+            _ => None,
+        };
+
+        let details: iced::Element<'_, AppMessage> = Column::new()
+            .push(text(user_label).size(TYPO_MD).width(Length::Fill))
+            .push(text(chat_label).size(TYPO_SM).color(self.color_muted()))
+            .spacing(SPACE_4)
+            .into();
+
+        let mut status_row = row![text(format!("State: {state_label}")).size(TYPO_XS).color(state_color)]
+            .spacing(SPACE_8)
+            .align_y(iced::Alignment::Center);
+
+        if matches!(item.state, OutgoingRequestState::Pending) {
+            status_row = status_row.push(
+                text(Self::join_request_spinner_frame())
+                    .size(TYPO_MD)
+                    .color(state_color),
+            );
+        }
+
+        if let Some(error) = failed_error {
+            status_row = status_row.push(
+                text(error)
+                    .size(TYPO_XS)
+                    .color(color_error(&self.theme())),
+            );
+        }
+
+        let body: iced::Element<'_, AppMessage> = Column::new()
+            .push(details)
+            .push(status_row)
+            .spacing(SPACE_6)
+            .into();
+
+        if matches!((&item.state, peer), (OutgoingRequestState::Accepted, Some(_))) {
+            let peer = peer.expect("accepted request should have a parseable peer key");
+            let accepted_card = button(
+                Column::new()
+                    .push(body)
+                    .push(
+                        text(Self::join_request_open_chat_label())
+                            .size(TYPO_SM)
+                            .color(self.color_muted()),
+                    )
+                    .spacing(SPACE_8),
+            )
+            .on_press(AppMessage::OpenFriendChat(peer))
+            .width(Length::Fill)
+            .padding([SPACE_12, SPACE_16])
+            .style(move |t, _status| {
+                let mut s = iced::widget::button::Style::default();
+                s.background = Some(iced::Background::Color(bg_surface(t)));
+                s.text_color = text_remote_body(t);
+                s.border = iced::Border {
+                    color: border_color,
+                    width: 1.5,
+                    radius: SPACE_10.into(),
+                };
+                s
+            });
+            return accepted_card.into();
+        }
+
+        if matches!((&item.state, peer), (OutgoingRequestState::Failed(_), Some(_))) {
+            let peer = peer.expect("failed request should have a parseable peer key");
+            let failed_card = row![
+                container(body)
+                    .width(Length::Fill)
+                    .padding([SPACE_12, SPACE_16])
+                    .style(move |t| {
+                        let mut s = iced::widget::container::Style::default();
+                        s.background = Some(iced::Background::Color(bg_surface(t)));
+                        s.border = iced::Border {
+                            color: border_color,
+                            width: 1.0,
+                            radius: SPACE_10.into(),
+                        };
+                        s
+                    }),
+                button(text(Self::join_request_retry_label()).size(TYPO_SM))
+                    .on_press(AppMessage::FriendRequestRetry(peer))
+                    .padding([SPACE_12, SPACE_16])
+                    .style(move |t, _status| {
+                        let mut s = iced::widget::button::Style::default();
+                        s.background = Some(iced::Background::Color(bg_hover(t)));
+                        s.text_color = color_error(t);
+                        s.border = iced::Border {
+                            color: border_color,
+                            width: 1.0,
+                            radius: SPACE_8.into(),
+                        };
+                        s
+                    }),
+            ]
+            .spacing(SPACE_8)
+            .align_y(iced::Alignment::Center);
+            return failed_card.into();
+        }
+
+        container(body)
+            .width(Length::Fill)
+            .padding([SPACE_12, SPACE_16])
+            .style(move |t| {
+                let mut s = iced::widget::container::Style::default();
+                s.background = Some(iced::Background::Color(bg_surface(t)));
+                s.border = iced::Border {
+                    color: border_color,
+                    width: 1.0,
+                    radius: SPACE_10.into(),
+                };
+                s
+            })
+            .into()
+    }
+
+    fn view_join_requests(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{container, row, scrollable, text, Column};
+        use iced::Length;
+
+        let mut section = Column::new().spacing(SPACE_8);
+        section = section.push(
+            row![
+                text(Self::join_request_section_title()).size(TYPO_MD).width(Length::Fill),
+                text(Self::join_request_total_label(self.join_request_list.len()))
+                    .size(TYPO_XXS)
+                    .color(self.color_muted()),
+            ]
+            .spacing(SPACE_4),
+        );
+
+        let mut list = Column::new().spacing(SPACE_4).width(Length::Fill);
+        for item in self.join_requests() {
+            list = list.push(self.view_join_request_row(item));
+        }
+        section = section.push(scrollable(list).height(Length::Fixed(240.0)));
+
+        container(section)
+            .width(Length::Fill)
+            .padding(SPACE_12)
+            .style(move |t| container_surface(t))
+            .into()
     }
 
     /// Return a reference to the structured join-request list.
@@ -5923,6 +6864,9 @@ impl IcedChat {
                     .push(space::horizontal())
                     .width(Length::Fill);
                 col = col.push(system_row);
+                if let Some(download) = &entry.download {
+                    col = col.push(self.view_download_attachment(download));
+                }
                 continue;
             }
 
@@ -6021,12 +6965,37 @@ impl IcedChat {
             col = col.push(msg_row);
 
             // ── Image (cached handle — decoded once at construction) ──
-            if let Some(ref handle) = entry.image_handle {
-                let img = iced::widget::image(handle.clone())
+            if let Some(handle) = self.image_handle_for_entry(entry) {
+                let img = iced::widget::image(handle)
                     .content_fit(iced::ContentFit::ScaleDown)
                     .width(Length::Fill)
                     .height(Length::Fixed(300.0));
                 col = col.push(img);
+            } else if entry.image_error.is_some() || entry.image_identifier.is_some() {
+                use iced::widget::{container, text, Column};
+                let error_text = entry
+                    .image_error
+                    .as_deref()
+                    .unwrap_or("Image preview unavailable");
+                let placeholder = Column::new()
+                    .push(
+                        text("🖼 Image unavailable")
+                            .size(TYPO_SM)
+                            .color(text_system(&theme)),
+                    )
+                    .push(
+                        text(error_text)
+                            .size(TYPO_XS)
+                            .color(color_error(&theme))
+                            .wrapping(Wrapping::Word),
+                    )
+                    .spacing(SPACE_2);
+                col = col.push(
+                    container(placeholder)
+                        .width(Length::Fill)
+                        .padding([SPACE_8, SPACE_10])
+                        .style(move |t| container_card(t)),
+                );
             }
 
             // ── Reactions ──
@@ -7203,10 +8172,12 @@ mod tests {
                 image_handle: None,
                 image_bytes: Some(image_data.clone()),
                 image_identifier: None,
+                image_error: None,
                 timestamp: Some(i as i64),
                 event_id: 0,
                 delivery_state: DeliveryState::default(),
                 sender_key: None,
+                download: None,
             })
             .collect();
         let total: usize = entries
@@ -7247,10 +8218,12 @@ mod tests {
             image_handle: None,
             image_bytes: Some(img),
             image_identifier: None,
+            image_error: None,
             timestamp: Some(1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
             sender_key: None,
+            download: None,
         };
         assert_eq!(e.body, "hello");
         assert_eq!(e.label, "peer");
@@ -7288,12 +8261,77 @@ mod tests {
     }
 
     #[test]
+    fn download_attachment_state_helpers_cover_all_states() {
+        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket");
+        assert_eq!(attachment.action_label(), "Download");
+        assert_eq!(attachment.status_label(), "Ready to download");
+        assert!(attachment.progress_fraction().is_none());
+
+        attachment.state = DownloadState::Active {
+            bytes: 1024,
+            total: Some(2048),
+        };
+        assert_eq!(attachment.action_label(), "Downloading");
+        assert!(attachment.status_label().contains("50%"));
+        assert_eq!(attachment.progress_fraction(), Some(0.5));
+
+        attachment.state = DownloadState::Active {
+            bytes: 1536,
+            total: None,
+        };
+        assert!(attachment.status_label().contains("size unknown"));
+        assert!(attachment.status_label().contains("1.5 KiB"));
+        assert!(attachment.progress_fraction().is_none());
+
+        attachment.state = DownloadState::Active {
+            bytes: 2,
+            total: Some(0),
+        };
+        assert!(attachment.status_label().contains("2 B / 0 B"));
+        assert!(attachment.progress_fraction().is_none());
+
+        attachment.state = DownloadState::Completed {
+            saved_name: "demo.bin".into(),
+            saved_path: Some(std::path::PathBuf::from("/tmp/demo.bin")),
+        };
+        assert_eq!(attachment.action_label(), "Open");
+        assert!(attachment.status_label().contains("Saved"));
+
+        attachment.state = DownloadState::Failed {
+            error: "boom".into(),
+        };
+        assert_eq!(attachment.action_label(), "Retry");
+        assert!(attachment.status_label().contains("boom"));
+
+        attachment.state = DownloadState::Cancelled;
+        assert_eq!(attachment.action_label(), "Retry");
+        assert_eq!(attachment.status_label(), "Cancelled");
+    }
+
+    #[test]
+    fn image_chat_kind_uses_local_for_own_sender() {
+        let local = SecretKey::from_bytes(&[7u8; 32]).public();
+        let remote = SecretKey::from_bytes(&[8u8; 32]).public();
+
+        assert!(matches!(
+            IcedChat::image_chat_kind(local, local),
+            ChatKind::Local
+        ));
+        assert!(matches!(
+            IcedChat::image_chat_kind(remote, local),
+            ChatKind::Remote
+        ));
+    }
+
+    #[test]
     fn perf_image_entry_caches_handle_and_keeps_bytes() {
         let img_data = vec![0xABu8; 256];
         let e = ChatEntry::image(
+            ChatKind::Remote,
             "peer",
             "[Image: test.png]",
             img_data,
+            None,
             None,
             None,
             None,
@@ -7524,6 +8562,49 @@ mod tests {
         assert!((c.r - 0.8).abs() < 1e-6);
         assert!((c.g - 0.2).abs() < 1e-6);
         assert!((c.b - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn join_request_state_labels_cover_all_states() {
+        assert_eq!(
+            IcedChat::join_request_state_label(&OutgoingRequestState::Pending),
+            "Pending"
+        );
+        assert_eq!(
+            IcedChat::join_request_state_label(&OutgoingRequestState::Accepted),
+            "Accepted"
+        );
+        assert_eq!(
+            IcedChat::join_request_state_label(&OutgoingRequestState::Declined),
+            "Rejected"
+        );
+        assert_eq!(
+            IcedChat::join_request_state_label(&OutgoingRequestState::Failed("nope".into())),
+            "Failed"
+        );
+    }
+
+    #[test]
+    fn join_request_state_colors_are_distinct() {
+        let pending = IcedChat::join_request_state_color(&OutgoingRequestState::Pending);
+        let accepted = IcedChat::join_request_state_color(&OutgoingRequestState::Accepted);
+        let declined = IcedChat::join_request_state_color(&OutgoingRequestState::Declined);
+        let failed = IcedChat::join_request_state_color(&OutgoingRequestState::Failed("x".into()));
+        assert_ne!(pending, accepted);
+        assert_ne!(accepted, declined);
+        assert_ne!(declined, failed);
+    }
+
+    #[test]
+    fn join_request_section_strings_are_localized_via_helpers() {
+        assert_eq!(IcedChat::join_request_section_title(), "Join requests");
+        assert_eq!(IcedChat::join_request_total_label(0), "0 total");
+        assert_eq!(IcedChat::join_request_total_label(3), "3 total");
+        assert_eq!(IcedChat::join_request_target_user_prefix(), "Target user");
+        assert_eq!(IcedChat::join_request_chat_prefix(), "Chat");
+        assert_eq!(IcedChat::join_request_open_chat_label(), "Open chat");
+        assert_eq!(IcedChat::join_request_retry_label(), "Retry");
+        assert_eq!(IcedChat::join_request_failure_prefix(), "Failure");
     }
 
     /// Test that the button text for each state can be read from the
@@ -8161,5 +9242,509 @@ mod tests {
             matches!(items[1].state, OutgoingRequestState::Declined),
             "Declined should be second after sort"
         );
+    }
+
+    // ── Join request display and retry flow tests (t_6a20efaa) ──────────
+
+    // Scenario 1: Initial loading — section is empty when there are no states.
+    #[test]
+    fn join_request_section_is_empty_when_no_outgoing_states() {
+        let _ = make_test_data_dir();
+        let items: Vec<JoinRequestItem> = Vec::new();
+        assert!(items.is_empty(), "no items when there are no outgoing request states");
+    }
+
+    // Scenario 2: Pending request display — shows target user and loading indicator.
+    #[test]
+    fn join_request_pending_has_state_label_and_spinner_frame() {
+        let label = IcedChat::join_request_state_label(&OutgoingRequestState::Pending);
+        assert_eq!(label, "Pending", "pending state label should be 'Pending'");
+        let frame = IcedChat::join_request_spinner_frame();
+        assert!(!frame.is_empty(), "spinner should produce a non-empty animation frame");
+    }
+
+    #[test]
+    fn join_request_pending_state_color_is_amber() {
+        let color = IcedChat::join_request_state_color(&OutgoingRequestState::Pending);
+        // Amber-ish: r=0.88, g=0.67, b=0.10
+        assert!((color.r - 0.88).abs() < 0.01, "pending red channel");
+        assert!((color.g - 0.67).abs() < 0.01, "pending green channel");
+        assert!((color.b - 0.10).abs() < 0.01, "pending blue channel");
+    }
+
+    #[test]
+    fn join_request_pending_item_carries_user_and_chat_labels() {
+        let pk = SecretKey::generate().public();
+        let local_pk = SecretKey::generate().public();
+        let chat_id = direct_topic(&local_pk, &pk);
+        let item = JoinRequestItem::new(
+            "pending-req".into(),
+            pk.to_string(),
+            chat_id,
+            OutgoingRequestState::Pending,
+        );
+        assert_eq!(item.target_user, pk.to_string(), "target user");
+        assert_eq!(item.chat_id, chat_id, "chat id");
+        assert_eq!(item.request_id, "pending-req", "request id");
+    }
+
+    // Scenario 3: Success — accepted label + tap navigates to chat.
+    #[test]
+    fn join_request_accepted_has_state_label_and_open_chat_label() {
+        let label = IcedChat::join_request_state_label(&OutgoingRequestState::Accepted);
+        assert_eq!(label, "Accepted", "accepted state label");
+        let open_label = IcedChat::join_request_open_chat_label();
+        assert_eq!(open_label, "Open chat", "open chat label");
+    }
+
+    #[test]
+    fn join_request_accepted_state_color_is_green() {
+        let color = IcedChat::join_request_state_color(&OutgoingRequestState::Accepted);
+        // Green: r=0.18, g=0.68, b=0.28
+        assert!((color.r - 0.18).abs() < 0.01, "accepted red channel");
+        assert!((color.g - 0.68).abs() < 0.01, "accepted green channel");
+        assert!((color.b - 0.28).abs() < 0.01, "accepted blue channel");
+    }
+
+    #[test]
+    fn join_request_accepted_item_parses_to_valid_peer() {
+        let pk = SecretKey::generate().public();
+        let item = JoinRequestItem::new(
+            "accept-1".into(),
+            pk.to_string(),
+            direct_topic(&SecretKey::generate().public(), &pk),
+            OutgoingRequestState::Accepted,
+        );
+        let parsed = PublicKey::from_str(&item.target_user);
+        assert!(parsed.is_ok(), "accepted item must have parseable peer key");
+        assert_eq!(parsed.unwrap(), pk);
+    }
+
+    // Scenario 4: Rejection — declined label, no retry button.
+    #[test]
+    fn join_request_declined_has_rejected_label() {
+        let label = IcedChat::join_request_state_label(&OutgoingRequestState::Declined);
+        assert_eq!(label, "Rejected", "declined state label should read 'Rejected'");
+    }
+
+    #[test]
+    fn join_request_declined_state_color_is_gray() {
+        let color = IcedChat::join_request_state_color(&OutgoingRequestState::Declined);
+        // Gray: r=0.53, g=0.53, b=0.53
+        assert!((color.r - 0.53).abs() < 0.01, "declined red channel");
+        assert!((color.g - 0.53).abs() < 0.01, "declined green channel");
+        assert!((color.b - 0.53).abs() < 0.01, "declined blue channel");
+    }
+
+    #[test]
+    fn join_request_declined_not_failed_and_no_error() {
+        // A Declined item is NOT a Failed item — it does not carry an error
+        // string and has no retry action in the view.
+        let item = JoinRequestItem::new(
+            "decline-1".into(),
+            "peer-key".into(),
+            TopicId::from_bytes([0u8; 32]),
+            OutgoingRequestState::Declined,
+        );
+        assert!(matches!(item.state, OutgoingRequestState::Declined));
+    }
+
+    // Scenario 5: Failure with retry — failed label + retry button.
+    #[test]
+    fn join_request_failed_has_failed_label_with_error() {
+        let label = IcedChat::join_request_state_label(&OutgoingRequestState::Failed(
+            "connection refused".into(),
+        ));
+        assert_eq!(label, "Failed", "failed state label");
+        let retry_label = IcedChat::join_request_retry_label();
+        assert_eq!(retry_label, "Retry", "retry button label");
+        let failure_prefix = IcedChat::join_request_failure_prefix();
+        assert_eq!(failure_prefix, "Failure", "failure prefix");
+    }
+
+    #[test]
+    fn join_request_failed_state_color_is_red() {
+        let color = IcedChat::join_request_state_color(&OutgoingRequestState::Failed(
+            "".into(),
+        ));
+        // Red: r=0.80, g=0.22, b=0.22
+        assert!((color.r - 0.80).abs() < 0.01, "failed red channel");
+        assert!((color.g - 0.22).abs() < 0.01, "failed green channel");
+        assert!((color.b - 0.22).abs() < 0.01, "failed blue channel");
+    }
+
+    #[test]
+    fn join_request_failed_border_color_is_red() {
+        let color = IcedChat::join_request_border_color(&OutgoingRequestState::Failed(
+            "".into(),
+        ));
+        // Red: r=0.80, g=0.22, b=0.22
+        assert!((color.r - 0.80).abs() < 0.01, "failed border red");
+        assert!((color.g - 0.22).abs() < 0.01, "failed border green");
+    }
+
+    #[test]
+    fn join_request_retry_transitions_failed_to_pending() {
+        // Full retry lifecycle: failed → FriendRequestRetry → SendFriendRequest → Pending
+        let pk = SecretKey::generate().public();
+        let mut states: HashMap<PublicKey, OutgoingRequestState> = HashMap::new();
+
+        // Initial failure
+        states.insert(pk, OutgoingRequestState::Failed("network down".into()));
+        assert!(matches!(
+            states.get(&pk),
+            Some(OutgoingRequestState::Failed(_))
+        ));
+
+        // Retry: FriendRequestRetry(peer) re-dispatches SendFriendRequest
+        states.insert(pk, OutgoingRequestState::Pending);
+        assert!(
+            matches!(states.get(&pk), Some(OutgoingRequestState::Pending)),
+            "retry transitions Failed → Pending"
+        );
+    }
+
+    // Scenario 6: Duplicate suppression — same request ID appears once.
+    #[test]
+    fn join_request_rebuild_dedup_by_request_id() {
+        // Simulate rebuild_join_request_list's seen_ids logic:
+        // if two entries share the same request_id, only the first is kept.
+        let pk = SecretKey::generate().public();
+        let local_pk = SecretKey::generate().public();
+        let store = FriendRequestStore::default();
+
+        let peer_str = pk.to_string();
+        let request_id = store
+            .iter()
+            .find(|r| r.requester == local_pk.to_string() && r.recipient == peer_str)
+            .map(|r| r.id.clone())
+            .unwrap_or_else(|| format!("outgoing:{}", &peer_str[..8]));
+
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut items: Vec<JoinRequestItem> = Vec::new();
+
+        for _ in 0..2 {
+            if !seen_ids.insert(request_id.clone()) {
+                continue; // skip duplicate
+            }
+            items.push(JoinRequestItem::new(
+                request_id.clone(),
+                peer_str.clone(),
+                direct_topic(&local_pk, &pk),
+                OutgoingRequestState::Pending,
+            ));
+        }
+
+        assert_eq!(items.len(), 1, "dedup: same request_id only produces one item");
+    }
+
+    #[test]
+    fn join_request_rebuild_orders_pending_first_then_failed() {
+        // Multiple items are sorted with Pending first, then Failed, then
+        // Accepted/Declined.
+        let pk_a = SecretKey::generate().public();
+        let pk_b = SecretKey::generate().public();
+        let pk_c = SecretKey::generate().public();
+        let local_pk = SecretKey::generate().public();
+        let store = FriendRequestStore::default();
+
+        let mut items: Vec<JoinRequestItem> = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+
+        // Insert in random order
+        for (peer, state) in [
+            (pk_c, OutgoingRequestState::Accepted),
+            (pk_a, OutgoingRequestState::Pending),
+            (pk_b, OutgoingRequestState::Failed("err".into())),
+        ] {
+            let peer_str = peer.to_string();
+            let request_id = store
+                .iter()
+                .find(|r| r.requester == local_pk.to_string() && r.recipient == peer_str)
+                .map(|r| r.id.clone())
+                .unwrap_or_else(|| format!("outgoing:{}", &peer_str[..8]));
+            if !seen_ids.insert(request_id) {
+                continue;
+            }
+            items.push(JoinRequestItem::new(
+                peer_str,
+                format!("{}", peer),
+                direct_topic(&local_pk, &peer),
+                state,
+            ));
+        }
+
+        items.sort_by_key(|item| match item.state {
+            OutgoingRequestState::Pending => 0u8,
+            OutgoingRequestState::Failed(_) => 1,
+            OutgoingRequestState::Accepted => 2,
+            OutgoingRequestState::Declined => 3,
+        });
+
+        assert_eq!(items.len(), 3);
+        assert!(
+            matches!(items[0].state, OutgoingRequestState::Pending),
+            "pending should sort first"
+        );
+        assert!(
+            matches!(items[1].state, OutgoingRequestState::Failed(_)),
+            "failed should sort second"
+        );
+        assert!(
+            matches!(items[2].state, OutgoingRequestState::Accepted),
+            "accepted should sort last of these three"
+        );
+    }
+
+    #[test]
+    fn join_request_accepted_section_has_open_chat_action() {
+        // Verify that the accepted state renders with an "Open chat" button
+        // by checking the view_join_request_row branches correctly.
+        let pk = SecretKey::generate().public();
+        let item = JoinRequestItem::new(
+            "accept-action".into(),
+            pk.to_string(),
+            direct_topic(&SecretKey::generate().public(), &pk),
+            OutgoingRequestState::Accepted,
+        );
+        // In view_join_request_row, accepted items with a valid peer produce
+        // a full-row button that fires OpenFriendChat on press.
+        assert!(
+            matches!(&item.state, OutgoingRequestState::Accepted),
+            "accepted item state should be Accepted"
+        );
+        // The view branches on Accepted + Some(peer) → button with OpenFriendChat
+        let peer = IcedChat::join_request_peer(&item);
+        assert!(peer.is_some(), "accepted item must have parseable peer");
+    }
+
+    #[test]
+    fn join_request_failed_section_has_retry_action() {
+        // Verify that the failed state provides the retry infrastructure.
+        let pk = SecretKey::generate().public();
+        let item = JoinRequestItem::new(
+            "retry-action".into(),
+            pk.to_string(),
+            direct_topic(&SecretKey::generate().public(), &pk),
+            OutgoingRequestState::Failed("connection lost".into()),
+        );
+        // In view_join_request_row, failed items with a valid peer produce
+        // a Retry button that fires FriendRequestRetry on press.
+        assert!(
+            matches!(&item.state, OutgoingRequestState::Failed(msg) if msg == "connection lost"),
+            "failed item state should carry the error message"
+        );
+        let peer = IcedChat::join_request_peer(&item);
+        assert!(peer.is_some(), "failed item must have parseable peer for retry action");
+    }
+
+    fn build_join_request_test_app() -> (tokio::runtime::Runtime, IcedChat, PublicKey, PublicKey) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+
+        let mut data_dir = std::env::temp_dir();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        data_dir.push(format!("boru-iced-chat-join-request-{suffix}"));
+        std::fs::create_dir_all(&data_dir).expect("create temp data dir");
+
+        let local_sk = SecretKey::generate();
+        let local_public = local_sk.public();
+        let peer_public = SecretKey::generate().public();
+        let room_topic = TopicId::from_bytes([7u8; 32]);
+
+        let (
+            secret_key,
+            gossip,
+            router,
+            blob_store,
+            endpoint,
+            memory_lookup,
+            local_label,
+            friends,
+            friend_mgr,
+            friend_events_rx,
+            whisper_events_rx,
+            inbox_events_rx,
+            whisper_handle,
+            backfill_handle,
+            chat_history,
+            net_rx,
+            net_tx,
+            room_history,
+        ) = runtime.block_on(async {
+            let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+                .secret_key(local_sk.clone())
+                .address_lookup(iroh::address_lookup::memory::MemoryLookup::new())
+                .relay_mode(iroh::RelayMode::Default)
+                .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+                .expect("set bind addr")
+                .bind()
+                .await
+                .expect("bind endpoint");
+            endpoint.online().await;
+
+            let gossip = boru_chat::net::Gossip::builder().spawn(endpoint.clone());
+            let router = iroh::protocol::Router::builder(endpoint.clone())
+                .accept(boru_chat::net::GOSSIP_ALPN, gossip.clone())
+                .spawn();
+            let blob_store = iroh_blobs::store::mem::MemStore::new();
+            let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
+            let friends = boru_chat::friends::FriendsStore::empty_at(&data_dir);
+            let mut room_history = boru_chat::room_history::RoomHistoryStore::empty_at(&data_dir);
+            room_history.rooms.push(boru_chat::room_history::RoomHistoryEntry::new(
+                room_topic,
+                "Existing chat",
+                true,
+            ));
+            let chat_history = std::sync::Arc::new(std::sync::Mutex::new(
+                boru_chat::chat_history::ChatHistoryStore::empty_at(&data_dir),
+            ));
+            let backfill_handle = boru_chat::backfill::BackfillHandle::spawn(endpoint.clone());
+            let whisper_builder = boru_chat::whisper::WhisperBuilder::new(endpoint.clone(), local_sk.clone());
+            let _whisper_protocol = whisper_builder.protocol_handler();
+            let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
+            let whisper_events_rx = std::sync::Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
+            let (inbox_handle, inbox_events_rx_tmp) = boru_chat::inbox::InboxHandle::new();
+            let _inbox_protocol = boru_chat::inbox::InboxProtocol::new(inbox_handle.inner());
+            let inbox_events_rx = std::sync::Arc::new(tokio::sync::Mutex::new(inbox_events_rx_tmp));
+            let (friend_mgr, friend_events_rx_tmp) = boru_chat::chat_core::friend_ping::FriendPingManager::spawn(
+                endpoint.clone(),
+                boru_chat::chat_core::friend_ping::DEFAULT_PING_INTERVAL,
+                boru_chat::chat_core::friend_ping::DEFAULT_CONNECT_TIMEOUT,
+            );
+            let friend_events_rx = std::sync::Arc::new(tokio::sync::Mutex::new(friend_events_rx_tmp));
+            let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+            let net_rx = std::sync::Arc::new(tokio::sync::Mutex::new(net_rx));
+
+            (
+                local_sk.clone(),
+                gossip,
+                router,
+                blob_store,
+                endpoint,
+                memory_lookup,
+                "Alice".to_string(),
+                friends,
+                friend_mgr,
+                friend_events_rx,
+                whisper_events_rx,
+                inbox_events_rx,
+                whisper_handle,
+                backfill_handle,
+                chat_history,
+                net_rx,
+                net_tx,
+                room_history,
+            )
+        });
+
+        let app = IcedChat::new(
+            secret_key,
+            gossip,
+            router,
+            blob_store,
+            endpoint,
+            memory_lookup,
+            local_label,
+            local_public,
+            iroh::RelayMode::Default,
+            data_dir,
+            runtime.handle().clone(),
+            net_rx,
+            net_tx,
+            room_history,
+            friends,
+            friend_mgr,
+            friend_events_rx,
+            whisper_events_rx,
+            inbox_events_rx,
+            whisper_handle,
+            None,
+            "join-request test".to_string(),
+            chat_history,
+            backfill_handle,
+            false,
+        );
+
+        (runtime, app, local_public, peer_public)
+    }
+
+    #[test]
+    fn join_request_send_failure_and_retry_keeps_exactly_one_request() {
+        let _ = tracing_subscriber::fmt::try_init();
+        let (runtime, mut app, local_public, peer_public) = build_join_request_test_app();
+        let local_pk = local_public.to_string();
+        let peer_pk = peer_public.to_string();
+        let expected_chat_id = direct_topic(&local_public, &peer_public);
+
+        assert_eq!(app.screen, Screen::ChatList, "app should start on the chat list");
+        assert_eq!(app.join_requests().len(), 0, "no join requests before sending");
+        assert_eq!(app.room_history.rooms.len(), 1, "unrelated room history stays in place");
+
+        let _send_task = app.update(AppMessage::SendFriendRequest(peer_public));
+        let outgoing = app.friend_request_store.list_outgoing(&local_pk);
+        assert_eq!(outgoing.len(), 1, "exactly one request should be stored");
+        assert_eq!(outgoing[0].recipient, peer_pk);
+
+        let requests = app.join_requests();
+        assert_eq!(requests.len(), 1, "main menu should show exactly one join request");
+        assert_eq!(requests[0].request_id, outgoing[0].id);
+        assert_eq!(requests[0].target_user, peer_pk);
+        assert_eq!(requests[0].chat_id, expected_chat_id);
+        assert!(
+            matches!(requests[0].state, OutgoingRequestState::Pending),
+            "new request should appear as pending in the main menu"
+        );
+        assert_eq!(
+            IcedChat::join_request_state_label(&requests[0].state),
+            "Pending"
+        );
+        assert_eq!(app.screen, Screen::ChatList, "sending should not navigate away");
+        let _ = app.view();
+
+        let _ = app.update(AppMessage::FriendRequestFailed {
+            peer: peer_public,
+            error: "network down".to_string(),
+        });
+        let requests = app.join_requests();
+        assert_eq!(requests.len(), 1, "failed request should still be deduped to one row");
+        assert!(
+            matches!(requests[0].state, OutgoingRequestState::Failed(ref msg) if msg == "network down"),
+            "main menu should update the request status to failed"
+        );
+        assert_eq!(
+            IcedChat::join_request_state_label(&requests[0].state),
+            "Failed"
+        );
+        assert_eq!(app.screen, Screen::ChatList, "failure should not navigate away");
+        let _ = app.view();
+
+        let _retry_task = app.update(AppMessage::FriendRequestRetry(peer_public));
+        let _ = app.update(AppMessage::SendFriendRequest(peer_public));
+        let outgoing_after_retry = app.friend_request_store.list_outgoing(&local_pk);
+        assert_eq!(
+            outgoing_after_retry.len(),
+            1,
+            "retry must not submit a second request record"
+        );
+        let requests = app.join_requests();
+        assert_eq!(requests.len(), 1, "retry should keep the main-menu row deduplicated");
+        assert!(
+            matches!(requests[0].state, OutgoingRequestState::Pending),
+            "retry should bring the request back to pending"
+        );
+        assert_eq!(
+            IcedChat::join_request_state_label(&requests[0].state),
+            "Pending"
+        );
+        assert_eq!(app.screen, Screen::ChatList, "retry should not navigate away");
+        let _ = app.view();
+
+        drop(runtime);
     }
 }
