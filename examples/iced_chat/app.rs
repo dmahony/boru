@@ -44,6 +44,46 @@ use tracing::debug;
 use crate::{fmt_relay_mode, log_viewer, Message, NetEvent, SignedMessage, Ticket};
 use iced::Color;
 
+// ── Settings persistence ─────────────────────────────────────────
+/// On-disk settings stored as JSON in the application data directory.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AppSettings {
+    pub dark_mode: bool,
+    pub sound_enabled: bool,
+    pub chat_text_size: f32,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            dark_mode: false,
+            sound_enabled: true,
+            chat_text_size: TYPO_SM,
+        }
+    }
+}
+
+impl AppSettings {
+    const FILE_NAME: &'static str = "settings.json";
+
+    /// Load settings from disk, or return defaults if the file doesn't exist.
+    pub fn load(data_dir: &std::path::Path) -> Self {
+        let path = data_dir.join(Self::FILE_NAME);
+        match std::fs::read_to_string(&path) {
+            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Save settings to disk in the application data directory.
+    pub fn save(&self, data_dir: &std::path::Path) {
+        let path = data_dir.join(Self::FILE_NAME);
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+}
+
 /// Scrollable ID for the chat log — used to auto-scroll to bottom.
 const CHAT_LOG: &str = "chat_log";
 /// Stable widget ID used to focus the chat composer from the `/` shortcut.
@@ -579,10 +619,15 @@ pub struct IcedChat {
     /// Estimated total content height of the chat log (set in view_chat_log).
     /// Cell interior mutability allows &self reads in view().
     total_content_height: std::cell::Cell<f32>,
-    /// Whether dark mode is enabled.
+    /// On-disk app settings (persisted to settings.json).
+    settings: AppSettings,
+    /// Whether dark mode is enabled.  Kept alongside `settings` for fast access
+    /// (lags one write behind `settings` during update; always read from here).
     pub dark_mode: bool,
     /// Whether notification sounds are enabled.
     sound_enabled: bool,
+    /// Font size for chat message body text (pixels).
+    chat_text_size: f32,
     /// Whether the "clear history" confirmation is shown.
     history_confirm_clear: bool,
     /// Topic awaiting delete confirmation (None = no confirm pending).
@@ -734,6 +779,8 @@ pub enum AppMessage {
     OpenFriendChat(PublicKey),
     /// Toggle notification sounds on/off.
     ToggleSound(bool),
+    /// Set the chat message body text size in pixels.
+    SetChatTextSize(f32),
     /// Open the native picker for a local profile image.
     PickProfileImage,
     /// Result of reading the selected profile image.
@@ -875,6 +922,7 @@ impl IcedChat {
                 (None, None)
             };
         let first_run = room_history.is_empty() && friends.is_empty();
+        let app_settings = AppSettings::load(&data_dir);
         Self {
             screen: Screen::ChatList,
             pending_topic: None,
@@ -925,8 +973,10 @@ impl IcedChat {
             total_content_height: std::cell::Cell::new(0.0),
             scroll_offset: f32::MAX,
             viewport_height: 0.0,
-            dark_mode: false,
-            sound_enabled: true,
+            settings: app_settings.clone(),
+            dark_mode: app_settings.dark_mode,
+            sound_enabled: app_settings.sound_enabled,
+            chat_text_size: app_settings.chat_text_size,
             history_confirm_clear: false,
             room_delete_confirm_topic: None,
             notice,
@@ -1000,6 +1050,16 @@ impl IcedChat {
         true
     }
 
+    /// Persist current dark_mode, sound_enabled, and chat_text_size to disk.
+    fn save_settings(&self) {
+        let settings = AppSettings {
+            dark_mode: self.dark_mode,
+            sound_enabled: self.sound_enabled,
+            chat_text_size: self.chat_text_size,
+        };
+        settings.save(&self.data_dir);
+    }
+
     /// Keep the virtualized chat log anchored to the latest entry when the
     /// user is already following the conversation.  The custom windowed
     /// renderer uses `f32::MAX` as its bottom sentinel; retaining the old
@@ -1063,6 +1123,7 @@ impl IcedChat {
             AppMessage::CopyToClipboard(_) => "CopyToClipboard",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
             AppMessage::ToggleSound(_) => "ToggleSound",
+            AppMessage::SetChatTextSize(_) => "SetChatTextSize",
             AppMessage::PickProfileImage => "PickProfileImage",
             AppMessage::ProfileImagePicked(_) => "ProfileImagePicked",
             AppMessage::ProfileImageUploaded(_) => "ProfileImageUploaded",
@@ -1582,83 +1643,9 @@ impl IcedChat {
                 self.push_system("Type a message and press Enter to send.  /help for commands.");
                 self.push_system(format!("Ticket to join this room: {ticket}"));
 
-                // Replay chat history for this topic
-                let history_entries: Vec<_> = self
-                    .chat_history
-                    .lock()
-                    .unwrap()
-                    .for_topic(&topic)
-                    .into_iter()
-                    .cloned()
-                    .collect();
-                if !history_entries.is_empty() {
-                    for entry in &history_entries {
-                        match entry.kind.as_str() {
-                            "system" => {
-                                self.push_system(&entry.text_preview);
-                            }
-                            "image" if entry.image_bytes.is_some() => {
-                                let sender_pk = if entry.sender.is_empty() {
-                                    None
-                                } else if let Ok(bytes) = hex::decode(&entry.sender) {
-                                    if bytes.len() == 32 {
-                                        let arr: [u8; 32] = bytes.try_into().unwrap();
-                                        PublicKey::from_bytes(&arr).ok()
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
-                                let label = sender_pk
-                                    .map(|pk| pk.fmt_short().to_string())
-                                    .unwrap_or_else(|| "local".to_string());
-                                self.entries.push(ChatEntry::image(
-                                    &label,
-                                    &entry.text_preview,
-                                    entry.image_bytes.clone().unwrap(),
-                                    None,
-                                    Some(entry.timestamp / 1000),
-                                    sender_pk,
-                                ));
-                            }
-                            _ => {
-                                // Parse sender from hex, use short display
-                                let sender_pk = if entry.sender.is_empty() {
-                                    None
-                                } else if let Ok(bytes) = hex::decode(&entry.sender) {
-                                    if bytes.len() == 32 {
-                                        let arr: [u8; 32] = bytes.try_into().unwrap();
-                                        PublicKey::from_bytes(&arr).ok()
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
-                                let is_self =
-                                    sender_pk.map(|pk| pk == self.local_public).unwrap_or(false);
-                                if is_self {
-                                    let mut e =
-                                        ChatEntry::local(&self.local_label, &entry.text_preview);
-                                    e = e.with_timestamp(Some(entry.timestamp as i64));
-                                    self.entries.push(e);
-                                } else {
-                                    let label = sender_pk
-                                        .map(|pk| pk.fmt_short().to_string())
-                                        .unwrap_or_else(|| "peer".to_string());
-                                    self.entries.push(ChatEntry::remote(
-                                        &label,
-                                        &entry.text_preview,
-                                        None,
-                                        Some(entry.timestamp / 1000),
-                                        sender_pk,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
+                // History is persisted to disk but not replayed into the UI on
+                // room open — only messages from the current session are shown.
+                // Use the /history command or the log viewer for past messages.
 
                 // Replay queued or previously-sent messages after a reconnect.
                 // The signed bytes are reused verbatim, so retries cannot create
@@ -3513,11 +3500,18 @@ impl IcedChat {
 
             AppMessage::ToggleDark(enabled) => {
                 self.dark_mode = enabled;
+                self.save_settings();
                 iced::Task::none()
             }
 
             AppMessage::SetNickname(name) => {
                 self.local_label = name;
+                iced::Task::none()
+            }
+
+            AppMessage::SetChatTextSize(size) => {
+                self.chat_text_size = size;
+                self.save_settings();
                 iced::Task::none()
             }
 
@@ -3554,6 +3548,7 @@ impl IcedChat {
 
             AppMessage::ToggleSound(enabled) => {
                 self.sound_enabled = enabled;
+                self.save_settings();
                 iced::Task::none()
             }
 
@@ -4928,7 +4923,7 @@ impl IcedChat {
             let label_el = text(label_text).size(TYPO_XS).color(label_color);
 
             let body_el = text(&entry.body)
-                .size(TYPO_SM)
+                .size(self.chat_text_size)
                 .wrapping(Wrapping::Word)
                 .width(Length::Fill)
                 .color(body_color);
@@ -5142,6 +5137,7 @@ impl IcedChat {
                 .id(COMPOSER_INPUT)
                 .on_input(AppMessage::InputChanged)
                 .on_submit(AppMessage::SendPressed)
+                .size(self.chat_text_size)
                 .width(Length::Fill),
             actions,
         ]
@@ -5346,7 +5342,70 @@ impl IcedChat {
             .spacing(SPACE_12)
             .align_y(Alignment::Center);
 
-        let appearance_card = section_card("APPEARANCE", vec![appearance_row.into()]);
+        // ── Chat text size ──
+        let text_sizes: &[(f32, &str)] = &[
+            (TYPO_XS, "XS"),
+            (TYPO_SM, "SM"),
+            (TYPO_MD, "MD"),
+            (TYPO_LG, "LG"),
+            (TYPO_XL, "XL"),
+        ];
+        let current_size = self.chat_text_size;
+        let text_size_row = Row::new()
+            .push(
+                Column::new()
+                    .push(text(format!("Text size: {}px", current_size as u32)).size(TYPO_MD))
+                    .push(
+                        text("Choose the font size for chat message bodies.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            );
+        let text_size_row = text_sizes.iter().fold(text_size_row, |row, &(size, label)| {
+            let is_active = (current_size - size).abs() < 0.5;
+            row.push(
+                button(
+                    text(label)
+                        .size(if is_active { TYPO_SM } else { TYPO_XS }),
+                )
+                .on_press(AppMessage::SetChatTextSize(size))
+                .padding([SPACE_2, SPACE_6])
+                .style(move |t, status| {
+                    let mut s = iced::widget::button::Style::default();
+                    if is_active {
+                        s.background =
+                            Some(iced::Background::Color(accent_primary(t)));
+                        s.text_color = Color::WHITE;
+                    } else {
+                        s.background = None;
+                        s.text_color = match status {
+                            iced::widget::button::Status::Hovered => accent_primary(t),
+                            _ => Color::from_rgb(0.5, 0.5, 0.5),
+                        };
+                    }
+                    s.border = iced::Border {
+                        radius: SPACE_6.into(),
+                        ..Default::default()
+                    };
+                    s
+                }),
+            )
+            .spacing(SPACE_6)
+        })
+        .align_y(Alignment::Center)
+        .spacing(SPACE_8);
+
+        let appearance_card = section_card(
+            "APPEARANCE",
+            vec![
+                appearance_row.into(),
+                Space::new().height(Length::Fixed(SPACE_8)).into(),
+                text_size_row.into(),
+            ],
+        );
 
         // ── Notifications section ──
         let sound_label = if self.sound_enabled {
@@ -5562,7 +5621,13 @@ impl IcedChat {
             .width(Length::Fill)
             .max_width(520.0);
 
-        let scrollable = scrollable(content).width(Length::Fill).height(Length::Fill);
+        let scrollable = scrollable(
+            container(content)
+                .width(Length::Fill)
+                .center_x(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill);
 
         container(scrollable)
             .width(Length::Fill)
