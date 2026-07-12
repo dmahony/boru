@@ -28,17 +28,17 @@ use crossterm::{
 use boru_chat::backfill::{
     BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN, BACKFILL_TRIGGER_THRESHOLD,
 };
+use boru_chat::chat_callbacks::TransferKind;
 use boru_chat::chat_core::friend_ping::{
     FriendEvent, FriendPingManager, FriendStatus, PingHandler, DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
 };
 use boru_chat::chat_core::{
     check_peer_connection_type, collect_bootstrap_peers, download_blob_with_progress,
-    download_candidates, fmt_relay_mode, handle_net_event, message_hash,
-    refresh_bootstrap_peers, update_connection_counts, AppState, ChatEntry, ChatKind,
-    ConnectionType, MeshHealth, Message, NetEvent, SignedMessage, StatusContext, Ticket,
+    download_candidates, fmt_relay_mode, handle_net_event, message_hash, refresh_bootstrap_peers,
+    update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, MeshHealth, Message,
+    NetEvent, SignedMessage, StatusContext, Ticket,
 };
-use boru_chat::chat_callbacks::TransferKind;
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::friends::{FriendId, FriendRecord, FriendsStore};
 use boru_chat::inbox::{send_sync_request, InboxEvent, InboxHandle, InboxProtocol, INBOX_ALPN};

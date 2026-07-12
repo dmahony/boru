@@ -21,10 +21,12 @@ use boru_chat::chat_core::{
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
-use boru_chat::friend_request::{FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore};
+use boru_chat::friend_request::{
+    FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
+};
 use boru_chat::friends::{DirectConversationState, FriendId, FriendsStore};
-use boru_chat::image_store::ImageStore;
 use boru_chat::image_optimizer::{compress_image, optimize_chat_image, CHAT_IMAGE_MAX_BYTES};
+use boru_chat::image_store::ImageStore;
 use boru_chat::inbox::{send_ack, send_sync_request, InboxEvent};
 use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
 use boru_chat::net::Gossip;
@@ -469,7 +471,10 @@ impl DownloadAttachment {
                 )
             }
             DownloadState::Active { bytes, total: None } => {
-                format!("Downloading — {} received (size unknown)", Self::total_bytes_label(*bytes))
+                format!(
+                    "Downloading — {} received (size unknown)",
+                    Self::total_bytes_label(*bytes)
+                )
             }
             DownloadState::Active {
                 bytes,
@@ -506,7 +511,9 @@ impl DownloadAttachment {
 
     fn status_tone(&self) -> Color {
         match self.state {
-            DownloadState::Ready | DownloadState::Active { .. } => accent_primary(&iced::Theme::Dark),
+            DownloadState::Ready | DownloadState::Active { .. } => {
+                accent_primary(&iced::Theme::Dark)
+            }
             DownloadState::Completed { .. } => Color::from_rgb(0.2, 0.7, 0.2),
             DownloadState::Failed { .. } => Color::from_rgb(0.8, 0.22, 0.22),
             DownloadState::Cancelled => Color::from_rgb(0.55, 0.55, 0.55),
@@ -1758,8 +1765,8 @@ impl IcedChat {
         let neighbors = self.neighbors.clone();
         iced::Task::perform(
             async move {
-                use boru_chat::chat_core::download_blob_with_progress;
                 use boru_chat::chat_callbacks::{TransferKind, TransferProgress};
+                use boru_chat::chat_core::download_blob_with_progress;
                 let blob_hash: iroh_blobs::Hash = hash.into();
                 let candidates = download_candidates(sender_pk, &neighbors);
                 match download_blob_with_progress(
@@ -1964,7 +1971,10 @@ impl IcedChat {
         }
     }
 
-    fn view_download_attachment<'a>(&self, attachment: &'a DownloadAttachment) -> iced::Element<'a, AppMessage> {
+    fn view_download_attachment<'a>(
+        &self,
+        attachment: &'a DownloadAttachment,
+    ) -> iced::Element<'a, AppMessage> {
         use iced::widget::{button, container, progress_bar, text, Column, Row};
         use iced::Length;
 
@@ -1973,14 +1983,9 @@ impl IcedChat {
         let title = text(&attachment.name)
             .size(TYPO_SM)
             .color(text_system(&theme));
-        let status = text(attachment.status_label())
-            .size(TYPO_XS)
-            .color(tone);
+        let status = text(attachment.status_label()).size(TYPO_XS).color(tone);
 
-        let mut body = Column::new()
-            .push(title)
-            .push(status)
-            .spacing(SPACE_4);
+        let mut body = Column::new().push(title).push(status).spacing(SPACE_4);
 
         if let Some(fraction) = attachment.progress_fraction() {
             body = body.push(container(progress_bar(0.0..=1.0, fraction)).width(Length::Fill));
@@ -1997,13 +2002,15 @@ impl IcedChat {
             DownloadState::Active { .. } => Row::new()
                 .push(text("Downloading…").size(TYPO_XS).color(tone))
                 .spacing(SPACE_8),
-            DownloadState::Ready | DownloadState::Failed { .. } | DownloadState::Cancelled => Row::new()
-                .push(
-                    button(text(attachment.action_label()).size(TYPO_SM))
-                        .on_press(AppMessage::ExecuteDownload)
-                        .padding([SPACE_8, SPACE_12]),
-                )
-                .spacing(SPACE_8),
+            DownloadState::Ready | DownloadState::Failed { .. } | DownloadState::Cancelled => {
+                Row::new()
+                    .push(
+                        button(text(attachment.action_label()).size(TYPO_SM))
+                            .on_press(AppMessage::ExecuteDownload)
+                            .padding([SPACE_8, SPACE_12]),
+                    )
+                    .spacing(SPACE_8)
+            }
         };
 
         let card = Column::new().push(body).push(action_row).spacing(SPACE_8);
@@ -2181,10 +2188,7 @@ impl IcedChat {
             let body_text = entry.body.clone();
             let sender = match entry.kind {
                 ChatKind::System => String::new(),
-                ChatKind::Local => entry
-                    .sender_key
-                    .unwrap_or(self.local_public)
-                    .to_string(),
+                ChatKind::Local => entry.sender_key.unwrap_or(self.local_public).to_string(),
                 ChatKind::Remote => entry
                     .sender_key
                     .map(|pk| pk.to_string())
@@ -2877,7 +2881,8 @@ impl IcedChat {
                             .unwrap_or_default();
                         let record = self.friends.ensure_friend(fid);
                         record.set_direct_conversation(topic, DirectConversationState::Pending);
-                        let room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
+                        let room =
+                            RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                         let _ = room.save();
                         self.try_save_friends();
                         if let Err(err) = self.friend_request_store.save() {
@@ -2900,17 +2905,15 @@ impl IcedChat {
                                 });
                             }
                         };
-                        iced::Task::batch(vec![
-                            iced::Task::perform(
-                                async move {
-                                    let _ = whisper_handle.send_control(peer, payload).await;
-                                },
-                                move |_| AppMessage::FriendRequestSent {
-                                    peer,
-                                    request_id: request.id.clone(),
-                                },
-                            ),
-                        ])
+                        iced::Task::batch(vec![iced::Task::perform(
+                            async move {
+                                let _ = whisper_handle.send_control(peer, payload).await;
+                            },
+                            move |_| AppMessage::FriendRequestSent {
+                                peer,
+                                request_id: request.id.clone(),
+                            },
+                        )])
                     }
                     Err(FriendRequestError::DuplicatePending { .. }) => {
                         // Already sent — just show state.
@@ -2933,10 +2936,8 @@ impl IcedChat {
             }
 
             AppMessage::FriendRequestFailed { peer, error } => {
-                self.outgoing_request_states.insert(
-                    peer,
-                    OutgoingRequestState::Failed(error),
-                );
+                self.outgoing_request_states
+                    .insert(peer, OutgoingRequestState::Failed(error));
                 self.rebuild_join_request_list();
                 iced::Task::none()
             }
@@ -2966,10 +2967,7 @@ impl IcedChat {
                 iced::Task::done(AppMessage::SendFriendRequest(peer))
             }
 
-            AppMessage::IncomingFriendRequestAccept {
-                request_id,
-                peer,
-            } => {
+            AppMessage::IncomingFriendRequestAccept { request_id, peer } => {
                 let local_pk = self.local_public.to_string();
                 match self
                     .friend_request_store
@@ -2991,10 +2989,7 @@ impl IcedChat {
                 }
             }
 
-            AppMessage::IncomingFriendRequestDecline {
-                request_id,
-                peer,
-            } => {
+            AppMessage::IncomingFriendRequestDecline { request_id, peer } => {
                 let local_pk = self.local_public.to_string();
                 match self
                     .friend_request_store
@@ -3838,7 +3833,10 @@ impl IcedChat {
                 match req_opt {
                     Some(req) => {
                         let req_id = req.id.clone();
-                        match self.friend_request_store.decline_request(&req_id, &local_pk) {
+                        match self
+                            .friend_request_store
+                            .decline_request(&req_id, &local_pk)
+                        {
                             Ok(_) => {
                                 if let Err(err) = self.friend_request_store.save() {
                                     debug!(error = %err, "failed to save friend request store after decline");
@@ -3866,7 +3864,10 @@ impl IcedChat {
 
             AppMessage::FriendRequestCancel(request_id) => {
                 let local_pk = self.local_public.to_string();
-                match self.friend_request_store.cancel_request(&request_id, &local_pk) {
+                match self
+                    .friend_request_store
+                    .cancel_request(&request_id, &local_pk)
+                {
                     Ok(_) => {
                         if let Err(err) = self.friend_request_store.save() {
                             debug!(error = %err, "failed to save friend request store after cancel");
@@ -4024,8 +4025,8 @@ impl IcedChat {
                     let failed_peer = peer.clone();
                     return iced::Task::perform(
                         async move {
-                            use boru_chat::chat_core::download_blob_with_progress;
                             use boru_chat::chat_callbacks::{TransferKind, TransferProgress};
+                            use boru_chat::chat_core::download_blob_with_progress;
                             let ticket: BlobTicket = ticket_str
                                 .parse::<BlobTicket>()
                                 .map_err(|e| format!("Parse profile image ticket: {e}"))?;
@@ -4118,14 +4119,11 @@ impl IcedChat {
                                 let local_str = local_pk.to_string();
 
                                 // Check if this is a response to our outgoing request
-                                let is_outgoing = self
-                                    .friend_request_store
-                                    .iter()
-                                    .any(|r| {
-                                        r.requester == local_str
-                                            && r.recipient == sender_str
-                                            && r.status == FriendRequestStatus::Pending
-                                    });
+                                let is_outgoing = self.friend_request_store.iter().any(|r| {
+                                    r.requester == local_str
+                                        && r.recipient == sender_str
+                                        && r.status == FriendRequestStatus::Pending
+                                });
 
                                 if is_outgoing {
                                     // This is the recipient accepting our request
@@ -4136,8 +4134,7 @@ impl IcedChat {
                                         topic,
                                         DirectConversationState::Active,
                                     );
-                                    let room =
-                                        RoomStore::with_peers(&self.data_dir, topic, addrs);
+                                    let room = RoomStore::with_peers(&self.data_dir, topic, addrs);
                                     let _ = room.save();
                                     self.try_save_friends();
                                     self.outgoing_request_states
@@ -4580,8 +4577,8 @@ impl IcedChat {
                         let name_copy = filename.clone();
                         iced::Task::perform(
                             async move {
-                                use boru_chat::chat_core::download_blob_with_progress;
                                 use boru_chat::chat_callbacks::TransferKind;
+                                use boru_chat::chat_core::download_blob_with_progress;
                                 let ticket: BlobTicket = ticket_str
                                     .parse::<BlobTicket>()
                                     .map_err(|e| format!("Parse ticket: {e}"))?;
@@ -4633,7 +4630,9 @@ impl IcedChat {
             AppMessage::DownloadDone(name) => {
                 self.push_system(format!("Saved: {name}"));
                 let mut updated = false;
-                if let Some(idx) = self.current_download_entry_index(self.active_download_transfer_id) {
+                if let Some(idx) =
+                    self.current_download_entry_index(self.active_download_transfer_id)
+                {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
                             download.state = DownloadState::Completed {
@@ -4656,7 +4655,9 @@ impl IcedChat {
             AppMessage::DownloadFailed(error) => {
                 self.push_system(format!("Download failed: {error}"));
                 let mut updated = false;
-                if let Some(idx) = self.current_download_entry_index(self.active_download_transfer_id) {
+                if let Some(idx) =
+                    self.current_download_entry_index(self.active_download_transfer_id)
+                {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
                             download.state = DownloadState::Failed { error };
@@ -4701,7 +4702,8 @@ impl IcedChat {
                 // within the store — never an absolute filesystem path.
                 let user = sender.to_string();
                 let mut image_error = None;
-                let image_identifier = match self.image_store.save_image(&user, &name, &image_bytes) {
+                let image_identifier = match self.image_store.save_image(&user, &name, &image_bytes)
+                {
                     Ok(id) => Some(id),
                     Err(err) => {
                         image_error = Some(format!("Failed to save image: {err}"));
@@ -4725,7 +4727,7 @@ impl IcedChat {
                 }
                 self.entries_push(entry);
                 self.start_next_pending_image_download()
-            },
+            }
             AppMessage::ProfileImageDownloaded(peer, image_bytes) => {
                 if image_bytes.is_empty() || image_bytes.len() > 2 * 1024 * 1024 {
                     // Ignore empty or oversized images (>2MB) and clear cached ticket
@@ -4936,8 +4938,8 @@ impl IcedChat {
                     let failed_peer = peer.clone();
                     tasks.push(iced::Task::perform(
                         async move {
-                            use boru_chat::chat_core::download_blob_with_progress;
                             use boru_chat::chat_callbacks::{TransferKind, TransferProgress};
+                            use boru_chat::chat_core::download_blob_with_progress;
                             let ticket: BlobTicket = ticket_str
                                 .parse::<BlobTicket>()
                                 .map_err(|e| format!("Parse profile image ticket: {e}"))?;
@@ -6050,7 +6052,9 @@ impl IcedChat {
                 let mut section = Column::new().spacing(SPACE_8);
                 section = section.push(
                     row![
-                        text("Incoming Friend Requests").size(TYPO_MD).width(Length::Fill),
+                        text("Incoming Friend Requests")
+                            .size(TYPO_MD)
+                            .width(Length::Fill),
                         text(format!("{} pending", incoming.len()))
                             .size(TYPO_XXS)
                             .color(self.color_muted()),
@@ -6131,8 +6135,7 @@ impl IcedChat {
         };
 
         // Determine request state and button
-        let (request_label, request_color, button_widget) =
-            self.friend_request_button_for_peer(pk);
+        let (request_label, request_color, button_widget) = self.friend_request_button_for_peer(pk);
 
         container(
             row![
@@ -6186,12 +6189,16 @@ impl IcedChat {
         let color = Self::outgoing_request_color(state);
 
         let btn = match state {
-            Some(OutgoingRequestState::Pending) => button("Awaiting reply…").padding(SPACE_4).into(),
+            Some(OutgoingRequestState::Pending) => {
+                button("Awaiting reply…").padding(SPACE_4).into()
+            }
             Some(OutgoingRequestState::Accepted) => button("Open Chat")
                 .on_press(AppMessage::OpenFriendChat(pk))
                 .padding(SPACE_4)
                 .into(),
-            Some(OutgoingRequestState::Declined) => button("Request Declined").padding(SPACE_4).into(),
+            Some(OutgoingRequestState::Declined) => {
+                button("Request Declined").padding(SPACE_4).into()
+            }
             Some(OutgoingRequestState::Failed(_)) => button("Retry")
                 .on_press(AppMessage::FriendRequestRetry(pk))
                 .padding(SPACE_4)
@@ -6287,7 +6294,11 @@ impl IcedChat {
                     )
                 }
             }
-            None => format!("{}: {}", Self::join_request_target_user_prefix(), item.target_user),
+            None => format!(
+                "{}: {}",
+                Self::join_request_target_user_prefix(),
+                item.target_user
+            ),
         }
     }
 
@@ -6299,7 +6310,9 @@ impl IcedChat {
             .map(|room| room.display_name())
             .filter(|name| !name.trim().is_empty());
         match chat_name {
-            Some(name) if name != short => format!("{}: {name} ({short})", Self::join_request_chat_prefix()),
+            Some(name) if name != short => {
+                format!("{}: {name} ({short})", Self::join_request_chat_prefix())
+            }
             _ => format!("{}: {short}", Self::join_request_chat_prefix()),
         }
     }
@@ -6327,9 +6340,11 @@ impl IcedChat {
             .spacing(SPACE_4)
             .into();
 
-        let mut status_row = row![text(format!("State: {state_label}")).size(TYPO_XS).color(state_color)]
-            .spacing(SPACE_8)
-            .align_y(iced::Alignment::Center);
+        let mut status_row = row![text(format!("State: {state_label}"))
+            .size(TYPO_XS)
+            .color(state_color)]
+        .spacing(SPACE_8)
+        .align_y(iced::Alignment::Center);
 
         if matches!(item.state, OutgoingRequestState::Pending) {
             status_row = status_row.push(
@@ -6340,11 +6355,8 @@ impl IcedChat {
         }
 
         if let Some(error) = failed_error {
-            status_row = status_row.push(
-                text(error)
-                    .size(TYPO_XS)
-                    .color(color_error(&self.theme())),
-            );
+            status_row =
+                status_row.push(text(error).size(TYPO_XS).color(color_error(&self.theme())));
         }
 
         let body: iced::Element<'_, AppMessage> = Column::new()
@@ -6353,7 +6365,10 @@ impl IcedChat {
             .spacing(SPACE_6)
             .into();
 
-        if matches!((&item.state, peer), (OutgoingRequestState::Accepted, Some(_))) {
+        if matches!(
+            (&item.state, peer),
+            (OutgoingRequestState::Accepted, Some(_))
+        ) {
             let peer = peer.expect("accepted request should have a parseable peer key");
             let accepted_card = button(
                 Column::new()
@@ -6382,7 +6397,10 @@ impl IcedChat {
             return accepted_card.into();
         }
 
-        if matches!((&item.state, peer), (OutgoingRequestState::Failed(_), Some(_))) {
+        if matches!(
+            (&item.state, peer),
+            (OutgoingRequestState::Failed(_), Some(_))
+        ) {
             let peer = peer.expect("failed request should have a parseable peer key");
             let failed_card = row![
                 container(body)
@@ -6441,7 +6459,9 @@ impl IcedChat {
         let mut section = Column::new().spacing(SPACE_8);
         section = section.push(
             row![
-                text(Self::join_request_section_title()).size(TYPO_MD).width(Length::Fill),
+                text(Self::join_request_section_title())
+                    .size(TYPO_MD)
+                    .width(Length::Fill),
                 text(Self::join_request_total_label(self.join_request_list.len()))
                     .size(TYPO_XXS)
                     .color(self.color_muted()),
@@ -6530,8 +6550,7 @@ impl IcedChat {
         let label = label.into();
 
         // Determine request state and button
-        let (request_label, request_color, button_widget) =
-            self.friend_request_button_for_peer(pk);
+        let (request_label, request_color, button_widget) = self.friend_request_button_for_peer(pk);
 
         container(
             row![
@@ -7606,7 +7625,9 @@ impl IcedChat {
     /// 2. Incoming requests — pending requests with accept/decline buttons
     /// 3. Outgoing requests — pending outgoing requests with cancel button
     fn view_friend_requests(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, row, rule, scrollable, text, text_input, Column, Row, Space};
+        use iced::widget::{
+            button, container, row, rule, scrollable, text, text_input, Column, Row, Space,
+        };
         use iced::{Alignment, Color, Length};
 
         let theme = self.theme();
@@ -7662,8 +7683,7 @@ impl IcedChat {
                         .padding([SPACE_6, SPACE_12])
                         .style(move |t, _status| {
                             let mut s = iced::widget::button::Style::default();
-                            s.background =
-                                Some(iced::Background::Color(accent_primary(t)));
+                            s.background = Some(iced::Background::Color(accent_primary(t)));
                             s.text_color = Color::WHITE;
                             s.border = iced::Border {
                                 radius: SPACE_6.into(),
@@ -7721,17 +7741,16 @@ impl IcedChat {
                 let row_el = row![
                     Column::new()
                         .push(text(requester_short).size(TYPO_SM).width(Length::Fill))
-                        .push(
-                            if msg_display.is_empty() {
-                                iced::widget::text("").into()
-                            } else {
-                                let msg: iced::Element<'_, AppMessage> = text(format!("\"{msg_display}\""))
+                        .push(if msg_display.is_empty() {
+                            iced::widget::text("").into()
+                        } else {
+                            let msg: iced::Element<'_, AppMessage> =
+                                text(format!("\"{msg_display}\""))
                                     .size(TYPO_XS)
                                     .color(self.color_muted())
                                     .into();
-                                msg
-                            }
-                        )
+                            msg
+                        })
                         .spacing(SPACE_4),
                     button("Accept")
                         .on_press(AppMessage::FriendRequestAccept(req.id.clone()))
@@ -7821,10 +7840,10 @@ impl IcedChat {
             for req in &outgoing {
                 let recipient_short: String = req.recipient.chars().take(12).collect();
                 let row_el = row![
-                    text(recipient_short)
-                        .size(TYPO_SM)
-                        .width(Length::Fill),
-                    text("Pending").size(TYPO_XS).color(Color::from_rgb(0.7, 0.6, 0.0)),
+                    text(recipient_short).size(TYPO_SM).width(Length::Fill),
+                    text("Pending")
+                        .size(TYPO_XS)
+                        .color(Color::from_rgb(0.7, 0.6, 0.0)),
                     button("Cancel")
                         .on_press(AppMessage::FriendRequestCancel(req.id.clone()))
                         .padding([SPACE_4, SPACE_8])
@@ -7872,13 +7891,9 @@ impl IcedChat {
         }
 
         container(
-            scrollable(
-                container(content)
-                    .width(Length::Fill)
-                    .padding(SPACE_16),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill),
+            scrollable(container(content).width(Length::Fill).padding(SPACE_16))
+                .width(Length::Fill)
+                .height(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -8515,9 +8530,7 @@ mod tests {
     #[test]
     fn request_label_failed_returns_failed() {
         assert_eq!(
-            IcedChat::outgoing_request_label(Some(&OutgoingRequestState::Failed(
-                "timeout".into()
-            ))),
+            IcedChat::outgoing_request_label(Some(&OutgoingRequestState::Failed("timeout".into()))),
             "Failed"
         );
     }
@@ -8556,9 +8569,8 @@ mod tests {
 
     #[test]
     fn request_color_failed_is_red() {
-        let c = IcedChat::outgoing_request_color(Some(&OutgoingRequestState::Failed(
-            "error".into(),
-        )));
+        let c =
+            IcedChat::outgoing_request_color(Some(&OutgoingRequestState::Failed("error".into())));
         assert!((c.r - 0.8).abs() < 1e-6);
         assert!((c.g - 0.2).abs() < 1e-6);
         assert!((c.b - 0.2).abs() < 1e-6);
@@ -8639,8 +8651,7 @@ mod tests {
         // When state is Pending, the button has no on_press so the
         // user cannot send another request.  We verify by checking the
         // label — Pending means the button is disabled.
-        let label =
-            IcedChat::outgoing_request_label(Some(&OutgoingRequestState::Pending));
+        let label = IcedChat::outgoing_request_label(Some(&OutgoingRequestState::Pending));
         assert_eq!(label, "Pending");
     }
 
@@ -8648,23 +8659,20 @@ mod tests {
     fn request_state_failed_allows_retry() {
         // When state is Failed, the button text is 'Retry' and fires
         // FriendRequestRetry.  Verify label shows 'Failed'.
-        let label = IcedChat::outgoing_request_label(Some(&OutgoingRequestState::Failed(
-            "network".into(),
-        )));
+        let label =
+            IcedChat::outgoing_request_label(Some(&OutgoingRequestState::Failed("network".into())));
         assert_eq!(label, "Failed");
     }
 
     #[test]
     fn request_state_accepted_shows_accepted() {
-        let label =
-            IcedChat::outgoing_request_label(Some(&OutgoingRequestState::Accepted));
+        let label = IcedChat::outgoing_request_label(Some(&OutgoingRequestState::Accepted));
         assert_eq!(label, "Accepted");
     }
 
     #[test]
     fn request_state_declined_shows_declined() {
-        let label =
-            IcedChat::outgoing_request_label(Some(&OutgoingRequestState::Declined));
+        let label = IcedChat::outgoing_request_label(Some(&OutgoingRequestState::Declined));
         assert_eq!(label, "Declined");
     }
 
@@ -8822,10 +8830,10 @@ mod tests {
     fn request_state_initial_empty_returns_none() {
         // Freshly created state has no entries — all peers show as "Chat".
         let states: HashMap<PublicKey, OutgoingRequestState> = HashMap::new();
-        assert!(IcedChat::outgoing_request_label(
-            states.get(&SecretKey::generate().public())
-        )
-        .is_empty());
+        assert!(
+            IcedChat::outgoing_request_label(states.get(&SecretKey::generate().public()))
+                .is_empty()
+        );
     }
 
     // ── Friend Requests UI handler path tests ──────────────────────
@@ -8860,9 +8868,7 @@ mod tests {
         assert!(found.is_some(), "bob can find the request in incoming");
 
         // Bob accepts
-        let accepted = store
-            .accept_request(&req.id, &bob)
-            .expect("bob accepts");
+        let accepted = store.accept_request(&req.id, &bob).expect("bob accepts");
 
         assert_eq!(accepted.status, FriendRequestStatus::Accepted);
         assert!(accepted.updated_at_unix_ms >= accepted.created_at_unix_ms);
@@ -8885,9 +8891,7 @@ mod tests {
             .send_request(&alice, &bob, None)
             .expect("send request");
 
-        let declined = store
-            .decline_request(&req.id, &bob)
-            .expect("bob declines");
+        let declined = store.decline_request(&req.id, &bob).expect("bob declines");
 
         assert_eq!(declined.status, FriendRequestStatus::Declined);
         assert!(declined.updated_at_unix_ms >= declined.created_at_unix_ms);
@@ -9053,7 +9057,12 @@ mod tests {
                 continue;
             }
             let chat_id = direct_topic(&local_pk.public(), peer);
-            items.push(JoinRequestItem::new(request_id, peer_str, chat_id, state.clone()));
+            items.push(JoinRequestItem::new(
+                request_id,
+                peer_str,
+                chat_id,
+                state.clone(),
+            ));
         }
 
         assert_eq!(items.len(), 1, "one request item");
@@ -9069,7 +9078,10 @@ mod tests {
         );
         // Verify chat_id is a valid topic derived from the two public keys
         let expected_topic = direct_topic(&local_pk.public(), &pk);
-        assert_eq!(items[0].chat_id, expected_topic, "chat_id matches direct_topic");
+        assert_eq!(
+            items[0].chat_id, expected_topic,
+            "chat_id matches direct_topic"
+        );
     }
 
     #[test]
@@ -9124,7 +9136,12 @@ mod tests {
                 continue;
             }
             let chat_id = direct_topic(&local_pk, peer);
-            items.push(JoinRequestItem::new(request_id, peer_str, chat_id, state.clone()));
+            items.push(JoinRequestItem::new(
+                request_id,
+                peer_str,
+                chat_id,
+                state.clone(),
+            ));
         }
 
         assert_eq!(items.len(), 3, "three items, one per peer");
@@ -9152,10 +9169,14 @@ mod tests {
         );
 
         // Verify request IDs for A and B come from store
-        let a_has_store_id = items
-            .iter()
-            .any(|i| i.target_user == pk_a.to_string() && i.request_id != format!("outgoing:{}", &pk_a.to_string()[..8]));
-        assert!(a_has_store_id, "peer A should have a store-based request_id");
+        let a_has_store_id = items.iter().any(|i| {
+            i.target_user == pk_a.to_string()
+                && i.request_id != format!("outgoing:{}", &pk_a.to_string()[..8])
+        });
+        assert!(
+            a_has_store_id,
+            "peer A should have a store-based request_id"
+        );
         // C has no store entry so it uses fallback format
         let c_has_fallback = items
             .iter()
@@ -9251,7 +9272,10 @@ mod tests {
     fn join_request_section_is_empty_when_no_outgoing_states() {
         let _ = make_test_data_dir();
         let items: Vec<JoinRequestItem> = Vec::new();
-        assert!(items.is_empty(), "no items when there are no outgoing request states");
+        assert!(
+            items.is_empty(),
+            "no items when there are no outgoing request states"
+        );
     }
 
     // Scenario 2: Pending request display — shows target user and loading indicator.
@@ -9260,7 +9284,10 @@ mod tests {
         let label = IcedChat::join_request_state_label(&OutgoingRequestState::Pending);
         assert_eq!(label, "Pending", "pending state label should be 'Pending'");
         let frame = IcedChat::join_request_spinner_frame();
-        assert!(!frame.is_empty(), "spinner should produce a non-empty animation frame");
+        assert!(
+            !frame.is_empty(),
+            "spinner should produce a non-empty animation frame"
+        );
     }
 
     #[test]
@@ -9324,7 +9351,10 @@ mod tests {
     #[test]
     fn join_request_declined_has_rejected_label() {
         let label = IcedChat::join_request_state_label(&OutgoingRequestState::Declined);
-        assert_eq!(label, "Rejected", "declined state label should read 'Rejected'");
+        assert_eq!(
+            label, "Rejected",
+            "declined state label should read 'Rejected'"
+        );
     }
 
     #[test]
@@ -9364,9 +9394,7 @@ mod tests {
 
     #[test]
     fn join_request_failed_state_color_is_red() {
-        let color = IcedChat::join_request_state_color(&OutgoingRequestState::Failed(
-            "".into(),
-        ));
+        let color = IcedChat::join_request_state_color(&OutgoingRequestState::Failed("".into()));
         // Red: r=0.80, g=0.22, b=0.22
         assert!((color.r - 0.80).abs() < 0.01, "failed red channel");
         assert!((color.g - 0.22).abs() < 0.01, "failed green channel");
@@ -9375,9 +9403,7 @@ mod tests {
 
     #[test]
     fn join_request_failed_border_color_is_red() {
-        let color = IcedChat::join_request_border_color(&OutgoingRequestState::Failed(
-            "".into(),
-        ));
+        let color = IcedChat::join_request_border_color(&OutgoingRequestState::Failed("".into()));
         // Red: r=0.80, g=0.22, b=0.22
         assert!((color.r - 0.80).abs() < 0.01, "failed border red");
         assert!((color.g - 0.22).abs() < 0.01, "failed border green");
@@ -9435,7 +9461,11 @@ mod tests {
             ));
         }
 
-        assert_eq!(items.len(), 1, "dedup: same request_id only produces one item");
+        assert_eq!(
+            items.len(),
+            1,
+            "dedup: same request_id only produces one item"
+        );
     }
 
     #[test]
@@ -9535,7 +9565,10 @@ mod tests {
             "failed item state should carry the error message"
         );
         let peer = IcedChat::join_request_peer(&item);
-        assert!(peer.is_some(), "failed item must have parseable peer for retry action");
+        assert!(
+            peer.is_some(),
+            "failed item must have parseable peer for retry action"
+        );
     }
 
     fn build_join_request_test_app() -> (tokio::runtime::Runtime, IcedChat, PublicKey, PublicKey) {
@@ -9596,28 +9629,34 @@ mod tests {
             let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
             let friends = boru_chat::friends::FriendsStore::empty_at(&data_dir);
             let mut room_history = boru_chat::room_history::RoomHistoryStore::empty_at(&data_dir);
-            room_history.rooms.push(boru_chat::room_history::RoomHistoryEntry::new(
-                room_topic,
-                "Existing chat",
-                true,
-            ));
+            room_history
+                .rooms
+                .push(boru_chat::room_history::RoomHistoryEntry::new(
+                    room_topic,
+                    "Existing chat",
+                    true,
+                ));
             let chat_history = std::sync::Arc::new(std::sync::Mutex::new(
                 boru_chat::chat_history::ChatHistoryStore::empty_at(&data_dir),
             ));
             let backfill_handle = boru_chat::backfill::BackfillHandle::spawn(endpoint.clone());
-            let whisper_builder = boru_chat::whisper::WhisperBuilder::new(endpoint.clone(), local_sk.clone());
+            let whisper_builder =
+                boru_chat::whisper::WhisperBuilder::new(endpoint.clone(), local_sk.clone());
             let _whisper_protocol = whisper_builder.protocol_handler();
             let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
-            let whisper_events_rx = std::sync::Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
+            let whisper_events_rx =
+                std::sync::Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
             let (inbox_handle, inbox_events_rx_tmp) = boru_chat::inbox::InboxHandle::new();
             let _inbox_protocol = boru_chat::inbox::InboxProtocol::new(inbox_handle.inner());
             let inbox_events_rx = std::sync::Arc::new(tokio::sync::Mutex::new(inbox_events_rx_tmp));
-            let (friend_mgr, friend_events_rx_tmp) = boru_chat::chat_core::friend_ping::FriendPingManager::spawn(
-                endpoint.clone(),
-                boru_chat::chat_core::friend_ping::DEFAULT_PING_INTERVAL,
-                boru_chat::chat_core::friend_ping::DEFAULT_CONNECT_TIMEOUT,
-            );
-            let friend_events_rx = std::sync::Arc::new(tokio::sync::Mutex::new(friend_events_rx_tmp));
+            let (friend_mgr, friend_events_rx_tmp) =
+                boru_chat::chat_core::friend_ping::FriendPingManager::spawn(
+                    endpoint.clone(),
+                    boru_chat::chat_core::friend_ping::DEFAULT_PING_INTERVAL,
+                    boru_chat::chat_core::friend_ping::DEFAULT_CONNECT_TIMEOUT,
+                );
+            let friend_events_rx =
+                std::sync::Arc::new(tokio::sync::Mutex::new(friend_events_rx_tmp));
             let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
             let net_rx = std::sync::Arc::new(tokio::sync::Mutex::new(net_rx));
 
@@ -9682,9 +9721,21 @@ mod tests {
         let peer_pk = peer_public.to_string();
         let expected_chat_id = direct_topic(&local_public, &peer_public);
 
-        assert_eq!(app.screen, Screen::ChatList, "app should start on the chat list");
-        assert_eq!(app.join_requests().len(), 0, "no join requests before sending");
-        assert_eq!(app.room_history.rooms.len(), 1, "unrelated room history stays in place");
+        assert_eq!(
+            app.screen,
+            Screen::ChatList,
+            "app should start on the chat list"
+        );
+        assert_eq!(
+            app.join_requests().len(),
+            0,
+            "no join requests before sending"
+        );
+        assert_eq!(
+            app.room_history.rooms.len(),
+            1,
+            "unrelated room history stays in place"
+        );
 
         let _send_task = app.update(AppMessage::SendFriendRequest(peer_public));
         let outgoing = app.friend_request_store.list_outgoing(&local_pk);
@@ -9692,7 +9743,11 @@ mod tests {
         assert_eq!(outgoing[0].recipient, peer_pk);
 
         let requests = app.join_requests();
-        assert_eq!(requests.len(), 1, "main menu should show exactly one join request");
+        assert_eq!(
+            requests.len(),
+            1,
+            "main menu should show exactly one join request"
+        );
         assert_eq!(requests[0].request_id, outgoing[0].id);
         assert_eq!(requests[0].target_user, peer_pk);
         assert_eq!(requests[0].chat_id, expected_chat_id);
@@ -9704,7 +9759,11 @@ mod tests {
             IcedChat::join_request_state_label(&requests[0].state),
             "Pending"
         );
-        assert_eq!(app.screen, Screen::ChatList, "sending should not navigate away");
+        assert_eq!(
+            app.screen,
+            Screen::ChatList,
+            "sending should not navigate away"
+        );
         let _ = app.view();
 
         let _ = app.update(AppMessage::FriendRequestFailed {
@@ -9712,7 +9771,11 @@ mod tests {
             error: "network down".to_string(),
         });
         let requests = app.join_requests();
-        assert_eq!(requests.len(), 1, "failed request should still be deduped to one row");
+        assert_eq!(
+            requests.len(),
+            1,
+            "failed request should still be deduped to one row"
+        );
         assert!(
             matches!(requests[0].state, OutgoingRequestState::Failed(ref msg) if msg == "network down"),
             "main menu should update the request status to failed"
@@ -9721,7 +9784,11 @@ mod tests {
             IcedChat::join_request_state_label(&requests[0].state),
             "Failed"
         );
-        assert_eq!(app.screen, Screen::ChatList, "failure should not navigate away");
+        assert_eq!(
+            app.screen,
+            Screen::ChatList,
+            "failure should not navigate away"
+        );
         let _ = app.view();
 
         let _retry_task = app.update(AppMessage::FriendRequestRetry(peer_public));
@@ -9733,7 +9800,11 @@ mod tests {
             "retry must not submit a second request record"
         );
         let requests = app.join_requests();
-        assert_eq!(requests.len(), 1, "retry should keep the main-menu row deduplicated");
+        assert_eq!(
+            requests.len(),
+            1,
+            "retry should keep the main-menu row deduplicated"
+        );
         assert!(
             matches!(requests[0].state, OutgoingRequestState::Pending),
             "retry should bring the request back to pending"
@@ -9742,7 +9813,11 @@ mod tests {
             IcedChat::join_request_state_label(&requests[0].state),
             "Pending"
         );
-        assert_eq!(app.screen, Screen::ChatList, "retry should not navigate away");
+        assert_eq!(
+            app.screen,
+            Screen::ChatList,
+            "retry should not navigate away"
+        );
         let _ = app.view();
 
         drop(runtime);

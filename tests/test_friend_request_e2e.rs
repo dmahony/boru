@@ -60,8 +60,7 @@ fn alice_sends_to_bob(
         topic,
         addrs: vec![],
     };
-    SignedContactMessage::sign(alice_sk, &action)
-        .expect("alice signs conversation invite")
+    SignedContactMessage::sign(alice_sk, &action).expect("alice signs conversation invite")
 }
 
 /// Simulate what the receiving peer does with a ConversationInvite:
@@ -195,8 +194,8 @@ fn friend_request_cancel_flow() {
     assert!(alice_store
         .list_outgoing_by_status(&alice_pk_str, FriendRequestStatus::Pending)
         .is_empty());
-    let cancelled_out = alice_store
-        .list_outgoing_by_status(&alice_pk_str, FriendRequestStatus::Cancelled);
+    let cancelled_out =
+        alice_store.list_outgoing_by_status(&alice_pk_str, FriendRequestStatus::Cancelled);
     assert_eq!(cancelled_out.len(), 1);
 
     // Persist and reload
@@ -305,11 +304,10 @@ fn signed_contact_round_trip_with_conversation_invite() {
         addrs: vec![],
     };
 
-    let payload = SignedContactMessage::sign(&alice_sk, &action)
-        .expect("sign ConversationInvite");
+    let payload = SignedContactMessage::sign(&alice_sk, &action).expect("sign ConversationInvite");
 
-    let (from, decoded) = SignedContactMessage::verify(&payload, None)
-        .expect("verify ConversationInvite");
+    let (from, decoded) =
+        SignedContactMessage::verify(&payload, None).expect("verify ConversationInvite");
     assert_eq!(from, alice_sk.public());
     assert_eq!(decoded, action);
 
@@ -349,9 +347,8 @@ fn signed_contact_verify_with_expected_identity() {
 
     let payload = SignedContactMessage::sign(&alice_sk, &action).expect("sign");
 
-    let (from, decoded) =
-        SignedContactMessage::verify(&payload, Some(alice_sk.public()))
-            .expect("verify with alice's expected identity");
+    let (from, decoded) = SignedContactMessage::verify(&payload, Some(alice_sk.public()))
+        .expect("verify with alice's expected identity");
     assert_eq!(from, alice_sk.public());
     assert_eq!(decoded, action);
 
@@ -755,10 +752,7 @@ fn multiple_independent_request_pairs() {
         .send_request(&alice, &charlie, None)
         .expect("alice→charlie")
         .id;
-    let _r3 = store
-        .send_request(&dave, &bob, None)
-        .expect("dave→bob")
-        .id;
+    let _r3 = store.send_request(&dave, &bob, None).expect("dave→bob").id;
 
     assert_eq!(store.len(), 3);
     assert_eq!(store.list_outgoing(&alice).len(), 2, "alice has 2 outgoing");

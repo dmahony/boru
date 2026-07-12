@@ -285,7 +285,10 @@ mod tests {
         let final_mtime = fs::metadata(&path).unwrap().modified().unwrap();
 
         assert_eq!(id1, id2);
-        assert_eq!(initial_mtime, final_mtime, "cached image should not be rewritten");
+        assert_eq!(
+            initial_mtime, final_mtime,
+            "cached image should not be rewritten"
+        );
     }
 
     #[test]
@@ -365,9 +368,7 @@ mod tests {
     fn empty_bytes_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let store = ImageStore::at(dir.path());
-        let err = store
-            .save_image("alice", "photo.png", b"")
-            .unwrap_err();
+        let err = store.save_image("alice", "photo.png", b"").unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("empty") || msg.contains("empty"),
@@ -427,29 +428,31 @@ mod tests {
             ("webp", "webp"),
             ("bmp", "bmp"),
         ] {
-            let id = store.save_image("alice", &format!("img.{ext}"), b"x").unwrap();
+            let id = store
+                .save_image("alice", &format!("img.{ext}"), b"x")
+                .unwrap();
             assert!(
                 id.ends_with(&format!(".{label}")),
                 "expected .{label} for .{ext}, got {id}"
             );
         }
         // Unsafe / unrecognised extensions are normalised to .bin.
-        for ext in ["exe", "sh", "py", "svg", "html", "js", "pdf", "doc", "com", "scr"] {
+        for ext in [
+            "exe", "sh", "py", "svg", "html", "js", "pdf", "doc", "com", "scr",
+        ] {
             let id = store
                 .save_image("alice", &format!("bad.{ext}"), b"x")
                 .unwrap();
-            assert!(
-                id.ends_with(".bin"),
-                "expected .bin for .{ext}, got {id}"
-            );
+            assert!(id.ends_with(".bin"), "expected .bin for .{ext}, got {id}");
         }
         // No extension → .bin.
         let id = store.save_image("alice", "README", b"x").unwrap();
-        assert!(id.ends_with(".bin"), "no-extension should become .bin, got {id}");
+        assert!(
+            id.ends_with(".bin"),
+            "no-extension should become .bin, got {id}"
+        );
         // Double extension: only the last component matters.
-        let id = store
-            .save_image("alice", "photo.png.exe", b"x")
-            .unwrap();
+        let id = store.save_image("alice", "photo.png.exe", b"x").unwrap();
         assert!(id.ends_with(".bin"), ".exe wins → .bin, got {id}");
     }
 
@@ -499,7 +502,11 @@ mod tests {
     fn absolute_path_identifiers_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let store = ImageStore::at(dir.path());
-        for id in ["/etc/passwd", "/etc/passwd.bin", "C:\\Windows\\system32.bin"] {
+        for id in [
+            "/etc/passwd",
+            "/etc/passwd.bin",
+            "C:\\Windows\\system32.bin",
+        ] {
             assert!(
                 store.resolve_image("alice", id).is_err(),
                 "accepted absolute identifier {id:?}"
@@ -549,11 +556,7 @@ mod tests {
         let id1 = store.save_image("alice", "a.png", b"aaa").unwrap();
         let id2 = store.save_image("alice", "b.jpg", b"bbb").unwrap();
         let id3 = store.save_image("bob", "c.gif", b"ccc").unwrap();
-        for (user, id) in [
-            ("alice", &id1),
-            ("alice", &id2),
-            ("bob", &id3),
-        ] {
+        for (user, id) in [("alice", &id1), ("alice", &id2), ("bob", &id3)] {
             let abs = store.resolve_absolute_path(user, id).unwrap();
             assert!(
                 abs.starts_with(&root),

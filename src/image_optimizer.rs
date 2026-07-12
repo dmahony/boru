@@ -151,7 +151,12 @@ pub fn optimize_chat_image(raw: &[u8]) -> Result<Vec<u8>, String> {
         let mut buf = std::io::Cursor::new(Vec::new());
         let encoder = JpegEncoder::new_with_quality(&mut buf, quality);
         if encoder
-            .write_image(resized.as_raw(), new_w, new_h, image::ExtendedColorType::Rgb8)
+            .write_image(
+                resized.as_raw(),
+                new_w,
+                new_h,
+                image::ExtendedColorType::Rgb8,
+            )
             .is_ok()
         {
             let bytes = buf.into_inner();
@@ -169,9 +174,7 @@ pub fn optimize_chat_image(raw: &[u8]) -> Result<Vec<u8>, String> {
         }
     }
 
-    Err(last_err.unwrap_or_else(|| {
-        "Failed to produce an optimised chat image.".to_string()
-    }))
+    Err(last_err.unwrap_or_else(|| "Failed to produce an optimised chat image.".to_string()))
 }
 
 /// Lightweight display-thumbnailing helper for receiver-side safe rendering.
@@ -209,7 +212,12 @@ mod tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         let encoder = JpegEncoder::new_with_quality(&mut buf, quality);
         encoder
-            .write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgb8)
+            .write_image(
+                img.as_raw(),
+                img.width(),
+                img.height(),
+                image::ExtendedColorType::Rgb8,
+            )
             .unwrap();
         buf.into_inner()
     }
@@ -251,12 +259,12 @@ mod tests {
         buf.extend_from_slice(b"IHDR");
         buf.extend_from_slice(ihdr_data);
         buf.extend_from_slice(&[0x9e, 0xfb, 0xb3, 0x5f]); // CRC (pre-computed)
-        // acTL chunk: num_frames=1, num_plays=0
+                                                          // acTL chunk: num_frames=1, num_plays=0
         buf.extend_from_slice(&8u32.to_be_bytes());
         buf.extend_from_slice(b"acTL");
         buf.extend_from_slice(&[0u8, 0, 0, 1, 0, 0, 0, 0]);
         buf.extend_from_slice(&[0x98, 0xde, 0x93, 0xcc]); // CRC (pre-computed)
-        // IEND
+                                                          // IEND
         buf.extend_from_slice(&[0u8, 0, 0, 0, 0, 73, 69, 78, 68, 0xae, 0x42, 0x60, 0x82]);
         buf
     }
