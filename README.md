@@ -1,4 +1,28 @@
-# boru-chat
+# iroh-gossip-chat
+
+A decentralized, peer-to-peer chat application built on [iroh](https://iroh.com) gossip networking. Messages are disseminated via *epidemic broadcast trees* — there is no central server. Peers join a shared topic, discover each other through a layered address lookup system (DNS/Pkarr, mDNS, DHT, and gossip), and exchange messages directly over encrypted iroh connections.
+
+## Features
+
+- **Group chat rooms** — create or join a topic-based chat room via a shareable ticket; messages are broadcast to all peers in the swarm.
+- **Direct conversations** — add peers as contacts and open one-to-one direct chats with a deterministically derived private topic.
+- **Offline mailbox** — store-and-forward delivery of direct messages when the recipient is offline (X25519 + AES-256-GCM, sender-signed, idempotent acks).
+- **Image sharing** — inline image upload and display with content-addressed per-user storage.
+- **Durable identity and history** — the node identity and chat transcript persist across restarts.
+- **Two frontends** — a terminal UI ([ratatui](https://ratatui.rs)) and a desktop GUI ([iced](https://iced.rs)) with shared protocol code.
+
+## Frontends
+
+| Frontend | UI framework | Run |
+|---|---|---|
+| TUI | ratatui | `cargo chat open` / `cargo chat join <ticket>` |
+| GUI | iced | `cargo iced-chat open` / `cargo iced-chat join <ticket>` |
+
+Both share the same protocol types, `ChatCallbacks` trait, and `handle_net_event` core, so features work identically across both interfaces.
+
+---
+
+# Protocol
 
 This crate implements the `boru-chat` protocol.
 It is based on *epidemic broadcast trees* to disseminate messages among a swarm of peers interested in a *topic*.
@@ -406,7 +430,7 @@ Two constructors control the root:
 | `ImageStore::at(data_dir)` | Root is `<data_dir>/files`. Use the application's resolved data directory. |
 | `ImageStore::from_files_dir(files_dir)` | Root is an explicit directory. Useful for tests and custom deployments. |
 
-Override the whole data directory with `$BORU_CHAT_DATA_DIR`. There is no separate env var for the files subdirectory alone — the `files/` suffix is always appended to the data directory.
+Override the whole data directory with `$BORU_CHAT_DATA_DIR`. The iced GUI also honors `$BORU_CHAT_FILES_DIR` when you want to point image caching at an explicit files root for tests or alternate layouts. There is no separate env var for the files subdirectory alone in the default layout — the `files/` suffix is always appended to the data directory.
 
 ### Per-User Directory Layout
 
