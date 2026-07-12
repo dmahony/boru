@@ -60,7 +60,16 @@ impl ImageStore {
 
         let user_hash = hash_hex(user.as_bytes());
         let content_hash = hash_hex(bytes);
-        let extension = safe_extension(filename);
+        // Auto-detect JPEG content: `optimize_chat_image` always outputs JPEG
+        // (magic bytes FF D8 FF), so we override the extension to `jpg` even
+        // when the original filename suggests a different format.  This keeps
+        // stored files correctly labeled regardless of the optimization path.
+        let extension =
+            if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+                "jpg"
+            } else {
+                safe_extension(filename)
+            };
         let relative = format!("{user_hash}/{content_hash}.{extension}");
         let user_dir = self.root.join(&user_hash);
         fs::create_dir_all(&user_dir).std_context("create image user directory")?;
