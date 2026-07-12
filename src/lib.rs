@@ -22,6 +22,8 @@ pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod proto;
+pub mod topic_derivation;
+pub mod public_room;
 
 /// Shared chat core — state machine, protocol types, and network event handling.
 ///
