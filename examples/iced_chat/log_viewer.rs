@@ -33,7 +33,7 @@ impl LogViewer {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let header = row![text("Iroh Gossip Chat logs").size(22)]
+        let header = row![text("Boru Chat logs").size(22)]
             .spacing(12)
             .push(button("Reload").on_press(Message::Refresh));
 
@@ -76,14 +76,14 @@ fn build_spawn_command(data_dir: &Path) -> std::result::Result<Command, String> 
     let exe =
         std::env::current_exe().map_err(|e| format!("failed to locate current executable: {e}"))?;
     let mut cmd = Command::new(exe);
-    cmd.arg("logs").env("IROH_GOSSIP_CHAT_DATA_DIR", data_dir);
+    cmd.arg("logs").env("BORU_CHAT_DATA_DIR", data_dir);
     Ok(cmd)
 }
 
 pub fn run(log_path: PathBuf) -> NResult<()> {
     let state = LogViewer::load(log_path.clone());
     iced::application(move || (state.clone(), iced::Task::none()), update, view)
-        .title(move |_: &LogViewer| format!("Iroh Gossip Chat logs — {}", log_path.display()))
+        .title(move |_: &LogViewer| format!("Boru Chat logs — {}", log_path.display()))
         .subscription(|_| iced::time::every(Duration::from_secs(1)).map(|_| Message::Refresh))
         .run()
         .std_context("failed to run log viewer")?;
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn build_spawn_command_sets_data_dir_env_and_keeps_logs_as_the_only_argument() {
-        let data_dir = Path::new("/tmp/iroh-gossip-chat");
+        let data_dir = Path::new("/tmp/boru-chat");
         let cmd = build_spawn_command(data_dir).expect("command should build");
 
         let args: Vec<_> = cmd
@@ -125,7 +125,7 @@ mod tests {
 
         let env_value = cmd
             .get_envs()
-            .find(|(key, _)| *key == OsStr::new("IROH_GOSSIP_CHAT_DATA_DIR"))
+            .find(|(key, _)| *key == OsStr::new("BORU_CHAT_DATA_DIR"))
             .and_then(|(_, value)| value)
             .expect("data dir env should be set");
         assert_eq!(env_value, data_dir.as_os_str());

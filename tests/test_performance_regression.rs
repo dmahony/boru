@@ -1,4 +1,4 @@
-//! Performance regression tests for the iroh-gossip-chat message pipeline.
+//! Performance regression tests for the boru-chat message pipeline.
 //!
 //! These tests measure wall-clock time for core operations at different scales
 //! and assert that performance stays roughly linear (not quadratic) as the
@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use iroh_gossip::chat_core::{ChatEntry, Message, MessageHash, SignedMessage};
+use boru_chat::chat_core::{ChatEntry, Message, MessageHash, SignedMessage};
 use rand::SeedableRng;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ fn height_estimation_pass(entries: &[ChatEntry]) -> (Vec<f32>, Vec<f32>, f32) {
             }
             prev_day_ht = Some(d);
         }
-        use iroh_gossip::chat_core::ChatKind;
+        use boru_chat::chat_core::ChatKind;
         match entry.kind {
             ChatKind::System => h += SYSTEM_H,
             _ => {
@@ -452,15 +452,15 @@ async fn test_image_blob_operations_scaling() {
 async fn test_many_messages_handle_net_event_scaling() -> n0_error::Result<()> {
     use std::sync::Arc;
 
+    use boru_chat::chat_callbacks::ChatCallbacks;
+    use boru_chat::chat_core::{forward_gossip_events, handle_net_event, SignedMessage as SM};
+    use boru_chat::friends::{FriendId, FriendsStore};
+    use boru_chat::net::{Gossip, GOSSIP_ALPN};
+    use boru_chat::proto::TopicId;
     use iroh::{
         address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, PublicKey,
         RelayMode, SecretKey,
     };
-    use iroh_gossip::chat_callbacks::ChatCallbacks;
-    use iroh_gossip::chat_core::{forward_gossip_events, handle_net_event, SignedMessage as SM};
-    use iroh_gossip::friends::{FriendId, FriendsStore};
-    use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
-    use iroh_gossip::proto::TopicId;
     use n0_future::{task, time::sleep};
     use rand::RngExt;
     use tokio::sync::Mutex;
@@ -759,8 +759,8 @@ async fn test_many_messages_handle_net_event_scaling() -> n0_error::Result<()> {
 
 #[test]
 fn test_imageshare_processing_no_degradation() {
+    use boru_chat::chat_core::SignedMessage as SM;
     use iroh::SecretKey;
-    use iroh_gossip::chat_core::SignedMessage as SM;
 
     let sk = SecretKey::from_bytes(&[0u8; 32]);
     let _rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);

@@ -1,15 +1,15 @@
 //! Debug test: trace why two peers don't connect via gossip.
 //! Creates two peers with relay enabled, subscribes both, sends a message.
 
-use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, RelayMode,
-    SecretKey,
-};
-use iroh_gossip::{
+use boru_chat::{
     api::Event as GossipEvent,
     chat_core::{Message, SignedMessage},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
+};
+use iroh::{
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, RelayMode,
+    SecretKey,
 };
 use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};

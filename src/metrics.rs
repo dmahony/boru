@@ -1,4 +1,4 @@
-//! Metrics for iroh-gossip
+//! Metrics for boru-chat
 
 use iroh_metrics::{Counter, MetricsGroup};
 

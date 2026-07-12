@@ -17,16 +17,16 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
-    RelayMode, SecretKey,
-};
-use iroh_gossip::{
+use boru_chat::{
     chat_callbacks::ChatCallbacks,
     chat_core::{forward_gossip_events, ChatEntry, Message, MessageHash, NetEvent, SignedMessage},
     friends::{FriendId, FriendsStore},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
+};
+use iroh::{
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
+    RelayMode, SecretKey,
 };
 use n0_error::Result;
 use n0_future::{task, time::sleep};
@@ -45,7 +45,7 @@ struct SimChat {
     pending_image: Option<(String, MessageHash, PublicKey)>,
     neighbors: std::collections::HashSet<PublicKey>,
     received_messages: Vec<String>,
-    sender: Option<iroh_gossip::api::GossipSender>,
+    sender: Option<boru_chat::api::GossipSender>,
 }
 
 impl ChatCallbacks for SimChat {
@@ -125,7 +125,7 @@ fn drain_net(rx: &Arc<Mutex<mpsc::UnboundedReceiver<NetEvent>>>, sim: &mut SimCh
         let item = rx.try_lock().unwrap().try_recv();
         match item {
             Ok(event) => {
-                let _ = iroh_gossip::chat_core::handle_net_event(event, sim);
+                let _ = boru_chat::chat_core::handle_net_event(event, sim);
             }
             Err(_) => break,
         }
@@ -150,7 +150,7 @@ async fn test_gui_bootstrap_plumbing() -> Result<()> {
     println!("> Peer A (creator): {}", pk_a.fmt_short());
 
     // A creates a ticket — exactly as IcedChat::room_ticket() does
-    let ticket = iroh_gossip::chat_core::Ticket {
+    let ticket = boru_chat::chat_core::Ticket {
         topic,
         peers: vec![ep_a.addr().with_relay_url(relay_url.clone())],
     };
@@ -159,7 +159,7 @@ async fn test_gui_bootstrap_plumbing() -> Result<()> {
 
     // ── Simulate GUI join-from-ticket: parse ticket, extract topic AND peers ──
     // This is THE FIX: the GUI now preserves ticket.peers instead of discarding them.
-    let parsed_ticket = iroh_gossip::chat_core::Ticket::from_str(&ticket_str).unwrap();
+    let parsed_ticket = boru_chat::chat_core::Ticket::from_str(&ticket_str).unwrap();
     let extracted_peers = parsed_ticket.peers;
     let extracted_peer_ids: Vec<_> = extracted_peers.iter().map(|a| a.id).collect();
 

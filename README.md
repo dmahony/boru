@@ -1,25 +1,25 @@
-# iroh-gossip
+# boru-chat
 
-This crate implements the `iroh-gossip` protocol.
+This crate implements the `boru-chat` protocol.
 It is based on *epidemic broadcast trees* to disseminate messages among a swarm of peers interested in a *topic*.
 The implementation is based on the papers [HyParView](https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf) and [PlumTree](https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf).
 
 The crate is made up from two modules:
 The `proto` module is the protocol implementation, as a state machine without any IO.
-The `net` module implements networking logic for running `iroh-gossip` on `iroh` connections.
+The `net` module implements networking logic for running `boru-chat` on `iroh` connections.
 
 The `net` module is optional behind the `net` feature flag (enabled by default).
 
 # Getting Started
 
-The `iroh-gossip` protocol was designed to be used in conjunction with `iroh`. [Iroh](https://docs.rs/iroh) is a networking library for making direct connections, these connections are how gossip messages are sent.
+The `boru-chat` protocol was designed to be used in conjunction with `iroh`. [Iroh](https://docs.rs/iroh) is a networking library for making direct connections, these connections are how gossip messages are sent.
 
 Iroh provides a [`Router`](https://docs.rs/iroh/latest/iroh/protocol/struct.Router.html) that takes an [`Endpoint`](https://docs.rs/iroh/latest/iroh/endpoint/struct.Endpoint.html) and any protocols needed for the application. Similar to a router in webserver library, it runs a loop accepting incoming connections and routes them to the specific protocol handler, based on `ALPN`.
 
-Here is a basic example of how to set up `iroh-gossip` with `iroh`:
+Here is a basic example of how to set up `boru-chat` with `iroh`:
 ```rust,no_run
 use iroh::{protocol::Router, Endpoint, EndpointId, endpoint::presets};
-use iroh_gossip::{api::Event, Gossip, TopicId};
+use boru_chat::{api::Event, Gossip, TopicId};
 use n0_error::{Result, StdResultExt};
 use n0_future::StreamExt;
 
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
 
     // setup router
     let router = Router::builder(endpoint)
-        .accept(iroh_gossip::ALPN, gossip.clone())
+        .accept(boru_chat::ALPN, gossip.clone())
         .spawn();
 
     // gossip swarms are centered around a shared "topic id", which is a 32 byte identifier
@@ -82,11 +82,11 @@ The `examples/chat.rs` demo runs over direct iroh connectivity. It prints a base
 Both the `chat` and `setup` examples persist the node identity (secret key) to disk so your iroh peer ID remains stable across restarts.
 
 **Storage location** (checked in order):
-1. `$IROH_GOSSIP_CHAT_DATA_DIR/secret_key.txt` — if the env var is set
-2. `$XDG_DATA_HOME/iroh-gossip-chat/secret_key.txt` — typical: `~/.local/share/iroh-gossip-chat/secret_key.txt`
-3. `$HOME/.local/share/iroh-gossip-chat/secret_key.txt` — fallback when `XDG_DATA_HOME` is unset
-4. `$LOCALAPPDATA/iroh-gossip-chat/secret_key.txt` — Windows
-5. `./.iroh-gossip-chat/secret_key.txt` — current directory fallback
+1. `$BORU_CHAT_DATA_DIR/secret_key.txt` — if the env var is set
+2. `$XDG_DATA_HOME/boru-chat/secret_key.txt` — typical: `~/.local/share/boru-chat/secret_key.txt`
+3. `$HOME/.local/share/boru-chat/secret_key.txt` — fallback when `XDG_DATA_HOME` is unset
+4. `$LOCALAPPDATA/boru-chat/secret_key.txt` — Windows
+5. `./.boru-chat/secret_key.txt` — current directory fallback
 
 **File format:** The secret key is stored as lowercase hex-encoded bytes (64 hex chars) with a trailing newline. The file is created with restrictive permissions (`0o600`, owner read/write only) on Unix systems.
 
@@ -95,10 +95,10 @@ Both the `chat` and `setup` examples persist the node identity (secret key) to d
 The chat room transcript is stored separately in `chat_history.json` under the same data directory. That file is durable local history, not live network state. To clear the current room's transcript from the UI, use `/leave`; to clear everything, delete `chat_history.json`.
 
 ```text
-rm ~/.local/share/iroh-gossip-chat/secret_key.txt
+rm ~/.local/share/boru-chat/secret_key.txt
 ```
 
-You can also set `IROH_GOSSIP_CHAT_DATA_DIR` to a different path to use a separate identity for different sessions.
+You can also set `BORU_CHAT_DATA_DIR` to a different path to use a separate identity for different sessions.
 
 **Overriding via CLI flag:** The `chat` example accepts `--secret-key <hex>` to use a specific key for one session without writing it to disk.
 
@@ -142,7 +142,7 @@ events flowing into the iced event loop via a channel.
 
 ## Address Lookup Methods
 
-iroh-gossip-chat uses a layered address lookup system to discover peer
+boru-chat uses a layered address lookup system to discover peer
 addressing information.  Each method has different tradeoffs:
 
 ### DNS/Pkarr (default, enabled by `presets::N0`)
@@ -371,6 +371,192 @@ transport delivery is observed.  On restart, the outbox is replayed:
 
 The chat history is also persisted (via `ChatHistoryStore`) so room
 transcripts survive process restarts.
+
+## Image Storage
+
+The `image_store` module (feature-gated behind `net`) provides secure, local per-user image storage with content-addressed identifiers.
+
+### Storage Location
+
+Images are stored below the application's **data directory** in a `files/` subdirectory:
+
+```text
+<data_dir>/files/
+```
+
+The data directory is resolved in the same way as identity and chat history (see [Identity Persistence](#identity-persistence)):
+
+1. `$BORU_CHAT_DATA_DIR` — if the environment variable is set
+2. `$XDG_DATA_HOME/boru-chat/` — typical: `~/.local/share/boru-chat/`
+3. `$HOME/.local/share/boru-chat/` — fallback when `XDG_DATA_HOME` is unset
+4. `$LOCALAPPDATA/boru-chat/` — Windows
+
+Example default path:
+
+```text
+~/.local/share/boru-chat/files/
+```
+
+### Overriding the Storage Path
+
+Two constructors control the root:
+
+| Constructor | Purpose |
+|---|---|
+| `ImageStore::at(data_dir)` | Root is `<data_dir>/files`. Use the application's resolved data directory. |
+| `ImageStore::from_files_dir(files_dir)` | Root is an explicit directory. Useful for tests and custom deployments. |
+
+Override the whole data directory with `$BORU_CHAT_DATA_DIR`. There is no separate env var for the files subdirectory alone — the `files/` suffix is always appended to the data directory.
+
+### Per-User Directory Layout
+
+User names are never used as raw path components. Each user is assigned a **blake3 hash** of their name string, and images are stored under that hash directory:
+
+```text
+<data_dir>/files/
+  <user-hash-a>/
+    <content-hash-1>.png
+    <content-hash-2>.jpg
+  <user-hash-b>/
+    <content-hash-3>.webp
+```
+
+- User directories are created automatically on first save.
+- Unix permissions: directories `0o700`, files `0o600`.
+
+### Public API
+
+All operations are synchronous file I/O and return `n0_error::Result<T>`.
+
+#### `save_image(user, filename, bytes) -> Result<String>`
+
+Saves image bytes and returns a stable, portable identifier of the form:
+
+```text
+<user-hash>/<content-hash>.<extension>
+```
+
+- **user** — a non-empty string identifying the owning user (any string; the user's blake3 hash is used as the directory key).
+- **filename** — the original filename. Only its extension matters: matched against the allow-list (see below). The name itself is never used as a path component.
+- **bytes** — the raw image data. Must not be empty.
+- **Identifier format** — `<user-hash>/<content-hash>.<extension>` where both hashes are 64-hex-char blake3 digests.
+- **Atomicity** — writes to a temporary file first, then `rename`s to the final path. If the write or sync fails, the temp file is cleaned up.
+
+```rust,norun
+use crate::image_store::ImageStore;
+
+let store = ImageStore::at(data_dir);
+let id = store.save_image("alice", "photo.png", &image_bytes)?;
+// id = "a1b2c3d4.../e5f6g7h8....png"
+```
+
+#### `resolve_image(user, identifier) -> Result<PathBuf>`
+
+Validates and resolves an identifier to a **relative** path within the store's root. The returned path is never absolute.
+
+```rust,norun
+let relative = store.resolve_image("alice", &id)?;
+// relative = "a1b2c3d4.../e5f6g7h8....png"
+```
+
+The raw relative path should not be serialized. Persist the identifier string instead (see [Portable Identifiers](#portable-identifiers)).
+
+#### `image_exists(user, identifier) -> Result<bool>`
+
+Returns whether the identified file exists as a regular file on disk.
+
+```rust,norun
+if store.image_exists("alice", &id)? {
+    // serve from local disk
+}
+```
+
+#### `delete_image(user, identifier) -> Result<bool>`
+
+Deletes the identified file. Returns `true` if a file was removed, `false` if it did not exist. Does not fail on a missing file.
+
+```rust,norun
+let removed = store.delete_image("alice", &id)?;
+```
+
+### Portable Identifiers
+
+**Callers must persist the identifier string returned by `save_image`, not the filesystem path.** The identifier is relative by design — it survives data-directory moves, renames, and restores from backup. The filesystem path returned by `resolve_image` is a runtime convenience, not a portable storage key.
+
+```rust,norun
+// ✅ Correct — persist the identifier
+let id = store.save_image("alice", "photo.png", &bytes)?;
+database.store_image_metadata(message_id, &id);
+
+// ❌ Wrong — do not persist the resolved filesystem path
+let relative = store.resolve_image("alice", &id)?;
+database.store_path(&relative); // fragile across data-dir moves
+```
+
+### Security
+
+#### User Isolation
+
+Each user is assigned a separate hash directory. `save_image` always writes to the calling user's directory; the user parameter in `resolve_image`, `image_exists`, and `delete_image` authenticates access. There is no cross-user read or write path through the API. Two users with the same name string produce the same hash, matching the semantics of a stable user database key.
+
+#### Filename Sanitization
+
+Original filenames are **never used as path components**. Only the file extension is extracted, lowercased, and matched against a strict allow-list:
+
+| Supplied extension | Stored extension |
+|---|---|
+| `.png` | `.png` |
+| `.jpg` | `.jpg` |
+| `.jpeg` | `.jpeg` |
+| `.gif` | `.gif` |
+| `.webp` | `.webp` |
+| `.bmp` | `.bmp` |
+| Any other or no extension | `.bin` |
+
+The original filename (including any directory separators, parent-path references, or special characters) is discarded entirely.
+
+#### Traversal Prevention
+
+Directory-traversal and symlink attacks are rejected at multiple points:
+
+- Identifiers must have exactly one `/` separating the user hash and filename with no `..` components.
+- The user-hash segment must match the hash of the authenticated user string.
+- The filename must be exactly 64 hex characters (a blake3 digest) followed by a dot and an allowed extension.
+- Both the user directory and the resolved file path are checked for symlinks and rejected if found — a compromised filesystem cannot inject a symlink to redirect reads.
+
+#### Identifier Validation Matrix
+
+| Input | Result |
+|---|---|
+| `a1b2.../e5f6....png` | Valid — accepted |
+| `../secret` | Rejected — no `/` separator |
+| `x/../../secret.bin` | Rejected — directory traversal |
+| `alice/../secret.bin` | Rejected — directory traversal |
+| `a1b2/short.bin` | Rejected — filename not 64 hex chars |
+| `a1b2/e5f6...exe` | Rejected — `.exe` not in allow-list |
+| `different-hash/e5f6...png` | Rejected — user hash mismatch |
+| `a1b2/e5f6...png` (user dir is symlink) | Rejected — symlink detected |
+
+### Backup and Migration
+
+Backing up or migrating the `files/` directory is safe because:
+
+- **All paths are content-addressed.** The identifier for an image depends only on user identity and content bytes, not on directory layout. Restoring `files/` to a different base path works without updating any references.
+- **No absolute paths are stored anywhere.** The identifier strings that callers persist are relative path fragments; they resolve correctly under any data directory.
+- **Permissions are set on write.** Restoring with `rsync -a` preserves Unix permissions. If permissions are lost, the app re-creates them on the next write but reads are unaffected.
+- **Empty hash directories are harmless** — they consume only an inode and can be pruned manually.
+
+Migration steps:
+
+```text
+# Backup
+tar czf images-backup.tar.gz ~/.local/share/boru-chat/files/
+
+# Restore to a new machine under a different data directory
+tar xzf images-backup.tar.gz -C /new/data/path/files/
+```
+
+After migration, update `$BORU_CHAT_DATA_DIR` (or the platform default) on the new machine. All stored identifiers remain valid.
 
 # License
 

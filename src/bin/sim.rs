@@ -3,12 +3,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use clap::Parser;
-use comfy_table::{presets::NOTHING, Cell, CellAlignment, Table};
-use iroh_gossip::proto::sim::{
+use boru_chat::proto::sim::{
     BootstrapMode, NetworkConfig, RoundStats, RoundStatsAvg, RoundStatsDiff, Simulator,
     SimulatorConfig,
 };
+use clap::Parser;
+use comfy_table::{presets::NOTHING, Cell, CellAlignment, Table};
 use n0_error::{Result, StackResultExt, StdResultExt};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};

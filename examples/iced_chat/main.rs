@@ -1,4 +1,4 @@
-//! Iced desktop frontend for iroh-gossip chat.
+//! Iced desktop frontend for boru-chat.
 //!
 //! Usage:
 //!   cargo run --features gui --example iced_chat       # show chat list
@@ -13,27 +13,27 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use boru_chat::backfill::{BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN};
+use boru_chat::chat_core::friend_ping::{
+    FriendPingManager, PingHandler, DEFAULT_CONNECT_TIMEOUT, DEFAULT_PING_INTERVAL,
+    FRIEND_PING_ALPN,
+};
+use boru_chat::chat_history::ChatHistoryStore;
+use boru_chat::friends::{FriendId, FriendsStore};
+use boru_chat::inbox::{InboxHandle, InboxProtocol, INBOX_ALPN};
+use boru_chat::mailbox::MailboxStore;
+use boru_chat::net::{Gossip, GOSSIP_ALPN};
+use boru_chat::proto::TopicId;
+use boru_chat::room::RoomStore;
+use boru_chat::room_history::RoomHistoryStore;
 use clap::Parser;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, RelayMode,
     RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
-use iroh_gossip::backfill::{BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN};
-use iroh_gossip::chat_core::friend_ping::{
-    FriendPingManager, PingHandler, DEFAULT_CONNECT_TIMEOUT, DEFAULT_PING_INTERVAL,
-    FRIEND_PING_ALPN,
-};
-use iroh_gossip::chat_history::ChatHistoryStore;
-use iroh_gossip::friends::{FriendId, FriendsStore};
-use iroh_gossip::inbox::{InboxHandle, InboxProtocol, INBOX_ALPN};
-use iroh_gossip::mailbox::MailboxStore;
-use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
-use iroh_gossip::proto::TopicId;
-use iroh_gossip::room::RoomStore;
-use iroh_gossip::room_history::RoomHistoryStore;
 
-use iroh_gossip::whisper::{WhisperBuilder, WHISPER_ALPN};
+use boru_chat::whisper::{WhisperBuilder, WHISPER_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
 #[cfg(feature = "gui")]
 use iroh_mdns_address_lookup::MdnsAddressLookup;
@@ -69,7 +69,7 @@ struct Args {
     no_relay: bool,
     /// Directory for persistent identity and friend state. Chat and room
     /// history are kept in memory only.
-    /// Defaults to IROH_GOSSIP_CHAT_DATA_DIR env var, or ~/.local/share/iroh-gossip-chat/.
+    /// Defaults to BORU_CHAT_DATA_DIR env var, or ~/.local/share/boru-chat/.
     #[clap(long)]
     data_dir: Option<PathBuf>,
 
@@ -93,10 +93,10 @@ enum Command {
 }
 
 // ── Message protocol ──────────────────────────────────────────────────
-pub use iroh_gossip::chat_core::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
+pub use boru_chat::chat_core::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 
 // ── Network event bridging ────────────────────────────────────────────
-pub use iroh_gossip::chat_core::forward_gossip_events;
+pub use boru_chat::chat_core::forward_gossip_events;
 
 // ── Identity persistence ──────────────────────────────────────────────
 
@@ -104,24 +104,24 @@ fn get_data_dir(cli_override: Option<PathBuf>) -> PathBuf {
     if let Some(dir) = cli_override {
         return dir;
     }
-    if let Ok(val) = std::env::var("IROH_GOSSIP_CHAT_DATA_DIR") {
+    if let Ok(val) = std::env::var("BORU_CHAT_DATA_DIR") {
         return PathBuf::from(val);
     }
     if let Some(val) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(val).join("iroh-gossip-chat");
+        return PathBuf::from(val).join("boru-chat");
     }
     if let Some(val) = std::env::var_os("HOME") {
         return PathBuf::from(val)
             .join(".local")
             .join("share")
-            .join("iroh-gossip-chat");
+            .join("boru-chat");
     }
     if let Some(val) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(val).join("iroh-gossip-chat");
+        return PathBuf::from(val).join("boru-chat");
     }
     std::env::current_dir()
         .unwrap_or_default()
-        .join(".iroh-gossip-chat")
+        .join(".boru-chat")
 }
 
 fn load_or_generate_secret_key(data_dir: &Path) -> Result<(SecretKey, PathBuf)> {
@@ -637,9 +637,9 @@ fn main() -> Result<()> {
         IcedChat::update,
         IcedChat::view,
     )
-    .title(|_: &IcedChat| "Iroh Gossip Chat".to_string())
+    .title(|_: &IcedChat| "Boru Chat".to_string())
     .subscription(|state: &IcedChat| {
-        let mut subs: Vec<iced::Subscription<app::AppMessage>> = vec![
+        let subs: Vec<iced::Subscription<app::AppMessage>> = vec![
             IcedChat::subscription(
                 Arc::clone(&state.net_rx),
                 Arc::clone(&state.friend_events_rx),

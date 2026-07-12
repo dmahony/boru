@@ -13,15 +13,15 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use boru_chat::api::Event;
+use boru_chat::chat_core::{check_peer_connection_type, ConnectionType, Message, SignedMessage};
+use boru_chat::net::{Gossip, GOSSIP_ALPN};
+use boru_chat::proto::TopicId;
 use clap::Parser;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, EndpointId,
     PublicKey, RelayMode, RelayUrl, SecretKey, TransportAddr,
 };
-use iroh_gossip::api::Event;
-use iroh_gossip::chat_core::{check_peer_connection_type, ConnectionType, Message, SignedMessage};
-use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
-use iroh_gossip::proto::TopicId;
 use iroh_mainline_address_lookup::DhtAddressLookup;
 use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};
@@ -184,7 +184,7 @@ async fn main() -> Result<()> {
     let relay_url = args.relay.trim_end_matches('/').to_string();
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║  iroh-gossip-chat LAN Interop Test      ║");
+    println!("║  boru-chat LAN Interop Test      ║");
     println!("║  Relay: {:<34} ║", &relay_url);
     println!("║  Name:  {:<34} ║", &args.name);
     println!("╚══════════════════════════════════════════╝");

@@ -7,7 +7,7 @@ p2_count: 3
 timestamp: 2026-07-12T00-03-28Z
 slug: examples-iced-chat-app-rs
 ---
-# Design Critique: Iroh Gossip Chat GUI
+# Design Critique: Boru Chat GUI
 
 ## Design Health Score
 
@@ -133,7 +133,7 @@ Three different border radii: 0.0 (ghost), 6.0 (send), 8.0 (back button, compose
 
 **What**: On first launch with no room history, the user sees: an identity card, empty "No recent chats", empty "No friends", empty "No other users discovered". 4 empty states plus action buttons and a ticket input. No guidance on what to do first.
 
-**Why it matters**: A new user who just installed the app has no idea what "Iroh Gossip Chat" is or how to start using it. They need a clear first step: "Create a new chat room or join an existing one via ticket."
+**Why it matters**: A new user who just installed the app has no idea what "Boru Chat" is or how to start using it. They need a clear first step: "Create a new chat room or join an existing one via ticket."
 
 **Fix**: Add a first-run overlay or simplified empty-state that guides the user to their first action. Combine the 4 empty states into one clear "Get Started" message. Hide/simplify the advanced sections (friends, discovered users) until the user has at least one room.
 

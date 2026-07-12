@@ -1,5 +1,5 @@
 [package]
-name = "iroh-gossip"
+name = "boru-chat"
 version = "0.101.0"
 # ── EDITION ─────────────────────────────────────────────────────────
 # edition = "2021" ← correct.  If you see "Rust 2015" in an error message
@@ -20,7 +20,7 @@ readme = "README.md"
 description = "gossip messages over broadcast trees"
 license = "MIT/Apache-2.0"
 authors = ["n0 team"]
-repository = "https://github.com/n0-computer/iroh-gossip"
+repository = "https://github.com/dmahony/boru-chat"
 resolver = "2"
 
 # Sadly this also needs to be updated in .github/workflows/ci.yml
@@ -93,6 +93,7 @@ n0-error = { version = "1", features = ["anyhow"] }
 serde-byte-array = "0.1.2"
 x25519-dalek = { version = "2.0.1", features = ["getrandom", "static_secrets"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+iroh-blobs = { version = "0.103", default-features = false, optional = true }
 
 # test-utils dependencies (optional)
 humantime-serde = { version = "1.1.1", optional = true }
@@ -142,6 +143,7 @@ default = ["net", "metrics"]
 net = [
     "dep:irpc",
     "dep:iroh",
+    "dep:iroh-blobs",
     "dep:iroh-mdns-address-lookup",
     "dep:iroh-mainline-address-lookup",
     "dep:tokio",

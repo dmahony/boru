@@ -1,4 +1,4 @@
-//! Utilities for iroh-gossip networking
+//! Utilities for boru-chat networking
 
 use std::{
     collections::{hash_map, HashMap},

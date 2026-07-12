@@ -1,4 +1,4 @@
-//! Networking for the `iroh-gossip` protocol
+//! Networking for the `boru-chat` protocol
 
 use std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
@@ -214,7 +214,7 @@ impl Builder {
         let me = actor.endpoint.id().fmt_short().to_string();
         let max_message_size = actor.state.max_message_size();
 
-        // Initialise gossip debug tracing (reads `IROH_GOSSIP_DEBUG` env var).
+        // Initialise gossip debug tracing (reads `BORU_DEBUG` env var).
         crate::gossip_debug::init(&me);
 
         let actor_handle = task::spawn(actor.run().instrument(error_span!("gossip", %me)));

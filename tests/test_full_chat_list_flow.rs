@@ -5,11 +5,7 @@
 //! 4. A sends a message — verify B receives it
 //! 5. B sends a message — verify A receives it
 
-use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
-    RelayMode, SecretKey,
-};
-use iroh_gossip::{
+use boru_chat::{
     api::GossipSender,
     chat_callbacks::ChatCallbacks,
     chat_core::{
@@ -19,6 +15,10 @@ use iroh_gossip::{
     friends::FriendId,
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
+};
+use iroh::{
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
+    RelayMode, SecretKey,
 };
 use n0_error::Result;
 use n0_future::{task, time::sleep};
@@ -128,7 +128,7 @@ async fn test_full_chat_list_flow() -> Result<()> {
     println!("\n[Step 1] A: CreateNewRoom (random topic)");
 
     // Create ticket exactly like iced_chat does in room_ticket()
-    let ticket = iroh_gossip::chat_core::Ticket {
+    let ticket = boru_chat::chat_core::Ticket {
         topic,
         peers: vec![addr_a],
     };
@@ -157,7 +157,7 @@ async fn test_full_chat_list_flow() -> Result<()> {
 
     // STEP 2: B joins via the ticket (like JoinFromTicket in chat list)
     println!("\n[Step 2] B: JoinFromTicket");
-    let parsed_ticket: iroh_gossip::chat_core::Ticket = ticket_str.parse().unwrap();
+    let parsed_ticket: boru_chat::chat_core::Ticket = ticket_str.parse().unwrap();
     println!(
         "  Parsed topic={}, peers={}",
         parsed_ticket.topic,

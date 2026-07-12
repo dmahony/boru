@@ -1,4 +1,4 @@
-//! Durable friends list storage for iroh-gossip-chat.
+//! Durable friends list storage for boru-chat.
 //!
 //! This module owns the on-disk `friends.json` file that lives beside the
 //! persistent `secret_key.txt` identity file.
@@ -455,7 +455,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        dir.push(format!("iroh-gossip-friends-{name}-{suffix}"));
+        dir.push(format!("boru-friends-{name}-{suffix}"));
         dir
     }
 

@@ -2,13 +2,13 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use iroh::{EndpointAddr, PublicKey, SecretKey};
-use iroh_gossip::{
+use boru_chat::{
     chat_callbacks::ChatCallbacks,
     chat_core::{handle_net_event, Message, MessageHash, NetEvent, Ticket},
     friends::{FriendId, FriendsStore},
     proto::TopicId,
 };
+use iroh::{EndpointAddr, PublicKey, SecretKey};
 
 struct TestFrontend {
     local_public: PublicKey,

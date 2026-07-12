@@ -69,7 +69,7 @@ pub mod room_cleanup;
 #[cfg(feature = "net")]
 pub mod chat_history;
 
-/// Durable encrypted outbox storage for outgoing messages.
+/// Durable friend request store — tracks pending/accepted/declined/cancelled\n/// friend requests between peers.\n#[cfg(feature = \"net\")]\npub mod friend_request;\n\n/// Durable encrypted outbox storage for outgoing messages.
 ///
 /// Persists signed (encrypted) outgoing messages before sending so they
 /// survive crashes and restarts.  Supports expiry of old entries and
@@ -98,13 +98,35 @@ pub mod inbox;
 #[cfg(feature = "net")]
 pub mod backfill;
 
-/// Opt-in gossip debug tracing — append-only event log for diagnosing
+/// Secure, local per-user image storage with content-addressed identifiers.
+///
+/// Stores images below `<data_dir>/files` with hashed user directories and
+/// content-addressed filenames.  File extensions are validated against an
+/// allow-list; all others are treated as `.bin`.
+#[cfg(feature = "net")]
+pub mod image_store;
+
+/// Image preprocessing for chat wire transport.
+///
+/// Provides resize + quality-retry JPEG compression for sender-side
+/// optimization and receiver-side thumbnailing.
+#[cfg(feature = "gui")]
+pub mod image_optimizer;
+
+/// Opt-in boru-chat debug tracing — append-only event log for diagnosing
 /// mesh-forwarding bugs.
 ///
-/// Enable with `IROH_GOSSIP_DEBUG=1`.  Auto-initialised by the gossip actor;
+/// Enable with `BORU_DEBUG=1`.  Auto-initialised by the gossip actor;
 /// no manual setup needed.
 #[cfg(feature = "net")]
 pub mod gossip_debug;
+
+/// Durable friend request data model and persistent store.
+///
+/// Owns the on-disk `friend_requests.json` file that lives beside
+/// `secret_key.txt` and `friends.json`.
+#[cfg(feature = "net")]
+pub mod friend_request;
 
 pub use proto::TopicId;
 

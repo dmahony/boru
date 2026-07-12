@@ -12,11 +12,11 @@
 //! 5. **Message expiry** — TTL-based expiry in OutboxStore and handle_net_event stale-message drop
 //! 6. **Edge cases** — empty stores, missing entries, backward transitions, concurrent saves
 
-use iroh_gossip::chat_history::{
+use boru_chat::chat_history::{
     blake3_hex, ChatHistoryStore, DeliveryState, HistoryEntry, InvalidTransition,
 };
-use iroh_gossip::outbox::{OutboxEntry, OutboxStore, DEFAULT_OUTBOX_TTL};
-use iroh_gossip::proto::TopicId;
+use boru_chat::outbox::{OutboxEntry, OutboxStore, DEFAULT_OUTBOX_TTL};
+use boru_chat::proto::TopicId;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -29,7 +29,7 @@ fn temp_dir(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    dir.push(format!("iroh-gossip-lifecycle-{name}-{suffix}"));
+    dir.push(format!("boru-lifecycle-{name}-{suffix}"));
     dir
 }
 

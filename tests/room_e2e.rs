@@ -10,16 +10,16 @@
 
 use std::time::Duration;
 
-use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, tls::CaTlsConfig,
-    Endpoint, RelayMode, SecretKey,
-};
-use iroh_gossip::{
+use boru_chat::{
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
     room_docs::{
         self, create_metadata_doc, create_roster_doc, list_members, read_metadata, RoomMetadata,
     },
+};
+use iroh::{
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, tls::CaTlsConfig,
+    Endpoint, RelayMode, SecretKey,
 };
 use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};
@@ -49,7 +49,7 @@ async fn create_test_endpoint(
 async fn drain(
     md: &room_docs::RoomMetadataDoc,
     roster: &room_docs::RosterDoc,
-    rx: &mut iroh_gossip::api::GossipReceiver,
+    rx: &mut boru_chat::api::GossipReceiver,
     idle: Duration,
     max: usize,
 ) {
@@ -68,7 +68,7 @@ async fn drain(
 /// Format room info output in the same style as the `/room info` CLI command.
 fn format_room_info(
     md: &RoomMetadata,
-    members: &std::collections::HashMap<String, iroh_gossip::room_docs::RosterMember>,
+    members: &std::collections::HashMap<String, boru_chat::room_docs::RosterMember>,
 ) -> String {
     let mut out = format!(
         "Room: {} | Description: {} | Rules: {}",

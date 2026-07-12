@@ -1,4 +1,4 @@
-//! Transient multi-room state for iroh-gossip-chat.
+//! Transient multi-room state for boru-chat.
 //!
 //! Room history is intentionally not retained across process restarts.  The
 //! in-memory list is used only for the current process; legacy `rooms.json`
@@ -234,7 +234,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        dir.push(format!("iroh-gossip-room-history-{name}-{suffix}"));
+        dir.push(format!("boru-room-history-{name}-{suffix}"));
         dir
     }
 

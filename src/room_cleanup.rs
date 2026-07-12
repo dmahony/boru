@@ -98,7 +98,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        dir.push(format!("iroh-gossip-room-cleanup-{name}-{suffix}"));
+        dir.push(format!("boru-room-cleanup-{name}-{suffix}"));
         dir
     }
 

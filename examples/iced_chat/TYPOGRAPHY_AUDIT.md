@@ -1,4 +1,4 @@
-# Typography & Text Layout Audit — Iroh Gossip Chat GUI
+# Typography & Text Layout Audit — Boru Chat GUI
 
 **Date:** 2026-07-09
 **Scope:** `examples/iced_chat/app.rs` (2609 lines) — chat list screen + chat room screen

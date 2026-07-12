@@ -1,5 +1,5 @@
+use boru_chat::mailbox::{MailboxAck, MailboxIdentity, MailboxStore, DEFAULT_MAILBOX_TTL};
 use iroh::SecretKey;
-use iroh_gossip::mailbox::{MailboxAck, MailboxIdentity, MailboxStore, DEFAULT_MAILBOX_TTL};
 use std::time::Duration;
 
 #[test]

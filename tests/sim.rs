@@ -1,8 +1,8 @@
-//! Tests that use the [`iroh_gossip::proto::sim::Simulator`].
+//! Tests that use the [`boru_chat::proto::sim::Simulator`].
 
 use std::{env, fmt, str::FromStr, time::Duration};
 
-use iroh_gossip::proto::{
+use boru_chat::proto::{
     sim::{BootstrapMode, LatencyConfig, NetworkConfig, Simulator, SimulatorConfig},
     Config,
 };

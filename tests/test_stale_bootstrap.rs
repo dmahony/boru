@@ -14,14 +14,14 @@
 
 use std::time::Duration;
 
+use boru_chat::chat_core::{collect_bootstrap_peers, seed_memory_lookup};
+use boru_chat::net::{Gossip, GOSSIP_ALPN};
+use boru_chat::proto::TopicId;
+use boru_chat::room::RoomStore;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, EndpointAddr,
     PublicKey, RelayMode, RelayUrl, SecretKey,
 };
-use iroh_gossip::chat_core::{collect_bootstrap_peers, seed_memory_lookup};
-use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
-use iroh_gossip::proto::TopicId;
-use iroh_gossip::room::RoomStore;
 use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};
 use rand::{RngExt, SeedableRng};
@@ -253,7 +253,7 @@ async fn test_stale_bootstrap_peer_does_not_block_join() -> Result<()> {
     while let Ok(Some(Ok(ev))) =
         tokio::time::timeout(Duration::from_millis(100), recv_b.next()).await
     {
-        if matches!(ev, iroh_gossip::api::Event::Received(_)) {
+        if matches!(ev, boru_chat::api::Event::Received(_)) {
             got_msg = true;
             break;
         }
@@ -321,7 +321,7 @@ async fn test_stale_bootstrap_peer_does_not_block_join() -> Result<()> {
     while let Ok(Some(Ok(ev))) =
         tokio::time::timeout(Duration::from_millis(100), recv_c.next()).await
     {
-        if matches!(ev, iroh_gossip::api::Event::Received(_)) {
+        if matches!(ev, boru_chat::api::Event::Received(_)) {
             c_got_b = true;
             break;
         }

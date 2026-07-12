@@ -1,15 +1,15 @@
 //! Test: can two peers exchange messages via gossip?
 //! Uses relay mode, waits for both to join, sends, asserts delivery.
 
-use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, RelayMode,
-    SecretKey,
-};
-use iroh_gossip::{
+use boru_chat::{
     api::{Event as GossipEvent, GossipTopic},
     chat_core::{Message, SignedMessage},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
+};
+use iroh::{
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, RelayMode,
+    SecretKey,
 };
 use n0_error::Result;
 use n0_future::{time::sleep, StreamExt};

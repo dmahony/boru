@@ -1,4 +1,4 @@
-//! Durable chat history storage for iroh-gossip-chat.
+//! Durable chat history storage for boru-chat.
 //!
 //! Chat messages are persisted atomically so room history remains available
 //! after restart. Outgoing messages additionally live in the durable outbox
@@ -188,6 +188,13 @@ pub struct HistoryEntry {
     /// Stored so images persist when switching rooms within the same session.
     #[serde(default)]
     pub image_bytes: Option<Vec<u8>>,
+    /// Storage identifier returned by the [`ImageStore`](crate::image_store::ImageStore)
+    /// for this image, if it was stored via the per-user image storage system.
+    /// The identifier has the form `<user-hash>/<content-hash>.<ext>` and is
+    /// a relative path within the store's files root — never an absolute
+    /// filesystem path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_identifier: Option<String>,
 }
 
 impl HistoryEntry {
@@ -216,6 +223,7 @@ impl HistoryEntry {
             signed_bytes,
             delivery_state: DeliveryState::Queued,
             image_bytes: None,
+            image_identifier: None,
         }
     }
 
@@ -499,7 +507,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        dir.push(format!("iroh-gossip-chat-history-{name}-{suffix}"));
+        dir.push(format!("boru-chat-history-{name}-{suffix}"));
         dir
     }
 
@@ -1129,5 +1137,76 @@ mod tests {
         let entry = HistoryEntry::new(topic, "bob", vec![1, 2, 3], "text", "default test");
         assert_eq!(entry.delivery_state, DeliveryState::Queued);
         assert_eq!(entry.event_id, 0);
+    }
+
+    // ── Image identifier persistence tests ─────────────────────────────
+
+    #[test]
+    fn image_identifier_is_preserved_across_save_and_load() {
+        let dir = temp_dir("image_id_persist");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = ChatHistoryStore::empty_at(&dir);
+        let topic = make_topic(0xF0);
+
+        let mut entry = make_entry(topic, 1);
+        entry.image_identifier = Some("abc123hash/def456hash.png".to_string());
+        entry.image_bytes = Some(vec![1, 2, 3]);
+        store.push(entry);
+        store.save().expect("save");
+
+        let loaded = ChatHistoryStore::load_or_default(&dir);
+        assert_eq!(loaded.len(), 1);
+        let loaded_entry = &loaded.entries()[0];
+        assert_eq!(
+            loaded_entry.image_identifier,
+            Some("abc123hash/def456hash.png".to_string())
+        );
+        assert_eq!(loaded_entry.image_bytes, Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn image_identifier_is_none_by_default() {
+        let topic = make_topic(0xF1);
+        let entry = HistoryEntry::new(topic, "carol", vec![], "text", "no image");
+        assert!(entry.image_identifier.is_none());
+        assert!(entry.image_bytes.is_none());
+    }
+
+    #[test]
+    fn image_identifier_not_written_when_none() {
+        let dir = temp_dir("image_id_none");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = ChatHistoryStore::empty_at(&dir);
+        let topic = make_topic(0xF2);
+
+        store.push(make_entry(topic, 1));
+        store.push(make_entry(topic, 2));
+        store.save().expect("save");
+
+        let raw = std::fs::read_to_string(dir.join(HISTORY_FILE_NAME)).unwrap();
+        assert!(
+            !raw.contains("image_identifier"),
+            "JSON should not contain image_identifier key when None: {raw}"
+        );
+    }
+
+    #[test]
+    fn image_identifier_written_when_some() {
+        let dir = temp_dir("image_id_some");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = ChatHistoryStore::empty_at(&dir);
+        let topic = make_topic(0xF3);
+
+        let mut entry = make_entry(topic, 1);
+        entry.image_identifier = Some("hash1/hash2.jpg".to_string());
+        store.push(entry);
+        store.save().expect("save");
+
+        let raw = std::fs::read_to_string(dir.join(HISTORY_FILE_NAME)).unwrap();
+        assert!(
+            raw.contains("image_identifier"),
+            "JSON should contain image_identifier key when Some"
+        );
+        assert!(raw.contains("hash1/hash2.jpg"));
     }
 }

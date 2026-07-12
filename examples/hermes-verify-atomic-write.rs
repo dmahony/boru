@@ -1,12 +1,12 @@
 //! Ad-hoc verification for atomic_write_json.
-//! Build: rustc --edition 2021 -L /home/dan/iroh-gossip-chat/target/debug/deps ...
-//! Instead, use: cargo build -p iroh-gossip --lib --features net && cargo run --example <name>
+//! Build: rustc --edition 2021 -L /home/dan/boru-chat/target/debug/deps ...
+//! Instead, use: cargo build -p boru-chat --lib --features net && cargo run --example <name>
 //!
-//! This script is run from the iroh-gossip-chat workspace as an example.
+//! This script is run from the boru-chat workspace as an example.
 
 use std::fs;
 
-use iroh_gossip::chat_core::atomic_write::atomic_write_json;
+use boru_chat::chat_core::atomic_write::atomic_write_json;
 use n0_error::Result;
 use serde::{Deserialize, Serialize};
 

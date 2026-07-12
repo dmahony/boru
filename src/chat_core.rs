@@ -16,7 +16,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     str::FromStr,
-    sync::{LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -118,6 +118,7 @@ pub async fn refresh_bootstrap_peers(
 /// Re-export the callback trait for convenience — existing import paths
 /// (`iroh_gossip::chat_core::ChatCallbacks`) continue to work.
 pub use crate::chat_callbacks::ChatCallbacks;
+pub use crate::chat_callbacks::{TransferId, TransferKind, TransferProgress};
 
 // ── Composer ─────────────────────────────────────────────────────────────────
 
@@ -1405,6 +1406,169 @@ pub async fn check_peer_connection_type(
         }
         None => ConnectionType::Unknown,
     }
+}
+
+// ── CancelGuard ──────────────────────────────────────────────────────────
+//
+// A RAII guard that emits TransferProgress::Cancelled via the shared callback
+// wrapper when dropped without being disarmed first.
+struct CancelGuard {
+    callback: Arc<Mutex<Option<Box<dyn FnMut(TransferProgress) + Send>>>>,
+    id: TransferId,
+    kind: TransferKind,
+    name: String,
+    armed: bool,
+}
+
+impl CancelGuard {
+    fn new(
+        id: TransferId,
+        kind: TransferKind,
+        name: String,
+        callback: Arc<Mutex<Option<Box<dyn FnMut(TransferProgress) + Send>>>>,
+    ) -> Self {
+        Self {
+            callback,
+            id,
+            kind,
+            name,
+            armed: true,
+        }
+    }
+
+    /// Disarm the guard so Drop does not emit Cancelled.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Ok(mut guard) = self.callback.lock() {
+                if let Some(cb) = guard.as_mut() {
+                    cb(TransferProgress::Cancelled {
+                        id: self.id,
+                        kind: self.kind,
+                        name: self.name.clone(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Download a blob from the iroh network with observable progress events.
+///
+/// Wraps the iroh-blobs streaming download API to emit [`TransferProgress`]
+/// events — `Started`, `Progress`, `Completed`, `Failed`, or `Cancelled` —
+/// through the provided `on_progress` callback.  No events are emitted after
+/// a terminal state (completed, failed, or cancelled).
+///
+/// `total` on `Progress` events is `None` because iroh-blobs does not expose
+/// the total blob size before the download is complete.
+///
+/// If the future is dropped before the download finishes (e.g. the caller
+/// cancels via a timeout, `select!`, or component unmount), a `Cancelled`
+/// event is emitted automatically via the shared callback wrapper.
+///
+/// On success the blob bytes are returned.  The caller must ensure the blob
+/// was actually stored (the stream only confirms the download completed).
+pub async fn download_blob_with_progress(
+    blob_store: &iroh_blobs::api::Store,
+    endpoint: &Endpoint,
+    hash: iroh_blobs::Hash,
+    candidates: Vec<PublicKey>,
+    name: String,
+    kind: TransferKind,
+    on_progress: impl FnMut(TransferProgress) + Send + 'static,
+) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    let id = TransferId::next();
+
+    // Wrap the callback in a shared Mutex so the CancelGuard can reach it.
+    let shared_cb: Arc<Mutex<Option<Box<dyn FnMut(TransferProgress) + Send>>>> =
+        Arc::new(Mutex::new(Some(Box::new(on_progress))));
+
+    // Helper: lock and call the callback.
+    let emit = |ev: TransferProgress| {
+        if let Ok(mut guard) = shared_cb.lock() {
+            if let Some(cb) = guard.as_mut() {
+                cb(ev);
+            }
+        }
+    };
+
+    emit(TransferProgress::Started {
+        id,
+        kind,
+        name: name.clone(),
+        total: None,
+    });
+
+    // Drop-guard: emit Cancelled if the future is dropped before
+    // completion or failure.
+    let cancel_guard = CancelGuard::new(id, kind, name.clone(), shared_cb.clone());
+
+    let downloader = blob_store.downloader(endpoint);
+    let progress = downloader.download(hash, candidates);
+
+    // Stream the download progress items.
+    let mut stream = progress.stream().await?;
+
+    loop {
+        use iroh_blobs::api::downloader::DownloadProgressItem;
+        match stream.next().await {
+            Some(DownloadProgressItem::Progress(n)) => {
+                emit(TransferProgress::Progress {
+                    id,
+                    kind,
+                    name: name.clone(),
+                    bytes: n,
+                    total: None,
+                });
+            }
+            Some(DownloadProgressItem::Error(e)) => {
+                cancel_guard.disarm();
+                emit(TransferProgress::Failed {
+                    id,
+                    name,
+                    error: format!("{e}"),
+                });
+                return Err(e);
+            }
+            Some(DownloadProgressItem::DownloadError) => {
+                cancel_guard.disarm();
+                emit(TransferProgress::Failed {
+                    id,
+                    name,
+                    error: "Download error".into(),
+                });
+                return Err(n0_error::anyerr!("Download error"));
+            }
+            Some(_) => {
+                // Ignore TryProvider, ProviderFailed, PartComplete
+            }
+            None => {
+                // Stream ended → download completed successfully.
+                break;
+            }
+        }
+    }
+
+    cancel_guard.disarm();
+    emit(TransferProgress::Completed {
+        id,
+        kind,
+        name: name.clone(),
+    });
+
+    // Read back the blob.
+    let mut reader = blob_store.blobs().reader(hash);
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).await?;
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -2967,5 +3131,123 @@ mod tests {
         assert!(lookup
             .get_endpoint_info(SecretKey::generate().public())
             .is_none());
+    }
+
+    // ── TransferProgress lifecycle tests ────────────────────────────────
+
+    #[test]
+    fn test_transfer_id_unique() {
+        let a = TransferId::next();
+        let b = TransferId::next();
+        let c = TransferId::next();
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_cancel_guard_emits_cancelled_on_drop() {
+        use std::sync::Mutex;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+
+        let id = TransferId::next();
+        let cb: Arc<Mutex<Option<Box<dyn FnMut(TransferProgress) + Send>>>> =
+            Arc::new(Mutex::new(Some(Box::new(move |ev| {
+                events_clone.lock().unwrap().push(ev);
+            }))));
+
+        // Create the guard and let it drop without disarming.
+        {
+            let _guard = CancelGuard::new(id, TransferKind::File, "test.txt".into(), cb.clone());
+        }
+
+        let emitted = events.lock().unwrap();
+        assert_eq!(emitted.len(), 1, "should emit exactly one event on drop");
+        match &emitted[0] {
+            TransferProgress::Cancelled {
+                id: emitted_id,
+                kind,
+                name,
+            } => {
+                assert_eq!(*emitted_id, id);
+                assert_eq!(*kind, TransferKind::File);
+                assert_eq!(name, "test.txt");
+            }
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cancel_guard_disarm_suppresses_cancelled() {
+        use std::sync::Mutex;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+
+        let id = TransferId::next();
+        let cb: Arc<Mutex<Option<Box<dyn FnMut(TransferProgress) + Send>>>> =
+            Arc::new(Mutex::new(Some(Box::new(move |ev| {
+                events_clone.lock().unwrap().push(ev);
+            }))));
+
+        // Create the guard, disarm it, then let it drop.
+        {
+            let guard = CancelGuard::new(id, TransferKind::Image, "photo.png".into(), cb.clone());
+            guard.disarm();
+        }
+
+        let emitted = events.lock().unwrap();
+        assert!(
+            emitted.is_empty(),
+            "should NOT emit Cancelled after disarm, got {emitted:?}"
+        );
+    }
+
+    #[test]
+    fn test_transfer_progress_progress_variant_has_name() {
+        // Verify the Progress variant accepts kind + name fields.
+        let id = TransferId::next();
+        let ev = TransferProgress::Progress {
+            id,
+            kind: TransferKind::File,
+            name: "report.pdf".into(),
+            bytes: 512,
+            total: None,
+        };
+        match ev {
+            TransferProgress::Progress {
+                id: _,
+                kind,
+                ref name,
+                bytes,
+                total: _,
+            } => {
+                assert_eq!(kind, TransferKind::File);
+                assert_eq!(name, "report.pdf");
+                assert_eq!(bytes, 512);
+            }
+            other => panic!("expected Progress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_transfer_progress_cancelled_variant_has_name_and_kind() {
+        let id = TransferId::next();
+        let ev = TransferProgress::Cancelled {
+            id,
+            kind: TransferKind::Image,
+            name: "avatar.png".into(),
+        };
+        match ev {
+            TransferProgress::Cancelled {
+                id: _,
+                kind,
+                ref name,
+            } => {
+                assert_eq!(kind, TransferKind::Image);
+                assert_eq!(name, "avatar.png");
+            }
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
     }
 }

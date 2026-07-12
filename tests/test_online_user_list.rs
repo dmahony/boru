@@ -12,11 +12,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use iroh::PublicKey;
-use iroh_gossip::{
+use boru_chat::{
     chat_core::{handle_net_event, ChatCallbacks, MessageHash, NetEvent},
     friends::FriendId,
 };
+use iroh::PublicKey;
 use rand::SeedableRng;
 
 /// A mock frontend that captures neighbor changes as snapshots.

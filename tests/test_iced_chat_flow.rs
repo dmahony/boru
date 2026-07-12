@@ -2,11 +2,7 @@
 //! Subscribes, spawns forward_gossip_events, sends via sender.broadcast,
 //! receives via NetEvent channel -> handle_net_event -> ChatCallbacks.
 
-use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
-    RelayMode, SecretKey,
-};
-use iroh_gossip::{
+use boru_chat::{
     api::GossipSender,
     chat_callbacks::ChatCallbacks,
     chat_core::{
@@ -16,6 +12,10 @@ use iroh_gossip::{
     friends::{FriendId, FriendsStore},
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
+};
+use iroh::{
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
+    RelayMode, SecretKey,
 };
 use n0_error::Result;
 use n0_future::{task, time::sleep};

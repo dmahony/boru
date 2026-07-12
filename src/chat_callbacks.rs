@@ -12,9 +12,118 @@ use std::time::Duration;
 
 use iroh::PublicKey;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::chat_core::{MessageHash, Ticket};
 use crate::chat_history::DeliveryState;
 use crate::friends::FriendId;
+
+/// A stable identifier for a file or image transfer.
+///
+/// Generated locally when a transfer is initiated. Used to correlate
+/// progress events with the specific download they belong to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TransferId(u64);
+
+impl TransferId {
+    /// Create a new transfer ID from a raw u64 value.
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// Return the raw u64 value.
+    pub fn into_u64(self) -> u64 {
+        self.0
+    }
+}
+
+/// Global counter for allocating fresh [`TransferId`]s.
+///
+/// Each increment returns a monotonically increasing u64, starting from 0.
+/// Using `Relaxed` ordering is sufficient: we only require uniqueness,
+/// not synchronization with other memory operations.
+static TRANSFER_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+impl TransferId {
+    /// Allocate and return a new unique transfer identifier.
+    ///
+    /// Each call returns a value that is guaranteed to be distinct from
+    /// all prior calls in this process.  Thread-safe via atomic increment.
+    pub fn next() -> Self {
+        Self(TRANSFER_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// The kind of a download transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransferKind {
+    /// A shared file download initiated via `/download`.
+    File,
+    /// An auto-downloaded image from an ImageShare message.
+    Image,
+}
+
+/// Lifecycle events for a file/image download.
+///
+/// Emitted via [`ChatCallbacks::on_transfer_progress`] to let the frontend
+/// surface observable progress. Frontends should ignore events for unknown
+/// `TransferId`s (e.g. a stale progress callback after cancellation).
+///
+/// No events are emitted after a transfer reaches a terminal state.
+#[derive(Debug, Clone)]
+pub enum TransferProgress {
+    /// A new download has started.
+    Started {
+        /// Stable identifier for this transfer.
+        id: TransferId,
+        /// What is being downloaded.
+        kind: TransferKind,
+        /// Human-readable name of the file or image.
+        name: String,
+        /// Total expected bytes when known, otherwise None.
+        total: Option<u64>,
+    },
+    /// Progress update with current byte count.
+    Progress {
+        /// Stable identifier for this transfer.
+        id: TransferId,
+        /// What is being downloaded.
+        kind: TransferKind,
+        /// Human-readable name of the file or image.
+        name: String,
+        /// Bytes received so far.
+        bytes: u64,
+        /// Total expected bytes when known, otherwise None.
+        total: Option<u64>,
+    },
+    /// Download completed successfully.
+    Completed {
+        /// Stable identifier for this transfer.
+        id: TransferId,
+        /// Kind of the completed transfer.
+        kind: TransferKind,
+        /// Human-readable name.
+        name: String,
+    },
+    /// Download failed after starting.
+    Failed {
+        /// Stable identifier for this transfer.
+        id: TransferId,
+        /// Human-readable name.
+        name: String,
+        /// Reason the download aborted.
+        error: String,
+    },
+    /// Download was cancelled (the future was dropped before completion).
+    Cancelled {
+        /// Stable identifier for this transfer.
+        id: TransferId,
+        /// What was being downloaded.
+        kind: TransferKind,
+        /// Human-readable name of the file or image.
+        name: String,
+    },
+}
 
 /// Callbacks invoked by [`crate::chat_core::handle_net_event`] to react to
 /// network events.
@@ -170,4 +279,13 @@ pub trait ChatCallbacks {
     /// This is a no-op by default (frontends that want delivery-state tracking
     /// should override both this and [`event_id_for_hash`](Self::event_id_for_hash)).
     fn update_delivery_state(&mut self, _event_id: u64, _state: DeliveryState) {}
+
+    /// Observable lifecycle event for a file or image download.
+    ///
+    /// Called when a transfer starts, makes progress, completes, fails, or
+    /// is cancelled.  Frontends can use these to show progress bars, update
+    /// inline thumbnails, or display completion notifications.
+    ///
+    /// The default implementation is a no-op.
+    fn on_transfer_progress(&mut self, _event: TransferProgress) {}
 }

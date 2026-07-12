@@ -1,12 +1,12 @@
 //! Opt-in gossip debug tracing — append-only event log for diagnosing
 //! mesh-forwarding bugs.
 //!
-//! Enable by setting the `IROH_GOSSIP_DEBUG` environment variable to `1`.
+//! Enable by setting the `BORU_DEBUG` environment variable to `1`.
 //! The log is written to:
 //!
-//!   `~/.local/share/iroh-gossip/gossip-debug.log`
+//!   `~/.local/share/boru-chat/gossip-debug.log`
 //!
-//! …or the path in `IROH_GOSSIP_DEBUG_PATH` if that variable is set.
+//! …or the path in `BORU_DEBUG_PATH` if that variable is set.
 //!
 //! ## Format
 //!
@@ -51,7 +51,7 @@ struct DebugLog {
 /// Initialise the gossip debug log.
 ///
 /// Called automatically by the gossip actor at startup when
-/// `IROH_GOSSIP_DEBUG=1`.  Calling this more than once is a no-op (the first
+/// `BORU_DEBUG=1`.  Calling this more than once is a no-op (the first
 /// call wins).
 ///
 /// `local_id` should be the short-form peer ID of the local node
@@ -134,18 +134,18 @@ pub fn log_event(kind: &str, topic: Option<&str>, peer: Option<&str>, size: Opti
 // Internals
 // ---------------------------------------------------------------------------
 
-/// Read `IROH_GOSSIP_DEBUG` once per process.
+/// Read `BORU_DEBUG` once per process.
 fn env_is_enabled() -> bool {
-    std::env::var("IROH_GOSSIP_DEBUG").as_deref() == Ok("1")
+    std::env::var("BORU_DEBUG").as_deref() == Ok("1")
 }
 
 /// Determine the log file path.
 fn log_path() -> PathBuf {
-    if let Ok(p) = std::env::var("IROH_GOSSIP_DEBUG_PATH") {
+    if let Ok(p) = std::env::var("BORU_DEBUG_PATH") {
         return PathBuf::from(p);
     }
 
-    // Default: ~/.local/share/iroh-gossip/gossip-debug.log
+    // Default: ~/.local/share/boru-chat/gossip-debug.log
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into());
@@ -153,7 +153,7 @@ fn log_path() -> PathBuf {
     PathBuf::from(home)
         .join(".local")
         .join("share")
-        .join("iroh-gossip")
+        .join("boru-chat")
         .join("gossip-debug.log")
 }
 
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_env_not_set_by_default() {
-        // IROH_GOSSIP_DEBUG is not set in tests, so init should be a no-op.
+        // BORU_DEBUG is not set in tests, so init should be a no-op.
         init("test");
         assert!(!is_enabled());
     }

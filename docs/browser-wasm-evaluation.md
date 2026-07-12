@@ -1,4 +1,4 @@
-# Browser-WASM Evaluation: browser-chat as a reference for iroh-gossip-chat
+# Browser-WASM Evaluation: browser-chat as a reference for boru-chat
 
 Evaluated: 2026-07-09
 Reference: https://github.com/n0-computer/iroh-examples/tree/main/browser-chat
@@ -23,9 +23,9 @@ browser-chat is a **workspace** with 4 members:
 - `wasm-bindgen` + `wasm-streams` for async event streaming to JS
 - `vite-plugin-wasm` + `vite-plugin-top-level-await` for bundling
 
-## 2. iroh-gossip-chat architecture (our project)
+## 2. boru-chat architecture (our project)
 
-Our project is the **`iroh-gossip` library crate** itself + frontend examples:
+Our project is the **`boru-chat` library crate** itself + frontend examples:
 
 | Module | Purpose | WASM compatible? |
 |--------|---------|-----------------|
@@ -96,7 +96,7 @@ Our project is the **`iroh-gossip` library crate** itself + frontend examples:
 
 | Blocker | Mitigation |
 |---------|------------|
-| **Persistent identity** | SecretKey currently stored at `~/.local/share/iroh-gossip-chat/secret_key.txt`. Browser needs localStorage/IndexedDB. Easy fix with `wasm-bindgen` storage. |
+| **Persistent identity** | SecretKey currently stored at `~/.local/share/boru-chat/secret_key.txt`. Browser needs localStorage/IndexedDB. Easy fix with `wasm-bindgen` storage. |
 | **tokio::main** | All frontends use `#[tokio::main]`. WASM needs a different executor. Use `wasm-bindgen-futures` + `wasm-bindgen(start)`. |
 | **ratatui/crossterm/iced** | Already feature-gated behind `examples` and `gui` features — won't be pulled into a wasm build. |
 | **Image sharing** | The `pending_image` system in chat_core assumes local file access. Browser needs `<input type="file">` + drag-drop. |

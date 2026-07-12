@@ -1,4 +1,4 @@
-# Cargo aliases for iroh-gossip examples
+# Cargo aliases for boru-chat examples
 #
 # Run with:  cargo chat open
 #            cargo chat join <ticket>

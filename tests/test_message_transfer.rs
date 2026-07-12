@@ -7,18 +7,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use boru_chat::chat_callbacks::ChatCallbacks;
+use boru_chat::chat_core::{
+    forward_gossip_events, handle_net_event, ChatEntry, Message, MessageHash, NetEvent,
+    SignedMessage,
+};
+use boru_chat::friends::FriendId;
+use boru_chat::net::{Gossip, GOSSIP_ALPN};
+use boru_chat::proto::TopicId;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, PublicKey,
     RelayMode, SecretKey,
 };
-use iroh_gossip::chat_callbacks::ChatCallbacks;
-use iroh_gossip::chat_core::{
-    forward_gossip_events, handle_net_event, ChatEntry, Message, MessageHash, NetEvent,
-    SignedMessage,
-};
-use iroh_gossip::friends::FriendId;
-use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
-use iroh_gossip::proto::TopicId;
 use n0_error::Result;
 use n0_future::{task, time::sleep};
 use rand::{RngExt, SeedableRng};

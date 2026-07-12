@@ -1,4 +1,4 @@
-//! Durable room metadata for iroh-gossip-chat.
+//! Durable room metadata for boru-chat.
 //!
 //! This module owns the on-disk `room.json` file that lives beside the
 //! persistent `secret_key.txt` identity file.  When a user runs `open`
@@ -195,7 +195,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        dir.push(format!("iroh-gossip-room-{name}-{suffix}"));
+        dir.push(format!("boru-room-{name}-{suffix}"));
         dir
     }
 

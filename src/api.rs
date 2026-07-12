@@ -1,4 +1,4 @@
-//! Public API for using iroh-gossip
+//! Public API for using boru-chat
 //!
 //! The API is usable both locally and over RPC.
 

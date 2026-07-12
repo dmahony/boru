@@ -12,19 +12,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use boru_chat::chat_callbacks::ChatCallbacks;
+use boru_chat::chat_core::{
+    download_candidates, handle_net_event, ChatEntry, Message, MessageHash, NetEvent, SignedMessage,
+};
+use boru_chat::friends::FriendId;
+use boru_chat::net::{Gossip, GOSSIP_ALPN};
+use boru_chat::proto::TopicId;
+use boru_chat::room_docs;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, PublicKey,
     RelayMode, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
-use iroh_gossip::chat_callbacks::ChatCallbacks;
-use iroh_gossip::chat_core::{
-    download_candidates, handle_net_event, ChatEntry, Message, MessageHash, NetEvent, SignedMessage,
-};
-use iroh_gossip::friends::FriendId;
-use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
-use iroh_gossip::proto::TopicId;
-use iroh_gossip::room_docs;
 use n0_error::Result;
 use n0_future::{task, time::sleep};
 use rand::{RngExt, SeedableRng};
@@ -165,7 +165,7 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
         topic,
         &sender_a,
         room_docs::RoomMetadata {
-            name: Some("iroh-gossip-chat".to_string()),
+            name: Some("boru-chat".to_string()),
             description: None,
             rules: None,
         },
@@ -212,7 +212,7 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
             topic,
             &sender_b,
             room_docs::RoomMetadata {
-                name: Some("iroh-gossip-chat".to_string()),
+                name: Some("boru-chat".to_string()),
                 description: None,
                 rules: None,
             },

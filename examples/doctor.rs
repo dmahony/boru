@@ -1,4 +1,4 @@
-//! iroh-gossip-chat install doctor / sanity-check.
+//! boru-chat install doctor / sanity-check.
 //!
 //! Runs a battery of checks against the local install to verify:
 //!   - Data directory existence and permissions (0700 on Unix)
@@ -22,15 +22,15 @@ use clap::Parser;
 use iroh::SecretKey;
 use n0_error::Result;
 
-use iroh_gossip::chat_history::ChatHistoryStore;
-use iroh_gossip::friends::FriendsStore;
-use iroh_gossip::room::RoomStore;
-use iroh_gossip::room_history::RoomHistoryStore;
+use boru_chat::chat_history::ChatHistoryStore;
+use boru_chat::friends::FriendsStore;
+use boru_chat::room::RoomStore;
+use boru_chat::room_history::RoomHistoryStore;
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
-#[command(name = "doctor", about = "Check iroh-gossip-chat install health")]
+#[command(name = "doctor", about = "Check boru-chat install health")]
 struct Args {
     /// Override the data directory to check (default: auto-detect).
     #[arg(long)]
@@ -149,24 +149,24 @@ fn secret_key_mode_ok(mode: u32) -> bool {
 }
 
 fn get_data_dir() -> PathBuf {
-    if let Ok(val) = env::var("IROH_GOSSIP_CHAT_DATA_DIR") {
+    if let Ok(val) = env::var("BORU_CHAT_DATA_DIR") {
         return PathBuf::from(val);
     }
     if let Some(val) = env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(val).join("iroh-gossip-chat");
+        return PathBuf::from(val).join("boru-chat");
     }
     if let Some(val) = env::var_os("HOME") {
         return PathBuf::from(val)
             .join(".local")
             .join("share")
-            .join("iroh-gossip-chat");
+            .join("boru-chat");
     }
     if let Some(val) = env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(val).join("iroh-gossip-chat");
+        return PathBuf::from(val).join("boru-chat");
     }
     std::env::current_dir()
         .unwrap_or_default()
-        .join(".iroh-gossip-chat")
+        .join(".boru-chat")
 }
 
 fn resolve_data_dir(override_dir: Option<PathBuf>) -> PathBuf {
@@ -179,18 +179,18 @@ fn resolve_data_dir(override_dir: Option<PathBuf>) -> PathBuf {
 fn candidate_data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    if let Ok(val) = env::var("IROH_GOSSIP_CHAT_DATA_DIR") {
+    if let Ok(val) = env::var("BORU_CHAT_DATA_DIR") {
         dirs.push(PathBuf::from(val));
     }
     if let Some(val) = env::var_os("XDG_DATA_HOME") {
-        dirs.push(PathBuf::from(val).join("iroh-gossip-chat"));
+        dirs.push(PathBuf::from(val).join("boru-chat"));
     }
     if let Some(val) = env::var_os("HOME") {
         dirs.push(
             PathBuf::from(val)
                 .join(".local")
                 .join("share")
-                .join("iroh-gossip-chat"),
+                .join("boru-chat"),
         );
     }
 
@@ -496,8 +496,8 @@ fn check_env_overrides() -> Check {
     let name = "environment".to_string();
     let mut hints = Vec::new();
 
-    if let Ok(dir) = env::var("IROH_GOSSIP_CHAT_DATA_DIR") {
-        hints.push(format!("IROH_GOSSIP_CHAT_DATA_DIR={dir}"));
+    if let Ok(dir) = env::var("BORU_CHAT_DATA_DIR") {
+        hints.push(format!("BORU_CHAT_DATA_DIR={dir}"));
     }
     if let Some(xdg) = env::var_os("XDG_DATA_HOME") {
         hints.push(format!("XDG_DATA_HOME={}", xdg.to_string_lossy()));
@@ -576,7 +576,7 @@ fn format_human(checks: &[Check], data_dir: &Path) {
     let mut failures = 0;
     let mut skipped = 0;
 
-    println!("═══ iroh-gossip-chat doctor ═══");
+    println!("═══ boru-chat doctor ═══");
     println!("data dir: {}", data_dir.display());
     println!();
 

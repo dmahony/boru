@@ -1,6 +1,6 @@
 # Docs-based small-room messaging latency spike plan
 
-Goal: Measure whether an iroh-docs-backed message log is fast enough for 1:1 and small group rooms in `iroh-gossip-chat`, before replacing or augmenting the current gossip-only message path.
+Goal: Measure whether an iroh-docs-backed message log is fast enough for 1:1 and small group rooms in `boru-chat`, before replacing or augmenting the current gossip-only message path.
 
 ## Context from the current repo
 

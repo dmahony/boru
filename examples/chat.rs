@@ -1,8 +1,8 @@
-//! Terminal UI (TUI) chat frontend using iroh-gossip.
+//! Terminal UI (TUI) chat frontend using boru-chat.
 //!
 //! Usage: `cargo chat open` or `cargo chat join <ticket>`.
 //!
-//! This example uses the shared [`iroh_gossip::chat_core`] module for the
+//! This example uses the shared [`boru_chat::chat_core`] module for the
 //! protocol types, state machine, and network event handling.  Only the
 //! TUI-specific rendering (ratatui) and input handling (crossterm) live here.
 
@@ -25,36 +25,37 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
+use boru_chat::backfill::{
+    BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN, BACKFILL_TRIGGER_THRESHOLD,
+};
+use boru_chat::chat_core::friend_ping::{
+    FriendEvent, FriendPingManager, FriendStatus, PingHandler, DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
+};
+use boru_chat::chat_core::{
+    check_peer_connection_type, collect_bootstrap_peers, download_blob_with_progress,
+    download_candidates, fmt_relay_mode, handle_net_event, message_hash,
+    refresh_bootstrap_peers, update_connection_counts, AppState, ChatEntry, ChatKind,
+    ConnectionType, MeshHealth, Message, NetEvent, SignedMessage, StatusContext, Ticket,
+};
+use boru_chat::chat_callbacks::TransferKind;
+use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
+use boru_chat::friends::{FriendId, FriendRecord, FriendsStore};
+use boru_chat::inbox::{send_sync_request, InboxEvent, InboxHandle, InboxProtocol, INBOX_ALPN};
+use boru_chat::mailbox::{MailboxAck, MailboxIdentity, MailboxStore};
+use boru_chat::room::RoomStore;
+use boru_chat::room_docs::{
+    self, create_metadata_doc, create_roster_doc, list_members, read_metadata, RoomDocs,
+    RoomMetadata,
+};
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, PublicKey, RelayMode,
     RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
-use iroh_gossip::backfill::{
-    BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN, BACKFILL_TRIGGER_THRESHOLD,
-};
-use iroh_gossip::chat_core::friend_ping::{
-    FriendEvent, FriendPingManager, FriendStatus, PingHandler, DEFAULT_CONNECT_TIMEOUT,
-    DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
-};
-use iroh_gossip::chat_core::{
-    check_peer_connection_type, collect_bootstrap_peers, download_candidates, fmt_relay_mode,
-    handle_net_event, message_hash, refresh_bootstrap_peers, update_connection_counts, AppState,
-    ChatEntry, ChatKind, ConnectionType, MeshHealth, Message, NetEvent, SignedMessage,
-    StatusContext, Ticket,
-};
-use iroh_gossip::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
-use iroh_gossip::friends::{FriendId, FriendRecord, FriendsStore};
-use iroh_gossip::inbox::{send_sync_request, InboxEvent, InboxHandle, InboxProtocol, INBOX_ALPN};
-use iroh_gossip::mailbox::{MailboxAck, MailboxIdentity, MailboxStore};
-use iroh_gossip::room::RoomStore;
-use iroh_gossip::room_docs::{
-    self, create_metadata_doc, create_roster_doc, list_members, read_metadata, RoomDocs,
-    RoomMetadata,
-};
 
-use iroh_gossip::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
-use iroh_gossip::{
+use boru_chat::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
+use boru_chat::{
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
@@ -72,9 +73,9 @@ use ratatui::{
 };
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-/// Chat over iroh-gossip
+/// Chat over boru-chat
 ///
-/// This broadcasts signed messages over iroh-gossip and verifies signatures
+/// This broadcasts signed messages over boru-chat and verifies signatures
 /// on received messages.
 ///
 /// By default a new endpoint id is created when starting the example. To reuse your identity,
@@ -122,25 +123,25 @@ enum Command {
 }
 
 fn get_data_dir() -> PathBuf {
-    if let Ok(val) = env::var("IROH_GOSSIP_CHAT_DATA_DIR") {
+    if let Ok(val) = env::var("BORU_CHAT_DATA_DIR") {
         return PathBuf::from(val);
     }
     if let Some(val) = env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(val).join("iroh-gossip-chat");
+        return PathBuf::from(val).join("boru-chat");
     }
     if let Some(val) = env::var_os("HOME") {
         return PathBuf::from(val)
             .join(".local")
             .join("share")
-            .join("iroh-gossip-chat");
+            .join("boru-chat");
     }
     if let Some(val) = env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(val).join("iroh-gossip-chat");
+        return PathBuf::from(val).join("boru-chat");
     }
     // Fallback
     std::env::current_dir()
         .unwrap_or_default()
-        .join(".iroh-gossip-chat")
+        .join(".boru-chat")
 }
 
 fn load_or_generate_secret_key() -> Result<(SecretKey, PathBuf)> {
@@ -632,7 +633,7 @@ async fn main() -> Result<()> {
     // ── Room docs setup ─────────────────────────────────────────────────
     // Create metadata doc and roster doc for this room.
     let initial_metadata = RoomMetadata {
-        name: Some("iroh-gossip-chat".to_string()),
+        name: Some("boru-chat".to_string()),
         description: None,
         rules: None,
     };
@@ -1002,14 +1003,26 @@ async fn main() -> Result<()> {
                 if let Some((name, hash, sender_pk)) = app.pending_image.take() {
                     let blob_hash: iroh_blobs::Hash = hash.into();
                     let candidates = download_candidates(sender_pk, &app.status.neighbors);
-                    if let Err(err) = blob_store
-                        .downloader(&endpoint)
-                        .download(blob_hash, candidates)
-                        .await
+                    match download_blob_with_progress(
+                        &blob_store,
+                        &endpoint,
+                        blob_hash,
+                        candidates,
+                        name.clone(),
+                        TransferKind::Image,
+                        |_| {},
+                    )
+                    .await
                     {
-                        app.push_system(format!("Failed to download image '{}': {err}", name));
-                    } else {
-                        app.push_system(format!("Downloaded image: {}", name));
+                        Ok(_bytes) => {
+                            app.push_system(format!("Downloaded image: {}", name));
+                        }
+                        Err(err) => {
+                            app.push_system(format!(
+                                "Failed to download image '{}': {err}",
+                                name
+                            ));
+                        }
                     }
                 }
                 update_connection_counts(&endpoint, &mut app.status).await;
@@ -1136,7 +1149,7 @@ async fn main() -> Result<()> {
                                             let _ = store.save();
                                             let ack =
                                                 MailboxAck::sign(&sk, &msg_id);
-                                            let _ = iroh_gossip::inbox::send_ack(
+                                            let _ = boru_chat::inbox::send_ack(
                                                 &endpoint,
                                                 &sk,
                                                 peer,
@@ -1280,7 +1293,7 @@ fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
 async fn handle_ui_event(
     event: UiEvent,
     app: &mut AppState,
-    sender: &iroh_gossip::api::GossipSender,
+    sender: &boru_chat::api::GossipSender,
     secret_key: &SecretKey,
     local_label: &str,
     endpoint: &Endpoint,
@@ -1322,7 +1335,7 @@ async fn handle_ui_event(
 async fn handle_key_event(
     key: KeyEvent,
     app: &mut AppState,
-    sender: &iroh_gossip::api::GossipSender,
+    sender: &boru_chat::api::GossipSender,
     secret_key: &SecretKey,
     local_label: &str,
     endpoint: &Endpoint,
@@ -1433,10 +1446,19 @@ async fn handle_key_event(
                         }
                     };
                     let peer_id = ticket.addr().id;
-                    let downloader = blob_store.downloader(endpoint);
                     let candidates = download_candidates(peer_id, &app.status.neighbors);
                     app.push_system(format!("Downloading: {filename}..."));
-                    if let Err(e) = downloader.download(ticket.hash(), candidates).await {
+                    if let Err(e) = download_blob_with_progress(
+                        blob_store,
+                        endpoint,
+                        ticket.hash(),
+                        candidates,
+                        filename.clone(),
+                        TransferKind::File,
+                        |_| {},
+                    )
+                    .await
+                    {
                         app.push_system(format!("Download failed: {e}"));
                         return Ok(());
                     }
@@ -1828,7 +1850,7 @@ async fn handle_key_event(
                     Err(_) if mailbox_pk.is_some() => {
                         let mailbox_pk = mailbox_pk.unwrap();
                         let data_dir = get_data_dir();
-                        match iroh_gossip::mailbox::seal_for(
+                        match boru_chat::mailbox::seal_for(
                             secret_key,
                             mailbox_pk,
                             message.as_bytes(),
@@ -2150,8 +2172,8 @@ async fn handle_inbox_event(
                     // Persist accepted state.
                     let _ = store.save();
                     // Send acknowledgement.
-                    let ack = iroh_gossip::mailbox::MailboxAck::sign(secret_key, &_msg_id);
-                    let _ = iroh_gossip::inbox::send_ack(endpoint, secret_key, from, ack).await;
+                    let ack = boru_chat::mailbox::MailboxAck::sign(secret_key, &_msg_id);
+                    let _ = boru_chat::inbox::send_ack(endpoint, secret_key, from, ack).await;
                 }
                 Err(e) => {
                     app.push_system(format!(
@@ -2731,8 +2753,8 @@ fn format_iso8601_date_utc(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boru_chat::chat_core::Composer;
     use iroh::EndpointAddr;
-    use iroh_gossip::chat_core::Composer;
 
     #[test]
     fn ticket_roundtrips_through_base32() {
@@ -2953,13 +2975,13 @@ mod tests {
         } else {
             "/tmp/iroh-test-dir"
         };
-        let prior = std::env::var_os("IROH_GOSSIP_CHAT_DATA_DIR");
-        std::env::set_var("IROH_GOSSIP_CHAT_DATA_DIR", test_dir);
+        let prior = std::env::var_os("BORU_CHAT_DATA_DIR");
+        std::env::set_var("BORU_CHAT_DATA_DIR", test_dir);
         let dir = get_data_dir();
         assert_eq!(dir, PathBuf::from(test_dir));
         match prior {
-            Some(v) => std::env::set_var("IROH_GOSSIP_CHAT_DATA_DIR", v),
-            None => std::env::remove_var("IROH_GOSSIP_CHAT_DATA_DIR"),
+            Some(v) => std::env::set_var("BORU_CHAT_DATA_DIR", v),
+            None => std::env::remove_var("BORU_CHAT_DATA_DIR"),
         }
     }
 
@@ -3065,7 +3087,7 @@ mod tests {
         assert_eq!(path, key_path);
         assert_eq!(known_key.public(), loaded.public());
 
-        std::env::remove_var("IROH_GOSSIP_CHAT_DATA_DIR");
+        std::env::remove_var("BORU_CHAT_DATA_DIR");
         let _ = std::fs::remove_file(&key_path);
         let _ = std::fs::remove_dir(&tmp);
     }

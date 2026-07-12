@@ -1,4 +1,4 @@
-//! Durable encrypted outbox storage for iroh-gossip-chat.
+//! Durable encrypted outbox storage for boru-chat.
 //!
 //! Outgoing messages (signed+encoded) are persisted *before* they are
 //! broadcast so that in-flight messages survive a crash or restart.
@@ -507,7 +507,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        dir.push(format!("iroh-gossip-outbox-{name}-{suffix}"));
+        dir.push(format!("boru-outbox-{name}-{suffix}"));
         dir
     }
 

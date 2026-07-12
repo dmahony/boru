@@ -4,8 +4,8 @@ import unicodedata
 import json
 import os
 
-src = "/home/dan/iroh-gossip-chat/examples/iced_chat/app.rs"
-result_path = "/home/dan/iroh-gossip-chat/hermes-verify-emoji.json"
+src = "/home/dan/boru-chat/examples/iced_chat/app.rs"
+result_path = "/home/dan/boru-chat/hermes-verify-emoji.json"
 
 def is_target_emoji(cp):
     # Emoji ranges that should NOT appear in UI code

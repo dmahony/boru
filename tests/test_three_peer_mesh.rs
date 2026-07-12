@@ -12,12 +12,7 @@
 
 use std::time::Duration;
 
-use bytes::Bytes;
-use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, tls::CaTlsConfig,
-    Endpoint, RelayMode, SecretKey,
-};
-use iroh_gossip::{
+use boru_chat::{
     api::{Event as GossipEvent, GossipReceiver},
     chat_core::check_peer_connection_type,
     net::{Gossip, GOSSIP_ALPN},
@@ -26,6 +21,11 @@ use iroh_gossip::{
         self, add_member, create_metadata_doc, create_roster_doc, list_members, read_metadata,
         RoomMetadata, RoomMetadataUpdate,
     },
+};
+use bytes::Bytes;
+use iroh::{
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, tls::CaTlsConfig,
+    Endpoint, RelayMode, SecretKey,
 };
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use n0_error::Result;
@@ -487,16 +487,16 @@ async fn interop_three_peers_message_flow() -> Result<()> {
     assert!(
         matches!(
             conn_ab,
-            iroh_gossip::chat_core::ConnectionType::Relayed
-                | iroh_gossip::chat_core::ConnectionType::Direct
+            boru_chat::chat_core::ConnectionType::Relayed
+                | boru_chat::chat_core::ConnectionType::Direct
         ),
         "connection type A↔B should be known, got {conn_ab:?}"
     );
     assert!(
         matches!(
             conn_ac,
-            iroh_gossip::chat_core::ConnectionType::Relayed
-                | iroh_gossip::chat_core::ConnectionType::Direct
+            boru_chat::chat_core::ConnectionType::Relayed
+                | boru_chat::chat_core::ConnectionType::Direct
         ),
         "connection type A↔C should be known, got {conn_ac:?}"
     );
@@ -608,8 +608,8 @@ async fn interop_no_relay_direct_connect() -> Result<()> {
     assert!(
         matches!(
             conn_ab,
-            iroh_gossip::chat_core::ConnectionType::Direct
-                | iroh_gossip::chat_core::ConnectionType::Relayed
+            boru_chat::chat_core::ConnectionType::Direct
+                | boru_chat::chat_core::ConnectionType::Relayed
         ),
         "connection A→B should be known, got {conn_ab:?}"
     );
