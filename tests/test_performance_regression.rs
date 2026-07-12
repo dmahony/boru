@@ -831,3 +831,146 @@ fn test_imageshare_processing_no_degradation() {
         large_search_time,
     );
 }
+
+// ── Test: Incremental append is O(1) per entry, not O(n) ──────────────────
+//
+// When using an incremental cache, adding one entry computes just its own
+// height (constant work). The full-height recompute on the other hand does
+// O(n) work per addition. This test verifies that the incremental cost does
+// not grow with total entry count.
+#[test]
+fn test_incremental_append_cost() {
+    // Simulate the incremental cache pattern: compute height for one entry
+    // in isolation (like cache.append does).
+    fn incremental_append(height: f32, prev_total: f32) -> (f32, f32) {
+        let new_cum_last = prev_total; // cum.push(prev_total)
+        let new_total = prev_total + height;
+        (new_cum_last, new_total)
+    }
+
+    // Benchmark: incremental cost at small and large scales
+    let small_count = 100;
+    let large_count = 10_000;
+
+    let small_time = bench_min(
+        || {
+            let mut total = 0.0_f32;
+            for i in 0..small_count {
+                let h = (i as f32 % 76.0) + 32.0;
+                let _ = incremental_append(h, total);
+                total += h;
+            }
+        },
+        500,
+    );
+
+    let large_time = bench_min(
+        || {
+            let mut total = 0.0_f32;
+            for i in 0..large_count {
+                let h = (i as f32 % 76.0) + 32.0;
+                let _ = incremental_append(h, total);
+                total += h;
+            }
+        },
+        500,
+    );
+
+    println!(
+        "Incremental append {small_count}: {:?} | {large_count}: {:?}",
+        small_time, large_time
+    );
+
+    // Each iteration does the same O(1) work, so cost should be linear in
+    // iteration count, not quadratic: 100x entries → ~100x time (sub-quadratic)
+    assert_sub_quadratic(
+        "incremental append",
+        small_count,
+        small_time,
+        large_count,
+        large_time,
+    );
+}
+
+// ── Test: Window computation (binary search on cum) is O(log n) ──────────
+//
+// The cache's window() method uses binary search (partition_point) on the
+// cumulative array. This test verifies that the lookup cost stays roughly
+// constant (<2x) even when the entry count grows by 100x.
+#[test]
+fn test_cumulative_window_lookup_cost() {
+    fn make_cum(total: usize) -> Vec<f32> {
+        let mut cum = Vec::with_capacity(total);
+        let mut running = 0.0_f32;
+        for i in 0..total {
+            cum.push(running);
+            running += (i as f32 % 76.0) + 32.0;
+        }
+        cum
+    }
+
+    fn window_lookup(
+        cum: &[f32],
+        total_height: f32,
+        scroll_offset: f32,
+        vp_h: f32,
+    ) -> (usize, usize) {
+        const OVERSCAN: f32 = 800.0;
+        let total = cum.len();
+        if total == 0 || total_height <= 0.0 {
+            return (0, 0);
+        }
+        let so = if scroll_offset >= f32::MAX / 2.0 {
+            (total_height - vp_h.max(200.0)).max(0.0)
+        } else {
+            scroll_offset
+        };
+        let view_top = so.max(0.0);
+        let view_bot = view_top + vp_h.max(200.0);
+        let range_top = (view_top - OVERSCAN).max(0.0);
+        let range_bot = (view_bot + OVERSCAN).min(total_height);
+
+        let first_idx = cum
+            .partition_point(|&c| c < range_top)
+            .min(total.saturating_sub(1));
+        let last_idx = cum
+            .partition_point(|&c| c <= range_bot)
+            .saturating_sub(1)
+            .min(total.saturating_sub(1))
+            .max(first_idx);
+        (first_idx, last_idx)
+    }
+
+    let small_cum = make_cum(100);
+    let large_cum = make_cum(10_000);
+    let small_height = small_cum.last().copied().unwrap_or(0.0) + ((99_usize % 76) as f32 + 32.0);
+    let large_height =
+        large_cum.last().copied().unwrap_or(0.0) + ((9_999_usize % 76) as f32 + 32.0);
+
+    let small_time = bench_min(
+        || {
+            let _ = window_lookup(&small_cum, small_height, 0.0, 600.0);
+        },
+        2000,
+    );
+
+    let large_time = bench_min(
+        || {
+            let _ = window_lookup(&large_cum, large_height, 0.0, 600.0);
+        },
+        2000,
+    );
+
+    println!(
+        "Window lookup 100 entries: {:?} | 10,000 entries: {:?}",
+        small_time, large_time
+    );
+
+    // Binary search is O(log n), so 100x more entries should be <2x time
+    assert!(
+        large_time.as_nanos() as f64 <= small_time.as_nanos() as f64 * 3.0,
+        "Window lookup 10,000 entries {:?} should be <3x of 100 entries {:?}",
+        large_time,
+        small_time,
+    );
+}

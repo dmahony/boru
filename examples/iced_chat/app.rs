@@ -688,6 +688,9 @@ pub struct IcedChat {
     perf: std::cell::RefCell<PerfMetrics>,
     /// Whether this is the user's first run (no room history, no friends, no chats).
     first_run: bool,
+    /// Incrementally maintained layout cache for the chat log.
+    /// Avoids O(n) full-height scan on every render.
+    layout_cache: std::cell::RefCell<LayoutCache>,
 }
 
 /// Keyboard shortcut actions triggered by global keybindings.
@@ -865,6 +868,238 @@ pub struct PerfSnapshot {
     pub image_entry_count: usize,
 }
 
+// ── Incremental layout cache ────────────────────────────────────────────
+///
+/// Maintains per-entry estimated heights and cumulative offsets so that
+/// `view_chat_log` can compute the visible window in O(log n) time without
+/// scanning the full entry list on every render.
+///
+/// Invariants:
+/// - `heights.len() == cum.len()`  (may be empty)
+/// - `cum[i]` = sum of `heights[0..i]`  (prefix sum, cum[0] = 0)
+/// - `total_height` = sum of all heights (cached separately because cum
+///    stores only prefix sums of length total, with the final total omitted).
+/// - When `dirty_from` is `None`, the cache fully matches `entries`.
+/// - When `dirty_from` is `Some(i)`, entries index `i..` need recomputation.
+struct LayoutCache {
+    heights: Vec<f32>,
+    /// Prefix-sum: cum[i] = sum(heights[0..i]), same length as heights.
+    cum: Vec<f32>,
+    /// Sum of all heights; updated on append / rebuild.
+    total_height: f32,
+    /// First index whose height is stale, or `None` if fully valid.
+    dirty_from: Option<usize>,
+    /// The text-size value with which heights were last computed.
+    cached_text_size: f32,
+    /// Summed image bytes across all entries (maintained incrementally).
+    total_image_bytes: usize,
+    /// Count of entries that carry image data.
+    image_entry_count: usize,
+}
+
+impl LayoutCache {
+    const DATE_SEP_H: f32 = 32.0;
+    const SYSTEM_H: f32 = 24.0;
+    const MSG_BASE_H: f32 = 76.0;
+    const IMAGE_EXTRA: f32 = 304.0;
+    const REACTION_EXTRA: f32 = 22.0;
+
+    fn new(text_size: f32) -> Self {
+        Self {
+            heights: Vec::new(),
+            cum: Vec::new(),
+            total_height: 0.0,
+            dirty_from: None,
+            cached_text_size: text_size,
+            total_image_bytes: 0,
+            image_entry_count: 0,
+        }
+    }
+
+    /// Compute the estimated pixel height for a single entry.
+    fn compute_height(entry: &ChatEntry, prev_day: Option<i64>, _text_size: f32) -> f32 {
+        let mut h = 0.0;
+        let day = entry.timestamp.map(|ts| ts / 86400000);
+        if let Some(d) = day {
+            if prev_day.map_or(true, |prev| prev != d) {
+                h += Self::DATE_SEP_H;
+            }
+        }
+        match entry.kind {
+            ChatKind::System => h += Self::SYSTEM_H,
+            _ => {
+                h += Self::MSG_BASE_H;
+                if entry.image_bytes.is_some() {
+                    h += Self::IMAGE_EXTRA;
+                }
+                if !entry.reactions.is_empty() {
+                    h += Self::REACTION_EXTRA;
+                }
+            }
+        }
+        h
+    }
+
+    /// Append one entry to the cache (O(1)).
+    fn append(&mut self, entry: &ChatEntry, prev_day: Option<i64>, text_size: f32) {
+        let h = Self::compute_height(entry, prev_day, text_size);
+        self.heights.push(h);
+        self.cum.push(self.total_height);
+        self.total_height += h;
+        if let Some(ref img) = entry.image_bytes {
+            self.total_image_bytes += img.len();
+            self.image_entry_count += 1;
+        }
+        self.dirty_from = None; // append at end doesn't break tail validity
+    }
+
+    /// Remove entry at `idx` and mark subsequent entries dirty.
+    fn remove(&mut self, idx: usize, entry: &ChatEntry) {
+        if idx >= self.heights.len() {
+            return;
+        }
+        self.heights.remove(idx);
+        self.cum.pop(); // remove last prefix sentinel
+        self.total_height = self.heights.last().map_or(0.0, |&_| {
+            // Recompute total height from cum[idx] + sum of remaining heights
+            // Actually, just mark dirty and let rebuild handle it.
+            // For now, invalidate from idx.
+            0.0 // placeholder — will be set by build()
+        });
+        if let Some(ref img) = entry.image_bytes {
+            self.total_image_bytes = self.total_image_bytes.saturating_sub(img.len());
+            self.image_entry_count = self.image_entry_count.saturating_sub(1);
+        }
+        self.dirty_from = Some(idx);
+    }
+
+    /// Clear the entire cache (O(1)).
+    fn clear(&mut self) {
+        self.heights.clear();
+        self.cum.clear();
+        self.total_height = 0.0;
+        self.dirty_from = None;
+        self.total_image_bytes = 0;
+        self.image_entry_count = 0;
+    }
+
+    /// Mark the entire cache as needing rebuild (text-size change, etc.).
+    fn invalidate_all(&mut self) {
+        self.dirty_from = Some(0);
+    }
+
+    /// Rebuild the cache from a given index onward.
+    fn build(&mut self, entries: &[ChatEntry], text_size: f32, from: usize) {
+        let total = entries.len();
+
+        // Shrink vectors if entries shrunk, or grow as needed
+        if self.heights.len() > total {
+            self.heights.truncate(total);
+            self.cum.truncate(total);
+        }
+
+        let mut prev_day: Option<i64> = if from > 0 {
+            entries[from.saturating_sub(1)]
+                .timestamp
+                .map(|ts| ts / 86400000)
+        } else {
+            None
+        };
+
+        // Recompute image metrics from scratch (rare — only on invalidations)
+        if from == 0 {
+            self.total_image_bytes = 0;
+            self.image_entry_count = 0;
+            for e in entries {
+                if let Some(ref img) = e.image_bytes {
+                    self.total_image_bytes += img.len();
+                    self.image_entry_count += 1;
+                }
+            }
+        }
+
+        let mut running = if from > 0 {
+            self.cum[from] // prefix sum up to `from` is valid
+        } else {
+            0.0
+        };
+
+        for i in from..total {
+            let e = &entries[i];
+            let day = e.timestamp.map(|ts| ts / 86400000);
+            let h = Self::compute_height(e, prev_day, text_size);
+
+            if i < self.heights.len() {
+                self.heights[i] = h;
+                self.cum[i] = running;
+            } else {
+                self.heights.push(h);
+                self.cum.push(running);
+            }
+            running += h;
+            if day.is_some() {
+                prev_day = day;
+            }
+        }
+
+        self.total_height = running;
+        self.dirty_from = None;
+        self.cached_text_size = text_size;
+    }
+
+    /// Ensure the cache is fully valid. Rebuilds from the dirty point if needed.
+    fn ensure(&mut self, entries: &[ChatEntry], text_size: f32) {
+        let needs_full = self.dirty_from == Some(0)
+            || self.cached_text_size != text_size
+            || self.heights.len() != entries.len();
+
+        if needs_full {
+            self.build(entries, text_size, 0);
+        } else if let Some(from) = self.dirty_from {
+            self.build(entries, text_size, from);
+        }
+    }
+
+    /// Compute the visible-window parameters using binary search on cum.
+    /// Returns (first_idx, last_idx, top_spacer_height, bottom_spacer_height).
+    fn window(&self, scroll_offset: f32, viewport_height: f32) -> (usize, usize, f32, f32) {
+        const OVERSCAN: f32 = 800.0;
+
+        let total = self.heights.len();
+        if total == 0 || self.total_height <= 0.0 {
+            return (0, 0, 0.0, 0.0);
+        }
+
+        let so = if scroll_offset >= f32::MAX / 2.0 {
+            (self.total_height - viewport_height.max(200.0)).max(0.0)
+        } else {
+            scroll_offset
+        };
+        let view_top = so.max(0.0);
+        let view_bot = view_top + viewport_height.max(200.0);
+
+        let range_top = (view_top - OVERSCAN).max(0.0);
+        let range_bot = (view_bot + OVERSCAN).min(self.total_height);
+
+        let first_idx = self
+            .cum
+            .partition_point(|&c| c < range_top)
+            .min(total.saturating_sub(1));
+        let last_idx = self
+            .cum
+            .partition_point(|&c| c <= range_bot)
+            .saturating_sub(1)
+            .min(total.saturating_sub(1))
+            .max(first_idx);
+
+        let top_space_h = self.cum[first_idx];
+        let bottom_start = self.cum[last_idx] + self.heights[last_idx];
+        let bottom_h = (self.total_height - bottom_start).max(0.0);
+
+        (first_idx, last_idx, top_space_h, bottom_h)
+    }
+}
+
 impl IcedChat {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1006,6 +1241,7 @@ impl IcedChat {
             pending_profile_image_tickets: std::collections::VecDeque::new(),
             perf: std::cell::RefCell::new(PerfMetrics::default()),
             first_run,
+            layout_cache: std::cell::RefCell::new(LayoutCache::new(app_settings.chat_text_size)),
         }
     }
 
@@ -1078,11 +1314,25 @@ impl IcedChat {
     }
 
     fn push_system(&mut self, text: impl Into<String>) {
-        self.entries.push(ChatEntry::system(text));
-        self.keep_latest_visible();
+        let entry = ChatEntry::system(text);
+        self.entries_push(entry);
     }
     fn push_local(&mut self, text: impl Into<String>) {
-        self.entries.push(ChatEntry::local(&self.local_label, text));
+        let entry = ChatEntry::local(&self.local_label, text);
+        self.entries_push(entry);
+    }
+
+    /// Push an entry and update the incremental layout cache atomically.
+    /// Must be the *only* way entries are added to `self.entries`.
+    fn entries_push(&mut self, entry: ChatEntry) {
+        let prev_day = self
+            .entries
+            .last()
+            .and_then(|e| e.timestamp.map(|ts| ts / 86400000));
+        self.layout_cache
+            .borrow_mut()
+            .append(&entry, prev_day, self.chat_text_size);
+        self.entries.push(entry);
         self.keep_latest_visible();
     }
 
@@ -1165,6 +1415,7 @@ impl IcedChat {
         }
         self.sender = None;
         self.entries.clear();
+        self.layout_cache.borrow_mut().clear();
         self.names.clear();
         self.pending_file = None;
         self.pending_image = None;
@@ -1639,6 +1890,7 @@ impl IcedChat {
                 self.topic = topic;
                 self.ticket_str = ticket.clone();
                 self.entries.clear();
+                self.layout_cache.borrow_mut().clear();
                 self.names.clear();
                 self.composer_text.clear();
                 self.first_run = false; // First action taken — onboarding complete
@@ -2465,8 +2717,7 @@ impl IcedChat {
                 let mut local_entry = ChatEntry::local(&self.local_label, &text);
                 local_entry.event_id = event_id;
                 local_entry.message_hash = Some(msg_hash);
-                self.entries.push(local_entry);
-                self.keep_latest_visible();
+                self.entries_push(local_entry);
                 if let Some(sender) = self.sender.clone() {
                     iced::Task::perform(
                         async move {
@@ -2858,13 +3109,14 @@ impl IcedChat {
                         }
 
                         if !is_invite {
-                            self.entries.push(ChatEntry::remote(
+                            let entry = ChatEntry::remote(
                                 format!("Whisper from {label}"),
                                 text,
                                 None,
                                 None, // whisper events carry no sent_at
                                 Some(from),
-                            ));
+                            );
+                            self.entries_push(entry);
                         }
                     }
                     iroh_gossip::whisper::WhisperEvent::FileTransfer { from, name, ticket } => {
@@ -2987,13 +3239,14 @@ impl IcedChat {
                         match store.accept_incoming(&identity, envelope, &[from]) {
                             Ok((msg_id, plaintext)) => {
                                 if let Ok(text) = String::from_utf8(plaintext) {
-                                    self.entries.push(ChatEntry::remote(
+                                    let entry = ChatEntry::remote(
                                         format!("Offline DM from {label}"),
                                         text,
                                         None,
                                         None,
                                         Some(from),
-                                    ));
+                                    );
+                                    self.entries_push(entry);
                                 }
                                 // Persist accepted state.
                                 let _ = store.save();
@@ -3222,15 +3475,15 @@ impl IcedChat {
                     .get(&sender)
                     .cloned()
                     .unwrap_or_else(|| sender.fmt_short().to_string());
-                self.entries.push(ChatEntry::image(
+                let entry = ChatEntry::image(
                     &sender_name,
                     format!("[Image: {name}]"),
                     image_bytes,
                     None,
                     None,
                     Some(sender),
-                ));
-                self.keep_latest_visible();
+                );
+                self.entries_push(entry);
                 iced::Task::none()
             }
             AppMessage::ProfileImageDownloaded(peer, image_bytes) => {
@@ -3517,6 +3770,7 @@ impl IcedChat {
 
             AppMessage::SetChatTextSize(size) => {
                 self.chat_text_size = size;
+                self.layout_cache.borrow_mut().invalidate_all();
                 self.save_settings();
                 iced::Task::none()
             }
@@ -3732,13 +3986,14 @@ impl IcedChat {
                     .cloned()
                     .unwrap_or_else(|| peer.fmt_short().to_string());
                 for (_msg_id, text) in texts {
-                    self.entries.push(ChatEntry::remote(
+                    let entry = ChatEntry::remote(
                         format!("Offline DM from {label}"),
                         text,
                         None,
                         None,
                         Some(peer),
-                    ));
+                    );
+                    self.entries_push(entry);
                 }
                 iced::Task::none()
             }
@@ -4010,8 +4265,8 @@ impl ChatCallbacks for IcedChat {
     }
 
     fn push_system(&mut self, text: String) {
-        self.entries.push(ChatEntry::system(text));
-        self.keep_latest_visible();
+        let entry = ChatEntry::system(text);
+        self.entries_push(entry);
     }
 
     fn push_remote(
@@ -4022,9 +4277,8 @@ impl ChatCallbacks for IcedChat {
         hash: Option<MessageHash>,
         sent_at: Option<u64>,
     ) {
-        self.entries
-            .push(ChatEntry::remote(label, text, hash, sent_at, Some(peer)));
-        self.keep_latest_visible();
+        let entry = ChatEntry::remote(label, text, hash, sent_at, Some(peer));
+        self.entries_push(entry);
     }
 
     fn set_pending_file(&mut self, name: String, ticket: String) {
@@ -4049,6 +4303,8 @@ impl ChatCallbacks for IcedChat {
         {
             entry.body = new_text.clone();
             entry.edited = true;
+            // No height change on edit, but mark dirty for safety
+            self.layout_cache.borrow_mut().invalidate_all();
         }
     }
 
@@ -4061,6 +4317,9 @@ impl ChatCallbacks for IcedChat {
             entry.body = "[message deleted]".to_string();
             entry.edited = false;
             entry.reactions.clear();
+            // Reactions cleared → height changes. Invalidating the whole
+            // cache is fine since this is a rare user action.
+            self.layout_cache.borrow_mut().invalidate_all();
         }
     }
 
@@ -4071,6 +4330,8 @@ impl ChatCallbacks for IcedChat {
             .find(|e| e.message_hash.as_ref() == Some(hash))
         {
             entry.reactions.push(emoji);
+            // Reaction added → height may change (REACTION_EXTRA).
+            self.layout_cache.borrow_mut().invalidate_all();
         }
     }
 
@@ -4744,19 +5005,15 @@ impl IcedChat {
 
         let _start = std::time::Instant::now();
 
-        // ── Snapshot performance-relevant state on render ──
+        // ── Ensure layout cache is up-to-date ──
+        // Uses the incrementally maintained cache so the height/cumulative passes
+        // only run when entries or settings actually change, not on every frame.
+        let lc = &mut *self.layout_cache.borrow_mut();
+        lc.ensure(&self.entries, self.chat_text_size);
+
         let total_entries = self.entries.len();
-        let (total_image_bytes, image_entry_count) = {
-            let mut bytes = 0_usize;
-            let mut count = 0_usize;
-            for e in &self.entries {
-                if let Some(ref img) = e.image_bytes {
-                    bytes += img.len();
-                    count += 1;
-                }
-            }
-            (bytes, count)
-        };
+        let total_image_bytes = lc.total_image_bytes;
+        let image_entry_count = lc.image_entry_count;
 
         let theme = self.theme();
 
@@ -4786,78 +5043,16 @@ impl IcedChat {
                 });
         }
 
-        // ── Height estimation constants (pixels per entry type) ──
-        const DATE_SEP_H: f32 = 32.0;
-        const SYSTEM_H: f32 = 24.0;
-        const MSG_BASE_H: f32 = 76.0;
-        const IMAGE_EXTRA: f32 = 304.0;
-        const REACTION_EXTRA: f32 = 22.0;
-        /// Over-scan buffer in pixels — extra entries above/below viewport
-        /// so scroll-jumps don't flash empty space under estimation error.
-        const OVERSCAN: f32 = 800.0;
-
-        // ── First pass: compute per-entry estimated heights ──
-        let total = self.entries.len();
-        let mut heights: Vec<f32> = Vec::with_capacity(total);
-        let mut prev_day_ht: Option<i64> = None;
-
-        for entry in self.entries.iter() {
-            let mut h = 0.0;
-            let day = entry.timestamp.map(|ts| ts / 86400000);
-            if let Some(d) = day {
-                if prev_day_ht.map_or(true, |prev| prev != d) {
-                    h += DATE_SEP_H;
-                }
-                prev_day_ht = Some(d);
-            }
-            match entry.kind {
-                ChatKind::System => h += SYSTEM_H,
-                _ => {
-                    h += MSG_BASE_H;
-                    if entry.image_bytes.is_some() {
-                        h += IMAGE_EXTRA;
-                    }
-                    if !entry.reactions.is_empty() {
-                        h += REACTION_EXTRA;
-                    }
-                }
-            }
-            heights.push(h);
-        }
-
-        let mut cum: Vec<f32> = Vec::with_capacity(total);
-        let mut running = 0.0_f32;
-        for &h in &heights {
-            cum.push(running);
-            running += h;
-        }
-        let total_height = running;
+        // ── Use cached layout data for window computation (O(log n)) ──
+        let total_height = lc.total_height;
         self.total_content_height.set(total_height);
 
-        // ── Determine visible window ──
-        let so = if self.scroll_offset >= f32::MAX / 2.0 {
-            (total_height - self.viewport_height.max(200.0)).max(0.0)
-        } else {
-            self.scroll_offset
-        };
-        let view_top = so.max(0.0);
-        let view_bot = view_top + self.viewport_height.max(200.0);
-
-        let range_top = (view_top - OVERSCAN).max(0.0);
-        let range_bot = (view_bot + OVERSCAN).min(total_height);
-
-        let first_idx = cum.partition_point(|&c| c < range_top);
-        let last_idx = cum
-            .partition_point(|&c| c <= range_bot)
-            .saturating_sub(1)
-            .min(total.saturating_sub(1));
-        let first_idx = first_idx.min(total.saturating_sub(1));
-        let last_idx = last_idx.max(first_idx);
+        let (first_idx, last_idx, top_space_h, bottom_h) =
+            lc.window(self.scroll_offset, self.viewport_height);
 
         // ── Build windowed content column ──
         let mut col = Column::new().spacing(SPACE_4).width(Length::Fill);
 
-        let top_space_h = cum[first_idx];
         if top_space_h > 0.0 {
             col = col.push(
                 container(space::Space::new().height(Length::Fixed(top_space_h)))
@@ -5031,8 +5226,7 @@ impl IcedChat {
         }
 
         // Bottom spacer
-        let bottom_start = cum[last_idx] + heights[last_idx];
-        let bottom_h = total_height - bottom_start;
+        // Bottom spacer (precomputed by layout cache)
         if bottom_h > 0.0 {
             col = col.push(
                 container(space::Space::new().height(Length::Fixed(bottom_h))).width(Length::Fill),
