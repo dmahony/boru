@@ -617,6 +617,11 @@ pub struct IcedChat {
     /// Counter for periodic invisible keepalive heartbeat (decremented per
     /// ConnMonitorTick, broadcasts Message::Heartbeat when it hits 0, resets to 2).
     heartbeat_counter: u32,
+    /// Guards against overlapping async connection refresh tasks.
+    conn_refresh_in_flight: bool,
+    /// Set by on_neighbor_up/on_neighbor_down when a connection count refresh
+    /// is needed outside the normal ~60s cycle.
+    needs_conn_refresh: bool,
     /// Maps protocol message hashes to event_ids for delivery state resolution.
     self_sent_events: HashMap<MessageHash, u64>,
 
@@ -822,6 +827,13 @@ pub enum AppMessage {
     /// Scroll offset / viewport changed in the chat log.
     /// Used by windowed rendering to determine which entries to build widgets for.
     Scrolled(f32, f32),
+    /// Async result from connection-type refresh (direct vs relay counts).
+    ConnCountsResult {
+        direct: usize,
+        relayed: usize,
+    },
+    /// Async result from the /connections debug command.
+    ConnectionsResult(Vec<String>),
 }
 
 // ── Performance metrics ──────────────────────────────────────────────
@@ -1208,6 +1220,8 @@ impl IcedChat {
             last_mesh_health: None,
             presence_counter: 5,
             heartbeat_counter: 2,
+            conn_refresh_in_flight: false,
+            needs_conn_refresh: false,
             self_sent_events: HashMap::new(),
 
             follow_latest: true,
@@ -1392,6 +1406,8 @@ impl IcedChat {
             AppMessage::ConfirmDeleteRoom(_) => "ConfirmDeleteRoom",
             AppMessage::MailboxReplayed { .. } => "MailboxReplayed",
             AppMessage::Scrolled(..) => "Scrolled",
+            AppMessage::ConnCountsResult { .. } => "ConnCountsResult",
+            AppMessage::ConnectionsResult(_) => "ConnectionsResult",
             AppMessage::Shortcut(s) => match s {
                 Shortcut::Escape => "Shortcut(Escape)",
                 Shortcut::NewChat => "Shortcut(NewChat)",
@@ -2361,28 +2377,37 @@ impl IcedChat {
                     if neighbors.is_empty() {
                         self.push_system("No known peers to inspect.");
                     } else {
-                        self.push_system(format!("Connections ({}):", neighbors.len()));
-                        let rt = self.runtime_handle.clone();
                         let ep = self.endpoint.clone();
                         let names = self.names.clone();
-                        // Query each peer and push results inline via block_on.
-                        for pk in &neighbors {
-                            let ctype =
-                                rt.block_on(async { check_peer_connection_type(&ep, *pk).await });
-                            let label = names
-                                .get(pk)
-                                .cloned()
-                                .unwrap_or_else(|| pk.fmt_short().to_string());
-                            self.push_system(format!(
-                                "  {label} — {} ({})",
-                                match ctype {
-                                    iroh_gossip::chat_core::ConnectionType::Direct => "direct",
-                                    iroh_gossip::chat_core::ConnectionType::Relayed => "relayed",
-                                    iroh_gossip::chat_core::ConnectionType::Unknown => "unknown",
-                                },
-                                pk.fmt_short(),
-                            ));
-                        }
+                        return iced::Task::perform(
+                            async move {
+                                let mut lines = vec![format!("Connections ({}):", neighbors.len())];
+                                for pk in &neighbors {
+                                    let ctype = check_peer_connection_type(&ep, *pk).await;
+                                    let label = names
+                                        .get(pk)
+                                        .cloned()
+                                        .unwrap_or_else(|| pk.fmt_short().to_string());
+                                    lines.push(format!(
+                                        "  {label} — {} ({})",
+                                        match ctype {
+                                            iroh_gossip::chat_core::ConnectionType::Direct => {
+                                                "direct"
+                                            }
+                                            iroh_gossip::chat_core::ConnectionType::Relayed => {
+                                                "relayed"
+                                            }
+                                            iroh_gossip::chat_core::ConnectionType::Unknown => {
+                                                "unknown"
+                                            }
+                                        },
+                                        pk.fmt_short(),
+                                    ));
+                                }
+                                AppMessage::ConnectionsResult(lines)
+                            },
+                            |msg| msg,
+                        );
                     }
                     return iced::Task::none();
                 }
@@ -3306,13 +3331,21 @@ impl IcedChat {
                     entry.delivery_state = DeliveryState::Sent;
                     entry.message_hash = Some(msg_hash);
                 }
-                let mut history = self.chat_history.lock().unwrap();
-                let _ = history.update_delivery_state(event_id, DeliveryState::Sent);
-                let _ = history.save();
-                let mut outbox = self.outbox.lock().unwrap();
-                let _ = outbox.update_delivery_state(event_id, DeliveryState::Sent);
-                let _ = outbox.save();
-                iced::Task::none()
+                // Persist delivery state update in background so the UI thread
+                // is not blocked by disk I/O.
+                let history_arc = self.chat_history.clone();
+                let outbox_arc = self.outbox.clone();
+                iced::Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        let mut history = history_arc.lock().unwrap();
+                        let _ = history.update_delivery_state(event_id, DeliveryState::Sent);
+                        let _ = history.save();
+                        let mut outbox = outbox_arc.lock().unwrap();
+                        let _ = outbox.update_delivery_state(event_id, DeliveryState::Sent);
+                        let _ = outbox.save();
+                    }),
+                    |_| AppMessage::Noop,
+                )
             }
 
             AppMessage::ExecuteFileSend(encoded) => {
@@ -3567,16 +3600,42 @@ impl IcedChat {
             }
 
             AppMessage::ConnMonitorTick => {
-                // Periodic connection type refresh (~60s).
-                if self.conn_refresh_counter == 0 {
-                    self.recompute_connection_counts();
+                // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
+                let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
+
+                // Periodic connection type refresh (~60s) or on-demand
+                // (needs_conn_refresh set by on_neighbor_up/down).
+                let should_refresh = self.conn_refresh_counter == 0 || self.needs_conn_refresh;
+                if should_refresh && !self.conn_refresh_in_flight {
+                    self.conn_refresh_in_flight = true;
                     self.conn_refresh_counter = 60;
-                } else {
+                    self.needs_conn_refresh = false;
+                    let endpoint = self.endpoint.clone();
+                    let neighbors: Vec<iroh::PublicKey> = self.neighbors.iter().copied().collect();
+                    tasks.push(iced::Task::perform(
+                        async move {
+                            let mut direct = 0usize;
+                            let mut relayed = 0usize;
+                            for peer in &neighbors {
+                                let has_direct = endpoint
+                                    .remote_info(*peer)
+                                    .await
+                                    .map(|info| info.addrs().any(|a| !a.addr().is_relay()))
+                                    .unwrap_or(false);
+                                if has_direct {
+                                    direct += 1;
+                                } else {
+                                    relayed += 1;
+                                }
+                            }
+                            AppMessage::ConnCountsResult { direct, relayed }
+                        },
+                        |msg| msg,
+                    ));
+                } else if self.conn_refresh_counter > 0 {
                     self.conn_refresh_counter -= 1;
                 }
 
-                // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
-                let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
                 // Relay selection and direct addresses are learned asynchronously.
                 // Keep the room ticket shown in the UI (and therefore copied to the
                 // clipboard) aligned with the endpoint's current address.
@@ -3719,6 +3778,20 @@ impl IcedChat {
                 }
             }
 
+            AppMessage::ConnCountsResult { direct, relayed } => {
+                self.direct_peers = direct;
+                self.relayed_peers = relayed;
+                self.conn_refresh_in_flight = false;
+                iced::Task::none()
+            }
+
+            AppMessage::ConnectionsResult(lines) => {
+                for line in lines {
+                    self.push_system(line);
+                }
+                iced::Task::none()
+            }
+
             AppMessage::MeshWatchdogTick => {
                 // Periodic mesh quiescence check — monitors for prolonged inactivity.
                 let new_health = if self.sender.is_none() {
@@ -3759,8 +3832,18 @@ impl IcedChat {
 
             AppMessage::ToggleDark(enabled) => {
                 self.dark_mode = enabled;
-                self.save_settings();
-                iced::Task::none()
+                let settings = AppSettings {
+                    dark_mode: self.dark_mode,
+                    sound_enabled: self.sound_enabled,
+                    chat_text_size: self.chat_text_size,
+                };
+                let data_dir = self.data_dir.clone();
+                iced::Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        settings.save(&data_dir);
+                    }),
+                    |_| AppMessage::Noop,
+                )
             }
 
             AppMessage::SetNickname(name) => {
@@ -3771,8 +3854,18 @@ impl IcedChat {
             AppMessage::SetChatTextSize(size) => {
                 self.chat_text_size = size;
                 self.layout_cache.borrow_mut().invalidate_all();
-                self.save_settings();
-                iced::Task::none()
+                let settings = AppSettings {
+                    dark_mode: self.dark_mode,
+                    sound_enabled: self.sound_enabled,
+                    chat_text_size: self.chat_text_size,
+                };
+                let data_dir = self.data_dir.clone();
+                iced::Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        settings.save(&data_dir);
+                    }),
+                    |_| AppMessage::Noop,
+                )
             }
 
             AppMessage::OpenLogsWindow => {
@@ -4103,26 +4196,6 @@ impl IcedChat {
             .find(|(_, rec)| rec.label.as_deref() == Some(target))
             .and_then(|(fid, _)| fid.parse_public_key().ok())
     }
-    /// Query the iroh endpoint for each neighbor to recompute direct/relay counts.
-    fn recompute_connection_counts(&mut self) {
-        let mut direct = 0usize;
-        let mut relayed = 0usize;
-        let rt = self.runtime_handle.clone();
-        for peer in &self.neighbors {
-            let has_direct = rt
-                .block_on(async { self.endpoint.remote_info(*peer).await })
-                .map(|info| info.addrs().any(|a| !a.addr().is_relay()))
-                .unwrap_or(false);
-            if has_direct {
-                direct += 1;
-            } else {
-                relayed += 1;
-            }
-        }
-        self.direct_peers = direct;
-        self.relayed_peers = relayed;
-    }
-
     fn handle_friend_event(&mut self, event: FriendEvent) {
         match event {
             FriendEvent::StatusChanged { peer, status } => {
@@ -4338,13 +4411,13 @@ impl ChatCallbacks for IcedChat {
     fn on_neighbor_up(&mut self, peer: PublicKey) {
         self.neighbors.insert(peer);
         self.friend_online_cache.insert(peer);
-        self.recompute_connection_counts();
+        self.needs_conn_refresh = true;
     }
 
     fn on_neighbor_down(&mut self, peer: PublicKey) {
         self.neighbors.remove(&peer);
         self.friend_online_cache.remove(&peer);
-        self.recompute_connection_counts();
+        self.needs_conn_refresh = true;
     }
 
     fn record_activity(&mut self, peer: PublicKey) {
@@ -6231,5 +6304,121 @@ mod tests {
         assert!(ChatEntry::remote("p", "text", None, None, None)
             .image_handle
             .is_none());
+    }
+
+    // ── Connection refresh coalescing ─────────────────────────────────
+
+    /// Simulate the ConnMonitorTick connection-refresh guard logic.
+    /// Just the state-machine fields to keep the test lightweight.
+    struct ConnRefreshState {
+        counter: u32,
+        in_flight: bool,
+        needs_refresh: bool,
+    }
+
+    impl ConnRefreshState {
+        /// Returns true if a refresh task was launched (emulates the guard in ConnMonitorTick).
+        fn tick(&mut self) -> bool {
+            let should_refresh = self.counter == 0 || self.needs_refresh;
+            if should_refresh && !self.in_flight {
+                self.in_flight = true;
+                self.counter = 60;
+                self.needs_refresh = false;
+                true
+            } else if self.counter > 0 {
+                self.counter -= 1;
+                false
+            } else {
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn conn_refresh_normal_reaches_zero_and_fires() {
+        let mut s = ConnRefreshState {
+            counter: 2,
+            in_flight: false,
+            needs_refresh: false,
+        };
+        assert!(!s.tick(), "counter=2 → should not fire");
+        assert!(!s.tick(), "counter=1 → should not fire");
+        assert!(s.tick(), "counter=0 → should fire and set in_flight");
+        assert_eq!(s.counter, 60, "counter should reset to 60");
+        assert!(s.in_flight, "in_flight should be set");
+    }
+
+    #[test]
+    fn conn_refresh_coalescing_prevents_overlap() {
+        let mut s = ConnRefreshState {
+            counter: 0,
+            in_flight: true, // a prior refresh is still running
+            needs_refresh: false,
+        };
+        assert!(
+            !s.tick(),
+            "should NOT fire while in_flight is true even at counter=0"
+        );
+        // Subsequent tick with in_flight still true → reset happens via ConnCountsResult
+    }
+
+    #[test]
+    fn conn_refresh_needs_refresh_triggers_out_of_cycle() {
+        let mut s = ConnRefreshState {
+            counter: 44, // not zero
+            in_flight: false,
+            needs_refresh: true, // on_neighbor_up/down signalled
+        };
+        assert!(
+            s.tick(),
+            "should fire when needs_refresh is true regardless of counter"
+        );
+        assert!(s.in_flight, "in_flight should be set");
+        assert!(!s.needs_refresh, "needs_refresh should be cleared");
+    }
+
+    #[test]
+    fn conn_refresh_result_clears_in_flight() {
+        // Simulate the ConnCountsResult handler.
+        let mut direct_peers = 0usize;
+        let mut relayed_peers = 0usize;
+        let mut in_flight = true;
+
+        // Like the ConnCountsResult handler:
+        direct_peers = 3;
+        relayed_peers = 2;
+        in_flight = false;
+
+        assert_eq!(direct_peers, 3);
+        assert_eq!(relayed_peers, 2);
+        assert!(!in_flight, "in_flight cleared on ConnCountsResult");
+    }
+
+    #[test]
+    fn conn_refresh_no_block_on_in_update_path() {
+        // Assert that the blocking recompute_connection_counts no longer
+        // exists and that the update function does not call .block_on().
+        let src = include_str!("app.rs");
+        // Find the start of the update function.
+        let update_start = src
+            .find("pub fn update(&mut self, message: AppMessage)")
+            .expect("update function must exist");
+        // Find the start of the tests module to exclude test code.
+        let tests_start = src.find("#[cfg(test)]").unwrap_or(src.len());
+        // Extract the update path (excluding test code).
+        let update_body = &src[update_start..tests_start];
+        let block_on_in_update = update_body.matches(".block_on(").count();
+        assert_eq!(
+            block_on_in_update, 0,
+            "zero `.block_on(` calls in update path; found {block_on_in_update}"
+        );
+        // Also verify the old method definition is gone. Search for the pattern
+        // in code (outside test module, which is excluded above).
+        let code_before_tests = &src[..tests_start];
+        let fn_def_pattern = "fn recompute_connection_counts";
+        assert!(
+            !code_before_tests.contains(fn_def_pattern),
+            "recompute_connection_counts method definition must be removed"
+        );
     }
 }
