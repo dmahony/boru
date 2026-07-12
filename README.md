@@ -2,6 +2,10 @@
 
 A decentralized, peer-to-peer chat application built on [iroh](https://iroh.com) gossip networking. Messages are disseminated via *epidemic broadcast trees* — there is no central server. Peers join a shared topic, discover each other through a layered address lookup system (DNS/Pkarr, mDNS, DHT, and gossip), and exchange messages directly over encrypted iroh connections.
 
+_Boru_ — after Brian Boru, the Irish king who unified Ireland's fractured, warring clans into a single kingdom in the early 11th century, ending centuries of fragmented rule without a fixed central capital or throne — he held power through alliances between chieftains rather than a single seat of authority.
+
+That's the metaphor: boru-chat has no server, no central authority holding the network together — just peers connecting directly and gossiping messages between each other, the same way Boru's Ireland held together through direct bonds between chieftains rather than a hierarchy.
+
 ## Features
 
 - **Group chat rooms** — create or join a topic-based chat room via a shareable ticket; messages are broadcast to all peers in the swarm.
