@@ -142,7 +142,7 @@ pub fn optimize_chat_image(raw: &[u8]) -> Result<Vec<u8>, String> {
     let mut last_err: Option<String> = None;
     for &quality in OPTIMIZE_QUALITY_STEPS {
         let mut buf = std::io::Cursor::new(Vec::new());
-        let mut encoder = JpegEncoder::new_with_quality(&mut buf, quality);
+        let encoder = JpegEncoder::new_with_quality(&mut buf, quality);
         if encoder
             .write_image(resized.as_raw(), new_w, new_h, image::ExtendedColorType::Rgb8)
             .is_ok()
@@ -200,7 +200,7 @@ mod tests {
 
     fn encode_jpeg_helper(img: &image::RgbImage, quality: u8) -> Vec<u8> {
         let mut buf = std::io::Cursor::new(Vec::new());
-        let mut encoder = JpegEncoder::new_with_quality(&mut buf, quality);
+        let encoder = JpegEncoder::new_with_quality(&mut buf, quality);
         encoder
             .write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgb8)
             .unwrap();

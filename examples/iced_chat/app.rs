@@ -1593,6 +1593,7 @@ impl IcedChat {
                 Shortcut::BackToChatList => "Shortcut(BackToChatList)",
                 Shortcut::QuickCommand => "Shortcut(QuickCommand)",
             },
+            AppMessage::DownloadProgress(_) => "DownloadProgress",
         }
     }
 }
@@ -4021,6 +4022,7 @@ impl IcedChat {
                 self.pending_file = None;
                 iced::Task::none()
             }
+            AppMessage::DownloadProgress(_) => iced::Task::none(),
             AppMessage::ImageDownloaded {
                 sender,
                 name,
