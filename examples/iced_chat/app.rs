@@ -422,10 +422,12 @@ struct ChatEntry {
     edited: bool,
     /// Emoji reactions attached to this entry.
     reactions: Vec<String>,
+    /// Cached iced image handle, decoded once at construction time.
+    /// Cloning is cheap (Arc<..>) — avoids re-decoding JPEG bytes on every frame.
+    image_handle: Option<iced::widget::image::Handle>,
     /// Compressed image bytes for inline rendering, if this is an image message.
-    /// Stored as JPEG bytes (the output of `compress_image`) — the `image::Handle`
-    /// is created lazily during `view_chat_log` only for entries in the visible
-    /// window, avoiding a persistent duplicate in memory.
+    /// Kept for session-history/replay persistence; the `image_handle` is used
+    /// during rendering to avoid re-decoding on every frame.
     image_bytes: Option<Vec<u8>>,
     /// Unix epoch milliseconds when this message was sent (protocol sent_at
     /// for remote messages, local creation time for system/local messages).
@@ -448,6 +450,7 @@ impl ChatEntry {
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
+            image_handle: None,
             image_bytes: None,
             timestamp: Some(now_ms()),
             event_id: 0,
@@ -464,6 +467,7 @@ impl ChatEntry {
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
+            image_handle: None,
             image_bytes: None,
             timestamp: Some(now_ms()),
             event_id: 0,
@@ -486,6 +490,7 @@ impl ChatEntry {
             message_hash: hash,
             edited: false,
             reactions: Vec::new(),
+            image_handle: None,
             image_bytes: None,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
@@ -509,6 +514,7 @@ impl ChatEntry {
             message_hash: hash,
             edited: false,
             reactions: Vec::new(),
+            image_handle: Some(iced::widget::image::Handle::from_bytes(image_bytes.clone())),
             image_bytes: Some(image_bytes),
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
@@ -4997,10 +5003,9 @@ impl IcedChat {
 
             col = col.push(msg_row);
 
-            // ── Image (lazily decoded — handle created on-demand) ──
-            if let Some(ref bytes) = entry.image_bytes {
-                let handle = iced::widget::image::Handle::from_bytes(bytes.clone());
-                let img = iced::widget::image(handle)
+            // ── Image (cached handle — decoded once at construction) ──
+            if let Some(ref handle) = entry.image_handle {
+                let img = iced::widget::image(handle.clone())
                     .content_fit(iced::ContentFit::ScaleDown)
                     .width(Length::Fill)
                     .height(Length::Fixed(300.0));
@@ -5351,52 +5356,49 @@ impl IcedChat {
             (TYPO_XL, "XL"),
         ];
         let current_size = self.chat_text_size;
-        let text_size_row = Row::new()
-            .push(
-                Column::new()
-                    .push(text(format!("Text size: {}px", current_size as u32)).size(TYPO_MD))
-                    .push(
-                        text("Choose the font size for chat message bodies.")
-                            .size(TYPO_XS)
-                            .style(text_muted_style),
-                    )
-                    .spacing(SPACE_2)
-                    .width(Length::Fill)
-                    .align_x(Alignment::Start),
-            );
-        let text_size_row = text_sizes.iter().fold(text_size_row, |row, &(size, label)| {
-            let is_active = (current_size - size).abs() < 0.5;
-            row.push(
-                button(
-                    text(label)
-                        .size(if is_active { TYPO_SM } else { TYPO_XS }),
+        let text_size_row = Row::new().push(
+            Column::new()
+                .push(text(format!("Text size: {}px", current_size as u32)).size(TYPO_MD))
+                .push(
+                    text("Choose the font size for chat message bodies.")
+                        .size(TYPO_XS)
+                        .style(text_muted_style),
                 )
-                .on_press(AppMessage::SetChatTextSize(size))
-                .padding([SPACE_2, SPACE_6])
-                .style(move |t, status| {
-                    let mut s = iced::widget::button::Style::default();
-                    if is_active {
-                        s.background =
-                            Some(iced::Background::Color(accent_primary(t)));
-                        s.text_color = Color::WHITE;
-                    } else {
-                        s.background = None;
-                        s.text_color = match status {
-                            iced::widget::button::Status::Hovered => accent_primary(t),
-                            _ => Color::from_rgb(0.5, 0.5, 0.5),
-                        };
-                    }
-                    s.border = iced::Border {
-                        radius: SPACE_6.into(),
-                        ..Default::default()
-                    };
-                    s
-                }),
-            )
-            .spacing(SPACE_6)
-        })
-        .align_y(Alignment::Center)
-        .spacing(SPACE_8);
+                .spacing(SPACE_2)
+                .width(Length::Fill)
+                .align_x(Alignment::Start),
+        );
+        let text_size_row = text_sizes
+            .iter()
+            .fold(text_size_row, |row, &(size, label)| {
+                let is_active = (current_size - size).abs() < 0.5;
+                row.push(
+                    button(text(label).size(if is_active { TYPO_SM } else { TYPO_XS }))
+                        .on_press(AppMessage::SetChatTextSize(size))
+                        .padding([SPACE_2, SPACE_6])
+                        .style(move |t, status| {
+                            let mut s = iced::widget::button::Style::default();
+                            if is_active {
+                                s.background = Some(iced::Background::Color(accent_primary(t)));
+                                s.text_color = Color::WHITE;
+                            } else {
+                                s.background = None;
+                                s.text_color = match status {
+                                    iced::widget::button::Status::Hovered => accent_primary(t),
+                                    _ => Color::from_rgb(0.5, 0.5, 0.5),
+                                };
+                            }
+                            s.border = iced::Border {
+                                radius: SPACE_6.into(),
+                                ..Default::default()
+                            };
+                            s
+                        }),
+                )
+                .spacing(SPACE_6)
+            })
+            .align_y(Alignment::Center)
+            .spacing(SPACE_8);
 
         let appearance_card = section_card(
             "APPEARANCE",
@@ -5920,6 +5922,7 @@ mod tests {
                 message_hash: None,
                 edited: false,
                 reactions: vec![],
+                image_handle: None,
                 image_bytes: Some(image_data.clone()),
                 timestamp: Some(i as i64),
                 event_id: 0,
@@ -5962,6 +5965,7 @@ mod tests {
             message_hash: None,
             edited: false,
             reactions: vec![],
+            image_handle: None,
             image_bytes: Some(img),
             timestamp: Some(1000),
             event_id: 0,
@@ -6001,5 +6005,37 @@ mod tests {
             "remote text entry must not have image data"
         );
         assert_eq!(e.body, "hey there");
+    }
+
+    #[test]
+    fn perf_image_entry_caches_handle_and_keeps_bytes() {
+        let img_data = vec![0xABu8; 256];
+        let e = ChatEntry::image("peer", "[Image: test.png]", img_data, None, None, None);
+        // The handle must be created once at construction time.
+        assert!(
+            e.image_handle.is_some(),
+            "image entry must cache a decoded handle at construction time"
+        );
+        // Bytes must be preserved for session history/replay.
+        assert!(
+            e.image_bytes.is_some(),
+            "image entry must keep raw bytes for session history/replay"
+        );
+        assert_eq!(e.image_bytes.as_ref().map(|b| b.len()), Some(256));
+        // Cloning the handle must be cheap (Arc) and must not panic.
+        let _cloned = e.image_handle.clone();
+        assert!(
+            e.image_handle.is_some(),
+            "original handle must survive clone"
+        );
+    }
+
+    #[test]
+    fn perf_non_image_entries_have_no_handle() {
+        assert!(ChatEntry::system("s").image_handle.is_none());
+        assert!(ChatEntry::local("me", "hello").image_handle.is_none());
+        assert!(ChatEntry::remote("p", "text", None, None, None)
+            .image_handle
+            .is_none());
     }
 }
