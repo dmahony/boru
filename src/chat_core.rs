@@ -2314,6 +2314,95 @@ mod tests {
     }
 
     #[test]
+    fn handle_net_event_two_image_shares_both_pending() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+
+        let event1 = NetEvent::Message {
+            from: remote_key.public(),
+            message: Message::ImageShare {
+                name: "sunset.jpg".into(),
+                hash: [0xaa; 32],
+            },
+            sent_at: now_secs(),
+        };
+        let event2 = NetEvent::Message {
+            from: remote_key.public(),
+            message: Message::ImageShare {
+                name: "puppy.jpg".into(),
+                hash: [0xbb; 32],
+            },
+            sent_at: now_secs(),
+        };
+        handle_net_event(event1, &mut app).unwrap();
+        handle_net_event(event2, &mut app).unwrap();
+        assert_eq!(
+            app.pending_image.len(),
+            2,
+            "both image shares must be queued"
+        );
+        assert_eq!(app.pending_image[0].0, "sunset.jpg");
+        assert_eq!(app.pending_image[1].0, "puppy.jpg");
+        assert!(app.entries.iter().any(|e| e.body.contains("sunset.jpg")));
+        assert!(app.entries.iter().any(|e| e.body.contains("puppy.jpg")));
+    }
+
+    #[test]
+    fn handle_net_event_five_image_shares_all_pending() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+
+        let names = [
+            "img1.png", "img2.png", "img3.png", "img4.png", "img5.png",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            let event = NetEvent::Message {
+                from: remote_key.public(),
+                message: Message::ImageShare {
+                    name: name.to_string(),
+                    hash: [i as u8; 32],
+                },
+                sent_at: now_secs(),
+            };
+            handle_net_event(event, &mut app).unwrap();
+        }
+        assert_eq!(
+            app.pending_image.len(),
+            5,
+            "all five image shares must be queued"
+        );
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(app.pending_image[i].0, *name, "image {} order preserved", i);
+        }
+        for name in &names {
+            assert!(
+                app.entries.iter().any(|e| e.body.contains(name)),
+                "system message for {name} must be present"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_net_event_image_share_self_is_skipped() {
+        let mut app = test_app();
+        let local_pk = app.local_public;
+
+        let event = NetEvent::Message {
+            from: local_pk,
+            message: Message::ImageShare {
+                name: "selfie.jpg".into(),
+                hash: [0xcc; 32],
+            },
+            sent_at: now_secs(),
+        };
+        handle_net_event(event, &mut app).unwrap();
+        assert!(
+            app.pending_image.is_empty(),
+            "self-shared images must not be queued for download"
+        );
+    }
+
+    #[test]
     fn handle_net_event_file_share_sets_pending() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
