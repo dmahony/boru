@@ -167,6 +167,16 @@ pub trait ChatCallbacks {
     /// Check whether `peer` is a tracked friend.
     fn is_friend(&self, peer: &PublicKey) -> bool;
 
+    /// Check whether `peer` is blocked (their messages are silently dropped).
+    fn is_blocked(&self, _peer: &PublicKey) -> bool {
+        false
+    }
+
+    /// Check whether `peer` is muted (system notifications suppressed).
+    fn is_muted(&self, _peer: &PublicKey) -> bool {
+        false
+    }
+
     /// Mark a tracked friend as online.
     fn friend_mark_online(&mut self, fid: FriendId);
 

@@ -1084,6 +1084,27 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
             }
 
             cb.record_activity(from);
+
+            // ── Blocked peer check ──────────────────────────────
+            // Silently drop all messages from blocked peers.
+            if cb.is_blocked(&from) {
+                tracing::debug!(
+                    "dropping message from blocked peer {}",
+                    from.fmt_short(),
+                );
+                return Ok(());
+            }
+
+            // ── Muted peer check ────────────────────────────────
+            // Muted peers still have text messages shown, but
+            // system notifications (name changes, file shares, image
+            // shares) are suppressed.
+            let is_muted = if from != cb.local_public() {
+                cb.is_muted(&from)
+            } else {
+                false
+            };
+
             if from != cb.local_public() {
                 let age_secs = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -1097,6 +1118,16 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                         from.fmt_short(),
                         age_secs,
                         ttl_secs,
+                    );
+                    return Ok(());
+                }
+
+                // ── Blocked peer check ──────────────────────────────
+                // Silently drop all messages from blocked peers.
+                if cb.is_blocked(&from) {
+                    tracing::debug!(
+                        "dropping message from blocked peer {}",
+                        from.fmt_short(),
                     );
                     return Ok(());
                 }
@@ -1120,11 +1151,13 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                             cb.mark_friends_dirty();
                         }
                         if old_name.as_deref() != Some(&name) {
-                            cb.push_system(format!(
-                                "{} is now known as {}",
-                                from.fmt_short(),
-                                name
-                            ));
+                            if !is_muted {
+                                cb.push_system(format!(
+                                    "{} is now known as {}",
+                                    from.fmt_short(),
+                                    name
+                                ));
+                            }
                         }
                     }
                 }
@@ -1152,15 +1185,15 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) {
                             cb.friend_mark_online(fid);
-                            // NOT mark_friends_dirty — friend ping manager
-                            // is the authority for online status.
                         }
-                        let sender_name = cb.resolve_name(&from);
-                        cb.push_system(format!(
-                            "{} shared a file: {} (type /download to fetch it)",
-                            sender_name, name
-                        ));
-                        cb.set_pending_file(name, ticket);
+                        if !is_muted {
+                            let sender_name = cb.resolve_name(&from);
+                            cb.push_system(format!(
+                                "{} shared a file: {} (type /download to fetch it)",
+                                sender_name, name
+                            ));
+                            cb.set_pending_file(name, ticket);
+                        }
                     }
                 }
                 Message::ImageShare { name, hash } => {
@@ -1168,12 +1201,12 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) {
                             cb.friend_mark_online(fid);
-                            // NOT mark_friends_dirty — friend ping manager
-                            // is the authority for online status.
                         }
-                        let sender_name = cb.resolve_name(&from);
-                        cb.push_system(format!("{} shared an image: {}", sender_name, name));
-                        cb.set_pending_image(name, hash, from);
+                        if !is_muted {
+                            let sender_name = cb.resolve_name(&from);
+                            cb.push_system(format!("{} shared an image: {}", sender_name, name));
+                            cb.set_pending_image(name, hash, from);
+                        }
                     }
                 }
                 Message::Leave => {
