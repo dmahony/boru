@@ -656,7 +656,7 @@ impl ChatEntry {
             edited: false,
             reactions: Vec::new(),
             image_handle: Some(iced::widget::image::Handle::from_bytes(image_bytes.clone())),
-            image_bytes: Some(image_bytes),
+            image_bytes: None, // Cleared to avoid memory bloat
             image_identifier,
             image_error,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),

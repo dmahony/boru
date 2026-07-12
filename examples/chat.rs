@@ -999,8 +999,9 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Auto-download pending image (ImageShare received)
-                if let Some((name, hash, sender_pk)) = app.pending_image.take() {
+                // Auto-download pending images (ImageShare received)
+                let pending_images: Vec<_> = app.pending_image.drain(..).collect();
+                for (name, hash, sender_pk) in pending_images {
                     let blob_hash: iroh_blobs::Hash = hash.into();
                     let candidates = download_candidates(sender_pk, &app.status.neighbors);
                     match download_blob_with_progress(

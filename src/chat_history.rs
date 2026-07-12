@@ -186,7 +186,7 @@ pub struct HistoryEntry {
     pub delivery_state: DeliveryState,
     /// Decoded image bytes for inline rendering, if this is an image message.
     /// Stored so images persist when switching rooms within the same session.
-    #[serde(default)]
+    #[serde(skip)]
     pub image_bytes: Option<Vec<u8>>,
     /// Storage identifier returned by the [`ImageStore`](crate::image_store::ImageStore)
     /// for this image, if it was stored via the per-user image storage system.
@@ -1161,7 +1161,8 @@ mod tests {
             loaded_entry.image_identifier,
             Some("abc123hash/def456hash.png".to_string())
         );
-        assert_eq!(loaded_entry.image_bytes, Some(vec![1, 2, 3]));
+        // image_bytes is intentionally skipped in serde to prevent multi-megabyte JSON files.
+        assert_eq!(loaded_entry.image_bytes, None);
     }
 
     #[test]
