@@ -31,6 +31,7 @@ use crate::api::{Event, GossipReceiver};
 use crate::chat_history::DeliveryState;
 use crate::friends::{FriendId, FriendsStore};
 use crate::proto::TopicId;
+use crate::public_room_safety::PublicRoomSafety;
 
 // ── Bootstrap peer resolution ─────────────────────────────────────────────────
 
@@ -1044,6 +1045,115 @@ fn prune_seen_messages() {
     }
 }
 
+/// Apply public-room safety checks to a [`NetEvent`].
+///
+/// Returns `Some(event)` if the event passes all checks, or `None` if the
+/// event should be silently dropped (message too large, rate limited, peer
+/// exceeded blob announcement limit, etc.).
+///
+/// Non-message events (NeighborUp, NeighborDown, Closed, Error) always pass
+/// through unchanged — they are control-plane signals, not untrusted content.
+///
+/// Pass `&PublicRoomSafety` for public rooms, or simply do not call this
+/// function for private rooms to skip every check.
+///
+/// # Tracing
+///
+/// Each dropped event is logged at `debug` level with the reason, so operators
+/// can monitor whether a peer is abusing the room without noise from legitimate
+/// traffic.
+pub fn filter_net_event_with_safety(
+    event: NetEvent,
+    safety: &PublicRoomSafety,
+) -> Option<NetEvent> {
+    match event {
+        NetEvent::Message {
+            from,
+            message,
+            sent_at,
+        } => {
+            // ── Message size check (text messages) ─────────────
+            if let Message::Message { ref text } = message {
+                if !safety.check_message_size(text.as_bytes()) {
+                    tracing::debug!(
+                        "safety: dropped oversized message ({} B) from {}",
+                        text.len(),
+                        from.fmt_short(),
+                    );
+                    return None;
+                }
+            }
+
+            // ── Nickname length check ──────────────────────────
+            if let Message::AboutMe { ref name, .. } = message {
+                if name.len() > safety.config().nickname_length_limit {
+                    tracing::debug!(
+                        "safety: dropped long nickname ({} B) from {}",
+                        name.len(),
+                        from.fmt_short(),
+                    );
+                    return None;
+                }
+            }
+
+            // ── Blob announcement check ────────────────────────
+            let is_blob = matches!(
+                message,
+                Message::ImageShare { .. } | Message::FileShare { .. }
+            );
+            if is_blob && !safety.check_blob_announcement(&from) {
+                tracing::debug!(
+                    "safety: dropped blob announcement from {}",
+                    from.fmt_short(),
+                );
+                return None;
+            }
+
+            // ── Per-peer rate limit ───────────────────────────
+            if !safety.check_rate_limit(&from) {
+                tracing::debug!(
+                    "safety: rate-limited message from {}",
+                    from.fmt_short(),
+                );
+                return None;
+            }
+
+            Some(NetEvent::Message {
+                from,
+                message,
+                sent_at,
+            })
+        }
+        // ── Control-plane events always pass through ───────────
+        other => Some(other),
+    }
+}
+
+/// Process a decoded [`NetEvent`] against a [`ChatCallbacks`] implementor,
+/// optionally applying public-room safety checks first.
+///
+/// When `safety` is `Some(...)`, the event is first run through
+/// [`filter_net_event_with_safety`]; if it is rejected (rate-limited,
+/// oversized, etc.) the function returns `Ok(())` without calling the
+/// callback — the event is silently dropped.
+///
+/// When `safety` is `None` (private-room path), every event is forwarded
+/// to `handle_net_event` unchanged.
+pub fn handle_net_event_with_safety(
+    event: NetEvent,
+    cb: &mut impl ChatCallbacks,
+    safety: Option<&PublicRoomSafety>,
+) -> Result<()> {
+    let event = match safety {
+        Some(s) => match filter_net_event_with_safety(event, s) {
+            Some(ev) => ev,
+            None => return Ok(()),
+        },
+        None => event,
+    };
+    handle_net_event(event, cb)
+}
+
 /// Process a decoded [`NetEvent`] against a [`ChatCallbacks`] implementor.
 ///
 /// Handles common logic: friend tracking, name resolution, message
@@ -1314,10 +1424,26 @@ pub fn now_ms() -> u64 {
 /// Forward raw gossip events into a [`NetEvent`] channel.
 ///
 /// Spawn this as a background task to bridge the gossip receiver
-/// into a `NetEvent` stream.
+/// into a `NetEvent` stream.  Private-room callers use this; public-room
+/// callers should use [`forward_gossip_events_with_safety`] instead.
 pub async fn forward_gossip_events(
+    receiver: GossipReceiver,
+    net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+) {
+    forward_gossip_events_with_safety(receiver, net_tx, None).await
+}
+
+/// Forward raw gossip events into a [`NetEvent`] channel, applying public-room
+/// safety checks when a [`PublicRoomSafety`] is provided.
+///
+/// When `safety` is `None`, every decoded event passes through unchanged
+/// (private-room path).  When `Some(...)`, each event is run through
+/// [`filter_net_event_with_safety`] and silently dropped if it violates
+/// the room's size, rate, or announcement limits.
+pub async fn forward_gossip_events_with_safety(
     mut receiver: GossipReceiver,
     net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+    safety: Option<Arc<PublicRoomSafety>>,
 ) {
     while let Ok(Some(event)) = receiver.try_next().await {
         match event {
@@ -1331,14 +1457,20 @@ pub async fn forward_gossip_events(
                 }
                 match SignedMessage::verify_and_decode(&msg.content) {
                     Ok((from, message, sent_at)) => {
-                        if net_tx
-                            .send(NetEvent::Message {
-                                from,
-                                message,
-                                sent_at,
-                            })
-                            .is_err()
-                        {
+                        let net_event = NetEvent::Message {
+                            from,
+                            message,
+                            sent_at,
+                        };
+                        // Apply safety filter for public rooms.
+                        let net_event = match &safety {
+                            Some(s) => match filter_net_event_with_safety(net_event, s) {
+                                Some(ev) => ev,
+                                None => continue,
+                            },
+                            None => net_event,
+                        };
+                        if net_tx.send(net_event).is_err() {
                             return;
                         }
                     }
@@ -1603,6 +1735,51 @@ pub async fn download_blob_with_progress(
     let mut buf = Vec::new();
     reader.read_to_end(&mut buf).await?;
     Ok(buf)
+}
+
+/// Download a blob with public-room safety admission control.
+///
+/// When `safety` is `Some(...)`, this function first calls
+/// [`PublicRoomSafety::try_acquire_download`] for the `original_sender`.
+/// If the per-peer download queue is full, the function returns an error
+/// without starting the download.  On completion (success or failure),
+/// [`PublicRoomSafety::release_download`] is called to free the slot.
+///
+/// When `safety` is `None`, this is equivalent to
+/// [`download_blob_with_progress`].
+pub async fn download_blob_with_safety(
+    blob_store: &iroh_blobs::api::Store,
+    endpoint: &Endpoint,
+    hash: iroh_blobs::Hash,
+    candidates: Vec<PublicKey>,
+    name: String,
+    kind: TransferKind,
+    on_progress: impl FnMut(TransferProgress) + Send + 'static,
+    safety: Option<&PublicRoomSafety>,
+    original_sender: PublicKey,
+) -> Result<Vec<u8>> {
+    // ── Admission control for public rooms ───────────────────────
+    if let Some(s) = safety {
+        if !s.try_acquire_download(&original_sender) {
+            tracing::debug!(
+                "safety: download from {} rejected (queue full)",
+                original_sender.fmt_short(),
+            );
+            return Err(n0_error::anyerr!(
+                "download queue full for peer {}",
+                original_sender.fmt_short()
+            ));
+        }
+    }
+
+    let result = download_blob_with_progress(blob_store, endpoint, hash, candidates, name, kind, on_progress).await;
+
+    // ── Release the download slot ───────────────────────────────
+    if let Some(s) = safety {
+        s.release_download(&original_sender);
+    }
+
+    result
 }
 
 #[cfg(test)]

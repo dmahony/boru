@@ -23,10 +23,12 @@ pub const MAX_DISCOVERY_RECORDS: usize = 20;
 pub struct NamespaceId([u8; 32]);
 
 impl NamespaceId {
+    /// Create a new [`NamespaceId`] from raw bytes.
     pub fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
+    /// Return a reference to the underlying 32-byte identifier.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -41,15 +43,18 @@ impl From<[u8; 32]> for NamespaceId {
 /// An opaque encrypted discovery record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptedDiscoveryRecord {
+    /// The encrypted payload bytes.
     pub payload: Vec<u8>,
 }
 
 impl EncryptedDiscoveryRecord {
+    /// Create a new [`EncryptedDiscoveryRecord`] with the given payload.
     pub fn new(payload: Vec<u8>) -> Self {
         Self { payload }
     }
 }
 
+/// Validate a discovery record — rejects empty payloads.
 pub fn validate_discovery_record(record: &EncryptedDiscoveryRecord) -> Result<()> {
     ensure_any!(
         !record.payload.is_empty(),
@@ -58,41 +63,59 @@ pub fn validate_discovery_record(record: &EncryptedDiscoveryRecord) -> Result<()
     Ok(())
 }
 
-use async_trait::async_trait;
+/// Maximum serialized discovery-record payload size (before encryption).
+///
+/// A valid signed discovery record is ~171 B raw (~270 B encrypted).
+/// 256 B provides headroom without accepting DHT spam.
+pub const MAX_DISCOVERY_PAYLOAD_SIZE: usize = 256;
 
+/// Trait abstracting DHT-like topic discovery operations.
+///
+/// Implementations can be backed by a real DHT (e.g. MainlineDht) or
+/// by an in-memory store for testing.
 #[async_trait]
 pub trait TopicDiscoveryBackend: Send + Sync + 'static {
+    /// Publish a discovery record under the given namespace.
     async fn publish(
         &self,
         namespace: &NamespaceId,
         record: EncryptedDiscoveryRecord,
     ) -> Result<()>;
 
+    /// Look up discovery records published under the given namespace.
     async fn lookup(
         &self,
         namespace: &NamespaceId,
     ) -> Result<Vec<EncryptedDiscoveryRecord>>;
 
+    /// Shut down the backend, releasing any resources.
     async fn shutdown(&self) -> Result<()>;
 }
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+/// In-memory implementation of [`TopicDiscoveryBackend`] for testing.
+///
+/// Stores records in a `HashMap` protected by `RwLock`.  All operations
+/// are synchronous internally but exposed through the async trait.
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryDiscoveryBackend {
     records: Arc<RwLock<HashMap<NamespaceId, Vec<EncryptedDiscoveryRecord>>>>,
 }
 
 impl InMemoryDiscoveryBackend {
+    /// Create an empty in-memory discovery backend.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Number of distinct namespaces with stored records.
     pub fn namespace_count(&self) -> usize {
         self.records.read().expect("lock poisoned").len()
     }
 
+    /// Total number of records across all namespaces.
     pub fn total_record_count(&self) -> usize {
         self.records
             .read()
@@ -102,6 +125,7 @@ impl InMemoryDiscoveryBackend {
             .sum()
     }
 
+    /// Remove all records stored under the given namespace.
     pub fn clear_namespace(&self, namespace: &NamespaceId) {
         self.records
             .write()
@@ -109,6 +133,7 @@ impl InMemoryDiscoveryBackend {
             .remove(namespace);
     }
 
+    /// Remove all records across every namespace.
     pub fn clear_all(&self) {
         self.records
             .write()
@@ -147,6 +172,8 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
     }
 }
 
+/// DHT-backed implementation of [`TopicDiscoveryBackend`] using the
+/// `distributed-topic-tracker` crate.  Only available with the `net` feature.
 #[cfg(feature = "net")]
 pub struct MainlineDhtBackend {
     dht: distributed_topic_tracker::Dht,
@@ -155,6 +182,7 @@ pub struct MainlineDhtBackend {
 
 #[cfg(feature = "net")]
 impl MainlineDhtBackend {
+    /// Create a new DHT-backed discovery backend.
     pub fn new(
         dht: distributed_topic_tracker::Dht,
         default_namespace: distributed_topic_tracker::TopicId,
@@ -211,7 +239,7 @@ impl TopicDiscoveryBackend for MainlineDhtBackend {
                 .await?;
             for item in items {
                 all_records
-                    .push(EncryptedDiscoveryRecord::new(item.value.to_vec()));
+                    .push(EncryptedDiscoveryRecord::new(item.value().to_vec()));
             }
         }
         all_records.truncate(MAX_DISCOVERY_RECORDS);

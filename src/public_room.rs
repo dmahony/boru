@@ -111,6 +111,11 @@ impl PublicRoomIdentity {
             discovery_key,
         }
     }
+
+    /// Short hex identifier for logging (first 8 hex chars of the topic).
+    pub fn short_id(&self) -> String {
+        hex::encode(&self.topic.as_bytes()[..4])
+    }
 }
 
 // ---------------------------------------------------------------------------

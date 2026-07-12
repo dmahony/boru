@@ -18,12 +18,44 @@ pub use net::GOSSIP_ALPN as ALPN;
 
 #[cfg(feature = "net")]
 pub mod api;
+#[cfg(feature = "net")]
+pub mod discovery_backend;
+#[cfg(feature = "net")]
+pub mod discovery_record;
+#[cfg(feature = "net")]
+pub mod discovery_validation;
 pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod proto;
 pub mod topic_derivation;
 pub mod public_room;
+#[cfg(feature = "net")]
+/// Public-room configuration defaults and limits.
+///
+/// All tuning parameters for DHT discovery timing, record validation
+/// strictness, peer-count bounds, message size, nickname length, rate
+/// limits, blob announcement limits, download limits, and backfill caps
+/// are centralised here.  See [`PublicRoomConfig`] for field-level docs.
+pub mod public_room_config;
+/// Safety and rate-limit enforcement for untrusted public-room message flows.
+///
+/// Wraps [`PublicRoomConfig`] with per-peer state for message size, nickname
+/// length, message rate, blob announcements, and download-queue bounds.
+/// Pass `None` for private rooms to skip every check.
+#[cfg(feature = "net")]
+pub mod public_room_safety;
+/// Continuous DHT publication and discovery for public rooms.
+///
+/// Spawns background tasks that periodically re-publish local presence and
+/// discover new peers on the DHT.  Discovered peers are forwarded through
+/// an mpsc channel for the caller to join.
+#[cfg(feature = "net")]
+pub mod public_room_continuous;
+/// Boru-specific public-room topic tracker that wraps a [`TopicDiscoveryBackend`]
+/// with boru's identity model for publish-once / discover-once operations.
+#[cfg(feature = "net")]
+pub mod public_room_tracker;
 
 /// Shared chat core — state machine, protocol types, and network event handling.
 ///
@@ -119,6 +151,13 @@ pub mod image_store;
 /// optimization and receiver-side thumbnailing.
 #[cfg(feature = "gui")]
 pub mod image_optimizer;
+
+/// Pure-Rust image compression — resize and JPEG-encode with caller-specified
+/// parameters.
+///
+/// Always available (no feature gate). Uses the `image` crate's pure-Rust JPEG
+/// encoder with no C FFI dependencies.
+pub mod compression;
 
 /// Opt-in boru-chat debug tracing — append-only event log for diagnosing
 /// mesh-forwarding bugs.

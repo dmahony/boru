@@ -52,8 +52,9 @@ use tracing::{debug, trace, warn};
 /// Timeout error message emitted when a backfill request exceeds the deadline.
 const BACKFILL_TIMEOUT_MSG: &str = "backfill timed out";
 
-use crate::chat_core::{NetEvent, SignedMessage};
+use crate::chat_core::{filter_net_event_with_safety, NetEvent, SignedMessage};
 use crate::chat_history::ChatHistoryStore;
+use crate::public_room_safety::PublicRoomSafety;
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -318,6 +319,7 @@ enum Cmd {
         since_ms: u64,
         max_messages: u32,
         net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+        safety: Option<Arc<PublicRoomSafety>>,
         reply: tokio::sync::oneshot::Sender<Result<u32>>,
     },
 }
@@ -358,6 +360,7 @@ impl BackfillHandle {
         since_ms: u64,
         max_messages: u32,
         net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+        safety: Option<Arc<PublicRoomSafety>>,
     ) -> Result<u32> {
         let (reply, rx) = tokio::sync::oneshot::channel();
         self.cmd_tx
@@ -366,6 +369,7 @@ impl BackfillHandle {
                 since_ms,
                 max_messages,
                 net_tx,
+                safety,
                 reply,
             })
             .await
@@ -387,6 +391,7 @@ impl BackfillHandle {
         peer: PublicKey,
         local_history_count: usize,
         net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+        safety: Option<Arc<PublicRoomSafety>>,
     ) -> Result<Option<u32>> {
         if local_history_count >= BACKFILL_TRIGGER_THRESHOLD {
             return Ok(None);
@@ -397,7 +402,7 @@ impl BackfillHandle {
         };
         let addr = EndpointAddr::from_parts(peer, info.into_addrs().map(|addr| addr.into_addr()));
         let count = self
-            .request_history(addr, 0, DEFAULT_MAX_BACKFILL, net_tx)
+            .request_history(addr, 0, DEFAULT_MAX_BACKFILL, net_tx, safety)
             .await?;
         Ok(Some(count))
     }
@@ -412,10 +417,11 @@ async fn backfill_actor(endpoint: Endpoint, mut cmd_rx: mpsc::Receiver<Cmd>) {
                 since_ms,
                 max_messages,
                 net_tx,
+                safety,
                 reply,
             } => {
                 let result =
-                    do_backfill_request(&endpoint, addr, since_ms, max_messages, net_tx).await;
+                    do_backfill_request(&endpoint, addr, since_ms, max_messages, net_tx, safety).await;
                 let _ = reply.send(result);
             }
         }
@@ -433,6 +439,7 @@ async fn do_backfill_request(
     since_ms: u64,
     max_messages: u32,
     net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+    safety: Option<Arc<PublicRoomSafety>>,
 ) -> Result<u32> {
     // Enforce a hard timeout on the entire backfill exchange.
     tokio::time::timeout(BACKFILL_REQUEST_TIMEOUT, async {
@@ -513,14 +520,26 @@ async fn do_backfill_request(
             }
             match SignedMessage::verify_and_decode(raw) {
                 Ok((from, message, sent_at)) => {
-                    if net_tx
-                        .send(NetEvent::Message {
-                            from,
-                            message,
-                            sent_at,
-                        })
-                        .is_err()
-                    {
+                    // Apply public-room safety filter for backfill messages.
+                    let net_event = NetEvent::Message {
+                        from,
+                        message,
+                        sent_at,
+                    };
+                    let net_event = match &safety {
+                        Some(s) => match filter_net_event_with_safety(net_event, s) {
+                            Some(ev) => ev,
+                            None => {
+                                trace!(
+                                    "backfill: safety-filtered message from {}",
+                                    peer_id.fmt_short(),
+                                );
+                                continue;
+                            }
+                        },
+                        None => net_event,
+                    };
+                    if net_tx.send(net_event).is_err() {
                         warn!("backfill: net_tx closed, stopping injection");
                         break;
                     }
@@ -696,7 +715,7 @@ mod tests {
         // We need to advance by at least BACKFILL_REQUEST_TIMEOUT + some margin.
         tokio::time::advance(BACKFILL_REQUEST_TIMEOUT + Duration::from_secs(1)).await;
 
-        let result = do_backfill_request(&ep_requester, addr, 0, 10, net_tx).await;
+        let result = do_backfill_request(&ep_requester, addr, 0, 10, net_tx, None).await;
 
         let err = result.expect_err("slow backfill should time out");
         let err_msg = err.to_string();
@@ -744,7 +763,7 @@ mod tests {
 
         let (net_tx, _) = tokio::sync::mpsc::unbounded_channel();
 
-        let result = do_backfill_request(&ep_requester, addr, 0, 10, net_tx).await;
+        let result = do_backfill_request(&ep_requester, addr, 0, 10, net_tx, None).await;
 
         // Even with an empty store, the backfill should succeed (returning 0 messages).
         assert!(
