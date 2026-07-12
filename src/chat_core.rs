@@ -490,8 +490,9 @@ pub struct AppState {
     pub help_visible: bool,
     /// Pending file download info: (filename, ticket_string).
     pub pending_file: Option<(String, String)>,
-    /// Pending image download info: (filename, blob_hash, sender_pk).
-    pub pending_image: Option<(String, MessageHash, PublicKey)>,
+    /// Pending image downloads queue: (filename, blob_hash, sender_pk).
+    /// Vec so rapid ImageShare events are all queued (multi-image burst fix).
+    pub pending_image: Vec<(String, MessageHash, PublicKey)>,
     /// Durable friends list store.
     pub friends: FriendsStore,
     /// Whether the friends store has unsaved changes.
@@ -531,7 +532,7 @@ impl AppState {
             should_quit: false,
             help_visible: false,
             pending_file: None,
-            pending_image: None,
+            pending_image: Vec::new(),
             friends,
             friends_dirty: false,
             names,
@@ -706,7 +707,7 @@ impl ChatCallbacks for AppState {
     }
 
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
-        self.pending_image = Some((name, hash, from));
+        self.pending_image.push((name, hash, from));
     }
 
     fn has_message(&self, hash: &MessageHash) -> bool {
@@ -2307,7 +2308,7 @@ mod tests {
         handle_net_event(event, &mut app).unwrap();
         assert_eq!(
             app.pending_image,
-            Some(("photo.jpg".into(), [0xab; 32], remote_key.public()))
+            vec![("photo.jpg".into(), [0xab; 32], remote_key.public())]
         );
         assert!(app.entries.iter().any(|e| e.body.contains("photo.jpg")));
     }
