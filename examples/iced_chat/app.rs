@@ -46,6 +46,8 @@ use iced::Color;
 
 /// Scrollable ID for the chat log — used to auto-scroll to bottom.
 const CHAT_LOG: &str = "chat_log";
+/// Stable widget ID used to focus the chat composer from the `/` shortcut.
+const COMPOSER_INPUT: &str = "chat_composer";
 
 // ── Typography scale (minor-second ratio ~1.125) ─────────────────────
 const TYPO_XL: f32 = 24.0; // Primary heading (chat list title)
@@ -151,7 +153,7 @@ fn text_muted(theme: &iced::Theme) -> Color {
 /// Color for system message text (label and body).
 fn text_system(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.5, 0.5, 0.5)
+        Color::from_rgb(0.6, 0.6, 0.6) // #999, ~4.5:1 on dark bg ✓ AA
     } else {
         Color::from_rgb(0.35, 0.35, 0.35) // #595959, ~6.5:1 ✓ AA
     }
@@ -330,6 +332,28 @@ fn container_card(theme: &iced::Theme) -> iced::widget::container::Style {
     }
 }
 
+// ── Button style helpers ─────────────────────────────────────────────
+/// Ghost button — no background, text-colour accent on hover, otherwise
+/// inherits the surrounding text colour.
+const BUTTON_GHOST: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
+    |theme, status| {
+        let mut style = iced::widget::button::Style::default();
+        style.background = None;
+        style.text_color = match status {
+            iced::widget::button::Status::Hovered => accent_primary(theme),
+            iced::widget::button::Status::Pressed => {
+                // Slightly dimmer accent on press
+                let mut c = accent_primary(theme);
+                c.r *= 0.85;
+                c.g *= 0.85;
+                c.b *= 0.85;
+                c
+            }
+            _ => Color::from_rgb(0.5, 0.5, 0.5),
+        };
+        style
+    };
+
 // ── Chat entry types ──────────────────────────────────────────────────
 
 /// Current time as Unix epoch milliseconds.
@@ -495,7 +519,7 @@ pub struct IcedChat {
     // ── Chat state (active room) ──
     entries: Vec<ChatEntry>,
     composer_text: String,
-    help_visible: bool,
+    pub help_visible: bool,
     pending_file: Option<(String, String)>,
     /// Pending image download: (filename, blob_hash, sender_pk).
     pending_image: Option<(String, MessageHash, PublicKey)>,
@@ -611,6 +635,21 @@ pub struct IcedChat {
     pending_profile_image_tickets: std::collections::VecDeque<(PublicKey, String)>,
     /// Performance metrics for the last render — used by regression tests.
     perf: std::cell::RefCell<PerfMetrics>,
+    /// Whether this is the user's first run (no room history, no friends, no chats).
+    first_run: bool,
+}
+
+/// Keyboard shortcut actions triggered by global keybindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shortcut {
+    /// Escape — close help, close settings, or clear input.
+    Escape,
+    /// Ctrl+N — create a new chat.
+    NewChat,
+    /// Ctrl+Backspace — go back to the chat list.
+    BackToChatList,
+    /// Slash (/) — quick-command: focus composer with '/'.
+    QuickCommand,
 }
 
 #[derive(Debug, Clone)]
@@ -618,6 +657,8 @@ pub enum AppMessage {
     // ── Navigation ──
     /// Open the chat list screen (go back from a chat).
     GoToChatList,
+    /// A global keyboard shortcut was activated.
+    Shortcut(Shortcut),
     /// Open a specific room.
     OpenRoom(TopicId),
     /// A new room was created and we're now connected to it.
@@ -833,6 +874,7 @@ impl IcedChat {
             } else {
                 (None, None)
             };
+        let first_run = room_history.is_empty() && friends.is_empty();
         Self {
             screen: Screen::ChatList,
             pending_topic: None,
@@ -907,6 +949,7 @@ impl IcedChat {
             friend_image_tickets: HashMap::new(),
             pending_profile_image_tickets: std::collections::VecDeque::new(),
             perf: std::cell::RefCell::new(PerfMetrics::default()),
+            first_run,
         }
     }
 
@@ -1032,6 +1075,12 @@ impl IcedChat {
             AppMessage::ConfirmDeleteRoom(_) => "ConfirmDeleteRoom",
             AppMessage::MailboxReplayed { .. } => "MailboxReplayed",
             AppMessage::Scrolled(..) => "Scrolled",
+            AppMessage::Shortcut(s) => match s {
+                Shortcut::Escape => "Shortcut(Escape)",
+                Shortcut::NewChat => "Shortcut(NewChat)",
+                Shortcut::BackToChatList => "Shortcut(BackToChatList)",
+                Shortcut::QuickCommand => "Shortcut(QuickCommand)",
+            },
         }
     }
 }
@@ -1525,6 +1574,7 @@ impl IcedChat {
                 self.entries.clear();
                 self.names.clear();
                 self.composer_text.clear();
+                self.first_run = false; // First action taken — onboarding complete
                 self.push_system(format!(
                     "Connected as {}.  Topic: {topic}",
                     self.local_label
@@ -2471,6 +2521,34 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            // ── Global keyboard shortcuts ───────────────────────────
+            AppMessage::Shortcut(Shortcut::Escape) => {
+                if self.help_visible {
+                    self.help_visible = false;
+                } else if matches!(self.screen, Screen::Settings) {
+                    self.screen = self.settings_return_to.take().unwrap_or(Screen::ChatList);
+                } else if !self.composer_text.is_empty() {
+                    self.composer_text.clear();
+                }
+                iced::Task::none()
+            }
+            AppMessage::Shortcut(Shortcut::NewChat) => iced::Task::done(AppMessage::CreateNewRoom),
+            AppMessage::Shortcut(Shortcut::BackToChatList) => {
+                if matches!(self.screen, Screen::Chat { .. }) {
+                    iced::Task::done(AppMessage::GoToChatList)
+                } else {
+                    iced::Task::none()
+                }
+            }
+            AppMessage::Shortcut(Shortcut::QuickCommand) => {
+                if matches!(self.screen, Screen::Chat { .. }) {
+                    self.composer_text = "/".to_string();
+                    iced::widget::operation::focus(COMPOSER_INPUT)
+                } else {
+                    iced::Task::none()
+                }
+            }
+
             AppMessage::OpenSettings => {
                 if !matches!(self.screen, Screen::Settings) {
                     self.settings_return_to = Some(self.screen.clone());
@@ -3195,6 +3273,7 @@ impl IcedChat {
                 label,
                 was_new,
             } => {
+                self.first_run = false;
                 let friend_id = FriendId::new(fid);
                 self.friends.ensure_friend(friend_id.clone());
                 if self
@@ -3407,16 +3486,16 @@ impl IcedChat {
                 // Detect transitions and push system notifications.
                 let notification = match (&self.last_mesh_health, &new_health) {
                     (Some(MeshHealth::Good), MeshHealth::Degraded(reason)) => {
-                        Some(format!("⚠ Mesh health degraded: {reason}"))
+                        Some(format!("Mesh degraded: {reason}"))
                     }
                     (Some(MeshHealth::Good), MeshHealth::Offline(reason)) => {
-                        Some(format!("⚠ Mesh offline: {reason}"))
+                        Some(format!("Mesh offline: {reason}"))
                     }
                     (Some(MeshHealth::Degraded(_)), MeshHealth::Good) => {
-                        Some("✓ Mesh health recovered: all peers are active.".to_string())
+                        Some("Mesh recovered: all peers active.".to_string())
                     }
                     (Some(MeshHealth::Offline(_)), MeshHealth::Good) => {
-                        Some("✓ Mesh health recovered: endpoint is back online.".to_string())
+                        Some("Mesh recovered: endpoint back online.".to_string())
                     }
                     (None, _) => None,
                     _ => None,
@@ -4087,7 +4166,7 @@ impl IcedChat {
                     .push(
                         row![
                             text("Iroh Gossip Chat").size(TYPO_XL).width(Length::Fill),
-                            button(text("⚙").size(TYPO_MD))
+                            button(text("Settings").size(TYPO_MD))
                                 .on_press(AppMessage::OpenSettings)
                                 .padding(SPACE_4),
                         ]
@@ -4128,6 +4207,61 @@ impl IcedChat {
                 .width(Length::Fill)
                 .padding(SPACE_12)
                 .style(move |t| container_surface(t)),
+            );
+        }
+
+        // ── First-run onboarding card ──
+        if self.first_run {
+            content = content.push(
+                container(
+                    Column::new()
+                        .push(
+                            text("Welcome to Iroh Gossip Chat")
+                                .size(TYPO_XL)
+                                .width(Length::Fill),
+                        )
+                        .push(Space::new().height(Length::Fixed(SPACE_8)))
+                        .push(
+                            text("Get started in 3 steps:")
+                                .size(TYPO_MD)
+                                .color(self.color_muted()),
+                        )
+                        .push(Space::new().height(Length::Fixed(SPACE_8)))
+                        .push(
+                            row![
+                                text("1️⃣").size(TYPO_MD),
+                                text(" Create a new chat room or join via a shared ticket")
+                                    .size(TYPO_SM)
+                                    .width(Length::Fill),
+                            ]
+                            .spacing(SPACE_8)
+                            .align_y(Alignment::Center),
+                        )
+                        .push(
+                            row![
+                                text("2️⃣").size(TYPO_MD),
+                                text(" Share the room ticket with another user so they can join")
+                                    .size(TYPO_SM)
+                                    .width(Length::Fill),
+                            ]
+                            .spacing(SPACE_8)
+                            .align_y(Alignment::Center),
+                        )
+                        .push(
+                            row![
+                                text("3️⃣").size(TYPO_MD),
+                                text(" Chat, send files, and add friends from the chat list")
+                                    .size(TYPO_SM)
+                                    .width(Length::Fill),
+                            ]
+                            .spacing(SPACE_8)
+                            .align_y(Alignment::Center),
+                        )
+                        .spacing(SPACE_6),
+                )
+                .width(Length::Fill)
+                .padding(SPACE_16)
+                .style(move |t| container_card(t)),
             );
         }
 
@@ -4189,12 +4323,12 @@ impl IcedChat {
         }
 
         // ── Recent chats list ──
-        {
+        if !self.first_run {
             let mut section = Column::new().spacing(SPACE_8);
             section = section.push(
                 row![
                     text("Recent Chats").size(TYPO_MD).width(Length::Fill),
-                    text("(click room to open, click ✕ to remove)")
+                    text("(click room to open, click Remove to remove it)")
                         .size(TYPO_XXS)
                         .color(self.color_muted()),
                 ]
@@ -4222,7 +4356,7 @@ impl IcedChat {
         }
 
         // ── All Friends ──
-        {
+        if !self.first_run {
             let mut section = Column::new().spacing(SPACE_8);
             section = section.push(
                 row![
@@ -4262,7 +4396,6 @@ impl IcedChat {
                     .style(move |t| container_surface(t)),
             );
         }
-
         // ── Discovered Users ──
         let mut discovered_users: Vec<(PublicKey, String)> = self
             .neighbors
@@ -4278,8 +4411,7 @@ impl IcedChat {
             .map(|peer| (peer, self.resolve_name(&peer)))
             .collect();
         discovered_users.sort_by(|a, b| a.1.cmp(&b.1));
-        // ── Discovered Users ──
-        {
+        if !self.first_run {
             let mut section = Column::new().spacing(SPACE_8);
             section = section.push(
                 row![
@@ -4332,7 +4464,7 @@ impl IcedChat {
         let label = record.display_label(fid);
         let online = self.friend_online_cache.contains(&pk);
 
-        let status_emoji = if online { "🟢" } else { "🔴" };
+        let status_text = if online { "Online" } else { "Offline" };
         let status_color = if online {
             Color::from_rgb(0.2, 0.7, 0.2)
         } else {
@@ -4347,10 +4479,10 @@ impl IcedChat {
 
         container(
             row![
-                text(status_emoji).size(TYPO_XS),
+                text(status_text).size(TYPO_XXS).color(status_color),
                 text(label).size(TYPO_MD).width(Length::Fill),
                 text(last_seen_str).size(TYPO_XS).color(status_color),
-                button("💬 Chat")
+                button("Chat")
                     .on_press(AppMessage::OpenFriendChat(pk))
                     .padding(SPACE_4),
             ]
@@ -4377,9 +4509,11 @@ impl IcedChat {
 
         container(
             row![
-                text("🟢").size(TYPO_XS),
+                text("Online")
+                    .size(TYPO_XXS)
+                    .color(Color::from_rgb(0.2, 0.7, 0.2)),
                 text(label).size(TYPO_MD).width(Length::Fill),
-                button("💬 Chat")
+                button("Chat")
                     .on_press(AppMessage::OpenFriendChat(pk))
                     .padding(SPACE_4),
             ]
@@ -4447,7 +4581,7 @@ impl IcedChat {
                 .spacing(SPACE_2)
                 .padding(SPACE_8)
                 .width(Length::Fill),
-                button("✕")
+                button("✕ Remove")
                     .on_press(AppMessage::DeleteRoomRequested(topic))
                     .padding(SPACE_4),
             ]
@@ -4480,12 +4614,57 @@ impl IcedChat {
             .height(Length::Fill);
 
         if self.help_visible {
-            widget::container(self.view_help())
+            // Layer: chat content (bottom) → dimmed backdrop (middle) → help panel (top)
+            use iced::widget::Stack;
+            let chat_layer = inner.style(move |t| container_primary(t));
+
+            let backdrop = widget::button(widget::Space::new())
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-                .style(move |t| container_primary(t))
+                .on_press(AppMessage::ToggleHelp)
+                .style(move |t, _status| {
+                    let mut style = iced::widget::button::Style::default();
+                    style.background =
+                        Some(iced::Background::Color(if matches!(t, iced::Theme::Dark) {
+                            Color::from_rgba(0.0, 0.0, 0.0, 0.55)
+                        } else {
+                            Color::from_rgba(0.0, 0.0, 0.0, 0.35)
+                        }));
+                    style
+                });
+
+            let help_panel = widget::container(self.view_help())
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .max_width(480.0)
+                .max_height(600.0)
+                .style(move |t| {
+                    let mut s = iced::widget::container::Style::default();
+                    s.background = Some(iced::Background::Color(bg_surface(t)));
+                    s.border = iced::Border {
+                        radius: SPACE_12.into(),
+                        ..Default::default()
+                    };
+                    s.shadow = iced::Shadow {
+                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                        offset: iced::Vector::new(0.0, 4.0),
+                        blur_radius: 24.0,
+                    };
+                    s
+                });
+
+            Stack::new()
+                .push(chat_layer)
+                .push(backdrop)
+                .push(
+                    widget::container(help_panel)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
                 .into()
         } else {
             inner.style(move |t| container_primary(t)).into()
@@ -4513,12 +4692,12 @@ impl IcedChat {
 
         let mut header = column![
             row![
-                button(" ◀ ").on_press(AppMessage::GoToChatList),
+                button("← Back").on_press(AppMessage::GoToChatList),
                 text(room_name)
                     .size(TYPO_LG)
                     .width(Length::Fill)
                     .wrapping(Wrapping::Word),
-                button(text("⚙").size(TYPO_MD))
+                button(text("Settings").size(TYPO_MD))
                     .on_press(AppMessage::OpenSettings)
                     .padding(SPACE_4),
             ]
@@ -4791,7 +4970,7 @@ impl IcedChat {
                                 .height(Length::Fixed(28.0))
                                 .into()
                         } else {
-                            text("👤").size(TYPO_LG).into()
+                            text("?").size(TYPO_LG).into()
                         }
                     };
                     Row::new()
@@ -4809,7 +4988,7 @@ impl IcedChat {
                                 .height(Length::Fixed(28.0))
                                 .into()
                         } else {
-                            text("👤").size(TYPO_LG).into()
+                            text("?").size(TYPO_LG).into()
                         };
                     Row::new()
                         .push(avatar)
@@ -4891,7 +5070,7 @@ impl IcedChat {
         let has_text = !self.composer_text.is_empty();
 
         // ── Tertiary: help button ── smallest, subdued, sits at the edge
-        let help_btn = button(text("❓").size(TYPO_XS))
+        let help_btn = button(text("?").size(TYPO_XS))
             .on_press(AppMessage::ToggleHelp)
             .style(move |t: &iced::Theme, _status| {
                 let mut s = iced::widget::button::Style::default();
@@ -4907,7 +5086,7 @@ impl IcedChat {
             .padding([SPACE_2, SPACE_4]);
 
         // ── Secondary: attach button ── subdued but visible
-        let attach_btn = button(text("📎").size(TYPO_SM))
+        let attach_btn = button(text("Attach").size(TYPO_SM))
             .on_press(AppMessage::AttachPressed)
             .style(move |t: &iced::Theme, _status| {
                 let mut s = iced::widget::button::Style::default();
@@ -4924,7 +5103,7 @@ impl IcedChat {
 
         // ── Primary: send button ── filled accent colour when text exists,
         // ghost when empty (progressive disclosure)
-        let send_btn = button(text("➤").size(TYPO_MD))
+        let send_btn = button(text("Send").size(TYPO_MD))
             .on_press(AppMessage::SendPressed)
             .style(move |t: &iced::Theme, _status| {
                 let mut s = iced::widget::button::Style::default();
@@ -4960,6 +5139,7 @@ impl IcedChat {
         // ── Main composer row ──
         let composer = row![
             text_input("Type a message…", &self.composer_text)
+                .id(COMPOSER_INPUT)
                 .on_input(AppMessage::InputChanged)
                 .on_submit(AppMessage::SendPressed)
                 .width(Length::Fill),
@@ -4994,42 +5174,68 @@ impl IcedChat {
     }
 
     fn view_help(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, text, Column, Space};
+        use iced::widget::{button, container, scrollable, text, Column, Space};
         use iced::{Alignment, Length};
-        let theme = self.theme();
 
-        let col = Column::new()
-            .push(text("Help").size(TYPO_LG))
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
+        // ── Header: title + accessible close button ──
+        let header = iced::widget::row![
+            text("Help").size(TYPO_LG).width(Length::Fill),
+            button(text("Close").size(TYPO_MD))
+                .on_press(AppMessage::ToggleHelp)
+                .padding(SPACE_4)
+                .style(BUTTON_GHOST),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(SPACE_8);
+
+        // ── Command reference sections ──
+        let commands = Column::new()
+            .spacing(SPACE_6)
+            .push(text("── Commands ──").size(TYPO_XS).style(text_muted_style))
             .push(text("/send <path>    Share a file with peers").size(TYPO_SM))
             .push(text("/image <path>   Share an image inline").size(TYPO_SM))
             .push(text("/download       Fetch the last shared file").size(TYPO_SM))
             .push(text("/leave          Leave this room and delete from history").size(TYPO_SM))
             .push(text("/help           Toggle this menu").size(TYPO_SM))
+            .push(Space::new().height(Length::Fixed(SPACE_4)))
+            .push(text("── Friends ──").size(TYPO_XS).style(text_muted_style))
             .push(text("/friend add <pk> [alias]  Track a friend's online status").size(TYPO_SM))
             .push(text("/friend remove <pk|alias> Stop tracking a friend").size(TYPO_SM))
             .push(text("/friend list    List tracked friends and their status").size(TYPO_SM))
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(Space::new().height(Length::Fixed(SPACE_4)))
+            .push(text("── Messages ──").size(TYPO_XS).style(text_muted_style))
             .push(text("/react <idx> <emoji>  Add a reaction to a message").size(TYPO_SM))
             .push(text("/edit <idx> <text>   Edit a message").size(TYPO_SM))
             .push(text("/delete <idx>        Delete a message").size(TYPO_SM))
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(Space::new().height(Length::Fixed(SPACE_4)))
+            .push(text("── Tips ──").size(TYPO_XS).style(text_muted_style))
             .push(text("Type a message and press Enter to send.").size(TYPO_SM))
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(text("Tip: click ✕ on a room in the chat list to remove it.").size(TYPO_SM))
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(button("❌").on_press(AppMessage::ToggleHelp))
-            .spacing(SPACE_6)
-            .padding(SPACE_24)
-            .align_x(Alignment::Center);
+            .push(text("Click Remove on a room in the chat list to remove it.").size(TYPO_SM));
 
-        container(col)
-            .width(Length::Shrink)
-            .height(Length::Shrink)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .style(move |t| container_surface(t))
-            .into()
+        // ── Footer ──
+        let footer = text("Press Esc to close")
+            .size(TYPO_XS)
+            .style(text_muted_style);
+
+        let dialog_content = Column::new()
+            .push(header)
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(commands)
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(footer)
+            .spacing(SPACE_4)
+            .padding(SPACE_24)
+            .width(Length::Fill);
+
+        container(
+            scrollable(dialog_content)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| iced::widget::container::Style::default())
+        .into()
     }
 
     fn view_settings_screen(&self) -> iced::Element<'_, AppMessage> {
@@ -5079,7 +5285,7 @@ impl IcedChat {
                     .height(Length::Fixed(48.0))
                     .into()
             } else {
-                text("👤").size(TYPO_XL).into()
+                text("?").size(TYPO_XL).into()
             };
         let mut profile_row = Row::new()
             .push(
@@ -5113,10 +5319,8 @@ impl IcedChat {
         }
         let profile_row = profile_row.spacing(SPACE_12).align_y(Alignment::Center);
 
-        let identity_card = section_card(
-            "👤  IDENTITY",
-            vec![nickname_input.into(), profile_row.into()],
-        );
+        let identity_card =
+            section_card("IDENTITY", vec![nickname_input.into(), profile_row.into()]);
 
         // ── Appearance section ──
         let appearance_theme = if self.dark_mode { "Dark" } else { "Light" };
@@ -5135,21 +5339,14 @@ impl IcedChat {
                     .align_x(Alignment::Start),
             )
             .push(
-                button(
-                    text(if self.dark_mode {
-                        "☀ Light"
-                    } else {
-                        "🌙 Dark"
-                    })
-                    .size(TYPO_SM),
-                )
-                .on_press(AppMessage::ToggleDark(!self.dark_mode))
-                .padding([SPACE_6, SPACE_12]),
+                button(text(if self.dark_mode { "Light" } else { "Dark" }).size(TYPO_SM))
+                    .on_press(AppMessage::ToggleDark(!self.dark_mode))
+                    .padding([SPACE_6, SPACE_12]),
             )
             .spacing(SPACE_12)
             .align_y(Alignment::Center);
 
-        let appearance_card = section_card("🎨  APPEARANCE", vec![appearance_row.into()]);
+        let appearance_card = section_card("APPEARANCE", vec![appearance_row.into()]);
 
         // ── Notifications section ──
         let sound_label = if self.sound_enabled {
@@ -5171,21 +5368,14 @@ impl IcedChat {
                     .align_x(Alignment::Start),
             )
             .push(
-                button(
-                    text(if self.sound_enabled {
-                        "🔇 Mute"
-                    } else {
-                        "🔊 Unmute"
-                    })
-                    .size(TYPO_SM),
-                )
-                .on_press(AppMessage::ToggleSound(!self.sound_enabled))
-                .padding([SPACE_6, SPACE_12]),
+                button(text(if self.sound_enabled { "Mute" } else { "Unmute" }).size(TYPO_SM))
+                    .on_press(AppMessage::ToggleSound(!self.sound_enabled))
+                    .padding([SPACE_6, SPACE_12]),
             )
             .spacing(SPACE_12)
             .align_y(Alignment::Center);
 
-        let notifications_card = section_card("🔔  NOTIFICATIONS", vec![notifications_row.into()]);
+        let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into()]);
 
         // ── Network section ──
         let network_info = row![text(format!(
@@ -5205,8 +5395,7 @@ impl IcedChat {
         .size(TYPO_SM),]
         .spacing(SPACE_4);
 
-        let network_card =
-            section_card("🌐  NETWORK", vec![network_info.into(), mesh_status.into()]);
+        let network_card = section_card("NETWORK", vec![network_info.into(), mesh_status.into()]);
 
         // ── Relay section ──
         let relay_info =
@@ -5217,7 +5406,7 @@ impl IcedChat {
             .size(TYPO_XS)
             .style(text_muted_style);
 
-        let relay_card = section_card("📡  RELAY", vec![relay_info.into(), relay_note.into()]);
+        let relay_card = section_card("RELAY", vec![relay_info.into(), relay_note.into()]);
 
         // ── Logs & Diagnostics section ──
         let data_dir_str = self.data_dir.to_string_lossy().to_string();
@@ -5261,7 +5450,7 @@ impl IcedChat {
             .align_y(Alignment::Center);
 
         let logs_card = section_card(
-            "📋  LOGS & DIAGNOSTICS",
+            "LOGS & DIAGNOSTICS",
             vec![logs_row.into(), data_dir_label.into()],
         );
 
@@ -5323,7 +5512,7 @@ impl IcedChat {
                 .align_y(Alignment::Center)
         };
 
-        let data_card = section_card("💾  DATA", vec![clear_history_row.into()]);
+        let data_card = section_card("DATA", vec![clear_history_row.into()]);
 
         // ── Bottom navigation ──
         let nav_row = Row::new()
@@ -5381,6 +5570,34 @@ impl IcedChat {
             .style(move |t| container_primary(t))
             .into()
     }
+}
+
+// ── Global keyboard shortcuts subscription ─────────────────────────────
+
+/// Subscribe to global keyboard shortcuts (Escape, Ctrl+N, Ctrl+Backspace, /).
+pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
+    use iced::keyboard::{self, key};
+    keyboard::listen().map(|event: keyboard::Event| -> AppMessage {
+        match event {
+            keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                let ctrl = modifiers.control();
+                match key {
+                    key::Key::Named(key::Named::Escape) => AppMessage::Shortcut(Shortcut::Escape),
+                    key::Key::Named(key::Named::Backspace) if ctrl => {
+                        AppMessage::Shortcut(Shortcut::BackToChatList)
+                    }
+                    key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => {
+                        AppMessage::Shortcut(Shortcut::NewChat)
+                    }
+                    key::Key::Character(c) if c == "/" => {
+                        AppMessage::Shortcut(Shortcut::QuickCommand)
+                    }
+                    _ => AppMessage::Noop,
+                }
+            }
+            _ => AppMessage::Noop,
+        }
+    })
 }
 
 // ── Subscription ──────────────────────────────────────────────────────

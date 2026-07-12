@@ -639,12 +639,16 @@ fn main() -> Result<()> {
     )
     .title(|_: &IcedChat| "Iroh Gossip Chat".to_string())
     .subscription(|state: &IcedChat| {
-        IcedChat::subscription(
-            Arc::clone(&state.net_rx),
-            Arc::clone(&state.friend_events_rx),
-            Arc::clone(&state.whisper_events_rx),
-            Arc::clone(&state.inbox_events_rx),
-        )
+        let mut subs: Vec<iced::Subscription<app::AppMessage>> = vec![
+            IcedChat::subscription(
+                Arc::clone(&state.net_rx),
+                Arc::clone(&state.friend_events_rx),
+                Arc::clone(&state.whisper_events_rx),
+                Arc::clone(&state.inbox_events_rx),
+            ),
+            app::keyboard_shortcuts_subscription(),
+        ];
+        iced::Subscription::batch(subs)
     })
     .theme(|state: &IcedChat| {
         if state.dark_mode {
