@@ -1011,6 +1011,13 @@ pub struct IcedChat {
     /// Durable conversation records — persisted to `conversations.json`.
     /// Tracks metadata (peer, name, kind, archived) for all conversations.
     conversation_store: ConversationStore,
+    /// Peers currently connected via gossip, used as the source list for the
+    /// "Discovered Peers" sidebar section.
+    discovered_peers: Vec<PublicKey>,
+    /// PublicKey -> online indicator cache (populated from neighbors set).
+    /// Separate from friend_online_cache to avoid conflating friend vs
+    /// discovered-peer online status.
+    discovered_online_cache: HashSet<PublicKey>,
 }
 
 /// Tracks the UI-level lifecycle of an outgoing friend request.
@@ -1256,6 +1263,8 @@ pub enum AppMessage {
         conversation_topic: TopicId,
         content: String,
     },
+    /// New peers discovered via the public-room DHT continuous tracker.
+    NewDiscoveredPeers(Vec<PublicKey>),
 }
 
 // ── Performance metrics ──────────────────────────────────────────────
@@ -1774,6 +1783,8 @@ impl IcedChat {
             download_progress_queue: Arc::new(StdMutex::new(VecDeque::new())),
             public_room_safety: None,
             conversation_store: ConversationStore::load_or_default(&data_dir),
+            discovered_peers: Vec::new(),
+            discovered_online_cache: HashSet::new(),
         }
     }
 
@@ -2266,6 +2277,7 @@ impl IcedChat {
             AppMessage::FriendRequestFailed { .. } => "FriendRequestFailed",
             AppMessage::FriendRequestReceived { .. } => "FriendRequestReceived",
             AppMessage::FriendRequestRetry(_) => "FriendRequestRetry",
+            AppMessage::NewDiscoveredPeers(_) => "NewDiscoveredPeers",
             AppMessage::IncomingFriendRequestAccept { .. } => "IncomingFriendRequestAccept",
             AppMessage::IncomingFriendRequestDecline { .. } => "IncomingFriendRequestDecline",
             AppMessage::IncomingFriendRequestProcessed { .. } => "IncomingFriendRequestProcessed",
@@ -5040,6 +5052,12 @@ impl IcedChat {
             }
 
             AppMessage::ConnMonitorTick => {
+                // Rebuild discovered peers list from gossip neighbors
+                self.discovered_peers = self.neighbors.iter().copied().collect();
+                self.discovered_online_cache = self.neighbors.clone();
+                // Also update friend online cache from neighbors
+                self.friend_online_cache = self.neighbors.clone();
+
                 // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
                 let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
 
@@ -5325,6 +5343,15 @@ impl IcedChat {
             }
 
             AppMessage::Noop => iced::Task::none(),
+
+            AppMessage::NewDiscoveredPeers(peers) => {
+                for peer in peers {
+                    if !self.discovered_peers.contains(&peer) {
+                        self.discovered_peers.push(peer);
+                    }
+                }
+                iced::Task::none()
+            }
 
             AppMessage::Scrolled(offset, vp_h) => {
                 self.scroll_offset = offset;
@@ -6156,6 +6183,9 @@ impl IcedChat {
         // Chats section
         let chats_section = self.view_sidebar_chats();
 
+        // Discovered Peers section
+        let discovered_section = self.view_sidebar_discovered_peers();
+
         // Friends section
         let friends_section = self.view_sidebar_friends();
 
@@ -6176,6 +6206,7 @@ impl IcedChat {
                 left: SPACE_12,
             }))
             .push(chats_section)
+            .push(discovered_section)
             .push(friends_section)
             .push(requests_section)
             .push(Space::new().height(Length::Fill));
@@ -6365,9 +6396,130 @@ impl IcedChat {
         container(btn).width(Length::Fill).into()
     }
 
+    /// Generate a small colored avatar block from a peer's public key bytes.
+    fn peer_avatar_block(&self, peer: &PublicKey) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{container, text};
+        use iced::{Background, Border, Length};
+
+        let bytes = peer.as_bytes();
+        let r = bytes[0] as f32 / 255.0;
+        let g = bytes[1] as f32 / 255.0;
+        let b = bytes[2] as f32 / 255.0;
+        let avatar_color = Color::from_rgb(r, g, b);
+
+        if let Some(Some(handle)) = self.friend_image_handles.get(peer) {
+            return iced::widget::image(handle.clone())
+                .width(Length::Fixed(24.0))
+                .height(Length::Fixed(24.0))
+                .into();
+        }
+
+        let short = peer.fmt_short().to_string();
+        let first_char = short.chars().next().unwrap_or('?').to_string();
+
+        container(
+            text(first_char)
+                .size(TYPO_XS)
+                .color(Color::WHITE)
+                .width(Length::Fill),
+        )
+        .center_y(Length::Fill)
+        .width(Length::Fixed(24.0))
+        .height(Length::Fixed(24.0))
+        .style(move |_t| container::Style {
+            background: Some(Background::Color(avatar_color)),
+            border: Border {
+                radius: 12.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+    }
+
+    /// "Discovered Peers" section of the sidebar - gossip-connected peers.
+    fn view_sidebar_discovered_peers(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text, Column, Row};
+        use iced::{Alignment, Length};
+
+        let theme = self.theme();
+        let mut section = Column::new().spacing(SPACE_2);
+
+        section = section.push(
+            container(text("Discovered Peers").size(TYPO_XS).style(text_muted_style))
+                .padding(iced::Padding {
+                    top: SPACE_8,
+                    right: SPACE_12,
+                    bottom: SPACE_4,
+                    left: SPACE_12,
+                })
+                .width(Length::Fill),
+        );
+
+        let mut sorted: Vec<&PublicKey> = self.discovered_peers.iter().collect();
+        sorted.sort_by(|a, b| a.fmt_short().to_string().cmp(&b.fmt_short().to_string()));
+
+        let mut has_peers = false;
+        for peer in sorted {
+            has_peers = true;
+            let online = self.neighbors.contains(peer);
+            let status_dot = if online { "\u{25cf}" } else { "\u{25cb}" };
+            let short_key = peer.fmt_short().to_string();
+
+            let fid = boru_chat::friends::FriendId::from_public_key(*peer);
+            let is_friend = self.friends.get(&fid)
+                .map(|r| r.relationship.can_message()).unwrap_or(false);
+
+            let has_pending_request = matches!(
+                self.outgoing_request_states.get(peer),
+                Some(OutgoingRequestState::Pending)
+            );
+
+            let mut row_el = Row::new()
+                .push(self.peer_avatar_block(peer))
+                .push(
+                    text(format!("{} {}", status_dot, short_key))
+                        .size(TYPO_SM)
+                        .color(if online { text_remote_body(&theme) } else { self.color_muted() })
+                        .width(Length::Fill),
+                )
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center)
+                .padding([SPACE_4, SPACE_12])
+                .width(Length::Fill);
+
+            if is_friend {
+                row_el = row_el.push(
+                    button(text("Chat").size(TYPO_XS))
+                        .on_press(AppMessage::OpenFriendChat(*peer))
+                        .padding([SPACE_2, SPACE_6]),
+                );
+            } else if has_pending_request {
+                row_el = row_el.push(text("Sent").size(TYPO_XS).color(self.color_muted()));
+            } else {
+                row_el = row_el.push(
+                    button(text("+ Add").size(TYPO_XS))
+                        .on_press(AppMessage::SendFriendRequest(*peer))
+                        .padding([SPACE_2, SPACE_6]),
+                );
+            }
+
+            section = section.push(container(row_el).width(Length::Fill));
+        }
+
+        if !has_peers {
+            section = section.push(
+                container(text("No peers discovered yet.").size(TYPO_XS).color(self.color_muted()))
+                    .padding([SPACE_4, SPACE_12]),
+            );
+        }
+
+        section.into()
+    }
+
     /// "Friends" section of the sidebar — all friends with "Message" button.
     fn view_sidebar_friends(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, scrollable, text, Column, Space};
+        use iced::widget::{button, column, container, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = self.theme();
@@ -6433,23 +6585,27 @@ impl IcedChat {
             };
             let status_dot = if online { "●" } else { "○" };
 
-            let row_el = row![
-                text(format!("{status_dot} {label}"))
-                    .size(TYPO_SM)
-                    .color(if online {
-                        text_remote_body(&theme)
-                    } else {
-                        self.color_muted()
-                    })
-                    .width(Length::Fill),
-                button(text("Chat").size(TYPO_XS))
-                    .on_press(AppMessage::OpenFriendChat(pk))
-                    .padding([SPACE_2, SPACE_6]),
-            ]
-            .spacing(SPACE_4)
-            .align_y(Alignment::Center)
-            .padding([SPACE_4, SPACE_12])
-            .width(Length::Fill);
+            let row_el = Row::new()
+                .push(self.peer_avatar_block(&pk))
+                .push(
+                    text(format!("{} {}", status_dot, label))
+                        .size(TYPO_SM)
+                        .color(if online {
+                            text_remote_body(&theme)
+                        } else {
+                            self.color_muted()
+                        })
+                        .width(Length::Fill),
+                )
+                .push(
+                    button(text("Chat").size(TYPO_XS))
+                        .on_press(AppMessage::OpenFriendChat(pk))
+                        .padding([SPACE_2, SPACE_6]),
+                )
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center)
+                .padding([SPACE_4, SPACE_12])
+                .width(Length::Fill);
 
             section = section.push(container(row_el).width(Length::Fill));
         }
