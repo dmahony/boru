@@ -19,11 +19,15 @@ use boru_chat::chat_core::friend_ping::{
     FRIEND_PING_ALPN,
 };
 use boru_chat::chat_history::ChatHistoryStore;
+use boru_chat::discovery_backend::MainlineDhtBackend;
 use boru_chat::friends::{FriendId, FriendsStore};
 use boru_chat::inbox::{InboxHandle, InboxProtocol, INBOX_ALPN};
 use boru_chat::mailbox::MailboxStore;
 use boru_chat::net::{Gossip, GOSSIP_ALPN};
 use boru_chat::proto::TopicId;
+use boru_chat::public_room::PublicNetwork;
+use boru_chat::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
+use boru_chat::public_room_tracker::PublicRoomTracker;
 use boru_chat::room::RoomStore;
 use boru_chat::room_history::RoomHistoryStore;
 use clap::Parser;
@@ -397,6 +401,8 @@ fn main() -> Result<()> {
         whisper_events_rx,
         whisper_handle,
         inbox_events_rx,
+        continuous_tracker,
+        discovered_peers_rx,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
         use std::net::{Ipv4Addr, SocketAddrV4};
@@ -568,6 +574,31 @@ fn main() -> Result<()> {
             let _ = friend_mgr.add_friend_addrs(peer, addrs).await;
         }
 
+        // ── Continuous DHT discovery & publication ────────────────────
+        // Spawn background tasks that periodically publish local presence
+        // and discover new peers on the DHT for the public lobby topic.
+        let dht = distributed_topic_tracker::Dht::new(
+            &distributed_topic_tracker::DhtConfig::default(),
+        );
+        let dummy_namespace =
+            distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+        let dht_backend = MainlineDhtBackend::new(dht, dummy_namespace);
+        let public_room_tracker = PublicRoomTracker::start(
+            Box::new(dht_backend),
+            PublicNetwork::Mainnet,
+            endpoint.id(),
+            endpoint.secret_key().clone(),
+        )
+        .await?;
+        let (new_peers_tx, new_peers_rx) =
+            tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
+        let continuous_tracker = ContinuousTracker::start(
+            public_room_tracker,
+            ContinuousTrackerConfig::default(),
+            new_peers_tx,
+        );
+        let discovered_peers_rx = Arc::new(Mutex::new(new_peers_rx));
+
         Result::<_>::Ok((
             endpoint,
             memory_lookup,
@@ -586,6 +617,8 @@ fn main() -> Result<()> {
             whisper_events_rx,
             whisper_handle,
             inbox_events_rx,
+            continuous_tracker,
+            discovered_peers_rx,
         ))
     })?;
 
@@ -618,6 +651,8 @@ fn main() -> Result<()> {
             chat_history,
             backfill_handle,
             initial_topic.is_some() && args.command.is_none(),
+            continuous_tracker,
+            Arc::clone(&discovered_peers_rx),
         ),
         initial_topic,
     )));
@@ -647,6 +682,7 @@ fn main() -> Result<()> {
                 Arc::clone(&state.friend_events_rx),
                 Arc::clone(&state.whisper_events_rx),
                 Arc::clone(&state.inbox_events_rx),
+                Arc::clone(&state.discovered_peers_rx),
             ),
             app::keyboard_shortcuts_subscription(),
         ];

@@ -36,6 +36,7 @@ use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
 use boru_chat::net::Gossip;
 use boru_chat::outbox::{OutboxEntry, OutboxStore};
 use boru_chat::proto::TopicId;
+use boru_chat::public_room_continuous::ContinuousTracker;
 use boru_chat::public_room_safety::PublicRoomSafety;
 use boru_chat::room::RoomStore;
 use boru_chat::room_cleanup::delete_room_history;
@@ -1011,13 +1012,20 @@ pub struct IcedChat {
     /// Durable conversation records — persisted to `conversations.json`.
     /// Tracks metadata (peer, name, kind, archived) for all conversations.
     conversation_store: ConversationStore,
-    /// Peers currently connected via gossip, used as the source list for the
+    /// Peers currently discovered via DHT, used as the source list for the
     /// "Discovered Peers" sidebar section.
     discovered_peers: Vec<PublicKey>,
     /// PublicKey -> online indicator cache (populated from neighbors set).
     /// Separate from friend_online_cache to avoid conflating friend vs
     /// discovered-peer online status.
     discovered_online_cache: HashSet<PublicKey>,
+    /// Handle to the continuous DHT discovery & publication tracker.
+    /// Kept alive for the lifetime of the app — dropping it cancels the
+    /// background publish/discover tasks.
+    continuous_tracker: Option<ContinuousTracker>,
+    /// Receiver handle for discovered peers from the DHT discovery loop.
+    /// Read by the subscription stream to produce NewDiscoveredPeers events.
+    pub discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
 }
 
 /// Tracks the UI-level lifecycle of an outgoing friend request.
@@ -1617,6 +1625,8 @@ impl IcedChat {
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
         backfill_handle: BackfillHandle,
         return_to_chat_list_after_open: bool,
+        continuous_tracker: ContinuousTracker,
+        discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
     ) -> Self {
         let (initial_topic, initial_bootstrap) =
             initial_room.unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
@@ -1785,6 +1795,8 @@ impl IcedChat {
             conversation_store: ConversationStore::load_or_default(&data_dir),
             discovered_peers: Vec::new(),
             discovered_online_cache: HashSet::new(),
+            continuous_tracker: Some(continuous_tracker),
+            discovered_peers_rx,
         }
     }
 
@@ -8057,51 +8069,79 @@ impl std::hash::Hash for InboxRxHandle {
     }
 }
 
+/// Wrapper for the continuous tracker's discovered-peers channel.
+/// Uses a bounded mpsc receiver wrapped in Arc<Mutex<>>.
+struct DiscoveredPeersRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>);
+
+impl std::hash::Hash for DiscoveredPeersRxHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
 fn subscription_stream(
     rx: &RxHandle,
     friend_rx: &FriendRxHandle,
     whisper_rx: &WhisperRxHandle,
     inbox_rx: &InboxRxHandle,
+    discovered_rx: &DiscoveredPeersRxHandle,
 ) -> Pin<Box<dyn Stream<Item = AppMessage> + Send>> {
     let rx = Arc::clone(&rx.0);
     let friend_rx = Arc::clone(&friend_rx.0);
     let whisper_rx = Arc::clone(&whisper_rx.0);
     let inbox_rx = Arc::clone(&inbox_rx.0);
+    let discovered_rx = Arc::clone(&discovered_rx.0);
     Box::pin(n0_future::stream::unfold(
-        (rx, friend_rx, whisper_rx, inbox_rx),
-        |(rx, friend_rx, whisper_rx, inbox_rx)| async move {
+        (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx),
+        |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)| async move {
             let mut rx_guard = rx.lock().await;
             let mut friend_guard = friend_rx.lock().await;
             let mut whisper_guard = whisper_rx.lock().await;
             let mut inbox_guard = inbox_rx.lock().await;
+            let mut discovered_guard = discovered_rx.lock().await;
             tokio::select! {
                 event = rx_guard.recv() => {
                     drop(whisper_guard);
                     drop(friend_guard);
                     drop(inbox_guard);
+                    drop(discovered_guard);
                     drop(rx_guard);
-                    event.map(|e| (AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx)))
+                    event.map(|e| (AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)))
                 }
                 event = friend_guard.recv() => {
                     drop(whisper_guard);
                     drop(rx_guard);
                     drop(inbox_guard);
+                    drop(discovered_guard);
                     drop(friend_guard);
-                    event.map(|e| (AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx)))
+                    event.map(|e| (AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)))
                 }
                 event = whisper_guard.recv() => {
                     drop(friend_guard);
                     drop(rx_guard);
                     drop(inbox_guard);
+                    drop(discovered_guard);
                     drop(whisper_guard);
-                    event.map(|e| (AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx)))
+                    event.map(|e| (AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)))
                 }
                 event = inbox_guard.recv() => {
                     drop(friend_guard);
                     drop(rx_guard);
                     drop(whisper_guard);
+                    drop(discovered_guard);
                     drop(inbox_guard);
-                    event.map(|e| (AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx)))
+                    event.map(|e| (AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)))
+                }
+                peers = discovered_guard.recv() => {
+                    drop(friend_guard);
+                    drop(rx_guard);
+                    drop(whisper_guard);
+                    drop(inbox_guard);
+                    drop(discovered_guard);
+                    match peers {
+                        Some(peers) => Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx))),
+                        None => None,
+                    }
                 }
             }
         },
@@ -8114,6 +8154,7 @@ impl IcedChat {
         friend_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
         whisper_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
         inbox_rx: Arc<Mutex<UnboundedReceiver<InboxEvent>>>,
+        discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
     ) -> iced::Subscription<AppMessage> {
         iced::Subscription::batch(vec![
             iced::time::every(std::time::Duration::from_secs(1))
@@ -8126,9 +8167,10 @@ impl IcedChat {
                     FriendRxHandle(friend_rx),
                     WhisperRxHandle(whisper_rx),
                     InboxRxHandle(inbox_rx),
+                    DiscoveredPeersRxHandle(discovered_peers_rx),
                 ),
-                |(rx, friend_rx, whisper_rx, inbox_rx)| {
-                    subscription_stream(&rx, &friend_rx, &whisper_rx, &inbox_rx)
+                |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)| {
+                    subscription_stream(&rx, &friend_rx, &whisper_rx, &inbox_rx, &discovered_rx)
                 },
             ),
         ])
