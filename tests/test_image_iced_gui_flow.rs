@@ -183,6 +183,7 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
         roster_doc_a,
         receiver_a,
         net_tx_a,
+        None, // safety: private room
     ));
 
     // Peer A announces presence
@@ -232,6 +233,7 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
         roster_doc_b,
         receiver_b,
         net_tx_b,
+        None, // safety: private room
     ));
 
     let about_me_b = SignedMessage::sign_and_encode(

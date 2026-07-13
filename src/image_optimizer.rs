@@ -24,8 +24,8 @@ pub const CHAT_IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
 /// Max wire size for the optimized output (2 MiB).
 pub const CHAT_IMAGE_OPTIMIZED_MAX_BYTES: usize = 2 * 1024 * 1024;
 
-/// Longest edge of the output image in pixels (1920 px).  Never upscaled.
-pub const INLINE_IMAGE_MAX_DIM: u32 = 1920;
+/// Longest edge of the output image in pixels (1280 px).  Never upscaled.
+pub const INLINE_IMAGE_MAX_DIM: u32 = 1280;
 
 /// Starting JPEG quality for send-side optimisation (the optimizer steps
 /// down to 72, 64, 56 if the output exceeds [`CHAT_IMAGE_OPTIMIZED_MAX_BYTES`]).

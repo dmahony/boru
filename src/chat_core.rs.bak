@@ -1622,11 +1622,6 @@ impl Drop for CancelGuard {
 ///
 /// On success the blob bytes are returned.  The caller must ensure the blob
 /// was actually stored (the stream only confirms the download completed).
-///
-/// When `max_bytes` is `Some(limit)` the download is aborted as soon as the
-/// cumulative progress exceeds the limit — the stream is abandoned and the
-/// partially-stored blob is never loaded into memory.  When `None` (the
-/// private-room path) no size enforcement is applied.
 pub async fn download_blob_with_progress(
     blob_store: &iroh_blobs::api::Store,
     endpoint: &Endpoint,
@@ -1635,7 +1630,7 @@ pub async fn download_blob_with_progress(
     name: String,
     kind: TransferKind,
     on_progress: impl FnMut(TransferProgress) + Send + 'static,
-    max_bytes: Option<u64>,
+    max_size: Option<usize>,
 ) -> Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
 
@@ -1675,20 +1670,6 @@ pub async fn download_blob_with_progress(
         use iroh_blobs::api::downloader::DownloadProgressItem;
         match stream.next().await {
             Some(DownloadProgressItem::Progress(n)) => {
-                // Enforce streaming size cap before forwarding the event.
-                if let Some(max) = max_bytes {
-                    if n > max {
-                        cancel_guard.disarm();
-                        emit(TransferProgress::Failed {
-                            id,
-                            name,
-                            error: format!("blob too large ({} bytes, limit {max} bytes)", n,),
-                        });
-                        return Err(n0_error::anyerr!(
-                            "blob too large: {n} bytes, limit {max} bytes",
-                        ));
-                    }
-                }
                 emit(TransferProgress::Progress {
                     id,
                     kind,
@@ -1732,10 +1713,23 @@ pub async fn download_blob_with_progress(
         name: name.clone(),
     });
 
-    // Read back the blob.
+    // Read back the blob with optional size enforcement.
     let mut reader = blob_store.blobs().reader(hash);
     let mut buf = Vec::new();
-    reader.read_to_end(&mut buf).await?;
+    if let Some(max) = max_size {
+        let cap = max.saturating_add(1);
+        let mut limited = reader.take(cap as u64);
+        limited.read_to_end(&mut buf).await?;
+        if buf.len() > max {
+            return Err(n0_error::anyerr!(
+                "blob size {} exceeds max_blob_size_bytes {}",
+                buf.len(),
+                max,
+            ));
+        }
+    } else {
+        reader.read_to_end(&mut buf).await?;
+    }
     Ok(buf)
 }
 
@@ -1780,7 +1774,7 @@ pub async fn download_blob_with_safety(
         }
     }
 
-    let max_size = safety.map(|s| s.config().max_blob_size_bytes as u64);
+    let max_size = safety.map(|s| s.config().max_blob_size_bytes);
     let result = download_blob_with_progress(
         blob_store,
         endpoint,
@@ -1796,27 +1790,6 @@ pub async fn download_blob_with_safety(
     // ── Release the download slot ───────────────────────────────
     if let Some(s) = safety {
         s.release_download(&original_sender);
-    }
-
-    // ── Blob size enforcement ──────────────────────────────
-    if let Some(s) = safety {
-        if let Ok(ref bytes) = result {
-            if !s.check_blob_size(bytes.len()) {
-                let max = s.config().max_blob_size_bytes;
-                tracing::debug!(
-                    "safety: blob from {} exceeds size limit ({} > {})",
-                    original_sender.fmt_short(),
-                    bytes.len(),
-                    max,
-                );
-                return Err(n0_error::anyerr!(
-                    "blob from {} exceeds size limit ({} > {} bytes)",
-                    original_sender.fmt_short(),
-                    bytes.len(),
-                    max,
-                ));
-            }
-        }
     }
 
     result

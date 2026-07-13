@@ -28,7 +28,6 @@ pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod proto;
-pub mod topic_derivation;
 pub mod public_room;
 #[cfg(feature = "net")]
 /// Public-room configuration defaults and limits.
@@ -38,13 +37,6 @@ pub mod public_room;
 /// limits, blob announcement limits, download limits, and backfill caps
 /// are centralised here.  See [`PublicRoomConfig`] for field-level docs.
 pub mod public_room_config;
-/// Safety and rate-limit enforcement for untrusted public-room message flows.
-///
-/// Wraps [`PublicRoomConfig`] with per-peer state for message size, nickname
-/// length, message rate, blob announcements, and download-queue bounds.
-/// Pass `None` for private rooms to skip every check.
-#[cfg(feature = "net")]
-pub mod public_room_safety;
 /// Continuous DHT publication and discovery for public rooms.
 ///
 /// Spawns background tasks that periodically re-publish local presence and
@@ -52,10 +44,18 @@ pub mod public_room_safety;
 /// an mpsc channel for the caller to join.
 #[cfg(feature = "net")]
 pub mod public_room_continuous;
+/// Safety and rate-limit enforcement for untrusted public-room message flows.
+///
+/// Wraps [`PublicRoomConfig`] with per-peer state for message size, nickname
+/// length, message rate, blob announcements, and download-queue bounds.
+/// Pass `None` for private rooms to skip every check.
+#[cfg(feature = "net")]
+pub mod public_room_safety;
 /// Boru-specific public-room topic tracker that wraps a [`TopicDiscoveryBackend`]
 /// with boru's identity model for publish-once / discover-once operations.
 #[cfg(feature = "net")]
 pub mod public_room_tracker;
+pub mod topic_derivation;
 
 /// Shared chat core — state machine, protocol types, and network event handling.
 ///

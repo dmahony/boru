@@ -51,7 +51,7 @@ pub fn public_room_topic(network_byte: u8, room_name: &str, version: u8) -> Topi
     hasher.update(&[version]);
 
     let hash = hasher.finalize();
-    TopicId::from(<[u8; 32]>::from(*hash.as_bytes()))
+    TopicId::from(*hash.as_bytes())
 }
 
 #[cfg(test)]
@@ -102,8 +102,9 @@ mod tests {
     #[test]
     fn known_answer_mainnet() {
         let topic = public_room_topic(0x00, "public-lobby", 1);
-        let expected = hex::decode("ebab66f60ff734452d4fd83283b4d5ee221dfa73a81cc2ef520b919378fe4016")
-            .unwrap();
+        let expected =
+            hex::decode("ebab66f60ff734452d4fd83283b4d5ee221dfa73a81cc2ef520b919378fe4016")
+                .unwrap();
         assert_eq!(topic.as_bytes(), &expected[..]);
     }
 
@@ -111,8 +112,9 @@ mod tests {
     #[test]
     fn known_answer_development() {
         let topic = public_room_topic(0x01, "public-lobby", 1);
-        let expected = hex::decode("b8a6372ebf048d3756082eb4adb6d181a46b6c249395532acbd6043e5718bb1a")
-            .unwrap();
+        let expected =
+            hex::decode("b8a6372ebf048d3756082eb4adb6d181a46b6c249395532acbd6043e5718bb1a")
+                .unwrap();
         assert_eq!(topic.as_bytes(), &expected[..]);
     }
 
@@ -120,8 +122,9 @@ mod tests {
     #[test]
     fn known_answer_test() {
         let topic = public_room_topic(0x02, "public-lobby", 1);
-        let expected = hex::decode("188dc1a76d5766010e85a4e8deb3424526bc1c8e0e02d784373e115afa0f308c")
-            .unwrap();
+        let expected =
+            hex::decode("188dc1a76d5766010e85a4e8deb3424526bc1c8e0e02d784373e115afa0f308c")
+                .unwrap();
         assert_eq!(topic.as_bytes(), &expected[..]);
     }
 

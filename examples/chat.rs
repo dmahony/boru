@@ -34,15 +34,17 @@ use boru_chat::chat_core::friend_ping::{
     DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
 };
 use boru_chat::chat_core::{
-    check_peer_connection_type, collect_bootstrap_peers, download_blob_with_progress,
-    download_candidates, fmt_relay_mode, handle_net_event, message_hash, refresh_bootstrap_peers,
-    update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, MeshHealth, Message,
-    NetEvent, SignedMessage, StatusContext, Ticket,
+    check_peer_connection_type, collect_bootstrap_peers, download_blob_with_safety,
+    download_candidates, fmt_relay_mode, handle_net_event_with_safety, message_hash,
+    refresh_bootstrap_peers, update_connection_counts, AppState, ChatEntry, ChatKind,
+    ConnectionType, MeshHealth, Message, NetEvent, SignedMessage, StatusContext, Ticket,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::friends::{FriendId, FriendRecord, FriendsStore};
 use boru_chat::inbox::{send_sync_request, InboxEvent, InboxHandle, InboxProtocol, INBOX_ALPN};
 use boru_chat::mailbox::{MailboxAck, MailboxIdentity, MailboxStore};
+use boru_chat::public_room_config::PublicRoomConfig;
+use boru_chat::public_room_safety::PublicRoomSafety;
 use boru_chat::room::RoomStore;
 use boru_chat::room_docs::{
     self, create_metadata_doc, create_roster_doc, list_members, read_metadata, RoomDocs,
@@ -654,15 +656,22 @@ async fn main() -> Result<()> {
         topic,
     })));
 
+    // ── Public-room safety ─────────────────────────────────────────
+    // Apply per-peer rate limits, message-size bounds, and download-queue
+    // depth checks to this (public) gossip room.
+    let safety = Arc::new(PublicRoomSafety::new(PublicRoomConfig::default()));
+
     // Spawn the room-aware event forwarder: metadata + roster docs consume
     // their respective messages; everything else goes to net_tx for chat.
     let room_forwarder_net_tx = net_tx.clone();
+    let safety_forward = safety.clone();
     task::spawn(async move {
         room_docs::forward_room_events_for_chat(
             metadata_doc,
             roster_doc,
             receiver,
             room_forwarder_net_tx,
+            Some(safety_forward), // safety: public room
         )
         .await;
     });
@@ -766,6 +775,7 @@ async fn main() -> Result<()> {
                     &whisper_handle,
                     &chat_history,
                     topic,
+                    &safety,
                 ).await?;
                 if app.friends_dirty {
                     if let Err(err) = app.friends.save() {
@@ -841,9 +851,9 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                // ── Process the event through the standard handler ──
+                // ── Process the event through the safety-wrapped handler ──
                 let event_clone = event.clone();
-                handle_net_event(event_clone, &mut app)?;
+                handle_net_event_with_safety(event_clone, &mut app, Some(&*safety))?;
 
                 // ── Reconnection replay: re-broadcast pending messages ──
                 if let NetEvent::NeighborUp { peer } = &event {
@@ -902,6 +912,7 @@ async fn main() -> Result<()> {
                         let endpoint = endpoint.clone();
                         let net_tx = net_tx.clone();
                         let local_history_count = chat_history.lock().unwrap().len();
+                        let safety_backfill = safety.clone();
                         tokio::spawn(async move {
                             let _ = handle
                                 .try_backfill_from_peer(
@@ -909,6 +920,7 @@ async fn main() -> Result<()> {
                                     peer_owned,
                                     local_history_count,
                                     net_tx,
+                                    Some(safety_backfill),
                                 )
                                 .await;
                         });
@@ -1004,7 +1016,7 @@ async fn main() -> Result<()> {
                 for (name, hash, sender_pk) in pending_images {
                     let blob_hash: iroh_blobs::Hash = hash.into();
                     let candidates = download_candidates(sender_pk, &app.status.neighbors);
-                    match download_blob_with_progress(
+                    match download_blob_with_safety(
                         &blob_store,
                         &endpoint,
                         blob_hash,
@@ -1012,6 +1024,8 @@ async fn main() -> Result<()> {
                         name.clone(),
                         TransferKind::Image,
                         |_| {},
+                        Some(&*safety),
+                        sender_pk,
                     )
                     .await
                     {
@@ -1304,6 +1318,7 @@ async fn handle_ui_event(
     whisper_handle: &WhisperHandle,
     chat_history: &Arc<Mutex<ChatHistoryStore>>,
     topic: TopicId,
+    safety: &Arc<PublicRoomSafety>,
 ) -> Result<bool> {
     match event {
         UiEvent::Key(key) => {
@@ -1320,6 +1335,7 @@ async fn handle_ui_event(
                 whisper_handle,
                 chat_history,
                 topic,
+                safety,
             )
             .await?;
             Ok(true)
@@ -1346,6 +1362,7 @@ async fn handle_key_event(
     whisper_handle: &WhisperHandle,
     chat_history: &Arc<Mutex<ChatHistoryStore>>,
     _topic: TopicId,
+    safety: &Arc<PublicRoomSafety>,
 ) -> Result<()> {
     let visible_height = app.last_log_height;
     match key {
@@ -1449,7 +1466,7 @@ async fn handle_key_event(
                     let peer_id = ticket.addr().id;
                     let candidates = download_candidates(peer_id, &app.status.neighbors);
                     app.push_system(format!("Downloading: {filename}..."));
-                    if let Err(e) = download_blob_with_progress(
+                    if let Err(e) = download_blob_with_safety(
                         blob_store,
                         endpoint,
                         ticket.hash(),
@@ -1457,6 +1474,8 @@ async fn handle_key_event(
                         filename.clone(),
                         TransferKind::File,
                         |_| {},
+                        Some(&*safety),
+                        peer_id,
                     )
                     .await
                     {
@@ -2756,6 +2775,82 @@ mod tests {
     use super::*;
     use boru_chat::chat_core::Composer;
     use iroh::EndpointAddr;
+
+    /// Verifies that the public-room safety instance created in `main()` with
+    /// `PublicRoomConfig::default()` is functional — an oversized message is
+    /// rejected and a normal message passes through.
+    ///
+    /// This is the production-call-site test: it uses the exact same
+    /// instantiation path (`Arc::new(PublicRoomSafety::new(PublicRoomConfig::default()))`)
+    /// that `main()` now uses and confirms `Some(&safety)` actually enforces
+    /// limits, while `None` (private-room path) passes everything.
+    #[test]
+    fn production_public_room_safety_enforces_limits() {
+        let safety = Arc::new(boru_chat::public_room_safety::PublicRoomSafety::new(
+            boru_chat::public_room_config::PublicRoomConfig::default(),
+        ));
+
+        let peer = SecretKey::generate().public();
+
+        // Oversized message → rejected with Some(safety)
+        let oversized = boru_chat::chat_core::NetEvent::Message {
+            from: peer,
+            message: boru_chat::chat_core::Message::Message {
+                text: "a".repeat(4097),
+            },
+            sent_at: 1000,
+        };
+        let filtered = boru_chat::chat_core::filter_net_event_with_safety(oversized, &safety);
+        assert!(
+            filtered.is_none(),
+            "oversized message should be dropped with Some(safety)"
+        );
+
+        // Normal message → passes with Some(safety)
+        let normal = boru_chat::chat_core::NetEvent::Message {
+            from: peer,
+            message: boru_chat::chat_core::Message::Message {
+                text: "hello".into(),
+            },
+            sent_at: 1000,
+        };
+        let filtered = boru_chat::chat_core::filter_net_event_with_safety(normal, &safety);
+        assert!(
+            filtered.is_some(),
+            "normal message should pass through with Some(safety)"
+        );
+
+        // Private-room path (None) → oversized passes through
+        let oversized2 = boru_chat::chat_core::NetEvent::Message {
+            from: peer,
+            message: boru_chat::chat_core::Message::Message {
+                text: "a".repeat(4097),
+            },
+            sent_at: 1000,
+        };
+        let mut app = boru_chat::chat_core::AppState::new(
+            boru_chat::chat_core::StatusContext {
+                transport_status: "test".into(),
+                topic: boru_chat::proto::TopicId::from_bytes([0u8; 32]),
+                relay_mode: iroh::RelayMode::Disabled,
+                connected: true,
+                peer_count: 0,
+                identity_label: "test".into(),
+                transport_notice: "".into(),
+                direct_peers: 0,
+                relayed_peers: 0,
+                neighbors: std::collections::HashSet::new(),
+                peer_connection_types: std::collections::HashMap::new(),
+                last_activity: std::collections::HashMap::new(),
+                mesh_health: boru_chat::chat_core::MeshHealth::Good,
+            },
+            boru_chat::friends::FriendsStore::load_or_default("/tmp"),
+            peer,
+            Some("test".into()),
+        );
+        let result = boru_chat::chat_core::handle_net_event_with_safety(oversized2, &mut app, None);
+        assert!(result.is_ok(), "private-room path should accept oversized");
+    }
 
     #[test]
     fn ticket_roundtrips_through_base32() {

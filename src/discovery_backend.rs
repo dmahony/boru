@@ -83,10 +83,7 @@ pub trait TopicDiscoveryBackend: Send + Sync + 'static {
     ) -> Result<()>;
 
     /// Look up discovery records published under the given namespace.
-    async fn lookup(
-        &self,
-        namespace: &NamespaceId,
-    ) -> Result<Vec<EncryptedDiscoveryRecord>>;
+    async fn lookup(&self, namespace: &NamespaceId) -> Result<Vec<EncryptedDiscoveryRecord>>;
 
     /// Shut down the backend, releasing any resources.
     async fn shutdown(&self) -> Result<()>;
@@ -135,10 +132,7 @@ impl InMemoryDiscoveryBackend {
 
     /// Remove all records across every namespace.
     pub fn clear_all(&self) {
-        self.records
-            .write()
-            .expect("lock poisoned")
-            .clear();
+        self.records.write().expect("lock poisoned").clear();
     }
 }
 
@@ -155,10 +149,7 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
         Ok(())
     }
 
-    async fn lookup(
-        &self,
-        namespace: &NamespaceId,
-    ) -> Result<Vec<EncryptedDiscoveryRecord>> {
+    async fn lookup(&self, namespace: &NamespaceId) -> Result<Vec<EncryptedDiscoveryRecord>> {
         let map = self.records.read().expect("lock poisoned");
         let records = map.get(namespace).cloned().unwrap_or_default();
         let mut records = records;
@@ -177,6 +168,7 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
 #[cfg(feature = "net")]
 pub struct MainlineDhtBackend {
     dht: distributed_topic_tracker::Dht,
+    #[allow(dead_code)]
     default_namespace: distributed_topic_tracker::TopicId,
 }
 
@@ -187,7 +179,10 @@ impl MainlineDhtBackend {
         dht: distributed_topic_tracker::Dht,
         default_namespace: distributed_topic_tracker::TopicId,
     ) -> Self {
-        Self { dht, default_namespace }
+        Self {
+            dht,
+            default_namespace,
+        }
     }
 
     fn topic_id_for(&self, namespace: &NamespaceId) -> distributed_topic_tracker::TopicId {
@@ -206,8 +201,7 @@ impl TopicDiscoveryBackend for MainlineDhtBackend {
         validate_discovery_record(&record)?;
         let topic_id = self.topic_id_for(namespace);
         let unix_minute = distributed_topic_tracker::unix_minute(0);
-        let signing_key =
-            distributed_topic_tracker::signing_keypair(&topic_id, unix_minute);
+        let signing_key = distributed_topic_tracker::signing_keypair(&topic_id, unix_minute);
         let salt = distributed_topic_tracker::salt(&topic_id, unix_minute);
         self.dht
             .put_mutable(
@@ -220,26 +214,18 @@ impl TopicDiscoveryBackend for MainlineDhtBackend {
         Ok(())
     }
 
-    async fn lookup(
-        &self,
-        namespace: &NamespaceId,
-    ) -> Result<Vec<EncryptedDiscoveryRecord>> {
+    async fn lookup(&self, namespace: &NamespaceId) -> Result<Vec<EncryptedDiscoveryRecord>> {
         let topic_id = self.topic_id_for(namespace);
         let now = distributed_topic_tracker::unix_minute(0);
         let prev = now.saturating_sub(1);
         let mut all_records = Vec::new();
         for unix_minute in [prev, now] {
-            let signing_key =
-                distributed_topic_tracker::signing_keypair(&topic_id, unix_minute);
+            let signing_key = distributed_topic_tracker::signing_keypair(&topic_id, unix_minute);
             let pub_key = signing_key.verifying_key();
             let salt = distributed_topic_tracker::salt(&topic_id, unix_minute);
-            let items = self
-                .dht
-                .get(pub_key, Some(salt.to_vec()), None)
-                .await?;
+            let items = self.dht.get(pub_key, Some(salt.to_vec()), None).await?;
             for item in items {
-                all_records
-                    .push(EncryptedDiscoveryRecord::new(item.value().to_vec()));
+                all_records.push(EncryptedDiscoveryRecord::new(item.value().to_vec()));
             }
         }
         all_records.truncate(MAX_DISCOVERY_RECORDS);
@@ -260,7 +246,10 @@ mod tests {
         let record = EncryptedDiscoveryRecord::new(vec![]);
         let result = validate_discovery_record(&record);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty"));
     }
 
     #[test]
@@ -301,9 +290,18 @@ mod tests {
         let ns_a = NamespaceId::new([1u8; 32]);
         let ns_b = NamespaceId::new([2u8; 32]);
         run_async(async {
-            backend.publish(&ns_a, EncryptedDiscoveryRecord::new(vec![1])).await.unwrap();
-            backend.publish(&ns_b, EncryptedDiscoveryRecord::new(vec![2])).await.unwrap();
-            backend.publish(&ns_b, EncryptedDiscoveryRecord::new(vec![3])).await.unwrap();
+            backend
+                .publish(&ns_a, EncryptedDiscoveryRecord::new(vec![1]))
+                .await
+                .unwrap();
+            backend
+                .publish(&ns_b, EncryptedDiscoveryRecord::new(vec![2]))
+                .await
+                .unwrap();
+            backend
+                .publish(&ns_b, EncryptedDiscoveryRecord::new(vec![3]))
+                .await
+                .unwrap();
         });
         assert_eq!(backend.namespace_count(), 2);
         assert_eq!(backend.total_record_count(), 3);
@@ -314,7 +312,13 @@ mod tests {
         let backend = InMemoryDiscoveryBackend::new();
         run_async(async {
             for i in 0..MAX_DISCOVERY_RECORDS + 5 {
-                backend.publish(&NamespaceId::new([0u8; 32]), EncryptedDiscoveryRecord::new(vec![i as u8])).await.unwrap();
+                backend
+                    .publish(
+                        &NamespaceId::new([0u8; 32]),
+                        EncryptedDiscoveryRecord::new(vec![i as u8]),
+                    )
+                    .await
+                    .unwrap();
             }
             let results = backend.lookup(&NamespaceId::new([0u8; 32])).await.unwrap();
             assert_eq!(results.len(), MAX_DISCOVERY_RECORDS);
@@ -325,7 +329,10 @@ mod tests {
     fn test_in_memory_empty_payload_rejected() {
         run_async(async {
             let result = InMemoryDiscoveryBackend::new()
-                .publish(&NamespaceId::new([0u8; 32]), EncryptedDiscoveryRecord::new(vec![]))
+                .publish(
+                    &NamespaceId::new([0u8; 32]),
+                    EncryptedDiscoveryRecord::new(vec![]),
+                )
                 .await;
             assert!(result.is_err());
         });
@@ -336,7 +343,10 @@ mod tests {
         let backend = InMemoryDiscoveryBackend::new();
         let ns = NamespaceId::new([0u8; 32]);
         run_async(async {
-            backend.publish(&ns, EncryptedDiscoveryRecord::new(vec![1])).await.unwrap();
+            backend
+                .publish(&ns, EncryptedDiscoveryRecord::new(vec![1]))
+                .await
+                .unwrap();
         });
         assert_eq!(backend.total_record_count(), 1);
         backend.clear_namespace(&ns);
@@ -347,8 +357,20 @@ mod tests {
     fn test_in_memory_clear_all() {
         let backend = InMemoryDiscoveryBackend::new();
         run_async(async {
-            backend.publish(&NamespaceId::new([1u8; 32]), EncryptedDiscoveryRecord::new(vec![1])).await.unwrap();
-            backend.publish(&NamespaceId::new([2u8; 32]), EncryptedDiscoveryRecord::new(vec![2])).await.unwrap();
+            backend
+                .publish(
+                    &NamespaceId::new([1u8; 32]),
+                    EncryptedDiscoveryRecord::new(vec![1]),
+                )
+                .await
+                .unwrap();
+            backend
+                .publish(
+                    &NamespaceId::new([2u8; 32]),
+                    EncryptedDiscoveryRecord::new(vec![2]),
+                )
+                .await
+                .unwrap();
         });
         assert_eq!(backend.total_record_count(), 2);
         backend.clear_all();
@@ -370,10 +392,15 @@ mod tests {
 
     #[test]
     fn test_in_memory_trait_object() {
-        let backend: Arc<dyn TopicDiscoveryBackend> =
-            Arc::new(InMemoryDiscoveryBackend::new());
+        let backend: Arc<dyn TopicDiscoveryBackend> = Arc::new(InMemoryDiscoveryBackend::new());
         run_async(async {
-            backend.publish(&NamespaceId::new([0u8; 32]), EncryptedDiscoveryRecord::new(vec![42])).await.unwrap();
+            backend
+                .publish(
+                    &NamespaceId::new([0u8; 32]),
+                    EncryptedDiscoveryRecord::new(vec![42]),
+                )
+                .await
+                .unwrap();
             let results = backend.lookup(&NamespaceId::new([0u8; 32])).await.unwrap();
             assert_eq!(results.len(), 1);
         });

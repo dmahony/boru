@@ -17,7 +17,7 @@ use boru_chat::chat_callbacks::{ChatCallbacks, TransferId, TransferKind, Transfe
 use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_with_safety, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
-    handle_net_event as chat_net_event, handle_net_event_with_safety, message_hash, seed_memory_lookup, MeshHealth, MessageHash,
+    handle_net_event_with_safety, message_hash, seed_memory_lookup, MeshHealth, MessageHash,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
@@ -25,13 +25,15 @@ use boru_chat::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
 };
 use boru_chat::friends::{DirectConversationState, FriendId, FriendsStore};
-use boru_chat::image_optimizer::{optimize_chat_image, thumbnail_image, CHAT_IMAGE_MAX_BYTES};
+use boru_chat::image_optimizer::{compress_image, optimize_chat_image, CHAT_IMAGE_MAX_BYTES};
 use boru_chat::image_store::ImageStore;
 use boru_chat::inbox::{send_ack, send_sync_request, InboxEvent};
 use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
 use boru_chat::net::Gossip;
 use boru_chat::outbox::{OutboxEntry, OutboxStore};
 use boru_chat::proto::TopicId;
+use boru_chat::public_room_config::PublicRoomConfig;
+use boru_chat::public_room_safety::PublicRoomSafety;
 use boru_chat::room::RoomStore;
 use boru_chat::room_cleanup::delete_room_history;
 use boru_chat::room_docs::{self, RoomMetadata};
@@ -894,6 +896,9 @@ pub struct IcedChat {
     /// Queue of download progress events from background download tasks.
     /// Drained on each ConnMonitorTick and converted into AppMessage::DownloadProgress.
     download_progress_queue: Arc<StdMutex<VecDeque<TransferProgress>>>,
+    /// Public-room safety limits (rate-limiting, message-size, blob controls).
+    /// `None` for private rooms / direct conversations.
+    public_room_safety: Option<Arc<PublicRoomSafety>>,
 }
 
 /// Tracks the UI-level lifecycle of an outgoing friend request.
@@ -1634,6 +1639,7 @@ impl IcedChat {
             friend_request_search_input: String::new(),
             friend_request_error: String::new(),
             download_progress_queue: Arc::new(StdMutex::new(VecDeque::new())),
+            public_room_safety: None,
         }
     }
 
@@ -1763,6 +1769,7 @@ impl IcedChat {
         let blob_store = self.blob_store.clone();
         let endpoint = self.endpoint.clone();
         let neighbors = self.neighbors.clone();
+        let safety = self.public_room_safety.clone();
         iced::Task::perform(
             async move {
                 use boru_chat::chat_callbacks::{TransferKind, TransferProgress};
@@ -1776,13 +1783,13 @@ impl IcedChat {
                     name.clone(),
                     TransferKind::Image,
                     |_| {},
-                    None,
+                    safety.as_deref(),
                     sender_pk,
                 )
                 .await
                 {
                     Ok(buf) => {
-                        let thumb = thumbnail_image(&buf);
+                        let thumb = compress_image(&buf);
                         Ok((name, thumb))
                     }
                     Err(e) => Err(format!("Download: {e}")),
@@ -2761,6 +2768,11 @@ impl IcedChat {
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
+                // Initialise public-room safety for public rooms joined via ticket.
+                // Private rooms (CreateNewRoom / OpenRoom) keep safety = None.
+                self.public_room_safety =
+                    Some(Arc::new(PublicRoomSafety::new(PublicRoomConfig::default())));
+                let safety = self.public_room_safety.clone();
 
                 iced::Task::perform(
                     async move {
@@ -2819,7 +2831,7 @@ impl IcedChat {
                             roster_doc,
                             receiver,
                             net_tx,
-                            None,
+                            safety,
                         ));
                         *forward_handle_slot.lock().unwrap() = Some(forward_handle);
 
@@ -3914,7 +3926,8 @@ impl IcedChat {
 
             AppMessage::NetEvent(event) => {
                 self.update_room_preview(&event);
-                let _ = handle_net_event_with_safety(event.clone(), self, None);
+                let safety = self.public_room_safety.clone();
+                let _ = handle_net_event_with_safety(event.clone(), self, safety.as_deref());
                 // ── Delivery state transitions ──
                 // Echo: our own broadcast returning via gossip → Delivered
                 if let NetEvent::Message {
@@ -4027,6 +4040,7 @@ impl IcedChat {
                     let memory_lookup = self.memory_lookup.clone();
                     let neighbors = self.neighbors.clone();
                     let failed_peer = peer.clone();
+                    let safety = self.public_room_safety.clone();
                     return iced::Task::perform(
                         async move {
                             use boru_chat::chat_callbacks::{TransferKind, TransferProgress};
@@ -4048,7 +4062,7 @@ impl IcedChat {
                                 "profile-image".into(),
                                 TransferKind::Image,
                                 |_| {},
-                                None,
+                                safety.as_deref(),
                                 peer_id,
                             )
                             .await
@@ -4579,6 +4593,7 @@ impl IcedChat {
                         let endpoint = self.endpoint.clone();
                         let neighbors = self.neighbors.clone();
                         let progress_queue = self.download_progress_queue.clone();
+                        let safety = self.public_room_safety.clone();
                         let name_copy = filename.clone();
                         iced::Task::perform(
                             async move {
@@ -4603,7 +4618,7 @@ impl IcedChat {
                                             }
                                         }
                                     },
-                                    None,
+                                    safety.as_deref(),
                                     peer_id,
                                 )
                                 .await
@@ -4941,6 +4956,7 @@ impl IcedChat {
                     let endpoint = self.endpoint.clone();
                     let memory_lookup = self.memory_lookup.clone();
                     let neighbors = self.neighbors.clone();
+                    let safety = self.public_room_safety.clone();
                     let failed_peer = peer.clone();
                     tasks.push(iced::Task::perform(
                         async move {
@@ -4959,7 +4975,7 @@ impl IcedChat {
                                 "profile-image".into(),
                                 TransferKind::Image,
                                 |_| {},
-                                None,
+                                safety.as_deref(),
                                 peer_id,
                             )
                             .await
@@ -9857,7 +9873,9 @@ mod tests {
             if let Some(id) = transfer_id {
                 self.entries
                     .iter()
-                    .position(|entry| entry.download.as_ref().map(|d| d.transfer_id) == Some(Some(id)))
+                    .position(|entry| {
+                        entry.download.as_ref().map(|d| d.transfer_id) == Some(Some(id))
+                    })
                     .or(self.download_entry_index)
             } else {
                 self.download_entry_index
@@ -9977,7 +9995,8 @@ mod tests {
     /// Lifecycle: Started → Progress → Completed.
     #[test]
     fn download_lifecycle_started_progress_completed() {
-        let entry = ChatEntry::system_download("system msg", TransferKind::File, "test.doc", "ticket");
+        let entry =
+            ChatEntry::system_download("system msg", TransferKind::File, "test.doc", "ticket");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(1);
 
@@ -9989,7 +10008,13 @@ mod tests {
             total: Some(4096),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Active { bytes: 0, total: Some(4096) }));
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Active {
+                bytes: 0,
+                total: Some(4096)
+            }
+        ));
         assert_eq!(e.download.as_ref().unwrap().transfer_id, Some(id));
         assert_eq!(mgr.active_download_transfer_id, Some(id));
 
@@ -10002,8 +10027,17 @@ mod tests {
             total: Some(4096),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Active { bytes: 2048, total: Some(4096) }));
-        assert_eq!(e.download.as_ref().unwrap().status_label().contains("50%"), true);
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Active {
+                bytes: 2048,
+                total: Some(4096)
+            }
+        ));
+        assert_eq!(
+            e.download.as_ref().unwrap().status_label().contains("50%"),
+            true
+        );
 
         // Progress at 100%
         mgr.handle_download_progress(TransferProgress::Progress {
@@ -10014,7 +10048,10 @@ mod tests {
             total: Some(4096),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Active { bytes: 4096, .. }));
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Active { bytes: 4096, .. }
+        ));
 
         // Completed
         mgr.handle_download_progress(TransferProgress::Completed {
@@ -10023,7 +10060,10 @@ mod tests {
             name: "test.doc".into(),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Completed { .. }));
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Completed { .. }
+        ));
         assert_eq!(e.download.as_ref().unwrap().action_label(), "Open");
         // active_download_transfer_id must be cleared on terminal state
         assert!(mgr.active_download_transfer_id.is_none());
@@ -10032,7 +10072,8 @@ mod tests {
     /// Lifecycle: Started → Progress → Failed.
     #[test]
     fn download_lifecycle_started_progress_failed() {
-        let entry = ChatEntry::system_download("file share", TransferKind::File, "corrupt.zip", "ticket");
+        let entry =
+            ChatEntry::system_download("file share", TransferKind::File, "corrupt.zip", "ticket");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(2);
 
@@ -10055,16 +10096,25 @@ mod tests {
             error: "hash mismatch".into(),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Failed { .. }));
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Failed { .. }
+        ));
         assert_eq!(e.download.as_ref().unwrap().action_label(), "Retry");
-        assert!(e.download.as_ref().unwrap().status_label().contains("hash mismatch"));
+        assert!(e
+            .download
+            .as_ref()
+            .unwrap()
+            .status_label()
+            .contains("hash mismatch"));
         assert!(mgr.active_download_transfer_id.is_none());
     }
 
     /// Lifecycle: Started → Cancelled.
     #[test]
     fn download_lifecycle_started_cancelled() {
-        let entry = ChatEntry::system_download("file share", TransferKind::File, "large.iso", "ticket");
+        let entry =
+            ChatEntry::system_download("file share", TransferKind::File, "large.iso", "ticket");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(3);
 
@@ -10080,7 +10130,10 @@ mod tests {
             name: "large.iso".into(),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Cancelled));
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Cancelled
+        ));
         assert_eq!(e.download.as_ref().unwrap().action_label(), "Retry");
         assert_eq!(e.download.as_ref().unwrap().status_label(), "Cancelled");
         assert!(mgr.active_download_transfer_id.is_none());
@@ -10089,7 +10142,8 @@ mod tests {
     /// Stale progress after a terminal state (Completed) must be ignored.
     #[test]
     fn download_stale_progress_after_completion_ignored() {
-        let entry = ChatEntry::system_download("file share", TransferKind::File, "report.pdf", "ticket");
+        let entry =
+            ChatEntry::system_download("file share", TransferKind::File, "report.pdf", "ticket");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(4);
 
@@ -10104,7 +10158,10 @@ mod tests {
             kind: TransferKind::File,
             name: "report.pdf".into(),
         });
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Completed { .. }));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Completed { .. }
+        ));
         assert!(mgr.active_download_transfer_id.is_none());
         let prev_state = mgr.entries[0].download.as_ref().unwrap().state.clone();
 
@@ -10132,8 +10189,13 @@ mod tests {
         //
         // This test documents the current behaviour: stale progress *does* overwrite the state.
         // A fix would require checking that the state is not terminal before overwriting.
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Active { .. }),
-            "KNOWN LIMITATION: stale progress after completion overwrites terminal state");
+        assert!(
+            matches!(
+                mgr.entries[0].download.as_ref().unwrap().state,
+                DownloadState::Active { .. }
+            ),
+            "KNOWN LIMITATION: stale progress after completion overwrites terminal state"
+        );
     }
 
     /// TransferId anchoring: after entries shift (simulating view recreation),
@@ -10141,7 +10203,8 @@ mod tests {
     #[test]
     fn download_transfer_id_anchoring_survives_entry_reorder() {
         let id = TransferId::new(5);
-        let mut entry = ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket");
+        let mut entry =
+            ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket");
         entry.download.as_mut().unwrap().transfer_id = Some(id);
 
         // Simulate entries: a text entry inserted before the download entry,
@@ -10161,8 +10224,13 @@ mod tests {
             total: Some(1024),
         });
         let e = &mgr.entries[1];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Active { bytes: 512, .. }),
-            "TransferId anchoring must find correct entry after index shift");
+        assert!(
+            matches!(
+                e.download.as_ref().unwrap().state,
+                DownloadState::Active { bytes: 512, .. }
+            ),
+            "TransferId anchoring must find correct entry after index shift"
+        );
         assert_eq!(e.download.as_ref().unwrap().transfer_id, Some(id));
         // The text entry at index 0 must NOT have been touched.
         assert!(mgr.entries[0].download.is_none());
@@ -10173,7 +10241,8 @@ mod tests {
     /// the entry has a transfer_id).
     #[test]
     fn download_anchoring_falls_back_to_index_when_no_transfer_id() {
-        let entry = ChatEntry::system_download("file", TransferKind::File, "archive.tar.gz", "ticket");
+        let entry =
+            ChatEntry::system_download("file", TransferKind::File, "archive.tar.gz", "ticket");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(6);
 
@@ -10184,8 +10253,14 @@ mod tests {
             name: "archive.tar.gz".into(),
             total: None,
         });
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Active { .. }));
-        assert_eq!(mgr.entries[0].download.as_ref().unwrap().transfer_id, Some(id));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Active { .. }
+        ));
+        assert_eq!(
+            mgr.entries[0].download.as_ref().unwrap().transfer_id,
+            Some(id)
+        );
     }
 
     /// Multiple entries with download attachments: progress must only
@@ -10205,7 +10280,10 @@ mod tests {
             name: "a.zip".into(),
             total: Some(100),
         });
-        assert_eq!(mgr.entries[0].download.as_ref().unwrap().transfer_id, Some(id_a));
+        assert_eq!(
+            mgr.entries[0].download.as_ref().unwrap().transfer_id,
+            Some(id_a)
+        );
 
         // Now start download B — but download_entry_index is still 0.
         // Started with kind File goes through download_entry_index (index 0).
@@ -10218,10 +10296,19 @@ mod tests {
             name: "b.zip".into(),
             total: Some(200),
         });
-        assert_eq!(mgr.entries[1].download.as_ref().unwrap().transfer_id, Some(id_b));
+        assert_eq!(
+            mgr.entries[1].download.as_ref().unwrap().transfer_id,
+            Some(id_b)
+        );
         assert_eq!(mgr.entries[1].download.as_ref().unwrap().name, "b.zip");
         // Entry A's state must remain intact.
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Active { bytes: 0, total: Some(100) }));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Active {
+                bytes: 0,
+                total: Some(100)
+            }
+        ));
 
         // Progress for A must reach entry A
         mgr.handle_download_progress(TransferProgress::Progress {
@@ -10231,7 +10318,10 @@ mod tests {
             bytes: 50,
             total: Some(100),
         });
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Active { bytes: 50, .. }));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Active { bytes: 50, .. }
+        ));
     }
 
     /// Unknown total downloads (total: None) must display correctly.
@@ -10247,7 +10337,12 @@ mod tests {
             name: "live.mp4".into(),
             total: None,
         });
-        assert!(mgr.entries[0].download.as_ref().unwrap().status_label().contains("size unknown"));
+        assert!(mgr.entries[0]
+            .download
+            .as_ref()
+            .unwrap()
+            .status_label()
+            .contains("size unknown"));
 
         mgr.handle_download_progress(TransferProgress::Progress {
             id,
@@ -10257,22 +10352,38 @@ mod tests {
             total: None,
         });
         let label = mgr.entries[0].download.as_ref().unwrap().status_label();
-        assert!(label.contains("size unknown"), "label must say size unknown: {label}");
+        assert!(
+            label.contains("size unknown"),
+            "label must say size unknown: {label}"
+        );
         // No progress fraction when total is unknown
-        assert!(mgr.entries[0].download.as_ref().unwrap().progress_fraction().is_none());
+        assert!(mgr.entries[0]
+            .download
+            .as_ref()
+            .unwrap()
+            .progress_fraction()
+            .is_none());
 
         mgr.handle_download_progress(TransferProgress::Completed {
             id,
             kind: TransferKind::File,
             name: "live.mp4".into(),
         });
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Completed { .. }));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Completed { .. }
+        ));
     }
 
     /// Image download lifecycle — uses TransferKind::Image.
     #[test]
     fn download_image_lifecycle_uses_image_kind() {
-        let entry = ChatEntry::system_download("img share", TransferKind::Image, "screenshot.png", "ticket");
+        let entry = ChatEntry::system_download(
+            "img share",
+            TransferKind::Image,
+            "screenshot.png",
+            "ticket",
+        );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(8);
 
@@ -10287,8 +10398,11 @@ mod tests {
         // only match TransferKind::File, so Image variants fall through to _ => {}
         // This means image download progress is NOT tracked the same way as file downloads.
         // The `layout_cache` and entry state should NOT change.
-        assert_eq!(mgr.entries[0].download.as_ref().unwrap().action_label(),
-            "Download", "Image started should not change entry state (Image kind not matched)");
+        assert_eq!(
+            mgr.entries[0].download.as_ref().unwrap().action_label(),
+            "Download",
+            "Image started should not change entry state (Image kind not matched)"
+        );
         assert!(mgr.active_download_transfer_id.is_none());
     }
 
@@ -10306,7 +10420,12 @@ mod tests {
             total: Some(0),
         });
         // Zero total should not produce a progress fraction (prevents division by zero).
-        assert!(mgr.entries[0].download.as_ref().unwrap().progress_fraction().is_none());
+        assert!(mgr.entries[0]
+            .download
+            .as_ref()
+            .unwrap()
+            .progress_fraction()
+            .is_none());
         let label = mgr.entries[0].download.as_ref().unwrap().status_label();
         assert!(label.contains("0 B"), "zero total label: {label}");
 
@@ -10315,7 +10434,10 @@ mod tests {
             kind: TransferKind::File,
             name: "empty.txt".into(),
         });
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Completed { .. }));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Completed { .. }
+        ));
     }
 
     /// Verify that the constant width layout estimates stay within documented
@@ -10328,20 +10450,34 @@ mod tests {
         assert!((attachment.estimated_height() - 84.0).abs() < 1.0);
 
         // Active with known total
-        attachment.state = DownloadState::Active { bytes: 500, total: Some(1000) };
-        assert!((attachment.estimated_height() - 112.0).abs() < 1.0,
-            "active+total height expected ~112, got {}", attachment.estimated_height());
+        attachment.state = DownloadState::Active {
+            bytes: 500,
+            total: Some(1000),
+        };
+        assert!(
+            (attachment.estimated_height() - 112.0).abs() < 1.0,
+            "active+total height expected ~112, got {}",
+            attachment.estimated_height()
+        );
 
         // Active with unknown total
-        attachment.state = DownloadState::Active { bytes: 500, total: None };
+        attachment.state = DownloadState::Active {
+            bytes: 500,
+            total: None,
+        };
         assert!((attachment.estimated_height() - 104.0).abs() < 1.0);
 
         // Completed
-        attachment.state = DownloadState::Completed { saved_name: "demo.bin".into(), saved_path: None };
+        attachment.state = DownloadState::Completed {
+            saved_name: "demo.bin".into(),
+            saved_path: None,
+        };
         assert!((attachment.estimated_height() - 92.0).abs() < 1.0);
 
         // Failed
-        attachment.state = DownloadState::Failed { error: "err".into() };
+        attachment.state = DownloadState::Failed {
+            error: "err".into(),
+        };
         assert!((attachment.estimated_height() - 104.0).abs() < 1.0);
 
         // Cancelled

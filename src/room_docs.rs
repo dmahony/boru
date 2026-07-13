@@ -70,7 +70,9 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::{
     api::{Event as GossipEvent, GossipReceiver, GossipSender},
+    chat_core::filter_net_event_with_safety,
     proto::TopicId,
+    public_room_safety::PublicRoomSafety,
 };
 
 // ── Wire protocol ──────────────────────────────────────────────────────
@@ -758,17 +760,23 @@ pub fn spawn_room_event_forwarder(
 }
 
 /// Forward one room's gossip stream into chat `NetEvent`s while applying
-/// metadata and roster document updates.
+/// metadata and roster document updates, with optional public-room safety
+/// enforcement.
 ///
 /// This is the shared room-aware event bridge used by frontends. It consumes
 /// metadata (`0xFE`) and roster (`0xFF`) messages locally, converts signed chat
-/// messages plus neighbor events into [`crate::chat_core::NetEvent`], and drops
-/// malformed non-room packets instead of treating them as fatal frontend errors.
+/// messages plus neighbor events into [`crate::chat_core::NetEvent`], drops
+/// malformed non-room packets instead of treating them as fatal frontend errors,
+/// and — when `safety` is `Some(...)` — applies per-peer rate-limits, message-size
+/// bounds, and blob-announcement limits before forwarding.
+///
+/// Pass `None` for private rooms to skip all safety checks (zero overhead).
 pub async fn forward_room_events_for_chat(
     metadata_doc: RoomMetadataDoc,
     roster_doc: RosterDoc,
     mut receiver: GossipReceiver,
     net_tx: tokio::sync::mpsc::UnboundedSender<crate::chat_core::NetEvent>,
+    safety: Option<Arc<PublicRoomSafety>>,
 ) {
     use crate::chat_core::{NetEvent, SignedMessage};
 
@@ -802,14 +810,20 @@ pub async fn forward_room_events_for_chat(
         match event {
             GossipEvent::Received(msg) => match SignedMessage::verify_and_decode(&msg.content) {
                 Ok((from, message, sent_at)) => {
-                    if net_tx
-                        .send(NetEvent::Message {
-                            from,
-                            message,
-                            sent_at,
-                        })
-                        .is_err()
-                    {
+                    let net_event = NetEvent::Message {
+                        from,
+                        message,
+                        sent_at,
+                    };
+                    // Apply public-room safety filtering when configured.
+                    let net_event = match &safety {
+                        Some(s) => match filter_net_event_with_safety(net_event, s) {
+                            Some(ev) => ev,
+                            None => continue,
+                        },
+                        None => net_event,
+                    };
+                    if net_tx.send(net_event).is_err() {
                         return;
                     }
                 }

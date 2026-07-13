@@ -46,7 +46,7 @@ use iroh::{
 use n0_error::{bail_any, Result};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tracing::{debug, trace, warn};
 
 /// Timeout error message emitted when a backfill request exceeds the deadline.
@@ -90,6 +90,20 @@ pub const SERVER_BACKFILL_BYTE_CAP: usize = 2 * 1024 * 1024; // 2 MiB
 /// sends more, the client stops after this many messages.
 pub const CLIENT_MAX_BACKFILL_MESSAGES: u32 = 50;
 
+/// Maximum number of unique peers tracked in the backfill rate-limit map.
+/// Prevents unbounded growth when many unique peers connect simultaneously.
+/// Matches the `MAX_TRACKED_PEERS` pattern from `public_room_safety.rs`.
+const MAX_ACTIVE_PEERS: usize = 4096;
+
+/// Timeout after which an in-flight backfill entry is considered stale.
+/// Must match `BACKFILL_REQUEST_TIMEOUT` — this is the same constant
+/// passed to `prune_stale` at the call site.
+const BACKFILL_STALE_ENTRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Maximum number of concurrent backfill serve tasks globally.
+/// Prevents resource exhaustion when many peers request backfill at once.
+const MAX_CONCURRENT_BACKFILLS: usize = 32;
+
 // ── Wire messages ──────────────────────────────────────────────────────────────
 
 /// Request for history backfill — sent by the requester.
@@ -124,9 +138,17 @@ struct BackfillRateLimit {
 
 impl BackfillRateLimit {
     /// Try to register an incoming request.
-    /// Returns `true` if accepted, `false` if a request from this peer is already in flight.
+    /// Returns `true` if accepted, `false` if a request from this peer is already in flight
+    /// or the rate-limit map is at capacity (`MAX_ACTIVE_PEERS`).
     fn try_accept(&mut self, peer: PublicKey) -> bool {
         if self.active.contains_key(&peer) {
+            return false;
+        }
+        if self.active.len() >= MAX_ACTIVE_PEERS {
+            tracing::debug!(
+                "backfill rate-limit map at capacity ({}), rejecting",
+                MAX_ACTIVE_PEERS
+            );
             return false;
         }
         self.active.insert(peer, Instant::now());
@@ -139,10 +161,12 @@ impl BackfillRateLimit {
     }
 
     /// Prune stale entries (requests that hung without cleanup).
-    fn prune_stale(&mut self, max_age: std::time::Duration) {
+    /// Returns the number of active entries remaining after pruning.
+    fn prune_stale(&mut self, max_age: std::time::Duration) -> usize {
         let now = Instant::now();
         self.active
             .retain(|_, started| now.duration_since(*started) < max_age);
+        self.active.len()
     }
 }
 
@@ -161,6 +185,9 @@ pub struct BackfillProtocolHandler {
     history_store: Arc<Mutex<ChatHistoryStore>>,
     /// Per-peer rate-limiting state.
     rate_limit: Arc<Mutex<BackfillRateLimit>>,
+    /// Global concurrency cap on backfill serve tasks.
+    /// Prevents resource exhaustion when many peers request backfill simultaneously.
+    backfill_semaphore: Arc<Semaphore>,
 }
 
 impl BackfillProtocolHandler {
@@ -169,6 +196,7 @@ impl BackfillProtocolHandler {
         Self {
             history_store,
             rate_limit: Arc::new(Mutex::new(BackfillRateLimit::default())),
+            backfill_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_BACKFILLS)),
         }
     }
 }
@@ -181,10 +209,28 @@ impl ProtocolHandler for BackfillProtocolHandler {
             "backfill: incoming connection"
         );
 
+        // Try to acquire a global concurrency permit before proceeding.
+        // If all MAX_CONCURRENT_BACKFILLS permits are taken, drop the connection
+        // immediately rather than queuing.
+        let permit = match self.backfill_semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                debug!(
+                    peer = %remote_id.fmt_short(),
+                    "backfill: concurrency cap reached ({MAX_CONCURRENT_BACKFILLS}), dropping connection"
+                );
+                return Ok(());
+            }
+        };
+
         let store = self.history_store.clone();
         let rate_limit = self.rate_limit.clone();
 
         tokio::task::spawn(async move {
+            // The permit is held for the duration of the task and released
+            // automatically when it (or _permit) is dropped.
+            let _permit = permit;
+
             // Rate-limit check
             {
                 let mut rl = rate_limit.lock().unwrap();
@@ -192,7 +238,7 @@ impl ProtocolHandler for BackfillProtocolHandler {
                 if !rl.try_accept(remote_id) {
                     debug!(
                         peer = %remote_id.fmt_short(),
-                        "backfill: rate-limited (already active)"
+                        "backfill: rate-limited (already active or at capacity)"
                     );
                     return;
                 }
@@ -421,7 +467,8 @@ async fn backfill_actor(endpoint: Endpoint, mut cmd_rx: mpsc::Receiver<Cmd>) {
                 reply,
             } => {
                 let result =
-                    do_backfill_request(&endpoint, addr, since_ms, max_messages, net_tx, safety).await;
+                    do_backfill_request(&endpoint, addr, since_ms, max_messages, net_tx, safety)
+                        .await;
                 let _ = reply.send(result);
             }
         }
@@ -615,6 +662,44 @@ mod tests {
         assert!(rl.try_accept(pk2));
         assert!(!rl.try_accept(pk1));
         assert!(!rl.try_accept(pk2));
+    }
+
+    #[test]
+    fn backfill_max_active_peers_cap() {
+        // Fill the rate-limit map to MAX_ACTIVE_PEERS capacity, then verify
+        // that a new peer is rejected. After pruning stale entries, the new
+        // peer should be accepted.
+        let mut rl = BackfillRateLimit::default();
+
+        // Fill to exactly MAX_ACTIVE_PEERS.
+        for i in 0..MAX_ACTIVE_PEERS {
+            let pk = SecretKey::generate().public();
+            assert!(
+                rl.try_accept(pk),
+                "peer {i} should be accepted (still under cap)"
+            );
+        }
+
+        // Now at capacity — a new peer should be rejected.
+        let extra_pk = SecretKey::generate().public();
+        assert!(
+            !rl.try_accept(extra_pk),
+            "peer beyond cap should be rejected"
+        );
+
+        // Prune stale entries — all inserted entries are 'stale' because
+        // they were inserted with Instant::now() and no time has passed
+        // for the system clock relative to BACKFILL_REQUEST_TIMEOUT (5s).
+        // Use a zero-age prune to simulate stale cleanup.
+        let remaining = rl.prune_stale(std::time::Duration::ZERO);
+        assert_eq!(remaining, 0, "all entries should be pruned");
+
+        // After pruning, a new peer should be accepted.
+        let new_pk = SecretKey::generate().public();
+        assert!(
+            rl.try_accept(new_pk),
+            "peer should be accepted after stale pruning"
+        );
     }
 
     #[tokio::test]

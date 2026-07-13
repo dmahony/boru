@@ -150,7 +150,7 @@ pub fn public_discovery_key(network: PublicNetwork, room_name: &str, version: u8
     hasher.update(&[version]);
 
     let hash = hasher.finalize();
-    <[u8; 32]>::from(*hash.as_bytes())
+    *hash.as_bytes()
 }
 
 /// Derive the full [`PublicRoomIdentity`] for a public room.
@@ -216,17 +216,20 @@ mod tests {
     #[test]
     fn discovery_key_differs_from_topic() {
         let net = PublicNetwork::Mainnet;
-        let topic = crate::topic_derivation::public_room_topic(net.network_byte(), "public-lobby", 1);
+        let topic =
+            crate::topic_derivation::public_room_topic(net.network_byte(), "public-lobby", 1);
         let dk = public_discovery_key(net, "public-lobby", 1);
         assert_ne!(topic.as_bytes(), &dk);
 
         let dev = PublicNetwork::Development;
-        let t_dev = crate::topic_derivation::public_room_topic(dev.network_byte(), "public-lobby", 1);
+        let t_dev =
+            crate::topic_derivation::public_room_topic(dev.network_byte(), "public-lobby", 1);
         let dk_dev = public_discovery_key(dev, "public-lobby", 1);
         assert_ne!(t_dev.as_bytes(), &dk_dev);
 
         let test = PublicNetwork::Test;
-        let t_test = crate::topic_derivation::public_room_topic(test.network_byte(), "public-lobby", 1);
+        let t_test =
+            crate::topic_derivation::public_room_topic(test.network_byte(), "public-lobby", 1);
         let dk_test = public_discovery_key(test, "public-lobby", 1);
         assert_ne!(t_test.as_bytes(), &dk_test);
     }
@@ -234,7 +237,11 @@ mod tests {
     /// Version changes the discovery key for all three networks.
     #[test]
     fn version_changes_discovery_key() {
-        for net in [PublicNetwork::Mainnet, PublicNetwork::Development, PublicNetwork::Test] {
+        for net in [
+            PublicNetwork::Mainnet,
+            PublicNetwork::Development,
+            PublicNetwork::Test,
+        ] {
             let v1 = public_discovery_key(net, "public-lobby", 1);
             let v2 = public_discovery_key(net, "public-lobby", 2);
             assert_ne!(v1, v2, "version must change key for {:?}", net);
@@ -252,8 +259,9 @@ mod tests {
     #[test]
     fn known_answer_discovery_key_mainnet() {
         let dk = public_discovery_key(PublicNetwork::Mainnet, "public-lobby", 1);
-        let expected = hex::decode("b64678c2350fc74df608598fefc97f26557624cc9c68504526c2c3f9756d57f1")
-            .unwrap();
+        let expected =
+            hex::decode("b64678c2350fc74df608598fefc97f26557624cc9c68504526c2c3f9756d57f1")
+                .unwrap();
         assert_eq!(&dk[..], &expected[..]);
     }
 
@@ -261,8 +269,9 @@ mod tests {
     #[test]
     fn known_answer_discovery_key_development() {
         let dk = public_discovery_key(PublicNetwork::Development, "public-lobby", 1);
-        let expected = hex::decode("57f065d2ed324eeeb9e3145d21c25278cf9315cf551d9148a9ed5339389ceadc")
-            .unwrap();
+        let expected =
+            hex::decode("57f065d2ed324eeeb9e3145d21c25278cf9315cf551d9148a9ed5339389ceadc")
+                .unwrap();
         assert_eq!(&dk[..], &expected[..]);
     }
 
@@ -270,8 +279,9 @@ mod tests {
     #[test]
     fn known_answer_discovery_key_test() {
         let dk = public_discovery_key(PublicNetwork::Test, "public-lobby", 1);
-        let expected = hex::decode("4433f17c87e278eeb521d0c013aae4edfecdc92de10f892ab67ea06d19f99829")
-            .unwrap();
+        let expected =
+            hex::decode("4433f17c87e278eeb521d0c013aae4edfecdc92de10f892ab67ea06d19f99829")
+                .unwrap();
         assert_eq!(&dk[..], &expected[..]);
     }
 
@@ -279,8 +289,9 @@ mod tests {
     #[test]
     fn known_answer_discovery_key_v2() {
         let dk = public_discovery_key(PublicNetwork::Mainnet, "public-lobby", 2);
-        let expected = hex::decode("dcca4e664fa7e02d4e16caff1fe0c03c7ab743cf45b1cb72fd830a5198e76666")
-            .unwrap();
+        let expected =
+            hex::decode("dcca4e664fa7e02d4e16caff1fe0c03c7ab743cf45b1cb72fd830a5198e76666")
+                .unwrap();
         assert_eq!(&dk[..], &expected[..]);
     }
 
@@ -295,11 +306,8 @@ mod tests {
             PUBLIC_ROOM_NAME,
             PROTOCOL_VERSION,
         );
-        let expected_dk = public_discovery_key(
-            PublicNetwork::Mainnet,
-            PUBLIC_ROOM_NAME,
-            PROTOCOL_VERSION,
-        );
+        let expected_dk =
+            public_discovery_key(PublicNetwork::Mainnet, PUBLIC_ROOM_NAME, PROTOCOL_VERSION);
         assert_eq!(ident.topic, expected_topic);
         assert_eq!(ident.discovery_key, expected_dk);
     }

@@ -80,7 +80,7 @@ fn test_photo_large() {
     );
 }
 
-/// Verify a screenshot-style image is handled correctly (already <= 1920 px).
+/// Verify a screenshot-style image is resized to the 1280 px inline-image cap.
 #[test]
 fn test_screenshot() {
     let raw = load_fixture("screenshot_1920x1080.jpg");
@@ -89,8 +89,11 @@ fn test_screenshot() {
 
     let decoded = image::load_from_memory(&opt).unwrap();
     let (w, h) = decoded.dimensions();
-    assert_eq!(w, 1920, "screenshot width should remain 1920");
-    assert_eq!(h, 1080, "screenshot height should remain 1080");
+    assert_eq!(w, 1280, "screenshot width should be capped at 1280");
+    assert_eq!(
+        h, 720,
+        "screenshot height should preserve the 16:9 aspect ratio"
+    );
     assert!(opt.len() <= CHAT_IMAGE_OPTIMIZED_MAX_BYTES);
 }
 
