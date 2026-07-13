@@ -229,6 +229,16 @@ name = "performance_baseline"
 path = "tests/test_performance_baseline.rs"
 required-features = ["net", "test-utils"]
 
+[[test]]
+name = "stress_test_comprehensive"
+path = "tests/stress_test_comprehensive.rs"
+required-features = ["net", "test-utils"]
+
+[[test]]
+name = "gen_stress_data"
+path = "tests/gen_stress_data.rs"
+required-features = ["net", "test-utils"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
@@ -248,3 +258,8 @@ debug = true
 [patch.crates-io]
 iroh-dns = { path = "patched/iroh-dns" }
 
+
+[[test]]
+name = "test_serde_format"
+path = "tests/test_serde_format.rs"
+required-features = ["net"]

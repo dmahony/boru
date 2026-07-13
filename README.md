@@ -191,7 +191,7 @@ withhold records).
 **Limitations:** Single point of dependency on n0's infrastructure.  No
 discovery inside a LAN without internet access.
 
-### mDNS (enabled manually)
+### mDNS (enabled by default)
 
 **How it works:** mDNS address lookup broadcasts endpoint info on the local
 network.  Other endpoints on the same subnet receive it without any relay or
@@ -214,7 +214,7 @@ the DHT.
 - Global peer discovery **without depending on n0's DNS server**
 - Censorship-resistant / air-gapped deployments where a DNS server isn't
   reachable (DHT runs over UDP directly)
-- Combined with [mDNS](#mdns-enabled-manually) for fully decentralized
+- Combined with [mDNS](#mdns-enabled-by-default) for fully decentralized
   address lookup (local via mDNS, global via DHT)
 
 **Limitations:**

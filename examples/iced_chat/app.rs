@@ -1162,6 +1162,8 @@ pub struct IcedChat {
     pending_neighbor_status: HashMap<PublicKey, bool>,
 
     // ── Invite menu state ──
+    /// Whether the "Copied!" feedback is shown for the friend ID.
+    friend_id_copied: bool,
     /// Whether the invite menu popover is currently visible.
     show_invite_menu: bool,
     /// The peer public key input text in the invite whisper field.
@@ -1410,6 +1412,10 @@ pub enum AppMessage {
     Noop,
     /// Copy text to the system clipboard.
     CopyToClipboard(String),
+    /// Copy the user's own friend ID (public key) to the clipboard with visual feedback.
+    CopyFriendId,
+    /// Clear the "Copied!" visual feedback after copy.
+    FriendIdCopiedClear,
     /// Open a direct chat with an online friend.
     OpenFriendChat(PublicKey),
     /// Toggle notification sounds on/off.
@@ -1914,6 +1920,8 @@ fn profile_sidebar_identity_row(
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct ProfileIdentityCacheKey {
     local_label: String,
+    public_key: String,
+    friend_id_copied: bool,
     profile_image_identifier: Option<String>,
     profile_image_ticket: Option<String>,
     has_profile_image: bool,
@@ -1921,6 +1929,8 @@ struct ProfileIdentityCacheKey {
 
 fn profile_identity_card(
     local_label: String,
+    public_key: String,
+    copied_friend_id: bool,
     profile_image_handle: Option<iced::widget::image::Handle>,
 ) -> iced::Element<'static, AppMessage> {
     let _timer = PerfTracker::timer("profile_identity_card", "build");
@@ -1978,7 +1988,35 @@ fn profile_identity_card(
     }
     let profile_row = profile_row.spacing(SPACE_12).align_y(Alignment::Center);
 
-    section_card("IDENTITY", vec![nickname_input.into(), profile_row.into()])
+    let copy_label = if copied_friend_id { "Copied!" } else { "Copy" };
+    let friend_id_row = Row::new()
+        .push(
+            Column::new()
+                .push(text("Friend ID").size(TYPO_MD))
+                .push(
+                    text(public_key)
+                        .size(TYPO_XS)
+                        .style(text_muted_style)
+                        // Public keys contain no whitespace, so glyph wrapping is
+                        // required to keep the complete ID visible in narrow windows.
+                        .wrapping(iced::widget::text::Wrapping::Glyph),
+                )
+                .spacing(SPACE_2)
+                .width(Length::Fill)
+                .align_x(Alignment::Start),
+        )
+        .push(
+            button(text(copy_label).size(TYPO_SM))
+                .on_press(AppMessage::CopyFriendId)
+                .padding([SPACE_6, SPACE_12]),
+        )
+        .spacing(SPACE_12)
+        .align_y(Alignment::Center);
+
+    section_card(
+        "IDENTITY",
+        vec![nickname_input.into(), profile_row.into(), friend_id_row.into()],
+    )
 }
 
 impl IcedChat {
@@ -2186,6 +2224,7 @@ impl IcedChat {
             continuous_tracker,
             discovered_peers_rx,
             pending_neighbor_status: HashMap::new(),
+            friend_id_copied: false,
             show_invite_menu: false,
             invite_whisper_input: String::new(),
         }
@@ -2839,6 +2878,8 @@ impl IcedChat {
 
             AppMessage::Noop => "Noop",
             AppMessage::CopyToClipboard(_) => "CopyToClipboard",
+            AppMessage::CopyFriendId => "CopyFriendId",
+            AppMessage::FriendIdCopiedClear => "FriendIdCopiedClear",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
             AppMessage::ToggleSound(_) => "ToggleSound",
             AppMessage::SetChatTextSize(_) => "SetChatTextSize",
@@ -6091,6 +6132,21 @@ impl IcedChat {
                 return iced::clipboard::write(text);
             }
 
+            AppMessage::CopyFriendId => {
+                let pk = self.local_public.to_string();
+                self.friend_id_copied = true;
+                let clear_task = iced::Task::perform(
+                    tokio::time::sleep(std::time::Duration::from_secs(2)),
+                    |_| AppMessage::FriendIdCopiedClear,
+                );
+                return iced::Task::batch(vec![iced::clipboard::write(pk), clear_task]);
+            }
+
+            AppMessage::FriendIdCopiedClear => {
+                self.friend_id_copied = false;
+                iced::Task::none()
+            }
+
             AppMessage::ToggleSound(enabled) => {
                 self.sound_enabled = enabled;
                 let settings = AppSettings {
@@ -8739,15 +8795,19 @@ impl IcedChat {
         // ── Identity section ──
         let profile_identity_key = ProfileIdentityCacheKey {
             local_label: self.local_label.clone(),
+            public_key: self.local_public.to_string(),
+            friend_id_copied: self.friend_id_copied,
             profile_image_identifier: self.profile_image_identifier.clone(),
             profile_image_ticket: self.profile_image_ticket.clone(),
             has_profile_image: self.profile_image_handle.is_some(),
         };
         let profile_local_label = self.local_label.clone();
+        let profile_public_key = self.local_public.to_string();
+        let profile_friend_id_copied = self.friend_id_copied;
         let profile_image_handle = self.profile_image_handle.clone();
         let identity_card: iced::Element<'static, AppMessage> =
             lazy(profile_identity_key, move |_| {
-                profile_identity_card(profile_local_label.clone(), profile_image_handle.clone())
+                profile_identity_card(profile_local_label.clone(), profile_public_key.clone(), profile_friend_id_copied, profile_image_handle.clone())
             })
             .into();
 
@@ -8758,11 +8818,13 @@ impl IcedChat {
         let cached_sections = lazy(cached_key, |key| Self::view_settings_screen_cached(key));
 
         // ── Assemble page ──
-        let content = Column::new()
+        let mut content = Column::new()
             .push(text("Settings").size(TYPO_XL))
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(identity_card)
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(Space::new().height(Length::Fixed(SPACE_12)));
+
+        let content = content
             .push(cached_sections)
             .spacing(SPACE_6)
             .padding(SPACE_24)

@@ -869,3 +869,78 @@ fn multiple_independent_request_pairs() {
     );
     assert_eq!(store.list_outgoing(&dave).len(), 1, "dave has 1 outgoing");
 }
+
+/// Verify that friend requests from a public-chat context are unrestricted:
+/// no source-based checks, no rate limits, no cooldown between requests.
+///
+/// This test validates that the FriendRequest struct has no `source` field
+/// and that multiple requests to different peers in quick succession all
+/// succeed (simulating what happens when a user clicks "+ Add" on several
+/// discovered peers in the public-chat sidebar).
+#[test]
+fn public_chat_friend_requests_are_unrestricted() {
+    let alice_sk = SecretKey::generate();
+    let bob_sk = SecretKey::generate();
+    let charlie_sk = SecretKey::generate();
+    let dave_sk = SecretKey::generate();
+
+    let alice_pk = alice_sk.public().to_string();
+    let _bob_pk = bob_sk.public().to_string();
+    let _charlie_pk = charlie_sk.public().to_string();
+    let _dave_pk = dave_sk.public().to_string();
+
+    let mut store = FriendRequestStore::empty_at(std::env::temp_dir());
+
+    // Simulate clicking "+ Add" on several discovered peers in quick succession.
+    let r1 = store
+        .send_request(&alice_pk, &_bob_pk, None)
+        .expect("alice -> bob (first)");
+    let r2 = store
+        .send_request(&alice_pk, &_charlie_pk, None)
+        .expect("alice -> charlie (immediately after)");
+    let r3 = store
+        .send_request(&alice_pk, &_dave_pk, None)
+        .expect("alice -> dave (immediately after)");
+
+    // All three should be Pending and have distinct IDs.
+    assert_eq!(r1.status, FriendRequestStatus::Pending);
+    assert_eq!(r2.status, FriendRequestStatus::Pending);
+    assert_eq!(r3.status, FriendRequestStatus::Pending);
+    assert_ne!(r1.id, r2.id);
+    assert_ne!(r2.id, r3.id);
+
+    // Alice has 3 outgoing pending requests.
+    let outgoing = store.list_outgoing(&alice_pk);
+    assert_eq!(outgoing.len(), 3);
+
+    // Each target peer has exactly 1 incoming pending request.
+    assert_eq!(
+        store.list_incoming(&_bob_pk).len(),
+        1,
+        "bob has 1 pending from alice"
+    );
+    assert_eq!(
+        store.list_incoming(&_charlie_pk).len(),
+        1,
+        "charlie has 1 pending from alice"
+    );
+    assert_eq!(
+        store.list_incoming(&_dave_pk).len(),
+        1,
+        "dave has 1 pending from alice"
+    );
+
+    // Verify the FriendRequest struct has NO `source` field (compile-time check
+    // via serialisation: a `source` field would appear in the JSON output).
+    let json = serde_json::to_string(&r1).expect("serialize friend request");
+    assert!(
+        !json.contains("\"source\""),
+        "FriendRequest should not serialize a 'source' field: {}",
+        json
+    );
+
+    // Persist and reload — all 3 survive.
+    store.save().expect("persist 3 requests");
+    let loaded = FriendRequestStore::load(std::env::temp_dir()).expect("reload");
+    assert_eq!(loaded.len(), 3, "all 3 requests survived persistence");
+}

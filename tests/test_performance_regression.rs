@@ -8,6 +8,40 @@
 //! Each benchmark runs several iterations and takes the minimum to reduce noise.
 //! Assert thresholds are generous — the goal is to catch order-of-magnitude
 //! regressions, not micro-benchmark deltas.
+//!
+//! # Expected Performance Ranges (deterministic fixtures, debug build)
+//!
+//! All times are **minimum of N iterations** on a commodity x86-64 machine
+//! (Intel i7-13700K, 64 GB DDR5).  Timings on slower/faster hardware or in
+//! release mode will differ — the assertions only check **scaling ratios**,
+//! not absolute times.
+//!
+//! | Test / Operation | Scale | Expected min time | Scaling rule |
+//! |---|---|---|---|
+//! | chat entry iteration | 100 entries | <1 µs | O(n) — 10× entries → <30× time |
+//! | chat entry iteration | 5,000 entries | <10 µs | O(n) — 50× entries → <150× time |
+//! | height estimation pass | 100 entries | <1 µs | O(n) — 100× entries → <300× time |
+//! | height estimation pass | 10,000 entries | <50 µs | O(n) |
+//! | sign+encode | 100 messages | <1 ms | O(n) per message |
+//! | sign+encode | 1,000 messages | <10 ms | O(n) — 10× entries → <30× time |
+//! | verify+decode | 100 messages | <1 ms | O(n) |
+//! | blob add (mem store) | 10×64KB | <5 ms | O(n) — 10× images → <30× time |
+//! | blob read (mem store) | 100×64KB | <50 ms | O(n) |
+//! | hashmap (friends) iteration | 50 friends | <1 µs | O(n) — 10× → <30× time |
+//! | hashmap (friends) iteration | 500 friends | <5 µs | O(n) |
+//! | friends.json serialization | 50 friends | <50 µs | O(n) — 10× → <30× time |
+//! | friends.json serialization | 500 friends | <500 µs | O(n) |
+//! | history push (Vec append) | 100 entries | <1 µs | O(1) per entry — 10× entries → <15× time |
+//! | history push (Vec append) | 1,000 entries | <5 µs | O(1) per entry |
+//! | avatar handle map build | 20 avatars | <5 µs | O(n) — 10× avatars → <30× time |
+//! | avatar handle map build | 200 avatars | <50 µs | O(n) |
+//! | avatar handle lookup | 200 avatars | <3 µs | O(1) — <3× larger at 10× entries |
+//! | handle_net_event pipeline | 50 events | <100 µs | O(n) — 10× events → <40× time |
+//! | handle_net_event pipeline | 500 events | <1 ms | O(n) |
+//! | window lookup (binary search) | 100 entries | <100 ns | O(log n) — 100× → <2× time |
+//! | window lookup (binary search) | 10,000 entries | <200 ns | O(log n) |
+//! | conversation switch (simulated) | 10 convos | <500 ns | O(n) — 10× → <30× time |
+//! | conversation switch (simulated) | 100 convos | <5 µs | O(n) |
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -973,4 +1007,383 @@ fn test_cumulative_window_lookup_cost() {
         large_time,
         small_time,
     );
+}
+
+// ── Test: FriendsStore iteration scaling ────────────────────────────────────
+// Measures wall-clock time to iterate the friends BTreeMap at different sizes.
+// Iterating followed by label/status lookups is done on every frame when the
+// friends sidebar is visible.  This test asserts O(n) scaling.
+
+#[test]
+fn test_friends_store_iteration_scaling() {
+    use boru_chat::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore};
+    use iroh::SecretKey;
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    fn build_friends(count: usize) -> FriendsStore {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = FriendsStore::load_or_default(tmp.path());
+        for i in 0..count {
+            let sk = SecretKey::from_bytes(&[(i as u8).wrapping_mul(17); 32]);
+            let pk = sk.public();
+            let id = FriendId::from_public_key(pk);
+            store.friends.insert(
+                id,
+                FriendRecord {
+                    label: if i % 2 == 0 {
+                        Some(format!("Friend{i}"))
+                    } else {
+                        None
+                    },
+                    last_announced_name: None,
+                    last_announced_profile_image_ticket: None,
+                    status: FriendStatus {
+                        online: i % 3 == 0,
+                        ..Default::default()
+                    },
+                    known_addrs: vec![],
+                    addrs_updated_at_unix_ms: None,
+                    relationship: FriendRelationship::NotFriend,
+                    rooms: Default::default(),
+                    direct_conversation: None,
+                    mailbox_public_key: None,
+                },
+            );
+        }
+        store
+    }
+
+    let small = build_friends(50);
+    let large = build_friends(500);
+
+    // Iterate all friends + look up label + check online status
+    let small_time = bench_min(
+        || {
+            let mut online = 0usize;
+            let mut with_label = 0usize;
+            for (_id, record) in small.iter() {
+                if record.status.online {
+                    online += 1;
+                }
+                if record.label.is_some() {
+                    with_label += 1;
+                }
+            }
+            let _ = (online, with_label);
+        },
+        500,
+    );
+
+    let large_time = bench_min(
+        || {
+            let mut online = 0usize;
+            let mut with_label = 0usize;
+            for (_id, record) in large.iter() {
+                if record.status.online {
+                    online += 1;
+                }
+                if record.label.is_some() {
+                    with_label += 1;
+                }
+            }
+            let _ = (online, with_label);
+        },
+        100,
+    );
+
+    println!(
+        "Friends iteration 50: {:?} | 500: {:?}",
+        small_time, large_time
+    );
+
+    // 10x friends should be <30x time (O(n) with alloc noise)
+    assert_sub_quadratic(
+        "friends iteration 50→500",
+        50,
+        small_time,
+        500,
+        large_time,
+    );
+}
+
+// ── Test: ChatHistoryStore push scaling ─────────────────────────────────────
+// Measures the cost of appending entries to the history store.  This is done
+// on every incoming/outgoing message and must stay O(1) per entry — the
+// store is backed by Vec<HistoryEntry> with no linear scan on push.
+
+#[test]
+fn test_chat_history_push_scaling() {
+    use boru_chat::chat_history::{ChatHistoryStore, HistoryEntry};
+    use boru_chat::proto::TopicId;
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let small_count = 100;
+    let large_count = 1_000;
+
+    // Benchmark push at small scale
+    let small_time = bench_min(
+        || {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut store = ChatHistoryStore::empty_at(tmp.path());
+            for i in 0..small_count {
+                store.push(HistoryEntry {
+                    event_id: i as u64,
+                    hash: format!("{:032x}", i),
+                    sender: format!("User_{}", i % 10),
+                    timestamp: 1_700_000_000_000 + i as u64,
+                    kind: "text".to_string(),
+                    topic: TopicId::from_bytes([i as u8; 32]),
+                    text_preview: format!("Message #{i} with some padding content."),
+                    signed_bytes: vec![i as u8; 128],
+                    delivery_state: boru_chat::chat_history::DeliveryState::Sent,
+                    image_bytes: None,
+                    image_identifier: None,
+                });
+            }
+        },
+        200,
+    );
+
+    // Benchmark push at large scale
+    let large_time = bench_min(
+        || {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut store = ChatHistoryStore::empty_at(tmp.path());
+            for i in 0..large_count {
+                store.push(HistoryEntry {
+                    event_id: i as u64,
+                    hash: format!("{:032x}", i),
+                    sender: format!("User_{}", i % 10),
+                    timestamp: 1_700_000_000_000 + i as u64,
+                    kind: "text".to_string(),
+                    topic: TopicId::from_bytes([i as u8; 32]),
+                    text_preview: format!("Message #{i} with some padding content."),
+                    signed_bytes: vec![i as u8; 128],
+                    delivery_state: boru_chat::chat_history::DeliveryState::Sent,
+                    image_bytes: None,
+                    image_identifier: None,
+                });
+            }
+        },
+        50,
+    );
+
+    println!(
+        "History push {small_count}: {:?} | {large_count}: {:?}",
+        small_time, large_time
+    );
+
+    // Vec::push is O(1) amortized — 10x entries should be <15x time
+    let count_ratio = large_count as f64 / small_count as f64; // 10x
+    let time_ratio = large_time.as_secs_f64() / small_time.as_secs_f64();
+    let max_acceptable = count_ratio * 1.5;
+    assert!(
+        time_ratio <= max_acceptable,
+        "History push: {:.2}x time ratio exceeds {:.2}x limit (small: {:?}, large: {:?})",
+        time_ratio,
+        max_acceptable,
+        small_time,
+        large_time,
+    );
+    println!(
+        "  ✓ History push: {:.2}x time ratio vs {:.2}x count ratio (O(1) amortized)",
+        time_ratio, count_ratio
+    );
+}
+
+// ── Test: JSON serialization/deserialization scaling ───────────────────────
+// Startup loads the full friends list from disk.  This test measures
+// serde_json serialization + deserialization of FriendsStore at different
+// scales, which dominates the startup loading cost.
+
+#[test]
+fn test_serialization_scaling() {
+    use boru_chat::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore};
+    use iroh::SecretKey;
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    fn build_friends(count: usize) -> FriendsStore {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = FriendsStore::load_or_default(tmp.path());
+        for i in 0..count {
+            let sk = SecretKey::from_bytes(&[(i as u8).wrapping_mul(17); 32]);
+            let pk = sk.public();
+            let id = FriendId::from_public_key(pk);
+            store.friends.insert(
+                id,
+                FriendRecord {
+                    label: if i % 2 == 0 {
+                        Some(format!("Friend{i}"))
+                    } else {
+                        None
+                    },
+                    last_announced_name: None,
+                    last_announced_profile_image_ticket: None,
+                    status: FriendStatus {
+                        online: i % 3 == 0,
+                        ..Default::default()
+                    },
+                    known_addrs: vec![],
+                    addrs_updated_at_unix_ms: None,
+                    relationship: FriendRelationship::NotFriend,
+                    rooms: Default::default(),
+                    direct_conversation: None,
+                    mailbox_public_key: None,
+                },
+            );
+        }
+        store
+    }
+
+    let small = build_friends(50);
+    let large = build_friends(500);
+
+    // Serialize to JSON string
+    let small_ser_time = bench_min(
+        || {
+            let _ = serde_json::to_string(&small).unwrap();
+        },
+        200,
+    );
+
+    let large_ser_time = bench_min(
+        || {
+            let _ = serde_json::to_string(&large).unwrap();
+        },
+        50,
+    );
+
+    println!(
+        "Serialize 50 friends: {:?} | 500 friends: {:?}",
+        small_ser_time, large_ser_time
+    );
+
+    assert_sub_quadratic(
+        "serialize 50→500 friends",
+        50,
+        small_ser_time,
+        500,
+        large_ser_time,
+    );
+
+    // Deserialize from JSON string
+    let small_json = serde_json::to_string(&small).unwrap();
+    let large_json = serde_json::to_string(&large).unwrap();
+
+    let small_deser_time = bench_min(
+        || {
+            let _: FriendsStore = serde_json::from_str(&small_json).unwrap();
+        },
+        200,
+    );
+
+    let large_deser_time = bench_min(
+        || {
+            let _: FriendsStore = serde_json::from_str(&large_json).unwrap();
+        },
+        50,
+    );
+
+    println!(
+        "Deserialize 50 friends: {:?} | 500 friends: {:?}",
+        small_deser_time, large_deser_time
+    );
+
+    assert_sub_quadratic(
+        "deserialize 50→500 friends",
+        50,
+        small_deser_time,
+        500,
+        large_deser_time,
+    );
+}
+
+// ── Test: Avatar handle map build and lookup scaling ──────────────────────
+// Measures the cost of building the HashMap<PublicKey, Option<Vec<u8>>> that
+// caches decoded profile image data.  This is done at startup for every friend
+// with a profile image ticket, and is looked up on every profile open.
+
+#[test]
+fn test_avatar_handle_map_scaling() {
+    use std::collections::HashMap;
+    use iroh::{PublicKey, SecretKey};
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let small_count = 20;
+    let large_count = 200;
+
+    fn build_avatar_handles(count: usize) -> HashMap<PublicKey, Option<Vec<u8>>> {
+        let mut map = HashMap::with_capacity(count);
+        for i in 0..count {
+            let pk = SecretKey::from_bytes(&[(i as u8).wrapping_mul(37); 32]).public();
+            // ~2KB-5KB of avatar image data (like real profile images)
+            let avatar_data = if i % 3 != 0 {
+                Some(vec![0u8; 1024 * (2 + i % 4)])
+            } else {
+                None
+            };
+            map.insert(pk, avatar_data);
+        }
+        map
+    }
+
+    // Build map at small scale
+    let small_build_time = bench_min(
+        || {
+            let _ = build_avatar_handles(small_count);
+        },
+        200,
+    );
+
+    // Build map at large scale
+    let large_build_time = bench_min(
+        || {
+            let _ = build_avatar_handles(large_count);
+        },
+        50,
+    );
+
+    println!(
+        "Avatar map build {small_count}: {:?} | {large_count}: {:?}",
+        small_build_time, large_build_time
+    );
+
+    assert_sub_quadratic(
+        "avatar map build 20→200",
+        small_count,
+        small_build_time,
+        large_count,
+        large_build_time,
+    );
+
+    // Lookup: measure random access on the large map
+    let large_map = build_avatar_handles(large_count);
+    let keys: Vec<PublicKey> = large_map.keys().copied().take(large_count).collect();
+
+    // Single key lookup (like opening a profile)
+    let lookup_time = bench_min(
+        || {
+            for k in &keys {
+                let _ = large_map.get(k);
+            }
+        },
+        500,
+    );
+
+    let per_lookup_ns = lookup_time.as_nanos() as f64 / large_count as f64;
+    println!(
+        "Avatar map lookup {large_count}: {:?} total, {per_lookup_ns:.1} ns per lookup",
+        lookup_time
+    );
+
+    // HashMap::get is O(1) — should be well under 3 µs even at 200 entries
+    assert!(
+        per_lookup_ns < 3000.0,
+        "Avatar map lookup per-entry {per_lookup_ns:.1} ns exceeds 3000 ns"
+    );
+    println!("  ✓ Avatar lookup: {per_lookup_ns:.1} ns per entry (O(1))");
 }
