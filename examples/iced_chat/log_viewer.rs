@@ -11,6 +11,9 @@ use iced::{
 };
 use n0_error::{Result as NResult, StdResultExt};
 
+use crate::app;
+use crate::app::{text_muted_style, version_tag, TYPO_XXS};
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Refresh,
@@ -33,9 +36,14 @@ impl LogViewer {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let header = row![text("Boru Chat logs").size(22)]
-            .spacing(12)
-            .push(button("Reload").on_press(Message::Refresh));
+        let header = row![
+            text("Boru Chat logs").size(22),
+            text(format!(" {}", app::version_tag()))
+                .size(TYPO_XXS)
+                .style(text_muted_style)
+        ]
+        .spacing(12)
+        .push(button("Reload").on_press(Message::Refresh));
 
         let body = if self.contents.is_empty() {
             text(format!(
@@ -83,7 +91,13 @@ fn build_spawn_command(data_dir: &Path) -> std::result::Result<Command, String> 
 pub fn run(log_path: PathBuf) -> NResult<()> {
     let state = LogViewer::load(log_path.clone());
     iced::application(move || (state.clone(), iced::Task::none()), update, view)
-        .title(move |_: &LogViewer| format!("Boru Chat logs — {}", log_path.display()))
+        .title(move |_: &LogViewer| {
+            format!(
+                "Boru Chat logs {} — {}",
+                app::version_tag(),
+                log_path.display()
+            )
+        })
         .subscription(|_| iced::time::every(Duration::from_secs(1)).map(|_| Message::Refresh))
         .run()
         .std_context("failed to run log viewer")?;

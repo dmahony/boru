@@ -519,11 +519,7 @@ fn conversation_ordering_by_latest_activity() {
     // Initially: both created at ~same time. active_iter() sorts by
     // last_seen_at_unix_ms descending.  Touch Bob's entry to make it newer.
     std::thread::sleep(std::time::Duration::from_millis(2));
-    let bob_entry = stores
-        .conversations
-        .find_mut(&bob_topic)
-        .expect("bob entry");
-    bob_entry.touch();
+    stores.conversations.touch_and_bump(&bob_topic);
 
     let active: Vec<_> = stores.conversations.active_iter();
     assert_eq!(active.len(), 2);
@@ -539,11 +535,7 @@ fn conversation_ordering_by_latest_activity() {
 
     // Now touch Carol's entry — it should move to front
     std::thread::sleep(std::time::Duration::from_millis(2));
-    let carol_entry = stores
-        .conversations
-        .find_mut(&carol_topic)
-        .expect("carol entry");
-    carol_entry.touch();
+    stores.conversations.touch_and_bump(&carol_topic);
 
     let active: Vec<_> = stores.conversations.active_iter();
     assert_eq!(

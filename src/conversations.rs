@@ -204,13 +204,72 @@ impl ConversationStore {
         }
     }
 
+    /// Sort the conversation list most-recent-first by `last_seen_at_unix_ms`.
+    fn sort_by_recency(&mut self) {
+        self.conversations
+            .sort_by(|a, b| b.last_seen_at_unix_ms.cmp(&a.last_seen_at_unix_ms));
+        self.rebuild_index();
+    }
+
+    /// Bubble an entry at `idx` upward (toward index 0) after a
+    /// `last_seen_at_unix_ms` increase, keeping the list sorted
+    /// most-recent-first.  Updates `by_topic` indices for swapped entries.
+    fn bubble_up(&mut self, mut idx: usize) {
+        while idx > 0 {
+            if self.conversations[idx].last_seen_at_unix_ms
+                <= self.conversations[idx - 1].last_seen_at_unix_ms
+            {
+                break;
+            }
+            let ts = self.conversations[idx].topic;
+            let ts_prev = self.conversations[idx - 1].topic;
+            self.conversations.swap(idx, idx - 1);
+            self.by_topic.insert(ts, idx - 1);
+            self.by_topic.insert(ts_prev, idx);
+            idx -= 1;
+        }
+    }
+
+    /// Bubble an entry at `idx` downward after a `last_seen_at_unix_ms`
+    /// decrease, keeping the list sorted most-recent-first.
+    fn bubble_down(&mut self, mut idx: usize) {
+        let len = self.conversations.len();
+        while idx + 1 < len {
+            if self.conversations[idx].last_seen_at_unix_ms
+                >= self.conversations[idx + 1].last_seen_at_unix_ms
+            {
+                break;
+            }
+            let ts = self.conversations[idx].topic;
+            let ts_next = self.conversations[idx + 1].topic;
+            self.conversations.swap(idx, idx + 1);
+            self.by_topic.insert(ts, idx + 1);
+            self.by_topic.insert(ts_next, idx);
+            idx += 1;
+        }
+    }
+
     fn insert_or_update(&mut self, entry: ConversationEntry) -> Option<ConversationEntry> {
         if let Some(&idx) = self.by_topic.get(&entry.topic) {
             let old = std::mem::replace(&mut self.conversations[idx], entry);
+            // Re-position if the recency changed
+            if self.conversations[idx].last_seen_at_unix_ms > old.last_seen_at_unix_ms {
+                self.bubble_up(idx);
+            } else if self.conversations[idx].last_seen_at_unix_ms < old.last_seen_at_unix_ms {
+                self.bubble_down(idx);
+            }
             Some(old)
         } else {
-            self.by_topic.insert(entry.topic, self.conversations.len());
-            self.conversations.push(entry);
+            // Insert at the correct sorted position (most-recent-first)
+            let pos = self
+                .conversations
+                .binary_search_by(|e| entry.last_seen_at_unix_ms.cmp(&e.last_seen_at_unix_ms))
+                .unwrap_or_else(|e| e);
+            self.conversations.insert(pos, entry);
+            // Update indices for entries at `pos` and above
+            for i in pos..self.conversations.len() {
+                self.by_topic.insert(self.conversations[i].topic, i);
+            }
             None
         }
     }
@@ -272,6 +331,7 @@ impl ConversationStore {
         store.schema_version = SCHEMA_VERSION;
         store.data_dir = data_dir.to_path_buf();
         store.rebuild_index();
+        store.sort_by_recency();
         Ok(store)
     }
 
@@ -355,19 +415,35 @@ impl ConversationStore {
         self.by_topic.clear();
     }
 
+    /// Bump the `last_seen_at_unix_ms` of a conversation and re-position
+    /// it in the sorted list (most-recent-first).  Returns the entry's
+    /// previous timestamp, or `None` if the topic doesn't exist.
+    ///
+    /// This is O(k) where k is the number of positions the entry moves —
+    /// typically 0 or 1 for a conversation that was already recent.
+    pub fn touch_and_bump(&mut self, topic: &TopicId) -> Option<u64> {
+        let idx = *self.by_topic.get(topic)?;
+        let old_ts = self.conversations[idx].last_seen_at_unix_ms;
+        let now = now_unix_ms();
+        self.conversations[idx].last_seen_at_unix_ms = now;
+        if now > old_ts {
+            self.bubble_up(idx);
+        }
+        Some(old_ts)
+    }
+
     /// Return an iterator over non-archived conversations, most-recently-seen
     /// first.
+    ///
+    /// The list is already maintained in sorted order internally, so this
+    /// is O(n) without any sorting overhead.
     pub fn active_iter(&self) -> Vec<&ConversationEntry> {
-        let mut entries: Vec<_> = self.conversations.iter().filter(|e| !e.archived).collect();
-        entries.sort_by(|a, b| b.last_seen_at_unix_ms.cmp(&a.last_seen_at_unix_ms));
-        entries
+        self.conversations.iter().filter(|e| !e.archived).collect()
     }
 
     /// Return all archived conversations, most-recently-seen first.
     pub fn archived_iter(&self) -> Vec<&ConversationEntry> {
-        let mut entries: Vec<_> = self.conversations.iter().filter(|e| e.archived).collect();
-        entries.sort_by(|a, b| b.last_seen_at_unix_ms.cmp(&a.last_seen_at_unix_ms));
-        entries
+        self.conversations.iter().filter(|e| e.archived).collect()
     }
 }
 
@@ -634,6 +710,58 @@ mod tests {
         let topic = make_topic(0xAA);
         let entry = ConversationEntry::new(topic, "peer", "My Friend");
         assert_eq!(entry.display_name(), "My Friend");
+    }
+
+    // ── touch_and_bump ────────────────────────────────────────────────
+
+    #[test]
+    fn touch_and_bump_moves_conversation_to_top() {
+        let dir = temp_dir("touch-bump");
+        let mut store = ConversationStore::empty_at(&dir);
+
+        // Use entries with explicit, well-separated timestamps
+        let t1 = make_topic(0x01);
+        let t2 = make_topic(0x02);
+        let t3 = make_topic(0x03);
+
+        let mut e1 = make_entry(t1, "a", "A");
+        e1.last_seen_at_unix_ms = 1000;
+        let mut e2 = make_entry(t2, "b", "B");
+        e2.last_seen_at_unix_ms = 2000;
+        let mut e3 = make_entry(t3, "c", "C");
+        e3.last_seen_at_unix_ms = 3000;
+
+        store.upsert(e1);
+        store.upsert(e2);
+        store.upsert(e3);
+
+        // Sorted: t3 (3000), t2 (2000), t1 (1000)
+        let active = store.active_iter();
+        assert_eq!(active.len(), 3);
+        assert_eq!(active[0].topic, t3);
+        assert_eq!(active[1].topic, t2);
+        assert_eq!(active[2].topic, t1);
+
+        // Bump the oldest conversation to a timestamp newer than all others
+        {
+            let entry = store.find_mut(&t1).unwrap();
+            entry.last_seen_at_unix_ms = 4000;
+        }
+        let old_ts = store.touch_and_bump(&t1).expect("t1 exists");
+        // The store bumps to now() which is > 4000, so old_ts is whatever we set above
+        assert!(old_ts > 0, "should return the previous timestamp");
+
+        // After bump, t1 should be at the top
+        let active = store.active_iter();
+        assert_eq!(active.len(), 3);
+        assert_eq!(active[0].topic, t1, "t1 should move to top after bump");
+    }
+
+    #[test]
+    fn touch_and_bump_returns_none_for_unknown() {
+        let dir = temp_dir("touch-bump-unknown");
+        let mut store = ConversationStore::empty_at(&dir);
+        assert!(store.touch_and_bump(&make_topic(0xFF)).is_none());
     }
 
     #[test]

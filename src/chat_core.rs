@@ -1158,6 +1158,14 @@ pub fn handle_net_event_with_safety(
 /// sharing. Frontend-specific side-effects (persistence, connection
 /// counting, room previews) are delegated to the callbacks.
 pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<()> {
+    let event_label = match &event {
+        NetEvent::Message { .. } => "Message",
+        NetEvent::NeighborUp { .. } => "NeighborUp",
+        NetEvent::NeighborDown { .. } => "NeighborDown",
+        NetEvent::Closed => "Closed",
+        NetEvent::Error(_) => "Error",
+    };
+    let _timer = crate::perf::PerfTracker::timer("handle_net_event", event_label);
     match event {
         NetEvent::Message {
             from,
@@ -1348,23 +1356,10 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
             }
         }
         NetEvent::NeighborUp { peer } => {
-            let fid = FriendId::from_public_key(peer);
-            if cb.is_friend(&peer) {
-                cb.friend_mark_online(fid);
-            }
-            let name = cb.resolve_name(&peer);
-            cb.push_system(format!("{name} joined the chat"));
-            cb.on_neighbor_up(peer);
+            cb.on_neighbor_status_change(peer, true);
         }
         NetEvent::NeighborDown { peer } => {
-            let fid = FriendId::from_public_key(peer);
-            if cb.is_friend(&peer) {
-                cb.friend_mark_offline(fid);
-                cb.mark_friends_dirty();
-            }
-            let name = cb.resolve_name(&peer);
-            cb.push_system(format!("{name} left the chat"));
-            cb.on_neighbor_down(peer);
+            cb.on_neighbor_status_change(peer, false);
         }
         NetEvent::Closed => {
             cb.push_system("The gossip receiver closed.".into());
@@ -1437,6 +1432,8 @@ pub async fn forward_gossip_events_with_safety(
                         continue;
                     }
                 }
+                let _decode_timer =
+                    crate::perf::PerfTracker::timer("forward_gossip_decode", "verify_and_decode");
                 match SignedMessage::verify_and_decode(&msg.content) {
                     Ok((from, message, sent_at)) => {
                         let net_event = NetEvent::Message {

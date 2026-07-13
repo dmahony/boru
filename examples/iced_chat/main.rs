@@ -7,6 +7,7 @@
 
 mod app;
 mod log_viewer;
+mod perf_tracker;
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,8 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use app::IcedChat;
 
+use perf_tracker::PerfTracker;
+
 fn ensure_graphical_session() {
     #[cfg(target_os = "linux")]
     {
@@ -81,6 +84,9 @@ struct Args {
     name: Option<String>,
     #[clap(long, default_value = "0")]
     bind_port: u16,
+    /// Enable performance instrumentation and print baseline report at exit.
+    #[clap(long)]
+    perf: bool,
     /// Optional subcommand.  When omitted, shows the chat list (inbox).
     #[clap(subcommand)]
     command: Option<Command>,
@@ -299,6 +305,15 @@ fn main() -> Result<()> {
     let args = Args::parse();
     ensure_graphical_session();
 
+    // Enable perf tracking if requested
+    if args.perf {
+        perf_tracker::PerfTracker::set_enabled(true);
+    } else {
+        perf_tracker::PerfTracker::set_enabled(false);
+    }
+
+    let _startup_timer = perf_tracker::PerfTracker::timer("app_startup", "full startup");
+
     let data_dir = get_data_dir(args.data_dir.clone());
 
     if matches!(&args.command, Some(Command::Logs)) {
@@ -309,6 +324,8 @@ fn main() -> Result<()> {
     info!(data_dir = %data_dir.display(), "starting iced chat");
 
     let runtime = tokio::runtime::Runtime::new().std_context("failed to create tokio runtime")?;
+    let _tokio_timer = PerfTracker::timer("app_startup", "tokio-runtime");
+
     // Determine if there's an initial room to connect to
     let initial_room: Option<(TopicId, Vec<EndpointAddr>)> = runtime.block_on(async {
         match &args.command {
@@ -577,11 +594,9 @@ fn main() -> Result<()> {
         // ── Continuous DHT discovery & publication ────────────────────
         // Spawn background tasks that periodically publish local presence
         // and discover new peers on the DHT for the public lobby topic.
-        let dht = distributed_topic_tracker::Dht::new(
-            &distributed_topic_tracker::DhtConfig::default(),
-        );
-        let dummy_namespace =
-            distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+        let dht =
+            distributed_topic_tracker::Dht::new(&distributed_topic_tracker::DhtConfig::default());
+        let dummy_namespace = distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
         let dht_backend = MainlineDhtBackend::new(dht, dummy_namespace);
         let public_room_tracker = PublicRoomTracker::start(
             Box::new(dht_backend),
@@ -590,8 +605,7 @@ fn main() -> Result<()> {
             endpoint.secret_key().clone(),
         )
         .await?;
-        let (new_peers_tx, new_peers_rx) =
-            tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
+        let (new_peers_tx, new_peers_rx) = tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
         let continuous_tracker = ContinuousTracker::start(
             public_room_tracker,
             ContinuousTrackerConfig::default(),
@@ -674,7 +688,7 @@ fn main() -> Result<()> {
         IcedChat::update,
         IcedChat::view,
     )
-    .title(|_: &IcedChat| "Boru Chat".to_string())
+    .title(|_: &IcedChat| format!("Boru Chat {}", app::version_tag()))
     .subscription(|state: &IcedChat| {
         let subs: Vec<iced::Subscription<app::AppMessage>> = vec![
             IcedChat::subscription(
@@ -700,6 +714,11 @@ fn main() -> Result<()> {
         warn!("Failed to launch iced GUI: {err}");
         std::process::exit(1);
     });
+
+    // Print performance baseline report if --perf was active
+    if args.perf {
+        perf_tracker::PerfTracker::print_report();
+    }
 
     // The GUI owns clones of the endpoint, but iced drops the application
     // state before returning here.  Close the original endpoint explicitly

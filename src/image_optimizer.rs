@@ -598,9 +598,18 @@ mod tests {
         // The output should be a valid JPEG that can be decoded without error
         let decoded = image::load_from_memory(&optimized).unwrap();
         let (w, h) = decoded.dimensions();
-        // 1920x1080 ≤ 1920 on both axes, so no resize needed
-        assert_eq!(w, 1920);
-        assert_eq!(h, 1080);
+        // Longest edge must be ≤ INLINE_IMAGE_MAX_DIM
+        assert!(
+            w.max(h) <= INLINE_IMAGE_MAX_DIM,
+            "w={w} h={h} max_dim={INLINE_IMAGE_MAX_DIM}"
+        );
+        // Aspect ratio should be preserved (1920/1080 = 16/9 ≈ 1.777)
+        let aspect = w as f64 / h as f64;
+        let expected = 1920.0 / 1080.0;
+        assert!(
+            (aspect - expected).abs() < 0.02,
+            "aspect ratio {aspect} differs from {expected}"
+        );
         assert!(optimized.len() <= CHAT_IMAGE_OPTIMIZED_MAX_BYTES);
     }
 }

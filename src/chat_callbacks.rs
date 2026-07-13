@@ -224,6 +224,34 @@ pub trait ChatCallbacks {
     /// Add an emoji reaction to the message identified by `hash`.
     fn add_reaction(&mut self, hash: &MessageHash, emoji: String);
 
+    /// Called when a gossip neighbor connects or disconnects.
+    ///
+    /// The default implementation immediately marks friend status in the
+    /// store, pushes a system message, and calls [`on_neighbor_up`](ChatCallbacks::on_neighbor_up)
+    /// or [`on_neighbor_down`](ChatCallbacks::on_neighbor_down).
+    ///
+    /// Override this to debounce rapid transitions (see IcedChat for an
+    /// example) — batch pending changes and apply them at a fixed interval.
+    fn on_neighbor_status_change(&mut self, peer: PublicKey, online: bool) {
+        let fid = FriendId::from_public_key(peer);
+        if self.is_friend(&peer) {
+            if online {
+                self.friend_mark_online(fid);
+            } else {
+                self.friend_mark_offline(fid);
+                self.mark_friends_dirty();
+            }
+        }
+        let name = self.resolve_name(&peer);
+        if online {
+            self.push_system(format!("{name} joined the chat"));
+            self.on_neighbor_up(peer);
+        } else {
+            self.push_system(format!("{name} left the chat"));
+            self.on_neighbor_down(peer);
+        }
+    }
+
     /// A gossip neighbor has connected.
     fn on_neighbor_up(&mut self, peer: PublicKey);
 

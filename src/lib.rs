@@ -182,3 +182,10 @@ pub use proto::TopicId;
 /// and a roster (member set). Both are broadcast over the gossip topic.
 #[cfg(feature = "net")]
 pub mod room_docs;
+
+/// Performance instrumentation — timing samples, RAII timers, and
+/// slow-operation detection.
+///
+/// Enable at runtime with `BORU_PERF=1`.  Provides a global singleton
+/// that accumulates samples and prints a summary report.
+pub mod perf;

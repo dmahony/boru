@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.91"
 name = "iroh-dns"
-version = "1.0.0"
+version = "1.0.2"
 authors = ["n0 team"]
 build = "build.rs"
 autolib = false

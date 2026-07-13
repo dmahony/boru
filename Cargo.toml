@@ -112,7 +112,7 @@ rayon = { version = "1.10.0", optional = true }
 comfy-table = { version = "7.1.4", optional = true }
 ratatui = { version = "0.28.1", default-features = false, features = ["crossterm"], optional = true }
 crossterm = { version = "0.28.1", optional = true }
-iced = { version = "0.14", default-features = false, features = ["tokio", "x11", "wayland", "tiny-skia", "image"], optional = true }
+iced = { version = "0.14", default-features = false, features = ["tokio", "x11", "wayland", "tiny-skia", "image", "lazy"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 
@@ -223,6 +223,11 @@ required-features = ["net", "test-utils"]
 name = "image_optimizer_integration"
 path = "tests/image_optimizer_integration.rs"
 required-features = ["gui"]
+
+[[test]]
+name = "performance_baseline"
+path = "tests/test_performance_baseline.rs"
+required-features = ["net", "test-utils"]
 
 [package.metadata.docs.rs]
 all-features = true

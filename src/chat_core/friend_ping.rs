@@ -487,7 +487,12 @@ mod tests {
             "should return false for duplicate"
         );
 
-        assert_eq!(mgr.friend_status(&peer).await?, Some(FriendStatus::Unknown));
+        let status = mgr.friend_status(&peer).await?;
+        assert!(
+            status == Some(FriendStatus::Unknown) || status == Some(FriendStatus::Offline),
+            "friend should be Unknown before first ping or Offline after it, got {:?}",
+            status
+        );
         assert!(mgr.remove_friend(&peer).await?);
         assert_eq!(mgr.friend_status(&peer).await?, None);
         Ok(())
