@@ -5371,12 +5371,33 @@ impl IcedChat {
             AppMessage::Noop => iced::Task::none(),
 
             AppMessage::NewDiscoveredPeers(peers) => {
-                for peer in peers {
-                    if !self.discovered_peers.contains(&peer) {
-                        self.discovered_peers.push(peer);
+                for peer in &peers {
+                    if !self.discovered_peers.contains(peer) {
+                        self.discovered_peers.push(*peer);
                     }
                 }
-                iced::Task::none()
+                // Join newly discovered peers into the lobby's gossip mesh so
+                // they become active neighbors. Without this, both ends subscribe
+                // passively and no one dials — messages go nowhere.
+                let lobby_topic = Self::default_lobby_topic();
+                let tasks: Vec<iced::Task<AppMessage>> = peers
+                    .into_iter()
+                    .filter_map(|peer| {
+                        let sender = self
+                            .conversations
+                            .get(&lobby_topic)
+                            .and_then(|c| c.sender.clone());
+                        sender.map(|s| {
+                            iced::Task::perform(
+                                async move {
+                                    let _ = s.join_peers(vec![peer]).await;
+                                },
+                                |_| AppMessage::Noop,
+                            )
+                        })
+                    })
+                    .collect();
+                iced::Task::batch(tasks)
             }
 
             AppMessage::Scrolled(offset, vp_h) => {
