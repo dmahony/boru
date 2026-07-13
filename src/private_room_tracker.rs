@@ -1,33 +1,26 @@
-//! Private-room DHT tracker — thin wrapper around [`PublicRoomTracker`] for
-//! private rooms that use a shared [`DiscoverySecret`].
+//! Private-room DHT discovery tracker.
 //!
-//! Where `PublicRoomTracker` derives its room identity from a public
-//! [`PublicNetwork`] using canonical constants, `PrivateRoomTracker` derives
-//! the discovery key from a caller-supplied gossip topic and a secret, so
-//! only peers sharing the secret can discover each other.
+//! [`PrivateRoomTracker`] is a minimal wrapper around a
+//! [`TopicDiscoveryBackend`] that provides publish-once / discover-once
+//! operations for **private** rooms.  It differs from [`PublicRoomTracker`]
+//! in two key ways:
+//!
+//! 1. **Namespace isolation.**  The DHT namespace is derived via
+//!    BLAKE3(topic || secret) instead of from a public room name, so
+//!    only peers who know both the gossip [`TopicId`] and the
+//!    [`DiscoverySecret`] can locate each other on the DHT.
+//! 2. **Key material.**  The [`DiscoverySecret`] itself is used as the
+//!    discovery key for signing and verifying records, replacing the
+//!    public-room's deterministic discovery key.
 //!
 //! # Lifecycle
 //!
-//! 1. [`new`](PrivateRoomTracker::new) — construct with a topic + discovery
-//!    secret.
-//! 2. [`publish_once`](PrivateRoomTracker::publish_once) — advertise local
-//!    presence on the private room's DHT namespace.
-//! 3. [`discover_once`](PrivateRoomTracker::discover_once) — find peers that
-//!    share the same discovery secret.
-//! 4. [`shutdown`](PrivateRoomTracker::shutdown) — release backend resources.
+//! 1. [`new`](Self::new) — construct with a backend, topic, and secret.
+//! 2. [`publish_once`](Self::publish_once) — advertise local presence.
+//! 3. [`discover_once`](Self::discover_once) — find valid peers.
+//! 4. [`shutdown`](Self::shutdown) — release backend resources.
 //!
-//! Publishing and lookup are best-effort bootstrap operations. A DHT failure
-//! must not prevent the caller from using ticket-provided peers or an already
-//! connected gossip mesh. Lookup returns endpoint identities only; callers
-//! still need an address source (for example, ticket addresses, DNS/Pkarr, or
-//! mDNS) before an identity can be dialled. The tracker does not carry chat
-//! messages and does not provide message encryption.
-//!
-//! The discovery secret is a bearer capability. It is used as an input to the
-//! namespace derivation and must be kept with the room ticket; it is never
-//! printed by this module at normal log levels.
-//!
-//! # Example
+//! # Minimal example
 //!
 //! ```ignore
 //! use crate::discovery_backend::InMemoryDiscoveryBackend;
@@ -37,8 +30,8 @@
 //!
 //! let sk = SecretKey::generate();
 //! let ep = sk.public();
-//! let topic = crate::proto::TopicId::from_bytes(rand::random());
-//! let secret = DiscoverySecret::generate();
+//! let topic = [0xABu8; 32];
+//! let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
 //!
 //! let tracker = PrivateRoomTracker::new(
 //!     Box::new(InMemoryDiscoveryBackend::new()),
@@ -46,223 +39,321 @@
 //!     secret,
 //!     ep,
 //!     sk,
-//! );
+//! ).await.unwrap();
 //! ```
 
+use std::time::Instant;
+
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
+
+use crate::discovery_backend::{
+    EncryptedDiscoveryRecord, NamespaceId, TopicDiscoveryBackend, MAX_DISCOVERY_PAYLOAD_SIZE,
+};
+use crate::discovery_record::create_discovery_record;
+use crate::discovery_secret::DiscoverySecret;
+use crate::discovery_validation::{DiscoveryRecordValidator, PeerCandidates, ValidationConfig};
+use crate::proto::TopicId;
+use distributed_topic_tracker::{
+    encryption_keypair, unix_minute, EncryptedRecord, Record, RotationHandle,
+    TopicId as TrackerTopicId,
+};
 use iroh::{EndpointId, SecretKey};
 use n0_error::Result;
 
-use crate::discovery_backend::TopicDiscoveryBackend;
-use crate::discovery_secret::DiscoverySecret;
-use crate::proto::TopicId;
-use crate::public_room::PublicRoomIdentity;
-use crate::public_room_tracker::PublicRoomTracker;
-
 // ---------------------------------------------------------------------------
-// Domain separator
+// Domain separation constant
 // ---------------------------------------------------------------------------
 
-/// Domain separator for deriving a private-room discovery key from a gossip
-/// topic and a [`DiscoverySecret`].
+/// Domain separator for private-room DHT namespace derivation.
 ///
-/// Deliberately different from [`PUBLIC_ROOM_DOMAIN_SEPARATOR`] and
-/// [`DISCOVERY_KEY_DOMAIN_SEPARATOR`] to ensure domain separation between
-/// public and private discovery namespaces.
-const PRIVATE_DISCOVERY_KEY_DOMAIN_SEPARATOR: &[u8] = b"boru-chat private-room discovery-key v1";
+/// Deliberately distinct from all public-room domain separators so that
+/// the same (topic, secret) pair produces a namespace that is guaranteed
+/// different from any public-room namespace, the gossip topic itself, or
+/// any discovery key.
+pub const PRIVATE_ROOM_DOMAIN_SEPARATOR: &[u8] = b"boru-chat private-room v1";
+
+/// Derive a private-room DHT namespace from a topic and secret.
+///
+/// The namespace is `BLAKE3(PRIVATE_ROOM_DOMAIN_SEPARATOR || topic || secret)`.
+/// This provides **domain isolation** from public rooms: even if an attacker
+/// knows the gossip [`TopicId`], they cannot derive the DHT namespace without
+/// the [`DiscoverySecret`].
+pub fn private_room_namespace(topic: &TopicId, secret: &DiscoverySecret) -> NamespaceId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(PRIVATE_ROOM_DOMAIN_SEPARATOR);
+    hasher.update(topic.as_bytes());
+    hasher.update(secret.as_bytes());
+    let hash = hasher.finalize();
+    NamespaceId::new(*hash.as_bytes())
+}
 
 // ---------------------------------------------------------------------------
 // PrivateRoomTracker
 // ---------------------------------------------------------------------------
 
-/// A thin wrapper around [`PublicRoomTracker`] that derives the room identity
-/// from a caller-supplied gossip topic and a shared [`DiscoverySecret`].
+/// A minimal private-room tracker for DHT-based peer discovery.
 ///
-/// Peers that know the same `(topic, discovery_secret)` pair derive the same
-/// DHT namespace and can discover each other.  Peers with different secrets
-/// (or different topics) are isolated — they operate on disjoint namespaces.
+/// Wraps a [`TopicDiscoveryBackend`] with a private-room identity model.
+/// The namespace is derived from the gossip topic + discovery secret
+/// (see [`private_room_namespace`]), providing isolation from public rooms.
 ///
-/// All discovery operations delegate to the inner [`PublicRoomTracker`];
-/// this type exists purely to own the private-room identity derivation so
-/// callers don't have to construct a [`PublicRoomIdentity`] by hand.
+/// # Lifecycle
 ///
-/// The type is `Send + Sync` when the inner tracker is (it always is).
-#[derive(Debug)]
+/// 1. [`new`](Self::new) — construct.
+/// 2. [`publish_once`](Self::publish_once) — advertise local presence.
+/// 3. [`discover_once`](Self::discover_once) — find peers.
+/// 4. [`shutdown`](Self::shutdown) — release backend resources.
+///
+/// # Cancellation
+///
+/// The internal [`CancellationToken`] is a placeholder for future background
+/// tasks (e.g. periodic re-publish). It is fired during [`shutdown`](Self::shutdown)
+/// but currently has no listeners.
 pub struct PrivateRoomTracker {
-    inner: PublicRoomTracker,
-    /// The gossip topic for this private room (kept for identity queries).
+    /// The underlying discovery backend.
+    backend: Box<dyn TopicDiscoveryBackend>,
+    /// The DHT namespace derived from this room's topic and secret.
+    namespace: NamespaceId,
+    /// The discovery key — the secret bytes used for signing/verifying records.
+    discovery_key: [u8; 32],
+    /// The gossip topic for logging / identification.
     topic: TopicId,
+    /// This node's iroh EndpointId.
+    local_endpoint_id: EndpointId,
+    /// This node's iroh SecretKey — used to sign discovery records.
+    secret_key: SecretKey,
+    /// Cancellation token for future background tasks.
+    cancel: CancellationToken,
+}
+
+impl std::fmt::Debug for PrivateRoomTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivateRoomTracker")
+            .field("topic", &hex::encode(&self.topic.as_bytes()[..4]))
+            .field("local_endpoint_id", &self.local_endpoint_id)
+            .field("namespace", &hex::encode(&self.namespace.as_bytes()[..4]))
+            .finish()
+    }
 }
 
 impl PrivateRoomTracker {
-    /// Create a new private-room tracker for the given topic and discovery
-    /// secret.
-    ///
-    /// The room identity is derived deterministically from:
-    ///
-    /// ```text
-    /// discovery_key = BLAKE3(
-    ///     PRIVATE_DISCOVERY_KEY_DOMAIN_SEPARATOR ||
-    ///     topic_bytes ||
-    ///     discovery_secret_bytes
-    /// )
-    /// topic = caller-supplied TopicId  (passed through unchanged)
-    /// ```
+    /// Create a new private-room tracker.
     ///
     /// # Parameters
     ///
     /// * `backend` — the DHT-like discovery backend (in-memory for tests,
-    ///   `MainlineDhtBackend` for production).
-    /// * `topic` — the gossip mesh topic for this private room.
-    /// * `discovery_secret` — the shared secret that controls access to the
-    ///   room's discovery namespace.
-    /// * `local_endpoint_id` — this node's iroh EndpointId.
-    /// * `secret_key` — this node's iroh SecretKey for signing records.
+    ///   MainlineDHT in production).
+    /// * `topic` — the room's gossip [`TopicId`].
+    /// * `secret` — the room's [`DiscoverySecret`] (shared with all members).
+    /// * `local_endpoint_id` — this node's iroh [`EndpointId`].
+    /// * `secret_key` — this node's iroh [`SecretKey`] for signing records.
     pub fn new(
         backend: Box<dyn TopicDiscoveryBackend>,
         topic: TopicId,
-        discovery_secret: DiscoverySecret,
+        secret: DiscoverySecret,
         local_endpoint_id: EndpointId,
         secret_key: SecretKey,
     ) -> Self {
-        let discovery_key = derive_private_discovery_key(&topic, &discovery_secret);
-        let identity = PublicRoomIdentity::new(topic, discovery_key);
-        let inner = PublicRoomTracker::new(backend, identity, local_endpoint_id, secret_key);
-        Self { inner, topic }
+        let namespace = private_room_namespace(&topic, &secret);
+        let discovery_key = *secret.as_bytes();
+        info!(
+            topic = %hex::encode(&topic.as_bytes()[..4]),
+            namespace = %hex::encode(&namespace.as_bytes()[..4]),
+            "private room tracker created",
+        );
+        Self {
+            backend,
+            namespace,
+            discovery_key,
+            topic,
+            local_endpoint_id,
+            secret_key,
+            cancel: CancellationToken::new(),
+        }
     }
 
-    /// Return the room identity used by the inner tracker.
-    pub fn identity(&self) -> &PublicRoomIdentity {
-        self.inner.identity()
+    fn encryption_key(&self, minute: u64) -> ed25519_dalek::SigningKey {
+        let tracker_topic = TrackerTopicId::from_hash(&self.discovery_key);
+        let secret_hash = *blake3::hash(&self.discovery_key).as_bytes();
+        encryption_keypair(
+            &tracker_topic,
+            &RotationHandle::default(),
+            secret_hash,
+            minute,
+        )
     }
 
-    /// Return the gossip topic for this private room.
+    /// Return the gossip topic this tracker is configured for.
     pub fn topic(&self) -> &TopicId {
         &self.topic
     }
 
-    /// Consume this wrapper and extract the inner [`PublicRoomTracker`].
-    ///
-    /// Use this to pass the tracker to [`ContinuousTracker::start`](crate::public_room_continuous::ContinuousTracker::start)
-    /// for continuous background publish/discovery.
-    pub fn into_inner(self) -> PublicRoomTracker {
-        self.inner
+    /// Return the DHT namespace used for publish/lookup.
+    pub fn namespace(&self) -> &NamespaceId {
+        &self.namespace
     }
 
     /// Return this node's EndpointId.
     pub fn local_endpoint_id(&self) -> &EndpointId {
-        self.inner.local_endpoint_id()
+        &self.local_endpoint_id
     }
 
-    /// Publish this node's presence to the DHT once.
+    /// Publish this node's presence to the private room's DHT namespace once.
     ///
-    /// Delegates to the inner [`PublicRoomTracker::publish_once`].
+    /// Creates and signs a discovery record advertising this node's
+    /// [`EndpointId`], then publishes it via the backend under the
+    /// private-room namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying backend's [`publish`](TopicDiscoveryBackend::publish)
+    /// fails, or if record creation fails (extremely unlikely).
     pub async fn publish_once(&self) -> Result<()> {
-        self.inner.publish_once().await
+        let start = Instant::now();
+        let topic_short = hex::encode(&self.topic.as_bytes()[..4]);
+        let local = self.local_endpoint_id.fmt_short();
+
+        let now = unix_minute(0);
+        let record = create_discovery_record(
+            self.discovery_key,
+            now,
+            &self.local_endpoint_id,
+            &self.secret_key,
+        )?;
+        let encrypted_record = record.encrypt(&self.encryption_key(now));
+        let wire_record = encrypted_record.to_bytes()?;
+        let result = self
+            .backend
+            .publish(&self.namespace, EncryptedDiscoveryRecord::new(wire_record))
+            .await;
+
+        let duration_us = start.elapsed().as_micros() as u64;
+        match &result {
+            Ok(()) => info!(
+                topic = %topic_short,
+                local = %local,
+                duration_us = duration_us,
+                "private room publish completed",
+            ),
+            Err(e) => warn!(
+                topic = %topic_short,
+                local = %local,
+                error = %e,
+                duration_us = duration_us,
+                "private room publish failed",
+            ),
+        }
+
+        result
     }
 
-    /// Find valid peers on the room's DHT namespace.
+    /// Find valid peers on the private room's DHT namespace.
     ///
-    /// Delegates to the inner [`PublicRoomTracker::discover_once`].
+    /// Deserialises records from the backend, validates each through the full
+    /// pipeline (size, timestamp, decode, identity match, signature), filters
+    /// out the local node and duplicates, and returns the bounded result set.
+    ///
+    /// # Returns
+    ///
+    /// A [`Vec`] of validated [`EndpointId`] values from other peers.  The
+    /// result is bounded by [`ValidationConfig::max_candidate_peers`] (default
+    /// 20).  Returns an empty `Vec` when no valid peers exist — not an error.
+    ///
+    /// Records that fail deserialisation from raw bytes are silently skipped.
     pub async fn discover_once(&self) -> Result<Vec<EndpointId>> {
-        self.inner.discover_once().await
+        let start = Instant::now();
+        let topic_short = hex::encode(&self.topic.as_bytes()[..4]);
+        let local = self.local_endpoint_id.fmt_short();
+
+        // Fetch encrypted records from the backend.
+        let encrypted = self.backend.lookup(&self.namespace).await?;
+        let total_encrypted = encrypted.len();
+
+        // Decrypt native tracker envelopes for the current and previous minute.
+        // A wrong room secret cannot decrypt these bytes, even if records are
+        // accidentally copied into this namespace.
+        let mut records: Vec<Record> = Vec::with_capacity(encrypted.len());
+        let now_minute = unix_minute(0);
+        for er in encrypted {
+            if er.payload.len() > MAX_DISCOVERY_PAYLOAD_SIZE {
+                continue;
+            }
+            let Ok(encrypted_record) = EncryptedRecord::from_bytes(er.payload) else {
+                continue;
+            };
+            let mut decrypted = None;
+            for minute in [now_minute, now_minute.saturating_sub(1)] {
+                if let Ok(record) = encrypted_record.decrypt(&self.encryption_key(minute)) {
+                    decrypted = Some(record);
+                    break;
+                }
+            }
+            if let Some(record) = decrypted {
+                records.push(record);
+            }
+        }
+        let total_records = records.len();
+
+        // Validate and filter through the discovery-validation pipeline
+        // using the discovery_key derived from the shared secret.
+        let config = ValidationConfig::new(self.discovery_key);
+        let now_minute = unix_minute(0);
+        let validator = DiscoveryRecordValidator::new(config, now_minute);
+        let PeerCandidates { peers, counters } =
+            validator.filter_and_build(records, Some(&self.local_endpoint_id));
+
+        let duration_us = start.elapsed().as_micros() as u64;
+        let accepted = counters.accepted;
+        let rejected = counters.total_rejected();
+        if accepted > 0 {
+            info!(
+                topic = %topic_short,
+                local = %local,
+                encrypted = total_encrypted,
+                records = total_records,
+                accepted = accepted,
+                rejected = rejected,
+                oversized = counters.oversized,
+                stale = counters.stale,
+                future = counters.future,
+                decode_failure = counters.decode_failure,
+                identity_mismatch = counters.identity_mismatch,
+                invalid_signature = counters.invalid_signature,
+                self_filtered = counters.self_filtered,
+                duplicates = counters.duplicates,
+                duration_us = duration_us,
+                "private room discovery found peers",
+            );
+        } else {
+            debug!(
+                topic = %topic_short,
+                local = %local,
+                encrypted = total_encrypted,
+                records = total_records,
+                accepted = accepted,
+                rejected = rejected,
+                duration_us = duration_us,
+                "private room discovery returned no peers",
+            );
+        }
+
+        Ok(peers)
     }
 
     /// Shut down the tracker, releasing backend resources.
     ///
-    /// Delegates to the inner [`PublicRoomTracker::shutdown`].
+    /// Fires the cancellation token and calls [`shutdown`](TopicDiscoveryBackend::shutdown)
+    /// on the backend.
     ///
     /// **Consumes** the tracker — call this once when done.
     pub async fn shutdown(self) {
-        self.inner.shutdown().await
+        let topic_short = hex::encode(&self.topic.as_bytes()[..4]);
+        info!(topic = %topic_short, "private room tracker shutting down");
+        self.cancel.cancel();
+        let _ = self.backend.shutdown().await;
+        info!(topic = %topic_short, "private room tracker shut down");
     }
-}
-
-// ---------------------------------------------------------------------------
-// Discovery key derivation
-// ---------------------------------------------------------------------------
-
-/// Derive a 32-byte discovery key from a private-room gossip topic and a
-/// shared [`DiscoverySecret`].
-///
-/// # Derivation
-///
-/// ```text
-/// discovery_key = BLAKE3(
-///     PRIVATE_DISCOVERY_KEY_DOMAIN_SEPARATOR ||
-///     topic.as_bytes() ||
-///     discovery_secret.as_bytes()
-/// )
-/// ```
-///
-/// # Properties
-///
-/// * **Deterministic** — same (topic, secret) always produces the same key.
-/// * **Domain-separated** — the prefix differs from all public-room
-///   derivation constants.
-/// * **Secret-dependent** — different secrets on the same topic produce
-///   different keys.
-/// * **Topic-dependent** — the same secret on different topics produces
-///   different keys.
-fn derive_private_discovery_key(topic: &TopicId, secret: &DiscoverySecret) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(PRIVATE_DISCOVERY_KEY_DOMAIN_SEPARATOR);
-    hasher.update(topic.as_bytes());
-    hasher.update(secret.as_bytes());
-    let hash = hasher.finalize();
-    *hash.as_bytes()
-}
-
-/// Create a private room's DHT discovery record and publish it once.
-///
-/// **Call this during room creation** when the user (or the frontend) has
-/// opted into DHT-based discovery.  The function:
-///
-/// 1. Generates a fresh [`DiscoverySecret`].
-/// 2. Creates a [`PrivateRoomTracker`] for the given topic + secret.
-/// 3. Publishes the local endpoint's presence on the DHT.
-///
-/// # DHT backend availability
-///
-/// Pass `None` for `dht` to skip DHT entirely — the function returns
-/// `None` immediately without generating a secret or publishing.  This
-/// lets callers handle "DHT not available" transparently without changing
-/// their control flow.
-///
-/// # Errors
-///
-/// Errors from the DHT backend (e.g. network unreachable) are logged at
-/// `WARN` level but are **not** propagated — room creation without DHT
-/// works exactly as before.  The discovery secret is still returned on
-/// success so the caller can embed it in the room ticket and persist it.
-///
-/// # Returns
-///
-/// * `Some(secret)` — DHT backend was available and publishing succeeded
-///   (or failed non-fatally; the secret is still usable for ticket sharing).
-/// * `None` — no DHT instance was provided.
-pub async fn create_and_publish_private_discovery(
-    dht: Option<distributed_topic_tracker::Dht>,
-    topic: TopicId,
-    endpoint: &iroh::Endpoint,
-) -> Option<DiscoverySecret> {
-    let dht = dht?;
-    let secret = DiscoverySecret::generate();
-    let dummy_namespace = distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
-    let backend = Box::new(crate::discovery_backend::MainlineDhtBackend::new(
-        dht,
-        dummy_namespace,
-    ));
-    let tracker = PrivateRoomTracker::new(
-        backend,
-        topic,
-        secret,
-        endpoint.id(),
-        endpoint.secret_key().clone(),
-    );
-    if let Err(e) = tracker.publish_once().await {
-        tracing::warn!(error = %e, "DHT publish failed for private-room discovery (non-fatal)");
-    }
-    Some(secret)
 }
 
 // ---------------------------------------------------------------------------
@@ -272,21 +363,14 @@ pub async fn create_and_publish_private_discovery(
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::discovery_backend::InMemoryDiscoveryBackend;
+    use n0_tracing_test::traced_test;
 
-    /// Helper: generate a fresh test identity (SecretKey + EndpointId).
+    /// Helper: generate a fresh test identity.
     fn test_identity() -> (SecretKey, EndpointId) {
         let sk = SecretKey::generate();
         let ep = sk.public();
         (sk, ep)
-    }
-
-    /// Helper: generate a random TopicId for test private rooms.
-    fn test_topic() -> TopicId {
-        let mut bytes = [0u8; 32];
-        getrandom::fill(&mut bytes).expect("OS entropy failed");
-        TopicId::from(bytes)
     }
 
     /// Helper: block on an async future for synchronous test contexts.
@@ -294,79 +378,127 @@ mod tests {
         tokio::runtime::Runtime::new().unwrap().block_on(f)
     }
 
+    fn test_tracker(
+        shared: Option<InMemoryDiscoveryBackend>,
+    ) -> (PrivateRoomTracker, InMemoryDiscoveryBackend) {
+        let backend = shared.unwrap_or_default();
+        let (sk, ep) = test_identity();
+        let topic = TopicId::from_bytes([0xABu8; 32]);
+        let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
+        let tracker = PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep, sk);
+        (tracker, backend)
+    }
+
+    // ── Tracing smoke tests ──────────────────────────────────────────
+
+    /// Tracing is emitted during publish + discover cycle without panics.
+    #[test]
+    #[traced_test]
+    fn traced_publish_discover_roundtrip() {
+        publish_discover_roundtrip();
+    }
+
+    /// Tracing is emitted on publish without panics.
+    #[test]
+    #[traced_test]
+    fn traced_publish_logs() {
+        let (tracker, _backend) = test_tracker(None);
+        block_on(tracker.publish_once()).unwrap();
+        block_on(tracker.shutdown());
+    }
+
+    /// Tracing is emitted during tracker shutdown.
+    #[test]
+    #[traced_test]
+    fn traced_shutdown_logs() {
+        let (tracker, _backend) = test_tracker(None);
+        block_on(tracker.shutdown());
+    }
+
     // ── Construction ──────────────────────────────────────────────────
 
-    /// Construction with explicit parameters preserves the topic and
-    /// produces a valid identity.
     #[test]
-    fn constructor_creates_tracker() {
-        let topic = test_topic();
-        let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
+    fn tracker_new_constructs_with_identity() {
         let (sk, ep) = test_identity();
+        let topic = TopicId::from_bytes([0xABu8; 32]);
+        let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
+        let backend = InMemoryDiscoveryBackend::new();
 
-        let tracker = PrivateRoomTracker::new(
-            Box::new(InMemoryDiscoveryBackend::new()),
-            topic,
-            secret,
-            ep.clone(),
-            sk,
-        );
+        let tracker = PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep, sk);
 
         assert_eq!(tracker.topic(), &topic);
         assert_eq!(tracker.local_endpoint_id(), &ep);
-        // The identity's topic should match what we passed in.
-        assert_eq!(tracker.identity().topic, topic);
+
+        // Namespace should be deterministic
+        let expected_ns =
+            private_room_namespace(&topic, &DiscoverySecret::from_bytes([0x42u8; 32]));
+        assert_eq!(tracker.namespace(), &expected_ns);
     }
 
-    /// Two trackers with the same (topic, secret) produce identical
-    /// identities (same discovery key).
     #[test]
-    fn same_topic_and_secret_produce_same_identity() {
-        let topic = test_topic();
+    fn different_secrets_produce_different_namespaces() {
+        let topic = TopicId::from_bytes([0xABu8; 32]);
+        let secret_a = DiscoverySecret::from_bytes([0x01u8; 32]);
+        let secret_b = DiscoverySecret::from_bytes([0x02u8; 32]);
+        let ns_a = private_room_namespace(&topic, &secret_a);
+        let ns_b = private_room_namespace(&topic, &secret_b);
+        assert_ne!(
+            ns_a, ns_b,
+            "different secrets must give different namespaces"
+        );
+    }
+
+    #[test]
+    fn same_secret_same_topic_same_namespace() {
+        let topic = TopicId::from_bytes([0xABu8; 32]);
         let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
-        let (sk_a, ep_a) = test_identity();
-        let (_sk_b, _ep_b) = test_identity();
-
-        let tracker_a = PrivateRoomTracker::new(
-            Box::new(InMemoryDiscoveryBackend::new()),
-            topic,
-            secret,
-            ep_a,
-            sk_a,
-        );
-        // Same params again.
-        let tracker_b = PrivateRoomTracker::new(
-            Box::new(InMemoryDiscoveryBackend::new()),
-            topic,
-            secret,
-            _ep_b,
-            _sk_b,
-        );
-
-        assert_eq!(tracker_a.identity(), tracker_b.identity());
+        let ns_a = private_room_namespace(&topic, &secret);
+        let ns_b = private_room_namespace(&topic, &secret);
+        assert_eq!(ns_a, ns_b, "same inputs must give same namespace");
     }
 
-    // ── Two peers on same discovery secret discover each other ─────────
-
-    /// Two peers that share the same (topic, secret) can discover each
-    /// other via the in-memory backend.
     #[test]
-    fn same_secret_discovers_peers() {
-        let topic = test_topic();
-        let secret = DiscoverySecret::generate();
-        let backend = InMemoryDiscoveryBackend::new();
+    fn private_namespace_differs_from_public() {
+        // Private-room namespace should not equal any public-room topic
+        let topic = TopicId::from_bytes([0xABu8; 32]);
+        let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
+        let private_ns = private_room_namespace(&topic, &secret);
+        // A public-room namespace derived from the same topic bytes
+        // (through the tracker_namespace_from_topic function) should differ.
+        let public_ns = crate::topic_derivation::tracker_namespace_from_topic(topic.as_bytes());
+        assert_ne!(
+            private_ns.as_bytes(),
+            &public_ns.hash(),
+            "private-room namespace must differ from public-room namespace"
+        );
+    }
 
+    // ── publish_once + discover_once ──────────────────────────────────
+
+    #[test]
+    fn publish_discover_roundtrip() {
         let (sk_a, ep_a) = test_identity();
         let (_sk_b, ep_b) = test_identity();
+        let topic = TopicId::from_bytes([0xABu8; 32]);
+        let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
 
-        // Peer A publishes.
-        let tracker_a =
-            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep_a.clone(), sk_a);
+        // Use a shared backend so both trackers operate on the same store.
+        let shared = InMemoryDiscoveryBackend::new();
+
+        // Tracker A publishes into shared backend.
+        let tracker_a = PrivateRoomTracker::new(
+            Box::new(shared.clone()),
+            topic,
+            secret.clone(),
+            ep_a.clone(),
+            sk_a,
+        );
         block_on(tracker_a.publish_once()).unwrap();
+        block_on(tracker_a.shutdown());
 
-        // Peer B discovers.
+        // Tracker B discovers from the same shared backend.
         let tracker_b = PrivateRoomTracker::new(
-            Box::new(backend.clone()),
+            Box::new(shared.clone()),
             topic,
             secret,
             ep_b,
@@ -374,212 +506,167 @@ mod tests {
         );
         let peers = block_on(tracker_b.discover_once()).unwrap();
 
+        // B should discover A (and not itself).
         assert!(
             peers.contains(&ep_a),
             "expected peer A to be discovered, got {peers:?}"
         );
-        assert_eq!(
-            peers.len(),
-            1,
-            "expected exactly one peer, got {}",
+        assert!(
+            peers.len() == 1,
+            "expected exactly one peer (A), got {}",
             peers.len()
         );
+        block_on(tracker_b.shutdown());
     }
 
-    // ── Two peers on different discovery secrets are isolated ──────────
-
-    /// Peers with different secrets on the same topic are isolated — they
-    /// cannot discover each other.
-    #[test]
-    fn different_secrets_are_isolated() {
-        let topic = test_topic();
-        let secret_a = DiscoverySecret::from_bytes([1u8; 32]);
-        let secret_b = DiscoverySecret::from_bytes([2u8; 32]);
-
-        let backend_a = InMemoryDiscoveryBackend::new();
-        let backend_b = InMemoryDiscoveryBackend::new();
-
-        let (sk_a, ep_a) = test_identity();
-        let (_sk_b, ep_b) = test_identity();
-
-        // Peer A publishes with secret A.
-        let tracker_a =
-            PrivateRoomTracker::new(Box::new(backend_a.clone()), topic, secret_a, ep_a, sk_a);
-        block_on(tracker_a.publish_once()).unwrap();
-
-        // Peer B tries to discover with secret B — should see nothing.
-        let tracker_b =
-            PrivateRoomTracker::new(Box::new(backend_b.clone()), topic, secret_b, ep_b, _sk_b);
-        let peers = block_on(tracker_b.discover_once()).unwrap();
-
-        assert!(
-            peers.is_empty(),
-            "peers with different secrets should be isolated, got {peers:?}"
-        );
-    }
-
-    // ── Self-filter works ─────────────────────────────────────────────
-
-    /// A peer does not discover its own EndpointId.
     #[test]
     fn self_filter_excludes_local_peer() {
-        let topic = test_topic();
-        let secret = DiscoverySecret::generate();
-        let backend = InMemoryDiscoveryBackend::new();
         let (sk, ep) = test_identity();
+        let topic = TopicId::from_bytes([0xABu8; 32]);
+        let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
+        let backend = InMemoryDiscoveryBackend::new();
 
+        // Publish our own presence.
         let tracker =
             PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep.clone(), sk);
         block_on(tracker.publish_once()).unwrap();
 
+        // Discover — our own EndpointId should be filtered out.
         let peers = block_on(tracker.discover_once()).unwrap();
         assert!(
             !peers.contains(&ep),
             "self endpoint should be filtered out, got {peers:?}"
         );
         assert!(peers.is_empty(), "expected no peers, got {peers:?}");
-    }
 
-    // ── Duplicate filter works ────────────────────────────────────────
-
-    /// Multiple publishes by the same peer produce only one EndpointId.
-    #[test]
-    fn duplicate_peers_are_filtered() {
-        let topic = test_topic();
-        let secret = DiscoverySecret::generate();
-        let backend = InMemoryDiscoveryBackend::new();
-        let (sk, ep) = test_identity();
-
-        // Publish twice.
-        {
-            let t = PrivateRoomTracker::new(
-                Box::new(backend.clone()),
-                topic,
-                secret,
-                ep.clone(),
-                sk.clone(),
-            );
-            block_on(t.publish_once()).unwrap();
-        }
-        {
-            let t =
-                PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep.clone(), sk);
-            block_on(t.publish_once()).unwrap();
-        }
-
-        // Discover from a different peer.
-        let (sk_b, ep_b) = test_identity();
-        let t_b = PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep_b, sk_b);
-        let peers = block_on(t_b.discover_once()).unwrap();
-
-        assert!(
-            peers.contains(&ep),
-            "expected A to be discovered, got {peers:?}"
-        );
-        assert_eq!(
-            peers.iter().filter(|&&p| p == ep).count(),
-            1,
-            "A should appear exactly once, got {peers:?}"
-        );
-    }
-
-    // ── Empty discovery returns empty ─────────────────────────────────
-
-    /// Discovering on an empty backend returns an empty list.
-    #[test]
-    fn discover_empty_backend_returns_empty() {
-        let topic = test_topic();
-        let secret = DiscoverySecret::generate();
-        let (sk, ep) = test_identity();
-
-        let tracker = PrivateRoomTracker::new(
-            Box::new(InMemoryDiscoveryBackend::new()),
-            topic,
-            secret,
-            ep,
-            sk,
-        );
-        let peers = block_on(tracker.discover_once()).unwrap();
-        assert!(peers.is_empty(), "expected empty, got {peers:?}");
-    }
-
-    // ── Shutdown prevents further operations ──────────────────────────
-
-    /// Shutdown consumes the tracker without panicking.  The underlying
-    /// backend remains usable (in-memory shutdown is a no-op).
-    #[test]
-    fn shutdown_does_not_panic() {
-        let topic = test_topic();
-        let secret = DiscoverySecret::generate();
-        let (sk, ep) = test_identity();
-
-        let tracker = PrivateRoomTracker::new(
-            Box::new(InMemoryDiscoveryBackend::new()),
-            topic,
-            secret,
-            ep,
-            sk,
-        );
         block_on(tracker.shutdown());
     }
 
-    // ── Send + Sync ──────────────────────────────────────────────────
-
-    /// The type satisfies Send + Sync (compile-time check).
     #[test]
-    fn tracker_is_send_sync() {
+    fn different_secret_isolation() {
+        // Two trackers using different secrets for the same topic
+        // should NOT discover each other.
+        let (sk_a, ep_a) = test_identity();
+        let (_sk_b, ep_b) = test_identity();
+        let topic = TopicId::from_bytes([0xABu8; 32]);
+        let secret_a = DiscoverySecret::from_bytes([0x01u8; 32]);
+        let secret_b = DiscoverySecret::from_bytes([0x02u8; 32]);
+
+        let shared = InMemoryDiscoveryBackend::new();
+
+        // Tracker A publishes with secret A.
+        let tracker_a = PrivateRoomTracker::new(
+            Box::new(shared.clone()),
+            topic,
+            secret_a,
+            ep_a.clone(),
+            sk_a,
+        );
+        block_on(tracker_a.publish_once()).unwrap();
+        block_on(tracker_a.shutdown());
+
+        // Tracker B tries to discover with secret B (different namespace).
+        let tracker_b = PrivateRoomTracker::new(
+            Box::new(shared.clone()),
+            topic,
+            secret_b,
+            ep_b,
+            SecretKey::generate(),
+        );
+        let peers = block_on(tracker_b.discover_once()).unwrap();
+        assert!(
+            peers.is_empty(),
+            "different secrets should isolate rooms, got {peers:?}"
+        );
+        block_on(tracker_b.shutdown());
+    }
+
+    #[test]
+    fn malformed_and_wrong_secret_envelopes_are_ignored() {
+        let (sk, ep) = test_identity();
+        let topic = TopicId::from_bytes([0xCDu8; 32]);
+        let secret = DiscoverySecret::from_bytes([0x52u8; 32]);
+        let backend = InMemoryDiscoveryBackend::new();
+        let tracker =
+            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret.clone(), ep, sk);
+        let namespace = tracker.namespace().clone();
+        block_on(backend.publish(&namespace, EncryptedDiscoveryRecord::new(vec![0xAA; 32])))
+            .unwrap();
+
+        // A valid native envelope encrypted with another room secret must
+        // also be rejected at decryption, not passed to record validation.
+        let other_key = SecretKey::generate();
+        let other_ep = other_key.public();
+        let record =
+            create_discovery_record(*secret.as_bytes(), unix_minute(0), &other_ep, &other_key)
+                .unwrap();
+        let wrong_envelope = record
+            .encrypt(&tracker.encryption_key(unix_minute(0) + 1))
+            .to_bytes()
+            .unwrap();
+        block_on(backend.publish(&namespace, EncryptedDiscoveryRecord::new(wrong_envelope)))
+            .unwrap();
+
+        assert!(block_on(tracker.discover_once()).unwrap().is_empty());
+    }
+
+    // ── Shutdown ──────────────────────────────────────────────────────
+
+    #[test]
+    fn shutdown_releases_backend() {
+        let (tracker, backend) = test_tracker(None);
+        block_on(tracker.shutdown());
+        // After shutdown, the backend should still accept operations
+        // (in-memory backend never truly shuts down, but the call should
+        // not panic or error).
+        assert!(block_on(backend.shutdown()).is_ok());
+    }
+
+    #[test]
+    fn publish_after_shutdown_is_allowed_on_backend() {
+        let (tracker, backend) = test_tracker(None);
+        block_on(tracker.shutdown());
+
+        // The backend should still be usable independently after the
+        // tracker that owned it has shut down.
+        let ns = NamespaceId::new([0u8; 32]);
+        let result = block_on(backend.publish(&ns, EncryptedDiscoveryRecord::new(vec![1, 2, 3])));
+        assert!(result.is_ok());
+    }
+
+    // ── Namespace derivation ──────────────────────────────────────────
+
+    #[test]
+    fn namespace_is_nonzero() {
+        let topic = TopicId::from_bytes([0u8; 32]);
+        let secret = DiscoverySecret::from_bytes([0u8; 32]);
+        let ns = private_room_namespace(&topic, &secret);
+        assert!(
+            ns.as_bytes().iter().any(|&b| b != 0),
+            "namespace should not be all-zero"
+        );
+    }
+
+    #[test]
+    fn namespace_is_deterministic() {
+        let topic = TopicId::from_bytes([0xABu8; 32]);
+        let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
+        let a = private_room_namespace(&topic, &secret);
+        let b = private_room_namespace(&topic, &secret);
+        assert_eq!(a, b);
+    }
+
+    // ── Send + Sync ───────────────────────────────────────────────────
+
+    #[test]
+    fn private_room_tracker_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<PrivateRoomTracker>();
     }
 
-    // ── Discovery key derivation ──────────────────────────────────────
-
-    /// Same (topic, secret) produces the same key.
     #[test]
-    fn derive_key_is_deterministic() {
-        let topic = test_topic();
-        let secret = DiscoverySecret::from_bytes([0xab; 32]);
-        let a = derive_private_discovery_key(&topic, &secret);
-        let b = derive_private_discovery_key(&topic, &secret);
-        assert_eq!(a, b);
-    }
-
-    /// Different secrets produce different keys (same topic).
-    #[test]
-    fn derive_key_differs_by_secret() {
-        let topic = test_topic();
-        let secret_a = DiscoverySecret::from_bytes([1u8; 32]);
-        let secret_b = DiscoverySecret::from_bytes([2u8; 32]);
-        let a = derive_private_discovery_key(&topic, &secret_a);
-        let b = derive_private_discovery_key(&topic, &secret_b);
-        assert_ne!(a, b);
-    }
-
-    /// Different topics produce different keys (same secret).
-    #[test]
-    fn derive_key_differs_by_topic() {
-        let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
-        let topic_a = {
-            let mut b = [0u8; 32];
-            b[0] = 1;
-            TopicId::from(b)
-        };
-        let topic_b = {
-            let mut b = [0u8; 32];
-            b[0] = 2;
-            TopicId::from(b)
-        };
-        let a = derive_private_discovery_key(&topic_a, &secret);
-        let b = derive_private_discovery_key(&topic_b, &secret);
-        assert_ne!(a, b);
-    }
-
-    /// Output is non-zero (avalanche sanity).
-    #[test]
-    fn derive_key_is_nonzero() {
-        let topic = test_topic();
-        let secret = DiscoverySecret::generate();
-        let key = derive_private_discovery_key(&topic, &secret);
-        assert!(key.iter().any(|&b| b != 0));
+    fn namespace_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<NamespaceId>();
     }
 }

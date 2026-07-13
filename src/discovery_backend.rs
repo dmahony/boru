@@ -65,9 +65,9 @@ pub fn validate_discovery_record(record: &EncryptedDiscoveryRecord) -> Result<()
 
 /// Maximum serialized discovery-record payload size (before encryption).
 ///
-/// A valid signed discovery record is ~171 B raw (~270 B encrypted).
-/// 256 B provides headroom without accepting DHT spam.
-pub const MAX_DISCOVERY_PAYLOAD_SIZE: usize = 256;
+/// Native `distributed-topic-tracker::EncryptedRecord` envelopes include an
+/// HPKE-wrapped key and are bounded by the crate's 2048-byte wire limit.
+pub const MAX_DISCOVERY_PAYLOAD_SIZE: usize = 2048;
 
 /// Trait abstracting DHT-like topic discovery operations.
 ///

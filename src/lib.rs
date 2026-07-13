@@ -23,16 +23,10 @@ pub mod discovery_backend;
 #[cfg(feature = "net")]
 pub mod discovery_record;
 #[cfg(feature = "net")]
-pub mod discovery_secret;
-#[cfg(feature = "net")]
 pub mod discovery_validation;
 pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;
-/// Private-room DHT tracker — thin wrapper around [`PublicRoomTracker`] for
-/// private rooms that use a shared [`DiscoverySecret`].
-#[cfg(feature = "net")]
-pub mod private_room_tracker;
 pub mod proto;
 pub mod public_room;
 #[cfg(feature = "net")]
@@ -62,6 +56,18 @@ pub mod public_room_safety;
 #[cfg(feature = "net")]
 pub mod public_room_tracker;
 pub mod topic_derivation;
+
+/// Per-room discovery secrets — cryptographically random 32-byte keys
+/// that isolate private rooms on the DHT.
+///
+/// Always available (no feature gate) so that [`RoomStore`] can
+/// (de)serialize secrets without the `net` feature.
+pub mod discovery_secret;
+
+/// Private-room topic tracker — thin wrapper over [`TopicDiscoveryBackend`]
+/// with domain-separated namespace derivation and peer isolation.
+#[cfg(feature = "net")]
+pub mod private_room_tracker;
 
 /// Shared chat core — state machine, protocol types, and network event handling.
 ///

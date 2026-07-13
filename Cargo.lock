@@ -824,6 +824,7 @@ dependencies = [
  "data-encoding",
  "derive_more",
  "distributed-topic-tracker",
+ "ed25519-dalek",
  "futures-concurrency",
  "getrandom 0.3.4",
  "hex",
@@ -849,6 +850,7 @@ dependencies = [
  "serde",
  "serde-byte-array",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "testresult",
  "tokio",
@@ -1871,8 +1873,6 @@ dependencies = [
  "ed25519-dalek-hpke",
  "futures-lite",
  "getrandom 0.4.3",
- "iroh",
- "iroh-gossip",
  "mainline",
  "postcard",
  "rand 0.10.2",
@@ -3592,33 +3592,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "iroh-gossip"
-version = "0.101.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e1dc4b05f73e7a1b9e83b531eb63c3fd671b0af3aeb13b59c546dd7ca747515"
-dependencies = [
- "blake3",
- "bytes",
- "data-encoding",
- "derive_more",
- "futures-concurrency",
- "hex",
- "indexmap",
- "iroh",
- "iroh-base",
- "iroh-metrics",
- "irpc",
- "n0-error",
- "n0-future",
- "postcard",
- "rand 0.10.2",
- "serde",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]

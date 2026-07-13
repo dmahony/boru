@@ -47,7 +47,7 @@ pub struct RoomStore {
     /// seed the address lookup without a fresh ticket.
     #[serde(default)]
     pub peers: Vec<EndpointAddr>,
-    /// Optional discovery secret for DHT-based private-room discovery.
+    /// Per-room discovery secret for private-room DHT isolation.
     ///
     /// Generated at room creation time and persisted across restarts so
     /// that the same DHT namespace is reused.  `None` for legacy rooms
@@ -125,28 +125,29 @@ impl RoomStore {
         let mut store: Self = serde_json::from_str(&raw)
             .with_std_context(|_| format!("failed to parse room file {}", path.display()))?;
 
-        match store.schema_version {
-            3 => {
-                // Current version — no migration needed.
-                store.data_dir = data_dir.to_path_buf();
-                Ok(Some(store))
+        if store.schema_version < SCHEMA_VERSION {
+            // ── v2 → v3 migration: add discovery_secret field ─────────
+            // Older files lack the discovery_secret field (it is
+            // `#[serde(default)]` so deserializing a v2 file as v3 would
+            // default it to None anyway), but we bump the version to v3
+            // so that future migrations have a consistent base.
+            store.discovery_secret = None;
+            store.schema_version = SCHEMA_VERSION;
+            store.data_dir = data_dir.to_path_buf();
+            // Persist the migrated store so future loads skip migration.
+            if let Err(err) = store.save() {
+                eprintln!("warning: failed to persist v3 room migration: {err}");
             }
-            2 => {
-                // Migration: v2 → v3 adds discovery_secret: None.
-                store.schema_version = SCHEMA_VERSION;
-                store.discovery_secret = None;
-                store.data_dir = data_dir.to_path_buf();
-                // Persist the migrated store so future loads skip migration.
-                if let Err(err) = store.save() {
-                    eprintln!("warning: failed to persist v3 room migration: {err}");
-                }
-                Ok(Some(store))
-            }
-            other => Err(n0_error::anyerr!(
-                "unsupported room schema version {} in {}; expected version 3 or lower",
-                other,
-                path.display(),
-            )),
+            Ok(Some(store))
+        } else if store.schema_version > SCHEMA_VERSION {
+            return Err(n0_error::anyerr!(
+                "unsupported room schema version {} in {}",
+                store.schema_version,
+                path.display()
+            ));
+        } else {
+            store.data_dir = data_dir.to_path_buf();
+            Ok(Some(store))
         }
     }
 
