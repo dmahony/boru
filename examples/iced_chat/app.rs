@@ -3157,11 +3157,17 @@ impl IcedChat {
                         };
                         iced::Task::batch(vec![iced::Task::perform(
                             async move {
-                                let _ = whisper_handle.send_control(peer, payload).await;
+                                whisper_handle.send_control(peer, payload).await
                             },
-                            move |_| AppMessage::FriendRequestSent {
-                                peer,
-                                request_id: request.id.clone(),
+                            move |result| match result {
+                                Ok(()) => AppMessage::FriendRequestSent {
+                                    peer,
+                                    request_id: request.id.clone(),
+                                },
+                                Err(e) => AppMessage::FriendRequestFailed {
+                                    peer,
+                                    error: e.to_string(),
+                                },
                             },
                         )])
                     }
@@ -5380,14 +5386,25 @@ impl IcedChat {
                 // they become active neighbors. Without this, both ends subscribe
                 // passively and no one dials — messages go nowhere.
                 let lobby_topic = Self::default_lobby_topic();
+                // The lobby sender may be in conversations (if we've switched
+                // rooms before) or in self.sender (if the lobby is the current
+                // room). RoomOpened never inserts into conversations, so only
+                // checking conversations.get() would miss the common case.
+                let lobby_sender = self
+                    .conversations
+                    .get(&lobby_topic)
+                    .and_then(|c| c.sender.clone())
+                    .or_else(|| {
+                        if self.topic == lobby_topic {
+                            self.sender.clone()
+                        } else {
+                            None
+                        }
+                    });
                 let tasks: Vec<iced::Task<AppMessage>> = peers
                     .into_iter()
                     .filter_map(|peer| {
-                        let sender = self
-                            .conversations
-                            .get(&lobby_topic)
-                            .and_then(|c| c.sender.clone());
-                        sender.map(|s| {
+                        lobby_sender.as_ref().map(|s| s.clone()).map(|s| {
                             iced::Task::perform(
                                 async move {
                                     let _ = s.join_peers(vec![peer]).await;
