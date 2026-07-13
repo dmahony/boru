@@ -776,6 +776,17 @@ impl HickoryResolver {
         options.ip_strategy = hickory_resolver::config::LookupIpStrategy::Ipv4thenIpv6;
         options.negative_max_ttl = Some(Duration::ZERO);
 
+        // ── Additional hardening for Windows DNS ────────────────────
+        // On Windows, pfSense/Unbound returns REFUSED when hickory-resolver
+        // sends EDNS0 OPT records.  TCP fallback handles edge cases where
+        // UDP is entirely blocked, and OS port selection avoids source-port
+        // filtering on firewalls.
+        options.try_tcp_on_error = true;
+        #[cfg(target_os = "windows")]
+        {
+            options.os_port_selection = true;
+        }
+
         let mut hickory_builder =
             TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
         *hickory_builder.options_mut() = options;
