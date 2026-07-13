@@ -39,7 +39,7 @@ use boru_chat::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
 use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
 use boru_chat::net::Gossip;
 use boru_chat::outbox::{OutboxEntry, OutboxStore};
-use boru_chat::private_room_tracker::{create_and_publish_private_discovery, PrivateRoomTracker};
+use boru_chat::private_room_tracker::{PrivateContinuousTracker, PrivateRoomTracker};
 use boru_chat::proto::TopicId;
 use boru_chat::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
 use boru_chat::public_room_safety::PublicRoomSafety;
@@ -64,19 +64,22 @@ use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use iced::Color;
 
 // ── Shared ContinuousTracker wrapper ─────────────────────────────────
-/// Wraps [`ContinuousTracker`] so it can be stored in the Clone-derived
+/// Wraps [`PrivateContinuousTracker`] so it can be stored in the Clone-derived
 /// [`AppMessage`] enum.  Inner tracker is accessed via `shutdown_shared`.
 #[derive(Debug)]
 struct SharedTracker {
     /// The underlying continuous tracker (publish + discover loops).
-    tracker: Arc<tokio::sync::Mutex<Option<ContinuousTracker>>>,
+    tracker: Arc<tokio::sync::Mutex<Option<PrivateContinuousTracker>>>,
     /// Cancellation token for the join-fanout background task, so it
     /// exits promptly when the room is left or deleted.
     join_cancel: Arc<tokio_util::sync::CancellationToken>,
 }
 
 impl SharedTracker {
-    fn new(tracker: ContinuousTracker, join_cancel: tokio_util::sync::CancellationToken) -> Self {
+    fn new(
+        tracker: PrivateContinuousTracker,
+        join_cancel: tokio_util::sync::CancellationToken,
+    ) -> Self {
         Self {
             tracker: Arc::new(tokio::sync::Mutex::new(Some(tracker))),
             join_cancel: Arc::new(join_cancel),
@@ -872,6 +875,8 @@ pub enum Screen {
     ChatList,
     /// An individual chat room with a given topic.
     Chat { topic: TopicId },
+    /// The friend request management screen.
+    FriendRequests,
     /// Application settings screen.
     Settings,
 }
@@ -1480,6 +1485,8 @@ pub enum AppMessage {
     ConnMonitorTick,
     /// Periodic tick for mesh quiescence watchdog.
     MeshWatchdogTick,
+    /// Periodic tick (30s) to retry undelivered outgoing mailbox envelopes.
+    OutboxRetryTick,
 
     /// Toggle dark mode on/off.
     ToggleDark(bool),
@@ -2979,6 +2986,7 @@ impl IcedChat {
             AppMessage::DeleteRoom(_) => "DeleteRoom",
             AppMessage::ConnMonitorTick => "ConnMonitorTick",
             AppMessage::MeshWatchdogTick => "MeshWatchdogTick",
+            AppMessage::OutboxRetryTick => "OutboxRetryTick",
 
             AppMessage::ToggleDark(_) => "ToggleDark",
             AppMessage::SetNickname(_) => "SetNickname",
@@ -3424,8 +3432,22 @@ impl IcedChat {
                         // Clone dht so we can also use it for continuous tracking.
                         let dht_for_publish = dht.clone();
                         let discovery_secret = if dht_enabled {
-                            create_and_publish_private_discovery(dht_for_publish, topic, &endpoint)
-                                .await
+                            let Some(dht_for_publish) = dht_for_publish else {
+                                return Err("DHT unavailable".to_string());
+                            };
+                            let secret = DiscoverySecret::generate();
+                            let dummy_ns =
+                                distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+                            let backend = MainlineDhtBackend::new(dht_for_publish, dummy_ns);
+                            let tracker = PrivateRoomTracker::new(
+                                Box::new(backend),
+                                topic,
+                                secret.clone(),
+                                endpoint.id(),
+                                endpoint.secret_key().clone(),
+                            );
+                            tracker.publish_once().await.ok();
+                            Some(secret)
                         } else {
                             None
                         };
@@ -3453,8 +3475,8 @@ impl IcedChat {
                                 join_cancel.clone(),
                             );
                             Some(SharedTracker::new(
-                                ContinuousTracker::start(
-                                    tracker.into_inner(),
+                                PrivateContinuousTracker::start(
+                                    tracker,
                                     ContinuousTrackerConfig::default(),
                                     new_peers_tx,
                                 ),
@@ -3686,8 +3708,8 @@ impl IcedChat {
                                         join_cancel.clone(),
                                     );
                                 Some(SharedTracker::new(
-                                    ContinuousTracker::start(
-                                        tracker.into_inner(),
+                                    PrivateContinuousTracker::start(
+                                        tracker,
                                         ContinuousTrackerConfig::default(),
                                         new_peers_tx,
                                     ),
@@ -4040,8 +4062,8 @@ impl IcedChat {
                                 let join_cancel = tokio_util::sync::CancellationToken::new();
                                 pending_dht_fanout = Some((new_peers_rx, join_cancel.clone()));
                                 room_tracker = Some(SharedTracker::new(
-                                    ContinuousTracker::start(
-                                        tracker.into_inner(),
+                                    PrivateContinuousTracker::start(
+                                        tracker,
                                         ContinuousTrackerConfig::default(),
                                         new_peers_tx,
                                     ),
@@ -5157,7 +5179,7 @@ impl IcedChat {
 
             // ── Friend Requests ───────────────────────────────────────
             AppMessage::OpenFriendRequests => {
-                // Friend requests are now shown in the sidebar — no navigation needed.
+                self.screen = Screen::FriendRequests;
                 iced::Task::none()
             }
 
@@ -6483,6 +6505,69 @@ impl IcedChat {
                 }
 
                 iced::Task::none()
+            }
+
+            AppMessage::OutboxRetryTick => {
+                // Periodic retry of undelivered outgoing mailbox envelopes.
+                // Collect friends with mailbox keys and attempt delivery of
+                // any pending envelopes.
+                let endpoint = self.endpoint.clone();
+                let secret_key = self.secret_key.clone();
+                let data_dir = self.data_dir.clone();
+                let peers_with_mailbox: Vec<PublicKey> = self
+                    .friends
+                    .iter()
+                    .filter_map(|(fid, rec)| {
+                        rec.mailbox_public_key
+                            .map(|mb| (fid, mb.identity))
+                    })
+                    .map(|(_, pk)| pk)
+                    .collect();
+
+                if peers_with_mailbox.is_empty() {
+                    iced::Task::none()
+                } else {
+                    iced::Task::perform(
+                        async move {
+                            // Load the local mailbox store (shared across all outgoing envelopes).
+                            let mut store = match MailboxStore::load(&data_dir)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| {
+                                    MailboxStore::for_recipient(&data_dir, secret_key.public())
+                                })
+                            {
+                                s => s,
+                            };
+                            for peer in &peers_with_mailbox {
+                                let pending = store.pending_for_recipient(*peer);
+                                for envelope in pending {
+                                    let msg_id = envelope.message_id();
+                                    match send_deliver(
+                                        &endpoint,
+                                        &secret_key,
+                                        *peer,
+                                        envelope,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            // Delivery succeeded — acknowledge locally so the
+                                            // envelope is removed from the store.
+                                            let ack = MailboxAck::sign(&secret_key, &msg_id);
+                                            let _ = store.acknowledge_outgoing_and_save(&ack);
+                                        }
+                                        Err(_) => {
+                                            // Leave in store for next retry.
+                                        }
+                                    }
+                                }
+                            }
+                            AppMessage::Noop
+                        },
+                        |msg| msg,
+                    )
+                }
             }
 
             AppMessage::ToggleDark(enabled) => {
@@ -7830,6 +7915,7 @@ impl IcedChat {
         let main_panel: iced::Element<'_, AppMessage> = match self.screen {
             Screen::ChatList => self.view_main_empty_state(),
             Screen::Chat { .. } => self.view_chat_panel(),
+            Screen::FriendRequests => self.view_friend_requests(),
             Screen::Settings => self.view_settings_screen(),
         };
 
@@ -8661,6 +8747,7 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
+        let dark_mode = dep.dark_mode;
         let mut section = Column::new().spacing(SPACE_2);
 
         let header_text = if dep.incoming.is_empty() {
@@ -8670,14 +8757,34 @@ impl IcedChat {
         };
 
         section = section.push(
-            container(text(header_text).size(TYPO_XS).style(text_muted_style))
-                .padding(iced::Padding {
-                    top: SPACE_8,
-                    right: SPACE_12,
-                    bottom: SPACE_4,
-                    left: SPACE_12,
-                })
-                .width(Length::Fill),
+            container(
+                row![
+                    text(header_text).size(TYPO_XS).style(text_muted_style),
+                    button(text("Manage").size(TYPO_XXS))
+                        .on_press(AppMessage::OpenFriendRequests)
+                        .padding([SPACE_2, SPACE_6])
+                        .style(move |t, _status| {
+                            let mut s = iced::widget::button::Style::default();
+                            s.background = Some(iced::Background::Color(bg_surface(t)));
+                            s.text_color = Self::muted_color(dark_mode);
+                            s.border = iced::Border {
+                                color: border_muted(t),
+                                width: 1.0,
+                                radius: SPACE_4.into(),
+                            };
+                            s
+                        }),
+                ]
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center),
+            )
+            .padding(iced::Padding {
+                top: SPACE_8,
+                right: SPACE_12,
+                bottom: SPACE_4,
+                left: SPACE_12,
+            })
+            .width(Length::Fill),
         );
 
         if dep.incoming.is_empty() {
@@ -10162,6 +10269,8 @@ impl IcedChat {
                 .map(|_| AppMessage::ConnMonitorTick),
             iced::time::every(std::time::Duration::from_secs(30))
                 .map(|_| AppMessage::MeshWatchdogTick),
+            iced::time::every(std::time::Duration::from_secs(30))
+                .map(|_| AppMessage::OutboxRetryTick),
             iced::Subscription::run_with(
                 (
                     RxHandle(rx),
@@ -10816,6 +10925,53 @@ mod tests {
         assert_eq!(IcedChat::join_request_open_chat_label(), "Open chat");
         assert_eq!(IcedChat::join_request_retry_label(), "Retry");
         assert_eq!(IcedChat::join_request_failure_prefix(), "Failure");
+    }
+
+    #[test]
+    fn open_friend_requests_navigates_to_dedicated_screen() {
+        let (_runtime, mut app, _local_public, _peer_public) = build_join_request_test_app();
+
+        assert_eq!(app.screen, Screen::ChatList);
+
+        let _ = app.update(AppMessage::OpenFriendRequests);
+        assert_eq!(app.screen, Screen::FriendRequests);
+
+        let _ = app.view();
+
+        let _ = app.update(AppMessage::CloseFriendRequests);
+        assert_eq!(app.screen, Screen::ChatList);
+    }
+
+    #[test]
+    fn sidebar_requests_dependency_filters_to_pending_incoming_requests() {
+        let (_runtime, mut app, local_public, peer_public) = build_join_request_test_app();
+        let local_pk = local_public.to_string();
+
+        // One incoming pending request that should render.
+        app.friend_request_store
+            .send_request(&peer_public.to_string(), &local_pk, None)
+            .expect("store incoming request");
+
+        // A second incoming request that has already moved to a terminal state
+        // must stay out of the pending-only sidebar list.
+        let ignored_peer = SecretKey::generate().public();
+        let ignored_req = app
+            .friend_request_store
+            .send_request(&ignored_peer.to_string(), &local_pk, None)
+            .expect("store second incoming request");
+        app.friend_request_store
+            .decline_request(&ignored_req.id, &local_pk)
+            .expect("decline terminal request");
+
+        // Outgoing requests must not be mixed into the incoming sidebar.
+        let outgoing_peer = SecretKey::generate().public();
+        app.friend_request_store
+            .send_request(&local_pk, &outgoing_peer.to_string(), None)
+            .expect("store outgoing request");
+
+        let dep = app.sidebar_requests_dependency();
+        assert_eq!(dep.incoming.len(), 1);
+        assert_eq!(dep.incoming[0].requester, peer_public);
     }
 
     /// Test that the button text for each state can be read from the
@@ -11911,6 +12067,7 @@ mod tests {
             backfill_handle,
             false,
             None,
+            false,
             Arc::new(Mutex::new(dummy_discovered_rx)),
         );
 
