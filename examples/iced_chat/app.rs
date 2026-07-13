@@ -2342,7 +2342,8 @@ impl IcedChat {
         self.pending_image.clear();
         self.download_entry_index = None;
         self.active_download_transfer_id = None;
-        self.neighbors.clear();
+        // neighbors preserved across room switches so discovered-peers and
+        // friend-online caches don't appear empty after switching rooms.
         self.history_saved_count = 0;
     }
 
@@ -2656,6 +2657,13 @@ impl IcedChat {
             }
 
             AppMessage::OpenRoom(topic) => {
+                // If the topic is already active, just reveal the chat screen
+                // without tearing down the subscription.
+                if topic == self.topic {
+                    self.screen = Screen::Chat { topic };
+                    return iced::Task::none();
+                }
+
                 // Re-select an already subscribed conversation instead of
                 // creating a second gossip subscription. Its forwarder stays
                 // alive while other conversations are selected.
@@ -5052,11 +5060,17 @@ impl IcedChat {
             }
 
             AppMessage::ConnMonitorTick => {
-                // Rebuild discovered peers list from gossip neighbors
-                self.discovered_peers = self.neighbors.iter().copied().collect();
+                // Keep discovered peers as a session-wide list.  Gossip
+                // neighbors belong to the selected room and may be empty
+                // while another room is displayed; replacing this list on
+                // every tick made the sidebar appear empty and discarded
+                // DHT discoveries.
+                for peer in &self.neighbors {
+                    if !self.discovered_peers.contains(peer) {
+                        self.discovered_peers.push(*peer);
+                    }
+                }
                 self.discovered_online_cache = self.neighbors.clone();
-                // Also update friend online cache from neighbors
-                self.friend_online_cache = self.neighbors.clone();
 
                 // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
                 let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
