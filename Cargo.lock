@@ -849,6 +849,7 @@ dependencies = [
  "serde",
  "serde-byte-array",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "testresult",
  "tokio",
