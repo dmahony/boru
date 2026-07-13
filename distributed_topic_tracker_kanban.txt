@@ -1,0 +1,1304 @@
+================================================================================
+  PRIVATE-ROOM DHT DISCOVERY KANBAN BOARD
+  boru-chat + distributed-topic-tracker integration roadmap
+================================================================================
+
+This roadmap describes the complete work to add automatic DHT-based room
+discovery to boru-chat while preserving backward compatibility with legacy
+tickets.  Each card represents approximately one pull request.
+
+================================================================================
+CARD 0: REPOSITORY AUDIT
+================================================================================
+
+Title: Repository Audit — Identify all integration points
+Status: TODO
+Priority: HIGHEST — must complete before any other card
+Dependencies: None
+
+Objective:
+Systematically inspect the current repository to identify every file that
+must change for private-room DHT discovery.  Verify that the existing
+public-room discovery system (discovery_backend, discovery_record,
+discovery_validation, public_room_tracker, public_room_continuous) is
+available and reusable for private rooms.
+
+Tasks:
+1. Verify the current Cargo.lock shows distributed-topic-tracker v0.3.5
+   with no version conflicts.
+2. Confirm Ticket (chat_core.rs:959-997) uses topic: TopicId + peers:
+   Vec<EndpointAddr> with postcard serde and BASE32_NOPAD display.
+3. Confirm RoomStore (src/room.rs) persists topic + peers to room.json
+   with schema_version=2 and atomic_write_json.
+4. Identify every place a Ticket is constructed (new room creation) and
+   every place a Ticket is parsed (room join).
+5. Identify every place RoomStore is loaded, saved, or queried.
+6. Confirm GossipAddressLookup (src/net/address_lookup.rs) provides
+   add/resolve and writes through to FriendsStore for known peers.
+7. Confirm MemoryLookup (iroh::address_lookup::memory) is seeded from
+   ticket/room-store peers before subscribe_and_join.
+8. Verify PublicRoomTracker::new() accepts an explicit PublicRoomIdentity
+   (already exists — card NR.4 in public_room_tracker.rs:99-112).
+9. Verify MainlineDhtBackend uses NamespaceId for all operations (already
+   does — discovery_backend.rs:188-190, 196-233).
+10. Identify every example that creates rooms: examples/chat.rs line 559,
+    examples/iced_chat/ (app.rs CreateNewRoom handler), and the CLI/TUI
+    entry points.
+11. Check if any test uses a real DHT that would need mocking.
+
+Deliverables:
+- A file-by-file list of required changes (included as appendix, or just
+  verify the codebase matches the analysis above).
+- No code changes — this card is purely documentation.
+
+Acceptance criteria:
+- Every file that creates, parses, stores, or displays a Ticket is known.
+- Every file that creates, opens, or persists a room is known.
+- The public-room discovery API is confirmed reusable for private rooms
+  (PublicRoomTracker::new accepts explicit identity, MainlineDhtBackend
+  uses NamespaceId, TopicDiscoveryBackend is trait-object safe).
+
+
+================================================================================
+CARD 1: DISCOVERY SECRET & NAMESPACE DERIVATION
+================================================================================
+
+Title: Discovery secret generation and namespace derivation
+Status: TODO
+Priority: HIGH
+Dependencies: Card 0 (Repository Audit)
+
+Objective:
+Define the discovery secret type, its generation, and the straightforward
+namespace derivation for private-room DHT lookups.
+
+Background:
+The public-room discovery system already uses a deterministic discovery
+key derived from room name + network + version (see public_room.rs).
+Private rooms need a RANDOM discovery key (32 bytes) so that only peers
+who have been given the key (via ticket) can find the room on the DHT.
+The namespace for DHT operations is simply NamespaceId::new(secret).
+
+Tasks:
+1. Define a newtype DiscoverySecret([u8; 32]) in src/discovery_backend.rs
+   or a new module src/discovery_secret.rs with:
+   - DiscoverySecret::generate() -> Self using getrandom
+   - DiscoverySecret::from_bytes([u8; 32]) -> Self
+   - DiscoverySecret::as_bytes() -> &[u8; 32]
+   - Display/hex Debug (partial, show first 4 bytes only)
+   - Into<NamespaceId> or as_namespace_id() convenience method
+
+2. Add a domain-separated namespace derivation:
+   Since the discovery secret IS the namespace key (unlike public rooms
+   which use domain-separated hashing), the derivation is trivial:
+   namespace = NamespaceId::new(discovery_secret.as_bytes())
+   No hashing is needed because the secret is already a uniform random
+   32-byte value.  Document this clearly.
+
+3. Write tests:
+   - generate() produces non-zero output
+   - generate() is non-deterministic (two calls produce different values)
+   - from_bytes round-trips
+   - as_namespace_id() produces the expected value
+   - Send + Sync for the new type
+   - Deterministic from_bytes returns same secret for same input
+
+Deliverables:
+- New type: DiscoverySecret in src/discovery_secret.rs (or added to
+  discovery_backend.rs)
+- Module registered in src/lib.rs
+- Unit tests for generation and round-trip
+
+Acceptance criteria:
+- DiscoverySecret::generate() creates a cryptographically random 32-byte
+  value.
+- as_namespace_id() returns NamespaceId::new(secret_bytes).
+- All unit tests pass.
+- No changes to existing code (this is additive).
+
+
+================================================================================
+CARD 2: TICKET EXTENSION — ADD DISCOVERY SECRET
+================================================================================
+
+Title: Extend Ticket struct with optional discovery secret
+Status: TODO
+Priority: HIGH
+Dependencies: Card 1 (Discovery Secret)
+
+Objective:
+Extend the existing Ticket struct to carry an optional discovery secret.
+Legacy tickets (without the field) must still parse correctly.
+
+Serialisation approach:
+The Ticket already uses postcard for binary serialisation and BASE32_NOPAD
+for the display string.  Add an Option<[u8; 32]> discovery_secret field
+with #[serde(default)] so missing fields deserialise to None.
+
+Tasks:
+1. In src/chat_core.rs, modify the Ticket struct:
+   - Add `pub discovery_secret: Option<DiscoverySecret>` field.
+   - The field uses #[serde(default)] and optionally a custom
+     Serialize/Deserialize wrapper if needed for the newtype.
+   - Actually, since DiscoverySecret is a newtype around [u8; 32],
+     serde derives should handle Option<DiscoverySecret> naturally
+     with #[serde(default)].
+
+2. Update Ticket constructors:
+   - Add a constructor Ticket::with_discovery(topic, peers, secret) -> Self
+   - Existing Ticket { topic, peers } still works (secret defaults to None)
+
+3. Update Ticket display logic:
+   - The Display impl uses to_bytes + BASE32_NOPAD — the new Option field
+     will automatically be serialised by postcard.
+   - Ensure the existing FromStr works for both old and new formats.
+   - Write a test that parses a legacy ticket (no discovery_secret) and
+     gets None.
+
+4. Write serde format tests:
+   - A legacy binary fixture (just topic + peers) must deserialise to
+     Ticket { discovery_secret: None, ... }
+   - A new binary fixture (topic + peers + Some(secret)) must round-trip
+   - Validate that test_serde_format (tests/test_serde_format.rs) still
+     passes if it tests ticket serialisation.
+
+Deliverables:
+- Modified Ticket struct in src/chat_core.rs
+- Updated serialisation/deserialisation
+- Round-trip and backward-compatibility tests
+- Updated test_serde_format if needed
+
+Acceptance criteria:
+- Existing legacy tickets parse correctly with discovery_secret = None.
+- New tickets with discovery_secret = Some(...) round-trip correctly.
+- Display/FromStr round-trip works for both formats.
+- cargo test --features net passes for test_serde_format and chat_core tests.
+
+
+================================================================================
+CARD 3: ROOM STORE MIGRATION — PERSIST DISCOVERY SECRET
+================================================================================
+
+Title: Persist discovery secret across restarts in RoomStore
+Status: TODO
+Priority: HIGH
+Dependencies: Card 1 (Discovery Secret), Card 2 (Ticket Extension)
+
+Objective:
+Store the optional discovery secret in room.json alongside the topic and
+peers.  Bump the schema version to 3 and write a migration path.
+
+Tasks:
+1. In src/room.rs, add to RoomStore:
+   - `pub discovery_secret: Option<DiscoverySecret>` with #[serde(default)]
+   - Bump SCHEMA_VERSION from 2 to 3.
+
+2. Update RoomStore constructors:
+   - RoomStore::new() — secret defaults to None
+   - RoomStore::with_peers() — add optional discovery_secret parameter
+   - Add set_discovery_secret(&mut self, secret: DiscoverySecret) method
+
+3. Write a migration for schema 2 -> 3:
+   - When loading a room.json with schema_version 2, add
+     discovery_secret: None and save as schema_version 3.
+   - Use a match on schema_version to dispatch.
+
+4. Update tests:
+   - save+load round-trip preserves discovery_secret.
+   - RoomStore without discovery_secret loads correctly (backward compat).
+   - Schema version is bumped and migration works.
+
+Deliverables:
+- Modified src/room.rs with schema_version=3
+- Migration path from version 2
+- Tests for old format backward compatibility
+
+Acceptance criteria:
+- Existing room.json files (version 2) load correctly, get migrated to
+  version 3 with discovery_secret = None.
+- New rooms with discovery_secret persist and reload correctly.
+- cargo test passes.
+
+
+================================================================================
+CARD 4: PRIVATE ROOM IDENTITY — ADAPT PUBLIC FOR PRIVATE USE
+================================================================================
+
+Title: Private-room identity struct for DHT tracker integration
+Status: TODO
+Priority: HIGH
+Dependencies: Card 1 (Discovery Secret), Card 3 (Room Store Migration)
+
+Objective:
+Create a PrivateRoomIdentity struct (analogous to PublicRoomIdentity) that
+derives a DHT discovery namespace from the discovery secret and pairs it
+with the gossip TopicId.
+
+Architecture note:
+For private rooms, the discovery key for DHT operations is simply the
+discovery secret itself (no hashing needed — the secret is random).
+The TopicId remains whatever the room creator chose (could be a stable
+topic derived from the secret, or purely random).
+
+Decision: The gossip TopicId and the DHT discovery secret should be linked
+but DERIVED via domain separation from a single "room secret" so that:
+  - The ticket carries one 32-byte value, from which both the gossip topic
+    and the DHT namespace are derived.
+  - Knowing one does not reveal the other (domain separation).
+  - Peers joining via ticket all converge on the same topic + namespace.
+
+However, this changes the current room creation flow where TopicId is
+random.  Domain-separated derivation from a single room secret would mean
+the TopicId is deterministic from the secret, not random.
+
+ALTERNATIVE (simpler): Keep TopicId as a random value (current behaviour),
+generate a separate random DiscoverySecret, and carry both in the ticket.
+This avoids changing how TopicId works and keeps the two domains
+independent.  But the ticket becomes larger (two 32-byte values).
+
+RECOMMENDED APPROACH (chosen for minimal blast radius):
+Generate a single 32-byte RoomSecret.  Derive:
+  - gossip_topic = BLAKE3("boru-chat private-room topic v1" || room_secret)
+  - discovery_key = BLAKE3("boru-chat private-room discovery-key v2" || room_secret)
+
+The ticket carries only the room_secret (32 bytes).  Both topic and
+discovery key are derived deterministically.  This is one field instead
+of two, and uses the same domain-separation pattern as public rooms.
+
+BUT: This changes how Topics are created.  Currently create_room generates
+a random TopicId.  Now it generates a random RoomSecret and derives both.
+This is backward-incompatible for direct chat topics (direct_topic) and
+for any persisted room data.  Only NEW rooms with DHT discovery use the
+new derivation.  Rooms created without DHT discovery keep random TopicId.
+
+FINAL DECISION (simplest, least blast radius):
+For the initial implementation, keep TopicId as-is (random per room).
+Generate a separate random DiscoverySecret.  The ticket carries BOTH:
+  - topic: TopicId (as today)
+  - discovery_secret: Option<DiscoverySecret> (new)
+  - peers: Vec<EndpointAddr> (as today)
+
+This avoids changing topic derivation entirely.  The discovery secret is
+a separate concept.  If domain separation is desired later, the ticket
+can encode a single secret and derive both — but that is future work.
+
+Update: Go with separate random TopicId + DiscoverySecret.  No derivation.
+
+Tasks:
+1. No new identity struct needed.  The private-room tracker uses:
+   - The existing TopicId for the gossip mesh
+   - DiscoverySecret for the DHT namespace
+   - Both are independent random values
+
+2. Document the rationale in a module doc comment.
+
+Deliverables:
+- Design decision documented
+- No code change (card may be empty aside from confirmation)
+
+Acceptance criteria:
+- Design agreed: separate random TopicId and DiscoverySecret.
+
+
+================================================================================
+CARD 5: PRIVATE-ROOM TRACKER WRAPPER
+================================================================================
+
+Title: PrivateRoomTracker — publish/discover wrapper for private DHT rooms
+Status: TODO
+Priority: HIGH
+Dependencies: Card 1 (Discovery Secret), Card 4 (Private Room Identity)
+
+Objective:
+Create a thin wrapper that adapts the existing PublicRoomTracker for
+private-room use.  Since PublicRoomTracker::new() already accepts an
+explicit PublicRoomIdentity, and MainlineDhtBackend operates on
+NamespaceId, the private-room tracker only needs a convenience constructor
+that bridges DiscoverySecret -> NamespaceId.
+
+Tasks:
+1. Create src/private_room_tracker.rs containing:
+   - PrivateRoomTracker struct (wraps PublicRoomTracker OR directly wraps
+     TopicDiscoveryBackend like PublicRoomTracker does).
+
+   Option A (wrapper): PrivateRoomTracker holds a PublicRoomTracker
+     internally.  Its publish_once() and discover_once() delegate down.
+     This is the cleanest — no duplication.
+
+   Option B (standalone): PrivateRoomTracker duplicates the
+     PublicRoomTracker logic but uses DiscoverySecret as identity.
+     This is more explicit but duplicates code.
+
+   RECOMMENDED: Option A — PrivateRoomTracker wraps PublicRoomTracker
+   with a PrivateRoomIdentity that is constructed from TopicId +
+   DiscoverySecret.
+
+   Wait — PublicRoomTracker expects PublicRoomIdentity which has topic
+   and discovery_key fields.  If we construct a PublicRoomIdentity from
+   the private room's topic and discovery secret, the tracker would work
+   unchanged.  But the discovery_key in PublicRoomIdentity is a [u8; 32],
+   same as DiscoverySecret.  So:
+
+   let identity = PublicRoomIdentity::new(topic, discovery_secret.as_bytes());
+   let tracker = PublicRoomTracker::new(backend, identity, endpoint_id, secret_key);
+
+   This works without any new code!  PublicRoomIdentity is just topic +
+   [u8; 32] discovery_key.
+
+   Create PrivateRoomTracker as a newtype around PublicRoomTracker with
+   one extra method: discovery_secret() -> &DiscoverySecret, and an
+   ownership-preserving shutdown.
+
+2. Add to src/lib.rs: pub mod private_room_tracker; (behind #[cfg(feature = "net")])
+
+3. Write tests:
+   - PrivateRoomTracker can publish and discover via InMemoryDiscoveryBackend
+   - Two private-room trackers on the same discovery secret discover each other
+   - Two private-room trackers on different discovery secrets do NOT discover
+     each other (namespace isolation)
+   - Self-filter works (own endpoint excluded)
+
+4. The test helpers follow the pattern in public_room_tracker.rs tests and
+   test_public_lobby_integration.rs.
+
+Deliverables:
+- src/private_room_tracker.rs (feature-gated behind "net")
+- Public API: new(), publish_once(), discover_once(), shutdown(),
+  identity(), local_endpoint_id()
+- Unit tests
+
+Acceptance criteria:
+- PrivateRoomTracker wraps PublicRoomTracker with zero code duplication
+  for publish/discover logic.
+- Two peers on the same discovery secret discover each other.
+- Two peers on different discovery secrets are isolated.
+- All tests pass without touching the real DHT.
+- cargo build --features net succeeds.
+
+
+================================================================================
+CARD 6: ROOM CREATION — GENERATE DISCOVERY SECRET & PUBLISH
+================================================================================
+
+Title: Wire discovery secret generation and DHT publishing into room creation
+Status: TODO
+Priority: HIGH
+Dependencies: Card 2 (Ticket Extension), Card 5 (Private-room Tracker)
+
+Objective:
+When a user creates a new private room, generate a DiscoverySecret and
+optionally publish the room creator's presence to the DHT.  The discovery
+secret is embedded in the ticket so invited peers can look up the room.
+
+Tasks:
+
+Part A — Room creation in chat_core / frontends:
+
+1. In examples/chat.rs (TUI) — the "opening new chat room" block (~line 559):
+   - After generating the random TopicId, also generate a DiscoverySecret.
+   - Create a PrivateRoomTracker (or just publish via the backend).
+   - Call publish_once() to advertise this peer's presence on the DHT.
+   - Save the discovery secret in RoomStore.
+
+   Control flow:
+   ```
+   let topic = TopicId::from_bytes(rand::random());
+   let discovery_secret = DiscoverySecret::generate();
+   let room = RoomStore::with_peers(&data_dir, topic, vec![]);
+   room.set_discovery_secret(discovery_secret);
+   room.save()?;
+
+   // Publish to DHT
+   let backend = MainlineDhtBackend::new(dht, dummy_namespace);
+   let tracker = PrivateRoomTracker::new(
+       Box::new(backend),
+       topic,
+       discovery_secret,
+       endpoint.id(),
+       endpoint.secret_key().clone(),
+   );
+   tracker.publish_once().await?;
+   // Keep tracker alive for continuous publishing...
+   ```
+
+   Actually, the DHT backend is typically created once at startup (see
+   examples/iced_chat/main.rs line 597-600).  For the TUI example, we need
+   to either create a DHT instance per room or share one.
+
+   RECOMMENDED: Create a shared DHT instance at startup and pass it to
+   the room creation code.  MainlineDhtBackend wraps the DHT instance.
+
+2. In examples/iced_chat/app.rs:
+   - The CreateNewRoom handler (~line 851) currently generates a random
+     topic and subscribes with empty bootstrap.
+   - Modify to also generate DiscoverySecret, create PrivateRoomTracker,
+     publish, and store the secret in the (yet-to-exist) room data.
+
+3. Thread the PrivateRoomTracker or Dht instance into the room creation
+   code path.  For iced_chat, the DHT instance and continuous tracker
+   already exist — the private room's tracker should be separate from the
+   public lobby's tracker.
+
+Part B — Ticket creation:
+
+1. Modify the ticket creation (wherever Ticket { topic, peers } is built):
+   - Include `discovery_secret: Some(secret)` in the ticket.
+   - The Display impl automatically includes it in the encoded string.
+
+2. Ensure the invite/ticket-copy UI shows the new format:
+   - The ticket string will be longer (extra 32 bytes + Option overhead).
+   - The base32 display grows from ~85 chars to ~130 chars.
+
+Deliverables:
+- Modified room creation paths:
+  - examples/chat.rs room creation
+  - examples/iced_chat/app.rs CreateNewRoom handler
+- DHT publish at creation time
+- Ticket includes discovery_secret
+
+Acceptance criteria:
+- Creating a new room generates and stores a DiscoverySecret.
+- The room creator's presence is published to the DHT (when DHT backend
+  is available).
+- The ticket string includes the discovery secret.
+- RoomStore persists the discovery secret.
+- When the DHT backend is unavailable (tests, no net feature), room
+  creation still works — DHT publish is best-effort or skipped.
+- cargo build --features examples succeeds.
+- cargo build --features gui succeeds.
+
+
+================================================================================
+CARD 7: ROOM JOIN — DHT DISCOVERY ON TICKET JOIN
+================================================================================
+
+Title: Perform DHT discovery when joining from a DHT-enabled ticket
+Status: TODO
+Priority: HIGH
+Dependencies: Card 2 (Ticket Extension), Card 5 (Private-room Tracker)
+
+Objective:
+When parsing a ticket that contains a discovery_secret, perform a DHT
+lookup before subscribing to the gossip mesh.  Merge discovered peer
+addresses with the ticket's explicit peers for bootstrap.
+
+Tasks:
+
+Part A — Ticket join in chat_core / frontends:
+
+1. In examples/chat.rs — the ticket join flow (~line 700):
+   - After parsing the ticket, check if discovery_secret is Some.
+   - If yes, perform a DHT lookup using PrivateRoomTracker.
+   - Merge the discovered peers (EndpointIds) with the ticket's explicit
+     peers and RoomStore peers.
+   - Seed MemoryLookup with both the ticket's explicit addresses and
+     (if possible) resolved addresses for DHT-discovered peers.
+
+   Key: DHT only returns EndpointIds (32-byte public keys), not full
+   EndpointAddr(including relay/direct addresses).  The discovered peers
+   need address resolution.  This is where GossipAddressLookup and
+   iroh's address resolution come in.
+
+   When we call gossip.subscribe(topic, discovered_ids), iroh uses its
+   address lookup chain (MemoryLookup -> GossipAddressLookup -> mDNS ->
+   DHT/Pkarr) to resolve the public keys into addresses.  So simply
+   adding the EndpointIds to the bootstrap list and subscribing should
+   work — iroh's address resolution finds them.
+
+   But to seed MemoryLookup, we need addresses.  For DHT-discovered peers
+   we don't have addresses yet.  That's fine — iroh's address lookup
+   handles that.  We only seed MemoryLookup from ticket addresses.
+
+2. In examples/iced_chat/app.rs — the ticket join handler:
+   - Check discovery_secret on the parsed ticket.
+   - If present, call discover_once() and merge discovered peer IDs
+     into the bootstrap list before subscribing.
+
+Part B — Error handling:
+
+1. If DHT lookup fails (timeout, no net), fall back to ticket peers only
+   (current behaviour).  Log a warning.
+
+2. If DHT lookup returns peers, log success.  If some peers were already
+   in the ticket's peer list, avoid duplicates (collect_bootstrap_peers
+   already handles this).
+
+Deliverables:
+- Modified ticket join paths:
+  - examples/chat.rs join flow
+  - examples/iced_chat/app.rs ticket join handler
+- Graceful fallback when DHT is unavailable
+
+Acceptance criteria:
+- Joining a DHT-enabled ticket performs a DHT lookup.
+- Discovered peers are merged with ticket peers for bootstrap.
+- Joining a legacy ticket (no discovery_secret) works exactly as before.
+- When DHT lookup fails, joining falls back to ticket peers.
+- cargo build --features examples succeeds.
+
+
+================================================================================
+CARD 8: CONTINUOUS DISCOVERY FOR PRIVATE ROOMS
+================================================================================
+
+Title: Background publish/discover for private-room membership
+Status: TODO
+Priority: HIGH
+Dependencies: Card 5 (Private-room Tracker), Card 6 (Room Creation),
+              Card 7 (Room Join)
+
+Objective:
+Run periodic DHT publish and discovery for private rooms so that:
+  - The room creator's presence stays fresh on the DHT (publish loop).
+  - New peers who join the room are discovered by existing members
+    (discover loop).
+  - Peer churn is handled without requiring ticket redistribution.
+
+Tasks:
+
+Part A — ContinuousTracker for private rooms:
+
+1. Create a PrivateContinuousTracker (or reuse ContinuousTracker):
+   - ContinuousTracker::start() takes a PublicRoomTracker and config.
+   - Create a PrivateRoomTracker, turn it into a PublicRoomIdentity via
+     identity()... but PrivateRoomTracker wraps PublicRoomTracker.
+   - So: create a PublicRoomTracker first (using the private room's
+     topic + discovery_secret as PublicRoomIdentity), then wrap in
+     ContinuousTracker.
+   - Or better: PrivateRoomTracker exposes an internal reference to the
+     underlying PublicRoomTracker for ContinuousTracker to use.
+   - Simplest: ContinuousTracker accepts Arc<dyn Trait> — but currently
+     takes PublicRoomTracker by value.  We can either:
+     a) Make ContinuousTracker generic over the tracker type.
+     b) Have PrivateRoomTracker deref to PublicRoomTracker.
+     c) Create ContinuousTracker directly from a PublicRoomTracker
+        constructed with private-room identity.
+
+   RECOMMENDED: Option (c) — the caller creates the PublicRoomTracker
+   with the private room's identity, then passes it to ContinuousTracker.
+   This avoids any changes to ContinuousTracker.
+
+2. Lifecycle management:
+   - When a user creates or joins a private room, start a
+     ContinuousTracker for that room.
+   - When a user leaves a private room, stop the ContinuousTracker.
+   - Each room gets its own ContinuousTracker (independent publish/discover).
+   - The public lobby's ContinuousTracker (if any) is separate.
+
+Part B — Threading in frontends:
+
+1. In examples/iced_chat/app.rs:
+   - Add a field: room_trackers: HashMap<TopicId, ContinuousTracker>
+   - On CreateNewRoom (with DHT): create tracker, store in map, start.
+   - On OpenRoom (from ticket with discovery_secret): create tracker,
+     store in map, start.
+   - On LeaveRoom: shutdown the tracker for that topic, remove from map.
+
+2. In examples/chat.rs (TUI):
+   - Add room_trackers: HashMap<TopicId, ContinuousTracker> to TuiState
+     or the main function state.
+   - Wire into room lifecycle.
+
+Deliverables:
+- ContinuousTracker lifecycle management for private rooms
+- Modified frontends to start/stop per-room trackers
+
+Acceptance criteria:
+- Each private room with DHT discovery gets a ContinuousTracker.
+- The tracker publishes periodically and discovers new peers.
+- Leaving/stopping a room shuts down its tracker cleanly.
+- The public lobby tracker (if any) is unaffected.
+- cargo test --features gui passes (if iced tests exist), otherwise
+  cargo build --features gui succeeds.
+
+
+================================================================================
+CARD 9: DYNAMIC PEER JOINS FROM DISCOVERY
+================================================================================
+
+Title: Wire discovered peers into the gossip mesh as they are found
+Status: TODO
+Priority: HIGH
+Dependencies: Card 8 (Continuous Discovery)
+
+Objective:
+When the ContinuousTracker discovers new peers on the DHT, automatically
+inject them into the gossip mesh for the corresponding room.  This is the
+key mechanism that converts DHT discovery into actual gossip connections.
+
+Tasks:
+
+1. The ContinuousTracker already sends discovered peer batches through an
+   mpsc::Sender<Vec<EndpointId>>.  This pattern is already used by the
+   iced_chat public lobby (main.rs:608-614, app.rs:6057-6070).
+
+2. For private rooms, wire each room's ContinuousTracker output to a
+   dedicated mpsc channel whose receiver calls:
+   sender.join_peers(discovered_peers)
+   for the gossip topic of that room.
+
+3. In examples/iced_chat/app.rs:
+   - For each private room tracker, create a new_peers_tx/new_peers_rx
+     pair.
+   - Spawn a task that reads from new_peers_rx and calls
+     sender.join_peers(peers) for the room's gossip sender.
+   - The task is cancelled on room leave (via CancellationToken or
+     drop).
+
+4. The NewDiscoveredPeers pattern used for the public lobby displays
+   discovered peers in a sidebar.  For private rooms, the discovered
+   peers should be silently joined (no sidebar needed), but a log/trace
+   message is appropriate.
+
+5. For examples/chat.rs (TUI):
+   - Same pattern: spawn a task per room that forwards discovered peers
+     to the gossip sender.
+
+Deliverables:
+- Wire discovered peer batches to gossip join_peers for each room
+- Graceful shutdown on room leave
+
+Acceptance criteria:
+- When ContinuousTracker discovers a new peer, that peer is automatically
+  joined to the gossip mesh for the room.
+- Multiple room trackers can coexist without cross-talk.
+- Room leave shuts down the join-peer task.
+- No manual intervention needed — discovery is fully automatic.
+
+
+================================================================================
+CARD 10: RETRY / BACKOFF / SHUTDOWN FOR PRIVATE ROOMS
+================================================================================
+
+Title: Backoff, retry, and graceful shutdown for private-room discovery
+Status: TODO
+Priority: MEDIUM
+Dependencies: Card 8 (Continuous Discovery)
+
+Objective:
+Ensure private-room DHT operations handle failures gracefully with retry
+and backoff, and clean up on shutdown.  Leverage the existing retry and
+backoff in public_room_continuous.rs (retry_with_backoff, publish_loop,
+discover_loop).
+
+Tasks:
+
+1. Review the existing retry/backoff in ContinuousTracker:
+   - publish_loop: exponential backoff from initial_retry_delay (1s) to
+     max_retry_delay (60s), consecutive failure tracking.
+   - discover_loop: same backoff pattern.
+   - Both use CancellationToken for shutdown.
+
+2. Confirm that ContinuousTracker works unchanged for private-room
+   trackers.  Since it takes a PublicRoomTracker by value, and
+   PrivateRoomTracker wraps PublicRoomTracker, any ContinuousTracker
+   created via a PrivateRoomTracker's inner PublicRoomTracker gets the
+   same behaviour.
+
+3. Test that cancellation works when a private room is left:
+   - ContinuousTracker::shutdown() fires CancellationToken and awaits the
+     background tasks.
+   - Verify that in-flight publish/discover operations abort cleanly.
+
+4. Add a bounded retry count for transient DHT failures:
+   - Current implementation retries forever (exponential backoff, but
+     never gives up).  For private rooms, consider adding a max retry
+     count after which the tracker shuts itself down.
+   - This prevents wasted resources when a DHT is permanently unavailable.
+
+Deliverables:
+- Review existing retry/backoff — confirm no changes needed.
+- Optional: add max_retry_count to ContinuousTrackerConfig.
+
+Acceptance criteria:
+- DHT publish/discover failures in private-room trackers use backoff.
+- Shutdown on room leave is clean (no zombie tasks).
+- Tracker eventually stops retrying after DHT is down for extended period.
+- All existing ContinuousTracker tests pass.
+
+
+================================================================================
+CARD 11: LEGACY TICKET COMPATIBILITY
+================================================================================
+
+Title: Full backward compatibility with legacy tickets
+Status: TODO
+Priority: HIGH
+Dependencies: Card 2 (Ticket Extension), Card 7 (Room Join)
+
+Objective:
+Ensure that all existing functionality is preserved and that the DHT
+discovery system never interferes with legacy (non-DHT) room operations.
+
+Tasks:
+
+1. Create a comprehensive test suite:
+   - Legacy ticket (no discovery_secret) parses correctly with
+     discovery_secret = None.
+   - Legacy ticket join flow: subscribe_and_join(topic, peers) where
+     peers come from the ticket and room store — no DHT lookup attempted.
+   - Room created with old code still opens and works.
+   - RoomStore from schema_version 2 loads and works.
+
+2. Add runtime guards:
+   - If ticket has no discovery_secret, skip DHT lookup entirely.
+   - If RoomStore has no discovery_secret, skip DHT publish on room
+     create/join (unless DHT flag is explicitly enabled).
+   - Log what path was taken (DHT / legacy) at debug level.
+
+3. In examples/chat.rs and examples/iced_chat/app.rs:
+   - Check: if discovery_secret is Some, do DHT + gossip.
+   - If discovery_secret is None, do gossip only (current behaviour).
+   - Both paths must work with zero changes to the non-DHT path.
+
+4. Add a CLI flag or config to disable DHT discovery entirely:
+   - For users who want legacy-only behaviour.
+   - In examples: --no-dht or --legacy flag.
+   - In iced_chat settings: a toggle.
+
+Deliverables:
+- Backward compatibility tests
+- Runtime guard in all join paths
+- Optional disable flag
+
+Acceptance criteria:
+- Every existing test passes unchanged.
+- Joining a legacy ticket never touches the DHT.
+- Creating a room with DHT disabled creates a legacy ticket.
+- Flag/option to disable DHT exists and works.
+
+
+================================================================================
+CARD 12: FRONTEND CHANGES — TUI (examples/chat.rs)
+================================================================================
+
+Title: TUI frontend changes for DHT room discovery indicators
+Status: TODO
+Priority: MEDIUM
+Dependencies: Card 6 (Room Creation), Card 7 (Room Join), Card 8
+              (Continuous Discovery)
+
+Objective:
+Add minimal UI indicators so the TUI user can see DHT discovery status.
+
+Tasks:
+
+1. Status line additions (in TuiState / StatusContext):
+   - "DHT: active" or "DHT: off" in the status bar.
+   - Number of DHT-discovered peers vs ticket peers.
+
+2. Room metadata display:
+   - When showing room info, indicate if DHT discovery is enabled
+     (discovery_secret present).
+
+3. Logging:
+   - Log when DHT publish/discover succeeds or fails.
+   - Log when new peers are discovered via DHT.
+   - Reuse the existing tracing infrastructure.
+
+4. The TUI chat example (examples/chat.rs) should accept a --dht flag
+   and create/join the DHT backend at startup if present.
+
+Deliverables:
+- Modified examples/chat.rs with DHT status display
+- --dht CLI flag
+- DHT-connected status in the status bar
+
+Acceptance criteria:
+- DHT status displayed in TUI status bar.
+- --dht flag enables DHT backend creation.
+- Without --dht, TUI works exactly as before.
+- cargo build --features examples succeeds.
+
+
+================================================================================
+CARD 13: FRONTEND CHANGES — ICED GUI (examples/iced_chat)
+================================================================================
+
+Title: Iced GUI frontend changes for DHT room discovery indicators
+Status: TODO
+Priority: MEDIUM
+Dependencies: Card 6 (Room Creation), Card 7 (Room Join), Card 8
+              (Continuous Discovery), Card 9 (Dynamic Peer Joins)
+
+Objective:
+Update the iced GUI to show DHT discovery status and provide room-level
+control over DHT discovery.
+
+Tasks:
+
+1. Room info panel:
+   - Show a "DHT Discovery: Enabled" or "DHT Discovery: Off" indicator
+     in the room info / header.
+   - When DHT is enabled, show the number of DHT-discovered peers.
+
+2. Settings screen:
+   - Add a toggle for "DHT Room Discovery" (per-room or global default).
+   - The public lobby already has continuous discovery — this should be
+     a separate setting for private rooms.
+
+3. Create room dialog:
+   - Add a checkbox: "Enable DHT discovery for this room"
+   - When checked, the room gets a DiscoverySecret and publishes to DHT.
+   - When unchecked, it's a legacy room (ticket-only).
+
+4. Discovered Peers sidebar:
+   - The existing Discovered Peers section (driven by NewDiscoveredPeers
+     events) should show peers discovered for ALL rooms, not just the
+     public lobby.
+   - Add a note indicating which room each peer was discovered for.
+
+5. Integration with existing NewDiscoveredPeers handler:
+   - The current handler (app.rs:6057-6070) pushes peers to
+     self.discovered_peers and optionally joins them.
+   - For private rooms, the join_peers call should use the room's
+     specific GossipSender, not the lobby sender.
+   - This may require routing discovered peers per-room rather than
+     globally.
+
+Deliverables:
+- Modified examples/iced_chat/app.rs
+- Modified examples/iced_chat/main.rs (if settings storage changes)
+- Settings toggle and room-level DHT indicators
+
+Acceptance criteria:
+- User can enable/disable DHT discovery per room.
+- DHT status is visible in room header.
+- Discovered Peers sidebar works for all rooms.
+- Default is DHT off (legacy behaviour preserved).
+- cargo build --features gui succeeds.
+
+
+================================================================================
+CARD 14: UNIT & INTEGRATION TESTS — DISCOVERY
+================================================================================
+
+Title: Unit and integration tests for private-room DHT discovery
+Status: TODO
+Priority: HIGH
+Dependencies: Card 1 (Discovery Secret), Card 2 (Ticket Extension),
+              Card 5 (Private-room Tracker), Card 11 (Legacy Compatibility)
+
+Objective:
+Write comprehensive tests that do NOT depend on the real BitTorrent DHT.
+All tests use InMemoryDiscoveryBackend.
+
+Tasks:
+
+Test categories:
+
+A — Unit tests (no async):
+  1. DiscoverySecret generation and round-trip (already in Card 1).
+  2. Ticket serialisation with/without discovery_secret (Card 2).
+  3. RoomStore migration (Card 3).
+  4. Legacy ticket parsing (Card 11).
+
+B — Integration tests (async, InMemoryDiscoveryBackend):
+  1. Two peers: Peer A creates room with DHT, Peer B joins via ticket
+     with discovery_secret, discovers Peer A, connects.
+  2. Three peers: A -> B -> C chain, each joining via DHT.
+  3. Creator-offline scenario: Peer A creates, publishes, goes offline.
+     Peer B discovers, then Peer C joins via ticket and discovers both
+     B (still online).  Verifies creator-independence.
+  4. Namespace isolation: Two rooms with different discovery secrets
+     must not leak peers between them.
+  5. Self-filter: A peer publishing and discovering must not discover
+     itself.
+  6. Duplicate filter: Multiple publishes by same peer yield one result.
+  7. Empty discovery: No peers on DHT returns empty result, join falls
+     back to ticket peers only.
+  8. Tracker shutdown: Publish/discover after shutdown returns error.
+
+C — Gossip integration tests:
+  1. Two peers with InMemoryDiscoveryBackend create room, publish,
+     discover, and exchange gossip messages.
+  2. Verify that discovered peers are joined to the gossip mesh and
+     messages are received.
+
+D — Error handling tests:
+  1. DHT lookup timeout -> fallback to ticket peers (log warning,
+     continue).
+  2. DHT backend uninitialised -> fallback to legacy behaviour.
+
+Deliverables:
+- tests/test_private_room_dht_discovery.rs
+- InMemoryDiscoveryBackend-based integration tests
+- Gossip integration tests (if the test infrastructure supports it
+  without real iroh endpoints)
+
+Acceptance criteria:
+- All tests pass without network access.
+- Creator-offline scenario verified.
+- Namespace isolation verified.
+- Legacy compatibility verified (tickets without discovery_secret).
+- cargo test --features test-utils passes the new tests.
+
+
+================================================================================
+CARD 15: DOCUMENTATION
+================================================================================
+
+Title: Documentation — README, architecture, migration notes
+Status: TODO
+Priority: MEDIUM
+Dependencies: Card 6 (Room Creation), Card 7 (Room Join), Card 11
+              (Legacy Compatibility)
+
+Objective:
+Document the new DHT-based room discovery feature.
+
+Tasks:
+
+1. README.md updates:
+   - Add "DHT Room Discovery" section explaining the feature.
+   - What it is: automatic peer discovery for private rooms via
+     distributed-topic-tracker.
+   - How to use it: create room with DHT enabled, share ticket, peers
+     find each other automatically.
+   - Compatibility: tickets with and without DHT both work.
+   - Privacy: discovery secret is carried in ticket, DHT namespace is
+     isolated per room.
+
+2. src/discovery_backend.rs doc update:
+   - Add note that MainlineDhtBackend is used for both public and
+     private rooms.
+   - Document the NamespaceId -> discovery secret relationship.
+
+3. src/private_room_tracker.rs module doc:
+   - Purpose: publish/discover wrapper for private rooms.
+   - Lifecycle: create -> publish_once -> discover_once -> shutdown.
+   - Integration: used with ContinuousTracker for background loops.
+
+4. Migration notes (for existing users):
+   - Existing rooms work unchanged (no discovery_secret in room.json).
+   - New rooms with DHT get a discovery_secret.
+   - No manual migration needed — the code handles both.
+
+5. Architecture documentation:
+   - Create or update docs/ARCHITECTURE.md (or ARCHITECTURE.md at repo
+     root) with:
+     - How discovery works: ticket carries discovery_secret -> DHT
+       lookup -> discovered peers merged into gossip bootstrap.
+     - Component diagram: user -> frontend -> PrivateRoomTracker ->
+       TopicDiscoveryBackend -> distributed-topic-tracker -> Mainline DHT.
+     - Flow diagram for room creation and join.
+     - How ContinuousTracker maintains presence.
+
+6. Security model:
+   - Discovery secret secrecy: only shared via ticket (out-of-band or
+     whisper).  Anyone with the secret can find the room's current peers.
+   - No encryption: the record payload is the peer's public EndpointId
+     (inherently public).
+   - Topic privacy: the gossip topic is derived from a random value
+     (the topic itself), so it cannot be guessed.
+   - An attacker who knows the discovery_secret can discover current
+     peers but cannot:
+     a) Decrypt room messages (unless they also have the topic key)
+     b) Impersonate a peer (need the peer's SecretKey)
+     c) Read past records (minute-rotating keys)
+   - The distributed-topic-tracker's HPKE encryption is an additional
+     layer — the record payload is encrypted on the DHT.
+
+7. Limitations:
+   - DHT discovery only returns PeerIds, not full addresses.  iroh's
+     address resolution (MemoryLookup -> GossipAddressLookup -> mDNS ->
+     DHT/Pkarr) fills in the addresses after the peer ID is known.
+   - DHT requires UDP access to the global Mainline DHT.  Firewalls,
+     NAT, and corporate networks may block this.
+   - Initial discovery may take up to 30 seconds (configurable) because
+     the DHT lookup has a timeout.
+   - The DHT discovery record is time-bound (current minute +/- 1),
+     so a peer that publishes then immediately shuts down may not be
+     discoverable after 2 minutes.
+   - No offline mailbox integration for DHT-discovered peers (offline
+     delivery is a separate feature).
+
+8. Privacy model:
+   - Room membership is discoverable by anyone with the ticket.
+   - No central server tracks room membership.
+   - DHT records are ephemeral (current minute +/- 1).
+   - Room name/topic is not leaked on the DHT — only the discovery
+     secret (a random 32-byte value) is used as the namespace.
+   - The discovery protocol is not anonymous — it uses the peer's
+     long-lived iroh EndpointId.
+
+Deliverables:
+- Updated README.md
+- Module-level doc comments
+- Security and privacy documentation
+- Migration notes
+- Architecture documentation (docs/ARCHITECTURE.md or ARCHITECTURE.md)
+
+Acceptance criteria:
+- All changed modules have appropriate doc comments.
+- README.md describes the DHT discovery feature.
+- Architecture doc explains the system.
+- Security and privacy models are documented.
+
+
+================================================================================
+CARD 16: CARGO FMT / CLIPPY / TEST FINAL VERIFICATION
+================================================================================
+
+Title: Final code quality verification and compatibility review
+Status: TODO
+Priority: HIGH
+Dependencies: ALL previous cards
+
+Objective:
+Run the full verification suite and validate forward/backward compatibility.
+
+Tasks:
+
+1. Run cargo fmt --all --check — fix any formatting issues.
+
+2. Run cargo clippy --all-features — fix all warnings.  Pay special
+   attention to:
+   - Unused imports/modules from the new code.
+   - Unnecessary clones or allocations.
+   - Large enum variants (the NewDiscoveredPeers Vec<PublicKey> is
+     already large, but it was pre-existing).
+   - Missing Debug implementations.
+
+3. Run cargo test --all-features — all tests must pass:
+   - Unit tests in all new modules.
+   - Existing integration tests.
+   - The public lobby integration tests.
+
+4. Run the serde format test specifically:
+   - cargo test --features net test_serde_format
+   - Verify legacy ticket binary format is still parseable.
+
+5. Compatibility review checklist:
+   - [ ] Legacy tickets (no discovery_secret) parse correctly.
+   - [ ] Legacy room.json files load and migrate.
+   - [ ] Direct chats (direct_topic) are untouched.
+   - [ ] Private rooms without DHT work exactly as before.
+   - [ ] Public rooms are unaffected.
+   - [ ] mDNS, DNS/Pkarr, iroh-mainline-address-lookup still work.
+   - [ ] Offline mailbox is untouched.
+   - [ ] Blob/image transfer is untouched.
+   - [ ] Persistent identities are untouched.
+   - [ ] Relay support is untouched.
+   - [ ] Friends/whisper/inbox/backfill are untouched.
+   - [ ] CLI flags and frontend arguments remain backward compatible.
+
+6. Release readiness:
+   - No TODO comments in released code.
+   - No dbg!() or eprintln! left in production paths.
+   - Public API changes are documented.
+   - New public types have doc comments.
+   - No new unwrap()/expect() in production code (tests OK).
+
+Deliverables:
+- Clean linter output.
+- All tests passing.
+- Compatibility checklist signed off.
+
+Acceptance criteria:
+- cargo fmt --all --check passes.
+- cargo clippy --all-features is clean.
+- cargo test --all-features passes.
+- Compatibility checklist is fully checked.
+- No regressions in existing functionality.
+
+
+================================================================================
+DEFINITION OF DONE
+================================================================================
+
+The project is complete when:
+
+1. All cards from 0 through 16 are implemented.
+
+2. All tests pass (cargo test --all-features).
+
+3. All lints pass (cargo clippy --all-features, cargo fmt --all --check).
+
+4. Five scenarios work end-to-end:
+
+   Scenario A — New room with DHT:
+   User A creates a new private room with DHT enabled.
+   User B receives the ticket (copy/paste or whisper).
+   User B joins.  User B discovers User A via DHT, connects, exchanges
+   messages.
+
+   Scenario B — Creator offline:
+   User A creates room, publishes, goes offline.
+   User B joins via ticket.  User B discovers no one (creator gone).
+   User C joins via ticket.  User B publishes to DHT, User C discovers
+   User B, they connect and chat.  Creator-independence verified.
+
+   Scenario C — Churn:
+   Users A, B, C in a room with continuous DHT discovery.
+   User C leaves.  User A and B continue chatting, still discoverable.
+   User C rejoins.  All three discover each other.
+
+   Scenario D — Legacy ticket:
+   User A creates a room WITHOUT DHT (legacy).
+   User B joins with legacy ticket.  No DHT operations occur.
+   Everything works exactly as before.
+
+   Scenario E — Migration:
+   User upgrades from old boru-chat to new version.
+   Existing room.json loads, existing tickets work.
+   User can create new rooms with DHT alongside old rooms without.
+
+5. Documentation is updated (README, architecture, security model).
+
+6. No regressions in any preserved feature (see "Important requirements"
+   in the original task description).
+
+
+================================================================================
+REMAINING RISKS
+================================================================================
+
+1. DHT address resolution:
+   The DHT only returns EndpointId (32-byte public key).  It does NOT
+   return relay URLs or direct IP addresses.  iroh's address lookup
+   chain must resolve these.  If iroh's built-in resolution fails
+   (no relay, no mDNS, no Pkarr), the peer ID is known but the peer
+   cannot be connected to.  This is a limitation of the DHT protocol,
+   not something we can fix in boru-chat.
+
+2. DHT port/firewall:
+   The Mainline DHT uses UDP on a random ephemeral port.  Corporate
+   firewalls, NAT configurations, and containerised environments may
+   block DHT traffic.  The discovery feature degrades gracefully
+   (falls back to ticket-only), but the user loses the benefit.
+
+3. DHT rate limits:
+   Frequent publishing (sub-minute) on the Mainline DHT is considered
+   antisocial.  The defaults (publish every 5 minutes) are conservative,
+   but users who override them may be rate-limited by the DHT network.
+
+4. Sequence number semantics:
+   The distributed-topic-tracker uses i64::MAX as the sequence number
+   for all records (see record.rs line 328).  This means the last
+   published record always wins, regardless of actual publication order.
+   For our use case (publishing EndpointId), this is fine — stale
+   records expire anyway.
+
+5. Room secret size:
+   The DiscoverySecret is 32 bytes.  When embedded in a base32 ticket,
+   it adds ~52 characters to the ticket string.  Existing tickets are
+   ~85 characters.  DHT-enabled tickets become ~137 characters.
+   This may affect copy/paste workflows on mobile or character-limited
+   channels.
+
+6. Concurrent DHT instances:
+   Each room with DHT discovery creates a new PrivateRoomTracker (and
+   potentially a new DHT client).  Multiple DHT clients on the same
+   machine share the global Mainline DHT but each maintains its own
+   routing table.  This is wasteful.  Future optimisation: share a
+   single DHT client across all room trackers.
+
+7. Topic stability:
+   Currently, room TopicIds are random.  If a user recreates a room
+   (deletes room.json), they get a different topic.  With DHT discovery,
+   the topic is still random.  The discovery secret is what enables
+   DHT lookup, not the topic.  This means a room's ticket changes if
+   the creator recreates the room — but that's already the case even
+   without DHT.
+
+8. ContinuousTracker lifetime:
+   The ContinuousTracker holds a CancellationToken and background tasks.
+   If the IcedChat state is dropped without calling shutdown(), the
+   tasks are aborted (JoinHandle is not detached).  Current code already
+   handles this for the public lobby tracker via the Option<ContinuousTracker>
+   field.  The per-room HashMap<..., ContinuousTracker> must also clean
+   up on drop.
+
+
+================================================================================
+FUTURE WORK (PUBLIC ROOMS — NOT IN SCOPE)
+================================================================================
+
+This roadmap covers PRIVATE-ROOM DHT discovery only.  Public-room
+discovery already exists in the codebase (see public_room.rs,
+public_room_tracker.rs, public_room_continuous.rs, etc.) and operates
+on a different discovery key derivation (deterministic from room name).
+
+Public-room enhancements that are explicitly NOT in scope:
+
+1. Public room list / directory — no way to enumerate all public rooms.
+2. Public room search — no name-based DHT lookup (discovery key is
+   deterministic, so you need to know the room name).
+3. Public room access control — all peers with the discovery key can
+   find each other.
+4. Public room moderation — no operator/administrator concept.
+5. Public room persistent history — no DHT-backed message archive.
+
+These are separate features that build on the existing public-room
+discovery foundation.
+
+For the purpose of this roadmap, all "discovery" refers to PRIVATE-ROOM
+discovery using a random discovery secret carried in the ticket.
+
+
+================================================================================
+ESTIMATED IMPLEMENTATION ORDER
+================================================================================
+
+The cards are designed to be implemented sequentially, but some cards
+can be parallelised:
+
+CRITICAL PATH (must be sequential):
+  Card 0 (Audit)
+  -> Card 1 (Discovery Secret)
+  -> Card 2 (Ticket Extension)
+  -> Card 5 (Private-room Tracker)
+  -> Card 6 (Room Creation)
+
+PARALLEL BRANCH (after Card 2):
+  Card 3 (Room Store Migration) — can parallel with Card 5
+  Card 11 (Legacy Compatibility) — test-only, can start after Card 2
+
+CONVERGENCE (after Card 5 + Card 6):
+  Card 7 (Room Join)
+  Card 8 (Continuous Discovery)
+  Card 9 (Dynamic Peer Joins)
+  Card 10 (Retry/Backoff/Shutdown)
+
+FRONTENDS (after Card 6 + Card 7):
+  Card 12 (TUI)
+  Card 13 (Iced GUI)
+
+TESTING + DOCS (can start any time after the main logic cards):
+  Card 14 (Tests)
+  Card 15 (Documentation)
+
+FINAL:
+  Card 16 (Verification)
+
+Estimated total: approximately 14-18 implementation sessions for a single
+experienced Rust developer, assuming one card per session (some cards
+like 7, 8, 9 may need multiple sessions).
+
+
+================================================================================
+CRITICAL PATH SUMMARY
+================================================================================
+
+The critical path runs through:
+
+1. Card 0 — Audit.  Skip this and you'll miss integration points.
+2. Card 1 — DiscoverySecret type.  Foundation for everything.
+3. Card 2 — Ticket extension.  Needed before any room can carry DHT info.
+4. Card 5 — PrivateRoomTracker.  Needed before any DHT operation.
+5. Card 6 — Room creation with DHT.  First end-to-end testable path.
+6. Card 7 — Room join with DHT.  Second end-to-end testable path.
+7. Card 8 — Continuous discovery.  Makes the feature useful.
+8. Card 9 — Dynamic joins.  Completes the discovery loop.
+
+After Card 9, the core feature is functional.  Cards 10-16 are
+polish, testing, documentation, and verification.
+
+The shortest path to a working prototype:
+  Card 0 -> Card 1 -> Card 2 -> Card 5 -> Card 6 -> Card 7 -> Card 14 -> Card 16
+  (8 cards)
+
+================================================================================
+END OF KANBAN BOARD
+================================================================================
