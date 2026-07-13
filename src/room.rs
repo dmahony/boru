@@ -16,9 +16,10 @@ use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
 use crate::chat_core::atomic_write::atomic_write_json;
+use crate::discovery_secret::DiscoverySecret;
 use crate::proto::TopicId;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 /// Name of the on-disk room metadata file (lives beside `secret_key.txt`).
 pub const ROOM_FILE_NAME: &str = "room.json";
 
@@ -46,6 +47,12 @@ pub struct RoomStore {
     /// seed the address lookup without a fresh ticket.
     #[serde(default)]
     pub peers: Vec<EndpointAddr>,
+    /// Per-room discovery secret for private-room DHT isolation.
+    ///
+    /// `None` for public rooms (including legacy v1/v2 data); `Some(...)`
+    /// for private rooms that use a shared discovery secret.
+    #[serde(default)]
+    pub discovery_secret: Option<DiscoverySecret>,
     /// Data directory used for load/save operations.
     #[serde(skip)]
     data_dir: PathBuf,
@@ -60,6 +67,7 @@ impl RoomStore {
             schema_version: SCHEMA_VERSION,
             topic: TopicId::from_bytes([0u8; 32]),
             peers: Vec::new(),
+            discovery_secret: None,
             data_dir: data_dir.into(),
         }
     }
@@ -70,6 +78,7 @@ impl RoomStore {
             schema_version: SCHEMA_VERSION,
             topic,
             peers: Vec::new(),
+            discovery_secret: None,
             data_dir: data_dir.into(),
         }
     }
@@ -84,6 +93,7 @@ impl RoomStore {
             schema_version: SCHEMA_VERSION,
             topic,
             peers,
+            discovery_secret: None,
             data_dir: data_dir.into(),
         }
     }
@@ -114,7 +124,15 @@ impl RoomStore {
         let mut store: Self = serde_json::from_str(&raw)
             .with_std_context(|_| format!("failed to parse room file {}", path.display()))?;
 
-        if store.schema_version != SCHEMA_VERSION {
+        if store.schema_version < SCHEMA_VERSION {
+            // ── v2 → v3 migration: add discovery_secret field ─────────
+            // Older files lack the discovery_secret field (it is
+            // `#[serde(default)]` so deserializing a v2 file as v3 would
+            // default it to None anyway), but we bump the version to v3
+            // so that future migrations have a consistent base.
+            store.discovery_secret = None;
+            store.schema_version = SCHEMA_VERSION;
+        } else if store.schema_version > SCHEMA_VERSION {
             return Err(n0_error::anyerr!(
                 "unsupported room schema version {} in {}",
                 store.schema_version,

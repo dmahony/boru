@@ -57,6 +57,18 @@ pub mod public_room_safety;
 pub mod public_room_tracker;
 pub mod topic_derivation;
 
+/// Per-room discovery secrets — cryptographically random 32-byte keys
+/// that isolate private rooms on the DHT.
+///
+/// Always available (no feature gate) so that [`RoomStore`] can
+/// (de)serialize secrets without the `net` feature.
+pub mod discovery_secret;
+
+/// Private-room topic tracker — thin wrapper over [`TopicDiscoveryBackend`]
+/// with domain-separated namespace derivation and peer isolation.
+#[cfg(feature = "net")]
+pub mod private_room_tracker;
+
 /// Shared chat core — state machine, protocol types, and network event handling.
 ///
 /// Available when the `net` feature is enabled.  Used by the `chat` example

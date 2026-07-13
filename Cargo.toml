@@ -81,7 +81,7 @@ futures-concurrency = { version = "7.6.1", optional = true }
 iroh = { version = "1", default-features = false, optional = true }
 iroh-mdns-address-lookup = { version = "0.4", optional = true }
 iroh-mainline-address-lookup = { version = "0.4", optional = true }
-distributed-topic-tracker = "0.3"
+distributed-topic-tracker = { version = "0.3.5", default-features = false }
 tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt", "macros", "time"] }
 
 tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
