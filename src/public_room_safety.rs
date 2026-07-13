@@ -1186,6 +1186,8 @@ mod tests {
             peer_connection_types: HashMap::new(),
             last_activity: HashMap::new(),
             mesh_health: crate::chat_core::MeshHealth::Good,
+            dht_enabled: false,
+            dht_peer_count: 0,
         };
         crate::chat_core::AppState::new(status, friends, local_public, Some("tester".into()))
     }

@@ -20,28 +20,28 @@ use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_with_safety, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     handle_net_event as chat_net_event, handle_net_event_with_safety, message_hash,
-    seed_memory_lookup, MeshHealth, MessageHash,
+    seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_chat::conversations::{
     spawn_conversation_forwarder, ConversationNetEvent, ConversationStore,
 };
+use boru_chat::discovery_backend::MainlineDhtBackend;
+use boru_chat::discovery_secret::DiscoverySecret;
 use boru_chat::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
 };
 use boru_chat::friends::{DirectConversationState, FriendId, FriendsStore};
 use boru_chat::image_optimizer::{compress_image, optimize_chat_image, CHAT_IMAGE_MAX_BYTES};
 use boru_chat::image_store::ImageStore;
-use boru_chat::inbox::{send_ack, send_sync_request, InboxEvent};
+use boru_chat::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
 use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
 use boru_chat::net::Gossip;
 use boru_chat::outbox::{OutboxEntry, OutboxStore};
-use boru_chat::discovery_backend::MainlineDhtBackend;
-use boru_chat::discovery_secret::DiscoverySecret;
 use boru_chat::private_room_tracker::{create_and_publish_private_discovery, PrivateRoomTracker};
 use boru_chat::proto::TopicId;
-use boru_chat::public_room_continuous::ContinuousTracker;
+use boru_chat::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
 use boru_chat::public_room_safety::PublicRoomSafety;
 use boru_chat::room::RoomStore;
 use boru_chat::room_cleanup::delete_room_history;
@@ -49,7 +49,8 @@ use boru_chat::room_docs::{self, RoomMetadata};
 use boru_chat::room_history::{RoomHistoryEntry, RoomHistoryStore};
 use boru_chat::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
-    address_lookup::memory::MemoryLookup, EndpointAddr, EndpointId, PublicKey, RelayMode, SecretKey, Watcher,
+    address_lookup::memory::MemoryLookup, EndpointAddr, EndpointId, PublicKey, RelayMode,
+    SecretKey, Watcher,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket};
 use n0_future::task;
@@ -61,6 +62,47 @@ use tracing::{debug, info, warn};
 use crate::perf_tracker::PerfTracker;
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use iced::Color;
+
+// ── Shared ContinuousTracker wrapper ─────────────────────────────────
+/// Wraps [`ContinuousTracker`] so it can be stored in the Clone-derived
+/// [`AppMessage`] enum.  Inner tracker is accessed via `shutdown_shared`.
+#[derive(Debug)]
+struct SharedTracker {
+    /// The underlying continuous tracker (publish + discover loops).
+    tracker: Arc<tokio::sync::Mutex<Option<ContinuousTracker>>>,
+    /// Cancellation token for the join-fanout background task, so it
+    /// exits promptly when the room is left or deleted.
+    join_cancel: Arc<tokio_util::sync::CancellationToken>,
+}
+
+impl SharedTracker {
+    fn new(tracker: ContinuousTracker, join_cancel: tokio_util::sync::CancellationToken) -> Self {
+        Self {
+            tracker: Arc::new(tokio::sync::Mutex::new(Some(tracker))),
+            join_cancel: Arc::new(join_cancel),
+        }
+    }
+
+    /// Shutdown the tracker and cancel the join-fanout task (fire-and-forget via task::spawn).
+    fn shutdown_shared(&self) {
+        self.join_cancel.cancel();
+        let inner = self.tracker.clone();
+        task::spawn(async move {
+            if let Some(tracker) = inner.lock().await.take() {
+                tracker.shutdown().await;
+            }
+        });
+    }
+}
+
+impl Clone for SharedTracker {
+    fn clone(&self) -> Self {
+        Self {
+            tracker: self.tracker.clone(),
+            join_cancel: self.join_cancel.clone(),
+        }
+    }
+}
 
 // ── Settings persistence ─────────────────────────────────────────
 /// On-disk settings stored as JSON in the application data directory.
@@ -1041,6 +1083,11 @@ pub struct IcedChat {
     /// Maps protocol message hashes to event_ids for delivery state resolution.
     self_sent_events: HashMap<MessageHash, u64>,
 
+    /// Maps offline mail envelope message_ids to ChatEntry indices for
+    /// updating delivery status when an AckReceived or MailboxReplayed event
+    /// arrives for a queued offline DM.
+    pending_offline_ids: HashMap<String, usize>,
+
     /// Whether to auto-scroll to the latest message.
     follow_latest: bool,
     /// Estimated total content height of the chat log (set in view_chat_log).
@@ -1176,9 +1223,15 @@ pub struct IcedChat {
     invite_whisper_input: String,
     /// Shared DHT client for creating private-room discovery records.
     dht: Option<distributed_topic_tracker::Dht>,
+    /// Disable private-room DHT discovery from the command line.
+    private_dht_disabled: bool,
     /// Whether the \"Enable DHT discovery\" checkbox is checked in the
     /// create-room dialog.  Default: off (no DHT discovery).
     create_room_dht_enabled: bool,
+    /// Per-room continuous DHT trackers for private rooms with discovery enabled.
+    /// Started when creating/joining a DHT-enabled room; shut down when
+    /// leaving or deleting the room.
+    room_trackers: HashMap<TopicId, SharedTracker>,
     /// Whether the create-room dialog is currently shown.
     show_create_room_dialog: bool,
 }
@@ -1346,6 +1399,9 @@ pub enum AppMessage {
         topic: TopicId,
         ticket: String,
         sender: GossipSender,
+        /// Optional continuous DHT tracker for background publish/discovery
+        /// in private rooms with DHT discovery enabled.
+        room_tracker: Option<SharedTracker>,
     },
     /// Finished creating a new room (random topic).
     CreateNewRoom,
@@ -1492,6 +1548,18 @@ pub enum AppMessage {
         peer: PublicKey,
         /// Accepted entries: (message_id, plaintext).
         texts: Vec<(String, String)>,
+    },
+    /// An offline DM was queued for later delivery.
+    OfflineDMQueued {
+        /// Stable envelope identifier (blake3 hash of the envelope bytes).
+        message_id: String,
+        /// Human-readable peer label for the chat log.
+        label: String,
+    },
+    /// An offline DM was delivered (ack received from the peer).
+    OfflineDMDelivered {
+        /// Envelope identifier returned by [`OfflineDMQueued`].
+        message_id: String,
     },
     /// Scroll offset / viewport changed in the chat log.
     /// Used by windowed rendering to determine which entries to build widgets for.
@@ -2076,6 +2144,7 @@ impl IcedChat {
         continuous_tracker: Option<ContinuousTracker>,
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
         dht: Option<distributed_topic_tracker::Dht>,
+        private_dht_disabled: bool,
     ) -> Self {
         let (initial_topic, initial_bootstrap) =
             initial_room.unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
@@ -2161,6 +2230,7 @@ impl IcedChat {
             composer_text: String::new(),
             help_visible: false,
             pending_file: None,
+            pending_offline_ids: HashMap::new(),
             pending_image: VecDeque::new(),
             download_entry_index: None,
             active_download_transfer_id: None,
@@ -2256,7 +2326,9 @@ impl IcedChat {
             show_invite_menu: false,
             invite_whisper_input: String::new(),
             dht,
+            private_dht_disabled,
             create_room_dht_enabled: false,
+            room_trackers: HashMap::new(),
             show_create_room_dialog: false,
         }
     }
@@ -2968,6 +3040,8 @@ impl IcedChat {
             AppMessage::ProfileImageRemoved => "ProfileImageRemoved",
             AppMessage::ProfileImagePersisted { .. } => "ProfileImagePersisted",
             AppMessage::SystemMsg(_) => "SystemMsg",
+            AppMessage::OfflineDMQueued { .. } => "OfflineDMQueued",
+            AppMessage::OfflineDMDelivered { .. } => "OfflineDMDelivered",
         }
     }
 }
@@ -3318,7 +3392,7 @@ impl IcedChat {
 
             AppMessage::ConfirmCreateNewRoom => {
                 self.show_create_room_dialog = false;
-                let dht_enabled = self.create_room_dht_enabled;
+                let dht_enabled = self.create_room_dht_enabled && !self.private_dht_disabled;
                 // Leave the current room first — abort forward_handle, clear
                 // sender + entries — so we don't have a zombie forward_handle
                 // or broadcast to the wrong topic during the async gap.
@@ -3347,13 +3421,45 @@ impl IcedChat {
                         let local_peer_addr = endpoint.watch_addr().get();
 
                         // Optionally publish to DHT for private-room discovery.
+                        // Clone dht so we can also use it for continuous tracking.
+                        let dht_for_publish = dht.clone();
                         let discovery_secret = if dht_enabled {
-                            create_and_publish_private_discovery(
-                                dht,
+                            create_and_publish_private_discovery(dht_for_publish, topic, &endpoint)
+                                .await
+                        } else {
+                            None
+                        };
+
+                        // Start continuous DHT publish/discover for this room.
+                        let room_tracker = if let (Some(secret), Some(dht)) =
+                            (discovery_secret, dht)
+                        {
+                            let dummy_ns =
+                                distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+                            let backend = MainlineDhtBackend::new(dht, dummy_ns);
+                            let tracker = PrivateRoomTracker::new(
+                                Box::new(backend),
                                 topic,
-                                &endpoint,
-                            )
-                            .await
+                                secret,
+                                endpoint.id(),
+                                endpoint.secret_key().clone(),
+                            );
+                            let (new_peers_tx, new_peers_rx) =
+                                tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
+                            let join_cancel = tokio_util::sync::CancellationToken::new();
+                            let _join_task = boru_chat::public_room_continuous::spawn_join_fanout(
+                                new_peers_rx,
+                                sender.clone(),
+                                join_cancel.clone(),
+                            );
+                            Some(SharedTracker::new(
+                                ContinuousTracker::start(
+                                    tracker.into_inner(),
+                                    ContinuousTrackerConfig::default(),
+                                    new_peers_tx,
+                                ),
+                                join_cancel,
+                            ))
                         } else {
                             None
                         };
@@ -3417,17 +3523,24 @@ impl IcedChat {
                                 .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(presence).await;
 
-                        let mut room = RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);
+                        let mut room =
+                            RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);
                         room.discovery_secret = discovery_secret;
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
+                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>), String>((
+                            sender,
+                            topic,
+                            ticket_str,
+                            room_tracker,
+                        ))
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str)) => AppMessage::RoomOpened {
+                        Ok((sender, topic, ticket_str, room_tracker)) => AppMessage::RoomOpened {
                             topic,
                             ticket: ticket_str,
                             sender,
+                            room_tracker,
                         },
                         Err(e) => AppMessage::RoomJoinFailed(e),
                     },
@@ -3490,7 +3603,13 @@ impl IcedChat {
                 let memory_lookup = self.memory_lookup.clone();
                 let data_dir = self.data_dir.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
-                // Extract bootstrap peer addresses from the one-shot initial room
+                let private_dht_disabled = self.private_dht_disabled;
+                let dht = self.dht.clone();
+                // Preserve a persisted private-room discovery secret when reopening
+                // a room from the chat list.
+                let saved_discovery_secret = RoomStore::load_or_none(&data_dir)
+                    .filter(|room| room.topic == topic)
+                    .and_then(|room| room.discovery_secret);
                 // or from the saved RoomStore for this topic.
                 let initial_addrs: Vec<EndpointAddr> =
                     self.initial_bootstrap_peers.drain(..).collect();
@@ -3542,10 +3661,49 @@ impl IcedChat {
                         };
                         let (sender, receiver) = sub.split();
                         let local_peer_addr = endpoint.watch_addr().get();
+
+                        let room_tracker = if !private_dht_disabled {
+                            if let (Some(secret), Some(dht)) =
+                                (saved_discovery_secret.clone(), dht.clone())
+                            {
+                                let dummy_ns =
+                                    distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+                                let backend = MainlineDhtBackend::new(dht, dummy_ns);
+                                let tracker = PrivateRoomTracker::new(
+                                    Box::new(backend),
+                                    topic,
+                                    secret,
+                                    endpoint.id(),
+                                    endpoint.secret_key().clone(),
+                                );
+                                let (new_peers_tx, new_peers_rx) =
+                                    tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
+                                let join_cancel = tokio_util::sync::CancellationToken::new();
+                                let _join_task =
+                                    boru_chat::public_room_continuous::spawn_join_fanout(
+                                        new_peers_rx,
+                                        sender.clone(),
+                                        join_cancel.clone(),
+                                    );
+                                Some(SharedTracker::new(
+                                    ContinuousTracker::start(
+                                        tracker.into_inner(),
+                                        ContinuousTrackerConfig::default(),
+                                        new_peers_tx,
+                                    ),
+                                    join_cancel,
+                                ))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        let room_secret = saved_discovery_secret.clone();
                         let ticket_str = Ticket {
                             topic,
                             peers: vec![local_peer_addr.clone()],
-                            discovery_secret: None,
+                            discovery_secret: room_secret,
                         }
                         .to_string();
                         let personal_ticket = Ticket {
@@ -3606,16 +3764,23 @@ impl IcedChat {
                         } else {
                             initial_addrs_for_save.clone()
                         };
-                        let room = RoomStore::with_peers(&data_dir, topic, saved_peers);
+                        let mut room = RoomStore::with_peers(&data_dir, topic, saved_peers);
+                        room.discovery_secret = saved_discovery_secret;
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
+                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>), String>((
+                            sender,
+                            topic,
+                            ticket_str,
+                            room_tracker,
+                        ))
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str)) => AppMessage::RoomOpened {
+                        Ok((sender, topic, ticket_str, room_tracker)) => AppMessage::RoomOpened {
                             topic,
                             ticket: ticket_str,
                             sender,
+                            room_tracker,
                         },
                         Err(e) => AppMessage::RoomJoinFailed(e),
                     },
@@ -3626,10 +3791,16 @@ impl IcedChat {
                 topic,
                 ticket,
                 sender,
+                room_tracker,
             } => {
                 self.pending_topic = None;
                 self.sender = Some(sender.clone());
                 self.forward_handle = self.forward_handle_slot.lock().unwrap().take();
+
+                // Store continuous tracker if one was provided (private room with DHT).
+                if let Some(tracker) = room_tracker {
+                    self.room_trackers.insert(topic, tracker);
+                }
 
                 self.screen = Screen::Chat { topic };
                 self.topic = topic;
@@ -3645,6 +3816,18 @@ impl IcedChat {
                 ));
                 self.push_system("Type a message and press Enter to send.  /help for commands.");
                 self.push_system(format!("Ticket to join this room: {ticket}"));
+
+                // If the ticket contains a discovery secret, also display a
+                // stable boru1: invitation (no endpoint info, compact format).
+                if let Ok(t) = ticket.parse::<Ticket>() {
+                    if let Some(secret) = t.discovery_secret {
+                        let invite = RoomInviteV2::new(t.topic, secret);
+                        self.push_system(format!(
+                            "Invite to join this room (boru1): {}",
+                            invite.encode()
+                        ));
+                    }
+                }
 
                 // History is persisted to disk but not replayed into the UI on
                 // room open — only messages from the current session are shown.
@@ -3738,13 +3921,26 @@ impl IcedChat {
                     self.screen = Screen::ChatList;
                     return iced::Task::none();
                 }
-                let ticket: Ticket = match ticket_input.parse() {
-                    Ok(ticket) => ticket,
-                    Err(e) => {
-                        self.chat_list_error = format!("Invalid ticket: {e}");
-                        self.screen = Screen::ChatList;
-                        return iced::Task::none();
+                // Try stable boru1: invitation first, then fall back to legacy ticket format.
+                let (ticket, is_boru1) = match RoomInviteV2::parse(ticket_input) {
+                    Ok(invite) => {
+                        // Convert boru1 invitation to a temporary Ticket so the
+                        // rest of the join flow works unchanged.
+                        let t = Ticket {
+                            topic: invite.topic,
+                            peers: Vec::new(),
+                            discovery_secret: Some(invite.discovery_secret),
+                        };
+                        (t, true)
                     }
+                    Err(_) => match ticket_input.parse::<Ticket>() {
+                        Ok(t) => (t, false),
+                        Err(e) => {
+                            self.chat_list_error = format!("Invalid ticket: {e}");
+                            self.screen = Screen::ChatList;
+                            return iced::Task::none();
+                        }
+                    },
                 };
 
                 // Show progress while subscribe_and_join waits for the
@@ -3765,11 +3961,15 @@ impl IcedChat {
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
+                let private_dht_disabled = self.private_dht_disabled;
+                let dht = self.dht.clone();
 
                 iced::Task::perform(
                     async move {
                         let topic = ticket.topic;
                         let secret = ticket.discovery_secret;
+                        let mut room_tracker: Option<SharedTracker> = None;
+                        let mut pending_dht_fanout = None;
                         let saved_addrs = RoomStore::load_or_none(&data_dir)
                             .filter(|room| room.topic == topic)
                             .map(|room| room.peers)
@@ -3801,38 +4001,55 @@ impl IcedChat {
                         // returns IDs, not addrs).
                         seed_memory_lookup(&memory_lookup, &ticket_addrs);
 
-                        if let Some(secret) = secret {
-                            let dht = distributed_topic_tracker::Dht::new(
-                                &distributed_topic_tracker::DhtConfig::default(),
-                            );
-                            let dummy_ns =
-                                distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
-                            let backend = MainlineDhtBackend::new(dht, dummy_ns);
-                            let tracker = PrivateRoomTracker::new(
-                                Box::new(backend),
-                                topic,
-                                secret,
-                                endpoint.id(),
-                                sk.clone(),
-                            );
-                            match tracker.discover_once().await {
-                                Ok(discovered_ids) => {
-                                    let existing: HashSet<iroh::EndpointId> =
-                                        merged_peers.iter().map(|a| a.id).collect();
-                                    for id in discovered_ids {
-                                        if !existing.contains(&id) && id != endpoint.id() {
-                                            merged_peers.push(EndpointAddr::new(id));
+                        if !private_dht_disabled {
+                            if let Some(secret) = secret {
+                                let dht = dht.unwrap_or_else(|| {
+                                    distributed_topic_tracker::Dht::new(
+                                        &distributed_topic_tracker::DhtConfig::default(),
+                                    )
+                                });
+                                let dummy_ns =
+                                    distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+                                let backend = MainlineDhtBackend::new(dht.clone(), dummy_ns);
+                                let tracker = PrivateRoomTracker::new(
+                                    Box::new(backend),
+                                    topic,
+                                    secret,
+                                    endpoint.id(),
+                                    sk.clone(),
+                                );
+                                match tracker.discover_once().await {
+                                    Ok(discovered_ids) => {
+                                        let existing: HashSet<iroh::EndpointId> =
+                                            merged_peers.iter().map(|a| a.id).collect();
+                                        for id in discovered_ids {
+                                            if !existing.contains(&id) && id != endpoint.id() {
+                                                merged_peers.push(EndpointAddr::new(id));
+                                            }
                                         }
                                     }
+                                    Err(e) => {
+                                        warn!(
+                                            error = %e,
+                                            "DHT discovery failed, falling back to ticket peers"
+                                        );
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!(
-                                        error = %e,
-                                        "DHT discovery failed, falling back to ticket peers"
-                                    );
-                                }
+                                let (new_peers_tx, new_peers_rx) =
+                                    tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
+                                let join_cancel = tokio_util::sync::CancellationToken::new();
+                                pending_dht_fanout = Some((new_peers_rx, join_cancel.clone()));
+                                room_tracker = Some(SharedTracker::new(
+                                    ContinuousTracker::start(
+                                        tracker.into_inner(),
+                                        ContinuousTrackerConfig::default(),
+                                        new_peers_tx,
+                                    ),
+                                    join_cancel,
+                                ));
                             }
-                            tracker.shutdown().await;
+                        } else {
+                            debug!("private room DHT disabled by --no-dht; using ticket peers");
                         }
 
                         let peers: Vec<iroh::EndpointId> =
@@ -3854,6 +4071,13 @@ impl IcedChat {
                         .map_err(|_| "timed out waiting for a peer to join the room".to_string())?
                         .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
+                        if let Some((new_peers_rx, join_cancel)) = pending_dht_fanout {
+                            let _join_task = boru_chat::public_room_continuous::spawn_join_fanout(
+                                new_peers_rx,
+                                sender.clone(),
+                                join_cancel,
+                            );
+                        }
                         let local_peer_addr = endpoint.watch_addr().get();
                         let new_ticket = Ticket {
                             topic,
@@ -3912,13 +4136,19 @@ impl IcedChat {
                         let room = RoomStore::with_peers(&data_dir, topic, merged_peers);
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
+                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>), String>((
+                            sender,
+                            topic,
+                            ticket_str,
+                            room_tracker,
+                        ))
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str)) => AppMessage::RoomOpened {
+                        Ok((sender, topic, ticket_str, room_tracker)) => AppMessage::RoomOpened {
                             topic,
                             ticket: ticket_str,
                             sender,
+                            room_tracker,
                         },
                         Err(e) => AppMessage::RoomJoinFailed(e),
                     },
@@ -3963,11 +4193,12 @@ impl IcedChat {
 
                         let secret_key = self.secret_key.clone();
                         let whisper_handle = self.whisper_handle.clone();
-                        let local_addr = self.endpoint.addr();
-                        let action = ContactAction::ConversationInvite {
-                            topic,
-                            addrs: vec![local_addr],
-                        };
+                        // A friend request is a control-plane request, not a
+                        // conversation invite.  Keeping these actions distinct is
+                        // important: ConversationInvite is sent only after the
+                        // recipient accepts, while FriendRequest must remain
+                        // pending so it can be rendered and acted on locally.
+                        let action = ContactAction::FriendRequest { name: None };
                         let payload = match SignedContactMessage::sign(&secret_key, &action) {
                             Ok(payload) => payload.into(),
                             Err(err) => {
@@ -4596,6 +4827,7 @@ impl IcedChat {
                     };
                     let secret_key = self.secret_key.clone();
                     let data_dir = self.data_dir.clone();
+                    let endpoint = self.endpoint.clone();
                     return iced::Task::perform(
                         async move {
                             match whisper_handle.send_dm(peer_key, text.clone()).await {
@@ -4608,16 +4840,66 @@ impl IcedChat {
                                                 .ok()
                                                 .flatten()
                                                 .unwrap_or_else(|| {
-                                                    MailboxStore::empty_at(&data_dir)
+                                                    MailboxStore::for_recipient(
+                                                        &data_dir,
+                                                        secret_key.public(),
+                                                    )
                                                 });
+                                            let delivery_envelope = envelope.clone();
                                             match store.enqueue_outgoing(envelope) {
-                                                Ok(_) => {
+                                                Ok(msg_id) => {
+                                                    // Persist the envelope first (fallback for offline peers).
                                                     if let Err(save_err) = store.save() {
                                                         AppMessage::ErrorMsg(format!(
                                                             "Failed to persist offline message: {save_err}"
                                                         ))
                                                     } else {
-                                                        AppMessage::Noop
+                                                        // Attempt proactive direct QUIC delivery.
+                                                        match send_deliver(
+                                                            &endpoint,
+                                                            &secret_key,
+                                                            peer_key,
+                                                            delivery_envelope,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(()) => {
+                                                                // Delivery succeeded — acknowledge locally so the
+                                                                // envelope is removed from the store (no need to
+                                                                // wait for a remote ack on sync).
+                                                                let ack = MailboxAck::sign(
+                                                                    &secret_key,
+                                                                    &msg_id,
+                                                                );
+                                                                let mut store =
+                                                                    match MailboxStore::load(
+                                                                        &data_dir,
+                                                                    )
+                                                                    .ok()
+                                                                    .flatten()
+                                                                    .unwrap_or_else(|| {
+                                                                        MailboxStore::for_recipient(
+                                                                            &data_dir,
+                                                                            secret_key.public(),
+                                                                        )
+                                                                    }) {
+                                                                        s => s,
+                                                                    };
+                                                                let _ = store
+                                                                    .acknowledge_and_save(&ack);
+                                                                AppMessage::OfflineDMDelivered {
+                                                                    message_id: msg_id,
+                                                                }
+                                                            }
+                                                            Err(_) => {
+                                                                // Peer offline; envelope is already stored for later
+                                                                // sync-based delivery.
+                                                                AppMessage::OfflineDMQueued {
+                                                                    message_id: msg_id,
+                                                                    label,
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                                 Err(enq_err) => AppMessage::ErrorMsg(format!(
@@ -5086,30 +5368,39 @@ impl IcedChat {
                     boru_chat::whisper::WhisperEvent::Control { from, content } => {
                         match SignedContactMessage::verify(&content, Some(from)) {
                             Ok((sender, ContactAction::FriendRequest { name })) => {
-                                let record = self
-                                    .friends
-                                    .ensure_friend(FriendId::from_public_key(sender));
-                                if name.is_some() {
-                                    record.last_announced_name = name;
+                                // Keep the request pending until the user explicitly
+                                // accepts or declines it.  Auto-accepting here made
+                                // incoming requests disappear from the sidebar.
+                                let local_str = self.local_public.to_string();
+                                if let Some(name) = name {
+                                    let record = self
+                                        .friends
+                                        .ensure_friend(FriendId::from_public_key(sender));
+                                    record.last_announced_name = Some(name);
+                                    self.try_save_friends();
                                 }
-                                self.try_save_friends();
-                                let payload = SignedContactMessage::sign(
-                                    &self.secret_key,
-                                    &ContactAction::FriendRequestAccepted,
-                                );
-                                if let Ok(payload) = payload {
-                                    let whisper_handle = self.whisper_handle.clone();
-                                    return iced::Task::perform(
-                                        async move {
-                                            let _ = whisper_handle
-                                                .send_control(sender, payload.into())
-                                                .await;
-                                        },
-                                        |_| AppMessage::Noop,
-                                    );
+                                match self.friend_request_store.send_request(
+                                    sender.to_string(),
+                                    local_str,
+                                    None,
+                                ) {
+                                    Ok(_) => {
+                                        self.requests_sidebar_revision =
+                                            self.requests_sidebar_revision.wrapping_add(1);
+                                        if let Err(err) = self.friend_request_store.save() {
+                                            debug!(error = %err, "failed to save incoming friend request");
+                                        }
+                                    }
+                                    Err(FriendRequestError::DuplicatePending { .. }) => {}
+                                    Err(err) => {
+                                        debug!(error = %err, "failed to store incoming friend request");
+                                    }
                                 }
                             }
                             Ok((sender, ContactAction::FriendRequestAccepted)) => {
+                                self.outgoing_request_states
+                                    .insert(sender, OutgoingRequestState::Accepted);
+                                self.rebuild_join_request_list();
                                 if let Some(record) =
                                     self.friends.get_mut(&FriendId::from_public_key(sender))
                                 {
@@ -5119,6 +5410,11 @@ impl IcedChat {
                                     }
                                 }
                                 self.try_save_friends();
+                            }
+                            Ok((sender, ContactAction::FriendRequestRejected)) => {
+                                self.outgoing_request_states
+                                    .insert(sender, OutgoingRequestState::Declined);
+                                self.rebuild_join_request_list();
                             }
                             Ok((sender, ContactAction::ConversationInvite { topic, addrs }))
                                 if addrs.iter().all(|addr| addr.id == sender) =>
@@ -5374,6 +5670,25 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::OfflineDMQueued { message_id, label } => {
+                let entry =
+                    ChatEntry::local(&self.local_label, format!("[Offline DM queued] {label}"));
+                let idx = self.entries.len();
+                self.entries_push(entry);
+                self.pending_offline_ids.insert(message_id, idx);
+                iced::Task::none()
+            }
+
+            AppMessage::OfflineDMDelivered { message_id } => {
+                if let Some(&idx) = self.pending_offline_ids.get(&message_id) {
+                    if idx < self.entries.len() {
+                        self.entries[idx].body = "[Offline DM delivered]".to_string();
+                        self.entries[idx].bump_gen();
+                    }
+                }
+                iced::Task::none()
+            }
+
             AppMessage::InboxEvent(event) => {
                 match event {
                     InboxEvent::EnvelopeReceived { from, envelope } => {
@@ -5441,12 +5756,19 @@ impl IcedChat {
                         {
                             s => s,
                         };
-                        if let Ok(true) = store.acknowledge_and_save(&_ack) {
+                        if let Ok(true) = store.acknowledge_outgoing_and_save(&_ack) {
                             debug!(
                                 "mailbox: peer {} acknowledged envelope {}",
                                 _from.fmt_short(),
                                 _ack.message_id
                             );
+                            // Update the in-memory ChatEntry to show delivered status.
+                            if let Some(&idx) = self.pending_offline_ids.get(&_ack.message_id) {
+                                if idx < self.entries.len() {
+                                    self.entries[idx].body = "[Offline DM delivered]".to_string();
+                                    self.entries[idx].bump_gen();
+                                }
+                            }
                         }
                         iced::Task::none()
                     }
@@ -5855,6 +6177,10 @@ impl IcedChat {
             }
 
             AppMessage::DeleteRoom(topic) => {
+                // Shutdown continuous DHT tracker for this room if one exists.
+                if let Some(tracker) = self.room_trackers.remove(&topic) {
+                    tracker.shutdown_shared();
+                }
                 if let Err(err) = self.purge_room_history(topic) {
                     self.push_system(format!("Could not delete room history: {err}"));
                 }
@@ -6550,6 +6876,10 @@ impl IcedChat {
 
             AppMessage::ConfirmDeleteRoom(topic) => {
                 self.room_delete_confirm_topic = None;
+                // Shutdown continuous DHT tracker for this room if one exists.
+                if let Some(tracker) = self.room_trackers.remove(&topic) {
+                    tracker.shutdown_shared();
+                }
                 if let Err(err) = self.purge_room_history(topic) {
                     self.push_system(format!("Could not delete room history: {err}"));
                 }
@@ -6557,6 +6887,7 @@ impl IcedChat {
             }
 
             AppMessage::MailboxReplayed { peer, texts } => {
+                let n = texts.len();
                 let label = self
                     .names
                     .get(&peer)
@@ -6571,6 +6902,12 @@ impl IcedChat {
                         Some(peer),
                     );
                     self.entries_push(entry);
+                }
+                if n > 0 {
+                    self.push_system(format!(
+                        "[Offline DM sync: received {n} message{} from {label}]",
+                        if n == 1 { "" } else { "s" }
+                    ));
                 }
                 iced::Task::none()
             }
@@ -7513,10 +7850,6 @@ impl IcedChat {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        container(content)
-            .width(iced::Length::Fill)
-            .height(iced::Length::Fill);
-
         let base = container(content)
             .width(iced::Length::Fill)
             .height(iced::Length::Fill);
@@ -7529,29 +7862,36 @@ impl IcedChat {
     }
 
     /// Minimal dialog for creating a new room with optional DHT discovery.
-    fn view_create_room_dialog(
+    fn view_create_room_dialog<'a>(
         &self,
-        base: iced::widget::Container<'_, AppMessage>,
-    ) -> iced::Element<'_, AppMessage> {
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
         use iced::widget::{button, checkbox, column, container, text};
         use iced::{Alignment, Length};
 
         let dialog = column![]
             .push(text("Create New Room").size(18))
-            .push(checkbox("Enable DHT discovery", self.create_room_dht_enabled)
-                .on_toggled(AppMessage::CreateNewRoomDhtToggled))
+            .push(
+                checkbox(self.create_room_dht_enabled)
+                    .label("Enable DHT discovery")
+                    .on_toggle(AppMessage::CreateNewRoomDhtToggled),
+            )
             .push(
                 iced::widget::row![]
-                    .push(button(text("Cancel"))
-                        .on_press(AppMessage::CancelCreateRoom)
-                        .padding(8))
-                    .push(button(text("Create"))
-                        .on_press(AppMessage::ConfirmCreateNewRoom)
-                        .padding(8))
+                    .push(
+                        button(text("Cancel"))
+                            .on_press(AppMessage::CancelCreateRoom)
+                            .padding(8),
+                    )
+                    .push(
+                        button(text("Create"))
+                            .on_press(AppMessage::ConfirmCreateNewRoom)
+                            .padding(8),
+                    )
                     .spacing(12),
             )
             .spacing(12)
-            .align_items(Alignment::Center);
+            .align_x(Alignment::Center);
 
         let overlay = container(dialog)
             .width(Length::Fixed(320.0))
@@ -7559,7 +7899,9 @@ impl IcedChat {
             .padding(24)
             .style(move |t| {
                 let mut s = iced::widget::container::Style::default();
-                s.background = Some(iced::Background::Color(iced::Color::from_rgba(0.15, 0.15, 0.15, 0.95)));
+                s.background = Some(iced::Background::Color(iced::Color::from_rgba(
+                    0.15, 0.15, 0.15, 0.95,
+                )));
                 s.border = iced::Border {
                     radius: 12.0.into(),
                     width: 1.0,
@@ -7568,15 +7910,15 @@ impl IcedChat {
                 s
             });
 
-        container(base)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .overlay(container(overlay)
+        iced::widget::stack![
+            base,
+            container(overlay)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center_x(Length::Fill)
-                .center_y(Length::Fill))
-            .into()
+                .center_y(Length::Fill),
+        ]
+        .into()
     }
 
     // ── Sidebar ────────────────────────────────────────────────────────

@@ -20,9 +20,13 @@ use serde::{Deserialize, Serialize};
 
 /// A 32-byte secret for private-room DHT discovery.
 ///
-/// This value controls access to the room's discovery namespace on the DHT.
-/// The [`Display`] and [`Debug`] impls show only the first 4 hex characters
-/// to prevent accidental leakage in logs.
+/// This value controls access to the room's discovery namespace on the DHT:
+/// possession of it is sufficient to derive the namespace and attempt room
+/// discovery. It is therefore a bearer capability, not an identity or a key
+/// that encrypts chat messages. The [`Display`] and [`Debug`] impls show only
+/// the first 4 hex characters to reduce accidental leakage in logs; callers
+/// must still avoid logging or exposing the full value (including through
+/// tickets, diagnostics, and crash reports).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DiscoverySecret([u8; 32]);
 

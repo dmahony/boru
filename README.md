@@ -172,10 +172,68 @@ sharing (`/send <path>`, `/download`), dark mode toggle, and a
 scrolling chat log.  Networking runs in background tokio tasks with
 events flowing into the iced event loop via a channel.
 
+## DHT Room Discovery
+
+Private rooms can optionally use the Mainline BitTorrent DHT to discover active
+room members without putting endpoint addresses in the room ticket. This is
+separate from the public-room address lookup described below: it publishes
+short-lived, signed discovery records under a namespace derived from the room
+topic and a random 32-byte `discovery_secret`.
+
+### How to use it
+
+Create a room normally; when DHT discovery is enabled, the generated ticket
+contains the room topic, bootstrap addresses (if any), and the discovery
+secret. A joining client uses the ticket's known addresses first, then queries
+the private namespace and merges validated endpoint IDs into its bootstrap set.
+After joining, the continuous tracker republishes presence and refreshes the
+peer set. Legacy tickets without a discovery secret continue to use their
+existing bootstrap peers.
+
+```text
+# TUI: DHT private-room discovery is enabled by default in current builds
+cargo chat open
+cargo chat join <ticket>
+
+# Explicitly disable private-room DHT discovery; public-room discovery is
+# unaffected and ticket-only rooms remain compatible.
+cargo chat --no-dht open
+cargo chat --no-dht join <ticket>
+
+# Builds/configurations that default DHT off may explicitly enable it with:
+# cargo chat --dht open
+# cargo chat --dht join <ticket>
+# (The current examples enable private-room DHT by default and expose
+# --no-dht as the explicit disable switch.)
+
+# GUI uses the room-creation checkbox for per-room opt-in/out, and also
+# accepts --no-dht for a legacy-only session.
+cargo iced-chat --no-dht
+```
+
+`--dht` and `--no-dht` control private-room discovery only; they do not
+replace Boru's gossip implementation or the public lobby's address lookup.
+The GUI's room creation dialog provides the equivalent per-room toggle.
+
+### Compatibility and privacy
+
+DHT discovery is additive and non-fatal. If UDP is blocked or a lookup fails,
+clients fall back to the addresses in the ticket and normal iroh address
+lookup. DHT lookup returns endpoint IDs, not complete endpoint addresses, so a
+reachable ticket bootstrap peer or another address lookup method may still be
+needed to turn a discovered ID into a connection.
+
+The discovery secret is a bearer capability: anyone who holds it can query the
+room namespace. Keep tickets private and do not log or paste them into public
+channels. The DHT records are encrypted and endpoint-signed, but this feature
+is **not message encryption** and does not make membership anonymous. Ticket
+holders can discover publishers, while the DHT can still observe ordinary
+network metadata such as packet timing and source addresses. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the component and security models.
+
 ## Address Lookup Methods
 
-boru-chat uses a layered address lookup system to discover peer
-addressing information.  Each method has different tradeoffs:
+boru-chat uses a layered address lookup system to discover peer addressing information. Each method has different tradeoffs:
 
 ### DNS/Pkarr (default, enabled by `presets::N0`)
 

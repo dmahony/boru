@@ -22,7 +22,7 @@ use std::{
 
 use bytes::Bytes;
 use iroh::{Endpoint, EndpointAddr, EndpointId, PublicKey, RelayMode, SecretKey};
-use n0_error::{Result, StdResultExt};
+use n0_error::{bail_any, Result, StdResultExt};
 use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
@@ -377,6 +377,10 @@ pub struct StatusContext {
     pub last_activity: HashMap<PublicKey, Instant>,
     /// Current mesh health summary for the UI.
     pub mesh_health: MeshHealth,
+    /// Whether private-room DHT discovery is enabled.
+    pub dht_enabled: bool,
+    /// Number of peers discovered via DHT.
+    pub dht_peer_count: usize,
 }
 
 impl StatusContext {
@@ -969,10 +973,13 @@ pub struct Ticket {
     pub topic: TopicId,
     /// Known peers to bootstrap from.
     pub peers: Vec<EndpointAddr>,
-    /// Optional discovery secret for DHT-based private-room lookup.
+    /// Optional bearer capability for DHT-based private-room lookup.
     ///
-    /// `#[serde(default)]` ensures legacy tickets (serialised without this
-    /// field) deserialise to `None` instead of failing.
+    /// Holders can derive the room's private discovery namespace, so this
+    /// value must be protected like the ticket itself. It is not message
+    /// encryption and does not authenticate room membership. `#[serde(default)]`
+    /// ensures legacy tickets (serialised without this field) deserialise to
+    /// `None` instead of failing.
     #[serde(default)]
     pub discovery_secret: Option<DiscoverySecret>,
 }
@@ -1029,6 +1036,123 @@ impl FromStr for Ticket {
             .decode(s.to_ascii_uppercase().as_bytes())
             .std_context("decode chat ticket base32")?;
         Self::from_bytes(&bytes)
+    }
+}
+
+// ── RoomInviteV2 — stable, versioned, compact invitation ────────────────────
+
+/// A stable versioned room invitation with no endpoint/relay/creator identity.
+///
+/// Unlike the legacy [`Ticket`], this format carries only the room identity
+/// (topic) and a bearer discovery secret — no transport address information.
+/// It produces shorter, copy-paste-safe strings prefixed with `boru1:`.
+///
+/// # Format
+///
+/// `boru1:` + base32-nopad-lowercase of `[version: u8, topic: [u8; 32], discovery_secret: [u8; 32]]`
+///
+/// Total payload: 1 + 32 + 32 = 65 bytes.  Encoded string: ~105 chars + `boru1:` prefix.
+///
+/// # Safety
+///
+/// The discovery secret is redacted in the [`Debug`] implementation so it
+/// never appears in logs or terminal output.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RoomInviteV2 {
+    /// The gossip topic to join (32 bytes).
+    pub topic: TopicId,
+    /// Bearer capability for DHT-based private-room discovery.
+    /// Redacted in Debug output.
+    pub discovery_secret: DiscoverySecret,
+}
+
+impl fmt::Debug for RoomInviteV2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RoomInviteV2")
+            .field("topic", &self.topic)
+            .field("discovery_secret", &"[redacted]")
+            .finish()
+    }
+}
+
+impl RoomInviteV2 {
+    /// Current wire version for serialisation.
+    /// Increment this when the payload layout changes (e.g. adding a field).
+    const VERSION: u8 = 1;
+
+    /// The human-readable prefix that identifies this invitation format.
+    const PREFIX: &'static str = "boru1:";
+
+    /// Create a new invitation from a topic and discovery secret.
+    pub fn new(topic: TopicId, discovery_secret: DiscoverySecret) -> Self {
+        Self {
+            topic,
+            discovery_secret,
+        }
+    }
+
+    /// Serialise this invitation into a compact string with the `boru1:` prefix.
+    ///
+    /// Payload layout: `[version: u8, topic: [u8; 32], discovery_secret: [u8; 32]]`
+    pub fn encode(&self) -> String {
+        let mut payload = Vec::with_capacity(65);
+        payload.push(Self::VERSION);
+        payload.extend_from_slice(self.topic.as_ref());
+        payload.extend_from_slice(self.discovery_secret.as_bytes());
+        let encoded = data_encoding::BASE32_NOPAD.encode(&payload);
+        let mut lower = encoded.to_ascii_lowercase();
+        lower.insert_str(0, Self::PREFIX);
+        lower
+    }
+
+    /// Parse an invitation string, accepting only the `boru1:` prefix.
+    ///
+    /// Returns an error for wrong prefix, version mismatch, or incorrect payload
+    /// length.
+    pub fn parse(s: &str) -> Result<Self> {
+        let s = s.trim();
+        if !s.starts_with(Self::PREFIX) {
+            bail_any!(
+                "invalid invitation: expected prefix '{}', got '{}'",
+                Self::PREFIX,
+                &s[..s.len().min(10)]
+            );
+        }
+        let encoded = &s[Self::PREFIX.len()..];
+        if encoded.len() < 104 {
+            // 65 bytes → 104 base32-nopad chars
+            bail_any!(
+                "invalid invitation: payload too short ({} chars, need ≥104)",
+                encoded.len()
+            );
+        }
+        let bytes = data_encoding::BASE32_NOPAD
+            .decode(encoded.to_ascii_uppercase().as_bytes())
+            .std_context("decode invitation base32")?;
+        if bytes.len() != 65 {
+            bail_any!(
+                "invalid invitation: expected 65 payload bytes, got {}",
+                bytes.len()
+            );
+        }
+        let version = bytes[0];
+        if version != Self::VERSION {
+            bail_any!(
+                "unsupported invitation version {} (expected {})",
+                version,
+                Self::VERSION
+            );
+        }
+        let topic_bytes: [u8; 32] = bytes[1..33]
+            .try_into()
+            .map_err(|_| n0_error::anyerr!("invitation topic is not 32 bytes"))?;
+        let secret_bytes: [u8; 32] = bytes[33..65]
+            .try_into()
+            .map_err(|_| n0_error::anyerr!("invitation secret is not 32 bytes"))?;
+        Ok(Self {
+            topic: TopicId::from_bytes(topic_bytes),
+            discovery_secret: DiscoverySecret::from_bytes(secret_bytes),
+        })
     }
 }
 
@@ -2047,6 +2171,8 @@ mod tests {
             peer_connection_types: HashMap::new(),
             last_activity: HashMap::new(),
             mesh_health: MeshHealth::Good,
+            dht_enabled: false,
+            dht_peer_count: 0,
         }
     }
 

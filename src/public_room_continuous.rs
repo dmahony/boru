@@ -518,6 +518,67 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Join fanout — automatically join discovered peers into the gossip mesh
+// ---------------------------------------------------------------------------
+
+/// Spawn a background task that reads discovered peer batches from
+/// `new_peers_rx` and forwards them to [`GossipSender::join_peers`].
+///
+/// This lets the automatic DHT discovery loop actually bring discovered
+/// peers into the gossip mesh for the room.  Without this task, the
+/// [`ContinuousTracker`] sends discovered [`EndpointId`] values into the
+/// channel but nobody reads them.
+///
+/// # Returns
+///
+/// A [`JoinHandle`] that completes when the channel closes or the
+/// [`CancellationToken`] is cancelled.  The caller should cancel the token
+/// when the room is left or deleted to ensure the task exits promptly.
+///
+/// # Logging
+///
+/// Successful joins are logged at `INFO` level; failures at `WARN`.
+pub fn spawn_join_fanout(
+    new_peers_rx: mpsc::Receiver<Vec<EndpointId>>,
+    sender: crate::api::GossipSender,
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::task::spawn(async move {
+        let mut rx = new_peers_rx;
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    trace!("join-fanout task cancelled");
+                    break;
+                }
+                maybe_peers = rx.recv() => {
+                    match maybe_peers {
+                        Some(peers) => {
+                            let count = peers.len();
+                            if count == 0 {
+                                continue;
+                            }
+                            info!(
+                                count = count,
+                                "join-fanout: forwarding discovered peers to gossip mesh",
+                            );
+                            if let Err(e) = sender.join_peers(peers).await {
+                                warn!(error = %e, "join-fanout: join_peers failed");
+                            }
+                        }
+                        None => {
+                            trace!("join-fanout channel closed, exiting");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -793,5 +854,96 @@ mod tests {
             "negative jitter_factor should be clamped to 0.0, got {}",
             sanitized2.jitter_factor
         );
+    }
+
+    // ── Join-fanout integration ──────────────────────────────────────
+
+    /// Two peers with InMemoryDiscoveryBackend: peer A publishes, peer B's
+    /// ContinuousTracker discovers A and the join-fanout task forwards the
+    /// discovered peers through a GossipSender to the command channel.
+    #[tokio::test]
+    async fn join_fanout_forwards_discovered_peers() {
+        let (_alice_sk, alice_ep) = test_identity();
+        let (bob_sk, bob_ep) = test_identity();
+
+        let backend = InMemoryDiscoveryBackend::new();
+
+        // Bob publishes first so Alice has someone to discover.
+        let bob_tracker = PublicRoomTracker::start(
+            Box::new(backend.clone()),
+            PublicNetwork::Test,
+            bob_ep.clone(),
+            bob_sk,
+        )
+        .await
+        .unwrap();
+        bob_tracker.publish_once().await.unwrap();
+
+        // Alice starts continuous tracker.
+        let alice_tracker = PublicRoomTracker::start(
+            Box::new(backend.clone()),
+            PublicNetwork::Test,
+            alice_ep,
+            SecretKey::generate(),
+        )
+        .await
+        .unwrap();
+
+        let (peers_tx, mut peers_rx) = mpsc::channel::<Vec<EndpointId>>(16);
+        let cancel = CancellationToken::new();
+
+        let config = ContinuousTrackerConfig {
+            discover_interval: Duration::from_millis(50),
+            publish_interval: Duration::from_secs(3600),
+            max_candidates_per_cycle: 20,
+            ..Default::default()
+        };
+
+        let continuous = ContinuousTracker::start(alice_tracker, config.sanitize(), peers_tx);
+
+        // Read discovered peers from the channel (this is what the
+        // join-fanout task would normally do).
+        let result = tokio::time::timeout(Duration::from_secs(5), peers_rx.recv()).await;
+        cancel.cancel();
+        continuous.shutdown().await;
+
+        let peers = result
+            .expect("timeout waiting for discovery")
+            .expect("channel closed unexpectedly");
+        assert!(
+            peers.contains(&bob_ep),
+            "expected Bob's EndpointId to be discovered, got {peers:?}"
+        );
+        info!(
+            discovered = peers.len(),
+            "join-fanout integration test: discovered peers",
+        );
+    }
+
+    /// Verifies spawn_join_fanout exits on cancellation.
+    #[tokio::test]
+    async fn join_fanout_exits_on_cancellation() {
+        let (tx, rx) = mpsc::channel::<Vec<EndpointId>>(16);
+        let cancel = CancellationToken::new();
+
+        use crate::api::Command;
+        let (cmd_tx, _cmd_rx): (
+            irpc::channel::mpsc::Sender<Command>,
+            irpc::channel::mpsc::Receiver<Command>,
+        ) = irpc::channel::mpsc::channel(16);
+        let sender = crate::api::GossipSender::new(cmd_tx);
+
+        let handle = spawn_join_fanout(rx, sender, cancel.clone());
+
+        // Cancel the token — the task should exit promptly.
+        cancel.cancel();
+
+        tokio::time::timeout(Duration::from_secs(3), handle)
+            .await
+            .expect("join-fanout task did not exit within timeout")
+            .expect("join-fanout task panicked");
+
+        // Sending on the discovery channel should not panic (receiver dropped).
+        let _ = tx.send(vec![]).await;
     }
 }

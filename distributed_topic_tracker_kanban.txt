@@ -240,49 +240,25 @@ discovery secret itself (no hashing needed — the secret is random).
 The TopicId remains whatever the room creator chose (could be a stable
 topic derived from the secret, or purely random).
 
-Decision: The gossip TopicId and the DHT discovery secret should be linked
-but DERIVED via domain separation from a single "room secret" so that:
-  - The ticket carries one 32-byte value, from which both the gossip topic
-    and the DHT namespace are derived.
-  - Knowing one does not reveal the other (domain separation).
-  - Peers joining via ticket all converge on the same topic + namespace.
-
-However, this changes the current room creation flow where TopicId is
-random.  Domain-separated derivation from a single room secret would mean
-the TopicId is deterministic from the secret, not random.
-
-ALTERNATIVE (simpler): Keep TopicId as a random value (current behaviour),
-generate a separate random DiscoverySecret, and carry both in the ticket.
-This avoids changing how TopicId works and keeps the two domains
-independent.  But the ticket becomes larger (two 32-byte values).
-
-RECOMMENDED APPROACH (chosen for minimal blast radius):
-Generate a single 32-byte RoomSecret.  Derive:
-  - gossip_topic = BLAKE3("boru-chat private-room topic v1" || room_secret)
-  - discovery_key = BLAKE3("boru-chat private-room discovery-key v2" || room_secret)
-
-The ticket carries only the room_secret (32 bytes).  Both topic and
-discovery key are derived deterministically.  This is one field instead
-of two, and uses the same domain-separation pattern as public rooms.
-
-BUT: This changes how Topics are created.  Currently create_room generates
-a random TopicId.  Now it generates a random RoomSecret and derives both.
-This is backward-incompatible for direct chat topics (direct_topic) and
-for any persisted room data.  Only NEW rooms with DHT discovery use the
-new derivation.  Rooms created without DHT discovery keep random TopicId.
-
-FINAL DECISION (simplest, least blast radius):
-For the initial implementation, keep TopicId as-is (random per room).
-Generate a separate random DiscoverySecret.  The ticket carries BOTH:
+FINAL DESIGN DECISION (Card 4 confirmation):
+For the initial private-room DHT implementation, keep the gossip TopicId as
+its existing independent random value and add a separate independent random
+DiscoverySecret.  The ticket carries both values:
   - topic: TopicId (as today)
   - discovery_secret: Option<DiscoverySecret> (new)
   - peers: Vec<EndpointAddr> (as today)
 
-This avoids changing topic derivation entirely.  The discovery secret is
-a separate concept.  If domain separation is desired later, the ticket
-can encode a single secret and derive both — but that is future work.
+The DiscoverySecret is used directly as the DHT namespace key.  It is not
+hashed with, derived from, or otherwise coupled to TopicId.  Do not use a
+single room secret or domain-separated derivation for this implementation.
+That alternative is explicitly deferred to future work if a later protocol
+version needs it.
 
-Update: Go with separate random TopicId + DiscoverySecret.  No derivation.
+This decision preserves the current random TopicId and existing gossip
+semantics, keeps the two namespaces independent, and minimizes migration
+and compatibility risk.  New private-room modules must repeat this rationale
+in their module-level documentation comments; normal logs and Debug output
+must not reveal the DiscoverySecret.
 
 Tasks:
 1. No new identity struct needed.  The private-room tracker uses:

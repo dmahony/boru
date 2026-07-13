@@ -255,8 +255,15 @@ debug = true
 # UDP queries.  The patched version adds Cloudflare/Google DoH nameservers
 # as fallback resolvers and increases the DNS timeout from 3s to 5s.
 # See patched/iroh-dns/src/dns.rs for the actual changes.
+#
+# ── Mainline v7.0.0 Windows compatibility ──────────────────────────────
+# UdpSocket::set_read_timeout causes recv_from to return TimedOut on
+# Windows (WSAETIMEDOUT / 10060) when idle.  Upstream only handles
+# WouldBlock silently, so Windows logs spurious "IO error" warnings every
+# ~50ms.  See patched/mainline/src/rpc/socket.rs for the fix.
 [patch.crates-io]
 iroh-dns = { path = "patched/iroh-dns" }
+mainline = { path = "patched/mainline" }
 
 
 [[test]]

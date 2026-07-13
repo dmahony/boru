@@ -16,6 +16,17 @@
 //!    share the same discovery secret.
 //! 4. [`shutdown`](PrivateRoomTracker::shutdown) — release backend resources.
 //!
+//! Publishing and lookup are best-effort bootstrap operations. A DHT failure
+//! must not prevent the caller from using ticket-provided peers or an already
+//! connected gossip mesh. Lookup returns endpoint identities only; callers
+//! still need an address source (for example, ticket addresses, DNS/Pkarr, or
+//! mDNS) before an identity can be dialled. The tracker does not carry chat
+//! messages and does not provide message encryption.
+//!
+//! The discovery secret is a bearer capability. It is used as an input to the
+//! namespace derivation and must be kept with the room ticket; it is never
+//! printed by this module at normal log levels.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -129,6 +140,14 @@ impl PrivateRoomTracker {
         &self.topic
     }
 
+    /// Consume this wrapper and extract the inner [`PublicRoomTracker`].
+    ///
+    /// Use this to pass the tracker to [`ContinuousTracker::start`](crate::public_room_continuous::ContinuousTracker::start)
+    /// for continuous background publish/discovery.
+    pub fn into_inner(self) -> PublicRoomTracker {
+        self.inner
+    }
+
     /// Return this node's EndpointId.
     pub fn local_endpoint_id(&self) -> &EndpointId {
         self.inner.local_endpoint_id()
@@ -191,6 +210,59 @@ fn derive_private_discovery_key(topic: &TopicId, secret: &DiscoverySecret) -> [u
     hasher.update(secret.as_bytes());
     let hash = hasher.finalize();
     *hash.as_bytes()
+}
+
+/// Create a private room's DHT discovery record and publish it once.
+///
+/// **Call this during room creation** when the user (or the frontend) has
+/// opted into DHT-based discovery.  The function:
+///
+/// 1. Generates a fresh [`DiscoverySecret`].
+/// 2. Creates a [`PrivateRoomTracker`] for the given topic + secret.
+/// 3. Publishes the local endpoint's presence on the DHT.
+///
+/// # DHT backend availability
+///
+/// Pass `None` for `dht` to skip DHT entirely — the function returns
+/// `None` immediately without generating a secret or publishing.  This
+/// lets callers handle "DHT not available" transparently without changing
+/// their control flow.
+///
+/// # Errors
+///
+/// Errors from the DHT backend (e.g. network unreachable) are logged at
+/// `WARN` level but are **not** propagated — room creation without DHT
+/// works exactly as before.  The discovery secret is still returned on
+/// success so the caller can embed it in the room ticket and persist it.
+///
+/// # Returns
+///
+/// * `Some(secret)` — DHT backend was available and publishing succeeded
+///   (or failed non-fatally; the secret is still usable for ticket sharing).
+/// * `None` — no DHT instance was provided.
+pub async fn create_and_publish_private_discovery(
+    dht: Option<distributed_topic_tracker::Dht>,
+    topic: TopicId,
+    endpoint: &iroh::Endpoint,
+) -> Option<DiscoverySecret> {
+    let dht = dht?;
+    let secret = DiscoverySecret::generate();
+    let dummy_namespace = distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+    let backend = Box::new(crate::discovery_backend::MainlineDhtBackend::new(
+        dht,
+        dummy_namespace,
+    ));
+    let tracker = PrivateRoomTracker::new(
+        backend,
+        topic,
+        secret,
+        endpoint.id(),
+        endpoint.secret_key().clone(),
+    );
+    if let Err(e) = tracker.publish_once().await {
+        tracing::warn!(error = %e, "DHT publish failed for private-room discovery (non-fatal)");
+    }
+    Some(secret)
 }
 
 // ---------------------------------------------------------------------------

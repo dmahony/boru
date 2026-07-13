@@ -74,6 +74,9 @@ struct Args {
     relay: Option<RelayUrl>,
     #[clap(long)]
     no_relay: bool,
+    /// Disable private-room DHT discovery. The public lobby is unaffected.
+    #[clap(long)]
+    no_dht: bool,
     /// Directory for persistent identity and friend state. Chat and room
     /// history are kept in memory only.
     /// Defaults to BORU_CHAT_DATA_DIR env var, or ~/.local/share/boru-chat/.
@@ -420,6 +423,7 @@ fn main() -> Result<()> {
         inbox_events_rx,
         continuous_tracker,
         discovered_peers_rx,
+        dht_for_private,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
         use std::net::{Ipv4Addr, SocketAddrV4};
@@ -594,8 +598,10 @@ fn main() -> Result<()> {
         // ── Continuous DHT discovery & publication ────────────────────
         // Spawn background tasks that periodically publish local presence
         // and discover new peers on the DHT for the public lobby topic.
+        // Also keep a clone for private-room DHT discovery.
         let dht =
             distributed_topic_tracker::Dht::new(&distributed_topic_tracker::DhtConfig::default());
+        let dht_for_private = dht.clone();
         let dummy_namespace = distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
         let dht_backend = MainlineDhtBackend::new(dht, dummy_namespace);
         let public_room_tracker = PublicRoomTracker::start(
@@ -633,6 +639,7 @@ fn main() -> Result<()> {
             inbox_events_rx,
             continuous_tracker,
             discovered_peers_rx,
+            dht_for_private,
         ))
     })?;
 
@@ -667,6 +674,8 @@ fn main() -> Result<()> {
             initial_topic.is_some() && args.command.is_none(),
             Some(continuous_tracker),
             Arc::clone(&discovered_peers_rx),
+            Some(dht_for_private),
+            args.no_dht,
         ),
         initial_topic,
     )));

@@ -390,6 +390,21 @@ impl MailboxStore {
         Ok(self.entries.remove(&ack.message_id).is_some())
     }
 
+    /// Remove an outgoing envelope after verifying the acknowledgement against
+    /// the recipient encoded in that envelope.
+    ///
+    /// Outgoing stores are not bound to the local identity: their `recipient`
+    /// field is either unset or describes an incoming mailbox.  The signer of
+    /// an outgoing acknowledgement is the remote envelope recipient, so using
+    /// [`acknowledge`] here would verify against the wrong identity.
+    pub fn acknowledge_outgoing(&mut self, ack: &MailboxAck) -> Result<bool> {
+        let Some(envelope) = self.entries.get(&ack.message_id) else {
+            return Ok(false);
+        };
+        ack.verify(envelope.recipient.identity)?;
+        Ok(self.entries.remove(&ack.message_id).is_some())
+    }
+
     /// Authenticate and decrypt an incoming envelope before durably accepting
     /// its opaque ciphertext. The returned plaintext can then be handed to the
     /// normal signed-message pipeline by the application.
@@ -414,6 +429,15 @@ impl MailboxStore {
     /// Remove an acknowledged outgoing envelope and persist the removal.
     pub fn acknowledge_and_save(&mut self, ack: &MailboxAck) -> Result<bool> {
         let removed = self.acknowledge(ack)?;
+        if removed {
+            self.save()?;
+        }
+        Ok(removed)
+    }
+
+    /// Remove and persist an acknowledged outgoing envelope.
+    pub fn acknowledge_outgoing_and_save(&mut self, ack: &MailboxAck) -> Result<bool> {
+        let removed = self.acknowledge_outgoing(ack)?;
         if removed {
             self.save()?;
         }
@@ -487,5 +511,21 @@ mod tests {
         let env = identity.seal(&sender, b"private").unwrap();
         let result = env.validate_for(&identity, &[], DEFAULT_MAILBOX_TTL);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn outgoing_ack_uses_envelope_recipient_when_store_is_unconfigured() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = SecretKey::generate();
+        let recipient = SecretKey::generate();
+        let recipient_identity = MailboxIdentity::from_secret(&recipient);
+        let envelope = recipient_identity.seal(&sender, b"outgoing").unwrap();
+        let message_id = envelope.message_id();
+        let mut store = MailboxStore::empty_at(dir.path());
+        store.enqueue_outgoing(envelope).unwrap();
+
+        let ack = MailboxAck::sign(&recipient, message_id);
+        assert!(store.acknowledge_outgoing(&ack).unwrap());
+        assert!(store.is_empty());
     }
 }

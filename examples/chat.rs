@@ -25,6 +25,7 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4},
     path::{Path, PathBuf},
     str::FromStr,
+    sync::atomic::{AtomicUsize, Ordering},
     sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
@@ -49,8 +50,8 @@ use boru_chat::chat_core::friend_ping::{
 use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_with_progress, download_candidates, fmt_relay_mode,
     handle_net_event, message_hash, refresh_bootstrap_peers, update_connection_counts, AppState,
-    ChatEntry, ChatKind, ConnectionType, MeshHealth, Message, NetEvent, SignedMessage,
-    StatusContext, Ticket,
+    ChatEntry, ChatKind, ConnectionType, MeshHealth, Message, NetEvent, RoomInviteV2,
+    SignedMessage, StatusContext, Ticket,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::direct_topic;
@@ -72,6 +73,7 @@ use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
 
 use boru_chat::discovery_backend::MainlineDhtBackend;
 use boru_chat::private_room_tracker::PrivateRoomTracker;
+use boru_chat::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
 use boru_chat::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
 use boru_chat::{
     net::{Gossip, GOSSIP_ALPN},
@@ -111,6 +113,12 @@ struct Args {
     /// Disable relay completely.
     #[clap(long)]
     no_relay: bool,
+    /// Disable private-room DHT discovery (kept for compatibility; DHT is off by default).
+    #[clap(long, conflicts_with = "dht")]
+    no_dht: bool,
+    /// Enable private-room DHT discovery.
+    #[clap(long, conflicts_with = "no_dht")]
+    dht: bool,
     /// Set your nickname.
     #[clap(short, long)]
     name: Option<String>,
@@ -361,6 +369,8 @@ struct TuiState {
     // ── Session state ──
     /// Connection status context.
     status: StatusContext,
+    /// Whether the current room has a discovery secret (and can be found via DHT).
+    room_discovery_secret_present: bool,
     /// Durable friends list store.
     friends: FriendsStore,
     /// Whether friends has unsaved changes.
@@ -381,6 +391,9 @@ struct TuiState {
 
     /// Per-conversation forward-handle slots for keeping subscriptions alive.
     forward_handles: HashMap<TopicId, n0_future::task::JoinHandle<()>>,
+    /// Per-room continuous DHT trackers for private rooms with discovery enabled.
+    /// The second element is the join-fanout CancellationToken.
+    room_trackers: HashMap<TopicId, (ContinuousTracker, tokio_util::sync::CancellationToken)>,
 }
 
 impl TuiState {
@@ -425,6 +438,7 @@ impl TuiState {
             conversation_order,
             conversations,
             status,
+            room_discovery_secret_present: false,
             friends,
             friends_dirty: false,
             conversation_store,
@@ -433,6 +447,7 @@ impl TuiState {
             local_label,
             global_names: HashMap::new(),
             forward_handles: HashMap::new(),
+            room_trackers: HashMap::new(),
         }
     }
 
@@ -540,12 +555,19 @@ async fn main() -> Result<()> {
     init_logging(&data_dir)?;
     tracing::info!(path = %log_file_path(&data_dir).display(), "logging to file");
     let args = Args::parse();
+    // DHT is opt-in. The default path must not construct a DHT client or
+    // start any discovery tasks.
+    let dht_enabled = args.dht && !args.no_dht;
+    tracing::info!(dht_enabled, "private-room DHT discovery");
+    // Shared atomic counter for DHT-discovered peers (updated by the
+    // continuous-tracker fanout task).  Read each frame by the UI.
+    let dht_peer_count: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
 
     // Parse the CLI command.
-    let (topic, mut peers, mut discovery_secret) = match &args.command {
+    let (topic, mut peers, mut discovery_secret, room_created) = match &args.command {
         Command::Open { topic } => {
-            let (topic, saved_peers, stored_secret) = match topic {
-                Some(t) => (*t, Vec::new(), None),
+            let (topic, saved_peers, stored_secret, created) = match topic {
+                Some(t) => (*t, Vec::new(), None, false),
                 None => match RoomStore::load_or_none(&data_dir) {
                     Some(store) => {
                         let n_peers = store.peers.len();
@@ -555,7 +577,12 @@ async fn main() -> Result<()> {
                             String::new()
                         };
                         tracing::info!(topic = %store.topic, peer_info = %peer_info, "reusing saved room topic");
-                        (store.topic, store.peers.clone(), store.discovery_secret)
+                        (
+                            store.topic,
+                            store.peers.clone(),
+                            store.discovery_secret,
+                            false,
+                        )
                     }
                     None => {
                         let t = TopicId::from_bytes(rand::random());
@@ -564,19 +591,31 @@ async fn main() -> Result<()> {
                         if let Err(err) = room.save() {
                             tracing::warn!(error = %err, "failed to save room metadata");
                         }
-                        (t, vec![], None)
+                        (t, vec![], None, true)
                     }
                 },
             };
-            (topic, saved_peers, stored_secret)
+            (topic, saved_peers, stored_secret, created)
         }
         Command::Join { ticket } => {
-            let Ticket { topic, peers, discovery_secret } = Ticket::from_str(ticket)?;
-            tracing::info!(topic = %topic, "joining chat room");
-            (topic, peers, discovery_secret)
+            // Try stable boru1: invitation first, then fall back to legacy ticket format.
+            let (topic, peers, discovery_secret) =
+                if let Ok(invite) = RoomInviteV2::parse(ticket) {
+                    tracing::info!(topic = %invite.topic, "joining room via boru1 invitation");
+                    (invite.topic, Vec::new(), Some(invite.discovery_secret))
+                } else {
+                    let Ticket {
+                        topic,
+                        peers,
+                        discovery_secret,
+                    } = Ticket::from_str(ticket)?;
+                    tracing::info!(topic = %topic, "joining chat room via legacy ticket");
+                    (topic, peers, discovery_secret)
+                };
+            (topic, peers, discovery_secret, false)
         }
     };
-    let is_new_room = discovery_secret.is_none() && matches!(&args.command, Command::Open { .. });
+    let is_new_room = room_created;
 
     // Secret key.
     let (secret_key, key_path) = match args.secret_key.as_ref() {
@@ -635,26 +674,37 @@ async fn main() -> Result<()> {
             addr_lookup.add(mdns);
         }
     }
-    if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
-        if let Ok(dht) = DhtAddressLookup::builder()
-            .secret_key(endpoint.secret_key().clone())
-            .build()
-        {
-            addr_lookup.add(dht);
+    if dht_enabled {
+        if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
+            if let Ok(dht) = DhtAddressLookup::builder()
+                .secret_key(endpoint.secret_key().clone())
+                .build()
+            {
+                addr_lookup.add(dht);
+            }
         }
     }
 
     // ── Shared DHT client for private-room discovery ─────────────────
     // Used both for initial publish (new rooms) and for join-time
     // discovery (rooms with a discovery_secret from a ticket).
-    let shared_dht = distributed_topic_tracker::Dht::new(
-        &distributed_topic_tracker::DhtConfig::default(),
-    );
+    let shared_dht = dht_enabled.then(|| {
+        distributed_topic_tracker::Dht::new(&distributed_topic_tracker::DhtConfig::default())
+    });
+
+    // Will hold the continuous tracker (and its join-fanout resources) for this
+    // room if DHT is enabled.  The rx is kept alive until `sender` is available,
+    // then the join-fanout task is spawned.
+    let mut room_tracker: Option<(
+        ContinuousTracker,
+        tokio::sync::mpsc::Receiver<Vec<iroh::EndpointId>>,
+        tokio_util::sync::CancellationToken,
+    )> = None;
 
     // ── Publish DHT discovery for newly created rooms ─────────────────
-    if is_new_room {
+    if is_new_room && dht_enabled {
         let secret = boru_chat::private_room_tracker::create_and_publish_private_discovery(
-            Some(shared_dht.clone()),
+            shared_dht.clone(),
             topic,
             &endpoint,
         )
@@ -670,6 +720,46 @@ async fn main() -> Result<()> {
                     tracing::warn!(error = %err, "failed to save RoomStore with discovery_secret");
                 }
             }
+            // Start continuous DHT publish/discover.
+            let secret = secret;
+            let dummy_ns = distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+            let backend =
+                MainlineDhtBackend::new(shared_dht.clone().expect("DHT enabled"), dummy_ns);
+            let tracker = PrivateRoomTracker::new(
+                Box::new(backend),
+                topic,
+                secret,
+                endpoint.id(),
+                endpoint.secret_key().clone(),
+            );
+            let (new_peers_tx, new_peers_rx) =
+                tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
+            let join_cancel = tokio_util::sync::CancellationToken::new();
+            // DHT peer counting wrapper: forward batches to the join-fanout
+            // task while counting them for the UI.
+            let (fanout_tx, fanout_rx) = tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
+            {
+                let dht_count = dht_peer_count.clone();
+                let mut rx = new_peers_rx;
+                tokio::spawn(async move {
+                    while let Some(peers) = rx.recv().await {
+                        dht_count.fetch_add(peers.len(), Ordering::Relaxed);
+                        tracing::info!(count = peers.len(), "DHT discovered new peers");
+                        if fanout_tx.send(peers).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            room_tracker = Some((
+                ContinuousTracker::start(
+                    tracker.into_inner(),
+                    ContinuousTrackerConfig::default(),
+                    new_peers_tx,
+                ),
+                fanout_rx,
+                join_cancel,
+            ));
             tracing::info!("published DHT discovery for new private room");
         }
     }
@@ -679,38 +769,71 @@ async fn main() -> Result<()> {
     // peers via the DHT before subscribing.  Non-fatal errors are silently
     // downgraded to a fallback (ticket peers only).
     let ticket_addrs: Vec<EndpointAddr> = peers.clone();
-    if let Some(ref secret) = discovery_secret {
-        let dummy_ns = distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
-        let backend = MainlineDhtBackend::new(shared_dht.clone(), dummy_ns);
-        let tracker = PrivateRoomTracker::new(
-            Box::new(backend),
-            topic,
-            secret.clone(),
-            endpoint.id(),
-            endpoint.secret_key().clone(),
-        );
-        match tracker.discover_once().await {
-            Ok(discovered_ids) => {
-                let existing: HashSet<EndpointId> =
-                    peers.iter().map(|a| a.id).collect();
-                for id in discovered_ids {
-                    if !existing.contains(&id) && id != endpoint.id() {
-                        peers.push(EndpointAddr::new(id));
+    if dht_enabled {
+        if let Some(ref secret) = discovery_secret {
+            let dummy_ns = distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+            let backend =
+                MainlineDhtBackend::new(shared_dht.clone().expect("DHT enabled"), dummy_ns);
+            let tracker = PrivateRoomTracker::new(
+                Box::new(backend),
+                topic,
+                secret.clone(),
+                endpoint.id(),
+                endpoint.secret_key().clone(),
+            );
+            match tracker.discover_once().await {
+                Ok(discovered_ids) => {
+                    let existing: HashSet<EndpointId> = peers.iter().map(|a| a.id).collect();
+                    for id in discovered_ids {
+                        if !existing.contains(&id) && id != endpoint.id() {
+                            peers.push(EndpointAddr::new(id));
+                        }
                     }
+                    tracing::info!(
+                        peer_count = peers.len(),
+                        "DHT discovery merged additional peers"
+                    );
                 }
-                tracing::info!(
-                    peer_count = peers.len(),
-                    "DHT discovery merged additional peers"
-                );
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "DHT discovery failed, falling back to ticket peers only"
+                    );
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "DHT discovery failed, falling back to ticket peers only"
-                );
+            // Start continuous DHT publish/discover instead of shutting down.
+            let (new_peers_tx, new_peers_rx) =
+                tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
+            let join_cancel = tokio_util::sync::CancellationToken::new();
+            // DHT peer counting wrapper (see above).
+            let (fanout_tx, fanout_rx) = tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
+            {
+                let dht_count = dht_peer_count.clone();
+                let mut rx = new_peers_rx;
+                tokio::spawn(async move {
+                    while let Some(peers) = rx.recv().await {
+                        dht_count.fetch_add(peers.len(), Ordering::Relaxed);
+                        tracing::info!(count = peers.len(), "DHT discovered new peers");
+                        if fanout_tx.send(peers).await.is_err() {
+                            break;
+                        }
+                    }
+                });
             }
+            room_tracker = Some((
+                ContinuousTracker::start(
+                    tracker.into_inner(),
+                    ContinuousTrackerConfig::default(),
+                    new_peers_tx,
+                ),
+                fanout_rx,
+                join_cancel,
+            ));
+        } else {
+            tracing::debug!("legacy room/ticket has no discovery secret; skipping private DHT");
         }
-        tracker.shutdown().await;
+    } else {
+        tracing::debug!("private room DHT disabled by --no-dht; using ticket peers");
     }
 
     let gossip = Gossip::builder().spawn(endpoint.clone());
@@ -723,6 +846,14 @@ async fn main() -> Result<()> {
         discovery_secret,
     };
     tracing::info!(ticket = %ticket, "created room ticket");
+
+    // Also create a stable boru1: invitation for the room.
+    let boru1_invite = ticket.discovery_secret.map(|secret| {
+        let invite = RoomInviteV2::new(topic, secret);
+        let invite_str = invite.encode();
+        tracing::info!(invite = %invite_str, "created boru1 room invitation");
+        invite_str
+    });
 
     let whisper_builder = WhisperBuilder::new(endpoint.clone(), endpoint.secret_key().clone());
     let whisper_handler = whisper_builder.protocol_handler();
@@ -810,6 +941,21 @@ async fn main() -> Result<()> {
     let (sender, receiver) = sub.split();
     tracing::info!("connected");
 
+    // Spawn join-fanout task for any previously-created continuous tracker,
+    // so discovered peers are automatically joined into the gossip mesh.
+    let mut room_tracker_with_cancel: Option<(
+        ContinuousTracker,
+        tokio_util::sync::CancellationToken,
+    )> = None;
+    if let Some((tracker, new_peers_rx, join_cancel)) = room_tracker.take() {
+        let _join_task = boru_chat::public_room_continuous::spawn_join_fanout(
+            new_peers_rx,
+            sender.clone(),
+            join_cancel.clone(),
+        );
+        room_tracker_with_cancel = Some((tracker, join_cancel));
+    }
+
     {
         if let Some(mut room) = RoomStore::load_or_none(get_data_dir()) {
             let mut neighbor_set: HashSet<_> = peer_ids.iter().copied().collect();
@@ -863,6 +1009,8 @@ async fn main() -> Result<()> {
         peer_connection_types: HashMap::new(),
         last_activity: HashMap::new(),
         mesh_health: MeshHealth::Good,
+        dht_enabled,
+        dht_peer_count: dht_peer_count.load(Ordering::Relaxed),
     };
 
     let mut tui = TuiState::new(
@@ -874,6 +1022,12 @@ async fn main() -> Result<()> {
         local_label.clone(),
         public_room_topic,
     );
+    tui.room_discovery_secret_present = discovery_secret.is_some();
+
+    // Store the continuous DHT tracker if one was created.
+    if let Some((tracker, join_cancel)) = room_tracker_with_cancel {
+        tui.room_trackers.insert(topic, (tracker, join_cancel));
+    }
 
     // Set up the main room conversation.
     {
@@ -889,6 +1043,9 @@ async fn main() -> Result<()> {
     }
 
     tui.push_system(format!("Ticket to join this room: {ticket}"));
+    if let Some(invite_str) = &boru1_invite {
+        tui.push_system(format!("Invite to join this room (boru1): {invite_str}"));
+    }
     if peers.is_empty() {
         tui.push_system("Waiting for peers to join us...");
     } else {
@@ -1140,6 +1297,7 @@ async fn main() -> Result<()> {
             _ = conn_monitor.tick() => {
                 update_connection_counts(&endpoint, &mut tui.status).await;
                 tui.status.recompute_mesh_health(&endpoint).await;
+                tui.status.dht_peer_count = dht_peer_count.load(Ordering::Relaxed);
             }
             _ = mesh_watchdog.tick() => {
                 tui.status.recompute_mesh_health(&endpoint).await;
@@ -1152,7 +1310,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Shutdown.
+    // Shutdown all per-room continuous DHT trackers.
+    for (_topic, (tracker, join_cancel)) in tui.room_trackers.drain() {
+        join_cancel.cancel();
+        tracker.shutdown().await;
+    }
+
+    // Save state before exit.
     if let Ok(tracked) = friend_mgr.list_friends().await {
         for (peer, status) in tracked {
             let id = FriendId::from_public_key(peer);
@@ -1790,7 +1954,7 @@ async fn handle_inbox_event_loop(
             {
                 s => s,
             };
-            if let Ok(true) = store.acknowledge_and_save(&_ack) {
+            if let Ok(true) = store.acknowledge_outgoing_and_save(&_ack) {
                 tracing::debug!(
                     "mailbox: peer {} acknowledged envelope {}",
                     _from.fmt_short(),
@@ -1875,7 +2039,7 @@ async fn handle_ui_event(
                     // Update the FriendRequestStore.
                     let _ = tui
                         .friend_request_store
-                        .accept_request(&local_pk, &request_id);
+                        .accept_request(&request_id, &local_pk);
                     // Add as a friend.
                     if let Ok(pk) = req.requester.parse::<PublicKey>() {
                         let fid = FriendId::from_public_key(pk);
@@ -1895,7 +2059,7 @@ async fn handle_ui_event(
             let local_pk = tui.local_public.to_string();
             let _ = tui
                 .friend_request_store
-                .decline_request(&local_pk, &request_id);
+                .decline_request(&request_id, &local_pk);
             tui.push_system("Declined friend request");
             let _ = tui.friend_request_store.save();
             Ok(true)
@@ -2395,6 +2559,14 @@ async fn handle_chat_key(
                         md.description.as_deref().unwrap_or("none"),
                         md.rules.as_deref().unwrap_or("none"),
                     ));
+                    tui.push_system(format!(
+                        "DHT discovery: {}",
+                        if tui.room_discovery_secret_present {
+                            "active (discovery secret present)"
+                        } else {
+                            "off (discovery secret absent)"
+                        }
+                    ));
                     tui.push_system(format!("Members ({}):", members.len()));
                     for (pk, member) in &members {
                         tui.push_system(format!(
@@ -2530,7 +2702,7 @@ async fn handle_friend_requests_key(_key: KeyEvent, tui: &mut TuiState) -> Resul
             if let Some(first) = incoming.first() {
                 let id = first.id.clone();
                 let requester = first.requester.clone();
-                let _ = tui.friend_request_store.accept_request(&local_pk, &id);
+                let _ = tui.friend_request_store.accept_request(&id, &local_pk);
                 if let Ok(pk) = requester.parse::<PublicKey>() {
                     let fid = FriendId::from_public_key(pk);
                     tui.friends.ensure_friend(fid);
@@ -2551,7 +2723,7 @@ async fn handle_friend_requests_key(_key: KeyEvent, tui: &mut TuiState) -> Resul
             if let Some(first) = incoming.first() {
                 let id = first.id.clone();
                 let requester = first.requester.clone();
-                let _ = tui.friend_request_store.decline_request(&local_pk, &id);
+                let _ = tui.friend_request_store.decline_request(&id, &local_pk);
                 tui.push_system(format!("Declined friend request from {requester}"));
                 let _ = tui.friend_request_store.save();
             } else {
@@ -2720,14 +2892,19 @@ fn conversation_list_lines(tui: &TuiState) -> Vec<Line<'static>> {
             Style::default()
         };
 
+        // Room-level DHT status indicator.
+        let has_dht = tui.room_trackers.contains_key(topic);
+        let dht_badge = if has_dht { " 📡" } else { "" };
+
         let prefix = if is_public_room { "★ " } else { "  " };
         let short_topic = topic.fmt_short();
         lines.push(Line::from(vec![
             Span::styled(prefix, line_style),
             Span::styled(display_name.clone(), line_style),
+            Span::styled(dht_badge, Style::default().fg(Color::Green)),
             Span::styled(badge, badge_style),
             Span::styled(
-                format!("  {}", short_topic),
+                format!("  {short_topic}"),
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
@@ -2935,18 +3112,26 @@ fn render_status_bar(frame: &mut Frame<'_>, tui: &TuiState, area: Rect) {
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
 
+    let dht_label = if tui.status.dht_enabled {
+        format!(" DHT: active ({})", tui.status.dht_peer_count)
+    } else {
+        " DHT: off".to_string()
+    };
+
     let content = format!(
-        " [{mode_label}] | {n} peer(s) | topic: {t} | Esc back, Tab switch",
+        " [{mode_label}] | {n} peer(s) | topic: {t} |{dht_label} | Esc back, Tab switch",
         n = tui.status.peer_count,
         t = tui.status.topic.fmt_short(),
+        dht_label = dht_label,
     );
 
     let bar = Paragraph::new(Text::from(Line::from(vec![
         Span::styled(format!(" [{mode_label}] "), screen_label),
         Span::raw(format!(
-            " {n} peer(s) | topic: {t} | Esc back • Tab switch • PgUp/PgDn scroll",
+            " {n} peer(s) | topic: {t} |{dht_label} | Esc back • Tab switch • PgUp/PgDn scroll",
             n = tui.status.peer_count,
             t = tui.status.topic.fmt_short(),
+            dht_label = dht_label,
         )),
     ])))
     .style(Style::default().bg(Color::Blue).fg(Color::White));
@@ -3084,7 +3269,7 @@ fn friend_status_text(record: &FriendRecord) -> (&'static str, Style) {
 
 fn status_panel_height(context: &StatusContext) -> u16 {
     let height = status_lines(context).len() as u16 + 2;
-    height.clamp(6, 10)
+    height.clamp(6, 11)
 }
 
 fn status_lines(context: &StatusContext) -> Vec<Line<'static>> {
@@ -3131,6 +3316,18 @@ fn status_lines(context: &StatusContext) -> Vec<Line<'static>> {
                 format!(": {health_value}"),
                 Style::default().fg(health_color),
             ),
+        ]),
+        Line::from(vec![
+            Span::styled("DHT", label_style),
+            Span::raw(if context.dht_enabled {
+                format!(
+                    ": active ({} peer{})",
+                    context.dht_peer_count,
+                    if context.dht_peer_count == 1 { "" } else { "s" }
+                )
+            } else {
+                ": off".to_string()
+            }),
         ]),
         Line::from(vec![
             Span::styled("Notice", label_style),
@@ -3362,6 +3559,8 @@ mod tests {
             peer_connection_types: HashMap::new(),
             last_activity: HashMap::new(),
             mesh_health: MeshHealth::Good,
+            dht_enabled: false,
+            dht_peer_count: 0,
         };
         let lines = status_lines(&status);
         let rendered: Vec<_> = lines.iter().map(|line| line.to_string()).collect();
@@ -3370,6 +3569,7 @@ mod tests {
             .any(|line| line.contains("Direct iroh transport is ready.")));
         assert!(rendered.iter().any(|line| line.contains("alice")));
         assert!(rendered.iter().any(|line| line.contains("3 known")));
+        assert!(rendered.iter().any(|line| line.contains("DHT: off")));
     }
 
     #[test]
@@ -3400,6 +3600,8 @@ mod tests {
             peer_connection_types: HashMap::new(),
             last_activity: HashMap::new(),
             mesh_health: MeshHealth::Good,
+            dht_enabled: false,
+            dht_peer_count: 0,
         };
         let friends = FriendsStore::empty_at(
             std::env::temp_dir().join(format!("iroh-chat-friends-empty-{}", rand::random::<u64>())),
@@ -3442,6 +3644,8 @@ mod tests {
             peer_connection_types: HashMap::new(),
             last_activity: HashMap::new(),
             mesh_health: MeshHealth::Good,
+            dht_enabled: false,
+            dht_peer_count: 0,
         };
         let friends = FriendsStore::empty_at(
             std::env::temp_dir().join(format!("iroh-chat-render-test-{}", rand::random::<u64>())),
@@ -3484,6 +3688,8 @@ mod tests {
             peer_connection_types: HashMap::new(),
             last_activity: HashMap::new(),
             mesh_health: MeshHealth::Good,
+            dht_enabled: false,
+            dht_peer_count: 0,
         };
         let mut store = FriendsStore::empty_at(std::env::temp_dir().join(format!(
             "iroh-chat-friends-status-{}",
@@ -3532,6 +3738,8 @@ mod tests {
             peer_connection_types: HashMap::new(),
             last_activity: HashMap::new(),
             mesh_health: MeshHealth::Good,
+            dht_enabled: false,
+            dht_peer_count: 0,
         };
         let public_topic = TopicId::from_bytes([1u8; 32]);
         let tui = TuiState::new(
