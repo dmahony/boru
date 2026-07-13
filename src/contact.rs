@@ -15,17 +15,26 @@ use crate::{mailbox::MailboxPublicKey, proto::TopicId};
 const SIGNATURE_LENGTH: usize = Signature::LENGTH;
 const MAX_CONTROL_CLOCK_SKEW_SECS: u64 = 24 * 60 * 60;
 
-/// A signed control-plane operation between two contacts.
+/// A signed control-plane operation between two peers.
+///
+/// Friend-request actions (`FriendRequest`, `FriendRequestAccepted`,
+/// `FriendRequestRejected`) are distinct from conversation actions
+/// (`ConversationInvite`).  Accepting a friend request does **not**
+/// auto-open a conversation — the user must explicitly invite their
+/// existing friend to a direct conversation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContactAction {
-    /// Ask a peer to add the sender as a contact.
-    ContactRequest {
+    /// Ask a peer to become friends (replaces `ContactRequest`).
+    FriendRequest {
         /// Optional display name proposed by the requester.
         name: Option<String>,
     },
-    /// Accept a contact request.
-    ContactAccept,
+    /// Accept a pending friend request (replaces `ContactAccept`).
+    FriendRequestAccepted,
+    /// Reject a pending friend request (new).
+    FriendRequestRejected,
     /// Propose or confirm the stable direct conversation topic.
+    /// Only used between peers who are **already friends**.
     ConversationInvite {
         /// Stable one-to-one topic.
         topic: TopicId,

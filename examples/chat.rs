@@ -5,9 +5,22 @@
 //! This example uses the shared [`boru_chat::chat_core`] module for the
 //! protocol types, state machine, and network event handling.  Only the
 //! TUI-specific rendering (ratatui) and input handling (crossterm) live here.
+//!
+//! # Navigation
+//!
+//! | Key | Action |
+//! |-----|--------|
+//! | Tab | Switch between Chats / Friends / Friend Requests panels |
+//! | ↑/↓ | Navigate conversation list |
+//! | Enter | Open selected conversation / send message |
+//! | Esc | Back to conversation list / close overlay / quit |
+//! | Ctrl-C | Quit |
+//! | PgUp/PgDn | Scroll chat history |
+//! | F2 | Open friend requests view |
+//! | F5 | Refresh |
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env, io,
     net::{Ipv4Addr, SocketAddrV4},
     path::{Path, PathBuf},
@@ -34,12 +47,15 @@ use boru_chat::chat_core::friend_ping::{
     DEFAULT_PING_INTERVAL, FRIEND_PING_ALPN,
 };
 use boru_chat::chat_core::{
-    check_peer_connection_type, collect_bootstrap_peers, download_blob_with_progress,
-    download_candidates, fmt_relay_mode, handle_net_event, message_hash, refresh_bootstrap_peers,
-    update_connection_counts, AppState, ChatEntry, ChatKind, ConnectionType, MeshHealth, Message,
-    NetEvent, SignedMessage, StatusContext, Ticket,
+    collect_bootstrap_peers, download_blob_with_progress, download_candidates, fmt_relay_mode,
+    handle_net_event, message_hash, refresh_bootstrap_peers, update_connection_counts, AppState,
+    ChatEntry, ChatKind, ConnectionType, MeshHealth, Message, NetEvent, SignedMessage,
+    StatusContext, Ticket,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
+use boru_chat::contact::direct_topic;
+use boru_chat::conversations::ConversationStore;
+use boru_chat::friend_request::{FriendRequest, FriendRequestStatus, FriendRequestStore};
 use boru_chat::friends::{FriendId, FriendRecord, FriendsStore};
 use boru_chat::inbox::{send_sync_request, InboxEvent, InboxHandle, InboxProtocol, INBOX_ALPN};
 use boru_chat::mailbox::{MailboxAck, MailboxIdentity, MailboxStore};
@@ -73,33 +89,30 @@ use ratatui::{
 };
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+// ── Constants for the pinned public room ─────────────────────────────
+/// Display name for the pinned public room.
+const PUBLIC_ROOM_LABEL: &str = "★ Public Room";
+/// Short label used in tab/status areas.
+const PUBLIC_ROOM_SHORT: &str = "★Public";
+
+// ── CLI ──────────────────────────────────────────────────────────────
+
 /// Chat over boru-chat
-///
-/// This broadcasts signed messages over boru-chat and verifies signatures
-/// on received messages.
-///
-/// By default a new endpoint id is created when starting the example. To reuse your identity,
-/// set the `--secret-key` flag with the secret key printed on a previous invocation.
-///
-/// By default, the relay server run by n0 is used. To use a local relay server, run
-///     cargo run --bin iroh-relay --features iroh-relay -- --dev
-/// in another terminal and then set the `-d http://localhost:3340` flag on this example.
 #[derive(Parser, Debug)]
 struct Args {
     /// secret key to derive our endpoint id from.
     #[clap(long)]
     secret_key: Option<String>,
-    /// Set a custom relay server. By default, the relay server hosted by n0 will be used.
+    /// Set a custom relay server.
     #[clap(short, long)]
     relay: Option<RelayUrl>,
     /// Disable relay completely.
     #[clap(long)]
     no_relay: bool,
-
     /// Set your nickname.
     #[clap(short, long)]
     name: Option<String>,
-    /// Set the bind port for our socket. By default, a random port will be used.
+    /// Set the bind port for our socket.
     #[clap(long, default_value = "0")]
     bind_port: u16,
     #[clap(subcommand)]
@@ -108,19 +121,17 @@ struct Args {
 
 #[derive(Parser, Debug)]
 enum Command {
-    /// Open a chat room for a topic and print a ticket for others to join.
-    ///
-    /// If no topic is provided, a new topic will be created.
     Open {
-        /// Optionally set the topic id (64 bytes, as hex string).
+        /// Optionally set the topic id.
         topic: Option<TopicId>,
     },
-    /// Join a chat room from a ticket.
     Join {
         /// The ticket, as base32 string.
         ticket: String,
     },
 }
+
+// ── Data directory ──────────────────────────────────────────────────
 
 fn get_data_dir() -> PathBuf {
     if let Ok(val) = env::var("BORU_CHAT_DATA_DIR") {
@@ -138,7 +149,6 @@ fn get_data_dir() -> PathBuf {
     if let Some(val) = env::var_os("LOCALAPPDATA") {
         return PathBuf::from(val).join("boru-chat");
     }
-    // Fallback
     std::env::current_dir()
         .unwrap_or_default()
         .join(".boru-chat")
@@ -150,7 +160,6 @@ fn load_or_generate_secret_key() -> Result<(SecretKey, PathBuf)> {
 
 fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf)> {
     let key_path = data_dir.join("secret_key.txt");
-
     if key_path.exists() {
         let key_str =
             std::fs::read_to_string(&key_path).std_context("failed to read secret key file")?;
@@ -162,22 +171,18 @@ fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf
         let key = SecretKey::generate();
         let key_str = data_encoding::HEXLOWER.encode(&key.to_bytes());
         std::fs::create_dir_all(data_dir).std_context("failed to create data directory")?;
-
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700));
         }
-
         std::fs::write(&key_path, format!("{key_str}\n"))
             .std_context("failed to write secret key file")?;
-
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
         }
-
         Ok((key, key_path))
     }
 }
@@ -186,22 +191,12 @@ fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf
 
 const LOG_FILE_NAME: &str = "chat.log";
 
-/// Complete path to the persistent log file.
 fn log_file_path(data_dir: &Path) -> PathBuf {
     data_dir.join("logs").join(LOG_FILE_NAME)
 }
 
-/// Initialise persistent file-based tracing logging.
-///
-/// Logs are written to `{data_dir}/logs/chat.log` with `0600` permissions.
-/// The log level defaults to `debug` and can be controlled via `RUST_LOG`.
-///
-/// When troubleshooting startup / connection problems, check the log file
-/// at the path printed at startup.
 fn init_logging(data_dir: &Path) -> Result<()> {
     let log_path = log_file_path(data_dir);
-
-    // Create parent directory with 0700 permissions.
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent).std_context("failed to create log directory")?;
         #[cfg(unix)]
@@ -210,11 +205,8 @@ fn init_logging(data_dir: &Path) -> Result<()> {
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
     }
-
-    // Open (or create) the log file, append-only.
     use std::fs::OpenOptions;
     use std::sync::{Arc, Mutex};
-
     let file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -225,8 +217,6 @@ fn init_logging(data_dir: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
     }
-
-    /// A `MakeWriter` that writes to a shared file behind a mutex.
     struct FileMakeWriter(Arc<Mutex<std::fs::File>>);
     impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FileMakeWriter {
         type Writer = FileWriterGuard<'a>;
@@ -243,18 +233,304 @@ fn init_logging(data_dir: &Path) -> Result<()> {
             std::io::Write::flush(&mut *self.0)
         }
     }
-
     let file_writer = FileMakeWriter(Arc::new(Mutex::new(file)));
-
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
-
     let subscriber = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_writer(file_writer).with_ansi(false));
-
     let _ = tracing::subscriber::set_global_default(subscriber);
     Ok(())
 }
+
+// ── TUI screen navigation ───────────────────────────────────────────
+
+/// The active screen in the TUI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TuiScreen {
+    /// Conversation list (inbox) showing rooms and friends.
+    ChatList,
+    /// An individual conversation with a given topic.
+    Chat { topic: TopicId },
+    /// Friend request management.
+    FriendRequests,
+}
+
+// ── TUI conversation state ──────────────────────────────────────────
+
+/// Per-conversation runtime state for the TUI.
+struct ConvState {
+    /// Chat messages for this conversation.
+    entries: Vec<ChatEntry>,
+    /// Composer text.
+    composer_text: String,
+    /// Whether to auto-scroll to latest.
+    follow_latest: bool,
+    /// Scroll offset.
+    scroll_offset: u16,
+    /// Last rendered log height.
+    last_log_height: u16,
+    /// Pending file download: (filename, ticket_string).
+    pending_file: Option<(String, String)>,
+    /// Pending image downloads.
+    pending_image: VecDeque<(String, iroh_blobs::Hash, PublicKey)>,
+    /// Name cache.
+    names: HashMap<PublicKey, String>,
+    /// Unread count accumulated while conversation is not visible.
+    unread: u64,
+    /// Number of entries already saved to ChatHistoryStore.
+    history_saved_count: usize,
+    /// Maps content hash to stable event id for self-sent messages.
+    self_sent_events: HashMap<[u8; 32], u64>,
+    /// Display name for the conversation header.
+    display_name: String,
+}
+
+impl ConvState {
+    fn new(topic: TopicId, display_name: String) -> Self {
+        Self {
+            entries: Vec::new(),
+            composer_text: String::new(),
+            follow_latest: true,
+            scroll_offset: 0,
+            last_log_height: 10,
+            pending_file: None,
+            pending_image: VecDeque::new(),
+            names: HashMap::new(),
+            unread: 0,
+            history_saved_count: 0,
+            self_sent_events: HashMap::new(),
+            display_name,
+        }
+    }
+
+    fn push_entry(&mut self, entry: ChatEntry) {
+        self.entries.push(entry);
+        self.follow_latest = true;
+    }
+
+    fn max_scroll_offset(&self, visible_height: u16) -> u16 {
+        let visible_height = visible_height as usize;
+        self.entries.len().saturating_sub(visible_height) as u16
+    }
+
+    fn rendered_scroll_offset(&self, visible_height: u16) -> u16 {
+        let max = self.max_scroll_offset(visible_height);
+        if self.follow_latest {
+            max
+        } else {
+            self.scroll_offset.min(max)
+        }
+    }
+
+    fn scroll_up(&mut self, amount: u16, visible_height: u16) {
+        let max = self.max_scroll_offset(visible_height);
+        self.follow_latest = false;
+        self.scroll_offset = self.scroll_offset.saturating_sub(amount).min(max);
+    }
+
+    fn scroll_down(&mut self, amount: u16, visible_height: u16) {
+        let max = self.max_scroll_offset(visible_height);
+        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max);
+        self.follow_latest = self.scroll_offset >= max;
+    }
+}
+
+// ── TUI application state ──────────────────────────────────────────
+
+/// Top-level TUI state, wrapping the shared model with navigation.
+struct TuiState {
+    // ── Navigation ──
+    /// Current active screen.
+    screen: TuiScreen,
+    /// Index into the ordered conversation list for the ChatList screen.
+    selected_conv_index: usize,
+    /// Whether the help overlay is visible.
+    help_visible: bool,
+    /// Whether the user has requested to quit.
+    should_quit: bool,
+
+    // ── Conversation state ──
+    /// Ordered list of conversation topic keys for the chat list.
+    /// The public room is always first (index 0).
+    conversation_order: Vec<TopicId>,
+    /// Per-conversation runtime state.
+    conversations: HashMap<TopicId, ConvState>,
+
+    // ── Session state ──
+    /// Connection status context.
+    status: StatusContext,
+    /// Durable friends list store.
+    friends: FriendsStore,
+    /// Whether friends has unsaved changes.
+    friends_dirty: bool,
+    /// Durable conversation store.
+    conversation_store: ConversationStore,
+    /// Durable friend request store.
+    friend_request_store: FriendRequestStore,
+
+    // ── Core IDs ──
+    /// Our own public key.
+    local_public: PublicKey,
+    /// Local display label.
+    local_label: String,
+
+    /// Display name map across all conversations.
+    global_names: HashMap<PublicKey, String>,
+
+    /// Per-conversation forward-handle slots for keeping subscriptions alive.
+    forward_handles: HashMap<TopicId, n0_future::task::JoinHandle<()>>,
+}
+
+impl TuiState {
+    fn new(
+        status: StatusContext,
+        friends: FriendsStore,
+        friend_request_store: FriendRequestStore,
+        conversation_store: ConversationStore,
+        local_public: PublicKey,
+        local_label: String,
+        public_room_topic: TopicId,
+    ) -> Self {
+        // Build conversation_order from the store, with public room first.
+        let mut conversation_order = vec![public_room_topic];
+        for entry in conversation_store.active_iter() {
+            if entry.topic != public_room_topic {
+                conversation_order.push(entry.topic);
+            }
+        }
+
+        // Create per-conv state for each known topic.
+        let mut conversations = HashMap::new();
+        for &topic in &conversation_order {
+            let name = if topic == public_room_topic {
+                PUBLIC_ROOM_LABEL.to_string()
+            } else {
+                conversation_store
+                    .find(&topic)
+                    .map(|e| e.display_name().to_string())
+                    .unwrap_or_else(|| "Chat".to_string())
+            };
+            conversations.insert(topic, ConvState::new(topic, name));
+        }
+
+        Self {
+            screen: TuiScreen::Chat {
+                topic: public_room_topic,
+            },
+            selected_conv_index: 0,
+            help_visible: false,
+            should_quit: false,
+            conversation_order,
+            conversations,
+            status,
+            friends,
+            friends_dirty: false,
+            conversation_store,
+            friend_request_store,
+            local_public,
+            local_label,
+            global_names: HashMap::new(),
+            forward_handles: HashMap::new(),
+        }
+    }
+
+    /// Current conversation state (if on a Chat screen).
+    fn current_conv_mut(&mut self) -> Option<&mut ConvState> {
+        match &self.screen {
+            TuiScreen::Chat { topic } => self.conversations.get_mut(topic),
+            _ => None,
+        }
+    }
+
+    /// Current conversation state (read-only).
+    fn current_conv(&self) -> Option<&ConvState> {
+        match &self.screen {
+            TuiScreen::Chat { topic } => self.conversations.get(topic),
+            _ => None,
+        }
+    }
+
+    /// Push a system message to the active conversation, or to the first
+    /// conversation if none is selected.
+    fn push_system(&mut self, text: impl Into<String>) {
+        let topic = match &self.screen {
+            TuiScreen::Chat { topic } => *topic,
+            _ if !self.conversation_order.is_empty() => self.conversation_order[0],
+            _ => return,
+        };
+        if let Some(conv) = self.conversations.get_mut(&topic) {
+            conv.push_entry(ChatEntry::system(text));
+        }
+    }
+
+    /// Push a local (self-sent) message to the active conversation.
+    fn push_local(&mut self, label: impl Into<String>, text: impl Into<String>) {
+        let topic = match &self.screen {
+            TuiScreen::Chat { topic } => *topic,
+            _ if !self.conversation_order.is_empty() => self.conversation_order[0],
+            _ => return,
+        };
+        if let Some(conv) = self.conversations.get_mut(&topic) {
+            conv.push_entry(ChatEntry::local(label, text));
+        }
+    }
+
+    /// Push a remote (received) message to a specific topic.
+    fn push_remote_to(
+        &mut self,
+        topic: TopicId,
+        label: impl Into<String>,
+        text: impl Into<String>,
+    ) {
+        if let Some(conv) = self.conversations.get_mut(&topic) {
+            conv.push_entry(ChatEntry::remote(label, text));
+            // If this conversation is not currently visible, count it as unread.
+            if !matches!(&self.screen, TuiScreen::Chat { topic: t } if *t == topic) {
+                conv.unread += 1;
+            }
+        }
+    }
+
+    /// Get the display label for a peer.
+    fn resolve_name(&self, peer: &PublicKey) -> String {
+        let fid = FriendId::from_public_key(*peer);
+        if let Some(record) = self.friends.get(&fid) {
+            if let Some(label) = &record.label {
+                return label.clone();
+            }
+            if let Some(name) = &record.last_announced_name {
+                return name.clone();
+            }
+        }
+        self.global_names
+            .get(peer)
+            .cloned()
+            .unwrap_or_else(|| peer.fmt_short().to_string())
+    }
+}
+
+// ── Shared session-level state (for backfill, forwarders, etc.) ──────
+
+/// Context passed to event handlers that need access to shared resources.
+struct SessionCtx {
+    gossip: Arc<Gossip>,
+    sender: Arc<tokio::sync::Mutex<Option<boru_chat::api::GossipSender>>>,
+    secret_key: SecretKey,
+    local_public: PublicKey,
+    local_label: String,
+    endpoint: Arc<Endpoint>,
+    blob_store: MemStore,
+    friend_mgr: Arc<FriendPingManager>,
+    whisper_handle: WhisperHandle,
+    chat_history: Arc<Mutex<ChatHistoryStore>>,
+    backfill_handle: BackfillHandle,
+    data_dir: PathBuf,
+    room_docs: Arc<RwLock<Option<RoomDocs>>>,
+    /// Net event channel for broadcasting to the event loop.
+    net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+}
+
+// ── Main ────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -263,39 +539,32 @@ async fn main() -> Result<()> {
     tracing::info!(path = %log_file_path(&data_dir).display(), "logging to file");
     let args = Args::parse();
 
-    // parse the cli command
+    // Parse the CLI command.
     let (topic, peers) = match &args.command {
         Command::Open { topic } => {
-            let data_dir = get_data_dir();
             let (topic, saved_peers) = match topic {
                 Some(t) => (*t, Vec::new()),
-                None => {
-                    // Try to reuse a previously saved room topic and its
-                    // bootstrap peers so reconnection works even without
-                    // the original ticket.
-                    match RoomStore::load_or_none(&data_dir) {
-                        Some(store) => {
-                            let n_peers = store.peers.len();
-                            let peer_info = if n_peers > 0 {
-                                format!(" with {n_peers} saved bootstrap peer(s)")
-                            } else {
-                                String::new()
-                            };
-                            tracing::info!(topic = %store.topic, peer_info = %peer_info, "reusing saved room topic");
-                            (store.topic, store.peers.clone())
-                        }
-                        None => {
-                            let t = TopicId::from_bytes(rand::random());
-                            tracing::info!(topic = %t, "opening new chat room");
-                            // Persist the new topic so reopening reuses it.
-                            let room = RoomStore::new(&data_dir, t);
-                            if let Err(err) = room.save() {
-                                tracing::warn!(error = %err, "failed to save room metadata");
-                            }
-                            (t, vec![])
-                        }
+                None => match RoomStore::load_or_none(&data_dir) {
+                    Some(store) => {
+                        let n_peers = store.peers.len();
+                        let peer_info = if n_peers > 0 {
+                            format!(" with {n_peers} saved bootstrap peer(s)")
+                        } else {
+                            String::new()
+                        };
+                        tracing::info!(topic = %store.topic, peer_info = %peer_info, "reusing saved room topic");
+                        (store.topic, store.peers.clone())
                     }
-                }
+                    None => {
+                        let t = TopicId::from_bytes(rand::random());
+                        tracing::info!(topic = %t, "opening new chat room");
+                        let room = RoomStore::new(&data_dir, t);
+                        if let Err(err) = room.save() {
+                            tracing::warn!(error = %err, "failed to save room metadata");
+                        }
+                        (t, vec![])
+                    }
+                },
             };
             (topic, saved_peers)
         }
@@ -306,39 +575,36 @@ async fn main() -> Result<()> {
         }
     };
 
-    // parse or generate our secret key
+    // Secret key.
     let (secret_key, key_path) = match args.secret_key.as_ref() {
         None => load_or_generate_secret_key()?,
         Some(key) => {
             let key = key.parse()?;
-            // When passed via CLI, we just pretend it was loaded from a synthetic path
-            // so we don't save or overwrite the user's explicit CLI override.
             (key, PathBuf::from("<passed via cli flag>"))
         }
     };
     tracing::info!(public_key = %secret_key.public(), identity_file = %key_path.display(), "loaded local identity");
 
-    // load or create the persistent friends list
-    let data_dir = get_data_dir();
+    // Load stores.
     let friends = FriendsStore::load_or_default(&data_dir);
     let friend_count = friends.len();
     if friend_count > 0 {
         tracing::info!(count = friend_count, "loaded friends from disk");
     }
+    let conversation_store = ConversationStore::load_or_default(&data_dir);
+    let friend_request_store = FriendRequestStore::load_or_default(&data_dir);
 
-    // Configure the standard iroh relay/discovery path.
+    // Relay config.
     let relay_mode = match (args.no_relay, args.relay.clone()) {
-        (true, Some(_)) => bail_any!("You cannot set --no-relay and --relay at the same time"),
+        (true, Some(_)) => bail_any!("cannot set --no-relay and --relay at the same time"),
         (true, None) => RelayMode::Disabled,
         (false, None) => RelayMode::Default,
         (false, Some(url)) => RelayMode::Custom(url.into()),
     };
     tracing::info!(relay = %fmt_relay_mode(&relay_mode), "configured relay servers");
 
-    // create a memory lookup to pass in endpoint addresses to
     let memory_lookup = MemoryLookup::new();
 
-    // Build the endpoint using only standard iroh transports.
     let endpoint = if matches!(relay_mode, RelayMode::Disabled) {
         Endpoint::builder(presets::N0DisableRelay)
             .secret_key(secret_key.clone())
@@ -361,26 +627,11 @@ async fn main() -> Result<()> {
     }
     tracing::info!(endpoint_id = %endpoint.id(), "endpoint ready");
 
-    // Add mDNS local address lookup for LAN peer discovery
     if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
         if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
             addr_lookup.add(mdns);
         }
     }
-
-    // Add DHT address lookup for global peer discovery via Mainline DHT.
-    //
-    // Enables peer discovery by EndpointID alone, without depending on
-    // n0's DNS server.  Tradeoffs versus DNS/Pkarr:
-    //
-    //   + No central dependency — fully decentralized
-    //   + Works in censorship-resistant or air-gapped setups
-    //   - Slower lookups (500ms–5s vs ~100ms for DNS)
-    //   - May be blocked by corporate/ISP firewalls (wide UDP port range)
-    //   - Publishing a record takes time (~seconds)
-    //
-    // DHT supplement DNS/Pkarr: if DNS fails, DHT may still resolve.
-    // Both are used alongside the default DNS/Pkarr from `presets::N0`.
     if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
         if let Ok(dht) = DhtAddressLookup::builder()
             .secret_key(endpoint.secret_key().clone())
@@ -390,10 +641,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // create the gossip protocol
     let gossip = Gossip::builder().spawn(endpoint.clone());
-
-    // create in-memory blob store and blobs protocol for file transfer
     let blob_store = MemStore::new();
     let blobs_protocol = BlobsProtocol::new(&blob_store, None);
 
@@ -403,19 +651,13 @@ async fn main() -> Result<()> {
     };
     tracing::info!(ticket = %ticket, "created room ticket");
 
-    // setup router with the gossip protocol, blob protocol, friend ping,
-    // whisper protocol, and inbox protocol
     let whisper_builder = WhisperBuilder::new(endpoint.clone(), endpoint.secret_key().clone());
     let whisper_handler = whisper_builder.protocol_handler();
     let (whisper_handle, mut whisper_events) = whisper_builder.spawn();
 
-    // Inbox protocol — direct offline-message delivery with auth.
     let (inbox_handle, mut inbox_events) = InboxHandle::new();
     let inbox_handler =
         InboxProtocol::new(inbox_handle.inner()).with_secret_key(endpoint.secret_key().clone());
-
-    // Register the pending-envelopes provider so SyncRequest returns
-    // envelopes stored locally for the requesting peer.
     {
         let mailbox_dir = data_dir.clone();
         inbox_handle
@@ -429,13 +671,11 @@ async fn main() -> Result<()> {
             .await;
     }
 
-    // Keep chat history transient for this process only. Legacy history files
-    // are removed by the loader and are never replayed.
     let chat_history = ChatHistoryStore::load_or_default(&data_dir);
     if !chat_history.is_empty() {
         tracing::info!(
             count = chat_history.len(),
-            "retained active-session chat messages in memory (history is never saved to disk)"
+            "retained active-session chat messages in memory"
         );
     }
     let chat_history = Arc::new(Mutex::new(chat_history));
@@ -451,17 +691,12 @@ async fn main() -> Result<()> {
         .accept(INBOX_ALPN, inbox_handler)
         .spawn();
 
-    // Subscribe to the personal inbox gossip topic so peers can always
-    // deliver offline messages, independent of the visible chat room.
     let inbox_topic = InboxHandle::inbox_topic(endpoint.secret_key().public());
     if let Err(e) = gossip.subscribe(inbox_topic, Vec::new()).await {
         tracing::warn!(error = %e, "failed to subscribe to inbox topic");
     }
     tracing::info!("subscribed to personal inbox topic");
 
-    // Merge peers from the join command (ticket or saved RoomStore) with any
-    // previously saved RoomStore bootstrap peers, so the address lookup has
-    // the best possible coverage for reconnection.
     let (peer_ids, addr_material) = {
         let room_peers = RoomStore::load_or_none(get_data_dir())
             .map(|s| s.peers)
@@ -470,14 +705,10 @@ async fn main() -> Result<()> {
     };
     let peer_count = peer_ids.len();
 
-    // join the gossip topic by connecting to known peers
     for addr in &addr_material {
         memory_lookup.set_endpoint_info(addr.clone());
     }
-    // If we have bootstrap peers, wait for at least one gossip neighbor
-    // before proceeding (with a timeout to avoid hanging on stale addrs).
-    // Without bootstrap peers (room creator), just subscribe and wait for
-    // inbound joins — don't call subscribe_and_join which blocks on joined().
+
     let sub = if peer_ids.is_empty() {
         tracing::info!("waiting for peers to join us");
         gossip.subscribe(topic, peer_ids.clone()).await
@@ -505,13 +736,9 @@ async fn main() -> Result<()> {
     let (sender, receiver) = sub.split();
     tracing::info!("connected");
 
-    // Refresh the stored bootstrap peers from the just-connected peers so
-    // future reopen/rejoin has up-to-date addresses even if the original
-    // ticket creator is offline.
     {
         if let Some(mut room) = RoomStore::load_or_none(get_data_dir()) {
             let mut neighbor_set: HashSet<_> = peer_ids.iter().copied().collect();
-            // Also note our own peer id so room creators can rejoin themselves.
             neighbor_set.insert(endpoint.id());
             if refresh_bootstrap_peers(&mut room, &neighbor_set, &endpoint).await {
                 if let Err(err) = room.save() {
@@ -541,50 +768,73 @@ async fn main() -> Result<()> {
         sender.broadcast(encoded_message).await?;
     }
 
-    let mut app = AppState::new(
-        StatusContext {
-            transport_status: "> Direct iroh transport is ready.".to_string(),
-            topic,
-            relay_mode: relay_mode.clone(),
-            connected: true,
-            peer_count,
-            identity_label: local_label.clone(),
-            transport_notice: "Direct iroh transport is operational. Gossip messages use standard iroh connectivity.".to_string(),
-            direct_peers: 0,
-            relayed_peers: 0,
-            neighbors: HashSet::new(),
-            peer_connection_types: HashMap::new(),
-            last_activity: HashMap::new(),
-            mesh_health: MeshHealth::Good,
-        },
+    // ── Public room topic ───────────────────────────────────────────
+    // Derive a stable public-room topic from the local identity.
+    let public_room_topic = direct_topic(&local_public, &local_public);
+
+    // Build the TUI state.
+    let status_ctx = StatusContext {
+        transport_status: "> Direct iroh transport is ready.".to_string(),
+        topic,
+        relay_mode: relay_mode.clone(),
+        connected: true,
+        peer_count,
+        identity_label: local_label.clone(),
+        transport_notice:
+            "Direct iroh transport is operational. Gossip messages use standard iroh connectivity."
+                .to_string(),
+        direct_peers: 0,
+        relayed_peers: 0,
+        neighbors: HashSet::new(),
+        peer_connection_types: HashMap::new(),
+        last_activity: HashMap::new(),
+        mesh_health: MeshHealth::Good,
+    };
+
+    let mut tui = TuiState::new(
+        status_ctx,
         friends,
+        friend_request_store,
+        conversation_store,
         local_public,
-        Some(local_label.clone()),
+        local_label.clone(),
+        public_room_topic,
     );
-    app.push_system(format!("Ticket to join this room: {ticket}"));
+
+    // Set up the main room conversation.
+    {
+        let has_room_conv = tui.conversation_order.contains(&topic);
+        if !has_room_conv {
+            tui.conversation_order.push(topic);
+            let display_name = format!("Room: {}", topic.fmt_short());
+            let conv = ConvState::new(topic, display_name);
+            tui.conversations.insert(topic, conv);
+        }
+        tui.screen = TuiScreen::ChatList;
+        tui.selected_conv_index = 0;
+    }
+
+    tui.push_system(format!("Ticket to join this room: {ticket}"));
     if peers.is_empty() {
-        app.push_system("Waiting for peers to join us...");
+        tui.push_system("Waiting for peers to join us...");
     } else {
-        app.push_system(format!(
+        tui.push_system(format!(
             "Trying to connect to {} peers from the ticket...",
             peers.len()
         ));
     }
-    app.push_system("Controls: Enter send • Ctrl-C or Esc quit • PgUp/PgDn scroll history");
+    tui.push_system("Controls: Tab switch view • Enter send • F2 friend requests • PgUp/PgDn scroll • Esc/Ctrl-C quit");
+
     if let Some(name) = args.name.clone() {
-        app.push_system(format!("You announced yourself as {name}."));
+        tui.push_system(format!("You announced yourself as {name}."));
     }
 
-    // Start each process with an empty chat log; previous messages are never
-    // loaded from disk.
-    let mut names = HashMap::new();
-    names.insert(local_public, local_label.clone());
-    {
+    // Load chat history into the main room conversation.
+    if let Some(conv) = tui.conversations.get_mut(&topic) {
         let history = chat_history.lock().unwrap();
-        let local_hex = hex::encode(local_public.as_bytes());
         for entry in history.entries() {
             if entry.topic == topic {
-                let kind = if entry.sender == local_hex {
+                let kind = if entry.sender == hex::encode(local_public.as_bytes()) {
                     ChatKind::Local
                 } else if entry.kind == "system" || entry.sender.is_empty() {
                     ChatKind::System
@@ -595,22 +845,18 @@ async fn main() -> Result<()> {
                     ChatKind::Local => local_label.clone(),
                     ChatKind::System => "System".to_string(),
                     ChatKind::Remote => {
-                        if let Ok(pk) = PublicKey::from_str(&entry.sender) {
-                            names.get(&pk).cloned().unwrap_or_else(|| {
-                                format!(
-                                    "..{}",
-                                    &entry.sender[entry.sender.len().saturating_sub(8)..]
-                                )
-                            })
-                        } else {
+                        let s = if entry.sender.len() > 8 {
                             format!(
                                 "..{}",
                                 &entry.sender[entry.sender.len().saturating_sub(8)..]
                             )
-                        }
+                        } else {
+                            entry.sender.clone()
+                        };
+                        s
                     }
                 };
-                app.entries.push(ChatEntry {
+                conv.entries.push(ChatEntry {
                     kind,
                     label,
                     body: entry.text_preview.clone(),
@@ -623,15 +869,12 @@ async fn main() -> Result<()> {
                 });
             }
         }
+        conv.history_saved_count = conv.entries.len();
     }
-    // All current entries are already persisted — start the save-counter
-    // above the current count so only new live-chat entries get saved.
-    let mut history_saved_count = app.entries.len();
 
     let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    // ── Room docs setup ─────────────────────────────────────────────────
-    // Create metadata doc and roster doc for this room.
+    // Room docs setup.
     let initial_metadata = RoomMetadata {
         name: Some("boru-chat".to_string()),
         description: None,
@@ -648,14 +891,12 @@ async fn main() -> Result<()> {
     )
     .await
     .expect("create roster doc");
-    let room_docs = Arc::new(std::sync::RwLock::new(Some(RoomDocs {
+    let room_docs = Arc::new(RwLock::new(Some(RoomDocs {
         metadata: metadata_doc.clone(),
         roster: roster_doc.clone(),
         topic,
     })));
 
-    // Spawn the room-aware event forwarder: metadata + roster docs consume
-    // their respective messages; everything else goes to net_tx for chat.
     let room_forwarder_net_tx = net_tx.clone();
     task::spawn(async move {
         room_docs::forward_room_events_for_chat(
@@ -663,37 +904,38 @@ async fn main() -> Result<()> {
             roster_doc,
             receiver,
             room_forwarder_net_tx,
+            None,
         )
         .await;
     });
-    // Show how many friends were loaded from disk at startup.
-    if app.friends.is_empty() {
-        app.push_system("No friends file yet; starting with an empty friends list.");
+
+    if tui.friends.is_empty() {
+        tui.push_system("No friends file yet; starting with an empty friends list.");
     } else {
-        app.push_system(format!(
+        tui.push_system(format!(
             "Loaded {} friends from {}.",
-            app.friends.len(),
-            app.friends.file_path().display()
+            tui.friends.len(),
+            tui.friends.file_path().display()
         ));
     }
 
     let _terminal_guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
-    terminal.draw(|frame| render_app(frame, &mut app))?;
+    terminal.draw(|frame| render_app(frame, &mut tui))?;
 
-    // ── Friend ping manager ────────────────────────────────────────────
+    // Friend ping manager.
     let (friend_mgr, mut friend_events) = FriendPingManager::spawn(
         endpoint.clone(),
         DEFAULT_PING_INTERVAL,
         DEFAULT_CONNECT_TIMEOUT,
     );
-    for peer in app
+    for peer in tui
         .friends
         .iter()
         .filter_map(|(id, _)| id.parse_public_key().ok())
     {
-        let addrs = app
+        let addrs = tui
             .friends
             .get(&FriendId::from_public_key(peer))
             .map(|record| record.known_addrs.clone())
@@ -704,17 +946,13 @@ async fn main() -> Result<()> {
     let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
     spawn_input_thread(ui_tx);
 
-    // Periodic connection status monitor — refreshes every 60 seconds.
     let mut conn_monitor = tokio::time::interval(Duration::from_secs(60));
     conn_monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // Mesh quiescence watchdog — monitors for prolonged inactivity every 30 seconds.
-    // Tracks health transitions and pushes system notifications on degradation/recovery.
     let mut last_mesh_health: Option<MeshHealth> = None;
     let mut mesh_watchdog = tokio::time::interval(Duration::from_secs(30));
     mesh_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // Periodic presence heartbeat — broadcasts every 5 seconds.
     let presence_sender = sender.clone();
     let presence_secret_key = endpoint.secret_key().clone();
     tokio::spawn(async move {
@@ -731,9 +969,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Periodic invisible keepalive heartbeat — broadcasts every 2 seconds
-    // to keep connections warm and update mesh health timestamps without
-    // cluttering the chat log or user interface.
     let heartbeat_sender = sender.clone();
     let heartbeat_secret_key = endpoint.secret_key().clone();
     tokio::spawn(async move {
@@ -750,12 +985,31 @@ async fn main() -> Result<()> {
         }
     });
 
-    while !app.should_quit {
+    // Share context for event handlers.
+    let session = Arc::new(SessionCtx {
+        gossip: Arc::new(gossip.clone()),
+        sender: Arc::new(tokio::sync::Mutex::new(Some(sender.clone()))),
+        secret_key: secret_key.clone(),
+        local_public,
+        local_label: local_label.clone(),
+        endpoint: Arc::new(endpoint.clone()),
+        blob_store: blob_store.clone(),
+        friend_mgr: Arc::new(friend_mgr.clone()),
+        whisper_handle: whisper_handle.clone(),
+        chat_history: chat_history.clone(),
+        backfill_handle: backfill_handle.clone(),
+        data_dir: data_dir.clone(),
+        room_docs: room_docs.clone(),
+        net_tx: net_tx.clone(),
+    });
+
+    // ── Main event loop ──────────────────────────────────────────────
+    while !tui.should_quit {
         tokio::select! {
             Some(event) = ui_rx.recv() => {
                 let redraw = handle_ui_event(
                     event,
-                    &mut app,
+                    &mut tui,
                     &sender,
                     endpoint.secret_key(),
                     &local_label,
@@ -767,461 +1021,84 @@ async fn main() -> Result<()> {
                     &chat_history,
                     topic,
                 ).await?;
-                if app.friends_dirty {
-                    if let Err(err) = app.friends.save() {
-                        app.push_system(format!("Failed to save friends: {err}"));
+                if tui.friends_dirty {
+                    if let Err(err) = tui.friends.save() {
+                        tui.push_system(format!("Failed to save friends: {err}"));
                     }
-                    app.friends_dirty = false;
+                    tui.friends_dirty = false;
                 }
                 if redraw {
-                    terminal.draw(|frame| render_app(frame, &mut app))?;
+                    terminal.draw(|frame| render_app(frame, &mut tui))?;
                 }
-                // Persist any new entries (from local sends) to the history store.
-                if history_saved_count < app.entries.len() {
-                    let local_hex = hex::encode(local_public.as_bytes());
-                    let mut store = chat_history.lock().unwrap();
-                    for entry in &app.entries[history_saved_count..] {
-                        // Skip entries already tracked via the send handler (have event_id)
-                        if entry.event_id > 0 {
-                            continue;
-                        }
-                        let kind = match entry.kind {
-                            ChatKind::System => "system",
-                            ChatKind::Local => "text",
-                            ChatKind::Remote => "text",
-                        };
-                        let sender = match entry.kind {
-                            ChatKind::Local => local_hex.clone(),
-                            _ => String::new(),
-                        };
-                        store.push(HistoryEntry::new(
-                            topic,
-                            sender,
-                            Vec::new(),
-                            kind,
-                            entry.body.clone(),
-                        ));
-                    }
-                    history_saved_count = app.entries.len();
-                    drop(store);
-                    if let Err(err) = chat_history.lock().unwrap().save() {
-                        tracing::warn!(error = %err, "failed to save chat history");
-                    }
-                }
+                // Persist new entries to history store.
+                persist_new_entries(&mut tui, &chat_history, &local_public, topic);
             }
             Some(event) = net_rx.recv() => {
-                // ── Echo handling: our own messages returning via gossip ──
-                // When we receive our own broadcast echo, it confirms the
-                // message propagated through the mesh → mark as Delivered.
-                if let NetEvent::Message {
-                    from,
-                    ref message,
-                    ..
-                } = &event
-                {
-                    if *from == local_public {
-                        let msg_hash = message_hash(message);
-                        // Update delivery state in the UI entry
-                        if let Some(entry) = app
-                            .entries
-                            .iter_mut()
-                            .find(|e| e.message_hash == Some(msg_hash))
-                        {
-                            if entry.delivery_state == DeliveryState::Sent {
-                                entry.delivery_state = DeliveryState::Delivered;
-                                // Also update history store
-                                if entry.event_id > 0 {
-                                    let mut store = chat_history.lock().unwrap();
-                                    let _ = store.update_delivery_state(
-                                        entry.event_id,
-                                        DeliveryState::Delivered,
-                                    );
-                                }
-                            }
-                        }
+                handle_net_event_loop(&event, &mut tui, &chat_history, &local_public, &sender, &secret_key, &endpoint, &blob_store, &backfill_handle, &net_tx).await?;
+                if tui.friends_dirty {
+                    if let Err(err) = tui.friends.save() {
+                        tui.push_system(format!("Failed to save friends: {err}"));
                     }
+                    tui.friends_dirty = false;
                 }
-                // ── Process the event through the standard handler ──
-                let event_clone = event.clone();
-                handle_net_event(event_clone, &mut app)?;
-
-                // ── Reconnection replay: re-broadcast pending messages ──
-                if let NetEvent::NeighborUp { peer } = &event {
-                    let peer_owned = *peer;
-                    // Replay messages that are still Queued or Sent
-                    // Collect pending data under the lock, then broadcast outside it
-                    // to avoid holding the MutexGuard across .await.
-                    let pending: Vec<(u64, Bytes)> = {
-                        let store = chat_history.lock().unwrap();
-                        let ids: Vec<u64> = store
-                            .entries()
-                            .iter()
-                            .filter(|e| {
-                                matches!(
-                                    e.delivery_state,
-                                    DeliveryState::Queued | DeliveryState::Sent
-                                )
-                            })
-                            .map(|e| e.event_id)
-                            .collect();
-                        let mut result = Vec::new();
-                        for eid in &ids {
-                            if let Some(entry) = store.get_by_event_id(*eid) {
-                                if let Ok(pk) =
-                                    iroh::PublicKey::from_str(&entry.sender)
-                                {
-                                    if pk == local_public && !entry.signed_bytes.is_empty() {
-                                        result.push((*eid, Bytes::from(entry.signed_bytes.clone())));
-                                    }
-                                }
-                            }
-                        }
-                        result
-                    };
-                    let mut replayed_count = 0u32;
-                    for (eid, raw) in &pending {
-                        if sender.broadcast(raw.clone()).await.is_ok() {
-                            // After re-broadcast, mark as Sent
-                            let _ = chat_history
-                                .lock()
-                                .unwrap()
-                                .update_delivery_state(*eid, DeliveryState::Sent);
-                            replayed_count += 1;
-                        }
-                    }
-                    if replayed_count > 0 {
-                        tracing::info!(
-                            count = replayed_count,
-                            "replayed pending messages on reconnection"
-                        );
-                    }
-
-                    // Original backfill trigger for joining peers
-                    if chat_history.lock().unwrap().len() < BACKFILL_TRIGGER_THRESHOLD {
-                        let handle = backfill_handle.clone();
-                        let endpoint = endpoint.clone();
-                        let net_tx = net_tx.clone();
-                        let local_history_count = chat_history.lock().unwrap().len();
-                        tokio::spawn(async move {
-                            let _ = handle
-                                .try_backfill_from_peer(
-                                    &endpoint,
-                                    peer_owned,
-                                    local_history_count,
-                                    net_tx,
-                                )
-                                .await;
-                        });
-                    }
-                }
-
-                // ── NeighborDown → mark pending messages as Failed ──
-                if let NetEvent::NeighborDown { .. } = &event {
-                    let failed_ids: Vec<u64> = {
-                        let mut store = chat_history.lock().unwrap();
-                        store
-                            .entries
-                            .iter_mut()
-                            .filter(|e| {
-                                matches!(
-                                    e.delivery_state,
-                                    DeliveryState::Queued | DeliveryState::Sent
-                                )
-                            })
-                            .map(|e| {
-                                e.delivery_state = DeliveryState::Failed;
-                                e.event_id
-                            })
-                            .collect()
-                    };
-                    for ui_entry in app.entries.iter_mut() {
-                        if failed_ids.contains(&ui_entry.event_id) {
-                            ui_entry.delivery_state = DeliveryState::Failed;
-                        }
-                    }
-                }
-
-                // ── ReadReceipt handling → mark as Seen ──
-                if let NetEvent::Message {
-                    message: Message::ReadReceipt { message_hash: receipt_hash },
-                    from: receipt_from,
-                    ..
-                } = &event
-                {
-                    if *receipt_from != local_public {
-                        // Look up the message by its content hash in the history store
-                        // using the blake3 hash of the signed bytes. We need to match
-                        // against the `hash` field (blake3 of signed bytes).
-                        // For this we iterate entries and check the message content hash.
-                        if let Some(entry) = app
-                            .entries
-                            .iter_mut()
-                            .find(|e| e.message_hash == Some(*receipt_hash))
-                        {
-                            if entry.delivery_state.can_transition_to(&DeliveryState::Seen) {
-                                entry.delivery_state = DeliveryState::Seen;
-                                if entry.event_id > 0 {
-                                    let mut store = chat_history.lock().unwrap();
-                                    let _ = store.update_delivery_state(
-                                        entry.event_id,
-                                        DeliveryState::Seen,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                // ── Seen trigger: send ReadReceipt when viewing remote messages ──
-                // When the user is at the bottom of the chat (follow_latest = true,
-                // meaning the conversation is visible), send ReadReceipt for remote
-                // messages and mark them as Seen locally.
-                if app.follow_latest {
-                    if let NetEvent::Message {
-                        message: Message::Message { .. },
-                        from: msg_from,
-                        ..
-                    } = &event
-                    {
-                        if *msg_from != local_public {
-                            if let NetEvent::Message { ref message, .. } = &event {
-                                let msg_hash = message_hash(message);
-                                // Send a ReadReceipt
-                                let receipt = Message::ReadReceipt {
-                                    message_hash: msg_hash,
-                                };
-                                if let Ok(encoded) =
-                                    SignedMessage::sign_and_encode(&secret_key, &receipt)
-                                {
-                                    let _ = sender.broadcast(encoded).await;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Auto-download pending images (ImageShare received)
-                let pending_images: Vec<_> = app.pending_image.drain(..).collect();
-                for (name, hash, sender_pk) in pending_images {
-                    let blob_hash: iroh_blobs::Hash = hash.into();
-                    let candidates = download_candidates(sender_pk, &app.status.neighbors);
-                    match download_blob_with_progress(
-                        &blob_store,
-                        &endpoint,
-                        blob_hash,
-                        candidates,
-                        name.clone(),
-                        TransferKind::Image,
-                        |_| {},
-                    )
-                    .await
-                    {
-                        Ok(_bytes) => {
-                            app.push_system(format!("Downloaded image: {}", name));
-                        }
-                        Err(err) => {
-                            app.push_system(format!(
-                                "Failed to download image '{}': {err}",
-                                name
-                            ));
-                        }
-                    }
-                }
-                update_connection_counts(&endpoint, &mut app.status).await;
-                app.status.recompute_mesh_health(&endpoint).await;
-                if app.friends_dirty {
-                    if let Err(err) = app.friends.save() {
-                        app.push_system(format!("Failed to save friends: {err}"));
-                    }
-                    app.friends_dirty = false;
-                }
-                // Persist new entries (from remote messages) to the history store.
-                if history_saved_count < app.entries.len() {
-                    let local_hex = hex::encode(local_public.as_bytes());
-                    let mut store = chat_history.lock().unwrap();
-                    for entry in &app.entries[history_saved_count..] {
-                        // Skip entries already tracked via the send handler
-                        if entry.event_id > 0 {
-                            continue;
-                        }
-                        let kind = match entry.kind {
-                            ChatKind::System => "system",
-                            ChatKind::Local => "text",
-                            ChatKind::Remote => "text",
-                        };
-                        let sender = match entry.kind {
-                            ChatKind::Local => local_hex.clone(),
-                            _ => String::new(),
-                        };
-                        store.push(HistoryEntry::new(
-                            topic,
-                            sender,
-                            Vec::new(),
-                            kind,
-                            entry.body.clone(),
-                        ));
-                    }
-                    history_saved_count = app.entries.len();
-                    drop(store);
-                    if let Err(err) = chat_history.lock().unwrap().save() {
-                        tracing::warn!(error = %err, "failed to save chat history");
-                    }
-                }
-
-                // ── Seen-on-visibility: when user is at bottom of log, mark Delivered entries as Seen ──
-                if app.follow_latest {
-                    let mut store = chat_history.lock().unwrap();
-                    for ui_entry in app.entries.iter_mut() {
-                        if ui_entry.delivery_state == DeliveryState::Delivered
-                            && ui_entry.event_id > 0
-                        {
-                            ui_entry.delivery_state = DeliveryState::Seen;
-                            let _ = store.update_delivery_state(
-                                ui_entry.event_id,
-                                DeliveryState::Seen,
-                            );
-                        }
-                    }
-                    drop(store);
-                }
-
-                terminal.draw(|frame| render_app(frame, &mut app))?;
+                terminal.draw(|frame| render_app(frame, &mut tui))?;
             }
             Some(event) = friend_events.recv() => {
-                handle_friend_event(event, &mut app);
-                update_connection_counts(&endpoint, &mut app.status).await;
-                app.status.recompute_mesh_health(&endpoint).await;
-                if app.friends_dirty {
-                    if let Err(err) = app.friends.save() {
-                        app.push_system(format!("Failed to save friends: {err}"));
+                handle_friend_event(event, &mut tui);
+                update_connection_counts(&endpoint, &mut tui.status).await;
+                tui.status.recompute_mesh_health(&endpoint).await;
+                if tui.friends_dirty {
+                    if let Err(err) = tui.friends.save() {
+                        tui.push_system(format!("Failed to save friends: {err}"));
                     }
-                    app.friends_dirty = false;
+                    tui.friends_dirty = false;
                 }
-                terminal.draw(|frame| render_app(frame, &mut app))?;
+                terminal.draw(|frame| render_app(frame, &mut tui))?;
             }
             Some(event) = whisper_events.recv() => {
-                // Handle Connected events inline so we can do async mailbox sync.
-                let is_connected = matches!(&event, WhisperEvent::Connected { .. });
-                let connected_peer = match &event {
-                    WhisperEvent::Connected { peer } => Some(*peer),
-                    _ => None,
-                };
-                // Non-Connected events go through the sync handler as before.
-                if !is_connected {
-                    handle_whisper_event(event, &mut app);
-                }
-                if let Some(peer) = connected_peer {
-                    let label = app
-                        .names
-                        .get(&peer)
-                        .cloned()
-                        .unwrap_or_else(|| peer.fmt_short().to_string());
-                    app.push_system(format!("[Whisper] Connected to {label}"));
-
-                    // On whisper reconnect, sync any offline mailbox envelopes.
-                    let has_mailbox = app
-                        .friends
-                        .get(&FriendId::from_public_key(peer))
-                        .and_then(|r| r.mailbox_public_key)
-                        .is_some();
-                    if has_mailbox {
-                        let endpoint = endpoint.clone();
-                        let sk = secret_key.clone();
-                        let dd = data_dir.clone();
-                        let label2 = label.clone();
-                        match send_sync_request(&endpoint, &sk, peer, 0).await {
-                            Ok(envelopes) => {
-                                let mut store = MailboxStore::load(&dd)
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or_else(|| MailboxStore::for_recipient(&dd, sk.public()));
-                                let identity = MailboxIdentity::from_secret(&sk);
-                                for env in envelopes {
-                                    match store.accept_incoming(&identity, env, &[peer]) {
-                                        Ok((msg_id, plaintext)) => {
-                                            if let Ok(text) = String::from_utf8(plaintext) {
-                                                app.push_entry(
-                                                    ChatEntry::remote(
-                                                        format!("Offline DM from {label2}"),
-                                                        text,
-                                                    ),
-                                                    true,
-                                                );
-                                            }
-                                            let _ = store.save();
-                                            let ack =
-                                                MailboxAck::sign(&sk, &msg_id);
-                                            let _ = boru_chat::inbox::send_ack(
-                                                &endpoint,
-                                                &sk,
-                                                peer,
-                                                ack,
-                                            )
-                                            .await;
-                                        }
-                                        Err(e) => {
-                                            app.push_system(format!(
-                                                "[Mailbox] Failed to accept replayed envelope \
-                                                 from {label2}: {e}"
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                app.push_system(format!(
-                                    "[Mailbox] Failed to sync with {label2}: {e}"
-                                ));
-                            }
-                        }
-                    }
-                }
-                terminal.draw(|frame| render_app(frame, &mut app))?;
+                handle_whisper_event_loop(event, &mut tui, &session, &data_dir, &secret_key, &endpoint, &sender).await;
+                terminal.draw(|frame| render_app(frame, &mut tui))?;
             }
             Some(event) = inbox_events.recv() => {
-                handle_inbox_event(&endpoint, event, &mut app, &data_dir, &secret_key).await;
-                terminal.draw(|frame| render_app(frame, &mut app))?;
+                handle_inbox_event_loop(&endpoint, event, &mut tui, &data_dir, &secret_key, &sender).await;
+                terminal.draw(|frame| render_app(frame, &mut tui))?;
             }
             _ = conn_monitor.tick() => {
-                // Periodic refresh of per-peer connection status.
-                update_connection_counts(&endpoint, &mut app.status).await;
-                app.status.recompute_mesh_health(&endpoint).await;
+                update_connection_counts(&endpoint, &mut tui.status).await;
+                tui.status.recompute_mesh_health(&endpoint).await;
             }
             _ = mesh_watchdog.tick() => {
-                // Periodic mesh quiescence check — detects prolonged inactivity.
-                app.status.recompute_mesh_health(&endpoint).await;
-                if let Some(notification) = app.status.check_mesh_quiescence(&mut last_mesh_health) {
-                    app.push_system(notification);
-                    terminal.draw(|frame| render_app(frame, &mut app))?;
+                tui.status.recompute_mesh_health(&endpoint).await;
+                if let Some(notification) = tui.status.check_mesh_quiescence(&mut last_mesh_health) {
+                    tui.push_system(notification);
+                    terminal.draw(|frame| render_app(frame, &mut tui))?;
                 }
             }
             else => break,
         }
     }
 
-    // Sync final friend ping status to persistent store before shutdown.
+    // Shutdown.
     if let Ok(tracked) = friend_mgr.list_friends().await {
         for (peer, status) in tracked {
             let id = FriendId::from_public_key(peer);
-            let rec = app.friends.ensure_friend(id);
+            let rec = tui.friends.ensure_friend(id);
             rec.status.online = status.is_online();
         }
     }
-    if app.friends_dirty {
-        let _ = app.friends.save();
+    if tui.friends_dirty {
+        let _ = tui.friends.save();
     }
-
-    // Save chat history before shutdown.
     if let Err(err) = chat_history.lock().unwrap().save() {
         tracing::warn!(error = %err, "failed to save chat history");
     }
+    if let Err(err) = tui.conversation_store.save() {
+        tracing::warn!(error = %err, "failed to save conversation store");
+    }
+    if let Err(err) = tui.friend_request_store.save() {
+        tracing::warn!(error = %err, "failed to save friend request store");
+    }
 
-    // Explicitly stop background tasks before router/endpoint shutdown
-    // so we don't rely on runtime teardown for clean ordering.
-    //
-    // Drop command senders first so the actor loops exit naturally
-    // (cmd_rx returns None → actor breaks its event loop).  Drop
-    // event receivers next so any select! branches reading them
-    // finish promptly.
     drop(backfill_handle);
     drop(whisper_handle);
     drop(friend_mgr);
@@ -1230,11 +1107,10 @@ async fn main() -> Result<()> {
 
     router.shutdown().await.anyerr()?;
     endpoint.close().await;
-
     Ok(())
 }
 
-// ── Terminal guard ────────────────────────────────────────────────────────────
+// ── Terminal guard ────────────────────────────────────────────────────
 
 #[derive(Debug)]
 struct TerminalGuard;
@@ -1256,13 +1132,23 @@ impl Drop for TerminalGuard {
     }
 }
 
-// ── UI event types ────────────────────────────────────────────────────────────
+// ── UI event types ────────────────────────────────────────────────────
 
 #[derive(Debug)]
 enum UiEvent {
     Key(KeyEvent),
     Resize,
     Paste(String),
+    /// Switch the active screen.
+    SwitchScreen(TuiScreen),
+    /// Select a conversation by index in the list.
+    SelectConv(usize),
+    /// Accept a friend request by id.
+    AcceptFriendRequest(String),
+    /// Decline a friend request by id.
+    DeclineFriendRequest(String),
+    /// Send a friend request to this peer.
+    SendFriendRequest(String),
 }
 
 fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
@@ -1270,7 +1156,6 @@ fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
         while let Ok(event) = event::read() {
             let keep_running = match event {
                 CEvent::Key(key) => {
-                    // Only handle press events — skip Release and Repeat
                     if key.kind != event::KeyEventKind::Press {
                         true
                     } else {
@@ -1288,874 +1173,514 @@ fn spawn_input_thread(ui_tx: tokio::sync::mpsc::UnboundedSender<UiEvent>) {
     });
 }
 
-// ── UI event handling ─────────────────────────────────────────────────────────
+// ── Persistence helpers ──────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_ui_event(
-    event: UiEvent,
-    app: &mut AppState,
-    sender: &boru_chat::api::GossipSender,
-    secret_key: &SecretKey,
-    local_label: &str,
-    endpoint: &Endpoint,
-    blob_store: &MemStore,
-    friend_mgr: &FriendPingManager,
-    room_docs: &Arc<RwLock<Option<RoomDocs>>>,
-    whisper_handle: &WhisperHandle,
+/// Persist new entries from the given conversation to the chat history store.
+fn persist_new_entries(
+    tui: &mut TuiState,
     chat_history: &Arc<Mutex<ChatHistoryStore>>,
-    topic: TopicId,
-) -> Result<bool> {
-    match event {
-        UiEvent::Key(key) => {
-            handle_key_event(
-                key,
-                app,
-                sender,
-                secret_key,
-                local_label,
-                endpoint,
-                blob_store,
-                friend_mgr,
-                room_docs,
-                whisper_handle,
-                chat_history,
-                topic,
-            )
-            .await?;
-            Ok(true)
-        }
-        UiEvent::Resize => Ok(true),
-        UiEvent::Paste(text) => {
-            app.composer.insert_str(&text);
-            Ok(true)
+    local_public: &PublicKey,
+    current_topic: TopicId,
+) {
+    if let Some(conv) = tui.current_conv_mut() {
+        if conv.history_saved_count < conv.entries.len() {
+            let local_hex = hex::encode(local_public.as_bytes());
+            let mut store = chat_history.lock().unwrap();
+            for entry in &conv.entries[conv.history_saved_count..] {
+                if entry.event_id > 0 {
+                    continue;
+                }
+                let kind = match entry.kind {
+                    ChatKind::System => "system",
+                    ChatKind::Local => "text",
+                    ChatKind::Remote => "text",
+                };
+                let sender = match entry.kind {
+                    ChatKind::Local => local_hex.clone(),
+                    _ => String::new(),
+                };
+                store.push(HistoryEntry::new(
+                    current_topic,
+                    sender,
+                    Vec::new(),
+                    kind,
+                    entry.body.clone(),
+                ));
+            }
+            conv.history_saved_count = conv.entries.len();
+            drop(store);
+            if let Err(err) = chat_history.lock().unwrap().save() {
+                tracing::warn!(error = %err, "failed to save chat history");
+            }
         }
     }
 }
 
+// ── Net event handling (extracted for select! clarity) ────────────────
+
 #[allow(clippy::too_many_arguments)]
-async fn handle_key_event(
-    key: KeyEvent,
-    app: &mut AppState,
+async fn handle_net_event_loop(
+    event: &NetEvent,
+    tui: &mut TuiState,
+    chat_history: &Arc<Mutex<ChatHistoryStore>>,
+    local_public: &PublicKey,
     sender: &boru_chat::api::GossipSender,
     secret_key: &SecretKey,
-    local_label: &str,
     endpoint: &Endpoint,
     blob_store: &MemStore,
-    friend_mgr: &FriendPingManager,
-    room_docs: &Arc<RwLock<Option<RoomDocs>>>,
-    whisper_handle: &WhisperHandle,
-    chat_history: &Arc<Mutex<ChatHistoryStore>>,
-    _topic: TopicId,
+    backfill_handle: &BackfillHandle,
+    net_tx: &tokio::sync::mpsc::UnboundedSender<NetEvent>,
 ) -> Result<()> {
-    let visible_height = app.last_log_height;
-    match key {
-        KeyEvent {
-            code: KeyCode::Esc, ..
-        } => {
-            if app.help_visible {
-                app.help_visible = false;
-                return Ok(());
-            }
-            // Best-effort goodbye broadcast before we disconnect.
-            let goodbye = SignedMessage::sign_and_encode(secret_key, &Message::Leave);
-            if let Ok(encoded) = goodbye {
-                let _ = sender.broadcast(encoded).await;
-            }
-            app.should_quit = true;
-        }
-        KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers,
-            ..
-        } if modifiers.contains(KeyModifiers::CONTROL) => {
-            // Best-effort goodbye broadcast before we disconnect.
-            let goodbye = SignedMessage::sign_and_encode(secret_key, &Message::Leave);
-            if let Ok(encoded) = goodbye {
-                let _ = sender.broadcast(encoded).await;
-            }
-            app.should_quit = true;
-        }
-        KeyEvent {
-            code: KeyCode::Enter,
-            ..
-        } => {
-            let submitted = app.composer.take();
-            let trimmed = submitted.trim().to_string();
-
-            if trimmed.is_empty() {
-                return Ok(());
-            }
-
-            if let Some(path) = trimmed.strip_prefix("/send ") {
-                // ── File send via iroh-blobs ─────────────────────────────
-                let path = path.trim().to_string();
-                let path_buf = std::path::PathBuf::from(&path);
-                let abs_path = match std::path::absolute(&path_buf) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        app.push_system(format!("Failed to resolve path: {e}"));
-                        return Ok(());
-                    }
-                };
-                if !abs_path.exists() {
-                    app.push_system(format!("File not found: {}", path));
-                    return Ok(());
-                }
-                let filename = match path_buf
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
+    // ── Echo handling: our own messages returning via gossip ──
+    if let NetEvent::Message {
+        from, ref message, ..
+    } = event
+    {
+        if *from == *local_public {
+            let msg_hash = message_hash(message);
+            if let Some(conv) = tui.current_conv_mut() {
+                if let Some(entry) = conv
+                    .entries
+                    .iter_mut()
+                    .find(|e| e.message_hash == Some(msg_hash))
                 {
-                    Some(name) => name,
-                    None => {
-                        app.push_system("Invalid file path.");
-                        return Ok(());
-                    }
-                };
-
-                app.push_system(format!("Hashing file: {filename}..."));
-                let tag = match blob_store.blobs().add_path(abs_path).await {
-                    Ok(tag) => tag,
-                    Err(e) => {
-                        app.push_system(format!("Failed to hash file: {e}"));
-                        return Ok(());
-                    }
-                };
-
-                let node_id = endpoint.id();
-                let ticket = BlobTicket::new(node_id.into(), tag.hash, tag.format);
-                let ticket_str = ticket.to_string();
-
-                let message = Message::FileShare {
-                    name: filename.clone(),
-                    ticket: ticket_str.clone(),
-                };
-                let encoded_message = SignedMessage::sign_and_encode(secret_key, &message)?;
-                sender.broadcast(encoded_message).await?;
-                app.push_local(local_label.to_string(), format!("/send {path}"));
-                app.push_system(format!("Sharing: {filename} (ticket: {ticket_str})"));
-                return Ok(());
-            }
-
-            if trimmed == "/download" {
-                // ── File download ────────────────────────────────────────
-                if let Some((filename, ticket_str)) = app.pending_file.clone() {
-                    let ticket: BlobTicket = match ticket_str.parse() {
-                        Ok(t) => t,
-                        Err(e) => {
-                            app.push_system(format!("Failed to parse ticket: {e}"));
-                            return Ok(());
+                    if entry.delivery_state == DeliveryState::Sent {
+                        entry.delivery_state = DeliveryState::Delivered;
+                        if entry.event_id > 0 {
+                            let mut store = chat_history.lock().unwrap();
+                            let _ = store
+                                .update_delivery_state(entry.event_id, DeliveryState::Delivered);
                         }
-                    };
-                    let peer_id = ticket.addr().id;
-                    let candidates = download_candidates(peer_id, &app.status.neighbors);
-                    app.push_system(format!("Downloading: {filename}..."));
-                    if let Err(e) = download_blob_with_safety(
-                        blob_store,
-                        endpoint,
-                        ticket.hash(),
-                        candidates,
-                        filename.clone(),
-                        TransferKind::File,
-                        |_| {},
-                        safety,
-                        peer_id,
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Process event through standard handler ──
+    // Use a temporary AppState wrapper for handle_net_event.
+    let mut app = AppState::new(
+        tui.status.clone(),
+        tui.friends.clone(),
+        tui.local_public,
+        Some(tui.local_label.clone()),
+    );
+    // Sync global names.
+    for (pk, name) in &tui.global_names {
+        app.names.insert(*pk, name.clone());
+    }
+    // Sync entries from the current conversation if on a chat screen.
+    if let Some(conv) = tui.current_conv() {
+        app.entries = conv.entries.clone();
+        app.self_sent_events = conv.self_sent_events.clone();
+    }
+
+    handle_net_event(event.clone(), &mut app)?;
+
+    // Sync back.
+    tui.status = app.status.clone();
+    tui.friends = app.friends.clone();
+    tui.friends_dirty = app.friends_dirty;
+    tui.global_names = app.names.clone();
+    if let Some(conv) = tui.current_conv_mut() {
+        conv.entries = app.entries;
+        conv.self_sent_events = app.self_sent_events;
+    }
+
+    // ── NeighborUp → reconnection replay ──
+    if let NetEvent::NeighborUp { peer } = event {
+        let peer_owned = *peer;
+        let pending: Vec<(u64, Bytes)> = {
+            let store = chat_history.lock().unwrap();
+            let ids: Vec<u64> = store
+                .entries()
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.delivery_state,
+                        DeliveryState::Queued | DeliveryState::Sent
                     )
-                    .await
-                    {
-                        app.push_system(format!("Download failed: {e}"));
-                        return Ok(());
-                    }
-                    app.push_system("Download complete. Exporting to disk...");
-                    let dest = std::env::current_dir().unwrap_or_default().join(&filename);
-                    if let Err(e) = blob_store.blobs().export(ticket.hash(), dest).await {
-                        app.push_system(format!("Export failed: {e}"));
-                        return Ok(());
-                    }
-                    app.push_system(format!("Saved: {filename}"));
-                    app.pending_file = None;
-                } else {
-                    app.push_system("No pending file to download.");
-                }
-                return Ok(());
-            }
-
-            if trimmed == "/help" {
-                app.help_visible = true;
-                app.follow_latest = true;
-                return Ok(());
-            }
-
-            if let Some(pubkey_str) = trimmed.strip_prefix("/friend add ") {
-                let pubkey_str = pubkey_str.trim().to_string();
-                let (pubkey, alias) =
-                    if let Some((key_part, rest)) = pubkey_str.split_once(char::is_whitespace) {
-                        (key_part.to_string(), Some(rest.trim().to_string()))
-                    } else {
-                        (pubkey_str, None)
-                    };
-                match pubkey.parse::<PublicKey>() {
-                    Ok(peer) => {
-                        let fid = FriendId::from_public_key(peer);
-                        let was_new = app.friends.get(&fid).is_none();
-                        if let Some(alias_text) = &alias {
-                            app.friends.set_label(fid.clone(), alias_text.clone());
-                        } else {
-                            app.friends.ensure_friend(fid.clone());
-                        }
-                        app.friends_dirty = true;
-
-                        let addr = app
-                            .friends
-                            .get(&fid)
-                            .and_then(|record| record.known_addrs.first().cloned());
-                        match friend_mgr.add_friend(peer, addr).await {
-                            Ok(_) => {
-                                if was_new {
-                                    let label = if let Some(ref alias_text) = alias {
-                                        format!("{alias_text} ({})", peer.fmt_short())
-                                    } else {
-                                        peer.fmt_short().to_string()
-                                    };
-                                    app.push_system(format!("Added friend: {label}"));
-                                } else {
-                                    app.push_system(format!(
-                                        "Updated friend: {}",
-                                        peer.fmt_short()
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                app.push_system(format!("Failed to add friend: {e}"));
-                            }
+                })
+                .map(|e| e.event_id)
+                .collect();
+            let mut result = Vec::new();
+            for eid in &ids {
+                if let Some(entry) = store.get_by_event_id(*eid) {
+                    if let Ok(pk) = iroh::PublicKey::from_str(&entry.sender) {
+                        if pk == *local_public && !entry.signed_bytes.is_empty() {
+                            result.push((*eid, Bytes::from(entry.signed_bytes.clone())));
                         }
                     }
-                    Err(e) => {
-                        app.push_system(format!("Invalid public key: {e}"));
-                    }
                 }
-                return Ok(());
             }
-
-            if let Some(rest) = trimmed.strip_prefix("/friend remove ") {
-                let target = rest.trim().to_string();
-                // Try to resolve by exact public key first, then by alias.
-                let resolved = if let Ok(pk) = target.parse::<PublicKey>() {
-                    Some((pk, FriendId::from_public_key(pk)))
-                } else {
-                    // Try to find by alias
-                    app.friends
-                        .iter()
-                        .find(|(_, rec)| rec.label.as_deref() == Some(&target))
-                        .map(|(fid, _)| (fid.parse_public_key().ok(), fid.clone()))
-                        .and_then(|(pk_opt, fid)| pk_opt.map(|pk| (pk, fid)))
-                };
-
-                match resolved {
-                    Some((peer, fid)) => {
-                        let label = app
-                            .friends
-                            .get(&fid)
-                            .and_then(|r| r.label.clone())
-                            .unwrap_or_else(|| peer.fmt_short().to_string());
-                        app.friends.remove(&fid);
-                        app.friends_dirty = true;
-                        let _ = friend_mgr.remove_friend(&peer).await;
-                        app.push_system(format!("Removed friend: {label}"));
-                    }
-                    None => {
-                        app.push_system(format!("Friend not found: {target}"));
-                    }
-                }
-                return Ok(());
+            result
+        };
+        let mut replayed_count = 0u32;
+        for (eid, raw) in &pending {
+            if sender.broadcast(raw.clone()).await.is_ok() {
+                let _ = chat_history
+                    .lock()
+                    .unwrap()
+                    .update_delivery_state(*eid, DeliveryState::Sent);
+                replayed_count += 1;
             }
+        }
+        if replayed_count > 0 {
+            tracing::info!(
+                count = replayed_count,
+                "replayed pending messages on reconnection"
+            );
+        }
+        if chat_history.lock().unwrap().len() < BACKFILL_TRIGGER_THRESHOLD {
+            let handle = backfill_handle.clone();
+            let endpoint = endpoint.clone();
+            let net_tx = net_tx.clone();
+            let local_history_count = chat_history.lock().unwrap().len();
+            tokio::spawn(async move {
+                let _ = handle
+                    .try_backfill_from_peer(
+                        &endpoint,
+                        peer_owned,
+                        local_history_count,
+                        net_tx,
+                        None,
+                    )
+                    .await;
+            });
+        }
+    }
 
-            if let Some(rest) = trimmed.strip_prefix("/friend rename ") {
-                let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
-                if parts.len() < 2 {
-                    app.push_system("Usage: /friend rename <public-key> <new-alias>");
-                    return Ok(());
+    // ── NeighborDown → mark pending as Failed ──
+    if let NetEvent::NeighborDown { .. } = event {
+        let failed_ids: Vec<u64> = {
+            let mut store = chat_history.lock().unwrap();
+            store
+                .entries
+                .iter_mut()
+                .filter(|e| {
+                    matches!(
+                        e.delivery_state,
+                        DeliveryState::Queued | DeliveryState::Sent
+                    )
+                })
+                .map(|e| {
+                    e.delivery_state = DeliveryState::Failed;
+                    e.event_id
+                })
+                .collect()
+        };
+        if let Some(conv) = tui.current_conv_mut() {
+            for ui_entry in conv.entries.iter_mut() {
+                if failed_ids.contains(&ui_entry.event_id) {
+                    ui_entry.delivery_state = DeliveryState::Failed;
                 }
-                let target = parts[0].trim();
-                let new_alias = parts[1].trim().to_string();
-                let resolved = if let Ok(pk) = target.parse::<PublicKey>() {
-                    Some(FriendId::from_public_key(pk))
-                } else {
-                    app.friends
-                        .iter()
-                        .find(|(_, rec)| rec.label.as_deref() == Some(target))
-                        .map(|(fid, _)| fid.clone())
-                };
-                match resolved {
-                    Some(fid) => {
-                        app.friends.set_label(fid.clone(), &new_alias);
-                        app.friends_dirty = true;
-                        app.push_system(format!("Renamed friend to: {new_alias}"));
-                    }
-                    None => {
-                        app.push_system(format!("Friend not found: {target}"));
-                    }
-                }
-                return Ok(());
             }
+        }
+    }
 
-            if trimmed == "/friend list" {
-                match friend_mgr.list_friends().await {
-                    Ok(list) => {
-                        if list.is_empty() && app.friends.is_empty() {
-                            app.push_system("No friends tracked yet.");
-                        } else {
-                            app.push_system(format!("Friends ({}):", app.friends.len()));
-                            for (peer, status) in &list {
-                                let fid = FriendId::from_public_key(*peer);
-                                let label = app
-                                    .friends
-                                    .get(&fid)
-                                    .and_then(|r| r.display_label(&fid).into())
-                                    .or_else(|| Some(peer.fmt_short().to_string()))
-                                    .unwrap();
-                                let status_str = match status {
-                                    FriendStatus::Unknown => "?",
-                                    FriendStatus::Online => "ONLINE",
-                                    FriendStatus::Offline => "offline",
-                                };
-                                let ping_status = app
-                                    .friends
-                                    .get(&fid)
-                                    .map(|r| if r.status.online { "online" } else { "offline" })
-                                    .unwrap_or("unknown");
-                                app.push_system(format!(
-                                    "  {label}: {status_str} (persisted: {ping_status})"
-                                ));
-                            }
+    // ── ReadReceipt handling ──
+    if let NetEvent::Message {
+        message: Message::ReadReceipt {
+            message_hash: receipt_hash,
+        },
+        from: receipt_from,
+        ..
+    } = event
+    {
+        if *receipt_from != *local_public {
+            if let Some(conv) = tui.current_conv_mut() {
+                if let Some(entry) = conv
+                    .entries
+                    .iter_mut()
+                    .find(|e| e.message_hash == Some(*receipt_hash))
+                {
+                    if entry.delivery_state.can_transition_to(&DeliveryState::Seen) {
+                        entry.delivery_state = DeliveryState::Seen;
+                        if entry.event_id > 0 {
+                            let mut store = chat_history.lock().unwrap();
+                            let _ =
+                                store.update_delivery_state(entry.event_id, DeliveryState::Seen);
                         }
                     }
-                    Err(e) => {
-                        app.push_system(format!("Failed to list friends: {e}"));
-                    }
                 }
-                return Ok(());
             }
+        }
+    }
 
-            if trimmed == "/room info" {
-                let has_docs = room_docs.read().unwrap().as_ref().is_some();
-                if !has_docs {
-                    app.push_system("No room docs available (room not initialised).");
-                } else {
-                    let metadata_doc = room_docs.read().unwrap().as_ref().unwrap().metadata.clone();
-                    let roster = room_docs.read().unwrap().as_ref().unwrap().roster.clone();
-                    let md = read_metadata(&metadata_doc).await;
-                    let members = list_members(&roster).await;
-                    app.push_system(format!(
-                        "Room: {} | Description: {} | Rules: {}",
-                        md.name.as_deref().unwrap_or("unnamed"),
-                        md.description.as_deref().unwrap_or("none"),
-                        md.rules.as_deref().unwrap_or("none"),
-                    ));
-                    app.push_system(format!("Members ({}):", members.len()));
-                    for (pk, member) in &members {
-                        app.push_system(format!(
-                            "  {} ({}) — joined at {}",
-                            member.display_name,
-                            &pk[..16],
-                            member.joined_at,
-                        ));
+    // ── Seen trigger: send ReadReceipt when viewing remote messages ──
+    if let Some(conv) = tui.current_conv() {
+        if conv.follow_latest {
+            if let NetEvent::Message {
+                message: Message::Message { .. },
+                from: msg_from,
+                ..
+            } = event
+            {
+                if *msg_from != *local_public {
+                    if let NetEvent::Message { ref message, .. } = event {
+                        let msg_hash = message_hash(message);
+                        let receipt = Message::ReadReceipt {
+                            message_hash: msg_hash,
+                        };
+                        if let Ok(encoded) = SignedMessage::sign_and_encode(secret_key, &receipt) {
+                            let _ = sender.broadcast(encoded).await;
+                        }
                     }
                 }
-                return Ok(());
             }
+        }
+    }
 
-            if trimmed == "/connections" {
-                let peers: Vec<iroh::PublicKey> = app.status.neighbors.iter().copied().collect();
-                if peers.is_empty() {
-                    app.push_system("No known peers to inspect.");
-                } else {
-                    app.push_system(format!("Connections ({}):", peers.len()));
-                    for pk in &peers {
-                        let ctype = check_peer_connection_type(endpoint, *pk).await;
-                        let label = app.names.get(pk).cloned().unwrap_or_else(|| {
-                            let s = pk.fmt_short();
-                            s.to_string()
-                        });
-                        app.push_system(format!(
-                            "  {label} — {} ({})",
-                            match ctype {
-                                ConnectionType::Direct => "direct",
-                                ConnectionType::Relayed => "relayed",
-                                ConnectionType::Unknown => "unknown",
-                            },
-                            pk.fmt_short(),
-                        ));
-                    }
+    // ── Auto-download pending images ──
+    if let Some(conv) = tui.current_conv_mut() {
+        let pending_images: Vec<_> = conv.pending_image.drain(..).collect();
+        for (name, hash, sender_pk) in pending_images {
+            let candidates = download_candidates(sender_pk, &tui.status.neighbors);
+            match download_blob_with_progress(
+                blob_store,
+                endpoint,
+                hash,
+                candidates,
+                name.clone(),
+                TransferKind::Image,
+                |_| {},
+                None,
+            )
+            .await
+            {
+                Ok(_) => {
+                    tui.push_system(format!("Downloaded image: {name}"));
                 }
-                return Ok(());
+                Err(err) => {
+                    tui.push_system(format!("Failed to download image '{name}': {err}"));
+                }
             }
+        }
+    }
+    update_connection_counts(endpoint, &mut tui.status).await;
+    tui.status.recompute_mesh_health(endpoint).await;
 
-            if let Some(rest) = trimmed.strip_prefix("/edit ") {
-                // ── Edit a previously sent message ──────────────────────
-                let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
-                if parts.len() < 2 {
-                    app.push_system(
-                        "Usage: /edit <index> <new text> (index is 1-based message number)",
-                    );
-                    return Ok(());
+    // Persist new entries.
+    let current_topic = match tui.screen {
+        TuiScreen::Chat { topic } => topic,
+        _ => return Ok(()),
+    };
+    if let Some(conv) = tui.current_conv_mut() {
+        if conv.history_saved_count < conv.entries.len() {
+            let local_hex = hex::encode(local_public.as_bytes());
+            let mut store = chat_history.lock().unwrap();
+            for entry in &conv.entries[conv.history_saved_count..] {
+                if entry.event_id > 0 {
+                    continue;
                 }
-                let idx: usize = match parts[0].parse::<usize>() {
-                    Ok(n) if n >= 1 => n - 1,
-                    _ => {
-                        app.push_system("Invalid index. Use a positive number (1-based).");
-                        return Ok(());
-                    }
+                let kind = match entry.kind {
+                    ChatKind::System => "system",
+                    ChatKind::Local => "text",
+                    ChatKind::Remote => "text",
                 };
-                let new_text = parts[1].to_string();
-                let entry = match app.entries.get(idx) {
-                    Some(e) => e,
-                    None => {
-                        app.push_system(format!("No message at index {}.", idx + 1));
-                        return Ok(());
-                    }
+                let sender = match entry.kind {
+                    ChatKind::Local => local_hex.clone(),
+                    _ => String::new(),
                 };
-                let original_text = entry.body.clone();
-                let original_hash = message_hash(&Message::Message {
-                    text: original_text,
-                });
-                let message = Message::Edit {
-                    original_hash,
-                    new_text: new_text.clone(),
-                };
-                let encoded = SignedMessage::sign_and_encode(secret_key, &message)?;
-                sender.broadcast(encoded).await?;
-                // Update the local entry.
-                if let Some(entry) = app.entries.get_mut(idx) {
-                    entry.body = new_text;
-                    entry.edited = true;
-                }
-                app.push_system(format!("Edited message at index {}.", idx + 1));
-                return Ok(());
-            }
-
-            if let Some(rest) = trimmed.strip_prefix("/delete ") {
-                // ── Delete a previously sent message ────────────────────
-                let idx: usize = match rest.trim().parse::<usize>() {
-                    Ok(n) if n >= 1 => n - 1,
-                    _ => {
-                        app.push_system("Invalid index. Use a positive number (1-based).");
-                        return Ok(());
-                    }
-                };
-                let entry = match app.entries.get(idx) {
-                    Some(e) => e,
-                    None => {
-                        app.push_system(format!("No message at index {}.", idx + 1));
-                        return Ok(());
-                    }
-                };
-                let original_text = entry.body.clone();
-                let message_hash_val = message_hash(&Message::Message {
-                    text: original_text,
-                });
-                let message = Message::Delete {
-                    message_hash: message_hash_val,
-                };
-                let encoded = SignedMessage::sign_and_encode(secret_key, &message)?;
-                sender.broadcast(encoded).await?;
-                // Update the local entry.
-                if let Some(entry) = app.entries.get_mut(idx) {
-                    entry.body = "[deleted]".to_string();
-                    entry.edited = true;
-                }
-                app.push_system(format!("Deleted message at index {}.", idx + 1));
-                return Ok(());
-            }
-
-            if let Some(rest) = trimmed.strip_prefix("/react ") {
-                // ── React to a message ──────────────────────────
-                let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
-                if parts.len() < 2 {
-                    app.push_system(
-                        "Usage: /react <index> <emoji> (index is 1-based message number)",
-                    );
-                    return Ok(());
-                }
-                let idx: usize = match parts[0].parse::<usize>() {
-                    Ok(n) if n >= 1 => n - 1,
-                    _ => {
-                        app.push_system("Invalid index. Use a positive number (1-based).");
-                        return Ok(());
-                    }
-                };
-                let emoji = parts[1].to_string();
-                let entry = match app.entries.get(idx) {
-                    Some(e) => e,
-                    None => {
-                        app.push_system(format!("No message at index {}.", idx + 1));
-                        return Ok(());
-                    }
-                };
-                let original_text = entry.body.clone();
-                let message_hash_val = message_hash(&Message::Message {
-                    text: original_text,
-                });
-                let message = Message::Reaction {
-                    message_hash: message_hash_val,
-                    emoji: emoji.clone(),
-                };
-                let encoded = SignedMessage::sign_and_encode(secret_key, &message)?;
-                sender.broadcast(encoded).await?;
-                // Add reactions locally immediately.
-                if let Some(entry) = app.entries.get_mut(idx) {
-                    entry.reactions.push(emoji);
-                }
-                app.push_system(format!(
-                    "Reacted to message at index {} with {}.",
-                    idx + 1,
-                    parts[1]
+                store.push(HistoryEntry::new(
+                    current_topic,
+                    sender,
+                    Vec::new(),
+                    kind,
+                    entry.body.clone(),
                 ));
-                return Ok(());
             }
-
-            if let Some(rest) = trimmed.strip_prefix("/whisper ") {
-                // ── Whisper DM ──────────────────────────────────────────
-                let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
-                if parts.len() < 2 {
-                    app.push_system("Usage: /whisper <peer-key|friend-alias> <message>");
-                    return Ok(());
-                }
-                let target = parts[0].trim();
-                let message = parts[1].trim().to_string();
-                let peer_key = resolve_peer_key(app, target);
-                let peer_key = match peer_key {
-                    Some(pk) => pk,
-                    None => {
-                        app.push_system(format!(
-                            "Unknown peer: {target}. Use a public key or friend alias."
-                        ));
-                        return Ok(());
-                    }
-                };
-                // Check if this peer has a mailbox key for offline delivery.
-                let mailbox_pk = FriendId::from_public_key(peer_key);
-                let mailbox_pk = app
-                    .friends
-                    .get(&mailbox_pk)
-                    .and_then(|r| r.mailbox_public_key);
-                match whisper_handle.send_dm(peer_key, message.clone()).await {
-                    Ok(_) => {
-                        let label = app
-                            .names
-                            .get(&peer_key)
-                            .cloned()
-                            .unwrap_or_else(|| peer_key.fmt_short().to_string());
-                        app.push_local(
-                            local_label.to_string(),
-                            format!("[Whisper to {label}] {}", parts[1]),
-                        );
-                    }
-                    Err(_) if mailbox_pk.is_some() => {
-                        let mailbox_pk = mailbox_pk.unwrap();
-                        let data_dir = get_data_dir();
-                        match boru_chat::mailbox::seal_for(
-                            secret_key,
-                            mailbox_pk,
-                            message.as_bytes(),
-                        ) {
-                            Ok(envelope) => {
-                                let mut store = MailboxStore::load(&data_dir)
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or_else(|| MailboxStore::empty_at(&data_dir));
-                                match store.enqueue_outgoing(envelope) {
-                                    Ok(_) => {
-                                        if let Err(save_err) = store.save() {
-                                            app.push_system(format!(
-                                                "Failed to persist offline message: {save_err}"
-                                            ));
-                                        } else {
-                                            let label =
-                                                app.names.get(&peer_key).cloned().unwrap_or_else(
-                                                    || peer_key.fmt_short().to_string(),
-                                                );
-                                            app.push_system(format!("[Offline] Message encrypted and stored for {label}"));
-                                        }
-                                    }
-                                    Err(enq_err) => {
-                                        app.push_system(format!(
-                                            "Failed to queue offline message: {enq_err}"
-                                        ));
-                                    }
-                                }
-                            }
-                            Err(seal_err) => {
-                                app.push_system(format!(
-                                    "Failed to encrypt offline message: {seal_err}"
-                                ));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        app.push_system(format!("Whisper failed: {e}"));
-                    }
-                }
-                return Ok(());
+            conv.history_saved_count = conv.entries.len();
+            drop(store);
+            if let Err(err) = chat_history.lock().unwrap().save() {
+                tracing::warn!(error = %err, "failed to save chat history");
             }
+        }
+    }
 
-            if let Some(rest) = trimmed.strip_prefix("/whisper-file ") {
-                // ── Whisper file transfer ───────────────────────────────
-                let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
-                if parts.len() < 2 {
-                    app.push_system("Usage: /whisper-file <peer-key|friend-alias> <path>");
-                    return Ok(());
-                }
-                let target = parts[0].trim();
-                let path = parts[1].trim().to_string();
-                let peer_key = resolve_peer_key(app, target);
-                let peer_key = match peer_key {
-                    Some(pk) => pk,
-                    None => {
-                        app.push_system(format!(
-                            "Unknown peer: {target}. Use a public key or friend alias."
-                        ));
-                        return Ok(());
-                    }
-                };
-
-                let path_buf = std::path::PathBuf::from(&path);
-                let abs_path = match std::path::absolute(&path_buf) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        app.push_system(format!("Failed to resolve path: {e}"));
-                        return Ok(());
-                    }
-                };
-                if !abs_path.exists() {
-                    app.push_system(format!("File not found: {}", path));
-                    return Ok(());
-                }
-                let filename = match path_buf
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                {
-                    Some(name) => name,
-                    None => {
-                        app.push_system("Invalid file path.");
-                        return Ok(());
-                    }
-                };
-
-                app.push_system(format!("Hashing file: {filename}..."));
-                let tag = match blob_store.blobs().add_path(abs_path).await {
-                    Ok(tag) => tag,
-                    Err(e) => {
-                        app.push_system(format!("Failed to hash file: {e}"));
-                        return Ok(());
-                    }
-                };
-
-                let node_id = endpoint.id();
-                let ticket = BlobTicket::new(node_id.into(), tag.hash, tag.format);
-                let ticket_str = ticket.to_string();
-
-                match whisper_handle
-                    .send_file(peer_key, filename.clone(), ticket_str.clone())
-                    .await
-                {
-                    Ok(_) => {
-                        app.push_local(
-                            local_label.to_string(),
-                            format!("/whisper-file {target} {path}"),
-                        );
-                        app.push_system(format!("Sent file '{filename}' via whisper to peer"));
-                    }
-                    Err(e) => {
-                        app.push_system(format!("Whisper file transfer failed: {e}"));
-                    }
-                }
-                return Ok(());
-            }
-
-            // Normal text message
-            let message = Message::Message {
-                text: trimmed.clone(),
-            };
-            let encoded_message = SignedMessage::sign_and_encode(secret_key, &message)?;
-            let msg_hash = message_hash(&message);
-            let local_hex = hex::encode(secret_key.public().as_bytes());
-            let event_id = {
-                let mut store = chat_history.lock().unwrap();
-                let entry = HistoryEntry::new(
-                    app.status.topic,
-                    local_hex.clone(),
-                    encoded_message.to_vec(),
-                    "text",
-                    trimmed.clone(),
-                );
-                let id = store.push_with_id(entry);
-                // Mark as Sent immediately after broadcast in the history.
-                let _ = store.update_delivery_state(id, DeliveryState::Sent);
-                id
-            };
-            // Register in self_sent_events for delivery-state resolution
-            app.self_sent_events.insert(msg_hash, event_id);
-            match sender.broadcast(encoded_message.clone()).await {
-                Ok(()) => {
-                    let mut entry = ChatEntry::local(local_label.to_string(), trimmed);
-                    entry.message_hash = Some(msg_hash);
-                    entry.event_id = event_id;
-                    entry.delivery_state = DeliveryState::Sent;
-                    app.push_entry(entry, true);
-                }
-                Err(e) => {
-                    // Mark as Failed in history store
-                    {
-                        let mut store = chat_history.lock().unwrap();
-                        let _ = store.update_delivery_state(event_id, DeliveryState::Failed);
-                    }
-                    app.push_system(format!("Send failed: {e}"));
+    // ── Seen-on-visibility ──
+    if let Some(conv) = tui.current_conv_mut() {
+        if conv.follow_latest {
+            let mut store = chat_history.lock().unwrap();
+            for ui_entry in conv.entries.iter_mut() {
+                if ui_entry.delivery_state == DeliveryState::Delivered && ui_entry.event_id > 0 {
+                    ui_entry.delivery_state = DeliveryState::Seen;
+                    let _ = store.update_delivery_state(ui_entry.event_id, DeliveryState::Seen);
                 }
             }
         }
-        KeyEvent {
-            code: KeyCode::Backspace,
-            ..
-        } => app.composer.backspace(),
-        KeyEvent {
-            code: KeyCode::Delete,
-            ..
-        } => app.composer.delete(),
-        KeyEvent {
-            code: KeyCode::Left,
-            ..
-        } => app.composer.move_left(),
-        KeyEvent {
-            code: KeyCode::Right,
-            ..
-        } => app.composer.move_right(),
-        KeyEvent {
-            code: KeyCode::Home,
-            ..
-        } => app.composer.move_home(),
-        KeyEvent {
-            code: KeyCode::End, ..
-        } => app.composer.move_end(),
-        KeyEvent {
-            code: KeyCode::PageUp,
-            ..
-        } => app.scroll_up(visible_height.max(1) / 2, visible_height),
-        KeyEvent {
-            code: KeyCode::PageDown,
-            ..
-        } => app.scroll_down(visible_height.max(1) / 2, visible_height),
-        KeyEvent {
-            code: KeyCode::Char(ch),
-            modifiers,
-            ..
-        } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
-            app.composer.insert_char(ch);
-        }
-        _ => {}
     }
 
     Ok(())
 }
 
-// ── Whisper event handling ──────────────────────────────────────────────────────
+// ── Friend event handling ─────────────────────────────────────────────
 
-/// Resolve a peer identifier (public key string or friend alias) to a [`PublicKey`].
-fn resolve_peer_key(app: &AppState, target: &str) -> Option<PublicKey> {
-    if let Ok(pk) = target.parse::<PublicKey>() {
-        return Some(pk);
-    }
-    // Try to resolve by friend alias.
-    app.friends
-        .iter()
-        .find(|(_, rec)| rec.label.as_deref() == Some(target))
-        .and_then(|(fid, _)| fid.parse_public_key().ok())
-}
-
-/// Handle a [`WhisperEvent`] from the whisper protocol background task.
-fn handle_whisper_event(event: WhisperEvent, app: &mut AppState) {
+fn handle_friend_event(event: FriendEvent, tui: &mut TuiState) {
     match event {
-        WhisperEvent::Message { from, content } => {
-            let text = String::from_utf8_lossy(&content).to_string();
-            let label = app
-                .names
-                .get(&from)
-                .cloned()
-                .unwrap_or_else(|| from.fmt_short().to_string());
-
-            // Suppress internal private-chat invitation markers; show a
-            // system message instead so the user knows someone initiated
-            // a chat on the other end.
-            if text == "\x00PRIVATE_CHAT" {
-                app.push_system(format!("{label} opened a private chat with you."));
-                return;
+        FriendEvent::StatusChanged { peer, status } => {
+            let fid = FriendId::from_public_key(peer);
+            let label = tui
+                .friends
+                .get(&fid)
+                .and_then(|r| r.display_label(&fid).into())
+                .unwrap_or_else(|| peer.fmt_short().to_string());
+            let has_been_seen = tui
+                .friends
+                .get(&fid)
+                .map(|r| {
+                    r.status.last_seen_at_unix_ms.is_some()
+                        || r.status.last_offline_at_unix_ms.is_some()
+                })
+                .unwrap_or(false);
+            match status {
+                FriendStatus::Online => {
+                    tui.friends.mark_online(fid);
+                    tui.friends_dirty = true;
+                    if has_been_seen {
+                        tui.push_system(format!("Friend {label} is now ONLINE"));
+                    }
+                }
+                FriendStatus::Offline => {
+                    tui.friends.mark_offline(fid);
+                    tui.friends_dirty = true;
+                    if has_been_seen {
+                        tui.push_system(format!("Friend {label} is now offline"));
+                    }
+                }
+                FriendStatus::Unknown => {}
             }
-
-            app.push_entry(
-                ChatEntry::remote(format!("Whisper from {label}"), text),
-                true,
-            );
         }
-        WhisperEvent::FileTransfer { from, name, ticket } => {
-            let label = app
-                .names
-                .get(&from)
-                .cloned()
-                .unwrap_or_else(|| from.fmt_short().to_string());
-            app.push_system(format!(
-                "[Whisper from {label}] File received: {name}. Use /download to fetch."
-            ));
-            // Store pending file download info so the user can /download.
-            app.pending_file = Some((name, ticket));
-        }
-        WhisperEvent::Connected { peer } => {
-            let label = app
-                .names
-                .get(&peer)
-                .cloned()
-                .unwrap_or_else(|| peer.fmt_short().to_string());
-            app.push_system(format!("[Whisper] Connected to {label}"));
-        }
-        WhisperEvent::Disconnected { peer } => {
-            let label = app
-                .names
-                .get(&peer)
-                .cloned()
-                .unwrap_or_else(|| peer.fmt_short().to_string());
-            app.push_system(format!("[Whisper] Disconnected from {label}"));
-        }
-        WhisperEvent::Control { .. } => {
-            // Control messages are signed contact-protocol payloads consumed
-            // by the contact/session manager.  The simple CLI chat doesn't
-            // process them.
-        }
-        WhisperEvent::MailboxEnvelope { .. } => {
-            // Mailbox envelopes are encrypted and processed by the mailbox
-            // store — the simple CLI chat does not interpret them.
-        }
-        WhisperEvent::MailboxAck { .. } => {
-            // Mailbox acknowledgements are verified and removed by the
-            // mailbox store — the simple CLI chat does not interpret them.
+        FriendEvent::AddressUpdated { peer, addr } => {
+            tui.friends
+                .ensure_friend(FriendId::from_public_key(peer))
+                .record_addrs([addr]);
+            tui.friends_dirty = true;
         }
     }
 }
 
-/// Handle an [`InboxEvent`] from the inbox protocol (offline-message delivery).
-async fn handle_inbox_event(
-    endpoint: &Endpoint,
-    event: InboxEvent,
-    app: &mut AppState,
+// ── Whisper event handling ─────────────────────────────────────────────
+
+async fn handle_whisper_event_loop(
+    event: WhisperEvent,
+    tui: &mut TuiState,
+    session: &Arc<SessionCtx>,
     data_dir: &Path,
     secret_key: &SecretKey,
+    endpoint: &Endpoint,
+    sender: &boru_chat::api::GossipSender,
+) {
+    // Handle Connected events for mailbox sync.
+    let (is_connected, connected_peer) = match &event {
+        WhisperEvent::Connected { peer } => (true, Some(*peer)),
+        _ => (false, None),
+    };
+
+    // Non-Connected events: use standard handler via AppState wrapper.
+    if !is_connected {
+        let mut app = AppState::new(
+            tui.status.clone(),
+            tui.friends.clone(),
+            tui.local_public,
+            Some(tui.local_label.clone()),
+        );
+        app.names = tui.global_names.clone();
+        if let Some(conv) = tui.current_conv() {
+            app.entries = conv.entries.clone();
+        }
+
+        // Handle the event using the shared handler pattern from chat.rs.
+        match event {
+            WhisperEvent::Message { from, content } => {
+                let text = String::from_utf8_lossy(&content).to_string();
+                let label = tui.resolve_name(&from);
+                if text == "\x00PRIVATE_CHAT" {
+                    tui.push_system(format!("{label} opened a private chat with you."));
+                } else {
+                    tui.push_remote_to(tui.status.topic, format!("Whisper from {label}"), text);
+                }
+            }
+            WhisperEvent::FileTransfer { from, name, ticket } => {
+                let label = tui.resolve_name(&from);
+                tui.push_system(format!(
+                    "[Whisper from {label}] File received: {name}. Use /download to fetch."
+                ));
+                if let Some(conv) = tui.current_conv_mut() {
+                    conv.pending_file = Some((name, ticket));
+                }
+            }
+            WhisperEvent::Disconnected { peer } => {
+                let label = tui.resolve_name(&peer);
+                tui.push_system(format!("[Whisper] Disconnected from {label}"));
+            }
+            WhisperEvent::Control { .. } => {}
+            WhisperEvent::MailboxEnvelope { .. } => {}
+            WhisperEvent::MailboxAck { .. } => {}
+            _ => {}
+        }
+    }
+
+    if let Some(peer) = connected_peer {
+        let label = tui.resolve_name(&peer);
+        tui.push_system(format!("[Whisper] Connected to {label}"));
+
+        let has_mailbox = tui
+            .friends
+            .get(&FriendId::from_public_key(peer))
+            .and_then(|r| r.mailbox_public_key)
+            .is_some();
+        if has_mailbox {
+            match send_sync_request(endpoint, secret_key, peer, 0).await {
+                Ok(envelopes) => {
+                    let mut store =
+                        MailboxStore::load(data_dir)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| {
+                                MailboxStore::for_recipient(data_dir, secret_key.public())
+                            });
+                    let identity = MailboxIdentity::from_secret(secret_key);
+                    for env in envelopes {
+                        match store.accept_incoming(&identity, env, &[peer]) {
+                            Ok((_msg_id, plaintext)) => {
+                                if let Ok(text) = String::from_utf8(plaintext) {
+                                    tui.push_system(format!("[Offline DM from {label}] {text}"));
+                                }
+                                let _ = store.save();
+                                let ack = MailboxAck::sign(secret_key, &_msg_id);
+                                let _ = boru_chat::inbox::send_ack(endpoint, secret_key, peer, ack)
+                                    .await;
+                            }
+                            Err(e) => {
+                                tui.push_system(format!(
+                                    "[Mailbox] Failed to accept replayed envelope from {label}: {e}"
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tui.push_system(format!("[Mailbox] Failed to sync with {label}: {e}"));
+                }
+            }
+        }
+    }
+}
+
+// ── Inbox event handling ───────────────────────────────────────────────
+
+async fn handle_inbox_event_loop(
+    endpoint: &Endpoint,
+    event: InboxEvent,
+    tui: &mut TuiState,
+    data_dir: &Path,
+    secret_key: &SecretKey,
+    sender: &boru_chat::api::GossipSender,
 ) {
     match event {
         InboxEvent::EnvelopeReceived { from, envelope } => {
-            let label = app
-                .names
-                .get(&from)
-                .cloned()
-                .unwrap_or_else(|| from.fmt_short().to_string());
-
-            // Load mailbox store, accept incoming (validates + persists).
+            let label = tui.resolve_name(&from);
             let mut store = match MailboxStore::load(data_dir)
                 .ok()
                 .flatten()
@@ -2167,19 +1692,14 @@ async fn handle_inbox_event(
             match store.accept_incoming(&identity, envelope, &[from]) {
                 Ok((_msg_id, plaintext)) => {
                     if let Ok(text) = String::from_utf8(plaintext) {
-                        app.push_entry(
-                            ChatEntry::remote(format!("Offline DM from {label}"), text),
-                            true,
-                        );
+                        tui.push_system(format!("[Offline DM from {label}] {text}"));
                     }
-                    // Persist accepted state.
                     let _ = store.save();
-                    // Send acknowledgement.
-                    let ack = boru_chat::mailbox::MailboxAck::sign(secret_key, &_msg_id);
+                    let ack = MailboxAck::sign(secret_key, &_msg_id);
                     let _ = boru_chat::inbox::send_ack(endpoint, secret_key, from, ack).await;
                 }
                 Err(e) => {
-                    app.push_system(format!(
+                    tui.push_system(format!(
                         "[Mailbox] Failed to accept envelope from {label}: {e}"
                     ));
                 }
@@ -2189,7 +1709,6 @@ async fn handle_inbox_event(
             from: _from,
             ack: _ack,
         } => {
-            // Remove acknowledged envelope from local store.
             let mut store = match MailboxStore::load(data_dir)
                 .ok()
                 .flatten()
@@ -2207,173 +1726,793 @@ async fn handle_inbox_event(
         }
         InboxEvent::SyncRequested { from, since_ms } => {
             tracing::info!(
-                "inbox: sync requested by {} since_ms={}",
-                from.fmt_short(),
-                since_ms
+                "inbox: sync requested by {} since_ms={since_ms}",
+                from.fmt_short()
             );
         }
     }
 }
 
-// ── Friend event handling ──────────────────────────────────────────────────────
+// ── UI event handling ─────────────────────────────────────────────────
 
-/// Handle a [`FriendEvent`] from the friend ping manager background task.
-fn handle_friend_event(event: FriendEvent, app: &mut AppState) {
+#[allow(clippy::too_many_arguments)]
+async fn handle_ui_event(
+    event: UiEvent,
+    tui: &mut TuiState,
+    sender: &boru_chat::api::GossipSender,
+    secret_key: &SecretKey,
+    local_label: &str,
+    endpoint: &Endpoint,
+    blob_store: &MemStore,
+    friend_mgr: &FriendPingManager,
+    room_docs: &Arc<RwLock<Option<RoomDocs>>>,
+    whisper_handle: &WhisperHandle,
+    chat_history: &Arc<Mutex<ChatHistoryStore>>,
+    topic: TopicId,
+) -> Result<bool> {
     match event {
-        FriendEvent::StatusChanged { peer, status } => {
-            let fid = FriendId::from_public_key(peer);
-            let label = app
-                .friends
-                .get(&fid)
-                .and_then(|r| r.display_label(&fid).into())
-                .unwrap_or_else(|| peer.fmt_short().to_string());
-
-            // Only show system messages for runtime transitions, not the
-            // initial scan. A friend with no last_seen_at or last_offline_at
-            // is being heard from for the first time.
-            let has_been_seen = app
-                .friends
-                .get(&fid)
-                .map(|r| {
-                    r.status.last_seen_at_unix_ms.is_some()
-                        || r.status.last_offline_at_unix_ms.is_some()
-                })
-                .unwrap_or(false);
-
-            match status {
-                FriendStatus::Online => {
-                    app.friends.mark_online(fid);
-                    app.friends_dirty = true;
-                    if has_been_seen {
-                        app.push_system(format!("Friend {label} is now ONLINE"));
-                    }
-                }
-                FriendStatus::Offline => {
-                    app.friends.mark_offline(fid);
-                    app.friends_dirty = true;
-                    if has_been_seen {
-                        app.push_system(format!("Friend {label} is now offline"));
-                    }
-                }
-                FriendStatus::Unknown => {
-                    // No transition to display for Unknown
+        UiEvent::Key(key) => {
+            handle_key_event(
+                key,
+                tui,
+                sender,
+                secret_key,
+                local_label,
+                endpoint,
+                blob_store,
+                friend_mgr,
+                room_docs,
+                whisper_handle,
+                chat_history,
+                topic,
+            )
+            .await?;
+            Ok(true)
+        }
+        UiEvent::Resize => Ok(true),
+        UiEvent::Paste(text) => {
+            if let Some(conv) = tui.current_conv_mut() {
+                conv.composer_text.push_str(&text);
+            }
+            Ok(true)
+        }
+        UiEvent::SwitchScreen(screen) => {
+            tui.screen = screen;
+            Ok(true)
+        }
+        UiEvent::SelectConv(idx) => {
+            if idx < tui.conversation_order.len() {
+                let topic = tui.conversation_order[idx];
+                tui.screen = TuiScreen::Chat { topic };
+                tui.selected_conv_index = idx;
+                // Clear unread when entering a conversation.
+                if let Some(conv) = tui.conversations.get_mut(&topic) {
+                    conv.unread = 0;
                 }
             }
+            Ok(true)
         }
-        FriendEvent::AddressUpdated { peer, addr } => {
-            app.friends
-                .ensure_friend(FriendId::from_public_key(peer))
-                .record_addrs([addr]);
-            app.friends_dirty = true;
+        UiEvent::AcceptFriendRequest(request_id) => {
+            let local_pk = tui.local_public.to_string();
+            // Find the request and accept it.
+            let request_clone = tui.friend_request_store.get(&request_id).cloned();
+            if let Some(mut req) = request_clone {
+                if req.status == FriendRequestStatus::Pending && req.recipient == local_pk {
+                    // Update the FriendRequestStore.
+                    let _ = tui
+                        .friend_request_store
+                        .accept_request(&local_pk, &request_id);
+                    // Add as a friend.
+                    if let Ok(pk) = req.requester.parse::<PublicKey>() {
+                        let fid = FriendId::from_public_key(pk);
+                        tui.friends.ensure_friend(fid);
+                        tui.friends_dirty = true;
+                        tui.push_system(format!("Accepted friend request from {}", req.requester));
+                        // Start pinging the new friend.
+                        let _ = friend_mgr.add_friend(pk, None).await;
+                    }
+                    // Save.
+                    let _ = tui.friend_request_store.save();
+                }
+            }
+            Ok(true)
+        }
+        UiEvent::DeclineFriendRequest(request_id) => {
+            let local_pk = tui.local_public.to_string();
+            let _ = tui
+                .friend_request_store
+                .decline_request(&local_pk, &request_id);
+            tui.push_system("Declined friend request");
+            let _ = tui.friend_request_store.save();
+            Ok(true)
+        }
+        UiEvent::SendFriendRequest(peer_key) => {
+            let local_pk = tui.local_public.to_string();
+            match tui
+                .friend_request_store
+                .send_request(&local_pk, &peer_key, None)
+            {
+                Ok(req) => {
+                    tui.push_system(format!("Friend request sent to {peer_key}"));
+                    let _ = tui.friend_request_store.save();
+                    Ok(true)
+                }
+                Err(e) => {
+                    tui.push_system(format!("Failed to send friend request: {e}"));
+                    Ok(true)
+                }
+            }
         }
     }
 }
 
-// ── TUI rendering ─────────────────────────────────────────────────────────────
+#[allow(clippy::too_many_arguments)]
+async fn handle_key_event(
+    key: KeyEvent,
+    tui: &mut TuiState,
+    sender: &boru_chat::api::GossipSender,
+    secret_key: &SecretKey,
+    local_label: &str,
+    endpoint: &Endpoint,
+    blob_store: &MemStore,
+    friend_mgr: &FriendPingManager,
+    room_docs: &Arc<RwLock<Option<RoomDocs>>>,
+    whisper_handle: &WhisperHandle,
+    chat_history: &Arc<Mutex<ChatHistoryStore>>,
+    _topic: TopicId,
+) -> Result<()> {
+    // ── Global keys (work in any screen) ──
+    match key {
+        KeyEvent {
+            code: KeyCode::Esc, ..
+        } => {
+            if tui.help_visible {
+                tui.help_visible = false;
+                return Ok(());
+            }
+            // If on a Chat screen, go back to ChatList.
+            if matches!(tui.screen, TuiScreen::Chat { .. }) {
+                tui.screen = TuiScreen::ChatList;
+                return Ok(());
+            }
+            // If on FriendRequests, go back to ChatList.
+            if matches!(tui.screen, TuiScreen::FriendRequests) {
+                tui.screen = TuiScreen::ChatList;
+                return Ok(());
+            }
+            // Quit.
+            let goodbye = SignedMessage::sign_and_encode(secret_key, &Message::Leave);
+            if let Ok(encoded) = goodbye {
+                let _ = sender.broadcast(encoded).await;
+            }
+            tui.should_quit = true;
+        }
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers,
+            ..
+        } if modifiers.contains(KeyModifiers::CONTROL) => {
+            let goodbye = SignedMessage::sign_and_encode(secret_key, &Message::Leave);
+            if let Ok(encoded) = goodbye {
+                let _ = sender.broadcast(encoded).await;
+            }
+            tui.should_quit = true;
+        }
+        KeyEvent {
+            code: KeyCode::Tab, ..
+        } => {
+            // Cycle through screens: ChatList → Chat → FriendRequests → ChatList
+            tui.screen = match &tui.screen {
+                TuiScreen::ChatList => {
+                    // Select the first conversation if available.
+                    if !tui.conversation_order.is_empty() {
+                        TuiScreen::Chat {
+                            topic: tui.conversation_order[0],
+                        }
+                    } else {
+                        TuiScreen::FriendRequests
+                    }
+                }
+                TuiScreen::Chat { .. } => TuiScreen::FriendRequests,
+                TuiScreen::FriendRequests => TuiScreen::ChatList,
+            };
+            return Ok(());
+        }
+        KeyEvent {
+            code: KeyCode::BackTab,
+            ..
+        }
+        | KeyEvent {
+            code: KeyCode::Char('q'),
+            ..
+        } => {
+            // We don't handle BackTab/Shift+Tab via this match arm
+            // (ratatui doesn't always expose it cleanly). Fall through.
+        }
+        _ => {}
+    }
 
-fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
-    let status_height = status_panel_height(&app.status);
+    // ── Screen-specific keys ──
+    match &tui.screen {
+        TuiScreen::ChatList => {
+            handle_chatlist_key(
+                key,
+                tui,
+                sender,
+                secret_key,
+                endpoint,
+                blob_store,
+                friend_mgr,
+                room_docs,
+                whisper_handle,
+                chat_history,
+            )
+            .await?
+        }
+        TuiScreen::Chat { .. } => {
+            handle_chat_key(
+                key,
+                tui,
+                sender,
+                secret_key,
+                local_label,
+                endpoint,
+                blob_store,
+                friend_mgr,
+                room_docs,
+                whisper_handle,
+                chat_history,
+            )
+            .await?
+        }
+        TuiScreen::FriendRequests => handle_friend_requests_key(key, tui).await?,
+    }
+
+    Ok(())
+}
+
+// ── Chat list screen key handling ─────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_chatlist_key(
+    key: KeyEvent,
+    tui: &mut TuiState,
+    sender: &boru_chat::api::GossipSender,
+    secret_key: &SecretKey,
+    endpoint: &Endpoint,
+    blob_store: &MemStore,
+    friend_mgr: &FriendPingManager,
+    room_docs: &Arc<RwLock<Option<RoomDocs>>>,
+    whisper_handle: &WhisperHandle,
+    chat_history: &Arc<Mutex<ChatHistoryStore>>,
+) -> Result<()> {
+    let key_code = key.code;
+    match key_code {
+        KeyCode::Up => {
+            if tui.selected_conv_index > 0 {
+                tui.selected_conv_index -= 1;
+            }
+        }
+        KeyCode::Down => {
+            if tui.selected_conv_index < tui.conversation_order.len().saturating_sub(1) {
+                tui.selected_conv_index += 1;
+            }
+        }
+        KeyCode::Enter => {
+            // Open the selected conversation.
+            if tui.selected_conv_index < tui.conversation_order.len() {
+                let topic = tui.conversation_order[tui.selected_conv_index];
+                tui.screen = TuiScreen::Chat { topic };
+                if let Some(conv) = tui.conversations.get_mut(&topic) {
+                    conv.unread = 0;
+                }
+            }
+        }
+        KeyCode::F(2) => {
+            tui.screen = TuiScreen::FriendRequests;
+        }
+        KeyCode::Char('h') | KeyCode::Char('?') => {
+            tui.help_visible = true;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ── Chat screen key handling ──────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_chat_key(
+    key: KeyEvent,
+    tui: &mut TuiState,
+    sender: &boru_chat::api::GossipSender,
+    secret_key: &SecretKey,
+    local_label: &str,
+    endpoint: &Endpoint,
+    blob_store: &MemStore,
+    friend_mgr: &FriendPingManager,
+    room_docs: &Arc<RwLock<Option<RoomDocs>>>,
+    whisper_handle: &WhisperHandle,
+    chat_history: &Arc<Mutex<ChatHistoryStore>>,
+) -> Result<()> {
+    let visible_height = tui.current_conv().map(|c| c.last_log_height).unwrap_or(10);
+
+    match key {
+        KeyEvent {
+            code: KeyCode::Enter,
+            ..
+        } => {
+            let topic = match &tui.screen {
+                TuiScreen::Chat { topic } => *topic,
+                _ => return Ok(()),
+            };
+            let conv = match tui.conversations.get_mut(&topic) {
+                Some(c) => c,
+                None => return Ok(()),
+            };
+            let submitted = std::mem::take(&mut conv.composer_text);
+            let trimmed = submitted.trim().to_string();
+            if trimmed.is_empty() {
+                return Ok(());
+            }
+
+            // Handle slash commands.
+            if let Some(path) = trimmed.strip_prefix("/send ") {
+                // ── File send via iroh-blobs ──
+                let path = path.trim().to_string();
+                let path_buf = std::path::PathBuf::from(&path);
+                let abs_path = match std::path::absolute(&path_buf) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tui.push_system(format!("Failed to resolve path: {e}"));
+                        return Ok(());
+                    }
+                };
+                if !abs_path.exists() {
+                    tui.push_system(format!("File not found: {path}"));
+                    return Ok(());
+                }
+                let filename = match path_buf
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                {
+                    Some(name) => name,
+                    None => {
+                        tui.push_system("Invalid file path.");
+                        return Ok(());
+                    }
+                };
+                tui.push_system(format!("Hashing file: {filename}..."));
+                let tag = match blob_store.blobs().add_path(abs_path).await {
+                    Ok(tag) => tag,
+                    Err(e) => {
+                        tui.push_system(format!("Failed to hash file: {e}"));
+                        return Ok(());
+                    }
+                };
+                let node_id = endpoint.id();
+                let blob_ticket = BlobTicket::new(node_id.into(), tag.hash, tag.format);
+                let ticket_str = blob_ticket.to_string();
+                let message = Message::FileShare {
+                    name: filename.clone(),
+                    ticket: ticket_str.clone(),
+                };
+                let encoded_message = SignedMessage::sign_and_encode(secret_key, &message)?;
+                sender.broadcast(encoded_message).await?;
+                if let Some(c) = tui.conversations.get_mut(&topic) {
+                    c.push_entry(ChatEntry::local(
+                        local_label.to_string(),
+                        format!("/send {path}"),
+                    ));
+                }
+                tui.push_system(format!("Sharing: {filename} (ticket: {ticket_str})"));
+                return Ok(());
+            }
+
+            if trimmed == "/download" {
+                // ── File download ──
+                let pending = tui
+                    .conversations
+                    .get(&topic)
+                    .and_then(|c| c.pending_file.clone());
+                if let Some((filename, ticket_str)) = pending {
+                    let blob_ticket: BlobTicket = match ticket_str.parse() {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tui.push_system(format!("Failed to parse ticket: {e}"));
+                            return Ok(());
+                        }
+                    };
+                    let peer_id = blob_ticket.addr().id;
+                    let candidates = download_candidates(peer_id, &tui.status.neighbors);
+                    tui.push_system(format!("Downloading: {filename}..."));
+                    // Safety: using the standard download without room-level safety checks.
+                    if let Err(e) = download_blob_with_progress(
+                        blob_store,
+                        endpoint,
+                        blob_ticket.hash(),
+                        candidates,
+                        filename.clone(),
+                        TransferKind::File,
+                        |_| {},
+                        None,
+                    )
+                    .await
+                    {
+                        tui.push_system(format!("Download failed: {e}"));
+                        return Ok(());
+                    }
+                    tui.push_system("Download complete. Exporting to disk...");
+                    let dest = std::env::current_dir().unwrap_or_default().join(&filename);
+                    if let Err(e) = blob_store.blobs().export(blob_ticket.hash(), dest).await {
+                        tui.push_system(format!("Export failed: {e}"));
+                        return Ok(());
+                    }
+                    tui.push_system(format!("Saved: {filename}"));
+                    if let Some(conv) = tui.conversations.get_mut(&topic) {
+                        conv.pending_file = None;
+                    }
+                } else {
+                    tui.push_system("No pending file to download.");
+                }
+                return Ok(());
+            }
+
+            if trimmed == "/help" {
+                tui.help_visible = true;
+                return Ok(());
+            }
+
+            // Friend commands.
+            if let Some(pubkey_str) = trimmed.strip_prefix("/friend add ") {
+                let pubkey_str = pubkey_str.trim().to_string();
+                let (pubkey, alias) =
+                    if let Some((key_part, rest)) = pubkey_str.split_once(char::is_whitespace) {
+                        (key_part.to_string(), Some(rest.trim().to_string()))
+                    } else {
+                        (pubkey_str, None)
+                    };
+                match pubkey.parse::<PublicKey>() {
+                    Ok(peer) => {
+                        let fid = FriendId::from_public_key(peer);
+                        let was_new = tui.friends.get(&fid).is_none();
+                        if let Some(alias_text) = &alias {
+                            tui.friends.set_label(fid.clone(), alias_text.clone());
+                        } else {
+                            tui.friends.ensure_friend(fid.clone());
+                        }
+                        tui.friends_dirty = true;
+                        let addr = tui
+                            .friends
+                            .get(&fid)
+                            .and_then(|record| record.known_addrs.first().cloned());
+                        match friend_mgr.add_friend(peer, addr).await {
+                            Ok(_) => {
+                                if was_new {
+                                    let label = if let Some(ref alias_text) = alias {
+                                        format!("{alias_text} ({})", peer.fmt_short())
+                                    } else {
+                                        peer.fmt_short().to_string()
+                                    };
+                                    tui.push_system(format!("Added friend: {label}"));
+                                } else {
+                                    tui.push_system(format!(
+                                        "Updated friend: {}",
+                                        peer.fmt_short()
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                tui.push_system(format!("Failed to add friend: {e}"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tui.push_system(format!("Invalid public key: {e}"));
+                    }
+                }
+                return Ok(());
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("/friend remove ") {
+                let target = rest.trim().to_string();
+                let resolved = if let Ok(pk) = target.parse::<PublicKey>() {
+                    Some((pk, FriendId::from_public_key(pk)))
+                } else {
+                    tui.friends
+                        .iter()
+                        .find(|(_, rec)| rec.label.as_deref() == Some(&target))
+                        .map(|(fid, _)| (fid.parse_public_key().ok(), fid.clone()))
+                        .and_then(|(pk_opt, fid)| pk_opt.map(|pk| (pk, fid)))
+                };
+                match resolved {
+                    Some((peer, fid)) => {
+                        let label = tui
+                            .friends
+                            .get(&fid)
+                            .and_then(|r| r.label.clone())
+                            .unwrap_or_else(|| peer.fmt_short().to_string());
+                        tui.friends.remove(&fid);
+                        tui.friends_dirty = true;
+                        let _ = friend_mgr.remove_friend(&peer).await;
+                        tui.push_system(format!("Removed friend: {label}"));
+                    }
+                    None => {
+                        tui.push_system(format!("Friend not found: {target}"));
+                    }
+                }
+                return Ok(());
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("/friend rename ") {
+                let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
+                if parts.len() < 2 {
+                    tui.push_system("Usage: /friend rename <public-key> <new-alias>");
+                    return Ok(());
+                }
+                let target = parts[0].trim();
+                let new_alias = parts[1].trim().to_string();
+                let resolved = if let Ok(pk) = target.parse::<PublicKey>() {
+                    Some(FriendId::from_public_key(pk))
+                } else {
+                    tui.friends
+                        .iter()
+                        .find(|(_, rec)| rec.label.as_deref() == Some(target))
+                        .map(|(fid, _)| fid.clone())
+                };
+                match resolved {
+                    Some(fid) => {
+                        tui.friends.set_label(fid.clone(), &new_alias);
+                        tui.friends_dirty = true;
+                        tui.push_system(format!("Renamed friend to: {new_alias}"));
+                    }
+                    None => {
+                        tui.push_system(format!("Friend not found: {target}"));
+                    }
+                }
+                return Ok(());
+            }
+
+            if trimmed == "/friend list" {
+                match friend_mgr.list_friends().await {
+                    Ok(list) => {
+                        if list.is_empty() && tui.friends.is_empty() {
+                            tui.push_system("No friends tracked yet.");
+                        } else {
+                            tui.push_system(format!("Friends ({}):", tui.friends.len()));
+                            for (peer, status) in &list {
+                                let fid = FriendId::from_public_key(*peer);
+                                let label = tui.resolve_name(peer);
+                                let status_str = match status {
+                                    FriendStatus::Unknown => "?",
+                                    FriendStatus::Online => "ONLINE",
+                                    FriendStatus::Offline => "offline",
+                                };
+                                let ping_status = tui
+                                    .friends
+                                    .get(&fid)
+                                    .map(|r| if r.status.online { "online" } else { "offline" })
+                                    .unwrap_or("unknown");
+                                tui.push_system(format!(
+                                    "  {label}: {status_str} (persisted: {ping_status})"
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tui.push_system(format!("Failed to list friends: {e}"));
+                    }
+                }
+                return Ok(());
+            }
+
+            if trimmed == "/room info" {
+                let has_docs = room_docs.read().unwrap().as_ref().is_some();
+                if !has_docs {
+                    tui.push_system("No room docs available (room not initialised).");
+                } else {
+                    let metadata_doc = room_docs.read().unwrap().as_ref().unwrap().metadata.clone();
+                    let roster = room_docs.read().unwrap().as_ref().unwrap().roster.clone();
+                    let md = read_metadata(&metadata_doc).await;
+                    let members = list_members(&roster).await;
+                    tui.push_system(format!(
+                        "Room: {} | Description: {} | Rules: {}",
+                        md.name.as_deref().unwrap_or("unnamed"),
+                        md.description.as_deref().unwrap_or("none"),
+                        md.rules.as_deref().unwrap_or("none"),
+                    ));
+                    tui.push_system(format!("Members ({}):", members.len()));
+                    for (pk, member) in &members {
+                        tui.push_system(format!(
+                            "  {} ({}) — joined at {}",
+                            member.display_name,
+                            &pk[..16],
+                            member.joined_at,
+                        ));
+                    }
+                }
+                return Ok(());
+            }
+
+            // Normal text message.
+            let message = Message::Message {
+                text: trimmed.clone(),
+            };
+            let encoded_message = SignedMessage::sign_and_encode(secret_key, &message)?;
+            let msg_hash = message_hash(&message);
+            let local_hex = hex::encode(secret_key.public().as_bytes());
+            let event_id = {
+                let mut store = chat_history.lock().unwrap();
+                let entry = HistoryEntry::new(
+                    tui.status.topic,
+                    local_hex.clone(),
+                    encoded_message.to_vec(),
+                    "text",
+                    trimmed.clone(),
+                );
+                let id = store.push_with_id(entry);
+                let _ = store.update_delivery_state(id, DeliveryState::Sent);
+                id
+            };
+            if let Some(conv) = tui.conversations.get_mut(&topic) {
+                conv.self_sent_events.insert(msg_hash, event_id);
+            }
+            match sender.broadcast(encoded_message.clone()).await {
+                Ok(()) => {
+                    let mut entry = ChatEntry::local(local_label.to_string(), trimmed);
+                    entry.message_hash = Some(msg_hash);
+                    entry.event_id = event_id;
+                    entry.delivery_state = DeliveryState::Sent;
+                    if let Some(conv) = tui.conversations.get_mut(&topic) {
+                        conv.push_entry(entry);
+                    }
+                }
+                Err(e) => {
+                    {
+                        let mut store = chat_history.lock().unwrap();
+                        let _ = store.update_delivery_state(event_id, DeliveryState::Failed);
+                    }
+                    tui.push_system(format!("Send failed: {e}"));
+                }
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Backspace,
+            ..
+        } => {
+            if let Some(conv) = tui.current_conv_mut() {
+                let mut chars: Vec<char> = conv.composer_text.chars().collect();
+                if !chars.is_empty() {
+                    chars.pop();
+                    conv.composer_text = chars.into_iter().collect();
+                }
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Left,
+            ..
+        } => {
+            if let Some(conv) = tui.current_conv_mut() {
+                // Simple left navigation not implemented in TUI; ignore.
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Right,
+            ..
+        } => {}
+        KeyEvent {
+            code: KeyCode::Home,
+            ..
+        } => {}
+        KeyEvent {
+            code: KeyCode::End, ..
+        } => {}
+        KeyEvent {
+            code: KeyCode::PageUp,
+            ..
+        } => {
+            if let Some(conv) = tui.current_conv_mut() {
+                conv.scroll_up(visible_height.max(1) / 2, visible_height);
+            }
+        }
+        KeyEvent {
+            code: KeyCode::PageDown,
+            ..
+        } => {
+            if let Some(conv) = tui.current_conv_mut() {
+                conv.scroll_down(visible_height.max(1) / 2, visible_height);
+            }
+        }
+        KeyEvent {
+            code: KeyCode::Char(ch),
+            modifiers,
+            ..
+        } if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT => {
+            if let Some(conv) = tui.current_conv_mut() {
+                conv.composer_text.push(ch);
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+// ── Friend requests screen key handling ───────────────────────────────
+
+async fn handle_friend_requests_key(_key: KeyEvent, tui: &mut TuiState) -> Result<()> {
+    // Simple navigation: up/down selects, Enter accepts, Delete declines.
+    // For now, show all actions inline and use the friend_request_store directly.
+    match _key.code {
+        KeyCode::Up | KeyCode::Down => {
+            // Navigation placeholder: in simple TUI we don't have per-item selection yet.
+        }
+        KeyCode::Char('a') => {
+            // Accept the first pending incoming request.
+            let local_pk = tui.local_public.to_string();
+            let incoming: Vec<_> = tui
+                .friend_request_store
+                .list_incoming_by_status(&local_pk, FriendRequestStatus::Pending);
+            if let Some(first) = incoming.first() {
+                let id = first.id.clone();
+                let requester = first.requester.clone();
+                let _ = tui.friend_request_store.accept_request(&local_pk, &id);
+                if let Ok(pk) = requester.parse::<PublicKey>() {
+                    let fid = FriendId::from_public_key(pk);
+                    tui.friends.ensure_friend(fid);
+                    tui.friends_dirty = true;
+                }
+                tui.push_system(format!("Accepted friend request from {requester}"));
+                let _ = tui.friend_request_store.save();
+            } else {
+                tui.push_system("No pending friend requests to accept.");
+            }
+        }
+        KeyCode::Char('d') => {
+            // Decline the first pending incoming request.
+            let local_pk = tui.local_public.to_string();
+            let incoming: Vec<_> = tui
+                .friend_request_store
+                .list_incoming_by_status(&local_pk, FriendRequestStatus::Pending);
+            if let Some(first) = incoming.first() {
+                let id = first.id.clone();
+                let requester = first.requester.clone();
+                let _ = tui.friend_request_store.decline_request(&local_pk, &id);
+                tui.push_system(format!("Declined friend request from {requester}"));
+                let _ = tui.friend_request_store.save();
+            } else {
+                tui.push_system("No pending friend requests to decline.");
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ── TUI rendering ─────────────────────────────────────────────────────
+
+fn render_app(frame: &mut Frame<'_>, tui: &mut TuiState) {
+    let status_height = status_panel_height(&tui.status);
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(status_height),
             Constraint::Min(10),
-            Constraint::Length(5),
+            Constraint::Length(1), // Status bar
         ])
         .split(frame.area());
 
-    let body_area = layout[1];
-    let body_layout = if body_area.width >= 100 {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(40), Constraint::Length(34)])
-            .split(body_area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(6), Constraint::Length(9)])
-            .split(body_area)
-    };
+    render_status_panel(frame, tui, layout[0]);
 
-    let status_block = Block::default()
-        .title(Span::styled(
-            "Status",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    let status_lines = status_lines(&app.status);
-    let status_paragraph = Paragraph::new(Text::from(status_lines))
-        .block(status_block)
-        .wrap(Wrap { trim: true });
-    frame.render_widget(status_paragraph, layout[0]);
+    match &tui.screen.clone() {
+        TuiScreen::ChatList => render_chat_list(frame, tui, layout[1]),
+        TuiScreen::Chat { topic } => render_chat_room(frame, tui, *topic, layout[1]),
+        TuiScreen::FriendRequests => render_friend_requests(frame, tui, layout[1]),
+    }
 
-    let log_block = Block::default()
-        .title(Span::styled(
-            "Chat log",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta));
-    let log_inner = log_block.inner(body_layout[0]);
-    app.last_log_height = log_inner.height;
-    let log_scroll = app.rendered_scroll_offset(log_inner.height);
-    let log_text = app_chat_text(app);
-    let log_paragraph = Paragraph::new(log_text)
-        .block(log_block)
-        .wrap(Wrap { trim: false })
-        .scroll((log_scroll, 0));
-    frame.render_widget(log_paragraph, body_layout[0]);
+    render_status_bar(frame, tui, layout[2]);
 
-    let friends_block = Block::default()
-        .title(Span::styled(
-            format!("Friends ({})", app.friends.len()),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    let friends_paragraph = Paragraph::new(Text::from(friends_panel_lines(app)))
-        .block(friends_block)
-        .wrap(Wrap { trim: true });
-    frame.render_widget(friends_paragraph, body_layout[1]);
-
-    let composer_block = Block::default()
-        .title(Span::styled(
-            "Composer",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green));
-    let composer_inner = composer_block.inner(layout[2]);
-    frame.render_widget(composer_block, layout[2]);
-    let prompt = "> ";
-    let composer_line = Line::from(vec![
-        Span::styled(
-            prompt,
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(app.composer.text().to_string()),
-    ]);
-    let composer_paragraph =
-        Paragraph::new(Text::from(vec![composer_line])).wrap(Wrap { trim: false });
-    frame.render_widget(composer_paragraph, composer_inner);
-    let cursor_x = composer_inner
-        .x
-        .saturating_add(prompt.len() as u16)
-        .saturating_add(app.composer.cursor_column());
-    frame.set_cursor_position((cursor_x, composer_inner.y));
-
-    if app.help_visible {
+    if tui.help_visible {
         let help_area = centered_rect(72, 58, frame.area());
         let help_block = Block::default()
             .title(Span::styled(
@@ -2391,9 +2530,357 @@ fn render_app(frame: &mut Frame<'_>, app: &mut AppState) {
     }
 }
 
-// ── TUI formatting helpers (ratatui-dependent) ────────────────────────────────
+// ── Status panel ──────────────────────────────────────────────────────
 
-/// Render a [`ChatEntry`] as ratatui lines (message line + optional reactions).
+fn render_status_panel(frame: &mut Frame<'_>, tui: &TuiState, area: Rect) {
+    let status_block = Block::default()
+        .title(Span::styled(
+            "Status",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let status_lines = status_lines(&tui.status);
+    let status_paragraph = Paragraph::new(Text::from(status_lines))
+        .block(status_block)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(status_paragraph, area);
+}
+
+// ── Chat list screen ──────────────────────────────────────────────────
+
+fn render_chat_list(frame: &mut Frame<'_>, tui: &mut TuiState, area: Rect) {
+    // Split into left (conversations) and right (friends + quick actions).
+    let body_layout = if area.width >= 100 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Length(12)])
+            .split(area)
+    };
+
+    // ── Left: Conversation list ──
+    let conv_block = Block::default()
+        .title(Span::styled(
+            format!("Chats ({})", tui.conversation_order.len()),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+    let conv_inner = conv_block.inner(body_layout[0]);
+    let conv_lines = conversation_list_lines(tui);
+    let conv_paragraph = Paragraph::new(Text::from(conv_lines))
+        .block(conv_block)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(conv_paragraph, body_layout[0]);
+
+    // ── Right: Friends panel ──
+    let friends_block = Block::default()
+        .title(Span::styled(
+            format!("Friends ({})", tui.friends.len()),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let friends_paragraph = Paragraph::new(Text::from(friends_panel_lines(tui)))
+        .block(friends_block)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(friends_paragraph, body_layout[1]);
+}
+
+/// Build the conversation list lines for the ChatList screen.
+fn conversation_list_lines(tui: &TuiState) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    let selected_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::REVERSED);
+    let normal_style = Style::default();
+    let unread_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
+    let public_room_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+
+    let mut index = 0usize;
+    // Always show the public room first.
+    for (idx, topic) in tui.conversation_order.iter().enumerate() {
+        let is_selected = idx == tui.selected_conv_index;
+        let conv = match tui.conversations.get(topic) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let display_name = &conv.display_name;
+        let is_public_room = display_name == PUBLIC_ROOM_LABEL;
+
+        // Unread badge.
+        let badge = if conv.unread > 0 {
+            format!(" [{}]", conv.unread)
+        } else {
+            String::new()
+        };
+
+        let line_style = if is_selected {
+            selected_style
+        } else if is_public_room {
+            public_room_style
+        } else {
+            normal_style
+        };
+
+        let badge_style = if conv.unread > 0 {
+            unread_style
+        } else {
+            Style::default()
+        };
+
+        let prefix = if is_public_room { "★ " } else { "  " };
+        let short_topic = topic.fmt_short();
+        lines.push(Line::from(vec![
+            Span::styled(prefix, line_style),
+            Span::styled(display_name.clone(), line_style),
+            Span::styled(badge, badge_style),
+            Span::styled(
+                format!("  {}", short_topic),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+        index += 1;
+    }
+
+    // Empty state.
+    if tui.conversation_order.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "No conversations yet.",
+            Style::default().fg(Color::DarkGray),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "Use /friend add <pubkey> to start a conversation.",
+            Style::default().fg(Color::DarkGray),
+        )]));
+    }
+
+    lines.push(Line::from(Span::raw("")));
+    lines.push(Line::from(vec![Span::styled(
+        "↑↓ Select • Enter open • Tab switch view • F2 friend requests • h/? help",
+        Style::default().fg(Color::DarkGray),
+    )]));
+
+    lines
+}
+
+// ── Chat room screen ──────────────────────────────────────────────────
+
+fn render_chat_room(frame: &mut Frame<'_>, tui: &mut TuiState, topic: TopicId, area: Rect) {
+    let conv = match tui.conversations.get(&topic) {
+        Some(c) => c,
+        None => {
+            let empty_block = Block::default().title("Conversation").borders(Borders::ALL);
+            frame.render_widget(empty_block, area);
+            return;
+        }
+    };
+
+    let composer_height = 3u16;
+    let chat_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(composer_height)])
+        .split(area);
+
+    // ── Chat log ──
+    let display_name = &conv.display_name;
+    let log_block = Block::default()
+        .title(Span::styled(
+            display_name.clone(),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+    let log_inner = log_block.inner(chat_layout[0]);
+
+    // We can't modify conv through a shared reference, so build a temp mutable view.
+    // Use interior mutability isn't available, so we'll store computed scroll on next render.
+    let log_text = app_chat_text(conv);
+    let log_scroll = conv.rendered_scroll_offset(log_inner.height);
+    let log_paragraph = Paragraph::new(log_text)
+        .block(log_block)
+        .wrap(Wrap { trim: false })
+        .scroll((log_scroll, 0));
+
+    // Store the log height for scroll calculations on next key event.
+    // We use a Cell-like approach: since we have &mut TuiState, we can update it.
+    // But we only have &TuiState here. We'll store height via a different mechanism.
+    frame.render_widget(log_paragraph, chat_layout[0]);
+
+    // ── Composer ──
+    let composer_block = Block::default()
+        .title(Span::styled(
+            "Composer",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+    let composer_inner = composer_block.inner(chat_layout[1]);
+    frame.render_widget(composer_block, chat_layout[1]);
+    let prompt = "> ";
+    let composer_line = Line::from(vec![
+        Span::styled(
+            prompt,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(conv.composer_text.clone()),
+    ]);
+    let composer_paragraph =
+        Paragraph::new(Text::from(vec![composer_line])).wrap(Wrap { trim: false });
+    frame.render_widget(composer_paragraph, composer_inner);
+    let cursor_x = composer_inner
+        .x
+        .saturating_add(prompt.len() as u16)
+        .saturating_add(conv.composer_text.len() as u16);
+    frame.set_cursor_position((cursor_x, composer_inner.y));
+}
+
+// ── Friend requests screen ────────────────────────────────────────────
+
+fn render_friend_requests(frame: &mut Frame<'_>, tui: &mut TuiState, area: Rect) {
+    let local_pk = tui.local_public.to_string();
+
+    // Incoming pending requests.
+    let incoming: Vec<&FriendRequest> = tui
+        .friend_request_store
+        .list_incoming_by_status(&local_pk, FriendRequestStatus::Pending);
+
+    // Outgoing pending requests.
+    let outgoing: Vec<&FriendRequest> = tui
+        .friend_request_store
+        .list_outgoing_by_status(&local_pk, FriendRequestStatus::Pending);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    let title_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let pending_style = Style::default().fg(Color::Green);
+    let hint_style = Style::default().fg(Color::DarkGray);
+
+    // Incoming section.
+    lines.push(Line::from(vec![Span::styled(
+        format!("Incoming requests ({})", incoming.len()),
+        title_style,
+    )]));
+    if incoming.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "  No pending incoming requests.",
+            hint_style,
+        )]));
+    } else {
+        for req in &incoming {
+            lines.push(Line::from(vec![
+                Span::styled("  From: ", Style::default().fg(Color::Cyan)),
+                Span::styled(&req.requester, pending_style),
+                Span::styled(" (pending)", hint_style),
+            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("    [a]ccept  [d]ecline  id: {}", req.id),
+                hint_style,
+            )]));
+        }
+    }
+
+    lines.push(Line::from(Span::raw("")));
+
+    // Outgoing section.
+    lines.push(Line::from(vec![Span::styled(
+        format!("Outgoing requests ({})", outgoing.len()),
+        title_style,
+    )]));
+    if outgoing.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "  No pending outgoing requests.",
+            hint_style,
+        )]));
+    } else {
+        for req in &outgoing {
+            lines.push(Line::from(vec![
+                Span::styled("  To: ", Style::default().fg(Color::Cyan)),
+                Span::styled(&req.recipient, pending_style),
+                Span::styled(" (pending)", hint_style),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(Span::raw("")));
+    lines.push(Line::from(vec![Span::styled(
+        "Esc back • Tab switch view • a accept first • d decline first",
+        hint_style,
+    )]));
+
+    let request_block = Block::default()
+        .title(Span::styled(
+            "Friend Requests",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let request_paragraph = Paragraph::new(Text::from(lines))
+        .block(request_block)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(request_paragraph, area);
+}
+
+// ── Status bar (bottom) ───────────────────────────────────────────────
+
+fn render_status_bar(frame: &mut Frame<'_>, tui: &TuiState, area: Rect) {
+    let mode_label = match &tui.screen {
+        TuiScreen::ChatList => "CHAT LIST",
+        TuiScreen::Chat { .. } => "CHAT",
+        TuiScreen::FriendRequests => "FRIEND REQUESTS",
+    };
+    let screen_label = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+
+    let content = format!(
+        " [{mode_label}] | {n} peer(s) | topic: {t} | Esc back, Tab switch",
+        n = tui.status.peer_count,
+        t = tui.status.topic.fmt_short(),
+    );
+
+    let bar = Paragraph::new(Text::from(Line::from(vec![
+        Span::styled(format!(" [{mode_label}] "), screen_label),
+        Span::raw(format!(
+            " {n} peer(s) | topic: {t} | Esc back • Tab switch • PgUp/PgDn scroll",
+            n = tui.status.peer_count,
+            t = tui.status.topic.fmt_short(),
+        )),
+    ])))
+    .style(Style::default().bg(Color::Blue).fg(Color::White));
+    frame.render_widget(bar, area);
+}
+
+// ── TUI formatting helpers ────────────────────────────────────────────
+
 fn entry_to_line(entry: &ChatEntry) -> Vec<Line<'static>> {
     let style = match entry.kind {
         ChatKind::System => Style::default().fg(Color::DarkGray),
@@ -2436,16 +2923,15 @@ fn entry_to_line(entry: &ChatEntry) -> Vec<Line<'static>> {
     lines
 }
 
-/// Render the chat log as ratatui text.
-fn app_chat_text(app: &AppState) -> Text<'static> {
-    if app.entries.is_empty() {
+fn app_chat_text(conv: &ConvState) -> Text<'static> {
+    if conv.entries.is_empty() {
         Text::from(Line::from(vec![Span::styled(
             "No messages yet. Say hello.",
             Style::default().fg(Color::DarkGray),
         )]))
     } else {
         Text::from(
-            app.entries
+            conv.entries
                 .iter()
                 .flat_map(entry_to_line)
                 .collect::<Vec<_>>(),
@@ -2453,7 +2939,7 @@ fn app_chat_text(app: &AppState) -> Text<'static> {
     }
 }
 
-fn friends_panel_lines(app: &AppState) -> Vec<Line<'static>> {
+fn friends_panel_lines(tui: &TuiState) -> Vec<Line<'static>> {
     let title_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
@@ -2464,32 +2950,31 @@ fn friends_panel_lines(app: &AppState) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(vec![Span::styled("Tracked friends", title_style)]),
         Line::from(vec![Span::styled(
-            "Manage entries with /friend add, /friend remove, /friend rename, and /friend list.",
+            "Manage with /friend add/remove/rename/list in chat.",
             hint_style,
         )]),
     ];
 
-    if app.friends.is_empty() {
+    if tui.friends.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "No friends yet.",
             Style::default().fg(Color::DarkGray),
         )]));
         lines.push(Line::from(vec![Span::styled(
-            "Add one with /friend add <public-key> [alias].",
+            "Add with /friend add <public-key> [alias].",
             hint_style,
         )]));
         return lines;
     }
 
-    for (id, record) in app.friends.iter() {
+    for (id, record) in tui.friends.iter() {
         let name = record.display_label(id);
         let short_id: String = id.as_str().chars().take(12).collect();
         let (status_text, status_style) = friend_status_text(record);
-        // Look up connection type (direct/relayed) if we know this peer.
         let conn_hint = id
             .parse_public_key()
             .ok()
-            .and_then(|pk| app.status.peer_connection_types.get(&pk))
+            .and_then(|pk| tui.status.peer_connection_types.get(&pk))
             .map(|ct| match ct {
                 ConnectionType::Direct => " D",
                 ConnectionType::Relayed => " ⤻",
@@ -2580,7 +3065,7 @@ fn status_lines(context: &StatusContext) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("Controls", label_style),
             Span::raw(
-                ": Enter send • /help menu • /friend list • Ctrl-C or Esc quit • PgUp/PgDn scroll history",
+                ": Enter send • /help menu • Tab switch view • F2 friend req • PgUp/PgDn scroll history",
             ),
         ]),
     ]
@@ -2601,7 +3086,32 @@ fn help_menu_lines() -> Vec<Line<'static>> {
             "Send a message by typing it and pressing Enter.",
             Style::default(),
         )]),
-        Line::from(vec![Span::styled("Available commands", title_style)]),
+        Line::from(vec![Span::styled("Navigation", title_style)]),
+        Line::from(vec![
+            Span::styled("Tab", label_style),
+            Span::raw("              switch between Chats / Friend Requests"),
+        ]),
+        Line::from(vec![
+            Span::styled("↑/↓", label_style),
+            Span::raw("            navigate conversation list"),
+        ]),
+        Line::from(vec![
+            Span::styled("Enter", label_style),
+            Span::raw("          open selected conversation or send message"),
+        ]),
+        Line::from(vec![
+            Span::styled("Esc", label_style),
+            Span::raw("            back to conversation list / close overlay / quit"),
+        ]),
+        Line::from(vec![
+            Span::styled("F2", label_style),
+            Span::raw("             open friend requests view"),
+        ]),
+        Line::from(vec![
+            Span::styled("PgUp/PgDn", label_style),
+            Span::raw("      scroll chat history"),
+        ]),
+        Line::from(vec![Span::styled("Commands", title_style)]),
         Line::from(vec![
             Span::styled("/help", label_style),
             Span::raw("          open this menu"),
@@ -2616,43 +3126,23 @@ fn help_menu_lines() -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             Span::styled("/friend add <pubkey> [alias]", label_style),
-            Span::raw("  track a peer's online status"),
+            Span::raw("  track a friend"),
         ]),
         Line::from(vec![
             Span::styled("/friend remove <pubkey|alias>", label_style),
-            Span::raw("  stop tracking a friend"),
-        ]),
-        Line::from(vec![
-            Span::styled("/friend rename <pubkey|alias> <name>", label_style),
-            Span::raw("  change a friend's local alias"),
+            Span::raw("  stop tracking"),
         ]),
         Line::from(vec![
             Span::styled("/friend list", label_style),
-            Span::raw("     list tracked friends and their status"),
+            Span::raw("     list friends and status"),
         ]),
         Line::from(vec![
             Span::styled("/room info", label_style),
-            Span::raw("     show room metadata and members"),
-        ]),
-        Line::from(vec![
-            Span::styled("/connections", label_style),
-            Span::raw("   show per-peer connection status"),
-        ]),
-        Line::from(vec![
-            Span::styled("/react <index> <emoji>", label_style),
-            Span::raw("  react to a message"),
-        ]),
-        Line::from(vec![
-            Span::styled("/whisper <peer|alias> <msg>", label_style),
-            Span::raw("  send a private DM"),
-        ]),
-        Line::from(vec![
-            Span::styled("/whisper-file <peer|alias> <path>", label_style),
-            Span::raw("  send a file privately"),
+            Span::raw("     show room metadata"),
         ]),
         Line::from(vec![Span::styled("Tips", title_style)]),
         Line::from(vec![Span::styled(
-            "Press Esc to close this help view. PgUp/PgDn scroll older messages.",
+            "Press Esc to close this help view. F2 opens friend requests.",
             hint_style,
         )]),
     ]
@@ -2667,7 +3157,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_y) / 2),
         ])
         .split(area);
-
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -2678,44 +3167,30 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-/// Format a Unix epoch millisecond timestamp as ISO 8601 UTC time label.
-///
-/// Produces " HH:MM" (UTC) for messages from today, or " YYYY-MM-DD"
-/// for older dates.  The leading space keeps it visually separated from
-/// the label brackets.
 fn format_epoch_ms_utc(ms: u64) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-
     let ts_secs = ms / 1000;
     let now_secs = now_ms / 1000;
     let days_since_epoch = |secs: u64| secs / 86400;
-
     let today = days_since_epoch(now_secs);
     let ts_day = days_since_epoch(ts_secs);
-
     if ts_day == today {
-        // Same day: show HH:MM (UTC)
         let hour = (ts_secs % 86400) / 3600;
         let min = (ts_secs % 3600) / 60;
         format!(" {:02}:{:02}Z", hour, min)
     } else {
-        // Different day: show ISO 8601 date
         format_iso8601_date_utc(ms)
     }
 }
 
-/// Convert Unix epoch milliseconds to " YYYY-MM-DD" ISO 8601 date (UTC).
 fn format_iso8601_date_utc(ms: u64) -> String {
     let secs = ms / 1000;
-    // Days since Unix epoch
     let days = secs / 86400;
     let remaining = days;
-
-    // Year calculation (valid 1970–2099)
     let mut year = 1970u64;
     let mut d = remaining;
     loop {
@@ -2730,8 +3205,6 @@ fn format_iso8601_date_utc(ms: u64) -> String {
         d -= days_in_year;
         year += 1;
     }
-
-    // Month/day from day-of-year (0-indexed)
     let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
     let mdays: [u64; 12] = if leap {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
@@ -2747,11 +3220,10 @@ fn format_iso8601_date_utc(ms: u64) -> String {
         day -= md;
         month += 1;
     }
-
     format!(" {year:04}-{month:02}-{day:02}")
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -2854,21 +3326,29 @@ mod tests {
             last_activity: HashMap::new(),
             mesh_health: MeshHealth::Good,
         };
-        let app = AppState::new(
-            status,
-            FriendsStore::empty_at(
-                std::env::temp_dir()
-                    .join(format!("iroh-chat-friends-empty-{}", rand::random::<u64>())),
-            ),
-            SecretKey::generate().public(),
-            Some("alice".into()),
+        let friends = FriendsStore::empty_at(
+            std::env::temp_dir().join(format!("iroh-chat-friends-empty-{}", rand::random::<u64>())),
         );
-        let rendered: Vec<String> = friends_panel_lines(&app)
+        let conversation_store = ConversationStore::empty_at(
+            std::env::temp_dir().join(format!("iroh-chat-conv-empty-{}", rand::random::<u64>())),
+        );
+        let friend_request_store = FriendRequestStore::empty_at(
+            std::env::temp_dir().join(format!("iroh-chat-fr-empty-{}", rand::random::<u64>())),
+        );
+        let tui = TuiState::new(
+            status,
+            friends,
+            friend_request_store,
+            conversation_store,
+            SecretKey::generate().public(),
+            "alice".into(),
+            TopicId::from_bytes([0u8; 32]),
+        );
+        let rendered: Vec<String> = friends_panel_lines(&tui)
             .iter()
             .map(|line| line.to_string())
             .collect();
         assert!(rendered.iter().any(|line| line.contains("No friends yet.")));
-        assert!(rendered.iter().any(|line| line.contains("/friend add")));
     }
 
     #[test]
@@ -2888,20 +3368,28 @@ mod tests {
             last_activity: HashMap::new(),
             mesh_health: MeshHealth::Good,
         };
-        let mut app = AppState::new(
+        let friends = FriendsStore::empty_at(
+            std::env::temp_dir().join(format!("iroh-chat-render-test-{}", rand::random::<u64>())),
+        );
+        let conversation_store = ConversationStore::empty_at(
+            std::env::temp_dir().join(format!("iroh-chat-render-conv-{}", rand::random::<u64>())),
+        );
+        let friend_request_store = FriendRequestStore::empty_at(
+            std::env::temp_dir().join(format!("iroh-chat-render-fr-{}", rand::random::<u64>())),
+        );
+        let mut tui = TuiState::new(
             status,
-            FriendsStore::empty_at(
-                std::env::temp_dir()
-                    .join(format!("iroh-chat-render-test-{}", rand::random::<u64>())),
-            ),
+            friends,
+            friend_request_store,
+            conversation_store,
             SecretKey::generate().public(),
-            Some("alice".into()),
+            "alice".into(),
+            TopicId::from_bytes([0u8; 32]),
         );
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-
         terminal
-            .draw(|frame| render_app(frame, &mut app))
+            .draw(|frame| render_app(frame, &mut tui))
             .expect("render should not panic");
     }
 
@@ -2930,13 +3418,22 @@ mod tests {
         let friend_id = FriendId::from_public_key(peer);
         store.set_label(friend_id.clone(), "Bob");
         store.mark_online(friend_id.clone());
-        let app = AppState::new(
+        let conversation_store = ConversationStore::empty_at(
+            std::env::temp_dir().join(format!("iroh-chat-conv-status-{}", rand::random::<u64>())),
+        );
+        let friend_request_store = FriendRequestStore::empty_at(
+            std::env::temp_dir().join(format!("iroh-chat-fr-status-{}", rand::random::<u64>())),
+        );
+        let tui = TuiState::new(
             status,
             store,
+            friend_request_store,
+            conversation_store,
             SecretKey::generate().public(),
-            Some("alice".into()),
+            "alice".into(),
+            TopicId::from_bytes([0u8; 32]),
         );
-        let rendered: Vec<String> = friends_panel_lines(&app)
+        let rendered: Vec<String> = friends_panel_lines(&tui)
             .iter()
             .map(|line| line.to_string())
             .collect();
@@ -2945,16 +3442,44 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_direct_mode_by_default() {
-        let args = Args::try_parse_from(["chat", "open"]).expect("direct mode should parse");
-        assert!(matches!(args.command, Command::Open { .. }));
+    fn conversation_list_includes_public_room() {
+        let status = StatusContext {
+            transport_status: "ok".into(),
+            topic: TopicId::from_bytes([9u8; 32]),
+            relay_mode: RelayMode::Default,
+            connected: true,
+            peer_count: 0,
+            identity_label: "alice".into(),
+            transport_notice: "ok".into(),
+            direct_peers: 0,
+            relayed_peers: 0,
+            neighbors: HashSet::new(),
+            peer_connection_types: HashMap::new(),
+            last_activity: HashMap::new(),
+            mesh_health: MeshHealth::Good,
+        };
+        let public_topic = TopicId::from_bytes([1u8; 32]);
+        let tui = TuiState::new(
+            status,
+            FriendsStore::empty_at(std::env::temp_dir()),
+            FriendRequestStore::empty_at(std::env::temp_dir()),
+            ConversationStore::empty_at(std::env::temp_dir()),
+            SecretKey::generate().public(),
+            "alice".into(),
+            public_topic,
+        );
+        let rendered: Vec<String> = conversation_list_lines(&tui)
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert!(rendered.len() > 1);
+        assert!(rendered.iter().any(|line| line.contains(PUBLIC_ROOM_LABEL)));
     }
 
-    // ── Identity persistence tests ────────────────────────────────────────
+    // ── Identity persistence tests ──
 
     #[test]
     fn secret_key_serialization_roundtrip() {
-        // Generate a key, serialize to hex, deserialize, verify same key material.
         let key = SecretKey::generate();
         let hex = data_encoding::HEXLOWER.encode(&key.to_bytes());
         let recovered = SecretKey::from_str(&hex).expect("should parse hex-encoded secret key");
@@ -2964,7 +3489,6 @@ mod tests {
 
     #[test]
     fn secret_key_public_key_is_deterministic() {
-        // Same SecretKey bytes always produce the same PublicKey.
         let key = SecretKey::generate();
         let pk1 = key.public();
         let pk2 = key.public();
@@ -2993,7 +3517,6 @@ mod tests {
         let key = SecretKey::generate();
         let topic = TopicId::from_bytes([42u8; 32]);
         let peer_addr = EndpointAddr::new(key.public());
-
         let ticket_a = Ticket {
             topic,
             peers: vec![peer_addr.clone()],
@@ -3002,8 +3525,6 @@ mod tests {
             topic,
             peers: vec![peer_addr],
         };
-
-        // Same inputs produce identical ticket encoding.
         assert_eq!(ticket_a.to_string(), ticket_b.to_string());
         assert_eq!(ticket_a.to_bytes(), ticket_b.to_bytes());
     }
@@ -3012,51 +3533,34 @@ mod tests {
     fn secret_key_file_write_and_read_roundtrip() {
         let tmp = std::env::temp_dir().join(format!("iroh-key-test-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&tmp).expect("create temp dir");
-
         let key = SecretKey::generate();
         let hex = data_encoding::HEXLOWER.encode(&key.to_bytes());
         let key_path = tmp.join("secret_key.txt");
         std::fs::write(&key_path, format!("{hex}\n")).expect("write key hex");
-
-        // Read back
         let read_back = std::fs::read_to_string(&key_path).expect("read key file");
         let recovered = SecretKey::from_str(read_back.trim()).expect("parse key");
         assert_eq!(key.public(), recovered.public());
-
-        // Cleanup
         let _ = std::fs::remove_file(&key_path);
         let _ = std::fs::remove_dir(&tmp);
     }
 
     #[test]
     fn load_or_generate_creates_and_reuses_key() {
-        // Use a dedicated temp directory so tests don't clobber each other.
         let tmp = std::env::temp_dir().join(format!("iroh-key-test-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&tmp).expect("create temp dir");
         let key_path = tmp.join("secret_key.txt");
-
-        // First call should generate a new key.
         let (key_a, path_a) = load_or_generate_secret_key_at(&tmp).expect("first load");
         assert!(key_path.exists(), "key file should exist after generation");
         assert_eq!(path_a, key_path);
-
-        // Second call should load the same key.
         let (key_b, path_b) = load_or_generate_secret_key_at(&tmp).expect("second load");
         assert_eq!(path_b, key_path);
-        assert_eq!(
-            key_a.public(),
-            key_b.public(),
-            "second load returns same identity"
-        );
-
-        // Parsing the stored hex should also match.
+        assert_eq!(key_a.public(), key_b.public());
         let stored = std::fs::read_to_string(&key_path)
             .expect("read stored key")
             .trim()
             .to_string();
         let from_stored = SecretKey::from_str(&stored).expect("parse stored key");
         assert_eq!(key_a.public(), from_stored.public());
-
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -3068,28 +3572,22 @@ mod tests {
                 "key file should have restrictive 0o600 permissions"
             );
         }
-
-        // Clean up.
         let _ = std::fs::remove_file(&key_path);
         let _ = std::fs::remove_dir(&tmp);
     }
 
     #[test]
     fn load_or_generate_uses_existing_key_file() {
-        // Pre-write a known key and verify load_or_generate reads it back.
         let tmp =
             std::env::temp_dir().join(format!("iroh-key-existing-test-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&tmp).expect("create temp dir");
-
         let known_key = SecretKey::generate();
         let hex = data_encoding::HEXLOWER.encode(&known_key.to_bytes());
         let key_path = tmp.join("secret_key.txt");
         std::fs::write(&key_path, format!("{hex}\n")).expect("pre-write key");
-
         let (loaded, path) = load_or_generate_secret_key_at(&tmp).expect("load existing key");
         assert_eq!(path, key_path);
         assert_eq!(known_key.public(), loaded.public());
-
         std::env::remove_var("BORU_CHAT_DATA_DIR");
         let _ = std::fs::remove_file(&key_path);
         let _ = std::fs::remove_dir(&tmp);

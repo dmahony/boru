@@ -1138,8 +1138,7 @@ mod tests {
             },
             sent_at: crate::chat_core::now_ms(),
         };
-        let result =
-            crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
+        let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
         assert!(result.is_ok(), "private room should process all events");
         assert_eq!(
             app.entries.len(),
@@ -1188,11 +1187,6 @@ mod tests {
             last_activity: HashMap::new(),
             mesh_health: crate::chat_core::MeshHealth::Good,
         };
-        crate::chat_core::AppState::new(
-            status,
-            friends,
-            local_public,
-            Some("tester".into()),
-        )
+        crate::chat_core::AppState::new(status, friends, local_public, Some("tester".into()))
     }
 }

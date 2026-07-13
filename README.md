@@ -285,12 +285,14 @@ so they remain verifiable when replayed from offline mailbox storage.
 
 ### ContactAction Messages
 
-| Action             | Purpose                                           |
-|--------------------|---------------------------------------------------|
-| `ContactRequest`   | Ask a peer to add you as a contact                |
-| `ContactAccept`    | Accept a pending contact request                  |
-| `ConversationInvite` | Agree on a stable one-to-one gossip topic       |
-| `AddressUpdate`    | Refresh bootstrap addresses for a direct session  |
+| Action | Purpose |
+|--------|---------|
+| `FriendRequest` | Ask a peer to become friends |
+| `FriendRequestAccepted` | Accept a pending friend request |
+| `FriendRequestRejected` | Reject a pending friend request |
+| `ConversationInvite` | Agree on a stable one-to-one gossip topic (must already be friends) |
+| `AddressUpdate` | Refresh bootstrap addresses for a direct session |
+| `MailboxAdvertise` | Advertise the peer's encrypted mailbox key |
 
 All messages are signed with the sender's identity key and include a
 wall-clock timestamp that is validated against a 24-hour replay window.
@@ -383,13 +385,15 @@ room creator must provide an updated ticket.  The timeout for bootstrap
 connection is 30 seconds, after which the room is subscribed but the user
 is warned that addresses may be stale.
 
-### First-Contact Requirement
+### First-Contact Handshake
 
-A first-contact handshake (`ContactRequest` / `ContactAccept`) is required
-to establish a direct conversation.  Until a contact accepts, the
-initiator's messages are queued in the outbox but not delivered to the
-direct topic.  The recipient must be online at least briefly for the
-initial handshake to complete.
+A first-contact handshake (`FriendRequest` → `FriendRequestAccepted` / `FriendRequestRejected`)
+is required to establish a friendship.  Accepting a friend request does **not**
+auto-open a conversation — the user must explicitly invite their established
+friend to a direct conversation via a separate `ConversationInvite`.  Until a
+friend accepts, the initiator's messages are queued in the outbox but not
+delivered to the direct topic.  The recipient must be online at least briefly
+for the initial handshake to complete.
 
 ## Outbox and Delivery Lifecycle
 

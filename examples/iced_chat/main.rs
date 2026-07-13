@@ -539,8 +539,10 @@ fn main() -> Result<()> {
             info!("> loaded {} room(s) from history", room_history.len());
         }
 
-        // Create the network event channel (shared across rooms)
-        let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Create the network event channel (shared across rooms, tagged by topic)
+        let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel::<
+            boru_chat::conversations::ConversationNetEvent,
+        >();
         let net_rx = Arc::new(Mutex::new(net_rx));
 
         // ── Friend ping manager ──────────────────────────────────────

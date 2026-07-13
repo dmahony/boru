@@ -458,7 +458,8 @@ async fn backfill_actor(endpoint: Endpoint, mut cmd_rx: mpsc::Receiver<Cmd>) {
                 reply,
             } => {
                 let result =
-                    do_backfill_request(&endpoint, addr, since_ms, max_messages, net_tx, safety).await;
+                    do_backfill_request(&endpoint, addr, since_ms, max_messages, net_tx, safety)
+                        .await;
                 let _ = reply.send(result);
             }
         }

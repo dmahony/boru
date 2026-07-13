@@ -3,12 +3,22 @@
 //! Uses two independent [`FriendRequestStore`]s with real temporary
 //! directories to test the complete lifecycle across peers: send → list →
 //! accept/decline/cancel → persist → reload.  Also covers the
-//! [`SignedContactMessage`] round-trip used by the wire protocol.
+//! [`SignedContactMessage`] round-trip for each of the new distinct
+//! friend-request protocol actions (`FriendRequest`, `FriendRequestAccepted`,
+//! `FriendRequestRejected`).
 //!
 //! The data-model validation rules (self-request, duplicate-pending,
 //! unauthorized, invalid transitions) are already covered by
 //! `friend_request.rs` 36 unit tests — this file adds the multi-store
 //! and persistence integration layer the unit tests cannot reach.
+//!
+//! # Protocol separation
+//!
+//! Friend requests (`FriendRequest` / `FriendRequestAccepted` /
+//! `FriendRequestRejected`) are now distinct from conversation invites
+//! (`ConversationInvite`).  Accepting a friend request does NOT auto-open
+//! a conversation — the user must explicitly invite their established friend
+//! to a direct conversation.
 
 use std::{
     path::PathBuf,
@@ -16,7 +26,7 @@ use std::{
 };
 
 use boru_chat::{
-    contact::{direct_topic, ContactAction, SignedContactMessage},
+    contact::{ContactAction, SignedContactMessage},
     friend_request::{FriendRequestError, FriendRequestStatus, FriendRequestStore},
 };
 use iroh::{PublicKey, SecretKey};
@@ -38,8 +48,8 @@ fn random_peer() -> String {
 }
 
 /// Simulate what the SendFriendRequest UI handler does in Alice's store:
-/// create a Pending request to Bob, sign a ConversationInvite contact
-/// message, and return the signed payload for the test to "send" to Bob.
+/// create a Pending request to Bob, sign a `FriendRequest` contact message,
+/// and return the signed payload for the test to "send" to Bob.
 ///
 /// Returns the signed bytes only (each store creates its own request ID,
 /// so we cannot share request IDs across stores).
@@ -55,15 +65,11 @@ fn alice_sends_to_bob(
         .send_request(&alice_pk_str, &bob_pk_str, None)
         .expect("alice sends friend request to bob");
 
-    let topic = direct_topic(&alice_sk.public(), bob_pk);
-    let action = ContactAction::ConversationInvite {
-        topic,
-        addrs: vec![],
-    };
-    SignedContactMessage::sign(alice_sk, &action).expect("alice signs conversation invite")
+    let action = ContactAction::FriendRequest { name: None };
+    SignedContactMessage::sign(alice_sk, &action).expect("alice signs friend request")
 }
 
-/// Simulate what the receiving peer does with a ConversationInvite:
+/// Simulate what the receiving peer does with an incoming `FriendRequest`:
 /// verify the signed message, extract the sender identity, then
 /// create a pending friend request in the recipient's store.
 /// Returns the request id that *this store* assigned.
@@ -73,15 +79,9 @@ fn bob_receives_from_alice(
     payload: &[u8],
 ) -> String {
     let (from, action) = SignedContactMessage::verify(payload, None)
-        .expect("bob verifies alice's signed contact message");
+        .expect("bob verifies alice's signed friend request");
 
-    assert_eq!(
-        action,
-        ContactAction::ConversationInvite {
-            topic: direct_topic(&from, bob_pk),
-            addrs: vec![],
-        }
-    );
+    assert_eq!(action, ContactAction::FriendRequest { name: None });
 
     let bob_pk_str = bob_pk.to_string();
     let from_str = from.to_string();
@@ -290,15 +290,123 @@ fn two_independent_pairs_across_four_peers() {
 
 // ── Signed contact message integration ──────────────────────────────────────
 
-/// Test the full signed contact message round-trip with the exact
-/// ConversationInvite action used by the friend request protocol.
+/// Test the full signed FriendRequest round-trip.
 #[test]
-fn signed_contact_round_trip_with_conversation_invite() {
+fn signed_friend_request_round_trip() {
     let alice_sk = SecretKey::generate();
-    let bob_sk = SecretKey::generate();
-    let bob_pk = bob_sk.public();
 
-    let topic = direct_topic(&alice_sk.public(), &bob_pk);
+    let action = ContactAction::FriendRequest {
+        name: Some("Alice".into()),
+    };
+
+    let payload = SignedContactMessage::sign(&alice_sk, &action).expect("sign FriendRequest");
+
+    let (from, decoded) =
+        SignedContactMessage::verify(&payload, None).expect("verify FriendRequest");
+    assert_eq!(from, alice_sk.public());
+    assert_eq!(decoded, action);
+
+    let (from, decoded) = SignedContactMessage::verify(&payload, Some(alice_sk.public()))
+        .expect("verify with expected_from");
+    assert_eq!(from, alice_sk.public());
+    assert_eq!(decoded, action);
+
+    let wrong_pk = SecretKey::generate().public();
+    let err = SignedContactMessage::verify(&payload, Some(wrong_pk))
+        .expect_err("wrong expected_from fails");
+    let err_msg = format!("{err}");
+    assert!(
+        err_msg.contains("signer") || err_msg.contains("transport") || err_msg.contains("peer"),
+        "error should mention signer/transport mismatch: {err_msg}"
+    );
+
+    let mut tampered = payload.clone();
+    if let Some(byte) = tampered.last_mut() {
+        *byte ^= 0xFF;
+    }
+    SignedContactMessage::verify(&tampered, None).expect_err("tampered payload fails");
+}
+
+/// Test the full signed FriendRequestAccepted round-trip.
+#[test]
+fn signed_friend_request_accepted_round_trip() {
+    let alice_sk = SecretKey::generate();
+
+    let action = ContactAction::FriendRequestAccepted;
+
+    let payload =
+        SignedContactMessage::sign(&alice_sk, &action).expect("sign FriendRequestAccepted");
+
+    let (from, decoded) =
+        SignedContactMessage::verify(&payload, None).expect("verify FriendRequestAccepted");
+    assert_eq!(from, alice_sk.public());
+    assert_eq!(decoded, action);
+
+    let (from, decoded) = SignedContactMessage::verify(&payload, Some(alice_sk.public()))
+        .expect("verify with expected_from");
+    assert_eq!(from, alice_sk.public());
+    assert_eq!(decoded, action);
+
+    let wrong_pk = SecretKey::generate().public();
+    let err = SignedContactMessage::verify(&payload, Some(wrong_pk))
+        .expect_err("wrong expected_from fails");
+    let err_msg = format!("{err}");
+    assert!(
+        err_msg.contains("signer") || err_msg.contains("transport") || err_msg.contains("peer"),
+        "error should mention signer/transport mismatch: {err_msg}"
+    );
+
+    let mut tampered = payload.clone();
+    if let Some(byte) = tampered.last_mut() {
+        *byte ^= 0xFF;
+    }
+    SignedContactMessage::verify(&tampered, None).expect_err("tampered payload fails");
+}
+
+/// Test the full signed FriendRequestRejected round-trip.
+#[test]
+fn signed_friend_request_rejected_round_trip() {
+    let alice_sk = SecretKey::generate();
+
+    let action = ContactAction::FriendRequestRejected;
+
+    let payload =
+        SignedContactMessage::sign(&alice_sk, &action).expect("sign FriendRequestRejected");
+
+    let (from, decoded) =
+        SignedContactMessage::verify(&payload, None).expect("verify FriendRequestRejected");
+    assert_eq!(from, alice_sk.public());
+    assert_eq!(decoded, action);
+
+    let (from, decoded) = SignedContactMessage::verify(&payload, Some(alice_sk.public()))
+        .expect("verify with expected_from");
+    assert_eq!(from, alice_sk.public());
+    assert_eq!(decoded, action);
+
+    let wrong_pk = SecretKey::generate().public();
+    let err = SignedContactMessage::verify(&payload, Some(wrong_pk))
+        .expect_err("wrong expected_from fails");
+    let err_msg = format!("{err}");
+    assert!(
+        err_msg.contains("signer") || err_msg.contains("transport") || err_msg.contains("peer"),
+        "error should mention signer/transport mismatch: {err_msg}"
+    );
+
+    let mut tampered = payload.clone();
+    if let Some(byte) = tampered.last_mut() {
+        *byte ^= 0xFF;
+    }
+    SignedContactMessage::verify(&tampered, None).expect_err("tampered payload fails");
+}
+
+/// Test the full signed ConversationInvite round-trip (still valid between
+/// existing friends, separate from friend requests).
+#[test]
+fn signed_conversation_invite_round_trip() {
+    let alice_sk = SecretKey::generate();
+    let bob_pk = SecretKey::generate().public();
+
+    let topic = boru_chat::contact::direct_topic(&alice_sk.public(), &bob_pk);
     let action = ContactAction::ConversationInvite {
         topic,
         addrs: vec![],
@@ -339,10 +447,8 @@ fn signed_contact_verify_with_expected_identity() {
     let alice_sk = SecretKey::generate();
     let bob_sk = SecretKey::generate();
 
-    let topic = direct_topic(&alice_sk.public(), &bob_sk.public());
-    let action = ContactAction::ConversationInvite {
-        topic,
-        addrs: vec![],
+    let action = ContactAction::FriendRequest {
+        name: Some("Alice".into()),
     };
 
     let payload = SignedContactMessage::sign(&alice_sk, &action).expect("sign");

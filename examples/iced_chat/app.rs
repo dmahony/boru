@@ -17,15 +17,19 @@ use boru_chat::chat_callbacks::{ChatCallbacks, TransferId, TransferKind, Transfe
 use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_with_safety, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
-    handle_net_event as chat_net_event, handle_net_event_with_safety, message_hash, seed_memory_lookup, MeshHealth, MessageHash,
+    handle_net_event as chat_net_event, handle_net_event_with_safety, message_hash,
+    seed_memory_lookup, MeshHealth, MessageHash,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
+use boru_chat::conversations::{
+    spawn_conversation_forwarder, ConversationNetEvent, ConversationStore,
+};
 use boru_chat::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
 };
 use boru_chat::friends::{DirectConversationState, FriendId, FriendsStore};
-use boru_chat::image_optimizer::{optimize_chat_image, thumbnail_image, CHAT_IMAGE_MAX_BYTES};
+use boru_chat::image_optimizer::{compress_image, optimize_chat_image, CHAT_IMAGE_MAX_BYTES};
 use boru_chat::image_store::ImageStore;
 use boru_chat::inbox::{send_ack, send_sync_request, InboxEvent};
 use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
@@ -46,9 +50,9 @@ use n0_future::task;
 use n0_future::Stream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
 
-use crate::{fmt_relay_mode, log_viewer, Message, NetEvent, SignedMessage, Ticket};
+use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use iced::Color;
 
 // ── Settings persistence ─────────────────────────────────────────
@@ -703,17 +707,114 @@ impl ChatEntry {
 
 // ── Screen navigation ─────────────────────────────────────────────────
 
-/// The active screen in the application.
+/// The active view in the main panel.
+///
+/// The sidebar (chat list, friends, requests) is always visible regardless
+/// of the active screen — only the right-hand main panel changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {
-    /// The chat-list / inbox showing recent rooms.
+    /// No chat selected — empty state shown in the main panel.
     ChatList,
     /// An individual chat room with a given topic.
     Chat { topic: TopicId },
     /// Application settings screen.
     Settings,
-    /// Friend request management screen.
-    FriendRequests,
+}
+
+// ── Per-conversation runtime state ─────────────────────────────────────
+
+/// Runtime state for a single live conversation (active or background).
+///
+/// Each conversation has its own gossip subscription, forwarder task,
+/// message entries, name cache, and composer state. Background
+/// conversations keep their forwarder alive when the user switches to
+/// another conversation — only the UI display swaps.
+#[derive(Debug)]
+pub struct ConversationLive {
+    // ── Subscription ──
+    /// Gossip message sender for this conversation.
+    pub sender: Option<GossipSender>,
+    /// Optional forward-handle; kept alive so background subscriptions
+    /// continue to receive events.
+    pub forward_handle: Option<n0_future::task::JoinHandle<()>>,
+    /// Pending forwarder handle awaiting transfer.
+    pub forward_handle_slot: Arc<StdMutex<Option<n0_future::task::JoinHandle<()>>>>,
+    /// The gossip topic for this conversation.
+    pub topic: TopicId,
+    /// Ticket string for sharing this conversation.
+    pub ticket_str: String,
+
+    // ── Chat state ──
+    /// Chat messages for this conversation.
+    pub entries: Vec<ChatEntry>,
+    /// Composer input text.
+    pub composer_text: String,
+    /// Whether to auto-scroll to the latest message.
+    pub follow_latest: bool,
+    /// Name cache: peer PublicKey → display name.
+    pub names: HashMap<PublicKey, String>,
+    /// Maps content hash to stable event id for self-sent messages.
+    pub self_sent_events: HashMap<MessageHash, u64>,
+    /// Number of entries already saved to ChatHistoryStore.
+    pub history_saved_count: usize,
+    /// Cached layout for the chat log.
+    pub layout_cache: std::cell::RefCell<LayoutCache>,
+    /// Y scroll offset.
+    pub scroll_offset: f32,
+    /// Viewport height.
+    pub viewport_height: f32,
+
+    // ── Downloads ──
+    /// Pending file download info: (filename, ticket_string).
+    pub pending_file: Option<(String, String)>,
+    /// Pending image downloads queue.
+    pub pending_image: VecDeque<(String, MessageHash, PublicKey)>,
+    /// Index of the chat entry with the active download.
+    pub download_entry_index: Option<usize>,
+    /// Transfer ID for the active download.
+    pub active_download_transfer_id: Option<TransferId>,
+
+    // ── Network peers ──
+    /// Set of gossip neighbors for this conversation.
+    pub neighbors: HashSet<PublicKey>,
+    /// Events received while this conversation is not selected.
+    pub pending_events: VecDeque<NetEvent>,
+    /// Number of unread events received while hidden.
+    pub unread: u64,
+}
+
+impl ConversationLive {
+    /// Create a new live conversation for the given topic.
+    fn new(topic: TopicId) -> Self {
+        Self {
+            sender: None,
+            forward_handle: None,
+            forward_handle_slot: Arc::new(StdMutex::new(None)),
+            topic,
+            ticket_str: String::new(),
+            entries: Vec::new(),
+            composer_text: String::new(),
+            follow_latest: true,
+            names: HashMap::new(),
+            self_sent_events: HashMap::new(),
+            history_saved_count: 0,
+            layout_cache: std::cell::RefCell::new(LayoutCache::new(TYPO_SM)),
+            scroll_offset: 0.0,
+            viewport_height: 0.0,
+            pending_file: None,
+            pending_image: VecDeque::new(),
+            download_entry_index: None,
+            active_download_transfer_id: None,
+            neighbors: HashSet::new(),
+            pending_events: VecDeque::new(),
+            unread: 0,
+        }
+    }
+
+    /// Convenience: read the gossip sender, or `None` if not yet subscribed.
+    fn sender(&self) -> Option<&GossipSender> {
+        self.sender.as_ref()
+    }
 }
 
 // ── Application state ─────────────────────────────────────────────────
@@ -727,6 +828,11 @@ pub struct IcedChat {
     /// Screen to return to when closing the settings page.
     settings_return_to: Option<Screen>,
 
+    // ── Multi-conversation state ──
+    /// Per-conversation runtime state. Each direct chat or group room
+    /// keeps its own subscription, entries, and composer.
+    conversations: HashMap<TopicId, ConversationLive>,
+
     // ── ChatList state ──
     room_history: RoomHistoryStore,
     room_history_dirty: bool,
@@ -735,8 +841,14 @@ pub struct IcedChat {
     /// Optional error message shown in the chat list.
     chat_list_error: String,
 
-    // ── Chat state (active room) ──
+    // ── Chat state (active room — display cache) ──
+    /// Active conversation topic (display cache).
+    topic: TopicId,
+    /// Active conversation display name.
+    ticket_str: String,
+    /// Active conversation entries (display cache).
     entries: Vec<ChatEntry>,
+    /// Active conversation composer text.
     composer_text: String,
     pub help_visible: bool,
     pending_file: Option<(String, String)>,
@@ -748,8 +860,12 @@ pub struct IcedChat {
     /// the correct row even if the view is recreated.
     active_download_transfer_id: Option<TransferId>,
     names: HashMap<PublicKey, String>,
-    topic: TopicId,
-    ticket_str: String,
+    /// Active conversation gossip sender.
+    sender: Option<GossipSender>,
+    /// JoinHandle for the active conversation's event forwarder.
+    forward_handle: Option<task::JoinHandle<()>>,
+    /// Pending forwarder handle slot for async transitions.
+    forward_handle_slot: Arc<StdMutex<Option<task::JoinHandle<()>>>>,
 
     // ── Shared network state ──
     secret_key: SecretKey,
@@ -757,7 +873,6 @@ pub struct IcedChat {
     /// Keeps the protocol router alive for the lifetime of the GUI. Dropping
     /// the router stops accepting incoming gossip connections.
     _router: iroh::protocol::Router,
-    sender: Option<GossipSender>,
     blob_store: MemStore,
     endpoint: iroh::Endpoint,
     memory_lookup: MemoryLookup,
@@ -765,14 +880,9 @@ pub struct IcedChat {
     local_public: PublicKey,
     relay_mode: RelayMode,
     runtime_handle: tokio::runtime::Handle,
-    pub net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
-    net_tx: UnboundedSender<NetEvent>,
+    pub net_rx: Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>,
+    net_tx: UnboundedSender<ConversationNetEvent>,
     backfill_handle: boru_chat::backfill::BackfillHandle,
-    /// JoinHandle to abort the current forward_gossip_events task when
-    /// switching rooms.
-    forward_handle: Option<task::JoinHandle<()>>,
-    /// Pending forwarder handle waiting to be transferred into `forward_handle`.
-    forward_handle_slot: Arc<StdMutex<Option<task::JoinHandle<()>>>>,
     friends: FriendsStore,
     friends_dirty: bool,
     friend_mgr: FriendPingManager,
@@ -898,6 +1008,9 @@ pub struct IcedChat {
     /// Public-room safety enforcement (rate limits, size limits, download queue bounding).
     /// `None` (default) means private-room behavior — all safety checks are skipped.
     pub public_room_safety: Option<Arc<PublicRoomSafety>>,
+    /// Durable conversation records — persisted to `conversations.json`.
+    /// Tracks metadata (peer, name, kind, archived) for all conversations.
+    conversation_store: ConversationStore,
 }
 
 /// Tracks the UI-level lifecycle of an outgoing friend request.
@@ -1003,7 +1116,7 @@ pub enum AppMessage {
     FriendRequestCancel(String),
     FriendRequestSentResult(Result<FriendRequest, String>),
     FriendRequestActionResult(Result<FriendRequest, String>),
-    NetEvent(NetEvent),
+    NetEvent(ConversationNetEvent),
     FriendEvent(FriendEvent),
     /// An event from the whisper (DM) protocol.
     WhisperEvent(WhisperEvent),
@@ -1044,8 +1157,7 @@ pub enum AppMessage {
     ToggleDark(bool),
     /// Update the local display name (nickname).
     SetNickname(String),
-    /// Open the separate log viewer window.
-    OpenLogsWindow,
+
     /// Internal no-op for async task completions that should not change UI state.
     Noop,
     /// Copy text to the system clipboard.
@@ -1133,6 +1245,17 @@ pub enum AppMessage {
     },
     /// A file/image download progress event from a background task.
     DownloadProgress(TransferProgress),
+    /// Open a conversation with a peer (derive topic, create record, select).
+    OpenConversation(PublicKey),
+    /// Select a conversation for display (UI-only switch).
+    SelectConversation(TopicId),
+    /// Close / archive a conversation (remove from local list, keep friend).
+    CloseConversation(TopicId),
+    /// Send a text message to the specified conversation.
+    SendMessage {
+        conversation_topic: TopicId,
+        content: String,
+    },
 }
 
 // ── Performance metrics ──────────────────────────────────────────────
@@ -1206,6 +1329,16 @@ struct LayoutCache {
     total_image_bytes: usize,
     /// Count of entries that carry image data.
     image_entry_count: usize,
+}
+
+impl std::fmt::Debug for LayoutCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayoutCache")
+            .field("heights_len", &self.heights.len())
+            .field("dirty_from", &self.dirty_from)
+            .field("total_height", &self.total_height)
+            .finish()
+    }
 }
 
 impl LayoutCache {
@@ -1461,8 +1594,8 @@ impl IcedChat {
         relay_mode: RelayMode,
         data_dir: std::path::PathBuf,
         runtime_handle: tokio::runtime::Handle,
-        net_rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
-        net_tx: UnboundedSender<NetEvent>,
+        net_rx: Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>,
+        net_tx: UnboundedSender<ConversationNetEvent>,
         room_history: RoomHistoryStore,
         friends: FriendsStore,
         friend_mgr: FriendPingManager,
@@ -1555,6 +1688,7 @@ impl IcedChat {
             room_history_dirty: false,
             join_ticket_input: String::new(),
             chat_list_error: String::new(),
+            conversations: HashMap::new(),
             entries: Vec::new(),
             composer_text: String::new(),
             help_visible: false,
@@ -1639,6 +1773,7 @@ impl IcedChat {
             friend_request_error: String::new(),
             download_progress_queue: Arc::new(StdMutex::new(VecDeque::new())),
             public_room_safety: None,
+            conversation_store: ConversationStore::load_or_default(&data_dir),
         }
     }
 
@@ -1788,7 +1923,7 @@ impl IcedChat {
                 .await
                 {
                     Ok(buf) => {
-                        let thumb = thumbnail_image(&buf);
+                        let thumb = compress_image(&buf);
                         Ok((name, thumb))
                     }
                     Err(e) => Err(format!("Download: {e}")),
@@ -2106,7 +2241,7 @@ impl IcedChat {
 
             AppMessage::ToggleDark(_) => "ToggleDark",
             AppMessage::SetNickname(_) => "SetNickname",
-            AppMessage::OpenLogsWindow => "OpenLogsWindow",
+
             AppMessage::Noop => "Noop",
             AppMessage::CopyToClipboard(_) => "CopyToClipboard",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
@@ -2150,6 +2285,10 @@ impl IcedChat {
                 Shortcut::QuickCommand => "Shortcut(QuickCommand)",
             },
             AppMessage::DownloadProgress(_) => "DownloadProgress",
+            AppMessage::OpenConversation(_) => "OpenConversation",
+            AppMessage::SelectConversation(_) => "SelectConversation",
+            AppMessage::CloseConversation(_) => "CloseConversation",
+            AppMessage::SendMessage { .. } => "SendMessage",
         }
     }
 }
@@ -2158,14 +2297,32 @@ impl IcedChat {
 
 impl IcedChat {
     fn leave_current_room(&mut self) {
-        // Abort the forwarding task
-        if let Some(handle) = self.forward_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.forward_handle_slot.lock().unwrap().take() {
-            handle.abort();
-        }
-        self.sender = None;
+        // A room switch changes only the selected view. Keep the sender and
+        // forwarder alive in the per-conversation map so incoming events are
+        // not lost while another conversation is selected.
+        let topic = self.topic;
+        let mut conversation = self
+            .conversations
+            .remove(&topic)
+            .unwrap_or_else(|| ConversationLive::new(topic));
+        conversation.sender = self.sender.take();
+        conversation.forward_handle = self.forward_handle.take();
+        conversation.forward_handle_slot = self.forward_handle_slot.clone();
+        conversation.ticket_str = std::mem::take(&mut self.ticket_str);
+        conversation.entries = std::mem::take(&mut self.entries);
+        conversation.composer_text = std::mem::take(&mut self.composer_text);
+        conversation.names = std::mem::take(&mut self.names);
+        conversation.self_sent_events = std::mem::take(&mut self.self_sent_events);
+        conversation.neighbors = std::mem::take(&mut self.neighbors);
+        conversation.history_saved_count = self.history_saved_count;
+        conversation.pending_file = self.pending_file.take();
+        conversation.pending_image = std::mem::take(&mut self.pending_image);
+        conversation.download_entry_index = self.download_entry_index.take();
+        conversation.active_download_transfer_id = self.active_download_transfer_id.take();
+        conversation.follow_latest = self.follow_latest;
+        conversation.scroll_offset = self.scroll_offset;
+        conversation.viewport_height = self.viewport_height;
+        self.conversations.insert(topic, conversation);
         self.entries.clear();
         self.layout_cache.borrow_mut().clear();
         self.names.clear();
@@ -2315,6 +2472,15 @@ where
     }
 }
 
+/// Truncate a message preview string to a reasonable length for display.
+fn format_preview(preview: &str) -> String {
+    if preview.len() > 60 {
+        format!("{}…", &preview[..60])
+    } else {
+        preview.to_string()
+    }
+}
+
 /// Create a deterministic topic id from two peer public keys.
 ///
 /// Both peers derive the same topic by sorting their public keys
@@ -2435,13 +2601,14 @@ impl IcedChat {
                         .await
                         .map_err(|e| e.to_string())?;
 
-                        let forward_handle = task::spawn(room_docs::forward_room_events_for_chat(
+                        let forward_handle = spawn_conversation_forwarder(
+                            topic,
                             metadata_doc,
                             roster_doc,
                             receiver,
                             net_tx,
                             None,
-                        ));
+                        );
                         *forward_handle_slot.lock().unwrap() = Some(forward_handle);
 
                         // Broadcast our presence (AboutMe + periodic Presence/Heartbeat
@@ -2477,6 +2644,45 @@ impl IcedChat {
             }
 
             AppMessage::OpenRoom(topic) => {
+                // Re-select an already subscribed conversation instead of
+                // creating a second gossip subscription. Its forwarder stays
+                // alive while other conversations are selected.
+                if topic != self.topic {
+                    if let Some(mut conversation) = self.conversations.remove(&topic) {
+                        if let Some(sender) = conversation.sender.take() {
+                            self.topic = topic;
+                            self.screen = Screen::Chat { topic };
+                            self.sender = Some(sender);
+                            self.forward_handle = conversation.forward_handle.take();
+                            self.forward_handle_slot = conversation.forward_handle_slot;
+                            self.ticket_str = conversation.ticket_str;
+                            self.entries = conversation.entries;
+                            self.composer_text = conversation.composer_text;
+                            self.names = conversation.names;
+                            self.self_sent_events = conversation.self_sent_events;
+                            self.neighbors = conversation.neighbors;
+                            self.history_saved_count = conversation.history_saved_count;
+                            self.pending_file = conversation.pending_file;
+                            self.pending_image = conversation.pending_image;
+                            self.download_entry_index = conversation.download_entry_index;
+                            self.active_download_transfer_id =
+                                conversation.active_download_transfer_id;
+                            self.follow_latest = conversation.follow_latest;
+                            self.scroll_offset = conversation.scroll_offset;
+                            self.viewport_height = conversation.viewport_height;
+                            self.layout_cache.borrow_mut().clear();
+                            // Selecting a conversation consumes its queued
+                            // notifications; events themselves are replayed
+                            // through the normal NetEvent path below.
+                            conversation.unread = 0;
+                            for event in conversation.pending_events.drain(..) {
+                                let _ = self.net_tx.send(ConversationNetEvent::new(topic, event));
+                            }
+                            return iced::Task::none();
+                        }
+                        self.conversations.insert(topic, conversation);
+                    }
+                }
                 // Save the current room first
                 self.save_room_to_history();
                 // Update room list preview for previous room
@@ -2598,13 +2804,14 @@ impl IcedChat {
                         .await
                         .map_err(|e| e.to_string())?;
 
-                        let forward_handle = task::spawn(room_docs::forward_room_events_for_chat(
+                        let forward_handle = spawn_conversation_forwarder(
+                            topic,
                             metadata_doc,
                             roster_doc,
                             receiver,
                             net_tx,
                             None,
-                        ));
+                        );
                         *forward_handle_slot.lock().unwrap() = Some(forward_handle);
 
                         // Broadcast our presence (AboutMe + periodic Presence/Heartbeat
@@ -2820,13 +3027,14 @@ impl IcedChat {
                         .await
                         .map_err(|e| e.to_string())?;
 
-                        let forward_handle = task::spawn(room_docs::forward_room_events_for_chat(
+                        let forward_handle = spawn_conversation_forwarder(
+                            topic,
                             metadata_doc,
                             roster_doc,
                             receiver,
                             net_tx,
                             None,
-                        ));
+                        );
                         *forward_handle_slot.lock().unwrap() = Some(forward_handle);
 
                         let msg = SignedMessage::sign_and_encode(
@@ -3086,13 +3294,7 @@ impl IcedChat {
                 iced::Task::done(AppMessage::OpenRoom(topic))
             }
 
-            AppMessage::RoomSelected(topic) => {
-                if let Screen::ChatList = self.screen {
-                    iced::Task::done(AppMessage::OpenRoom(topic))
-                } else {
-                    iced::Task::none()
-                }
-            }
+            AppMessage::RoomSelected(topic) => iced::Task::done(AppMessage::OpenRoom(topic)),
 
             // ── ChatList ─────────────────────────────────────────────
             AppMessage::JoinTicketInputChanged(text) => {
@@ -3763,9 +3965,7 @@ impl IcedChat {
 
             // ── Friend Requests ───────────────────────────────────────
             AppMessage::OpenFriendRequests => {
-                if !matches!(self.screen, Screen::FriendRequests) {
-                    self.screen = Screen::FriendRequests;
-                }
+                // Friend requests are now shown in the sidebar — no navigation needed.
                 iced::Task::none()
             }
 
@@ -3918,9 +4118,24 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::NetEvent(event) => {
+            AppMessage::NetEvent(conv_event) => {
+                let topic = conv_event.topic;
+                let event = conv_event.event;
+                let conversation = self
+                    .conversations
+                    .entry(topic)
+                    .or_insert_with(|| ConversationLive::new(topic));
+                if topic != self.topic || !matches!(self.screen, Screen::Chat { .. }) {
+                    conversation.pending_events.push_back(event);
+                    conversation.unread = conversation.unread.saturating_add(1);
+                    return iced::Task::none();
+                }
+                conversation.unread = 0;
                 self.update_room_preview(&event);
-                if let Err(err) = handle_net_event_with_safety(event.clone(), self, self.public_room_safety.as_deref()) {
+                let safety = self.public_room_safety.clone();
+                if let Err(err) =
+                    handle_net_event_with_safety(event.clone(), self, safety.as_deref())
+                {
                     warn!(error = %err, "failed to handle network event");
                 }
                 // ── Delivery state transitions ──
@@ -4090,7 +4305,7 @@ impl IcedChat {
                 match event {
                     boru_chat::whisper::WhisperEvent::Control { from, content } => {
                         match SignedContactMessage::verify(&content, Some(from)) {
-                            Ok((sender, ContactAction::ContactRequest { name })) => {
+                            Ok((sender, ContactAction::FriendRequest { name })) => {
                                 let record = self
                                     .friends
                                     .ensure_friend(FriendId::from_public_key(sender));
@@ -4100,7 +4315,7 @@ impl IcedChat {
                                 self.try_save_friends();
                                 let payload = SignedContactMessage::sign(
                                     &self.secret_key,
-                                    &ContactAction::ContactAccept,
+                                    &ContactAction::FriendRequestAccepted,
                                 );
                                 if let Ok(payload) = payload {
                                     let whisper_handle = self.whisper_handle.clone();
@@ -4114,7 +4329,7 @@ impl IcedChat {
                                     );
                                 }
                             }
-                            Ok((sender, ContactAction::ContactAccept)) => {
+                            Ok((sender, ContactAction::FriendRequestAccepted)) => {
                                 if let Some(record) =
                                     self.friends.get_mut(&FriendId::from_public_key(sender))
                                 {
@@ -5109,16 +5324,6 @@ impl IcedChat {
                 )
             }
 
-            AppMessage::OpenLogsWindow => {
-                let data_dir = self.data_dir.clone();
-                iced::Task::perform(async move { log_viewer::spawn(&data_dir) }, |result| {
-                    match result {
-                        Ok(()) => AppMessage::Noop,
-                        Err(err) => AppMessage::ErrorMsg(err),
-                    }
-                })
-            }
-
             AppMessage::Noop => iced::Task::none(),
 
             AppMessage::Scrolled(offset, vp_h) => {
@@ -5356,6 +5561,133 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+
+            // ── Conversation selection / management ─────────────────
+            AppMessage::OpenConversation(peer) => {
+                // Derive topic, ensure conversation record exists, and select.
+                let topic = direct_topic(&self.local_public, &peer);
+                let fid = FriendId::from_public_key(peer);
+                let record = self.friends.ensure_friend(fid);
+                record.set_direct_conversation(topic, DirectConversationState::Active);
+                self.conversation_store
+                    .upsert(boru_chat::conversations::ConversationEntry::new(
+                        topic,
+                        peer.to_string(),
+                        peer.fmt_short().to_string(),
+                    ));
+                let _ = self.conversation_store.save();
+                self.try_save_friends();
+                iced::Task::done(AppMessage::OpenRoom(topic))
+            }
+
+            AppMessage::SelectConversation(topic) => {
+                // UI-only switch — does NOT create or subscribe.
+                iced::Task::done(AppMessage::OpenRoom(topic))
+            }
+
+            AppMessage::CloseConversation(topic) => {
+                // Remove conversation from local list without affecting friendship,
+                // subscriptions, or the live forwarder. The conversation stays
+                // subscribed in the background.
+                self.save_room_to_history();
+                self.room_history.remove(&topic);
+                self.room_history_dirty = true;
+                self.persist_room_history();
+                // Archive in conversation store
+                if let Some(entry) = self.conversation_store.find_mut(&topic) {
+                    entry.archived = true;
+                }
+                let _ = self.conversation_store.save();
+                // If this was the displayed conversation, go back to chat list
+                if topic == self.topic {
+                    self.screen = Screen::ChatList;
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::SendMessage {
+                conversation_topic,
+                content,
+            } => {
+                // Validate that this conversation exists
+                if !self.conversations.contains_key(&conversation_topic) {
+                    warn!("SendMessage: unknown conversation {conversation_topic:?}");
+                    return iced::Task::none();
+                }
+                // If sending to the active conversation, use the normal flow
+                if conversation_topic == self.topic {
+                    self.composer_text = content;
+                    // Fall through to SendPressed logic
+                    let trimmed = self.composer_text.trim().to_string();
+                    if trimmed.is_empty() {
+                        return iced::Task::none();
+                    }
+                    self.composer_text.clear();
+                    // Send to active conversation via existing sender
+                    let text = trimmed.clone();
+                    let msg = crate::Message::Message { text: trimmed };
+                    let msg_hash = message_hash(&msg);
+                    let local_hex = hex::encode(self.local_public.as_bytes());
+                    let encoded = match SignedMessage::sign_and_encode(&self.secret_key, &msg) {
+                        Ok(encoded) => encoded,
+                        Err(e) => return iced::Task::done(AppMessage::ErrorMsg(e.to_string())),
+                    };
+                    let event_id = {
+                        let mut store = self.chat_history.lock().unwrap();
+                        let entry = HistoryEntry::new(
+                            self.topic,
+                            local_hex,
+                            encoded.to_vec(),
+                            "text",
+                            text.clone(),
+                        );
+                        let id = store.push_with_id(entry);
+                        let _ = store.save();
+                        id
+                    };
+                    {
+                        let mut outbox = self.outbox.lock().unwrap();
+                        let _ =
+                            outbox.push(OutboxEntry::new(event_id, self.topic, encoded.to_vec()));
+                        let _ = outbox.save();
+                    }
+                    self.self_sent_events.insert(msg_hash, event_id);
+                    let mut local_entry = ChatEntry::local(&self.local_label, &text);
+                    local_entry.event_id = event_id;
+                    local_entry.message_hash = Some(msg_hash);
+                    self.entries_push(local_entry);
+                    if let Some(sender) = self.sender.clone() {
+                        return iced::Task::perform(
+                            async move {
+                                sender.broadcast(encoded).await.ok();
+                                (text, event_id, msg_hash)
+                            },
+                            |(t, eid, mh)| AppMessage::MessageSent(t, eid, mh),
+                        );
+                    }
+                    return iced::Task::none();
+                }
+                // For background conversations, use the ConversationLive's sender
+                if let Some(conv) = self.conversations.get(&conversation_topic) {
+                    if let Some(ref sender) = conv.sender {
+                        let sender = sender.clone();
+                        let sk = self.secret_key.clone();
+                        let msg_text = content.clone();
+                        return iced::Task::perform(
+                            async move {
+                                if let Ok(encoded) = crate::SignedMessage::sign_and_encode(
+                                    &sk,
+                                    &crate::Message::Message { text: msg_text },
+                                ) {
+                                    sender.broadcast(encoded).await.ok();
+                                }
+                            },
+                            |_| AppMessage::Noop,
+                        );
+                    }
+                }
+                iced::Task::none()
+            }
         }
     }
 
@@ -5445,6 +5777,11 @@ impl IcedChat {
             let _ = self.chat_history.lock().unwrap().save();
             self.chat_history_dirty = false;
         }
+    }
+
+    /// Persist the conversation store if it has changes.
+    fn try_save_conversation_store(&mut self) {
+        let _ = self.conversation_store.save();
     }
 }
 
@@ -5737,931 +6074,546 @@ impl IcedChat {
     }
 
     pub fn view(&self) -> iced::Element<'_, AppMessage> {
-        let inner: iced::Element<'_, AppMessage> = match self.screen {
-            Screen::ChatList => self.view_chat_list().into(),
-            Screen::Chat { .. } => self.view_chat_screen().into(),
-            Screen::Settings => self.view_settings_screen().into(),
-            Screen::FriendRequests => self.view_friend_requests().into(),
+        use iced::widget::{container, row, Column};
+        use iced::Length;
+
+        let theme = self.theme();
+
+        // Always show sidebar on the left.
+        let sidebar = self.view_sidebar();
+
+        // Main panel depends on the active screen.
+        let main_panel: iced::Element<'_, AppMessage> = match self.screen {
+            Screen::ChatList => self.view_main_empty_state(),
+            Screen::Chat { .. } => self.view_chat_panel(),
+            Screen::Settings => self.view_settings_screen(),
         };
-        // Every view is wrapped in the primary background so the entire
-        // window responds to the theme toggle — not just text colors.
-        iced::widget::container(inner)
+
+        let content = row![
+            container(sidebar)
+                .width(Length::Fixed(280.0))
+                .height(Length::Fill)
+                .style(move |t| {
+                    let mut s = iced::widget::container::Style::default();
+                    s.background = Some(iced::Background::Color(bg_surface(t)));
+                    s
+                }),
+            container(main_panel)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(move |t| container_primary(t)),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+        container(content)
             .width(iced::Length::Fill)
             .height(iced::Length::Fill)
-            .style(move |t| container_primary(t))
             .into()
     }
 
-    // ── Chat list (inbox) view ───────────────────────────────────────
+    // ── Sidebar ────────────────────────────────────────────────────────
 
-    fn view_chat_list(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, row, scrollable, text, text_input, Column, Space};
-        use iced::{Alignment, Color, Length};
+    /// Left sidebar containing Chats, Friends, and Friend Requests sections.
+    fn view_sidebar(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{container, scrollable, text, Column, Row, Space};
+        use iced::{Alignment, Length};
+
         let theme = self.theme();
 
-        let mut content = Column::new().spacing(SPACE_12).padding(SPACE_16);
-
-        // ── Identity card ──
-        content = content.push(
-            container(
-                Column::new()
-                    .push(
-                        row![
-                            text("Boru Chat").size(TYPO_XL).width(Length::Fill),
-                            button(text("Settings").size(TYPO_MD))
-                                .on_press(AppMessage::OpenSettings)
-                                .padding(SPACE_4),
-                        ]
-                        .spacing(SPACE_8)
-                        .align_y(Alignment::Center),
-                    )
-                    .push(
-                        text(format!(
-                            "Identity: {}  |  Relay: {}",
-                            self.local_label,
-                            fmt_relay_mode(&self.relay_mode)
-                        ))
-                        .size(TYPO_XS)
-                        .color(self.color_muted()),
-                    )
-                    .spacing(SPACE_4),
+        let header = Row::new()
+            .push(text("Boru Chat").size(TYPO_LG).width(Length::Fill))
+            .push(
+                iced::widget::button(iced::widget::text("⚙").size(TYPO_MD))
+                    .on_press(AppMessage::OpenSettings)
+                    .padding(SPACE_4)
+                    .style(move |t, status| {
+                        let mut s = iced::widget::button::Style::default();
+                        s.background = None;
+                        s.text_color = if matches!(status, iced::widget::button::Status::Hovered) {
+                            accent_primary(t)
+                        } else {
+                            text_muted(t)
+                        };
+                        s
+                    }),
             )
-            .width(Length::Fill)
-            .padding(SPACE_12)
-            .style(move |t| container_surface(t)),
-        );
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center);
 
-        // ── Default lobby ticket ──
-        if self.topic == Self::default_lobby_topic() && !self.ticket_str.is_empty() {
-            content = content.push(
-                container(
-                    row![
-                        text("Lobby ticket (share once with another user):")
-                            .size(TYPO_SM)
-                            .width(Length::Fill),
-                        button("Copy ticket")
-                            .on_press(AppMessage::CopyToClipboard(self.ticket_str.clone()))
-                            .padding(SPACE_4),
-                    ]
-                    .spacing(SPACE_8)
-                    .align_y(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .padding(SPACE_12)
-                .style(move |t| container_surface(t)),
-            );
-        }
-
-        // ── First-run onboarding card ──
-        if self.first_run {
-            content = content.push(
-                container(
-                    Column::new()
-                        .push(
-                            text("Welcome to Boru Chat")
-                                .size(TYPO_XL)
-                                .width(Length::Fill),
-                        )
-                        .push(Space::new().height(Length::Fixed(SPACE_8)))
-                        .push(
-                            text("Get started in 3 steps:")
-                                .size(TYPO_MD)
-                                .color(self.color_muted()),
-                        )
-                        .push(Space::new().height(Length::Fixed(SPACE_8)))
-                        .push(
-                            row![
-                                text("1️⃣").size(TYPO_MD),
-                                text(" Create a new chat room or join via a shared ticket")
-                                    .size(TYPO_SM)
-                                    .width(Length::Fill),
-                            ]
-                            .spacing(SPACE_8)
-                            .align_y(Alignment::Center),
-                        )
-                        .push(
-                            row![
-                                text("2️⃣").size(TYPO_MD),
-                                text(" Share the room ticket with another user so they can join")
-                                    .size(TYPO_SM)
-                                    .width(Length::Fill),
-                            ]
-                            .spacing(SPACE_8)
-                            .align_y(Alignment::Center),
-                        )
-                        .push(
-                            row![
-                                text("3️⃣").size(TYPO_MD),
-                                text(" Chat, send files, and add friends from the chat list")
-                                    .size(TYPO_SM)
-                                    .width(Length::Fill),
-                            ]
-                            .spacing(SPACE_8)
-                            .align_y(Alignment::Center),
-                        )
-                        .spacing(SPACE_6),
-                )
-                .width(Length::Fill)
-                .padding(SPACE_16)
-                .style(move |t| container_card(t)),
-            );
-        }
-
-        // Small visual pause before action buttons
-        content = content.push(Space::new().height(Length::Fixed(SPACE_4)));
-
-        // ── New Chat / Join buttons (surface) ──
-        content = content.push(
-            container(
-                row![
-                    button(
-                        row![text(" ➕ ").size(TYPO_MD), text("New Chat").size(TYPO_MD),]
-                            .align_y(Alignment::Center)
-                            .spacing(SPACE_4),
-                    )
-                    .on_press(AppMessage::NewChatCreated)
-                    .padding(SPACE_8),
-                    button(
-                        row![
-                            text(" 🔗 ").size(TYPO_MD),
-                            text("Join via Ticket").size(TYPO_MD),
-                        ]
-                        .align_y(Alignment::Center)
-                        .spacing(SPACE_4),
-                    )
-                    .on_press(AppMessage::JoinFromTicket)
-                    .padding(SPACE_8),
-                    button(
-                        row![
-                            text(" 🤝 ").size(TYPO_MD),
-                            text("Friend Requests").size(TYPO_MD),
-                        ]
-                        .align_y(Alignment::Center)
-                        .spacing(SPACE_4),
-                    )
-                    .on_press(AppMessage::OpenFriendRequests)
-                    .padding(SPACE_8),
-                ]
-                .spacing(SPACE_8),
+        let identity_row = Row::new()
+            .push(
+                text(format!(
+                    "{} | {}",
+                    self.local_label,
+                    fmt_relay_mode(&self.relay_mode),
+                ))
+                .size(TYPO_XXS)
+                .color(self.color_muted()),
             )
-            .width(Length::Fill)
-            .padding(SPACE_12)
-            .style(move |t| container_surface(t)),
-        );
+            .spacing(SPACE_4);
 
-        // ── Join ticket input ──
-        content = content.push(
-            container(
-                row![
-                    text_input("Paste ticket to join a room…", &self.join_ticket_input)
-                        .on_input(AppMessage::JoinTicketInputChanged)
-                        .on_submit(AppMessage::JoinFromTicket)
-                        .width(Length::Fill),
-                ]
-                .spacing(SPACE_4),
-            )
-            .width(Length::Fill)
-            .padding(SPACE_12)
-            .style(move |t| container_surface(t)),
-        );
+        // Chats section
+        let chats_section = self.view_sidebar_chats();
 
-        // Error message
-        if !self.chat_list_error.is_empty() {
-            content = content.push(
-                text(&self.chat_list_error)
-                    .color(color_error(&theme))
-                    .size(TYPO_SM),
-            );
-        }
+        // Friends section
+        let friends_section = self.view_sidebar_friends();
 
-        if !self.join_request_list.is_empty() {
-            content = content.push(self.view_join_requests());
-        }
+        // Friend Requests section
+        let requests_section = self.view_sidebar_requests();
 
-        // ── Recent chats list ──
-        if !self.first_run {
-            let mut section = Column::new().spacing(SPACE_8);
-            section = section.push(
-                row![
-                    text("Recent Chats").size(TYPO_MD).width(Length::Fill),
-                    text("(click room to open, click Remove to remove it)")
-                        .size(TYPO_XXS)
-                        .color(self.color_muted()),
-                ]
-                .spacing(SPACE_4),
-            );
-            if self.room_history.is_empty() {
-                section = section.push(
-                    text("No recent chats. Create a new chat or join an existing one.")
-                        .color(self.color_muted())
-                        .size(TYPO_SM),
-                );
-            } else {
-                let mut list = Column::new().spacing(SPACE_2).width(Length::Fill);
-                for room in &self.room_history.rooms {
-                    list = list.push(self.view_room_row(room));
-                }
-                section = section.push(scrollable(list).height(Length::Fill));
-            }
-            content = content.push(
-                container(section)
-                    .width(Length::Fill)
-                    .padding(SPACE_12)
-                    .style(move |t| container_surface(t)),
-            );
-        }
+        let content = Column::new()
+            .push(container(header).padding(iced::Padding {
+                top: SPACE_12,
+                right: SPACE_12,
+                bottom: SPACE_4,
+                left: SPACE_12,
+            }))
+            .push(container(identity_row).padding(iced::Padding {
+                top: SPACE_2,
+                right: SPACE_12,
+                bottom: SPACE_8,
+                left: SPACE_12,
+            }))
+            .push(chats_section)
+            .push(friends_section)
+            .push(requests_section)
+            .push(Space::new().height(Length::Fill));
 
-        // ── All Friends ──
-        if !self.first_run {
-            let mut section = Column::new().spacing(SPACE_8);
-            section = section.push(
-                row![
-                    text("Friends").size(TYPO_MD).width(Length::Fill),
-                    text(format!("{} total", self.friends.len()))
-                        .size(TYPO_XXS)
-                        .color(self.color_muted()),
-                ]
-                .spacing(SPACE_4),
-            );
-            if self.friends.is_empty() {
-                section = section.push(
-                    text("No friends yet. Add friends via /friend add <pk> in a chat.")
-                        .color(self.color_muted())
-                        .size(TYPO_SM),
-                );
-            } else {
-                let mut friends_list = Column::new().spacing(SPACE_2).width(Length::Fill);
-                let mut sorted: Vec<(&FriendId, &boru_chat::friends::FriendRecord)> =
-                    self.friends.iter().collect();
-                sorted.sort_by(|a, b| {
-                    let label_a = a.1.display_label(a.0);
-                    let label_b = b.1.display_label(b.0);
-                    label_a.cmp(&label_b)
-                });
-                for (fid, record) in sorted {
-                    if let Ok(pk) = fid.parse_public_key() {
-                        friends_list = friends_list.push(self.view_friend_row(pk, fid, record));
-                    }
-                }
-                section = section.push(scrollable(friends_list).height(Length::Shrink));
-            }
-            content = content.push(
-                container(section)
-                    .width(Length::Fill)
-                    .padding(SPACE_12)
-                    .style(move |t| container_surface(t)),
-            );
-        }
-        // ── Discovered Users ──
-        let mut discovered_users: Vec<(PublicKey, String)> = self
-            .neighbors
-            .iter()
-            .copied()
-            .filter(|peer| *peer != self.local_public)
-            .filter(|peer| {
-                let fid = FriendId::from_public_key(*peer);
-                self.friends
-                    .get(&fid)
-                    .is_some_and(|record| !record.rooms.is_empty())
-            })
-            .map(|peer| (peer, self.resolve_name(&peer)))
-            .collect();
-        discovered_users.sort_by(|a, b| a.1.cmp(&b.1));
-        if !self.first_run {
-            let mut section = Column::new().spacing(SPACE_8);
-            section = section.push(
-                row![
-                    text("Discovered Users").size(TYPO_MD).width(Length::Fill),
-                    text(format!("{} user(s) discovered", discovered_users.len()))
-                        .size(TYPO_XXS)
-                        .color(self.color_muted()),
-                ]
-                .spacing(SPACE_4),
-            );
-            if discovered_users.is_empty() {
-                section = section.push(
-                    text("No other users discovered yet.")
-                        .color(self.color_muted())
-                        .size(TYPO_SM),
-                );
-            } else {
-                let mut discovered_list = Column::new().spacing(SPACE_2).width(Length::Fill);
-                for (pk, label) in discovered_users {
-                    discovered_list =
-                        discovered_list.push(self.view_discovered_user_row(pk, &label));
-                }
-                section = section.push(scrollable(discovered_list).height(Length::Shrink));
-            }
-            content = content.push(
-                container(section)
-                    .width(Length::Fill)
-                    .padding(SPACE_12)
-                    .style(move |t| container_surface(t)),
-            );
-        }
-
-        // ── Incoming Friend Requests ──
-        if !self.first_run {
-            let local_pk = self.local_public.to_string();
-            let incoming: Vec<&boru_chat::friend_request::FriendRequest> = self
-                .friend_request_store
-                .list_incoming_by_status(&local_pk, FriendRequestStatus::Pending);
-            if !incoming.is_empty() {
-                let mut section = Column::new().spacing(SPACE_8);
-                section = section.push(
-                    row![
-                        text("Incoming Friend Requests")
-                            .size(TYPO_MD)
-                            .width(Length::Fill),
-                        text(format!("{} pending", incoming.len()))
-                            .size(TYPO_XXS)
-                            .color(self.color_muted()),
-                    ]
-                    .spacing(SPACE_4),
-                );
-                for request in incoming {
-                    let peer_pk = match PublicKey::from_str(&request.requester) {
-                        Ok(pk) => pk,
-                        Err(_) => continue,
-                    };
-                    let label = self.resolve_name(&peer_pk);
-                    section = section.push(
-                        container(
-                            row![
-                                text(label).size(TYPO_SM).width(Length::Fill),
-                                button("Accept")
-                                    .on_press(AppMessage::IncomingFriendRequestAccept {
-                                        request_id: request.id.clone(),
-                                        peer: peer_pk,
-                                    })
-                                    .padding(SPACE_4),
-                                button("Decline")
-                                    .on_press(AppMessage::IncomingFriendRequestDecline {
-                                        request_id: request.id.clone(),
-                                        peer: peer_pk,
-                                    })
-                                    .padding(SPACE_4),
-                            ]
-                            .spacing(SPACE_8)
-                            .align_y(iced::Alignment::Center)
-                            .padding(SPACE_8),
-                        )
-                        .width(Length::Fill)
-                        .style(move |t| container_surface(t)),
-                    );
-                }
-                content = content.push(
-                    container(section)
-                        .width(Length::Fill)
-                        .padding(SPACE_12)
-                        .style(move |t| container_surface(t)),
-                );
-            }
-        }
-
-        container(content)
+        scrollable(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
     }
 
-    /// A single row for a known friend: status indicator + label + last-seen + Chat button.
-    fn view_friend_row(
-        &self,
-        pk: PublicKey,
-        fid: &FriendId,
-        record: &boru_chat::friends::FriendRecord,
-    ) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, row, text};
-        use iced::{Color, Length};
+    /// "Chats" section of the sidebar — public room pinned at top, then
+    /// conversations from the conversation store sorted by most-recent activity.
+    fn view_sidebar_chats(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, scrollable, text, Column, Space};
+        use iced::Length;
+
         let theme = self.theme();
+        let mut section = Column::new().spacing(SPACE_2);
 
-        let label = record.display_label(fid);
-        let online = self.friend_online_cache.contains(&pk);
-
-        let status_text = if online { "Online" } else { "Offline" };
-        let status_color = if online {
-            Color::from_rgb(0.2, 0.7, 0.2)
-        } else {
-            self.color_muted()
-        };
-
-        let last_seen_str = if online {
-            String::new()
-        } else {
-            format_last_seen(record.status.last_seen_at_unix_ms)
-        };
-
-        // Determine request state and button
-        let (request_label, request_color, button_widget) = self.friend_request_button_for_peer(pk);
-
-        container(
-            row![
-                text(status_text).size(TYPO_XXS).color(status_color),
-                text(label).size(TYPO_MD).width(Length::Fill),
-                text(last_seen_str).size(TYPO_XS).color(status_color),
-                text(request_label).size(TYPO_XS).color(request_color),
-                button_widget,
-            ]
-            .spacing(SPACE_8)
-            .align_y(iced::Alignment::Center)
-            .padding(SPACE_8),
-        )
-        .width(Length::Fill)
-        .style(move |t| container_surface(t))
-        .into()
-    }
-
-    /// Return the display label for an outgoing request state (empty = no request).
-    fn outgoing_request_label(state: Option<&OutgoingRequestState>) -> &'static str {
-        match state {
-            Some(OutgoingRequestState::Pending) => "Pending",
-            Some(OutgoingRequestState::Accepted) => "Accepted",
-            Some(OutgoingRequestState::Declined) => "Declined",
-            Some(OutgoingRequestState::Failed(_)) => "Failed",
-            None => "",
-        }
-    }
-
-    /// Return the colour associated with an outgoing request state.
-    fn outgoing_request_color(state: Option<&OutgoingRequestState>) -> Color {
-        match state {
-            Some(OutgoingRequestState::Pending) => Color::from_rgb(0.9, 0.7, 0.1),
-            Some(OutgoingRequestState::Accepted) => Color::from_rgb(0.2, 0.7, 0.2),
-            Some(OutgoingRequestState::Declined) => Color::from_rgb(0.8, 0.2, 0.2),
-            Some(OutgoingRequestState::Failed(_)) => Color::from_rgb(0.8, 0.2, 0.2),
-            None => Color::from_rgb(0.5, 0.5, 0.5),
-        }
-    }
-
-    /// Build the label + button for a peer based on outgoing request state.
-    fn friend_request_button_for_peer(
-        &self,
-        pk: PublicKey,
-    ) -> (String, Color, iced::Element<'_, AppMessage>) {
-        use iced::widget::button;
-
-        let state = self.outgoing_request_states.get(&pk);
-
-        let label = Self::outgoing_request_label(state).to_string();
-        let color = Self::outgoing_request_color(state);
-
-        let btn = match state {
-            Some(OutgoingRequestState::Pending) => {
-                button("Awaiting reply…").padding(SPACE_4).into()
-            }
-            Some(OutgoingRequestState::Accepted) => button("Open Chat")
-                .on_press(AppMessage::OpenFriendChat(pk))
-                .padding(SPACE_4)
-                .into(),
-            Some(OutgoingRequestState::Declined) => {
-                button("Request Declined").padding(SPACE_4).into()
-            }
-            Some(OutgoingRequestState::Failed(_)) => button("Retry")
-                .on_press(AppMessage::FriendRequestRetry(pk))
-                .padding(SPACE_4)
-                .into(),
-            None => button("Chat")
-                .on_press(AppMessage::SendFriendRequest(pk))
-                .padding(SPACE_4)
-                .into(),
-        };
-
-        (label, color, btn)
-    }
-
-    fn join_request_section_title() -> &'static str {
-        "Join requests"
-    }
-
-    fn join_request_total_label(count: usize) -> String {
-        format!("{count} total")
-    }
-
-    fn join_request_target_user_prefix() -> &'static str {
-        "Target user"
-    }
-
-    fn join_request_chat_prefix() -> &'static str {
-        "Chat"
-    }
-
-    fn join_request_retry_label() -> &'static str {
-        "Retry"
-    }
-
-    fn join_request_open_chat_label() -> &'static str {
-        "Open chat"
-    }
-
-    fn join_request_failure_prefix() -> &'static str {
-        "Failure"
-    }
-
-    fn join_request_state_label(state: &OutgoingRequestState) -> &'static str {
-        match state {
-            OutgoingRequestState::Pending => "Pending",
-            OutgoingRequestState::Accepted => "Accepted",
-            OutgoingRequestState::Declined => "Rejected",
-            OutgoingRequestState::Failed(_) => "Failed",
-        }
-    }
-
-    fn join_request_state_color(state: &OutgoingRequestState) -> Color {
-        match state {
-            OutgoingRequestState::Pending => Color::from_rgb(0.88, 0.67, 0.10),
-            OutgoingRequestState::Accepted => Color::from_rgb(0.18, 0.68, 0.28),
-            OutgoingRequestState::Declined => Color::from_rgb(0.53, 0.53, 0.53),
-            OutgoingRequestState::Failed(_) => Color::from_rgb(0.80, 0.22, 0.22),
-        }
-    }
-
-    fn join_request_border_color(state: &OutgoingRequestState) -> Color {
-        match state {
-            OutgoingRequestState::Pending => Color::from_rgb(0.88, 0.67, 0.10),
-            OutgoingRequestState::Accepted => Color::from_rgb(0.18, 0.68, 0.28),
-            OutgoingRequestState::Declined => Color::from_rgb(0.62, 0.62, 0.62),
-            OutgoingRequestState::Failed(_) => Color::from_rgb(0.80, 0.22, 0.22),
-        }
-    }
-
-    fn join_request_peer(item: &JoinRequestItem) -> Option<PublicKey> {
-        PublicKey::from_str(&item.target_user).ok()
-    }
-
-    fn join_request_spinner_frame() -> &'static str {
-        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let index = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| ((elapsed.as_millis() / 120) % FRAMES.len() as u128) as usize)
-            .unwrap_or(0);
-        FRAMES[index]
-    }
-
-    fn join_request_user_label(&self, item: &JoinRequestItem) -> String {
-        match Self::join_request_peer(item) {
-            Some(peer) => {
-                let resolved = self.resolve_name(&peer);
-                let short = peer.fmt_short().to_string();
-                if resolved == item.target_user || resolved == short {
-                    format!("{}: {short}", Self::join_request_target_user_prefix())
-                } else {
-                    format!(
-                        "{}: {resolved} ({short})",
-                        Self::join_request_target_user_prefix()
-                    )
-                }
-            }
-            None => format!(
-                "{}: {}",
-                Self::join_request_target_user_prefix(),
-                item.target_user
-            ),
-        }
-    }
-
-    fn join_request_chat_label(&self, item: &JoinRequestItem) -> String {
-        let short = item.chat_id.fmt_short().to_string();
-        let chat_name = self
-            .room_history
-            .find(&item.chat_id)
-            .map(|room| room.display_name())
-            .filter(|name| !name.trim().is_empty());
-        match chat_name {
-            Some(name) if name != short => {
-                format!("{}: {name} ({short})", Self::join_request_chat_prefix())
-            }
-            _ => format!("{}: {short}", Self::join_request_chat_prefix()),
-        }
-    }
-
-    fn view_join_request_row(&self, item: &JoinRequestItem) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, row, text, Column};
-        use iced::Length;
-
-        let peer = Self::join_request_peer(item);
-        let state_label = Self::join_request_state_label(&item.state);
-        let state_color = Self::join_request_state_color(&item.state);
-        let border_color = Self::join_request_border_color(&item.state);
-        let user_label = self.join_request_user_label(item);
-        let chat_label = self.join_request_chat_label(item);
-        let failed_error = match &item.state {
-            OutgoingRequestState::Failed(error) if !error.trim().is_empty() => {
-                Some(format!("{}: {error}", Self::join_request_failure_prefix()))
-            }
-            _ => None,
-        };
-
-        let details: iced::Element<'_, AppMessage> = Column::new()
-            .push(text(user_label).size(TYPO_MD).width(Length::Fill))
-            .push(text(chat_label).size(TYPO_SM).color(self.color_muted()))
-            .spacing(SPACE_4)
-            .into();
-
-        let mut status_row = row![text(format!("State: {state_label}"))
-            .size(TYPO_XS)
-            .color(state_color)]
-        .spacing(SPACE_8)
-        .align_y(iced::Alignment::Center);
-
-        if matches!(item.state, OutgoingRequestState::Pending) {
-            status_row = status_row.push(
-                text(Self::join_request_spinner_frame())
-                    .size(TYPO_MD)
-                    .color(state_color),
-            );
-        }
-
-        if let Some(error) = failed_error {
-            status_row =
-                status_row.push(text(error).size(TYPO_XS).color(color_error(&self.theme())));
-        }
-
-        let body: iced::Element<'_, AppMessage> = Column::new()
-            .push(details)
-            .push(status_row)
-            .spacing(SPACE_6)
-            .into();
-
-        if matches!(
-            (&item.state, peer),
-            (OutgoingRequestState::Accepted, Some(_))
-        ) {
-            let peer = peer.expect("accepted request should have a parseable peer key");
-            let accepted_card = button(
-                Column::new()
-                    .push(body)
-                    .push(
-                        text(Self::join_request_open_chat_label())
-                            .size(TYPO_SM)
-                            .color(self.color_muted()),
-                    )
-                    .spacing(SPACE_8),
-            )
-            .on_press(AppMessage::OpenFriendChat(peer))
-            .width(Length::Fill)
-            .padding([SPACE_12, SPACE_16])
-            .style(move |t, _status| {
-                let mut s = iced::widget::button::Style::default();
-                s.background = Some(iced::Background::Color(bg_surface(t)));
-                s.text_color = text_remote_body(t);
-                s.border = iced::Border {
-                    color: border_color,
-                    width: 1.5,
-                    radius: SPACE_10.into(),
-                };
-                s
-            });
-            return accepted_card.into();
-        }
-
-        if matches!(
-            (&item.state, peer),
-            (OutgoingRequestState::Failed(_), Some(_))
-        ) {
-            let peer = peer.expect("failed request should have a parseable peer key");
-            let failed_card = row![
-                container(body)
-                    .width(Length::Fill)
-                    .padding([SPACE_12, SPACE_16])
-                    .style(move |t| {
-                        let mut s = iced::widget::container::Style::default();
-                        s.background = Some(iced::Background::Color(bg_surface(t)));
-                        s.border = iced::Border {
-                            color: border_color,
-                            width: 1.0,
-                            radius: SPACE_10.into(),
-                        };
-                        s
-                    }),
-                button(text(Self::join_request_retry_label()).size(TYPO_SM))
-                    .on_press(AppMessage::FriendRequestRetry(peer))
-                    .padding([SPACE_12, SPACE_16])
-                    .style(move |t, _status| {
-                        let mut s = iced::widget::button::Style::default();
-                        s.background = Some(iced::Background::Color(bg_hover(t)));
-                        s.text_color = color_error(t);
-                        s.border = iced::Border {
-                            color: border_color,
-                            width: 1.0,
-                            radius: SPACE_8.into(),
-                        };
-                        s
-                    }),
-            ]
-            .spacing(SPACE_8)
-            .align_y(iced::Alignment::Center);
-            return failed_card.into();
-        }
-
-        container(body)
-            .width(Length::Fill)
-            .padding([SPACE_12, SPACE_16])
-            .style(move |t| {
-                let mut s = iced::widget::container::Style::default();
-                s.background = Some(iced::Background::Color(bg_surface(t)));
-                s.border = iced::Border {
-                    color: border_color,
-                    width: 1.0,
-                    radius: SPACE_10.into(),
-                };
-                s
-            })
-            .into()
-    }
-
-    fn view_join_requests(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{container, row, scrollable, text, Column};
-        use iced::Length;
-
-        let mut section = Column::new().spacing(SPACE_8);
+        // Section header
         section = section.push(
-            row![
-                text(Self::join_request_section_title())
-                    .size(TYPO_MD)
-                    .width(Length::Fill),
-                text(Self::join_request_total_label(self.join_request_list.len()))
-                    .size(TYPO_XXS)
-                    .color(self.color_muted()),
-            ]
-            .spacing(SPACE_4),
+            container(text("Chats").size(TYPO_XS).style(text_muted_style))
+                .padding(iced::Padding {
+                    top: SPACE_8,
+                    right: SPACE_12,
+                    bottom: SPACE_4,
+                    left: SPACE_12,
+                })
+                .width(Length::Fill),
         );
 
-        let mut list = Column::new().spacing(SPACE_4).width(Length::Fill);
-        for item in self.join_requests() {
-            list = list.push(self.view_join_request_row(item));
-        }
-        section = section.push(scrollable(list).height(Length::Fixed(240.0)));
+        // Pinned public room
+        let public_topic = Self::default_lobby_topic();
+        let is_selected = matches!(self.screen, Screen::Chat { topic } if topic == public_topic);
+        let unread = self
+            .conversations
+            .get(&public_topic)
+            .map(|c| c.unread)
+            .unwrap_or(0);
+        let public_last_seen = self
+            .conversation_store
+            .find(&public_topic)
+            .map(|e| e.last_seen_at_unix_ms)
+            .unwrap_or(0);
+        section = section.push(
+            self.view_sidebar_conversation_row(
+                public_topic,
+                "Public Room",
+                &self
+                    .room_history
+                    .find(&public_topic)
+                    .and_then(|r| {
+                        if r.last_preview.is_empty() {
+                            None
+                        } else {
+                            Some(r.last_preview.clone())
+                        }
+                    })
+                    .unwrap_or_default(),
+                unread,
+                is_selected,
+                public_last_seen,
+            ),
+        );
 
-        container(section)
-            .width(Length::Fill)
-            .padding(SPACE_12)
-            .style(move |t| container_surface(t))
-            .into()
-    }
-
-    /// Return a reference to the structured join-request list.
-    ///
-    /// The list is rebuilt after every state change and deduplicated by
-    /// request ID.  Each item carries the request ID, target peer key,
-    /// direct-conversation chat topic, and current state.
-    pub fn join_requests(&self) -> &[JoinRequestItem] {
-        &self.join_request_list
-    }
-
-    /// Rebuild the internal join-request list from `outgoing_request_states`
-    /// and the friend request store.
-    ///
-    /// Deduplicates by request ID: if two entries share the same request_id
-    /// (same peer, same direction) only the first is kept.  Items are
-    /// ordered by state priority: Pending first, then Failed, then
-    /// Accepted/Declined, so the most actionable items appear at the top.
-    fn rebuild_join_request_list(&mut self) {
-        let local_pk = self.local_public;
-        let mut items: Vec<JoinRequestItem> = Vec::new();
-        let mut seen_ids = HashSet::new();
-
-        for (peer, state) in &self.outgoing_request_states {
-            // Find the persistent request from the friend_request_store
-            let peer_str = peer.to_string();
-            let request_id = self
-                .friend_request_store
-                .iter()
-                .find(|r| r.requester == local_pk.to_string() && r.recipient == peer_str)
-                .map(|r| r.id.clone())
-                .unwrap_or_else(|| format!("outgoing:{}", &peer_str[..8]));
-
-            // Deduplicate by request ID
-            if !seen_ids.insert(request_id.clone()) {
+        // Conversations from conversation_store (non-archived)
+        let conv_entries = self.conversation_store.active_iter();
+        for entry in conv_entries {
+            // Skip if this is the public room (already pinned above)
+            if entry.topic == public_topic {
                 continue;
             }
-
-            let chat_id = direct_topic(&local_pk, peer);
-            items.push(JoinRequestItem::new(
-                request_id,
-                peer_str,
-                chat_id,
-                state.clone(),
+            let is_selected = matches!(self.screen, Screen::Chat { topic } if topic == entry.topic);
+            let unread = self
+                .conversations
+                .get(&entry.topic)
+                .map(|c| c.unread)
+                .unwrap_or(0);
+            let preview = self
+                .room_history
+                .find(&entry.topic)
+                .and_then(|r| {
+                    if r.last_preview.is_empty() {
+                        None
+                    } else {
+                        Some(r.last_preview.clone())
+                    }
+                })
+                .unwrap_or_default();
+            section = section.push(self.view_sidebar_conversation_row(
+                entry.topic,
+                entry.display_name(),
+                &preview,
+                unread,
+                is_selected,
+                entry.last_seen_at_unix_ms,
             ));
         }
 
-        // Sort by state priority: Pending first, then Failed, then others
-        items.sort_by_key(|item| match item.state {
-            OutgoingRequestState::Pending => 0u8,
-            OutgoingRequestState::Failed(_) => 1,
-            OutgoingRequestState::Accepted => 2,
-            OutgoingRequestState::Declined => 3,
-        });
-
-        self.join_request_list = items;
-    }
-
-    /// A single row for a discovered (non-friend) user.
-    fn view_discovered_user_row(
-        &self,
-        pk: PublicKey,
-        label: impl Into<String>,
-    ) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, row, text};
-        use iced::Length;
-
-        let label = label.into();
-
-        // Determine request state and button
-        let (request_label, request_color, button_widget) = self.friend_request_button_for_peer(pk);
-
-        container(
-            row![
-                text("Online")
-                    .size(TYPO_XXS)
-                    .color(Color::from_rgb(0.2, 0.7, 0.2)),
-                text(label).size(TYPO_MD).width(Length::Fill),
-                text(request_label).size(TYPO_XS).color(request_color),
-                button_widget,
-            ]
-            .spacing(SPACE_8)
-            .align_y(iced::Alignment::Center)
-            .padding(SPACE_8),
-        )
-        .width(Length::Fill)
-        .style(move |t| container_surface(t))
-        .into()
-    }
-
-    fn view_room_row(&self, room: &RoomHistoryEntry) -> iced::Element<'_, AppMessage> {
-        use iced::widget::text::Wrapping;
-        use iced::widget::{button, column, container, row, text};
-        use iced::Length;
-
-        let topic = room.topic;
-        let display_name = room.display_name();
-
-        if self.room_delete_confirm_topic == Some(topic) {
-            // ── Confirmation state ──
-            let confirm_row = row![
-                text("Delete this room?").size(TYPO_SM).width(Length::Fill),
-                button(text("Yes").size(TYPO_SM))
-                    .on_press(AppMessage::ConfirmDeleteRoom(topic))
-                    .padding([SPACE_4, SPACE_8]),
-                button(text("No").size(TYPO_SM))
-                    .on_press(AppMessage::DeleteRoomRequested(topic))
-                    .padding([SPACE_4, SPACE_8]),
-            ]
-            .spacing(SPACE_4)
-            .align_y(iced::Alignment::Center)
-            .padding(SPACE_8);
-
-            return container(confirm_row)
-                .width(Length::Fill)
-                .style(move |t| container_surface(t))
-                .into();
+        if self.conversation_store.is_empty() {
+            section = section.push(
+                container(
+                    text("No conversations yet.")
+                        .size(TYPO_XS)
+                        .color(self.color_muted()),
+                )
+                .padding([SPACE_4, SPACE_12]),
+            );
         }
 
-        let preview = if room.last_preview.is_empty() {
-            if room.is_owner {
-                "Created this room".to_string()
-            } else {
-                "Joined this room".to_string()
-            }
+        section.into()
+    }
+
+    /// Single conversation row in the sidebar's Chats section.
+    fn view_sidebar_conversation_row(
+        &self,
+        topic: TopicId,
+        name: &str,
+        preview: &str,
+        unread: u64,
+        is_selected: bool,
+        last_seen_at_unix_ms: u64,
+    ) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text, Column};
+        use iced::Length;
+
+        let theme = self.theme();
+
+        let display_name = if unread > 0 {
+            format!("{}  [{}]", name, unread)
         } else {
-            room.last_preview.clone()
+            name.to_string()
+        };
+
+        let preview_text = if preview.is_empty() {
+            String::new()
+        } else {
+            format_preview(preview)
+        };
+
+        let time_label_str = if last_seen_at_unix_ms > 0 {
+            format_last_seen(Some(last_seen_at_unix_ms))
+        } else {
+            String::new()
         };
 
         let btn = button(
-            row![
-                column![
-                    row![text(display_name)
-                        .size(TYPO_MD)
-                        .width(Length::Fill)
-                        .wrapping(Wrapping::Word),],
-                    row![text(preview)
+            Column::new()
+                .push(
+                    row![
+                        text(display_name).size(TYPO_SM).width(Length::Fill),
+                        text(time_label_str.clone())
+                            .size(TYPO_XXS)
+                            .color(self.color_muted()),
+                    ]
+                    .spacing(SPACE_4),
+                )
+                .push(
+                    text(preview_text)
                         .size(TYPO_XS)
                         .color(self.color_muted())
-                        .width(Length::Fill)
-                        .wrapping(Wrapping::Word),],
-                ]
+                        .width(Length::Fill),
+                )
                 .spacing(SPACE_2)
-                .padding(SPACE_8)
+                .padding([SPACE_6, SPACE_12])
                 .width(Length::Fill),
-                button("✕ Remove")
-                    .on_press(AppMessage::DeleteRoomRequested(topic))
-                    .padding(SPACE_4),
-            ]
-            .spacing(SPACE_4)
-            .align_y(iced::Alignment::Center),
         )
-        .on_press(AppMessage::RoomSelected(topic))
+        .on_press(AppMessage::SelectConversation(topic))
         .width(Length::Fill)
-        .padding(0);
+        .padding(0)
+        .style(move |t, _status| {
+            let mut s = iced::widget::button::Style::default();
+            s.background = Some(iced::Background::Color(if is_selected {
+                accent_primary(t)
+            } else {
+                // Use a transparent background for non-selected rows
+                Color::from_rgba(0.0, 0.0, 0.0, 0.0)
+            }));
+            s.text_color = text_remote_body(t);
+            s.border = iced::Border {
+                radius: SPACE_4.into(),
+                ..Default::default()
+            };
+            s
+        });
 
         container(btn).width(Length::Fill).into()
     }
 
-    // ── Chat screen view ─────────────────────────────────────────────
+    /// "Friends" section of the sidebar — all friends with "Message" button.
+    fn view_sidebar_friends(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, scrollable, text, Column, Space};
+        use iced::{Alignment, Length};
 
-    fn view_chat_screen(&self) -> iced::Element<'_, AppMessage> {
-        use iced::{widget, Length};
         let theme = self.theme();
+        let mut section = Column::new().spacing(SPACE_2);
+
+        section = section.push(
+            container(text("Friends").size(TYPO_XS).style(text_muted_style))
+                .padding(iced::Padding {
+                    top: SPACE_8,
+                    right: SPACE_12,
+                    bottom: SPACE_4,
+                    left: SPACE_12,
+                })
+                .width(Length::Fill),
+        );
+
+        // Add "New Friend" input
+        section = section.push(
+            container(
+                iced::widget::text_input("Add friend by key…", &self.friend_request_search_input)
+                    .on_input(AppMessage::FriendRequestSearchChanged)
+                    .on_submit(AppMessage::FriendRequestSend(
+                        self.friend_request_search_input.clone(),
+                    ))
+                    .size(TYPO_XS)
+                    .padding([SPACE_4, SPACE_8])
+                    .width(Length::Fill),
+            )
+            .padding(iced::Padding {
+                top: SPACE_2,
+                right: SPACE_12,
+                bottom: SPACE_4,
+                left: SPACE_12,
+            })
+            .width(Length::Fill),
+        );
+
+        // Friend list
+        let mut sorted: Vec<(&FriendId, &boru_chat::friends::FriendRecord)> =
+            self.friends.iter().collect();
+        sorted.sort_by(|a, b| {
+            let label_a = a.1.display_label(a.0);
+            let label_b = b.1.display_label(b.0);
+            label_a.cmp(&label_b)
+        });
+
+        let mut has_friends = false;
+        for (fid, record) in sorted {
+            if !record.relationship.can_message() {
+                continue;
+            }
+            has_friends = true;
+            let pk = match fid.parse_public_key() {
+                Ok(pk) => pk,
+                Err(_) => continue,
+            };
+            let label = record.display_label(fid);
+            let online = self.friend_online_cache.contains(&pk);
+            let status_color = if online {
+                accent_green(&theme)
+            } else {
+                self.color_muted()
+            };
+            let status_dot = if online { "●" } else { "○" };
+
+            let row_el = row![
+                text(format!("{status_dot} {label}"))
+                    .size(TYPO_SM)
+                    .color(if online {
+                        text_remote_body(&theme)
+                    } else {
+                        self.color_muted()
+                    })
+                    .width(Length::Fill),
+                button(text("Chat").size(TYPO_XS))
+                    .on_press(AppMessage::OpenFriendChat(pk))
+                    .padding([SPACE_2, SPACE_6]),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .padding([SPACE_4, SPACE_12])
+            .width(Length::Fill);
+
+            section = section.push(container(row_el).width(Length::Fill));
+        }
+
+        if !has_friends {
+            section = section.push(
+                container(
+                    text("No friends yet.")
+                        .size(TYPO_XS)
+                        .color(self.color_muted()),
+                )
+                .padding([SPACE_4, SPACE_12]),
+            );
+        }
+
+        section.into()
+    }
+
+    /// "Friend Requests" section of the sidebar — incoming pending requests.
+    fn view_sidebar_requests(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text, Column};
+        use iced::{Alignment, Length};
+
+        let local_pk_str = self.local_public.to_string();
+        let incoming: Vec<&boru_chat::friend_request::FriendRequest> =
+            self.friend_request_store.list_incoming_by_status(
+                &local_pk_str,
+                boru_chat::friend_request::FriendRequestStatus::Pending,
+            );
+
+        let mut section = Column::new().spacing(SPACE_2);
+
+        let header_text = if incoming.is_empty() {
+            "Friend Requests".to_string()
+        } else {
+            format!("Friend Requests ({})", incoming.len())
+        };
+
+        section = section.push(
+            container(text(header_text).size(TYPO_XS).style(text_muted_style))
+                .padding(iced::Padding {
+                    top: SPACE_8,
+                    right: SPACE_12,
+                    bottom: SPACE_4,
+                    left: SPACE_12,
+                })
+                .width(Length::Fill),
+        );
+
+        if incoming.is_empty() {
+            section = section.push(
+                container(
+                    text("No pending requests.")
+                        .size(TYPO_XS)
+                        .color(self.color_muted()),
+                )
+                .padding([SPACE_4, SPACE_12]),
+            );
+        } else {
+            for request in incoming {
+                let peer_pk = match std::str::FromStr::from_str(&request.requester) {
+                    Ok(pk) => pk,
+                    Err(_) => continue,
+                };
+                let label = self.resolve_name(&peer_pk);
+
+                let row_el = row![
+                    text(label.clone()).size(TYPO_SM).width(Length::Fill),
+                    button(text("✓").size(TYPO_XS))
+                        .on_press(AppMessage::IncomingFriendRequestAccept {
+                            request_id: request.id.clone(),
+                            peer: peer_pk,
+                        })
+                        .padding([SPACE_2, SPACE_4])
+                        .style(move |t, _status| {
+                            let mut s = iced::widget::button::Style::default();
+                            s.background = Some(iced::Background::Color(accent_primary(t)));
+                            s.text_color = Color::WHITE;
+                            s.border = iced::Border {
+                                radius: SPACE_4.into(),
+                                ..Default::default()
+                            };
+                            s
+                        }),
+                    button(text("✗").size(TYPO_XS))
+                        .on_press(AppMessage::IncomingFriendRequestDecline {
+                            request_id: request.id.clone(),
+                            peer: peer_pk,
+                        })
+                        .padding([SPACE_2, SPACE_4])
+                        .style(move |t, _status| {
+                            let mut s = iced::widget::button::Style::default();
+                            s.background = Some(iced::Background::Color(color_error(t)));
+                            s.text_color = Color::WHITE;
+                            s.border = iced::Border {
+                                radius: SPACE_4.into(),
+                                ..Default::default()
+                            };
+                            s
+                        }),
+                ]
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center)
+                .padding([SPACE_4, SPACE_12])
+                .width(Length::Fill);
+
+                section = section.push(container(row_el).width(Length::Fill));
+            }
+        }
+
+        // Error display
+        if !self.friend_request_error.is_empty() {
+            section = section.push(
+                container(
+                    text(&self.friend_request_error)
+                        .size(TYPO_XS)
+                        .color(color_error(&self.theme())),
+                )
+                .padding([SPACE_2, SPACE_12]),
+            );
+        }
+
+        section.into()
+    }
+
+    // ── Main panel (empty state) ───────────────────────────────────────
+
+    /// Empty-state shown when no conversation is selected.
+    fn view_main_empty_state(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{column, container, text, Column, Space};
+        use iced::{Alignment, Length};
+
+        let theme = self.theme();
+
+        let content = Column::new()
+            .push(
+                text("Select a conversation")
+                    .size(TYPO_LG)
+                    .color(text_muted(&theme)),
+            )
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(
+                text("Choose a friend to start chatting")
+                    .size(TYPO_SM)
+                    .color(text_system(&theme)),
+            )
+            .align_x(Alignment::Center)
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        container(content)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    // ── Chat panel (main panel when a conversation is selected) ──────────
+
+    /// The chat panel shown in the main panel area when a conversation is active.
+    /// Contains header + message log + composer.
+    fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
+        use iced::{widget, Length};
 
         let content = widget::column![
             self.view_chat_header(),
@@ -6676,9 +6628,9 @@ impl IcedChat {
             .height(Length::Fill);
 
         if self.help_visible {
-            // Layer: chat content (bottom) → dimmed backdrop (middle) → help panel (top)
             use iced::widget::Stack;
-            let chat_layer = inner.style(move |t| container_primary(t));
+            use iced::Color;
+            let chat_layer = inner;
 
             let backdrop = widget::button(widget::Space::new())
                 .width(Length::Fill)
@@ -6729,9 +6681,11 @@ impl IcedChat {
                 .height(Length::Fill)
                 .into()
         } else {
-            inner.style(move |t| container_primary(t)).into()
+            inner.into()
         }
     }
+
+    // ── Chat screen view ─────────────────────────────────────────────
 
     fn view_chat_header(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::text::Wrapping;
@@ -7467,52 +7421,7 @@ impl IcedChat {
 
         let relay_card = section_card("RELAY", vec![relay_info.into(), relay_note.into()]);
 
-        // ── Logs & Diagnostics section ──
-        let data_dir_str = self.data_dir.to_string_lossy().to_string();
-
-        let logs_row = Row::new()
-            .push(
-                Column::new()
-                    .push(text("Open logs").size(TYPO_MD))
-                    .push(
-                        text("View application logs in a separate window.")
-                            .size(TYPO_XS)
-                            .style(text_muted_style),
-                    )
-                    .spacing(SPACE_2)
-                    .width(Length::Fill)
-                    .align_x(Alignment::Start),
-            )
-            .push(
-                button(text("Open").size(TYPO_SM))
-                    .on_press(AppMessage::OpenLogsWindow)
-                    .padding([SPACE_6, SPACE_12]),
-            )
-            .spacing(SPACE_12)
-            .align_y(Alignment::Center);
-
-        let data_dir_label = Row::new()
-            .push(
-                Column::new()
-                    .push(text("Data directory").size(TYPO_MD))
-                    .push(
-                        text(data_dir_str.clone())
-                            .size(TYPO_XXS)
-                            .style(text_muted_style)
-                            .wrapping(iced::widget::text::Wrapping::Word),
-                    )
-                    .spacing(SPACE_2)
-                    .width(Length::Fill)
-                    .align_x(Alignment::Start),
-            )
-            .spacing(SPACE_12)
-            .align_y(Alignment::Center);
-
-        let logs_card = section_card(
-            "LOGS & DIAGNOSTICS",
-            vec![logs_row.into(), data_dir_label.into()],
-        );
-
+        // ── Logs & Diagnostics section removed per user request ──
         // ── Data Management section ──
         let clear_history_row = if self.history_confirm_clear {
             Row::new()
@@ -7609,9 +7518,6 @@ impl IcedChat {
             .push(network_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(relay_card)
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
-            .push(logs_card)
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(data_card)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(nav_row)
@@ -7949,7 +7855,7 @@ pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
 
 // ── Subscription ──────────────────────────────────────────────────────
 
-struct RxHandle(Arc<Mutex<UnboundedReceiver<NetEvent>>>);
+struct RxHandle(Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>);
 
 impl std::hash::Hash for RxHandle {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -8034,7 +7940,7 @@ fn subscription_stream(
 
 impl IcedChat {
     pub fn subscription(
-        rx: Arc<Mutex<UnboundedReceiver<NetEvent>>>,
+        rx: Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>,
         friend_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
         whisper_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
         inbox_rx: Arc<Mutex<UnboundedReceiver<InboxEvent>>>,
@@ -8056,6 +7962,49 @@ impl IcedChat {
                 },
             ),
         ])
+    }
+    /// Rebuild the internal join-request list from `outgoing_request_states`
+    /// and the friend request store.
+    fn rebuild_join_request_list(&mut self) {
+        let local_pk = self.local_public;
+        let mut items: Vec<JoinRequestItem> = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+
+        for (peer, state) in &self.outgoing_request_states {
+            let peer_str = peer.to_string();
+            let request_id = self
+                .friend_request_store
+                .iter()
+                .find(|r| r.requester == local_pk.to_string() && r.recipient == peer_str)
+                .map(|r| r.id.clone())
+                .unwrap_or_else(|| format!("outgoing:{}", &peer_str[..8]));
+
+            if !seen_ids.insert(request_id.clone()) {
+                continue;
+            }
+
+            let chat_id = direct_topic(&local_pk, peer);
+            items.push(JoinRequestItem::new(
+                request_id,
+                peer_str,
+                chat_id,
+                state.clone(),
+            ));
+        }
+
+        items.sort_by_key(|item| match item.state {
+            OutgoingRequestState::Pending => 0u8,
+            OutgoingRequestState::Failed(_) => 1,
+            OutgoingRequestState::Accepted => 2,
+            OutgoingRequestState::Declined => 3,
+        });
+
+        self.join_request_list = items;
+    }
+
+    /// Return a reference to the structured join-request list.
+    pub fn join_requests(&self) -> &[JoinRequestItem] {
+        &self.join_request_list
     }
 }
 
@@ -9868,7 +9817,9 @@ mod tests {
             if let Some(id) = transfer_id {
                 self.entries
                     .iter()
-                    .position(|entry| entry.download.as_ref().map(|d| d.transfer_id) == Some(Some(id)))
+                    .position(|entry| {
+                        entry.download.as_ref().map(|d| d.transfer_id) == Some(Some(id))
+                    })
                     .or(self.download_entry_index)
             } else {
                 self.download_entry_index
@@ -9988,7 +9939,8 @@ mod tests {
     /// Lifecycle: Started → Progress → Completed.
     #[test]
     fn download_lifecycle_started_progress_completed() {
-        let entry = ChatEntry::system_download("system msg", TransferKind::File, "test.doc", "ticket");
+        let entry =
+            ChatEntry::system_download("system msg", TransferKind::File, "test.doc", "ticket");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(1);
 
@@ -10000,7 +9952,13 @@ mod tests {
             total: Some(4096),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Active { bytes: 0, total: Some(4096) }));
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Active {
+                bytes: 0,
+                total: Some(4096)
+            }
+        ));
         assert_eq!(e.download.as_ref().unwrap().transfer_id, Some(id));
         assert_eq!(mgr.active_download_transfer_id, Some(id));
 
@@ -10013,8 +9971,17 @@ mod tests {
             total: Some(4096),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Active { bytes: 2048, total: Some(4096) }));
-        assert_eq!(e.download.as_ref().unwrap().status_label().contains("50%"), true);
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Active {
+                bytes: 2048,
+                total: Some(4096)
+            }
+        ));
+        assert_eq!(
+            e.download.as_ref().unwrap().status_label().contains("50%"),
+            true
+        );
 
         // Progress at 100%
         mgr.handle_download_progress(TransferProgress::Progress {
@@ -10025,7 +9992,10 @@ mod tests {
             total: Some(4096),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Active { bytes: 4096, .. }));
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Active { bytes: 4096, .. }
+        ));
 
         // Completed
         mgr.handle_download_progress(TransferProgress::Completed {
@@ -10034,7 +10004,10 @@ mod tests {
             name: "test.doc".into(),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Completed { .. }));
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Completed { .. }
+        ));
         assert_eq!(e.download.as_ref().unwrap().action_label(), "Open");
         // active_download_transfer_id must be cleared on terminal state
         assert!(mgr.active_download_transfer_id.is_none());
@@ -10043,7 +10016,8 @@ mod tests {
     /// Lifecycle: Started → Progress → Failed.
     #[test]
     fn download_lifecycle_started_progress_failed() {
-        let entry = ChatEntry::system_download("file share", TransferKind::File, "corrupt.zip", "ticket");
+        let entry =
+            ChatEntry::system_download("file share", TransferKind::File, "corrupt.zip", "ticket");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(2);
 
@@ -10066,16 +10040,25 @@ mod tests {
             error: "hash mismatch".into(),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Failed { .. }));
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Failed { .. }
+        ));
         assert_eq!(e.download.as_ref().unwrap().action_label(), "Retry");
-        assert!(e.download.as_ref().unwrap().status_label().contains("hash mismatch"));
+        assert!(e
+            .download
+            .as_ref()
+            .unwrap()
+            .status_label()
+            .contains("hash mismatch"));
         assert!(mgr.active_download_transfer_id.is_none());
     }
 
     /// Lifecycle: Started → Cancelled.
     #[test]
     fn download_lifecycle_started_cancelled() {
-        let entry = ChatEntry::system_download("file share", TransferKind::File, "large.iso", "ticket");
+        let entry =
+            ChatEntry::system_download("file share", TransferKind::File, "large.iso", "ticket");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(3);
 
@@ -10091,7 +10074,10 @@ mod tests {
             name: "large.iso".into(),
         });
         let e = &mgr.entries[0];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Cancelled));
+        assert!(matches!(
+            e.download.as_ref().unwrap().state,
+            DownloadState::Cancelled
+        ));
         assert_eq!(e.download.as_ref().unwrap().action_label(), "Retry");
         assert_eq!(e.download.as_ref().unwrap().status_label(), "Cancelled");
         assert!(mgr.active_download_transfer_id.is_none());
@@ -10100,7 +10086,8 @@ mod tests {
     /// Stale progress after a terminal state (Completed) must be ignored.
     #[test]
     fn download_stale_progress_after_completion_ignored() {
-        let entry = ChatEntry::system_download("file share", TransferKind::File, "report.pdf", "ticket");
+        let entry =
+            ChatEntry::system_download("file share", TransferKind::File, "report.pdf", "ticket");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(4);
 
@@ -10115,7 +10102,10 @@ mod tests {
             kind: TransferKind::File,
             name: "report.pdf".into(),
         });
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Completed { .. }));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Completed { .. }
+        ));
         assert!(mgr.active_download_transfer_id.is_none());
         let prev_state = mgr.entries[0].download.as_ref().unwrap().state.clone();
 
@@ -10143,8 +10133,13 @@ mod tests {
         //
         // This test documents the current behaviour: stale progress *does* overwrite the state.
         // A fix would require checking that the state is not terminal before overwriting.
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Active { .. }),
-            "KNOWN LIMITATION: stale progress after completion overwrites terminal state");
+        assert!(
+            matches!(
+                mgr.entries[0].download.as_ref().unwrap().state,
+                DownloadState::Active { .. }
+            ),
+            "KNOWN LIMITATION: stale progress after completion overwrites terminal state"
+        );
     }
 
     /// TransferId anchoring: after entries shift (simulating view recreation),
@@ -10152,7 +10147,8 @@ mod tests {
     #[test]
     fn download_transfer_id_anchoring_survives_entry_reorder() {
         let id = TransferId::new(5);
-        let mut entry = ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket");
+        let mut entry =
+            ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket");
         entry.download.as_mut().unwrap().transfer_id = Some(id);
 
         // Simulate entries: a text entry inserted before the download entry,
@@ -10172,8 +10168,13 @@ mod tests {
             total: Some(1024),
         });
         let e = &mgr.entries[1];
-        assert!(matches!(e.download.as_ref().unwrap().state, DownloadState::Active { bytes: 512, .. }),
-            "TransferId anchoring must find correct entry after index shift");
+        assert!(
+            matches!(
+                e.download.as_ref().unwrap().state,
+                DownloadState::Active { bytes: 512, .. }
+            ),
+            "TransferId anchoring must find correct entry after index shift"
+        );
         assert_eq!(e.download.as_ref().unwrap().transfer_id, Some(id));
         // The text entry at index 0 must NOT have been touched.
         assert!(mgr.entries[0].download.is_none());
@@ -10184,7 +10185,8 @@ mod tests {
     /// the entry has a transfer_id).
     #[test]
     fn download_anchoring_falls_back_to_index_when_no_transfer_id() {
-        let entry = ChatEntry::system_download("file", TransferKind::File, "archive.tar.gz", "ticket");
+        let entry =
+            ChatEntry::system_download("file", TransferKind::File, "archive.tar.gz", "ticket");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(6);
 
@@ -10195,8 +10197,14 @@ mod tests {
             name: "archive.tar.gz".into(),
             total: None,
         });
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Active { .. }));
-        assert_eq!(mgr.entries[0].download.as_ref().unwrap().transfer_id, Some(id));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Active { .. }
+        ));
+        assert_eq!(
+            mgr.entries[0].download.as_ref().unwrap().transfer_id,
+            Some(id)
+        );
     }
 
     /// Multiple entries with download attachments: progress must only
@@ -10216,7 +10224,10 @@ mod tests {
             name: "a.zip".into(),
             total: Some(100),
         });
-        assert_eq!(mgr.entries[0].download.as_ref().unwrap().transfer_id, Some(id_a));
+        assert_eq!(
+            mgr.entries[0].download.as_ref().unwrap().transfer_id,
+            Some(id_a)
+        );
 
         // Now start download B — but download_entry_index is still 0.
         // Started with kind File goes through download_entry_index (index 0).
@@ -10229,10 +10240,19 @@ mod tests {
             name: "b.zip".into(),
             total: Some(200),
         });
-        assert_eq!(mgr.entries[1].download.as_ref().unwrap().transfer_id, Some(id_b));
+        assert_eq!(
+            mgr.entries[1].download.as_ref().unwrap().transfer_id,
+            Some(id_b)
+        );
         assert_eq!(mgr.entries[1].download.as_ref().unwrap().name, "b.zip");
         // Entry A's state must remain intact.
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Active { bytes: 0, total: Some(100) }));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Active {
+                bytes: 0,
+                total: Some(100)
+            }
+        ));
 
         // Progress for A must reach entry A
         mgr.handle_download_progress(TransferProgress::Progress {
@@ -10242,7 +10262,10 @@ mod tests {
             bytes: 50,
             total: Some(100),
         });
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Active { bytes: 50, .. }));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Active { bytes: 50, .. }
+        ));
     }
 
     /// Unknown total downloads (total: None) must display correctly.
@@ -10258,7 +10281,12 @@ mod tests {
             name: "live.mp4".into(),
             total: None,
         });
-        assert!(mgr.entries[0].download.as_ref().unwrap().status_label().contains("size unknown"));
+        assert!(mgr.entries[0]
+            .download
+            .as_ref()
+            .unwrap()
+            .status_label()
+            .contains("size unknown"));
 
         mgr.handle_download_progress(TransferProgress::Progress {
             id,
@@ -10268,22 +10296,38 @@ mod tests {
             total: None,
         });
         let label = mgr.entries[0].download.as_ref().unwrap().status_label();
-        assert!(label.contains("size unknown"), "label must say size unknown: {label}");
+        assert!(
+            label.contains("size unknown"),
+            "label must say size unknown: {label}"
+        );
         // No progress fraction when total is unknown
-        assert!(mgr.entries[0].download.as_ref().unwrap().progress_fraction().is_none());
+        assert!(mgr.entries[0]
+            .download
+            .as_ref()
+            .unwrap()
+            .progress_fraction()
+            .is_none());
 
         mgr.handle_download_progress(TransferProgress::Completed {
             id,
             kind: TransferKind::File,
             name: "live.mp4".into(),
         });
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Completed { .. }));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Completed { .. }
+        ));
     }
 
     /// Image download lifecycle — uses TransferKind::Image.
     #[test]
     fn download_image_lifecycle_uses_image_kind() {
-        let entry = ChatEntry::system_download("img share", TransferKind::Image, "screenshot.png", "ticket");
+        let entry = ChatEntry::system_download(
+            "img share",
+            TransferKind::Image,
+            "screenshot.png",
+            "ticket",
+        );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(8);
 
@@ -10298,8 +10342,11 @@ mod tests {
         // only match TransferKind::File, so Image variants fall through to _ => {}
         // This means image download progress is NOT tracked the same way as file downloads.
         // The `layout_cache` and entry state should NOT change.
-        assert_eq!(mgr.entries[0].download.as_ref().unwrap().action_label(),
-            "Download", "Image started should not change entry state (Image kind not matched)");
+        assert_eq!(
+            mgr.entries[0].download.as_ref().unwrap().action_label(),
+            "Download",
+            "Image started should not change entry state (Image kind not matched)"
+        );
         assert!(mgr.active_download_transfer_id.is_none());
     }
 
@@ -10317,7 +10364,12 @@ mod tests {
             total: Some(0),
         });
         // Zero total should not produce a progress fraction (prevents division by zero).
-        assert!(mgr.entries[0].download.as_ref().unwrap().progress_fraction().is_none());
+        assert!(mgr.entries[0]
+            .download
+            .as_ref()
+            .unwrap()
+            .progress_fraction()
+            .is_none());
         let label = mgr.entries[0].download.as_ref().unwrap().status_label();
         assert!(label.contains("0 B"), "zero total label: {label}");
 
@@ -10326,7 +10378,10 @@ mod tests {
             kind: TransferKind::File,
             name: "empty.txt".into(),
         });
-        assert!(matches!(mgr.entries[0].download.as_ref().unwrap().state, DownloadState::Completed { .. }));
+        assert!(matches!(
+            mgr.entries[0].download.as_ref().unwrap().state,
+            DownloadState::Completed { .. }
+        ));
     }
 
     /// Verify that the constant width layout estimates stay within documented
@@ -10339,20 +10394,34 @@ mod tests {
         assert!((attachment.estimated_height() - 84.0).abs() < 1.0);
 
         // Active with known total
-        attachment.state = DownloadState::Active { bytes: 500, total: Some(1000) };
-        assert!((attachment.estimated_height() - 112.0).abs() < 1.0,
-            "active+total height expected ~112, got {}", attachment.estimated_height());
+        attachment.state = DownloadState::Active {
+            bytes: 500,
+            total: Some(1000),
+        };
+        assert!(
+            (attachment.estimated_height() - 112.0).abs() < 1.0,
+            "active+total height expected ~112, got {}",
+            attachment.estimated_height()
+        );
 
         // Active with unknown total
-        attachment.state = DownloadState::Active { bytes: 500, total: None };
+        attachment.state = DownloadState::Active {
+            bytes: 500,
+            total: None,
+        };
         assert!((attachment.estimated_height() - 104.0).abs() < 1.0);
 
         // Completed
-        attachment.state = DownloadState::Completed { saved_name: "demo.bin".into(), saved_path: None };
+        attachment.state = DownloadState::Completed {
+            saved_name: "demo.bin".into(),
+            saved_path: None,
+        };
         assert!((attachment.estimated_height() - 92.0).abs() < 1.0);
 
         // Failed
-        attachment.state = DownloadState::Failed { error: "err".into() };
+        attachment.state = DownloadState::Failed {
+            error: "err".into(),
+        };
         assert!((attachment.estimated_height() - 104.0).abs() < 1.0);
 
         // Cancelled

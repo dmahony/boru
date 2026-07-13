@@ -18,7 +18,14 @@ use iroh::{EndpointAddr, PublicKey};
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
-const SCHEMA_VERSION: u32 = 3;
+/// Current schema version.
+///
+/// v4 (current): `OutgoingPending`/`IncomingPending` relationship variants
+/// are deprecated.  Friend request lifecycle is tracked exclusively through
+/// [`FriendRequestStore`](crate::friend_request::FriendRequestStore).  On
+/// load, any friend record carrying a deprecated relationship is reset to
+/// `NotFriend`.
+const SCHEMA_VERSION: u32 = 4;
 const MAX_KNOWN_ADDRS: usize = 5;
 /// Name of the on-disk friends list file (lives beside `secret_key.txt`).
 pub const FRIENDS_FILE_NAME: &str = "friends.json";
@@ -79,6 +86,60 @@ pub struct FriendStatus {
     pub last_offline_at_unix_ms: Option<u64>,
 }
 
+/// State of the relationship between two peers.
+///
+/// This tracks the full lifecycle from not being friends through
+/// request-pending states to established friendship (or blocked).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FriendRelationship {
+    /// No friendship relationship exists.
+    #[serde(rename = "not_friend")]
+    NotFriend,
+    /// We sent a friend request that hasn't been answered yet.
+    ///
+    /// **Deprecated** — friend request lifecycle is tracked exclusively
+    /// through [`FriendRequestStore`](crate::friend_request::FriendRequestStore).
+    /// This variant is kept only for backward-compatible deserialisation of
+    /// old `friends.json` files; on load it is reset to `NotFriend`.
+    #[deprecated(
+        since = "4.0",
+        note = "use FriendRequestStore for request lifecycle instead"
+    )]
+    #[serde(rename = "outgoing_pending")]
+    OutgoingPending,
+    /// We received a friend request that we haven't answered yet.
+    ///
+    /// **Deprecated** — friend request lifecycle is tracked exclusively
+    /// through [`FriendRequestStore`](crate::friend_request::FriendRequestStore).
+    /// This variant is kept only for backward-compatible deserialisation of
+    /// old `friends.json` files; on load it is reset to `NotFriend`.
+    #[deprecated(
+        since = "4.0",
+        note = "use FriendRequestStore for request lifecycle instead"
+    )]
+    #[serde(rename = "incoming_pending")]
+    IncomingPending,
+    /// Mutual friendship — both sides have accepted.
+    #[serde(rename = "friends")]
+    Friends,
+    /// Peer is blocked.
+    #[serde(rename = "blocked")]
+    Blocked,
+}
+
+impl Default for FriendRelationship {
+    fn default() -> Self {
+        Self::NotFriend
+    }
+}
+
+impl FriendRelationship {
+    /// Returns `true` if the relationship allows direct-message exchanges.
+    pub fn can_message(self) -> bool {
+        matches!(self, Self::Friends)
+    }
+}
+
 /// State of the designated one-to-one conversation with a friend.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DirectConversationState {
@@ -122,6 +183,9 @@ pub struct FriendRecord {
     /// Last time the durable address list changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addrs_updated_at_unix_ms: Option<u64>,
+    /// Current relationship state with this peer.
+    #[serde(default)]
+    pub relationship: FriendRelationship,
     /// Rooms for which we have exchanged a ticket with this friend.
     #[serde(default, with = "topic_ticket_map")]
     pub rooms: BTreeMap<TopicId, Ticket>,
@@ -306,6 +370,21 @@ impl FriendsStore {
         // Version 1 had no durable addressing or room fields. They are
         // serde-defaulted above; normalise the version on the next save.
         store.schema_version = SCHEMA_VERSION;
+
+        // Migrate deprecated relationship variants (v3 → v4):
+        // OutgoingPending/IncomingPending are now tracked exclusively via
+        // FriendRequestStore.  Reset them to NotFriend so the friend record
+        // is not in a stale pending state after migration.  The actual request
+        // records live in friend_requests.json and are unaffected.
+        for record in store.friends.values_mut() {
+            #[allow(deprecated)]
+            match record.relationship {
+                FriendRelationship::OutgoingPending | FriendRelationship::IncomingPending => {
+                    record.relationship = FriendRelationship::NotFriend;
+                }
+                _ => {}
+            }
+        }
 
         for id in store.friends.keys() {
             id.parse_public_key().with_std_context(|_| {

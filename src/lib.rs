@@ -81,6 +81,13 @@ pub mod chat_callbacks;
 #[cfg(feature = "net")]
 pub mod friends;
 
+/// Durable conversation records for the chat frontends.
+///
+/// Persists conversation metadata keyed by gossip topic, surviving
+/// application restarts.  Separate from the transient room-history list.
+#[cfg(feature = "net")]
+pub mod conversations;
+
 /// Durable room metadata for the chat frontends.
 ///
 /// Persists the room topic so reopening a room reuses the same topic
