@@ -296,6 +296,7 @@ impl From<PublicRoomConfig> for ContinuousTrackerConfig {
             initial_retry_delay: cfg.retry_backoff_min,
             max_retry_delay: cfg.retry_backoff_max,
             jitter_factor: cfg.jitter_factor,
+            stale_peer_ttl: None,
         }
     }
 }

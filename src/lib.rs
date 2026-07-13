@@ -44,6 +44,11 @@ pub mod public_room_config;
 /// an mpsc channel for the caller to join.
 #[cfg(feature = "net")]
 pub mod public_room_continuous;
+
+/// Bounded dynamic peer joiner — joins discovered peers into the gossip mesh
+/// with dedup, backoff, retries, and concurrency limits.
+#[cfg(feature = "net")]
+pub mod dynamic_joiner;
 /// Safety and rate-limit enforcement for untrusted public-room message flows.
 ///
 /// Wraps [`PublicRoomConfig`] with per-peer state for message size, nickname

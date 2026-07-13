@@ -317,7 +317,7 @@ mod tests {
         let mut store = RoomStore::empty_at(&dir);
         let secret = DiscoverySecret::from_bytes([0xAAu8; 32]);
         store
-            .set_discovery_secret(Some(secret))
+            .set_discovery_secret(Some(secret.clone()))
             .expect("set discovery secret");
 
         let reloaded = RoomStore::load(&dir)
