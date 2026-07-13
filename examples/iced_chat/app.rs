@@ -37,6 +37,9 @@ use boru_chat::inbox::{send_ack, send_sync_request, InboxEvent};
 use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
 use boru_chat::net::Gossip;
 use boru_chat::outbox::{OutboxEntry, OutboxStore};
+use boru_chat::discovery_backend::MainlineDhtBackend;
+use boru_chat::discovery_secret::DiscoverySecret;
+use boru_chat::private_room_tracker::{create_and_publish_private_discovery, PrivateRoomTracker};
 use boru_chat::proto::TopicId;
 use boru_chat::public_room_continuous::ContinuousTracker;
 use boru_chat::public_room_safety::PublicRoomSafety;
@@ -46,7 +49,7 @@ use boru_chat::room_docs::{self, RoomMetadata};
 use boru_chat::room_history::{RoomHistoryEntry, RoomHistoryStore};
 use boru_chat::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
-    address_lookup::memory::MemoryLookup, EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher,
+    address_lookup::memory::MemoryLookup, EndpointAddr, EndpointId, PublicKey, RelayMode, SecretKey, Watcher,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket};
 use n0_future::task;
@@ -1171,6 +1174,13 @@ pub struct IcedChat {
     show_invite_menu: bool,
     /// The peer public key input text in the invite whisper field.
     invite_whisper_input: String,
+    /// Shared DHT client for creating private-room discovery records.
+    dht: Option<distributed_topic_tracker::Dht>,
+    /// Whether the \"Enable DHT discovery\" checkbox is checked in the
+    /// create-room dialog.  Default: off (no DHT discovery).
+    create_room_dht_enabled: bool,
+    /// Whether the create-room dialog is currently shown.
+    show_create_room_dialog: bool,
 }
 
 /// Tracks the UI-level lifecycle of an outgoing friend request.
@@ -1339,6 +1349,12 @@ pub enum AppMessage {
     },
     /// Finished creating a new room (random topic).
     CreateNewRoom,
+    /// Confirm create-new-room with current dialog settings.
+    ConfirmCreateNewRoom,
+    /// Cancel the create-room dialog.
+    CancelCreateRoom,
+    /// Toggle the "Enable DHT discovery" checkbox in the create-room dialog.
+    CreateNewRoomDhtToggled(bool),
     /// Join a room from a ticket string.
     JoinFromTicket,
     /// The room switch / join failed.
@@ -2059,6 +2075,7 @@ impl IcedChat {
         return_to_chat_list_after_open: bool,
         continuous_tracker: Option<ContinuousTracker>,
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
+        dht: Option<distributed_topic_tracker::Dht>,
     ) -> Self {
         let (initial_topic, initial_bootstrap) =
             initial_room.unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
@@ -2238,6 +2255,9 @@ impl IcedChat {
             friend_id_copied: false,
             show_invite_menu: false,
             invite_whisper_input: String::new(),
+            dht,
+            create_room_dht_enabled: false,
+            show_create_room_dialog: false,
         }
     }
 
@@ -2852,6 +2872,9 @@ impl IcedChat {
             AppMessage::OpenRoom(_) => "OpenRoom",
             AppMessage::RoomOpened { .. } => "RoomOpened",
             AppMessage::CreateNewRoom => "CreateNewRoom",
+            AppMessage::ConfirmCreateNewRoom => "ConfirmCreateNewRoom",
+            AppMessage::CancelCreateRoom => "CancelCreateRoom",
+            AppMessage::CreateNewRoomDhtToggled(_) => "CreateNewRoomDhtToggled",
             AppMessage::JoinFromTicket => "JoinFromTicket",
             AppMessage::RoomJoinFailed(_) => "RoomJoinFailed",
             AppMessage::JoinTicketInputChanged(_) => "JoinTicketInputChanged",
@@ -3278,6 +3301,24 @@ impl IcedChat {
             }
 
             AppMessage::CreateNewRoom => {
+                self.show_create_room_dialog = true;
+                self.create_room_dht_enabled = false;
+                iced::Task::none()
+            }
+
+            AppMessage::CancelCreateRoom => {
+                self.show_create_room_dialog = false;
+                iced::Task::none()
+            }
+
+            AppMessage::CreateNewRoomDhtToggled(enabled) => {
+                self.create_room_dht_enabled = enabled;
+                iced::Task::none()
+            }
+
+            AppMessage::ConfirmCreateNewRoom => {
+                self.show_create_room_dialog = false;
+                let dht_enabled = self.create_room_dht_enabled;
                 // Leave the current room first — abort forward_handle, clear
                 // sender + entries — so we don't have a zombie forward_handle
                 // or broadcast to the wrong topic during the async gap.
@@ -3293,6 +3334,7 @@ impl IcedChat {
                 let data_dir = self.data_dir.clone();
                 let endpoint = self.endpoint.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
+                let dht = self.dht.clone();
 
                 iced::Task::perform(
                     async move {
@@ -3303,10 +3345,23 @@ impl IcedChat {
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
                         let local_peer_addr = endpoint.watch_addr().get();
+
+                        // Optionally publish to DHT for private-room discovery.
+                        let discovery_secret = if dht_enabled {
+                            create_and_publish_private_discovery(
+                                dht,
+                                topic,
+                                &endpoint,
+                            )
+                            .await
+                        } else {
+                            None
+                        };
+
                         let ticket_str = Ticket {
                             topic,
                             peers: vec![local_peer_addr.clone()],
-                            discovery_secret: None,
+                            discovery_secret,
                         }
                         .to_string();
                         let personal_ticket = Ticket {
@@ -3362,7 +3417,8 @@ impl IcedChat {
                                 .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(presence).await;
 
-                        let room = RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);
+                        let mut room = RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);
+                        room.discovery_secret = discovery_secret;
                         let _ = room.save();
 
                         Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
@@ -3713,13 +3769,74 @@ impl IcedChat {
                 iced::Task::perform(
                     async move {
                         let topic = ticket.topic;
+                        let secret = ticket.discovery_secret;
                         let saved_addrs = RoomStore::load_or_none(&data_dir)
                             .filter(|room| room.topic == topic)
                             .map(|room| room.peers)
                             .unwrap_or_default();
-                        let (peers, bootstrap_addrs) =
-                            collect_bootstrap_peers([&ticket.peers, &saved_addrs]);
-                        seed_memory_lookup(&memory_lookup, &bootstrap_addrs);
+
+                        // ── DHT discovery for private-room tickets ──────
+                        // If the ticket includes a discovery secret, attempt
+                        // to find additional peers via the DHT before
+                        // subscribing.  Non-fatal errors are silently
+                        // downgraded to a fallback (ticket peers only).
+                        let ticket_addrs = ticket.peers.clone();
+                        let mut merged_peers: Vec<EndpointAddr> = {
+                            let (mut ids, addrs) =
+                                collect_bootstrap_peers([&ticket.peers, &saved_addrs]);
+                            // include room addrs in peer list
+                            ids.extend(addrs.iter().map(|a| a.id));
+                            // deduplicate back — collect_bootstrap_peers returns
+                            // deduped IDs but we need EndpointAddrs, rebuild
+                            let mut seen = HashSet::new();
+                            let mut result = Vec::new();
+                            for a in ticket.peers.iter().chain(saved_addrs.iter()) {
+                                if seen.insert(a.id) {
+                                    result.push(a.clone());
+                                }
+                            }
+                            result
+                        };
+                        // Seed MemoryLookup from ticket addresses only (DHT
+                        // returns IDs, not addrs).
+                        seed_memory_lookup(&memory_lookup, &ticket_addrs);
+
+                        if let Some(secret) = secret {
+                            let dht = distributed_topic_tracker::Dht::new(
+                                &distributed_topic_tracker::DhtConfig::default(),
+                            );
+                            let dummy_ns =
+                                distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+                            let backend = MainlineDhtBackend::new(dht, dummy_ns);
+                            let tracker = PrivateRoomTracker::new(
+                                Box::new(backend),
+                                topic,
+                                secret,
+                                endpoint.id(),
+                                sk.clone(),
+                            );
+                            match tracker.discover_once().await {
+                                Ok(discovered_ids) => {
+                                    let existing: HashSet<iroh::EndpointId> =
+                                        merged_peers.iter().map(|a| a.id).collect();
+                                    for id in discovered_ids {
+                                        if !existing.contains(&id) && id != endpoint.id() {
+                                            merged_peers.push(EndpointAddr::new(id));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        error = %e,
+                                        "DHT discovery failed, falling back to ticket peers"
+                                    );
+                                }
+                            }
+                            tracker.shutdown().await;
+                        }
+
+                        let peers: Vec<iroh::EndpointId> =
+                            merged_peers.iter().map(|a| a.id).collect();
 
                         // Use subscribe_and_join so we wait for at least one gossip
                         // neighbor to connect before proceeding — matching the TUI
@@ -3792,7 +3909,7 @@ impl IcedChat {
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(presence).await;
 
-                        let room = RoomStore::with_peers(&data_dir, topic, bootstrap_addrs);
+                        let room = RoomStore::with_peers(&data_dir, topic, merged_peers);
                         let _ = room.save();
 
                         Ok::<(GossipSender, TopicId, String), String>((sender, topic, ticket_str))
@@ -7398,7 +7515,67 @@ impl IcedChat {
 
         container(content)
             .width(iced::Length::Fill)
-            .height(iced::Length::Fill)
+            .height(iced::Length::Fill);
+
+        let base = container(content)
+            .width(iced::Length::Fill)
+            .height(iced::Length::Fill);
+
+        if self.show_create_room_dialog {
+            self.view_create_room_dialog(base)
+        } else {
+            base.into()
+        }
+    }
+
+    /// Minimal dialog for creating a new room with optional DHT discovery.
+    fn view_create_room_dialog(
+        &self,
+        base: iced::widget::Container<'_, AppMessage>,
+    ) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, checkbox, column, container, text};
+        use iced::{Alignment, Length};
+
+        let dialog = column![]
+            .push(text("Create New Room").size(18))
+            .push(checkbox("Enable DHT discovery", self.create_room_dht_enabled)
+                .on_toggled(AppMessage::CreateNewRoomDhtToggled))
+            .push(
+                iced::widget::row![]
+                    .push(button(text("Cancel"))
+                        .on_press(AppMessage::CancelCreateRoom)
+                        .padding(8))
+                    .push(button(text("Create"))
+                        .on_press(AppMessage::ConfirmCreateNewRoom)
+                        .padding(8))
+                    .spacing(12),
+            )
+            .spacing(12)
+            .align_items(Alignment::Center);
+
+        let overlay = container(dialog)
+            .width(Length::Fixed(320.0))
+            .height(Length::Shrink)
+            .padding(24)
+            .style(move |t| {
+                let mut s = iced::widget::container::Style::default();
+                s.background = Some(iced::Background::Color(iced::Color::from_rgba(0.15, 0.15, 0.15, 0.95)));
+                s.border = iced::Border {
+                    radius: 12.0.into(),
+                    width: 1.0,
+                    color: iced::Color::from_rgb(0.4, 0.4, 0.4),
+                };
+                s
+            });
+
+        container(base)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .overlay(container(overlay)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill))
             .into()
     }
 

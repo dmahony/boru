@@ -65,11 +65,13 @@ use boru_chat::room_docs::{
     RoomMetadata,
 };
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, PublicKey, RelayMode,
-    RelayUrl, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, EndpointId,
+    PublicKey, RelayMode, RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
 
+use boru_chat::discovery_backend::MainlineDhtBackend;
+use boru_chat::private_room_tracker::PrivateRoomTracker;
 use boru_chat::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
 use boru_chat::{
     net::{Gossip, GOSSIP_ALPN},
@@ -540,10 +542,10 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Parse the CLI command.
-    let (topic, peers) = match &args.command {
+    let (topic, mut peers, mut discovery_secret) = match &args.command {
         Command::Open { topic } => {
-            let (topic, saved_peers) = match topic {
-                Some(t) => (*t, Vec::new()),
+            let (topic, saved_peers, stored_secret) = match topic {
+                Some(t) => (*t, Vec::new(), None),
                 None => match RoomStore::load_or_none(&data_dir) {
                     Some(store) => {
                         let n_peers = store.peers.len();
@@ -553,7 +555,7 @@ async fn main() -> Result<()> {
                             String::new()
                         };
                         tracing::info!(topic = %store.topic, peer_info = %peer_info, "reusing saved room topic");
-                        (store.topic, store.peers.clone())
+                        (store.topic, store.peers.clone(), store.discovery_secret)
                     }
                     None => {
                         let t = TopicId::from_bytes(rand::random());
@@ -562,18 +564,19 @@ async fn main() -> Result<()> {
                         if let Err(err) = room.save() {
                             tracing::warn!(error = %err, "failed to save room metadata");
                         }
-                        (t, vec![])
+                        (t, vec![], None)
                     }
                 },
             };
-            (topic, saved_peers)
+            (topic, saved_peers, stored_secret)
         }
         Command::Join { ticket } => {
-            let Ticket { topic, peers } = Ticket::from_str(ticket)?;
+            let Ticket { topic, peers, discovery_secret } = Ticket::from_str(ticket)?;
             tracing::info!(topic = %topic, "joining chat room");
-            (topic, peers)
+            (topic, peers, discovery_secret)
         }
     };
+    let is_new_room = discovery_secret.is_none() && matches!(&args.command, Command::Open { .. });
 
     // Secret key.
     let (secret_key, key_path) = match args.secret_key.as_ref() {
@@ -641,6 +644,75 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── Shared DHT client for private-room discovery ─────────────────
+    // Used both for initial publish (new rooms) and for join-time
+    // discovery (rooms with a discovery_secret from a ticket).
+    let shared_dht = distributed_topic_tracker::Dht::new(
+        &distributed_topic_tracker::DhtConfig::default(),
+    );
+
+    // ── Publish DHT discovery for newly created rooms ─────────────────
+    if is_new_room {
+        let secret = boru_chat::private_room_tracker::create_and_publish_private_discovery(
+            Some(shared_dht.clone()),
+            topic,
+            &endpoint,
+        )
+        .await;
+        if let Some(secret) = secret {
+            discovery_secret = Some(secret);
+            // Save the discovery secret to the room store.
+            if let Some(mut room) = RoomStore::load_or_none(&data_dir) {
+                if let Err(err) = room.set_discovery_secret(discovery_secret) {
+                    tracing::warn!(error = %err, "failed to set discovery_secret in RoomStore");
+                }
+                if let Err(err) = room.save() {
+                    tracing::warn!(error = %err, "failed to save RoomStore with discovery_secret");
+                }
+            }
+            tracing::info!("published DHT discovery for new private room");
+        }
+    }
+
+    // ── DHT discovery for private-room tickets ──────────────────────
+    // If the ticket includes a discovery secret, attempt to find additional
+    // peers via the DHT before subscribing.  Non-fatal errors are silently
+    // downgraded to a fallback (ticket peers only).
+    let ticket_addrs: Vec<EndpointAddr> = peers.clone();
+    if let Some(ref secret) = discovery_secret {
+        let dummy_ns = distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+        let backend = MainlineDhtBackend::new(shared_dht.clone(), dummy_ns);
+        let tracker = PrivateRoomTracker::new(
+            Box::new(backend),
+            topic,
+            secret.clone(),
+            endpoint.id(),
+            endpoint.secret_key().clone(),
+        );
+        match tracker.discover_once().await {
+            Ok(discovered_ids) => {
+                let existing: HashSet<EndpointId> =
+                    peers.iter().map(|a| a.id).collect();
+                for id in discovered_ids {
+                    if !existing.contains(&id) && id != endpoint.id() {
+                        peers.push(EndpointAddr::new(id));
+                    }
+                }
+                tracing::info!(
+                    peer_count = peers.len(),
+                    "DHT discovery merged additional peers"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "DHT discovery failed, falling back to ticket peers only"
+                );
+            }
+        }
+        tracker.shutdown().await;
+    }
+
     let gossip = Gossip::builder().spawn(endpoint.clone());
     let blob_store = MemStore::new();
     let blobs_protocol = BlobsProtocol::new(&blob_store, None);
@@ -648,7 +720,7 @@ async fn main() -> Result<()> {
     let ticket = Ticket {
         topic,
         peers: vec![endpoint.addr()],
-        discovery_secret: None,
+        discovery_secret,
     };
     tracing::info!(ticket = %ticket, "created room ticket");
 
@@ -698,7 +770,7 @@ async fn main() -> Result<()> {
     }
     tracing::info!("subscribed to personal inbox topic");
 
-    let (peer_ids, addr_material) = {
+    let (peer_ids, _addr_material) = {
         let room_peers = RoomStore::load_or_none(get_data_dir())
             .map(|s| s.peers)
             .unwrap_or_default();
@@ -706,7 +778,8 @@ async fn main() -> Result<()> {
     };
     let peer_count = peer_ids.len();
 
-    for addr in &addr_material {
+    // Seed MemoryLookup from ticket addresses only (DHT returns IDs, not addrs).
+    for addr in &ticket_addrs {
         memory_lookup.set_endpoint_info(addr.clone());
     }
 
@@ -714,7 +787,7 @@ async fn main() -> Result<()> {
         tracing::info!("waiting for peers to join us");
         gossip.subscribe(topic, peer_ids.clone()).await
     } else {
-        tracing::info!(count = addr_material.len(), "trying to connect to peers");
+        tracing::info!(count = peer_count, "trying to connect to peers");
         let timeout_result = tokio::time::timeout(Duration::from_secs(30), async {
             gossip.subscribe_and_join(topic, peer_ids.clone()).await
         })
