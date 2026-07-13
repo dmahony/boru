@@ -91,6 +91,7 @@ fn peer_ticket_survives_callback_and_debounced_frontend_save() {
     let ticket = Ticket {
         topic,
         peers: vec![EndpointAddr::new(peer)],
+        discovery_secret: None,
     };
     let ticket_text = ticket.to_string();
 

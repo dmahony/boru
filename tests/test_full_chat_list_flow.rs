@@ -131,6 +131,7 @@ async fn test_full_chat_list_flow() -> Result<()> {
     let ticket = boru_chat::chat_core::Ticket {
         topic,
         peers: vec![addr_a],
+        discovery_secret: None,
     };
     let ticket_str = ticket.to_string();
     println!("  Ticket: {ticket_str}");

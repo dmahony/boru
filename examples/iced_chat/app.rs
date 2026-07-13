@@ -1079,6 +1079,9 @@ pub struct IcedChat {
     friend_online_cache: HashSet<PublicKey>,
     /// Revision counter for the friends sidebar cache.
     friends_sidebar_revision: u64,
+    /// Revision counter for the incoming friend-requests sidebar cache.
+    /// Receiving a request does not necessarily change the friends list.
+    requests_sidebar_revision: u64,
     /// Bootstrap peer addresses from the initial join ticket (if any).
     /// Used only for the first room subscription; cleared after use.
     initial_bootstrap_peers: Vec<EndpointAddr>,
@@ -1265,6 +1268,9 @@ struct SidebarRequestRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct SidebarRequestsDependency {
     dark_mode: bool,
+    /// Changes whenever the persistent request store changes so iced::lazy
+    /// cannot retain a stale list after an incoming request arrives.
+    requests_revision: u64,
     incoming: Vec<SidebarRequestRow>,
     friend_request_error: String,
 }
@@ -2015,7 +2021,11 @@ fn profile_identity_card(
 
     section_card(
         "IDENTITY",
-        vec![nickname_input.into(), profile_row.into(), friend_id_row.into()],
+        vec![
+            nickname_input.into(),
+            profile_row.into(),
+            friend_id_row.into(),
+        ],
     )
 }
 
@@ -2195,6 +2205,7 @@ impl IcedChat {
             history_saved_count: 0,
             friend_online_cache,
             friends_sidebar_revision: 0,
+            requests_sidebar_revision: 0,
             sidebar_selected_topic: Rc::new(Cell::new(None)),
             initial_bootstrap_peers: initial_bootstrap,
             return_to_chat_list_after_open,
@@ -2240,6 +2251,7 @@ impl IcedChat {
         Ticket {
             topic,
             peers: vec![self.endpoint.watch_addr().get()],
+            discovery_secret: None,
         }
     }
 
@@ -3294,11 +3306,13 @@ impl IcedChat {
                         let ticket_str = Ticket {
                             topic,
                             peers: vec![local_peer_addr.clone()],
+                            discovery_secret: None,
                         }
                         .to_string();
                         let personal_ticket = Ticket {
                             topic: personal_topic,
                             peers: vec![local_peer_addr.clone()],
+                            discovery_secret: None,
                         }
                         .to_string();
 
@@ -3475,11 +3489,13 @@ impl IcedChat {
                         let ticket_str = Ticket {
                             topic,
                             peers: vec![local_peer_addr.clone()],
+                            discovery_secret: None,
                         }
                         .to_string();
                         let personal_ticket = Ticket {
                             topic: personal_topic,
                             peers: vec![local_peer_addr.clone()],
+                            discovery_secret: None,
                         }
                         .to_string();
 
@@ -3725,11 +3741,13 @@ impl IcedChat {
                         let new_ticket = Ticket {
                             topic,
                             peers: vec![local_peer_addr.clone()],
+                            discovery_secret: None,
                         };
                         let ticket_str = new_ticket.to_string();
                         let personal_ticket = Ticket {
                             topic: personal_topic,
                             peers: vec![local_peer_addr.clone()],
+                            discovery_secret: None,
                         }
                         .to_string();
 
@@ -3915,6 +3933,8 @@ impl IcedChat {
                     .accept_request(&request_id, &local_pk)
                 {
                     Ok(_) => {
+                        self.requests_sidebar_revision =
+                            self.requests_sidebar_revision.wrapping_add(1);
                         if let Err(err) = self.friend_request_store.save() {
                             debug!(error = %err, "failed to save friend request store after accept");
                         }
@@ -3937,6 +3957,8 @@ impl IcedChat {
                     .decline_request(&request_id, &local_pk)
                 {
                     Ok(_) => {
+                        self.requests_sidebar_revision =
+                            self.requests_sidebar_revision.wrapping_add(1);
                         if let Err(err) = self.friend_request_store.save() {
                             debug!(error = %err, "failed to save friend request store after decline");
                         }
@@ -4779,6 +4801,8 @@ impl IcedChat {
                         let req_id = req.id.clone();
                         match self.friend_request_store.accept_request(&req_id, &local_pk) {
                             Ok(_) => {
+                                self.requests_sidebar_revision =
+                                    self.requests_sidebar_revision.wrapping_add(1);
                                 if let Err(err) = self.friend_request_store.save() {
                                     debug!(error = %err, "failed to save friend request store after accept");
                                 }
@@ -4819,6 +4843,8 @@ impl IcedChat {
                             .decline_request(&req_id, &local_pk)
                         {
                             Ok(_) => {
+                                self.requests_sidebar_revision =
+                                    self.requests_sidebar_revision.wrapping_add(1);
                                 if let Err(err) = self.friend_request_store.save() {
                                     debug!(error = %err, "failed to save friend request store after decline");
                                 }
@@ -5025,6 +5051,8 @@ impl IcedChat {
                                     None,
                                 ) {
                                     Ok(_request) => {
+                                        self.requests_sidebar_revision =
+                                            self.requests_sidebar_revision.wrapping_add(1);
                                         if let Err(err) = self.friend_request_store.save() {
                                             debug!(
                                                 error = %err,
@@ -8092,6 +8120,7 @@ impl IcedChat {
         incoming.sort_by(|a, b| a.label.cmp(&b.label));
         SidebarRequestsDependency {
             dark_mode: self.dark_mode,
+            requests_revision: self.requests_sidebar_revision,
             incoming,
             friend_request_error: self.friend_request_error.clone(),
         }
@@ -8873,7 +8902,12 @@ impl IcedChat {
         let profile_image_handle = self.profile_image_handle.clone();
         let identity_card: iced::Element<'static, AppMessage> =
             lazy(profile_identity_key, move |_| {
-                profile_identity_card(profile_local_label.clone(), profile_public_key.clone(), profile_friend_id_copied, profile_image_handle.clone())
+                profile_identity_card(
+                    profile_local_label.clone(),
+                    profile_public_key.clone(),
+                    profile_friend_id_copied,
+                    profile_image_handle.clone(),
+                )
             })
             .into();
 

@@ -1016,7 +1016,9 @@ fn test_cumulative_window_lookup_cost() {
 
 #[test]
 fn test_friends_store_iteration_scaling() {
-    use boru_chat::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore};
+    use boru_chat::friends::{
+        FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore,
+    };
     use iroh::SecretKey;
 
     let _ = tracing_subscriber::fmt::try_init();
@@ -1098,13 +1100,7 @@ fn test_friends_store_iteration_scaling() {
     );
 
     // 10x friends should be <30x time (O(n) with alloc noise)
-    assert_sub_quadratic(
-        "friends iteration 50→500",
-        50,
-        small_time,
-        500,
-        large_time,
-    );
+    assert_sub_quadratic("friends iteration 50→500", 50, small_time, 500, large_time);
 }
 
 // ── Test: ChatHistoryStore push scaling ─────────────────────────────────────
@@ -1200,7 +1196,9 @@ fn test_chat_history_push_scaling() {
 
 #[test]
 fn test_serialization_scaling() {
-    use boru_chat::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore};
+    use boru_chat::friends::{
+        FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore,
+    };
     use iroh::SecretKey;
 
     let _ = tracing_subscriber::fmt::try_init();
@@ -1308,8 +1306,8 @@ fn test_serialization_scaling() {
 
 #[test]
 fn test_avatar_handle_map_scaling() {
-    use std::collections::HashMap;
     use iroh::{PublicKey, SecretKey};
+    use std::collections::HashMap;
 
     let _ = tracing_subscriber::fmt::try_init();
 

@@ -33,10 +33,17 @@ fn generate_stress_data() {
         friends_store.friends.insert(
             fid,
             FriendRecord {
-                label: if i % 2 == 0 { Some(format!("Friend{i}")) } else { None },
+                label: if i % 2 == 0 {
+                    Some(format!("Friend{i}"))
+                } else {
+                    None
+                },
                 last_announced_name: None,
                 last_announced_profile_image_ticket: Some(format!("ticket_{i}")),
-                status: FriendStatus { online: i % 3 == 0, ..Default::default() },
+                status: FriendStatus {
+                    online: i % 3 == 0,
+                    ..Default::default()
+                },
                 known_addrs: vec![],
                 addrs_updated_at_unix_ms: None,
                 relationship: FriendRelationship::NotFriend,
@@ -77,7 +84,8 @@ fn generate_stress_data() {
         let signed_bytes = format!("signed_bytes_for_message_{i}").into_bytes();
         let hash = format!("{:032x}", i32::MAX as u64 + i as u64);
         let ts = 1700000000000u64 + (i as u64 * 1000);
-        let body = format!("Message #{i} in conversation {conv_idx} with some realistic padding content.");
+        let body =
+            format!("Message #{i} in conversation {conv_idx} with some realistic padding content.");
         history_store.push(HistoryEntry {
             event_id: 0,
             hash,

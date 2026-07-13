@@ -58,7 +58,10 @@ fn make_chat_entries(count: usize) -> Vec<ChatEntry> {
     for i in 0..count {
         let entry = if i % 15 == 0 {
             // File share message
-            ChatEntry::local("Me".to_string(), format!("📎 shared_file_{}.pdf [1.2 MB]", i % 100))
+            ChatEntry::local(
+                "Me".to_string(),
+                format!("📎 shared_file_{}.pdf [1.2 MB]", i % 100),
+            )
         } else if i % 3 == 0 {
             ChatEntry::local("Me".to_string(), format!("Hello! Message #{i}"))
         } else if i % 5 == 0 {
@@ -67,7 +70,10 @@ fn make_chat_entries(count: usize) -> Vec<ChatEntry> {
             // Image message — simulate image content
             ChatEntry::remote("Alice".to_string(), format!("📷 Check out photo #{i}"))
         } else {
-            ChatEntry::remote("Bob".to_string(), format!("Here's an interesting thought #{i}"))
+            ChatEntry::remote(
+                "Bob".to_string(),
+                format!("Here's an interesting thought #{i}"),
+            )
         };
         entries.push(entry);
     }
@@ -261,7 +267,8 @@ fn stress_conversation_switching() {
     let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
     // Build 100 conversations with entries
-    let mut conversations: Vec<(TopicId, Vec<ChatEntry>)> = Vec::with_capacity(DATASET_CONVERSATIONS);
+    let mut conversations: Vec<(TopicId, Vec<ChatEntry>)> =
+        Vec::with_capacity(DATASET_CONVERSATIONS);
     for i in 0..DATASET_CONVERSATIONS {
         let topic = TopicId::from_bytes(rng.random());
         let entry_count = 10 + (i % 100); // 10-109 entries per conversation
@@ -278,10 +285,7 @@ fn stress_conversation_switching() {
     }
 
     // Simulate switching through all conversations sequentially
-    let _timer = PerfTracker::timer(
-        "stress_switch_conversations_100",
-        "sequential_switch",
-    );
+    let _timer = PerfTracker::timer("stress_switch_conversations_100", "sequential_switch");
     for (i, (topic, entries)) in conversations.iter().enumerate() {
         // Simulate: store old, load new
         let _old_entries = &conversations
@@ -339,8 +343,12 @@ fn stress_profile_opening() {
     PerfTracker::record(
         "stress_profile_map_stats",
         Duration::ZERO,
-        format!("{}_handles {}_tickets {}_versions", 
-            friend_image_handles.len(), ticket_count, version_count),
+        format!(
+            "{}_handles {}_tickets {}_versions",
+            friend_image_handles.len(),
+            ticket_count,
+            version_count
+        ),
     );
 
     eprintln!("\n── Profile Opening Stress ──");
@@ -372,7 +380,8 @@ fn stress_downloads() {
         let tid = rng.random::<u64>();
         transfer_ids.push(tid);
         transfer_id_to_index.insert(tid, i);
-        download_progress.insert(tid, (0u64, 1024u64 * 1024u64 * (1u64 + i as u64 % 10u64))); // 1MB-10MB per download
+        download_progress.insert(tid, (0u64, 1024u64 * 1024u64 * (1u64 + i as u64 % 10u64)));
+        // 1MB-10MB per download
     }
 
     // Simulate progress updates (like app's DownloadProgress handler)
@@ -483,7 +492,7 @@ fn stress_all_operations() {
 
     // Build the full dataset
     let _timer = PerfTracker::timer("stress_build_full_dataset", "500friends_100conv_5000msgs");
-    
+
     // 500 friends
     let tmp = tempfile::tempdir().unwrap();
     let mut friends_store = FriendsStore::load_or_default(tmp.path());
@@ -496,7 +505,11 @@ fn stress_all_operations() {
         friends_store.friends.insert(
             fid,
             FriendRecord {
-                label: if i % 2 == 0 { Some(format!("Friend{i}")) } else { None },
+                label: if i % 2 == 0 {
+                    Some(format!("Friend{i}"))
+                } else {
+                    None
+                },
                 last_announced_name: None,
                 last_announced_profile_image_ticket: Some(format!("ticket_{i}")),
                 status: FriendStatus {
@@ -527,7 +540,10 @@ fn stress_all_operations() {
                 let sender = friend_keys[j % friend_keys.len()];
                 let label = sender.fmt_short().to_string();
                 if is_file {
-                    ChatEntry::remote(label, format!("📎 shared_file_{}.pdf", j % DATASET_SHARED_FILES))
+                    ChatEntry::remote(
+                        label,
+                        format!("📎 shared_file_{}.pdf", j % DATASET_SHARED_FILES),
+                    )
                 } else if is_image {
                     ChatEntry::remote(label, format!("📷 photo_{j}.jpg"))
                 } else {
@@ -543,22 +559,32 @@ fn stress_all_operations() {
     PerfTracker::record(
         "stress_dataset_built",
         Duration::ZERO,
-        format!("{}friends_{}conv_{}msgs", 
-            friends_store.len(), conversation_topics.len(), total_msgs),
+        format!(
+            "{}friends_{}conv_{}msgs",
+            friends_store.len(),
+            conversation_topics.len(),
+            total_msgs
+        ),
     );
 
     // ── Combined measure: startup simulation ──
     let _timer = PerfTracker::timer("stress_app_startup_full", "all_operations");
 
     // Build online cache (like IcedChat::new())
-    let _timer2 = PerfTracker::timer("stress_build_online_cache", &format!("{}_friends", friends_store.len()));
+    let _timer2 = PerfTracker::timer(
+        "stress_build_online_cache",
+        &format!("{}_friends", friends_store.len()),
+    );
     let starting_online_count = friends_store
         .iter()
         .filter(|(_, rec)| rec.status.online)
         .count();
 
     // Build profile image maps (like IcedChat::new())
-    let _timer3 = PerfTracker::timer("stress_build_image_maps", &format!("{}_avatars", DATASET_AVATARS));
+    let _timer3 = PerfTracker::timer(
+        "stress_build_image_maps",
+        &format!("{}_avatars", DATASET_AVATARS),
+    );
     let mut image_handles: HashMap<PublicKey, Option<Vec<u8>>> = HashMap::new();
     for i in 0..DATASET_AVATARS {
         let pk = friend_keys[i % friend_keys.len()];
@@ -654,7 +680,11 @@ fn stress_memory_pressure() {
         oversized_entries.push(entry);
     }
     // Simulate cap enforcement: truncate to 2000
-    let cap_label = format!("{}_entries_enforced_to_{}", oversized_entries.len(), MAX_ENTRIES);
+    let cap_label = format!(
+        "{}_entries_enforced_to_{}",
+        oversized_entries.len(),
+        MAX_ENTRIES
+    );
     if oversized_entries.len() > MAX_ENTRIES {
         let trimmed = oversized_entries.split_off(oversized_entries.len() - MAX_ENTRIES);
         oversized_entries = trimmed;

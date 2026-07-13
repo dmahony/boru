@@ -23,10 +23,16 @@ pub mod discovery_backend;
 #[cfg(feature = "net")]
 pub mod discovery_record;
 #[cfg(feature = "net")]
+pub mod discovery_secret;
+#[cfg(feature = "net")]
 pub mod discovery_validation;
 pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;
+/// Private-room DHT tracker — thin wrapper around [`PublicRoomTracker`] for
+/// private rooms that use a shared [`DiscoverySecret`].
+#[cfg(feature = "net")]
+pub mod private_room_tracker;
 pub mod proto;
 pub mod public_room;
 #[cfg(feature = "net")]

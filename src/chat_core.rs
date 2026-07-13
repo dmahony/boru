@@ -29,6 +29,7 @@ use serde_byte_array::ByteArray;
 
 use crate::api::{Event, GossipReceiver};
 use crate::chat_history::DeliveryState;
+use crate::discovery_secret::DiscoverySecret;
 use crate::friends::{FriendId, FriendsStore};
 use crate::proto::TopicId;
 use crate::public_room_safety::PublicRoomSafety;
@@ -957,15 +958,50 @@ impl SignedMessage {
 }
 
 /// A chat-room ticket that peers use to join a topic.
+///
+/// The optional [`DiscoverySecret`] enables DHT-based private-room discovery:
+/// when present, the holder can publish and look up discovery records under
+/// the room's encrypted namespace.  Legacy tickets (without the secret)
+/// deserialise to [`None`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ticket {
     /// The gossip topic to join.
     pub topic: TopicId,
     /// Known peers to bootstrap from.
     pub peers: Vec<EndpointAddr>,
+    /// Optional discovery secret for DHT-based private-room lookup.
+    ///
+    /// `#[serde(default)]` ensures legacy tickets (serialised without this
+    /// field) deserialise to `None` instead of failing.
+    #[serde(default)]
+    pub discovery_secret: Option<DiscoverySecret>,
 }
 
 impl Ticket {
+    /// Create a ticket from a topic, bootstrap peers, and an optional
+    /// discovery secret.
+    pub fn new(topic: TopicId, peers: Vec<EndpointAddr>) -> Self {
+        Self {
+            topic,
+            peers,
+            discovery_secret: None,
+        }
+    }
+
+    /// Create a ticket with a discovery secret for DHT-based private-room
+    /// discovery.
+    pub fn with_discovery(
+        topic: TopicId,
+        peers: Vec<EndpointAddr>,
+        secret: DiscoverySecret,
+    ) -> Self {
+        Self {
+            topic,
+            peers,
+            discovery_secret: Some(secret),
+        }
+    }
+
     /// Decode a ticket from serialized bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         postcard::from_bytes(bytes).std_context("decode chat ticket")
@@ -2101,6 +2137,7 @@ mod tests {
         let ticket = Ticket {
             topic: TopicId::from_bytes([9; 32]),
             peers: vec![EndpointAddr::new(local_public)],
+            discovery_secret: None,
         };
 
         ChatCallbacks::record_peer_ticket(&mut app, local_public, ticket.to_string());
@@ -2116,6 +2153,7 @@ mod tests {
         let ticket = Ticket {
             topic: TopicId::from_bytes([8; 32]),
             peers: vec![EndpointAddr::new(peer)],
+            discovery_secret: None,
         };
 
         ChatCallbacks::record_peer_ticket(&mut app, peer, ticket.to_string());
@@ -2349,6 +2387,7 @@ mod tests {
         let ticket = Ticket {
             topic: TopicId::from_bytes([9u8; 32]),
             peers: vec![EndpointAddr::new(SecretKey::generate().public())],
+            discovery_secret: None,
         };
         let encoded = ticket.to_string();
         let decoded = Ticket::from_str(&encoded).unwrap();
@@ -2363,10 +2402,12 @@ mod tests {
         let a = Ticket {
             topic,
             peers: vec![peer.clone()],
+            discovery_secret: None,
         };
         let b = Ticket {
             topic,
             peers: vec![peer],
+            discovery_secret: None,
         };
         assert_eq!(a.to_string(), b.to_string());
         assert_eq!(a.to_bytes(), b.to_bytes());
@@ -2377,6 +2418,7 @@ mod tests {
         let ticket = Ticket {
             topic: TopicId::from_bytes([1u8; 32]),
             peers: vec![],
+            discovery_secret: None,
         };
         let bytes = ticket.to_bytes();
         let decoded = Ticket::from_bytes(&bytes).unwrap();
@@ -3584,5 +3626,86 @@ mod tests {
             }
             other => panic!("expected Cancelled, got {other:?}"),
         }
+    }
+
+    // ── Ticket tests ────────────────────────────────────────────────────────
+
+    /// Legacy binary ticket (topic + peers only) deserialises to
+    /// discovery_secret=None.
+    #[test]
+    fn test_ticket_legacy_binary_no_secret() {
+        let topic = TopicId::from_bytes([0xAAu8; 32]);
+        let pk = iroh::SecretKey::generate().public();
+        let addr = iroh::EndpointAddr::new(pk);
+        let legacy = Ticket {
+            topic,
+            peers: vec![addr],
+            discovery_secret: None,
+        };
+        let bytes = postcard::to_stdvec(&legacy).unwrap();
+        // Decode into the new Ticket struct — should produce None.
+        let restored: Ticket = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.topic, topic);
+        assert_eq!(restored.peers.len(), 1);
+        assert_eq!(restored.discovery_secret, None);
+    }
+
+    /// New binary ticket (topic + peers + Some(secret)) round-trips correctly.
+    #[test]
+    fn test_ticket_with_secret_roundtrip() {
+        let topic = TopicId::from_bytes([0xBBu8; 32]);
+        let pk = iroh::SecretKey::generate().public();
+        let addr = iroh::EndpointAddr::new(pk);
+        let secret = DiscoverySecret::generate();
+        let ticket = Ticket::with_discovery(topic, vec![addr], secret);
+        let bytes = ticket.to_bytes();
+        let restored = Ticket::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.topic, ticket.topic);
+        assert_eq!(restored.peers, ticket.peers);
+        assert_eq!(restored.discovery_secret, ticket.discovery_secret);
+    }
+
+    /// Display/FromStr round-trip for a ticket without discovery secret.
+    #[test]
+    fn test_ticket_display_fromstr_no_secret() {
+        let topic = TopicId::from_bytes([0xCCu8; 32]);
+        let pk = iroh::SecretKey::generate().public();
+        let addr = iroh::EndpointAddr::new(pk);
+        let ticket = Ticket::new(topic, vec![addr]);
+        let display = ticket.to_string();
+        let parsed: Ticket = display.parse().unwrap();
+        assert_eq!(parsed.topic, ticket.topic);
+        assert_eq!(parsed.peers, ticket.peers);
+        assert_eq!(parsed.discovery_secret, None);
+    }
+
+    /// Display/FromStr round-trip for a ticket with discovery secret.
+    #[test]
+    fn test_ticket_display_fromstr_with_secret() {
+        let topic = TopicId::from_bytes([0xDDu8; 32]);
+        let pk = iroh::SecretKey::generate().public();
+        let addr = iroh::EndpointAddr::new(pk);
+        let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
+        let ticket = Ticket::with_discovery(topic, vec![addr], secret);
+        let display = ticket.to_string();
+        let parsed: Ticket = display.parse().unwrap();
+        assert_eq!(parsed.topic, ticket.topic);
+        assert_eq!(parsed.peers, ticket.peers);
+        assert_eq!(parsed.discovery_secret, ticket.discovery_secret);
+    }
+
+    /// Ticket is Send + Sync (compile-time check).
+    #[test]
+    fn test_ticket_is_send_sync() {
+        fn assert_send<T: Send>(_: &T) {}
+        fn assert_sync<T: Sync>(_: &T) {}
+        let ticket = Ticket::new(
+            TopicId::from_bytes([0xEEu8; 32]),
+            vec![iroh::EndpointAddr::new(
+                iroh::SecretKey::generate().public(),
+            )],
+        );
+        assert_send(&ticket);
+        assert_sync(&ticket);
     }
 }

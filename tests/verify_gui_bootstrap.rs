@@ -153,6 +153,7 @@ async fn test_gui_bootstrap_plumbing() -> Result<()> {
     let ticket = boru_chat::chat_core::Ticket {
         topic,
         peers: vec![ep_a.addr().with_relay_url(relay_url.clone())],
+        discovery_secret: None,
     };
     let ticket_str = ticket.to_string();
     println!("> Ticket: {ticket_str}");

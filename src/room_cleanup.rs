@@ -127,6 +127,7 @@ mod tests {
             Ticket {
                 topic,
                 peers: Vec::new(),
+                discovery_secret: None,
             },
         );
         record
@@ -172,6 +173,7 @@ mod tests {
             Ticket {
                 topic: target,
                 peers: Vec::new(),
+                discovery_secret: None,
             },
         );
         friends.upsert(other_friend_id, other_friend);

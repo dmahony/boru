@@ -648,6 +648,7 @@ async fn main() -> Result<()> {
     let ticket = Ticket {
         topic,
         peers: vec![endpoint.addr()],
+        discovery_secret: None,
     };
     tracing::info!(ticket = %ticket, "created room ticket");
 
@@ -3236,6 +3237,7 @@ mod tests {
         let ticket = Ticket {
             topic: TopicId::from_bytes([9u8; 32]),
             peers: vec![EndpointAddr::new(SecretKey::generate().public())],
+            discovery_secret: None,
         };
         let encoded = ticket.to_string();
         let decoded = Ticket::from_str(&encoded).expect("ticket should decode");
@@ -3520,10 +3522,12 @@ mod tests {
         let ticket_a = Ticket {
             topic,
             peers: vec![peer_addr.clone()],
+            discovery_secret: None,
         };
         let ticket_b = Ticket {
             topic,
             peers: vec![peer_addr],
+            discovery_secret: None,
         };
         assert_eq!(ticket_a.to_string(), ticket_b.to_string());
         assert_eq!(ticket_a.to_bytes(), ticket_b.to_bytes());

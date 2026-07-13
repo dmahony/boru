@@ -606,6 +606,7 @@ mod tests {
         let ticket = Ticket {
             topic,
             peers: vec![EndpointAddr::new(pk)],
+            discovery_secret: None,
         };
         store
             .ensure_friend(id.clone())

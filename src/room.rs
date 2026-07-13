@@ -16,9 +16,10 @@ use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
 use crate::chat_core::atomic_write::atomic_write_json;
+use crate::discovery_secret::DiscoverySecret;
 use crate::proto::TopicId;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 /// Name of the on-disk room metadata file (lives beside `secret_key.txt`).
 pub const ROOM_FILE_NAME: &str = "room.json";
 
@@ -46,6 +47,13 @@ pub struct RoomStore {
     /// seed the address lookup without a fresh ticket.
     #[serde(default)]
     pub peers: Vec<EndpointAddr>,
+    /// Optional discovery secret for DHT-based private-room discovery.
+    ///
+    /// Generated at room creation time and persisted across restarts so
+    /// that the same DHT namespace is reused.  `None` for legacy rooms
+    /// or rooms that do not use DHT discovery.
+    #[serde(default)]
+    pub discovery_secret: Option<DiscoverySecret>,
     /// Data directory used for load/save operations.
     #[serde(skip)]
     data_dir: PathBuf,
@@ -60,6 +68,7 @@ impl RoomStore {
             schema_version: SCHEMA_VERSION,
             topic: TopicId::from_bytes([0u8; 32]),
             peers: Vec::new(),
+            discovery_secret: None,
             data_dir: data_dir.into(),
         }
     }
@@ -70,6 +79,7 @@ impl RoomStore {
             schema_version: SCHEMA_VERSION,
             topic,
             peers: Vec::new(),
+            discovery_secret: None,
             data_dir: data_dir.into(),
         }
     }
@@ -84,6 +94,7 @@ impl RoomStore {
             schema_version: SCHEMA_VERSION,
             topic,
             peers,
+            discovery_secret: None,
             data_dir: data_dir.into(),
         }
     }
@@ -114,16 +125,29 @@ impl RoomStore {
         let mut store: Self = serde_json::from_str(&raw)
             .with_std_context(|_| format!("failed to parse room file {}", path.display()))?;
 
-        if store.schema_version != SCHEMA_VERSION {
-            return Err(n0_error::anyerr!(
-                "unsupported room schema version {} in {}",
-                store.schema_version,
-                path.display()
-            ));
+        match store.schema_version {
+            3 => {
+                // Current version — no migration needed.
+                store.data_dir = data_dir.to_path_buf();
+                Ok(Some(store))
+            }
+            2 => {
+                // Migration: v2 → v3 adds discovery_secret: None.
+                store.schema_version = SCHEMA_VERSION;
+                store.discovery_secret = None;
+                store.data_dir = data_dir.to_path_buf();
+                // Persist the migrated store so future loads skip migration.
+                if let Err(err) = store.save() {
+                    eprintln!("warning: failed to persist v3 room migration: {err}");
+                }
+                Ok(Some(store))
+            }
+            other => Err(n0_error::anyerr!(
+                "unsupported room schema version {} in {}; expected version 3 or lower",
+                other,
+                path.display(),
+            )),
         }
-
-        store.data_dir = data_dir.to_path_buf();
-        Ok(Some(store))
     }
 
     /// Load a room store, logging and falling back to `None` on failure.
@@ -151,6 +175,15 @@ impl RoomStore {
     /// Clear the peers list and persist to disk.
     pub fn clear_peers(&mut self) -> Result<()> {
         self.peers.clear();
+        self.save()?;
+        Ok(())
+    }
+
+    /// Set the discovery secret and persist to disk.
+    ///
+    /// Pass `None` to clear a previously stored secret.
+    pub fn set_discovery_secret(&mut self, secret: Option<DiscoverySecret>) -> Result<()> {
+        self.discovery_secret = secret;
         self.save()?;
         Ok(())
     }
@@ -271,5 +304,129 @@ mod tests {
         assert!(RoomStore::delete(&dir).expect("delete room file"));
         assert!(!path.exists());
         assert!(!RoomStore::delete(&dir).expect("delete room file again"));
+    }
+
+    // -----------------------------------------------------------------------
+    // v2 → v3 migration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn save_load_round_trip_preserves_discovery_secret() {
+        let dir = temp_dir("secret-roundtrip");
+        let mut store = RoomStore::empty_at(&dir);
+        let secret = DiscoverySecret::from_bytes([0xAAu8; 32]);
+        store
+            .set_discovery_secret(Some(secret))
+            .expect("set discovery secret");
+
+        let reloaded = RoomStore::load(&dir)
+            .expect("load saved store")
+            .expect("should have a saved room");
+        assert_eq!(reloaded.discovery_secret, Some(secret));
+    }
+
+    #[test]
+    fn v2_room_auto_migrates_to_v3_with_no_secret() {
+        let dir = temp_dir("v2-migration");
+        fs::create_dir_all(&dir).expect("create test dir");
+
+        // Write a v2 room.json — no discovery_secret field.
+        let topic_bytes: [u8; 32] = [0x42u8; 32];
+        let v2_json = serde_json::json!({
+            "schema_version": 2,
+            "topic": topic_bytes,
+            "peers": []
+        });
+        fs::write(room_file_path(&dir), v2_json.to_string()).expect("write v2 room file");
+
+        // Load should succeed and auto-migrate.
+        let loaded = RoomStore::load(&dir)
+            .expect("load v2 room")
+            .expect("should load v2 room file");
+        assert_eq!(loaded.schema_version, 3, "should migrate to v3");
+        assert_eq!(
+            loaded.discovery_secret, None,
+            "migrated room should have no discovery secret"
+        );
+        assert_eq!(
+            loaded.topic,
+            TopicId::from_bytes([0x42u8; 32]),
+            "topic preserved"
+        );
+
+        // The migrated file on disk should now be v3.
+        let raw = fs::read_to_string(room_file_path(&dir)).expect("read migrated file");
+        let reread: serde_json::Value = serde_json::from_str(&raw).expect("parse migrated file");
+        assert_eq!(reread["schema_version"], 3, "persisted schema should be v3");
+    }
+
+    #[test]
+    fn unsupported_schema_version_rejected() {
+        let dir = temp_dir("unsupported");
+        fs::create_dir_all(&dir).expect("create test dir");
+
+        // Write a room.json with version 99 (unsupported).
+        let topic_bytes: [u8; 32] = [0xFFu8; 32];
+        let v99_json = serde_json::json!({
+            "schema_version": 99,
+            "topic": topic_bytes,
+            "peers": []
+        });
+        fs::write(room_file_path(&dir), v99_json.to_string()).expect("write v99 room file");
+
+        let result = RoomStore::load(&dir);
+        assert!(result.is_err(), "unsupported version should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported room schema version 99"),
+            "error should mention version 99: {err}"
+        );
+        assert!(
+            err.contains("expected version 3 or lower"),
+            "error should mention expected max version: {err}"
+        );
+    }
+
+    #[test]
+    fn delete_works_on_migrated_v2_file() {
+        let dir = temp_dir("delete-migrated");
+        fs::create_dir_all(&dir).expect("create test dir");
+
+        // Write a v2 room file.
+        let topic_bytes: [u8; 32] = [0x33u8; 32];
+        let v2_json = serde_json::json!({
+            "schema_version": 2,
+            "topic": topic_bytes,
+            "peers": []
+        });
+        fs::write(room_file_path(&dir), v2_json.to_string()).expect("write v2 room file");
+
+        // Load triggers migration and persist.
+        let _loaded = RoomStore::load(&dir)
+            .expect("load v2 room")
+            .expect("should load v2 file");
+        assert!(room_file_path(&dir).exists(), "migrated file should exist");
+
+        // Delete should still work.
+        assert!(RoomStore::delete(&dir).expect("delete migrated file"));
+        assert!(!room_file_path(&dir).exists());
+    }
+
+    #[test]
+    fn empty_at_works_with_new_schema() {
+        let dir = temp_dir("empty-at");
+        let store = RoomStore::empty_at(&dir);
+        assert_eq!(store.schema_version, 3);
+        assert_eq!(store.discovery_secret, None);
+        assert_eq!(store.topic, TopicId::from_bytes([0u8; 32]));
+        assert!(store.peers.is_empty());
+
+        // Save and re-load should preserve everything.
+        store.save().expect("save empty store");
+        let loaded = RoomStore::load(&dir)
+            .expect("load empty store")
+            .expect("should have a saved room");
+        assert_eq!(loaded.schema_version, 3);
+        assert_eq!(loaded.discovery_secret, None);
     }
 }
