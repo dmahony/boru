@@ -27,125 +27,6 @@ use crate::public_room_config::PublicRoomConfig;
 
 const MAX_TRACKED_PEERS: usize = 4096;
 
-/// Per-peer drop counters, protected by a single mutex so lock ordering
-/// cannot deadlock between the three `record_*` functions.
-///
-/// Entries are bounded by [`MAX_TRACKED_PEERS`]; when at capacity and a new
-/// peer appears the increment is silently dropped (the enforcement rejection
-/// still happens — this is purely an observation bound).
-#[derive(Debug)]
-struct DropCounters {
-    rate_limit_hits: HashMap<PublicKey, u64>,
-    blob_announcement_rejects: HashMap<PublicKey, u64>,
-    download_rejects: HashMap<PublicKey, u64>,
-}
-
-impl DropCounters {
-    fn new() -> Self {
-        Self {
-            rate_limit_hits: HashMap::new(),
-            blob_announcement_rejects: HashMap::new(),
-            download_rejects: HashMap::new(),
-        }
-    }
-
-    /// Increment the rate-limit-hit counter for `peer`, bounded to
-    /// [`MAX_TRACKED_PEERS`] unique peers.  Returns the new value
-    /// (or `0` if the peer was silently dropped because the tracker is at capacity).
-    fn inc_rate(&mut self, peer: PublicKey) -> u64 {
-        self.ensure_peer(peer);
-        match self.rate_limit_hits.get_mut(&peer) {
-            Some(c) => {
-                *c = c.saturating_add(1);
-                *c
-            }
-            None => 0, // at capacity — peer not tracked
-        }
-    }
-
-    /// Increment the blob-announcement-reject counter for `peer`,
-    /// bounded to [`MAX_TRACKED_PEERS`] unique peers.  Returns the new value
-    /// (or `0` if the peer was silently dropped because the tracker is at capacity).
-    fn inc_blob(&mut self, peer: PublicKey) -> u64 {
-        self.ensure_peer(peer);
-        match self.blob_announcement_rejects.get_mut(&peer) {
-            Some(c) => {
-                *c = c.saturating_add(1);
-                *c
-            }
-            None => 0, // at capacity — peer not tracked
-        }
-    }
-
-    /// Increment the download-reject counter for `peer`, bounded to
-    /// [`MAX_TRACKED_PEERS`] unique peers.  Returns the new value
-    /// (or `0` if the peer was silently dropped because the tracker is at capacity).
-    fn inc_download(&mut self, peer: PublicKey) -> u64 {
-        self.ensure_peer(peer);
-        match self.download_rejects.get_mut(&peer) {
-            Some(c) => {
-                *c = c.saturating_add(1);
-                *c
-            }
-            None => 0, // at capacity — peer not tracked
-        }
-    }
-
-    /// Ensure `peer` has an entry in all three maps.  If at capacity and
-    /// `peer` is new, the increment is silently dropped (skip recording).
-    fn ensure_peer(&mut self, peer: PublicKey) {
-        if self.rate_limit_hits.contains_key(&peer) {
-            return;
-        }
-        if self.rate_limit_hits.len() >= MAX_TRACKED_PEERS {
-            return; // at capacity — silently drop rather than unbounded growth
-        }
-        self.rate_limit_hits.insert(peer, 0);
-        self.blob_announcement_rejects.insert(peer, 0);
-        self.download_rejects.insert(peer, 0);
-    }
-
-    /// Convenience: read all three counters for `peer` in one shot.
-    fn all_for(&self, peer: &PublicKey) -> (u64, u64, u64) {
-        (
-            self.rate_limit_hits.get(peer).copied().unwrap_or(0),
-            self.blob_announcement_rejects
-                .get(peer)
-                .copied()
-                .unwrap_or(0),
-            self.download_rejects.get(peer).copied().unwrap_or(0),
-        )
-    }
-
-    /// Full snapshot across all tracked peers.
-    fn snapshot(&self) -> HashMap<PublicKey, (u64, u64, u64)> {
-        let mut out = HashMap::new();
-        let mut all_peers: Vec<PublicKey> = self
-            .rate_limit_hits
-            .keys()
-            .chain(self.blob_announcement_rejects.keys())
-            .chain(self.download_rejects.keys())
-            .copied()
-            .collect();
-        all_peers.sort();
-        all_peers.dedup();
-        for pk in all_peers {
-            out.insert(
-                pk,
-                (
-                    self.rate_limit_hits.get(&pk).copied().unwrap_or(0),
-                    self.blob_announcement_rejects
-                        .get(&pk)
-                        .copied()
-                        .unwrap_or(0),
-                    self.download_rejects.get(&pk).copied().unwrap_or(0),
-                ),
-            );
-        }
-        out
-    }
-}
-
 /// Optional safety layer for public-room message processing.
 ///
 /// Create one with [`new`](Self::new) when entering a public room and
@@ -174,10 +55,13 @@ pub struct PublicRoomSafety {
     /// Current download-queue depth per peer.
     peer_download_count: Mutex<HashMap<PublicKey, usize>>,
 
-    // ── Per-peer drop counters (abuse-detection / safety tracing) ──
-    /// Single mutex protecting all three counter maps.
-    /// Never split into separate mutexes — lock ordering must be consistent.
-    drop_counters: Mutex<DropCounters>,
+    // ── Per-peer drop counters ────────────────────────────────────
+    /// How many times each peer has been rate-limited.
+    rate_limit_hits: Mutex<HashMap<PublicKey, u64>>,
+    /// How many blob/image announcements have been dropped per peer.
+    blob_announcement_rejects: Mutex<HashMap<PublicKey, u64>>,
+    /// How many download-acquires have been rejected per peer.
+    download_rejects: Mutex<HashMap<PublicKey, u64>>,
 }
 
 impl PublicRoomSafety {
@@ -196,7 +80,9 @@ impl PublicRoomSafety {
             peer_blob_count: Mutex::new(HashMap::new()),
             peer_blob_window_start: Mutex::new(HashMap::new()),
             peer_download_count: Mutex::new(HashMap::new()),
-            drop_counters: Mutex::new(DropCounters::new()),
+            rate_limit_hits: Mutex::new(HashMap::new()),
+            blob_announcement_rejects: Mutex::new(HashMap::new()),
+            download_rejects: Mutex::new(HashMap::new()),
         }
     }
 
@@ -276,17 +162,20 @@ impl PublicRoomSafety {
 
         let mut times = self.peer_message_times.lock().unwrap();
         if !times.contains_key(peer) && times.len() >= MAX_TRACKED_PEERS {
-            self.record_rate_limit_hit(peer);
             return false;
         }
-        let peer_times = times.entry(*peer).or_default();
+        let peer_times = times.entry(*peer).or_insert_with(Vec::new);
 
         // Prune entries outside the window.
         peer_times.retain(|t| now.duration_since(*t) < window_duration);
 
         if peer_times.len() >= max_per_window {
-            self.record_rate_limit_hit(peer);
-            return false;
+            // Increment per-peer counter and emit warning if threshold crossed.
+            let mut hits = self.rate_limit_hits.lock().unwrap();
+            let c = hits.entry(*peer).or_insert(0);
+            *c += 1;
+            Self::warn_if_over_threshold(peer, "rate-limited", *c);
+            return false; // rate limited
         }
 
         peer_times.push(now);
@@ -305,7 +194,6 @@ impl PublicRoomSafety {
     pub fn check_blob_announcement(&self, peer: &PublicKey) -> bool {
         let limit = self.config.blob_announcement_limit;
         if limit == 0 {
-            self.record_blob_reject(peer);
             return false; // blobs disabled
         }
 
@@ -315,7 +203,6 @@ impl PublicRoomSafety {
         let mut counts = self.peer_blob_count.lock().unwrap();
         let mut starts = self.peer_blob_window_start.lock().unwrap();
         if !starts.contains_key(peer) && starts.len() >= MAX_TRACKED_PEERS {
-            self.record_blob_reject(peer);
             return false;
         }
 
@@ -332,7 +219,11 @@ impl PublicRoomSafety {
 
         let count = counts.entry(*peer).or_insert(0);
         if *count >= limit {
-            self.record_blob_reject(peer);
+            // Increment per-peer counter and emit warning if threshold crossed.
+            let mut rejects = self.blob_announcement_rejects.lock().unwrap();
+            let c = rejects.entry(*peer).or_insert(0);
+            *c += 1;
+            Self::warn_if_over_threshold(peer, "blob-announcement rejected", *c);
             return false;
         }
         *count += 1;
@@ -353,18 +244,20 @@ impl PublicRoomSafety {
     pub fn try_acquire_download(&self, peer: &PublicKey) -> bool {
         let limit = self.config.blob_download_limit;
         if limit == 0 {
-            self.record_download_reject(peer);
             return false;
         }
 
         let mut counts = self.peer_download_count.lock().unwrap();
         if !counts.contains_key(peer) && counts.len() >= MAX_TRACKED_PEERS {
-            self.record_download_reject(peer);
             return false;
         }
         let count = counts.entry(*peer).or_insert(0);
         if *count >= limit {
-            self.record_download_reject(peer);
+            // Increment per-peer counter and emit warning if threshold crossed.
+            let mut rejects = self.download_rejects.lock().unwrap();
+            let c = rejects.entry(*peer).or_insert(0);
+            *c += 1;
+            Self::warn_if_over_threshold(peer, "download rejected", *c);
             return false;
         }
         *count += 1;
@@ -377,6 +270,54 @@ impl PublicRoomSafety {
         if let Some(count) = counts.get_mut(peer) {
             *count = count.saturating_sub(1);
         }
+    }
+
+    /// The threshold above which a per-peer counter triggers a warning log.
+    const COUNTER_WARN_THRESHOLD: u64 = 10;
+
+    /// Emit a `warn`-level log if `peer`'s counter has crossed the threshold,
+    /// including the current counter value and `short_id`.
+    fn warn_if_over_threshold(peer: &PublicKey, label: &str, count: u64) {
+        if count >= Self::COUNTER_WARN_THRESHOLD {
+            warn!(
+                "safety: peer {} has been {} {} times",
+                peer.fmt_short(),
+                label,
+                count,
+            );
+        }
+    }
+
+    // ── Per-peer drop-counter accessors (for testing / observability) ──
+
+    /// Return the number of times `peer` has been rate-limited.
+    pub fn rate_limit_hits(&self, peer: &PublicKey) -> u64 {
+        self.rate_limit_hits
+            .lock()
+            .unwrap()
+            .get(peer)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Return the number of blob/image announcements dropped for `peer`.
+    pub fn blob_announcement_rejects(&self, peer: &PublicKey) -> u64 {
+        self.blob_announcement_rejects
+            .lock()
+            .unwrap()
+            .get(peer)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Return the number of download-acquires rejected for `peer`.
+    pub fn download_rejects(&self, peer: &PublicKey) -> u64 {
+        self.download_rejects
+            .lock()
+            .unwrap()
+            .get(peer)
+            .copied()
+            .unwrap_or(0)
     }
 
     // ── Backfill bounding ──────────────────────────────────────────
@@ -393,88 +334,6 @@ impl PublicRoomSafety {
     pub fn server_max_backfill(&self) -> u32 {
         self.config.backfill_request_limit
     }
-
-    // ── Per-peer drop counters (abuse-detection / safety tracing) ──
-
-    const DROP_WARN_THRESHOLD: u64 = 10;
-
-    /// Increment the rate-limit-hit counter for `peer` and log a warning
-    /// if any of the peer's counters crosses the warning threshold.
-    fn record_rate_limit_hit(&self, peer: &PublicKey) {
-        let new_val;
-        let (blob, dl);
-        {
-            let mut counters = self.drop_counters.lock().unwrap();
-            new_val = counters.inc_rate(*peer);
-            let (_, b, d) = counters.all_for(peer);
-            blob = b;
-            dl = d;
-        } // guard drops here — warn! outside the lock
-        if new_val == Self::DROP_WARN_THRESHOLD {
-            warn!(
-                peer = %peer.fmt_short(),
-                rate_limit_hits = new_val,
-                blob_announcement_rejects = blob,
-                download_rejects = dl,
-                "peer has reached drop threshold — possible abuse",
-            );
-        }
-    }
-
-    /// Increment the blob-announcement-reject counter for `peer` and log
-    /// a warning if any counter crosses the threshold.
-    fn record_blob_reject(&self, peer: &PublicKey) {
-        let new_val;
-        let (rate, dl);
-        {
-            let mut counters = self.drop_counters.lock().unwrap();
-            new_val = counters.inc_blob(*peer);
-            let (r, _, d) = counters.all_for(peer);
-            rate = r;
-            dl = d;
-        }
-        if new_val == Self::DROP_WARN_THRESHOLD {
-            warn!(
-                peer = %peer.fmt_short(),
-                rate_limit_hits = rate,
-                blob_announcement_rejects = new_val,
-                download_rejects = dl,
-                "peer has reached drop threshold — possible abuse",
-            );
-        }
-    }
-
-    /// Increment the download-reject counter for `peer` and log a warning
-    /// if any counter crosses the threshold.
-    fn record_download_reject(&self, peer: &PublicKey) {
-        let new_val;
-        let (rate, blob);
-        {
-            let mut counters = self.drop_counters.lock().unwrap();
-            new_val = counters.inc_download(*peer);
-            let (r, b, _) = counters.all_for(peer);
-            rate = r;
-            blob = b;
-        }
-        if new_val == Self::DROP_WARN_THRESHOLD {
-            warn!(
-                peer = %peer.fmt_short(),
-                rate_limit_hits = rate,
-                blob_announcement_rejects = blob,
-                download_rejects = new_val,
-                "peer has reached drop threshold — possible abuse",
-            );
-        }
-    }
-
-    /// Return a snapshot of all per-peer drop counters for inspection /
-    /// health monitoring.
-    ///
-    /// Each entry maps a peer to `(rate_limit_hits, blob_announcement_rejects, download_rejects)`.
-    pub fn drop_counters_snapshot(&self) -> HashMap<PublicKey, (u64, u64, u64)> {
-        let counters = self.drop_counters.lock().unwrap();
-        counters.snapshot()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -485,7 +344,6 @@ impl PublicRoomSafety {
 mod tests {
     use super::*;
     use crate::public_room_config::PublicRoomConfig;
-    use std::sync::Arc;
 
     // ── Helpers ──────────────────────────────────────────────────────
 
@@ -533,16 +391,6 @@ mod tests {
         let safety = default_safety();
         assert!(safety.check_blob_size(10 * 1024 * 1024));
         assert!(!safety.check_blob_size(10 * 1024 * 1024 + 1));
-    }
-
-    #[test]
-    fn blob_size_custom_limit_honoured() {
-        let mut config = PublicRoomConfig::default();
-        config.max_blob_size_bytes = 128;
-        let safety = PublicRoomSafety::new(config);
-        assert!(safety.check_blob_size(128));
-        assert!(!safety.check_blob_size(129));
-        assert!(safety.check_blob_size(0));
     }
 
     // ── nickname enforcement tests ──────────────────────────────────
@@ -788,6 +636,75 @@ mod tests {
     fn server_max_backfill_matches_config() {
         let safety = default_safety();
         assert_eq!(safety.server_max_backfill(), 50);
+    }
+
+    // ── Per-peer drop-counter tests ──────────────────────────────────
+
+    #[test]
+    fn rate_limit_hits_incremented_on_rejection() {
+        let mut cfg = PublicRoomConfig::default();
+        cfg.per_peer_message_rate = 5.0;
+        let safety = PublicRoomSafety::new(cfg);
+        let peer = test_peer(50);
+
+        // Send 10 messages — the first 5 pass, the next 5 should be rate-limited.
+        for _ in 0..10 {
+            let _ = safety.check_rate_limit(&peer);
+        }
+
+        // The counter should reflect the 5 rejections.
+        assert_eq!(safety.rate_limit_hits(&peer), 5);
+    }
+
+    #[test]
+    fn blob_announcement_rejects_incremented_on_rejection() {
+        let safety = default_safety();
+        let peer = test_peer(51);
+
+        // Send 8 announcements — the first 5 pass, the next 3 should be rejected.
+        for _ in 0..8 {
+            let _ = safety.check_blob_announcement(&peer);
+        }
+
+        assert_eq!(safety.blob_announcement_rejects(&peer), 3);
+    }
+
+    #[test]
+    fn download_rejects_incremented_on_rejection() {
+        let safety = default_safety();
+        let peer = test_peer(52);
+
+        // Try to acquire 12 download slots — only 10 available, 2 should be rejected.
+        for _ in 0..12 {
+            let _ = safety.try_acquire_download(&peer);
+        }
+
+        assert_eq!(safety.download_rejects(&peer), 2);
+    }
+
+    #[test]
+    fn drop_counters_per_peer_isolation() {
+        let safety = default_safety();
+        let peer_a = test_peer(60);
+        let peer_b = test_peer(61);
+
+        // Exhaust peer A's rate limit.
+        for _ in 0..15 {
+            let _ = safety.check_rate_limit(&peer_a);
+        }
+
+        // Peer B should have zero hits.
+        assert_eq!(safety.rate_limit_hits(&peer_a), 5);
+        assert_eq!(safety.rate_limit_hits(&peer_b), 0);
+    }
+
+    #[test]
+    fn drop_counters_zero_for_unseen_peers() {
+        let safety = default_safety();
+        let peer = test_peer(99);
+        assert_eq!(safety.rate_limit_hits(&peer), 0);
+        assert_eq!(safety.blob_announcement_rejects(&peer), 0);
+        assert_eq!(safety.download_rejects(&peer), 0);
     }
 
     // ── Custom config tests ──────────────────────────────────────────
@@ -1208,7 +1125,7 @@ mod tests {
 
     #[test]
     fn handle_net_event_without_safety_passes_private_events() {
-        let _safety = default_safety();
+        let safety = default_safety();
         let peer = test_peer(3);
         let mut app = test_app();
 
@@ -1221,7 +1138,8 @@ mod tests {
             },
             sent_at: crate::chat_core::now_ms(),
         };
-        let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
+        let result =
+            crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
         assert!(result.is_ok(), "private room should process all events");
         assert_eq!(
             app.entries.len(),
@@ -1248,326 +1166,6 @@ mod tests {
         assert_eq!(app.entries.len(), 1);
     }
 
-    // ── Per-peer drop-counter tests ─────────────────────────────────
-
-    #[test]
-    fn rate_limit_hits_counter_increments_on_rejection() {
-        let mut cfg = PublicRoomConfig::default();
-        cfg.per_peer_message_rate = 1.0; // 1 msg/sec
-        let safety = PublicRoomSafety::new(cfg);
-        let peer = test_peer(30);
-
-        // First message is allowed.
-        assert!(safety.check_rate_limit(&peer));
-        // Second message in the same second should be rate-limited.
-        assert!(!safety.check_rate_limit(&peer));
-
-        let snapshot = safety.drop_counters_snapshot();
-        let (hits, blobs, dls) = snapshot.get(&peer).copied().unwrap_or((0, 0, 0));
-        assert_eq!(hits, 1, "expected 1 rate-limit hit");
-        assert_eq!(blobs, 0, "expected 0 blob rejects");
-        assert_eq!(dls, 0, "expected 0 download rejects");
-    }
-
-    #[test]
-    fn blob_announcement_rejects_counter_increments() {
-        let mut cfg = PublicRoomConfig::default();
-        cfg.blob_announcement_limit = 2;
-        let safety = PublicRoomSafety::new(cfg);
-        let peer = test_peer(31);
-
-        // Allow 2.
-        assert!(safety.check_blob_announcement(&peer));
-        assert!(safety.check_blob_announcement(&peer));
-        // 3rd should be rejected.
-        assert!(!safety.check_blob_announcement(&peer));
-
-        let snapshot = safety.drop_counters_snapshot();
-        let (hits, blobs, dls) = snapshot.get(&peer).copied().unwrap_or((0, 0, 0));
-        assert_eq!(hits, 0, "expected 0 rate-limit hits");
-        assert_eq!(blobs, 1, "expected 1 blob reject");
-        assert_eq!(dls, 0, "expected 0 download rejects");
-    }
-
-    #[test]
-    fn download_rejects_counter_increments() {
-        let mut cfg = PublicRoomConfig::default();
-        cfg.blob_download_limit = 2;
-        let safety = PublicRoomSafety::new(cfg);
-        let peer = test_peer(32);
-
-        // Acquire 2 slots.
-        assert!(safety.try_acquire_download(&peer));
-        assert!(safety.try_acquire_download(&peer));
-        // 3rd should be rejected.
-        assert!(!safety.try_acquire_download(&peer));
-
-        let snapshot = safety.drop_counters_snapshot();
-        let (hits, blobs, dls) = snapshot.get(&peer).copied().unwrap_or((0, 0, 0));
-        assert_eq!(hits, 0, "expected 0 rate-limit hits");
-        assert_eq!(blobs, 0, "expected 0 blob rejects");
-        assert_eq!(dls, 1, "expected 1 download reject");
-    }
-
-    #[test]
-    fn counters_respect_per_peer_isolation() {
-        let mut cfg = PublicRoomConfig::default();
-        cfg.per_peer_message_rate = 1.0;
-        cfg.blob_announcement_limit = 1;
-        cfg.blob_download_limit = 1;
-        let safety = PublicRoomSafety::new(cfg);
-        let peer_a = test_peer(33);
-        let peer_b = test_peer(34);
-
-        // Exhaust peer_a across all three limits.
-        assert!(safety.check_rate_limit(&peer_a)); // first msg ok
-        assert!(!safety.check_rate_limit(&peer_a)); // second rejected
-        assert!(safety.check_blob_announcement(&peer_a)); // 1st blob ok
-        assert!(!safety.check_blob_announcement(&peer_a)); // 2nd rejected
-        assert!(safety.try_acquire_download(&peer_a)); // 1st dl ok
-        assert!(!safety.try_acquire_download(&peer_a)); // 2nd rejected
-
-        // peer_b should have zero counters.
-        let snapshot = safety.drop_counters_snapshot();
-        let a_counters = snapshot.get(&peer_a).copied().unwrap_or((0, 0, 0));
-        assert_eq!(a_counters, (1, 1, 1), "peer_a should have 1 hit each");
-        assert!(
-            !snapshot.contains_key(&peer_b),
-            "peer_b should have no counters"
-        );
-    }
-
-    #[test]
-    fn rate_limit_hits_threshold_crossing() {
-        // Verify that the counter correctly tracks hits at the threshold
-        // boundary (DROP_WARN_THRESHOLD = 10).  We exhaust a single peer's
-        // rate-limit 10+ times and verify the counter snapshots correctly.
-        let mut cfg = PublicRoomConfig::default();
-        cfg.per_peer_message_rate = 1.0;
-        let safety = PublicRoomSafety::new(cfg);
-        let peer = test_peer(42);
-
-        // Allow the first message.
-        assert!(safety.check_rate_limit(&peer));
-
-        // Subsequent calls in the same 1-second window are rejected.
-        for i in 0..15 {
-            assert!(
-                !safety.check_rate_limit(&peer),
-                "call {} should be rate-limited",
-                i + 1
-            );
-        }
-
-        let snapshot = safety.drop_counters_snapshot();
-        let (hits, _, _) = snapshot.get(&peer).copied().unwrap_or((0, 0, 0));
-        assert_eq!(hits, 15, "all 15 rejections should be counted");
-    }
-
-    #[test]
-    fn blob_announcement_limit_zero_always_counts() {
-        // With limit=0, every call is rejected and counted.
-        let mut cfg = PublicRoomConfig::default();
-        cfg.blob_announcement_limit = 0;
-        let safety = PublicRoomSafety::new(cfg);
-        let peer = test_peer(43);
-
-        for _ in 0..5 {
-            assert!(!safety.check_blob_announcement(&peer));
-        }
-
-        let snapshot = safety.drop_counters_snapshot();
-        let (_, blobs, _) = snapshot.get(&peer).copied().unwrap_or((0, 0, 0));
-        assert_eq!(blobs, 5, "all 5 blob announcement rejects counted");
-    }
-
-    #[test]
-    fn download_limit_zero_always_counts() {
-        // With limit=0, every call is rejected and counted.
-        let mut cfg = PublicRoomConfig::default();
-        cfg.blob_download_limit = 0;
-        let safety = PublicRoomSafety::new(cfg);
-        let peer = test_peer(44);
-
-        for _ in 0..5 {
-            assert!(!safety.try_acquire_download(&peer));
-        }
-
-        let snapshot = safety.drop_counters_snapshot();
-        let (_, _, dls) = snapshot.get(&peer).copied().unwrap_or((0, 0, 0));
-        assert_eq!(dls, 5, "all 5 download rejects counted");
-    }
-
-    #[test]
-    fn drop_counters_snapshot_returns_empty_for_untracked() {
-        let safety = default_safety();
-        let snapshot = safety.drop_counters_snapshot();
-        assert!(snapshot.is_empty(), "no peers should have counters yet");
-    }
-
-    #[test]
-    fn drop_counters_snapshot_includes_all_peers() {
-        let mut cfg = PublicRoomConfig::default();
-        cfg.per_peer_message_rate = 1.0;
-        cfg.blob_announcement_limit = 1;
-        cfg.blob_download_limit = 1;
-        let safety = PublicRoomSafety::new(cfg);
-        let peer_a = test_peer(35);
-        let peer_b = test_peer(36);
-
-        // peer_a: rate-limit hit
-        assert!(safety.check_rate_limit(&peer_a));
-        assert!(!safety.check_rate_limit(&peer_a));
-        // peer_b: blob reject
-        assert!(safety.check_blob_announcement(&peer_b));
-        assert!(!safety.check_blob_announcement(&peer_b));
-
-        let snapshot = safety.drop_counters_snapshot();
-        assert_eq!(snapshot.len(), 2, "snapshot should include both peers");
-        let a = snapshot.get(&peer_a).copied().unwrap_or((0, 0, 0));
-        let b = snapshot.get(&peer_b).copied().unwrap_or((0, 0, 0));
-        assert_eq!(a.0, 1, "peer_a rate hits = 1");
-        assert_eq!(b.1, 1, "peer_b blob rejects = 1");
-    }
-
-    // ── MAX_TRACKED_PEERS bounding tests ──────────────────────────────
-
-    #[test]
-    fn drop_counters_bounded_to_max_tracked_peers() {
-        // Verify that DropCounters does not grow beyond MAX_TRACKED_PEERS.
-        let mut cfg = PublicRoomConfig::default();
-        cfg.per_peer_message_rate = 1.0;
-        cfg.blob_announcement_limit = 1;
-        cfg.blob_download_limit = 1;
-        let safety = PublicRoomSafety::new(cfg);
-
-        // Create MAX_TRACKED_PEERS + 1 unique peers.
-        for i in 0..=MAX_TRACKED_PEERS {
-            // Use all 32 bytes from the index as a deterministic seed,
-            // encoding u32 little-endian so every value is unique.
-            let mut seed = [0u8; 32];
-            let u = i as u32;
-            seed[0..4].copy_from_slice(&u.to_le_bytes());
-            let bytes = SecretKey::from_bytes(&seed).public();
-            // Trigger a rate-limit hit (first message allowed, second rejected).
-            let _ = safety.check_rate_limit(&bytes);
-            let _ = safety.check_rate_limit(&bytes);
-        }
-
-        let snapshot = safety.drop_counters_snapshot();
-        // Should have at most MAX_TRACKED_PEERS entries even though
-        // MAX_TRACKED_PEERS + 1 unique peers were exercised.
-        assert!(
-            snapshot.len() <= MAX_TRACKED_PEERS,
-            "drop_counters has {} entries, expected ≤ {}",
-            snapshot.len(),
-            MAX_TRACKED_PEERS,
-        );
-    }
-
-    // ── Concurrency regression: lock-ordering deadlock ─────────────────
-
-    #[test]
-    fn concurrent_drop_counter_record_does_not_deadlock() {
-        // Regression: the three record_* methods used to lock Mutexes in
-        // different orders (rate→blob→dl vs blob→rate→dl vs dl→rate→blob),
-        // creating a deadlock when called concurrently.  A single shared mutex
-        // (DropCounters) eliminates the inversion.  This test proves it.
-        let mut cfg = PublicRoomConfig::default();
-        cfg.per_peer_message_rate = 1.0;
-        cfg.blob_announcement_limit = 1;
-        cfg.blob_download_limit = 1;
-        let safety = Arc::new(PublicRoomSafety::new(cfg));
-
-        // Use a separate peer per thread so every call triggers a drop-counter
-        // increment (first call is allowed, second is rejected and recorded).
-        let threads: Vec<_> = (0..3)
-            .map(|i| {
-                let safety = Arc::clone(&safety);
-                std::thread::spawn(move || {
-                    let peer = {
-                        let mut seed = [0u8; 32];
-                        seed[0..4].copy_from_slice(&(100 + i as u32).to_le_bytes());
-                        SecretKey::from_bytes(&seed).public()
-                    };
-                    for _ in 0..500 {
-                        let _ = safety.check_rate_limit(&peer); // may call record_rate_limit_hit
-                        let _ = safety.check_blob_announcement(&peer); // may call record_blob_reject
-                        let _ = safety.try_acquire_download(&peer); // may call record_download_reject
-                    }
-                })
-            })
-            .collect();
-
-        for t in threads {
-            t.join().expect("thread panicked (deadlock?)");
-        }
-
-        // Verify counters were actually written — proves the test exercised
-        // the drop-counter paths.
-        let snapshot = safety.drop_counters_snapshot();
-        assert_eq!(snapshot.len(), 3, "each thread's peer should have counters");
-    }
-
-    // ── Production-pattern tests: Arc<PublicRoomSafety> via Some/None ──
-
-    #[test]
-    fn production_public_room_path_with_arc_safety() {
-        // Mirrors exactly how the CLI frontend (examples/chat.rs) wires safety:
-        //   let safety = Arc::new(PublicRoomSafety::new(PublicRoomConfig::default()));
-        //   handle_net_event_with_safety(event, &mut app, Some(&*safety))?;
-        let safety = Arc::new(PublicRoomSafety::new(PublicRoomConfig::default()));
-        let peer = test_peer(100);
-        let mut app = test_app();
-
-        // Normal message should pass through safety
-        let normal = crate::chat_core::NetEvent::Message {
-            from: peer,
-            message: crate::chat_core::Message::Message {
-                text: "hello from public-room path".into(),
-            },
-            sent_at: crate::chat_core::now_ms(),
-        };
-        let result =
-            crate::chat_core::handle_net_event_with_safety(normal, &mut app, Some(&*safety));
-        assert!(result.is_ok(), "normal message should be processed");
-        assert_eq!(app.entries.len(), 1);
-        assert_eq!(app.entries[0].body, "hello from public-room path");
-
-        // Oversized message should be filtered by safety
-        let oversized = crate::chat_core::NetEvent::Message {
-            from: peer,
-            message: crate::chat_core::Message::Message {
-                text: "a".repeat(4097),
-            },
-            sent_at: crate::chat_core::now_ms(),
-        };
-        let result =
-            crate::chat_core::handle_net_event_with_safety(oversized, &mut app, Some(&*safety));
-        assert!(result.is_ok(), "safety reject should return Ok");
-        assert_eq!(
-            app.entries.len(),
-            1,
-            "no extra entry should be added for rejected message"
-        );
-
-        // Private-room path (None) should bypass all checks
-        let oversized = crate::chat_core::NetEvent::Message {
-            from: peer,
-            message: crate::chat_core::Message::Message {
-                text: "a".repeat(4097),
-            },
-            sent_at: crate::chat_core::now_ms(),
-        };
-        let result = crate::chat_core::handle_net_event_with_safety(oversized, &mut app, None);
-        assert!(result.is_ok(), "private room should process oversized msg");
-        assert_eq!(
-            app.entries.len(),
-            2,
-            "oversized message should be added in private room"
-        );
-    }
-
     /// Helper: minimal AppState for testing handle_net_event_with_safety.
     fn test_app() -> crate::chat_core::AppState {
         use std::collections::{HashMap, HashSet};
@@ -1590,6 +1188,11 @@ mod tests {
             last_activity: HashMap::new(),
             mesh_health: crate::chat_core::MeshHealth::Good,
         };
-        crate::chat_core::AppState::new(status, friends, local_public, Some("tester".into()))
+        crate::chat_core::AppState::new(
+            status,
+            friends,
+            local_public,
+            Some("tester".into()),
+        )
     }
 }

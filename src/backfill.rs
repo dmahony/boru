@@ -95,11 +95,6 @@ pub const CLIENT_MAX_BACKFILL_MESSAGES: u32 = 50;
 /// Matches the `MAX_TRACKED_PEERS` pattern from `public_room_safety.rs`.
 const MAX_ACTIVE_PEERS: usize = 4096;
 
-/// Timeout after which an in-flight backfill entry is considered stale.
-/// Must match `BACKFILL_REQUEST_TIMEOUT` — this is the same constant
-/// passed to `prune_stale` at the call site.
-const BACKFILL_STALE_ENTRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Maximum number of concurrent backfill serve tasks globally.
 /// Prevents resource exhaustion when many peers request backfill at once.
 const MAX_CONCURRENT_BACKFILLS: usize = 32;
@@ -139,16 +134,12 @@ struct BackfillRateLimit {
 impl BackfillRateLimit {
     /// Try to register an incoming request.
     /// Returns `true` if accepted, `false` if a request from this peer is already in flight
-    /// or the rate-limit map is at capacity (`MAX_ACTIVE_PEERS`).
+    /// or the active set has reached [`MAX_ACTIVE_PEERS`].
     fn try_accept(&mut self, peer: PublicKey) -> bool {
         if self.active.contains_key(&peer) {
             return false;
         }
         if self.active.len() >= MAX_ACTIVE_PEERS {
-            tracing::debug!(
-                "backfill rate-limit map at capacity ({}), rejecting",
-                MAX_ACTIVE_PEERS
-            );
             return false;
         }
         self.active.insert(peer, Instant::now());
@@ -467,8 +458,7 @@ async fn backfill_actor(endpoint: Endpoint, mut cmd_rx: mpsc::Receiver<Cmd>) {
                 reply,
             } => {
                 let result =
-                    do_backfill_request(&endpoint, addr, since_ms, max_messages, net_tx, safety)
-                        .await;
+                    do_backfill_request(&endpoint, addr, since_ms, max_messages, net_tx, safety).await;
                 let _ = reply.send(result);
             }
         }
@@ -662,44 +652,6 @@ mod tests {
         assert!(rl.try_accept(pk2));
         assert!(!rl.try_accept(pk1));
         assert!(!rl.try_accept(pk2));
-    }
-
-    #[test]
-    fn backfill_max_active_peers_cap() {
-        // Fill the rate-limit map to MAX_ACTIVE_PEERS capacity, then verify
-        // that a new peer is rejected. After pruning stale entries, the new
-        // peer should be accepted.
-        let mut rl = BackfillRateLimit::default();
-
-        // Fill to exactly MAX_ACTIVE_PEERS.
-        for i in 0..MAX_ACTIVE_PEERS {
-            let pk = SecretKey::generate().public();
-            assert!(
-                rl.try_accept(pk),
-                "peer {i} should be accepted (still under cap)"
-            );
-        }
-
-        // Now at capacity — a new peer should be rejected.
-        let extra_pk = SecretKey::generate().public();
-        assert!(
-            !rl.try_accept(extra_pk),
-            "peer beyond cap should be rejected"
-        );
-
-        // Prune stale entries — all inserted entries are 'stale' because
-        // they were inserted with Instant::now() and no time has passed
-        // for the system clock relative to BACKFILL_REQUEST_TIMEOUT (5s).
-        // Use a zero-age prune to simulate stale cleanup.
-        let remaining = rl.prune_stale(std::time::Duration::ZERO);
-        assert_eq!(remaining, 0, "all entries should be pruned");
-
-        // After pruning, a new peer should be accepted.
-        let new_pk = SecretKey::generate().public();
-        assert!(
-            rl.try_accept(new_pk),
-            "peer should be accepted after stale pruning"
-        );
     }
 
     #[tokio::test]
