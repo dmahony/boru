@@ -1448,6 +1448,8 @@ pub enum AppMessage {
     WhisperEvent(WhisperEvent),
     /// An event from the inbox (offline-message) protocol.
     InboxEvent(InboxEvent),
+    /// Results of periodic durable outbox retry attempts.
+    OutboxRetryResult(Vec<(u64, bool)>),
     MessageSent(String, u64, MessageHash),
     FileSent(String),
     DownloadDone(String),
@@ -2969,6 +2971,7 @@ impl IcedChat {
             AppMessage::FriendEvent(_) => "FriendEvent",
             AppMessage::WhisperEvent(_) => "WhisperEvent",
             AppMessage::InboxEvent(_) => "InboxEvent",
+            AppMessage::OutboxRetryResult(_) => "OutboxRetryResult",
             AppMessage::MessageSent(..) => "MessageSent",
             AppMessage::FileSent(_) => "FileSent",
             AppMessage::DownloadDone(_) => "DownloadDone",
@@ -5805,6 +5808,41 @@ impl IcedChat {
                 }
             }
 
+            AppMessage::OutboxRetryResult(results) => {
+                // Only successful broadcasts advance a queued message. Failed
+                // attempts remain queued for the next periodic retry.
+                let mut changed = false;
+                {
+                    let mut outbox = self.outbox.lock().unwrap();
+                    let mut history = self.chat_history.lock().unwrap();
+                    for (event_id, delivered) in results {
+                        let _ = outbox.increment_retry(event_id);
+                        if delivered
+                            && outbox
+                                .update_delivery_state(event_id, DeliveryState::Sent)
+                                .is_ok()
+                        {
+                            let _ = history.update_delivery_state(event_id, DeliveryState::Sent);
+                            if let Some(entry) = self
+                                .entries
+                                .iter_mut()
+                                .find(|entry| entry.event_id == event_id)
+                            {
+                                entry.delivery_state = DeliveryState::Sent;
+                                entry.bump_gen();
+                                changed = true;
+                            }
+                        }
+                    }
+                    let _ = outbox.save();
+                    let _ = history.save();
+                }
+                if changed {
+                    self.layout_cache.borrow_mut().clear();
+                }
+                iced::Task::none()
+            }
+
             AppMessage::MessageSent(_text, event_id, msg_hash) => {
                 if let Some(entry) = self.entries.iter_mut().find(|e| e.event_id == event_id) {
                     entry.delivery_state = DeliveryState::Sent;
@@ -6238,8 +6276,44 @@ impl IcedChat {
                 }
                 self.discovered_online_cache = self.neighbors.clone();
 
-                // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
                 let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
+
+                // Retry durable gossip outbox entries for the active room. Entries
+                // stay Queued until broadcast succeeds, so a transient disconnect
+                // cannot lose a message or falsely advance its UI state.
+                if let Some(sender) = self.sender.clone() {
+                    let pending: Vec<(u64, Vec<u8>)> = {
+                        let outbox = self.outbox.lock().unwrap();
+                        outbox
+                            .pending()
+                            .into_iter()
+                            .filter(|entry| entry.topic == self.topic)
+                            .map(|entry| (entry.event_id, entry.signed_bytes.clone()))
+                            .collect()
+                    };
+                    if !pending.is_empty() {
+                        let outbox = self.outbox.clone();
+                        let history = self.chat_history.clone();
+                        tasks.push(iced::Task::perform(
+                            async move {
+                                let mut results = Vec::with_capacity(pending.len());
+                                for (event_id, bytes) in pending {
+                                    let delivered = sender.broadcast(bytes.into()).await.is_ok();
+                                    results.push((event_id, delivered));
+                                }
+                                (results, outbox, history)
+                            },
+                            |(results, outbox, history)| {
+                                // The stores are updated in the message handler; carrying
+                                // the Arcs here keeps the async task independent of UI state.
+                                let _ = (outbox, history);
+                                AppMessage::OutboxRetryResult(results)
+                            },
+                        ));
+                    }
+                }
+
+                // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
 
                 // Periodic connection type refresh (~60s) or on-demand
                 // (needs_conn_refresh set by on_neighbor_up/down).
