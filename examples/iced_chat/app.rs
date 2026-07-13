@@ -4022,6 +4022,9 @@ impl IcedChat {
             // ── ChatList ─────────────────────────────────────────────
             AppMessage::JoinTicketInputChanged(text) => {
                 self.join_ticket_input = text;
+                if !self.chat_list_error.is_empty() {
+                    self.chat_list_error.clear();
+                }
                 iced::Task::none()
             }
 
@@ -7431,6 +7434,7 @@ impl IcedChat {
             })
             .into();
 
+        let ticket_join_section = self.view_sidebar_ticket_join();
         let chats_section = self.view_sidebar_chats();
         let discovered_section = self.view_sidebar_discovered_peers();
         let friends_section = self.view_sidebar_friends();
@@ -7449,6 +7453,7 @@ impl IcedChat {
                 bottom: SPACE_8,
                 left: SPACE_12,
             }))
+            .push(ticket_join_section)
             .push(chats_section)
             .push(discovered_section)
             .push(friends_section)
@@ -7596,7 +7601,68 @@ impl IcedChat {
         section.into()
     }
 
-    /// Single conversation row in the sidebar's Chats section.
+    fn view_sidebar_ticket_join(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, row, text, text_input, Column};
+        use iced::{Alignment, Length};
+
+        let mut section = Column::new().spacing(SPACE_2);
+
+        section = section.push(
+            container(text("Join by ticket").size(TYPO_XS).style(text_muted_style))
+                .padding(iced::Padding {
+                    top: SPACE_8,
+                    right: SPACE_12,
+                    bottom: SPACE_4,
+                    left: SPACE_12,
+                })
+                .width(Length::Fill),
+        );
+
+        section = section.push(
+            container(
+                row![
+                    text_input("Enter ticket ID", &self.join_ticket_input)
+                        .on_input(AppMessage::JoinTicketInputChanged)
+                        .on_submit(AppMessage::JoinFromTicket)
+                        .size(TYPO_XS)
+                        .padding([SPACE_4, SPACE_8])
+                        .width(Length::Fill),
+                    button(text("Join").size(TYPO_XS))
+                        .on_press(AppMessage::JoinFromTicket)
+                        .padding([SPACE_4, SPACE_8]),
+                ]
+                .spacing(SPACE_6)
+                .align_y(Alignment::Center),
+            )
+            .padding(iced::Padding {
+                top: SPACE_2,
+                right: SPACE_12,
+                bottom: SPACE_2,
+                left: SPACE_12,
+            })
+            .width(Length::Fill),
+        );
+
+        if !self.chat_list_error.is_empty() {
+            section = section.push(
+                container(
+                    text(&self.chat_list_error)
+                        .size(TYPO_XS)
+                        .color(Color::from_rgb(0.8, 0.2, 0.2)),
+                )
+                .padding(iced::Padding {
+                    top: 0.0,
+                    right: SPACE_12,
+                    bottom: SPACE_2,
+                    left: SPACE_12,
+                })
+                .width(Length::Fill),
+            );
+        }
+
+        section.into()
+    }
+
     fn view_sidebar_conversation_row(
         dark_mode: bool,
         topic: TopicId,
