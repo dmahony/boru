@@ -54,7 +54,10 @@ use crate::discovery_record::create_discovery_record;
 use crate::discovery_secret::DiscoverySecret;
 use crate::discovery_validation::{DiscoveryRecordValidator, PeerCandidates, ValidationConfig};
 use crate::proto::TopicId;
-use distributed_topic_tracker::{unix_minute, Record};
+use distributed_topic_tracker::{
+    encryption_keypair, unix_minute, EncryptedRecord, Record, RotationHandle,
+    TopicId as TrackerTopicId,
+};
 use iroh::{EndpointId, SecretKey};
 use n0_error::Result;
 
@@ -170,6 +173,17 @@ impl PrivateRoomTracker {
         }
     }
 
+    fn encryption_key(&self, minute: u64) -> ed25519_dalek::SigningKey {
+        let tracker_topic = TrackerTopicId::from_hash(&self.discovery_key);
+        let secret_hash = *blake3::hash(&self.discovery_key).as_bytes();
+        encryption_keypair(
+            &tracker_topic,
+            &RotationHandle::default(),
+            secret_hash,
+            minute,
+        )
+    }
+
     /// Return the gossip topic this tracker is configured for.
     pub fn topic(&self) -> &TopicId {
         &self.topic
@@ -207,9 +221,11 @@ impl PrivateRoomTracker {
             &self.local_endpoint_id,
             &self.secret_key,
         )?;
+        let encrypted_record = record.encrypt(&self.encryption_key(now));
+        let wire_record = encrypted_record.to_bytes()?;
         let result = self
             .backend
-            .publish(&self.namespace, EncryptedDiscoveryRecord::new(record.to_bytes()))
+            .publish(&self.namespace, EncryptedDiscoveryRecord::new(wire_record))
             .await;
 
         let duration_us = start.elapsed().as_micros() as u64;
@@ -254,25 +270,27 @@ impl PrivateRoomTracker {
         let encrypted = self.backend.lookup(&self.namespace).await?;
         let total_encrypted = encrypted.len();
 
-        // Deserialise encrypted records back into Record values.
-        // Malformed bytes are silently skipped.
+        // Decrypt native tracker envelopes for the current and previous minute.
+        // A wrong room secret cannot decrypt these bytes, even if records are
+        // accidentally copied into this namespace.
         let mut records: Vec<Record> = Vec::with_capacity(encrypted.len());
+        let now_minute = unix_minute(0);
         for er in encrypted {
             if er.payload.len() > MAX_DISCOVERY_PAYLOAD_SIZE {
-                debug!(
-                    topic = %topic_short,
-                    payload_len = er.payload.len(),
-                    max_payload = MAX_DISCOVERY_PAYLOAD_SIZE,
-                    "private room discovery skipped oversized record"
-                );
                 continue;
             }
-            match Record::from_bytes(er.payload) {
-                Ok(r) => records.push(r),
-                Err(_) => {
-                    // Skip malformed/corrupt records silently.
-                    continue;
+            let Ok(encrypted_record) = EncryptedRecord::from_bytes(er.payload) else {
+                continue;
+            };
+            let mut decrypted = None;
+            for minute in [now_minute, now_minute.saturating_sub(1)] {
+                if let Ok(record) = encrypted_record.decrypt(&self.encryption_key(minute)) {
+                    decrypted = Some(record);
+                    break;
                 }
+            }
+            if let Some(record) = decrypted {
+                records.push(record);
             }
         }
         let total_records = records.len();
@@ -367,13 +385,7 @@ mod tests {
         let (sk, ep) = test_identity();
         let topic = TopicId::from_bytes([0xABu8; 32]);
         let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
-        let tracker = PrivateRoomTracker::new(
-            Box::new(backend.clone()),
-            topic,
-            secret,
-            ep,
-            sk,
-        );
+        let tracker = PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep, sk);
         (tracker, backend)
     }
 
@@ -412,19 +424,14 @@ mod tests {
         let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
         let backend = InMemoryDiscoveryBackend::new();
 
-        let tracker = PrivateRoomTracker::new(
-            Box::new(backend.clone()),
-            topic,
-            secret,
-            ep,
-            sk,
-        );
+        let tracker = PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep, sk);
 
         assert_eq!(tracker.topic(), &topic);
         assert_eq!(tracker.local_endpoint_id(), &ep);
 
         // Namespace should be deterministic
-        let expected_ns = private_room_namespace(&topic, &DiscoverySecret::from_bytes([0x42u8; 32]));
+        let expected_ns =
+            private_room_namespace(&topic, &DiscoverySecret::from_bytes([0x42u8; 32]));
         assert_eq!(tracker.namespace(), &expected_ns);
     }
 
@@ -435,7 +442,10 @@ mod tests {
         let secret_b = DiscoverySecret::from_bytes([0x02u8; 32]);
         let ns_a = private_room_namespace(&topic, &secret_a);
         let ns_b = private_room_namespace(&topic, &secret_b);
-        assert_ne!(ns_a, ns_b, "different secrets must give different namespaces");
+        assert_ne!(
+            ns_a, ns_b,
+            "different secrets must give different namespaces"
+        );
     }
 
     #[test]
@@ -517,13 +527,8 @@ mod tests {
         let backend = InMemoryDiscoveryBackend::new();
 
         // Publish our own presence.
-        let tracker = PrivateRoomTracker::new(
-            Box::new(backend.clone()),
-            topic,
-            secret,
-            ep.clone(),
-            sk,
-        );
+        let tracker =
+            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep.clone(), sk);
         block_on(tracker.publish_once()).unwrap();
 
         // Discover — our own EndpointId should be filtered out.
@@ -574,6 +579,35 @@ mod tests {
             "different secrets should isolate rooms, got {peers:?}"
         );
         block_on(tracker_b.shutdown());
+    }
+
+    #[test]
+    fn malformed_and_wrong_secret_envelopes_are_ignored() {
+        let (sk, ep) = test_identity();
+        let topic = TopicId::from_bytes([0xCDu8; 32]);
+        let secret = DiscoverySecret::from_bytes([0x52u8; 32]);
+        let backend = InMemoryDiscoveryBackend::new();
+        let tracker =
+            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret.clone(), ep, sk);
+        let namespace = tracker.namespace().clone();
+        block_on(backend.publish(&namespace, EncryptedDiscoveryRecord::new(vec![0xAA; 32])))
+            .unwrap();
+
+        // A valid native envelope encrypted with another room secret must
+        // also be rejected at decryption, not passed to record validation.
+        let other_key = SecretKey::generate();
+        let other_ep = other_key.public();
+        let record =
+            create_discovery_record(*secret.as_bytes(), unix_minute(0), &other_ep, &other_key)
+                .unwrap();
+        let wrong_envelope = record
+            .encrypt(&tracker.encryption_key(unix_minute(0) + 1))
+            .to_bytes()
+            .unwrap();
+        block_on(backend.publish(&namespace, EncryptedDiscoveryRecord::new(wrong_envelope)))
+            .unwrap();
+
+        assert!(block_on(tracker.discover_once()).unwrap().is_empty());
     }
 
     // ── Shutdown ──────────────────────────────────────────────────────

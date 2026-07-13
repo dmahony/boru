@@ -824,6 +824,7 @@ dependencies = [
  "data-encoding",
  "derive_more",
  "distributed-topic-tracker",
+ "ed25519-dalek",
  "futures-concurrency",
  "getrandom 0.3.4",
  "hex",

@@ -72,6 +72,17 @@ pub const DEFAULT_MAX_RECORDS_PER_LOOKUP: usize = 20;
 /// Default maximum number of candidate peers to return.
 pub const DEFAULT_MAX_CANDIDATE_PEERS: usize = 20;
 
+/// Hard upper bound for records examined in one lookup, regardless of caller
+/// configuration.  This is deliberately small: DHT responses are untrusted.
+pub const HARD_MAX_RECORDS_PER_LOOKUP: usize = 20;
+
+/// Hard upper bound for peers returned by one lookup, regardless of caller
+/// configuration.
+pub const HARD_MAX_CANDIDATE_PEERS: usize = 20;
+
+/// Hard upper bound for a serialized raw discovery record.
+pub const HARD_MAX_RECORD_SIZE: usize = 256;
+
 // ---------------------------------------------------------------------------
 // RejectionReason
 // ---------------------------------------------------------------------------
@@ -294,7 +305,15 @@ impl DiscoveryRecordValidator {
     /// * `now_minute` — the current Unix minute (seconds / 60), used as the
     ///   reference point for staleness and future-skew checks.  Obtain from
     ///   [`distributed_topic_tracker::unix_minute(0)`].
-    pub fn new(config: ValidationConfig, now_minute: u64) -> Self {
+    pub fn new(mut config: ValidationConfig, now_minute: u64) -> Self {
+        // Keep the public tuning knobs from disabling the safety bounds.  A
+        // caller may tighten these values, but never expand the amount of
+        // attacker-controlled DHT data processed in one lookup.
+        config.max_record_size = config.max_record_size.min(HARD_MAX_RECORD_SIZE);
+        config.max_records_per_lookup = config
+            .max_records_per_lookup
+            .min(HARD_MAX_RECORDS_PER_LOOKUP);
+        config.max_candidate_peers = config.max_candidate_peers.min(HARD_MAX_CANDIDATE_PEERS);
         Self { config, now_minute }
     }
 
@@ -337,6 +356,15 @@ impl DiscoveryRecordValidator {
         let payload: DiscoveryRecordPayload = record
             .content()
             .map_err(|e| RejectionReason::DecodeFailure(e.to_string()))?;
+
+        // Reject future/unknown payload versions instead of silently treating
+        // a structurally valid but semantically different record as a peer.
+        if payload.version() != crate::discovery_record::DISCOVERY_RECORD_CONTENT_VERSION {
+            return Err(RejectionReason::DecodeFailure(format!(
+                "unsupported discovery payload version {}",
+                payload.version()
+            )));
+        }
 
         // 4. Identity match — payload endpoint_id must match the record's pub_key.
         let pub_key = record.pub_key();
@@ -443,7 +471,7 @@ impl DiscoveryRecordValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery_record::create_discovery_record;
+    use crate::discovery_record::{create_discovery_record, DISCOVERY_RECORD_CONTENT_VERSION};
     use distributed_topic_tracker::{unix_minute, Record};
 
     // ── Helpers ───────────────────────────────────────────────────────
@@ -613,6 +641,53 @@ mod tests {
             result.is_ok(),
             "record at exactly max skew should be ok: {result:?}"
         );
+    }
+
+    #[test]
+    fn unknown_payload_version_rejected() {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct FuturePayload {
+            endpoint_id: [u8; 32],
+            version: u8,
+        }
+
+        let topic = test_topic();
+        let minute = 1_000_000;
+        let (sk, ep) = test_identity_seeded();
+        let record = Record::sign(
+            topic,
+            minute,
+            FuturePayload {
+                endpoint_id: *ep.as_bytes(),
+                version: DISCOVERY_RECORD_CONTENT_VERSION + 1,
+            },
+            sk.as_signing_key(),
+        )
+        .unwrap();
+        let result = test_validator(topic, minute).validate_single(&record);
+        assert!(matches!(result, Err(RejectionReason::DecodeFailure(_))));
+    }
+
+    #[test]
+    fn caller_cannot_expand_hard_bounds() {
+        let topic = test_topic();
+        let config = ValidationConfig {
+            max_record_size: usize::MAX,
+            max_records_per_lookup: usize::MAX,
+            max_candidate_peers: usize::MAX,
+            ..ValidationConfig::new(topic)
+        };
+        let validator = DiscoveryRecordValidator::new(config, 1_000_000);
+        let mut records = Vec::new();
+        for i in 0..HARD_MAX_RECORDS_PER_LOOKUP + 1 {
+            let seed = [i as u8; 32];
+            let sk = iroh::SecretKey::from_bytes(&seed);
+            let ep = sk.public();
+            records.push(create_discovery_record(topic, 1_000_000, &ep, &sk).unwrap());
+        }
+        let result = validator.filter_and_build(records, None);
+        assert_eq!(result.counters.total, HARD_MAX_RECORDS_PER_LOOKUP);
+        assert_eq!(result.peers.len(), HARD_MAX_CANDIDATE_PEERS);
     }
 
     // ── filter_and_build tests ────────────────────────────────────────
