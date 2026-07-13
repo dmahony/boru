@@ -651,7 +651,7 @@ fn main() -> Result<()> {
             chat_history,
             backfill_handle,
             initial_topic.is_some() && args.command.is_none(),
-            continuous_tracker,
+            Some(continuous_tracker),
             Arc::clone(&discovered_peers_rx),
         ),
         initial_topic,

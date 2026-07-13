@@ -600,24 +600,27 @@ async fn get_or_connect(
     }
 
     // Try to discover the peer's addresses from the endpoint.
-    let info = endpoint
-        .remote_info(*peer)
-        .await
-        .ok_or_else(|| n0_error::anyerr!("no address info for peer {}", peer.fmt_short()))?;
-
-    let transport_addrs: std::collections::BTreeSet<_> =
-        info.addrs().map(|a| a.addr().clone()).collect();
-
-    if transport_addrs.is_empty() {
-        return Err(n0_error::anyerr!(
-            "no known addresses for peer {}",
-            peer.fmt_short()
-        ));
-    }
-
-    let addr = EndpointAddr {
-        id: *peer,
-        addrs: transport_addrs,
+    let addr = match endpoint.remote_info(*peer).await {
+        Some(info) => {
+            let transport_addrs: std::collections::BTreeSet<_> =
+                info.addrs().map(|a| a.addr().clone()).collect();
+            if transport_addrs.is_empty() {
+                // remote_info has no addresses — fall back to ID-only resolution
+                // which triggers DHT/mDNS/DNS lookup during connect().
+                EndpointAddr::new(*peer)
+            } else {
+                EndpointAddr {
+                    id: *peer,
+                    addrs: transport_addrs,
+                }
+            }
+        }
+        None => {
+            // Endpoint has never cached this peer's addresses.
+            // Use ID-only resolution which triggers the full address
+            // lookup chain (DHT, mDNS, DNS/Pkarr) during connect().
+            EndpointAddr::new(*peer)
+        }
     };
 
     connect_to_peer(endpoint, *peer, addr, connected, event_tx, msg_tx).await

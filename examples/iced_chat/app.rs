@@ -51,7 +51,7 @@ use n0_future::task;
 use n0_future::Stream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use iced::Color;
@@ -1625,7 +1625,7 @@ impl IcedChat {
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
         backfill_handle: BackfillHandle,
         return_to_chat_list_after_open: bool,
-        continuous_tracker: ContinuousTracker,
+        continuous_tracker: Option<ContinuousTracker>,
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
     ) -> Self {
         let (initial_topic, initial_bootstrap) =
@@ -1795,7 +1795,7 @@ impl IcedChat {
             conversation_store: ConversationStore::load_or_default(&data_dir),
             discovered_peers: Vec::new(),
             discovered_online_cache: HashSet::new(),
-            continuous_tracker: Some(continuous_tracker),
+            continuous_tracker,
             discovered_peers_rx,
         }
     }
@@ -2952,6 +2952,26 @@ impl IcedChat {
                 self.room_history_dirty = true;
                 self.persist_room_history();
                 self.try_save_chat_history();
+
+                // Insert lobby into conversations so its GossipSender survives
+                // room switches.  Without this, NewDiscoveredPeers must rely on
+                // the self.topic == lobby_topic fallback, which breaks when a
+                // different room is active.
+                let lobby_topic = Self::default_lobby_topic();
+                if topic == lobby_topic {
+                    let mut lobby_conv = self
+                        .conversations
+                        .remove(&topic)
+                        .unwrap_or_else(|| ConversationLive::new(topic));
+                    lobby_conv.sender = Some(sender.clone());
+                    lobby_conv.forward_handle_slot = Arc::clone(&self.forward_handle_slot);
+                    lobby_conv.ticket_str = ticket.clone();
+                    self.conversations.insert(topic, lobby_conv);
+                    info!(
+                        topic = %lobby_topic,
+                        "inserted lobby into conversations",
+                    );
+                }
 
                 if self.return_to_chat_list_after_open {
                     self.return_to_chat_list_after_open = false;
@@ -5401,19 +5421,40 @@ impl IcedChat {
                             None
                         }
                     });
+                let count = peers.len();
                 let tasks: Vec<iced::Task<AppMessage>> = peers
                     .into_iter()
                     .filter_map(|peer| {
                         lobby_sender.as_ref().map(|s| s.clone()).map(|s| {
                             iced::Task::perform(
                                 async move {
-                                    let _ = s.join_peers(vec![peer]).await;
+                                    match s.join_peers(vec![peer]).await {
+                                        Ok(()) => {
+                                            info!(
+                                                peer = %peer,
+                                                "join_peers succeeded",
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                peer = %peer,
+                                                error = %e,
+                                                "join_peers failed",
+                                            );
+                                        }
+                                    }
                                 },
                                 |_| AppMessage::Noop,
                             )
                         })
                     })
                     .collect();
+                info!(
+                    count = count,
+                    tasks = tasks.len(),
+                    lobby_available = lobby_sender.is_some(),
+                    "NewDiscoveredPeers: joining lobby peers",
+                );
                 iced::Task::batch(tasks)
             }
 
@@ -6164,6 +6205,103 @@ impl IcedChat {
         }
     }
 
+    // ── Friend request UI helpers ────────────────────────────────────────
+
+    /// Label text for an outgoing request state shown in the sidebar.
+    pub fn outgoing_request_label(state: Option<&OutgoingRequestState>) -> &'static str {
+        match state {
+            None => "",
+            Some(OutgoingRequestState::Pending) => "Pending",
+            Some(OutgoingRequestState::Accepted) => "Accepted",
+            Some(OutgoingRequestState::Declined) => "Declined",
+            Some(OutgoingRequestState::Failed(_)) => "Failed",
+        }
+    }
+
+    /// Color for an outgoing request state indicator.
+    pub fn outgoing_request_color(state: Option<&OutgoingRequestState>) -> Color {
+        match state {
+            None => Color::from_rgb(0.5, 0.5, 0.5),
+            Some(OutgoingRequestState::Pending) => Color::from_rgb(0.9, 0.7, 0.1),
+            Some(OutgoingRequestState::Accepted) => Color::from_rgb(0.2, 0.7, 0.2),
+            Some(OutgoingRequestState::Declined) => Color::from_rgb(0.8, 0.2, 0.2),
+            Some(OutgoingRequestState::Failed(_)) => Color::from_rgb(0.8, 0.2, 0.2),
+        }
+    }
+
+    /// Human-readable label for a join request state.
+    pub fn join_request_state_label(state: &OutgoingRequestState) -> &'static str {
+        match state {
+            OutgoingRequestState::Pending => "Pending",
+            OutgoingRequestState::Accepted => "Accepted",
+            OutgoingRequestState::Declined => "Rejected",
+            OutgoingRequestState::Failed(_) => "Failed",
+        }
+    }
+
+    /// Color indicator for a join request state.
+    pub fn join_request_state_color(state: &OutgoingRequestState) -> Color {
+        match state {
+            OutgoingRequestState::Pending => Color::from_rgb(0.88, 0.67, 0.10),
+            OutgoingRequestState::Accepted => Color::from_rgb(0.18, 0.68, 0.28),
+            OutgoingRequestState::Declined => Color::from_rgb(0.53, 0.53, 0.53),
+            OutgoingRequestState::Failed(_) => Color::from_rgb(0.80, 0.22, 0.22),
+        }
+    }
+
+    /// Border color for a failed request state.
+    pub fn join_request_border_color(state: &OutgoingRequestState) -> Color {
+        match state {
+            OutgoingRequestState::Failed(_) => Color::from_rgb(0.80, 0.22, 0.22),
+            _ => Color::from_rgb(0.5, 0.5, 0.5),
+        }
+    }
+
+    /// Section title string for the join requests list.
+    pub fn join_request_section_title() -> &'static str {
+        "Join requests"
+    }
+
+    /// Total count label for the join requests section.
+    pub fn join_request_total_label(count: usize) -> String {
+        format!("{count} total")
+    }
+
+    /// Prefix label for the target user field in a join request row.
+    pub fn join_request_target_user_prefix() -> &'static str {
+        "Target user"
+    }
+
+    /// Prefix label for the chat identifier in a join request row.
+    pub fn join_request_chat_prefix() -> &'static str {
+        "Chat"
+    }
+
+    /// Label for the \"open chat\" action button.
+    pub fn join_request_open_chat_label() -> &'static str {
+        "Open chat"
+    }
+
+    /// Label for the retry action button on failed requests.
+    pub fn join_request_retry_label() -> &'static str {
+        "Retry"
+    }
+
+    /// Prefix label for the failure reason in a failed request row.
+    pub fn join_request_failure_prefix() -> &'static str {
+        "Failure"
+    }
+
+    /// A single animation frame character for the pending spinner indicator.
+    pub fn join_request_spinner_frame() -> &'static str {
+        "."
+    }
+
+    /// Parse the `target_user` field of a `JoinRequestItem` into a [`PublicKey`].
+    pub fn join_request_peer(item: &JoinRequestItem) -> Option<PublicKey> {
+        PublicKey::from_str(&item.target_user).ok()
+    }
+
     pub fn view(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{container, row, Column};
         use iced::Length;
@@ -6534,9 +6672,16 @@ impl IcedChat {
             let is_friend = self.friends.get(&fid)
                 .map(|r| r.relationship.can_message()).unwrap_or(false);
 
+            let request_state = self.outgoing_request_states.get(peer);
+
             let has_pending_request = matches!(
-                self.outgoing_request_states.get(peer),
+                request_state,
                 Some(OutgoingRequestState::Pending)
+            );
+
+            let has_failed_request = matches!(
+                request_state,
+                Some(OutgoingRequestState::Failed(_))
             );
 
             let mut row_el = Row::new()
@@ -6560,6 +6705,12 @@ impl IcedChat {
                 );
             } else if has_pending_request {
                 row_el = row_el.push(text("Sent").size(TYPO_XS).color(self.color_muted()));
+            } else if has_failed_request {
+                row_el = row_el.push(
+                    button(text("Retry").size(TYPO_XS))
+                        .on_press(AppMessage::FriendRequestRetry(*peer))
+                        .padding([SPACE_2, SPACE_6]),
+                );
             } else {
                 row_el = row_el.push(
                     button(text("+ Add").size(TYPO_XS))
@@ -9899,6 +10050,9 @@ mod tests {
             )
         });
 
+        let (dummy_discovered_tx, dummy_discovered_rx) =
+            tokio::sync::mpsc::channel::<Vec<iroh::PublicKey>>(1);
+
         let app = IcedChat::new(
             secret_key,
             gossip,
@@ -9925,6 +10079,8 @@ mod tests {
             chat_history,
             backfill_handle,
             false,
+            None,
+            Arc::new(Mutex::new(dummy_discovered_rx)),
         );
 
         (runtime, app, local_public, peer_public)
