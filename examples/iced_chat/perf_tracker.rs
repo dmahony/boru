@@ -11,7 +11,7 @@
 //! At shutdown (or /perf command), call `PerfTracker::report()` to print
 //! the full baseline summary.
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 /// A single performance sample.
@@ -67,13 +67,12 @@ impl PerfTracker {
             %context,
             "PERF"
         );
-        if let Ok(mut samples) = PERF.samples.lock() {
-            samples.push(PerfSample {
-                label,
-                duration_ns: ns,
-                context,
-            });
-        }
+        let mut samples = PERF.samples.lock();
+        samples.push(PerfSample {
+            label,
+            duration_ns: ns,
+            context,
+        });
     }
 
     /// Time a closure and record its duration.
@@ -113,7 +112,7 @@ impl PerfTracker {
     ///
     /// Call this at application shutdown or when the user runs /perf.
     pub fn print_report() {
-        let samples = PERF.samples.lock().unwrap();
+        let samples = PERF.samples.lock();
         if samples.is_empty() {
             eprintln!("[PERF] No performance samples recorded.");
             return;
@@ -174,7 +173,7 @@ impl PerfTracker {
 
     /// Print a JSON snapshot of the aggregated data (machine-readable).
     pub fn json_report() -> serde_json::Value {
-        let samples = PERF.samples.lock().unwrap();
+        let samples = PERF.samples.lock();
         let mut by_label: std::collections::BTreeMap<&'static str, Vec<u64>> =
             std::collections::BTreeMap::new();
         for s in samples.iter() {
@@ -219,9 +218,8 @@ impl PerfTracker {
 
     /// Reset all accumulated samples.
     pub fn reset() {
-        if let Ok(mut samples) = PERF.samples.lock() {
-            samples.clear();
-        }
+        let mut samples = PERF.samples.lock();
+        samples.clear();
     }
 }
 

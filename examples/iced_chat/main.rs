@@ -11,6 +11,11 @@ mod log_viewer;
 mod mcp_server;
 mod perf_tracker;
 
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

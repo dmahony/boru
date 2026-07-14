@@ -19,7 +19,7 @@
 //! that threshold logs a `warn!`-level tracing event tagged `target: "perf_slow"`.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -96,13 +96,12 @@ impl PerfTracker {
                 }
             }
         }
-        if let Ok(mut samples) = PERF.samples.lock() {
-            samples.push(PerfSample {
+        let mut samples = PERF.samples.lock();
+        samples.push(PerfSample {
                 label,
                 duration_ns: ns,
                 context,
             });
-        }
     }
 
     /// Time a closure and record its duration.
@@ -128,7 +127,7 @@ impl PerfTracker {
 
     /// Print a full summary of all recorded samples to stderr.
     pub fn print_report() {
-        let samples = PERF.samples.lock().unwrap();
+        let samples = PERF.samples.lock();
         if samples.is_empty() {
             eprintln!("[PERF] No performance samples recorded.");
             return;
@@ -195,9 +194,8 @@ impl PerfTracker {
 
     /// Reset all accumulated samples.
     pub fn reset() {
-        if let Ok(mut samples) = PERF.samples.lock() {
-            samples.clear();
-        }
+        let mut samples = PERF.samples.lock();
+        samples.clear();
     }
 }
 
@@ -295,10 +293,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// Helper: recover from a poisoned mutex (other parallel tests may have
-    /// panicked while holding the lock) and return samples filtered by label.
+    /// Helper: return samples filtered by label.
     fn samples_by_label(label: &str) -> Vec<PerfSample> {
-        let guard = PERF.samples.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = PERF.samples.lock();
         guard.iter().filter(|s| s.label == label).cloned().collect()
     }
 
