@@ -965,9 +965,9 @@ impl SignedMessage {
 ///
 /// The optional [`DiscoverySecret`] enables DHT-based private-room discovery:
 /// when present, the holder can publish and look up discovery records under
-/// the room's encrypted namespace.  Legacy tickets (without the secret)
-/// deserialise to [`None`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// the room's encrypted namespace. Legacy tickets without a secret use their
+/// endpoint-bearing bootstrap peers only; no replacement secret is generated.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ticket {
     /// The gossip topic to join.
     pub topic: TopicId,
@@ -982,6 +982,19 @@ pub struct Ticket {
     /// `None` instead of failing.
     #[serde(default)]
     pub discovery_secret: Option<DiscoverySecret>,
+}
+
+impl fmt::Debug for Ticket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ticket")
+            .field("topic", &self.topic)
+            .field("peers", &self.peers)
+            .field(
+                "discovery_secret",
+                &self.discovery_secret.as_ref().map(|_| "[redacted]"),
+            )
+            .finish()
+    }
 }
 
 impl Ticket {
@@ -1036,6 +1049,52 @@ impl FromStr for Ticket {
             .decode(s.to_ascii_uppercase().as_bytes())
             .std_context("decode chat ticket base32")?;
         Self::from_bytes(&bytes)
+    }
+}
+
+/// The invitation formats accepted by the room join path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoomInvitation {
+    /// Stable, endpoint-free invitation carrying the shared discovery secret.
+    Stable(RoomInviteV2),
+    /// Legacy postcard ticket. Bootstrap peers are preserved. A missing
+    /// discovery secret explicitly disables DHT discovery for this room.
+    Legacy(Ticket),
+}
+
+impl RoomInvitation {
+    /// Detect and decode an invitation. A malformed `boru1:` string never
+    /// falls through into the legacy decoder.
+    pub fn parse(input: &str) -> Result<Self> {
+        let trimmed = input.trim();
+        if trimmed.starts_with(RoomInviteV2::PREFIX) {
+            return Ok(Self::Stable(RoomInviteV2::parse(trimmed)?));
+        }
+        Ok(Self::Legacy(trimmed.parse()?))
+    }
+
+    /// Return the room topic represented by this invitation.
+    pub fn topic(&self) -> TopicId {
+        match self {
+            Self::Stable(invite) => invite.topic,
+            Self::Legacy(ticket) => ticket.topic,
+        }
+    }
+
+    /// Return the endpoint-bearing bootstrap peers, if any.
+    pub fn bootstrap_peers(&self) -> &[EndpointAddr] {
+        match self {
+            Self::Stable(_) => &[],
+            Self::Legacy(ticket) => &ticket.peers,
+        }
+    }
+
+    /// Return the shared DHT discovery capability, if present.
+    pub fn discovery_secret(&self) -> Option<&DiscoverySecret> {
+        match self {
+            Self::Stable(invite) => Some(&invite.discovery_secret),
+            Self::Legacy(ticket) => ticket.discovery_secret.as_ref(),
+        }
     }
 }
 

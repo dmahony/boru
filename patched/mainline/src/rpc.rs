@@ -55,6 +55,17 @@ type GetQueriesResult = (Vec<GetQueryOutcome>, bool);
 
 const MAX_CACHED_ITERATIVE_QUERIES: usize = 1000;
 
+/// Return a bounded identifier suitable for logs without exposing the full
+/// discovery target.  The target is still useful for correlating one lookup's
+/// events, but the complete 160-bit value is unnecessary log material.
+fn short_context_id(id: &Id) -> String {
+    id.as_bytes()
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[derive(Debug)]
 /// Internal Rpc called in the Dht thread loop, useful to create your own actor setup.
 pub struct Rpc {
@@ -415,6 +426,13 @@ impl Rpc {
             ..
         }) = self.cached_iterative_queries.get(&target)
         {
+            if !closest_responding_nodes.is_empty() {
+                debug!(
+                    context = %short_context_id(&target),
+                    cached_nodes = closest_responding_nodes.len(),
+                    "using cached discovery data as fallback"
+                );
+            }
             for node in closest_responding_nodes {
                 query.add_candidate(node.clone())
             }
@@ -1174,6 +1192,18 @@ mod tests {
     use ed25519_dalek::SigningKey;
 
     use super::*;
+
+    #[test]
+    fn cached_fallback_context_id_is_short() {
+        let id = Id::from_bytes([
+            0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+            0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+        ])
+        .unwrap();
+
+        assert_eq!(short_context_id(&id), "deadbeef");
+        assert!(!short_context_id(&id).contains("01020304"));
+    }
 
     #[test]
     fn get_does_not_echo_inflight_mutable_put() {

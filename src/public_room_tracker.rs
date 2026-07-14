@@ -34,7 +34,7 @@
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::discovery_backend::{
     EncryptedDiscoveryRecord, NamespaceId, TopicDiscoveryBackend, MAX_DISCOVERY_PAYLOAD_SIZE,
@@ -166,16 +166,20 @@ impl PublicRoomTracker {
             &self.secret_key,
         )?;
         let namespace = NamespaceId::new(discovery_key);
-        let result = self
-            .backend
-            .publish(&namespace, EncryptedDiscoveryRecord::new(record.to_bytes()))
-            .await;
+        let result = async {
+            self.backend
+                .publish(&namespace, EncryptedDiscoveryRecord::new(record.to_bytes()))
+                .await
+        }
+        .instrument(info_span!("tracker.publish", tracker = "public", room = %room_id))
+        .await;
 
         let duration_us = start.elapsed().as_micros() as u64;
         match &result {
             Ok(()) => info!(
                 room = %room_id,
                 local = %local,
+                outcome = "success",
                 duration_us = duration_us,
                 "publish completed",
             ),
@@ -183,6 +187,7 @@ impl PublicRoomTracker {
                 room = %room_id,
                 local = %local,
                 error = %e,
+                outcome = "failure",
                 duration_us = duration_us,
                 "publish failed",
             ),
@@ -214,7 +219,23 @@ impl PublicRoomTracker {
         let namespace = NamespaceId::new(discovery_key);
 
         // Fetch encrypted records from the backend.
-        let encrypted = self.backend.lookup(&namespace).await?;
+        let encrypted = match async { self.backend.lookup(&namespace).await }
+            .instrument(info_span!("tracker.lookup", tracker = "public", room = %room_id))
+            .await
+        {
+            Ok(records) => records,
+            Err(error) => {
+                warn!(
+                    room = %room_id,
+                    local = %local,
+                    outcome = "failure",
+                    error = %error,
+                    duration_us = start.elapsed().as_micros() as u64,
+                    "lookup failed",
+                );
+                return Err(error);
+            }
+        };
         let total_encrypted = encrypted.len();
 
         // Deserialise encrypted records back into Record values.
@@ -267,6 +288,7 @@ impl PublicRoomTracker {
                 self_filtered = counters.self_filtered,
                 duplicates = counters.duplicates,
                 duration_us = duration_us,
+                outcome = "success",
                 "discovery found peers",
             );
         } else {
@@ -282,6 +304,7 @@ impl PublicRoomTracker {
                 future = counters.future,
                 decode_failure = counters.decode_failure,
                 duration_us = duration_us,
+                outcome = "success",
                 "discovery returned no peers",
             );
         }

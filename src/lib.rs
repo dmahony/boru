@@ -123,6 +123,11 @@ pub mod room_history;
 #[cfg(feature = "net")]
 pub mod room_cleanup;
 
+/// Secure legacy room-secret migration: owner-signed, topic-bound,
+/// epoch-versioned upgrades with deterministic conflict resolution.
+#[cfg(feature = "net")]
+// pub mod room_secret_migration;
+
 /// Active-session chat message state. No chat messages are persisted.
 #[cfg(feature = "net")]
 pub mod chat_history;

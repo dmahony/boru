@@ -58,6 +58,10 @@
 //! | Continuous discover all known | `trace!` | [`discover_loop()`](crate::public_room_continuous) |
 //! | Continuous discover degraded DHT | `warn!` | [`discover_loop()`](crate::public_room_continuous) (3+ consecutive failures) |
 //! | Retry/backoff step | `debug!` | [`retry_with_backoff()`](crate::public_room_continuous) |
+//! | Backend publish operation span | `info` span | `tracker.publish` (public/private) |
+//! | Backend lookup operation span | `info` span | `tracker.lookup` (public/private) |
+//! | Candidate admitted for join | `trace!` | [`discover_loop()`](crate::public_room_continuous) |
+//! | Join attempt outcome + duration | `info!` / `warn!` span | `tracker.join` / [`spawn_join_fanout()`](crate::public_room_continuous) |
 //! | Room leave | `info!` | [`PublicRoomTracker::shutdown()`](crate::public_room_tracker::PublicRoomTracker::shutdown) |
 //!
 //! # Adding new tracing

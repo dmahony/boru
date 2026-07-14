@@ -36,7 +36,7 @@ use tokio::{
     time::{interval, sleep, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, info_span, trace, warn, Instrument};
 
 use crate::api::GossipSender;
 use crate::dynamic_joiner::{DynamicPeerJoiner, DynamicPeerJoinerConfig, NeighborEvent};
@@ -403,6 +403,7 @@ async fn publish_loop(
                                 error = %e,
                                 consecutive_failures = consecutive_failures,
                                 duration_us = duration_us,
+                                fallback = "continue_with_stale_advertisement",
                                 "continuous publish degraded DHT state",
                             );
                         } else {
@@ -520,6 +521,11 @@ async fn discover_loop(
                             if known_peers.contains_key(&peer) {
                                 continue;
                             }
+                            trace!(
+                                room = %room,
+                                candidate = %peer.fmt_short(),
+                                "candidate peer admitted for join",
+                            );
                             known_peers.insert(peer, now);
                             new_peers.push(peer);
                             attempt_times.push_back(now);
@@ -549,6 +555,7 @@ async fn discover_loop(
                             room = %room,
                             total = count,
                             new = new_count,
+                            filtered = count.saturating_sub(new_count),
                             duration_us = duration_us,
                             "discovery found new peers",
                         );
@@ -572,6 +579,7 @@ async fn discover_loop(
                                 error = %e,
                                 consecutive_failures = consecutive_failures,
                                 duration_us = duration_us,
+                                fallback = "continue_with_existing_peers",
                                 "continuous discover degraded DHT state",
                             );
                         } else {
@@ -703,8 +711,26 @@ pub fn spawn_join_fanout(
                                 count = count,
                                 "join-fanout: forwarding discovered peers to gossip mesh",
                             );
-                            if let Err(e) = sender.join_peers(peers).await {
-                                warn!(error = %e, "join-fanout: join_peers failed");
+                            let start = Instant::now();
+                            let result = sender
+                                .join_peers(peers)
+                                .instrument(info_span!("tracker.join", candidates = count))
+                                .await;
+                            let duration_us = start.elapsed().as_micros() as u64;
+                            match result {
+                                Ok(()) => info!(
+                                    candidates = count,
+                                    outcome = "queued",
+                                    duration_us,
+                                    "join-fanout: queued discovered peers for gossip join",
+                                ),
+                                Err(e) => warn!(
+                                    candidates = count,
+                                    outcome = "failure",
+                                    duration_us,
+                                    error = %e,
+                                    "join-fanout: join_peers failed",
+                                ),
                             }
                         }
                         None => {

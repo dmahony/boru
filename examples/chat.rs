@@ -50,8 +50,8 @@ use boru_chat::chat_core::friend_ping::{
 use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_with_progress, download_candidates, fmt_relay_mode,
     handle_net_event, message_hash, refresh_bootstrap_peers, update_connection_counts, AppState,
-    ChatEntry, ChatKind, ConnectionType, MeshHealth, Message, NetEvent, RoomInviteV2,
-    SignedMessage, StatusContext, Ticket,
+    ChatEntry, ChatKind, ConnectionType, MeshHealth, Message, NetEvent, RoomInvitation,
+    RoomInviteV2, SignedMessage, StatusContext, Ticket,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::direct_topic;
@@ -72,8 +72,11 @@ use iroh::{
 use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket, BlobsProtocol};
 
 use boru_chat::discovery_backend::MainlineDhtBackend;
-use boru_chat::private_room_tracker::PrivateRoomTracker;
-use boru_chat::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
+use boru_chat::discovery_secret::DiscoverySecret;
+use boru_chat::private_room_tracker::{
+    PrivateContinuousTracker as ContinuousTracker, PrivateRoomTracker,
+};
+use boru_chat::public_room_continuous::ContinuousTrackerConfig;
 use boru_chat::whisper::{WhisperBuilder, WhisperEvent, WhisperHandle, WHISPER_ALPN};
 use boru_chat::{
     net::{Gossip, GOSSIP_ALPN},
@@ -598,21 +601,17 @@ async fn main() -> Result<()> {
             (topic, saved_peers, stored_secret, created)
         }
         Command::Join { ticket } => {
-            // Try stable boru1: invitation first, then fall back to legacy ticket format.
-            let (topic, peers, discovery_secret) =
-                if let Ok(invite) = RoomInviteV2::parse(ticket) {
+            let invitation = RoomInvitation::parse(ticket)?;
+            match invitation {
+                RoomInvitation::Stable(invite) => {
                     tracing::info!(topic = %invite.topic, "joining room via boru1 invitation");
-                    (invite.topic, Vec::new(), Some(invite.discovery_secret))
-                } else {
-                    let Ticket {
-                        topic,
-                        peers,
-                        discovery_secret,
-                    } = Ticket::from_str(ticket)?;
-                    tracing::info!(topic = %topic, "joining chat room via legacy ticket");
-                    (topic, peers, discovery_secret)
-                };
-            (topic, peers, discovery_secret, false)
+                    (invite.topic, Vec::new(), Some(invite.discovery_secret), false)
+                }
+                RoomInvitation::Legacy(legacy) => {
+                    tracing::info!(topic = %legacy.topic, "joining chat room via legacy ticket");
+                    (legacy.topic, legacy.peers, legacy.discovery_secret, false)
+                }
+            }
         }
     };
     let is_new_room = room_created;
@@ -703,17 +702,38 @@ async fn main() -> Result<()> {
 
     // ── Publish DHT discovery for newly created rooms ─────────────────
     if is_new_room && dht_enabled {
-        let secret = boru_chat::private_room_tracker::create_and_publish_private_discovery(
-            shared_dht.clone(),
-            topic,
-            &endpoint,
-        )
-        .await;
+        let secret = if let Some(dht) = shared_dht.clone() {
+            let secret = DiscoverySecret::generate();
+            let dummy_ns = distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
+            let backend = MainlineDhtBackend::new(dht, dummy_ns);
+            let tracker = PrivateRoomTracker::new(
+                Box::new(backend),
+                topic,
+                secret.clone(),
+                endpoint.id(),
+                endpoint.secret_key().clone(),
+            );
+            match tracker.publish_once().await {
+                Ok(()) => Some(secret),
+                Err(error) => {
+                    tracing::warn!(
+                        room = %hex::encode(&topic.as_bytes()[..4]),
+                        operation = "initial_publish",
+                        fallback = "continue_without_dht_discovery_secret",
+                        error = %error,
+                        "DHT degraded; private-room discovery publish unavailable"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         if let Some(secret) = secret {
             discovery_secret = Some(secret);
             // Save the discovery secret to the room store.
             if let Some(mut room) = RoomStore::load_or_none(&data_dir) {
-                if let Err(err) = room.set_discovery_secret(discovery_secret) {
+                if let Err(err) = room.set_discovery_secret(discovery_secret.clone()) {
                     tracing::warn!(error = %err, "failed to set discovery_secret in RoomStore");
                 }
                 if let Err(err) = room.save() {
@@ -721,7 +741,7 @@ async fn main() -> Result<()> {
                 }
             }
             // Start continuous DHT publish/discover.
-            let secret = secret;
+            let secret = discovery_secret.clone().unwrap();
             let dummy_ns = distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
             let backend =
                 MainlineDhtBackend::new(shared_dht.clone().expect("DHT enabled"), dummy_ns);
@@ -752,11 +772,7 @@ async fn main() -> Result<()> {
                 });
             }
             room_tracker = Some((
-                ContinuousTracker::start(
-                    tracker.into_inner(),
-                    ContinuousTrackerConfig::default(),
-                    new_peers_tx,
-                ),
+                ContinuousTracker::start(tracker, ContinuousTrackerConfig::default(), new_peers_tx),
                 fanout_rx,
                 join_cancel,
             ));
@@ -821,11 +837,7 @@ async fn main() -> Result<()> {
                 });
             }
             room_tracker = Some((
-                ContinuousTracker::start(
-                    tracker.into_inner(),
-                    ContinuousTrackerConfig::default(),
-                    new_peers_tx,
-                ),
+                ContinuousTracker::start(tracker, ContinuousTrackerConfig::default(), new_peers_tx),
                 fanout_rx,
                 join_cancel,
             ));
@@ -848,7 +860,7 @@ async fn main() -> Result<()> {
     tracing::info!(ticket = %ticket, "created room ticket");
 
     // Also create a stable boru1: invitation for the room.
-    let boru1_invite = ticket.discovery_secret.map(|secret| {
+    let boru1_invite = ticket.discovery_secret.clone().map(|secret| {
         let invite = RoomInviteV2::new(topic, secret);
         let invite_str = invite.encode();
         tracing::info!(invite = %invite_str, "created boru1 room invitation");

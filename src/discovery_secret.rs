@@ -40,7 +40,7 @@ pub const DISCOVERY_SECRET_SIZE: usize = 32;
 ///
 /// `Clone` is implemented for practical use (testing, passing into async
 /// closures), but treat cloned secrets with the same care as the original.
-#[derive(Serialize, Deserialize)]
+#[derive(Copy, Serialize, Deserialize)]
 pub struct DiscoverySecret {
     /// The secret bytes.
     #[serde(with = "serde_bytes")]
@@ -68,6 +68,11 @@ impl DiscoverySecret {
     /// Return the raw 32-byte secret.
     pub fn as_bytes(&self) -> &[u8; DISCOVERY_SECRET_SIZE] {
         &self.bytes
+    }
+
+    /// View the secret bytes as a namespace identifier.
+    pub fn as_namespace_id(&self) -> crate::discovery_backend::NamespaceId {
+        crate::discovery_backend::NamespaceId::new(self.bytes)
     }
 }
 
@@ -112,7 +117,7 @@ impl std::hash::Hash for DiscoverySecret {
 /// serde helper for (de)serializing `[u8; 32]` as a byte slice.
 mod serde_bytes {
     use serde::de::Error;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_bytes(bytes)

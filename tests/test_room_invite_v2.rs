@@ -7,16 +7,16 @@
 //! - Legacy ticket compatibility (no overlap)
 //! - Expected prefix "boru1:"
 
-use boru_chat::chat_core::RoomInviteV2;
+use boru_chat::chat_core::{RoomInvitation, RoomInviteV2, Ticket};
 use boru_chat::discovery_secret::DiscoverySecret;
 use boru_chat::proto::TopicId;
 
 /// A known 32-byte secret for deterministic tests.
 fn test_secret() -> DiscoverySecret {
     let bytes: [u8; 32] = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
-        0x1d, 0x1e, 0x1f, 0x20,
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f, 0x20,
     ];
     DiscoverySecret::from_bytes(bytes)
 }
@@ -24,9 +24,9 @@ fn test_secret() -> DiscoverySecret {
 /// A known topic for deterministic tests.
 fn test_topic() -> TopicId {
     TopicId::from_bytes([
-        0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae,
-        0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc,
-        0xbd, 0xbe, 0xbf, 0xc0,
+        0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe,
+        0xbf, 0xc0,
     ])
 }
 
@@ -35,7 +35,10 @@ fn test_topic() -> TopicId {
 fn valid_round_trip() {
     let invite = RoomInviteV2::new(test_topic(), test_secret());
     let encoded = invite.encode();
-    assert!(encoded.starts_with("boru1:"), "should start with boru1: prefix");
+    assert!(
+        encoded.starts_with("boru1:"),
+        "should start with boru1: prefix"
+    );
     assert!(encoded.len() > 100, "should be ~105 characters");
 
     let decoded = RoomInviteV2::parse(&encoded).unwrap();
@@ -221,7 +224,7 @@ fn different_secrets_different_output() {
 /// Two different topics produce different encoded strings.
 #[test]
 fn different_topics_different_output() {
-    let mut topic_b_bytes = *test_topic().as_ref();
+    let mut topic_b_bytes: [u8; 32] = *test_topic().as_ref();
     topic_b_bytes[0] ^= 0xff;
     let topic_b = TopicId::from_bytes(topic_b_bytes);
 
@@ -236,11 +239,39 @@ fn different_topics_different_output() {
 fn accepts_uppercase_base32() {
     let invite = RoomInviteV2::new(test_topic(), test_secret());
     let encoded = invite.encode();
-    // The normal output is lowercase. Force it to uppercase and try.
-    // The prefix must remain lowercase "boru1:" though.
     let payload = &encoded[6..];
     let all_upper = format!("boru1:{}", payload.to_ascii_uppercase());
     let decoded = RoomInviteV2::parse(&all_upper).unwrap();
     assert_eq!(decoded.topic, test_topic());
     assert_eq!(decoded.discovery_secret, test_secret());
+}
+
+#[test]
+fn detects_stable_invites_before_legacy_decoding() {
+    let input = RoomInviteV2::new(test_topic(), test_secret()).encode();
+    let parsed = RoomInvitation::parse(&input).unwrap();
+    assert!(matches!(parsed, RoomInvitation::Stable(_)));
+}
+
+#[test]
+fn malformed_stable_invite_does_not_fall_back_to_legacy() {
+    let err = RoomInvitation::parse("boru1:not-a-valid-ticket").unwrap_err();
+    assert!(format!("{err}").contains("invitation"));
+}
+
+#[test]
+fn legacy_ticket_has_no_implicit_secret() {
+    let legacy = Ticket::new(test_topic(), Vec::new());
+    let parsed = RoomInvitation::parse(&legacy.to_string()).unwrap();
+    assert!(matches!(parsed, RoomInvitation::Legacy(_)));
+    assert!(parsed.bootstrap_peers().is_empty());
+    assert!(parsed.discovery_secret().is_none());
+}
+
+#[test]
+fn ticket_debug_redacts_discovery_secret() {
+    let ticket = Ticket::with_discovery(test_topic(), Vec::new(), test_secret());
+    let debug = format!("{ticket:?}");
+    assert!(debug.contains("[redacted]"));
+    assert!(!debug.contains("01020304"));
 }

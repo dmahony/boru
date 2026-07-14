@@ -32,7 +32,7 @@ use boru_chat::discovery_secret::DiscoverySecret;
 use boru_chat::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
 };
-use boru_chat::friends::{DirectConversationState, FriendId, FriendsStore};
+use boru_chat::friends::{DirectConversationState, FriendId, FriendRelationship, FriendsStore};
 use boru_chat::image_optimizer::{compress_image, optimize_chat_image, CHAT_IMAGE_MAX_BYTES};
 use boru_chat::image_store::ImageStore;
 use boru_chat::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
@@ -61,6 +61,7 @@ use tracing::{debug, info, warn};
 
 use crate::perf_tracker::PerfTracker;
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
+use boru_chat::chat_core::RoomInvitation;
 use iced::Color;
 
 // ── Shared ContinuousTracker wrapper ─────────────────────────────────
@@ -1391,6 +1392,12 @@ pub enum Shortcut {
 }
 
 #[derive(Debug, Clone)]
+pub enum OfflineDeliveryStatus {
+    Queued,
+    Delivered,
+}
+
+#[derive(Debug, Clone)]
 pub enum AppMessage {
     // ── Navigation ──
     /// Open the chat list screen (go back from a chat).
@@ -1558,17 +1565,14 @@ pub enum AppMessage {
         /// Accepted entries: (message_id, plaintext).
         texts: Vec<(String, String)>,
     },
-    /// An offline DM was queued for later delivery.
-    OfflineDMQueued {
+    /// An offline DM was persisted and its current delivery status is known.
+    OfflineDMStatus {
         /// Stable envelope identifier (blake3 hash of the envelope bytes).
         message_id: String,
         /// Human-readable peer label for the chat log.
         label: String,
-    },
-    /// An offline DM was delivered (ack received from the peer).
-    OfflineDMDelivered {
-        /// Envelope identifier returned by [`OfflineDMQueued`].
-        message_id: String,
+        /// Current transport status.
+        status: OfflineDeliveryStatus,
     },
     /// Scroll offset / viewport changed in the chat log.
     /// Used by windowed rendering to determine which entries to build widgets for.
@@ -3051,8 +3055,7 @@ impl IcedChat {
             AppMessage::ProfileImageRemoved => "ProfileImageRemoved",
             AppMessage::ProfileImagePersisted { .. } => "ProfileImagePersisted",
             AppMessage::SystemMsg(_) => "SystemMsg",
-            AppMessage::OfflineDMQueued { .. } => "OfflineDMQueued",
-            AppMessage::OfflineDMDelivered { .. } => "OfflineDMDelivered",
+            AppMessage::OfflineDMStatus { .. } => "OfflineDMStatus",
         }
     }
 }
@@ -3449,8 +3452,19 @@ impl IcedChat {
                                 endpoint.id(),
                                 endpoint.secret_key().clone(),
                             );
-                            tracker.publish_once().await.ok();
-                            Some(secret)
+                            match tracker.publish_once().await {
+                                Ok(()) => Some(secret),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        room = %hex::encode(&topic.as_bytes()[..4]),
+                                        operation = "initial_publish",
+                                        fallback = "continue_without_dht_discovery_secret",
+                                        error = %error,
+                                        "DHT degraded; private-room discovery publish unavailable"
+                                    );
+                                    None
+                                }
+                            }
                         } else {
                             None
                         };
@@ -3946,26 +3960,18 @@ impl IcedChat {
                     self.screen = Screen::ChatList;
                     return iced::Task::none();
                 }
-                // Try stable boru1: invitation first, then fall back to legacy ticket format.
-                let (ticket, is_boru1) = match RoomInviteV2::parse(ticket_input) {
-                    Ok(invite) => {
-                        // Convert boru1 invitation to a temporary Ticket so the
-                        // rest of the join flow works unchanged.
-                        let t = Ticket {
-                            topic: invite.topic,
-                            peers: Vec::new(),
-                            discovery_secret: Some(invite.discovery_secret),
-                        };
-                        (t, true)
-                    }
-                    Err(_) => match ticket_input.parse::<Ticket>() {
-                        Ok(t) => (t, false),
-                        Err(e) => {
-                            self.chat_list_error = format!("Invalid ticket: {e}");
-                            self.screen = Screen::ChatList;
-                            return iced::Task::none();
-                        }
+                let ticket = match RoomInvitation::parse(ticket_input) {
+                    Ok(RoomInvitation::Stable(invite)) => Ticket {
+                        topic: invite.topic,
+                        peers: Vec::new(),
+                        discovery_secret: Some(invite.discovery_secret),
                     },
+                    Ok(RoomInvitation::Legacy(ticket)) => ticket,
+                    Err(e) => {
+                        self.chat_list_error = format!("Invalid ticket: {e}");
+                        self.screen = Screen::ChatList;
+                        return iced::Task::none();
+                    }
                 };
 
                 // Show progress while subscribe_and_join waits for the
@@ -4363,9 +4369,14 @@ impl IcedChat {
                         .unwrap_or_default();
                     let record = self.friends.ensure_friend(fid);
                     record.set_direct_conversation(topic, DirectConversationState::Active);
+                    record.relationship = FriendRelationship::Friends;
                     let room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                     let _ = room.save();
                     self.try_save_friends();
+
+                    // Show the accepted friend immediately in the sidebar.
+                    self.friend_online_cache.insert(peer);
+                    self.mark_friends_sidebar_dirty();
 
                     // Send a ConversationInvite back to the original requester
                     // so they know the request was accepted and can join the topic.
@@ -4889,39 +4900,19 @@ impl IcedChat {
                                                         .await
                                                         {
                                                             Ok(()) => {
-                                                                // Delivery succeeded — acknowledge locally so the
-                                                                // envelope is removed from the store (no need to
-                                                                // wait for a remote ack on sync).
-                                                                let ack = MailboxAck::sign(
-                                                                    &secret_key,
-                                                                    &msg_id,
-                                                                );
-                                                                let mut store =
-                                                                    match MailboxStore::load(
-                                                                        &data_dir,
-                                                                    )
-                                                                    .ok()
-                                                                    .flatten()
-                                                                    .unwrap_or_else(|| {
-                                                                        MailboxStore::for_recipient(
-                                                                            &data_dir,
-                                                                            secret_key.public(),
-                                                                        )
-                                                                    }) {
-                                                                        s => s,
-                                                                    };
-                                                                let _ = store
-                                                                    .acknowledge_and_save(&ack);
-                                                                AppMessage::OfflineDMDelivered {
+                                                                AppMessage::OfflineDMStatus {
                                                                     message_id: msg_id,
+                                                                    label,
+                                                                    status: OfflineDeliveryStatus::Delivered,
                                                                 }
                                                             }
                                                             Err(_) => {
                                                                 // Peer offline; envelope is already stored for later
                                                                 // sync-based delivery.
-                                                                AppMessage::OfflineDMQueued {
+                                                                AppMessage::OfflineDMStatus {
                                                                     message_id: msg_id,
                                                                     label,
+                                                                    status: OfflineDeliveryStatus::Queued,
                                                                 }
                                                             }
                                                         }
@@ -5426,14 +5417,16 @@ impl IcedChat {
                                 self.outgoing_request_states
                                     .insert(sender, OutgoingRequestState::Accepted);
                                 self.rebuild_join_request_list();
-                                if let Some(record) =
-                                    self.friends.get_mut(&FriendId::from_public_key(sender))
+                                let fid = FriendId::from_public_key(sender);
+                                let record = self.friends.ensure_friend(fid);
+                                record.relationship = FriendRelationship::Friends;
+                                if let Some(conversation) = record.direct_conversation.as_mut()
                                 {
-                                    if let Some(conversation) = record.direct_conversation.as_mut()
-                                    {
-                                        conversation.state = DirectConversationState::Active;
-                                    }
+                                    conversation.state = DirectConversationState::Active;
                                 }
+                                // Show the accepted friend immediately in the sidebar.
+                                self.friend_online_cache.insert(sender);
+                                self.mark_friends_sidebar_dirty();
                                 self.try_save_friends();
                             }
                             Ok((sender, ContactAction::FriendRequestRejected)) => {
@@ -5460,12 +5453,16 @@ impl IcedChat {
                                     let fid = FriendId::from_public_key(sender);
                                     let record = self.friends.ensure_friend(fid);
                                     record.record_addrs(addrs.clone());
+                                    record.relationship = FriendRelationship::Friends;
                                     record.set_direct_conversation(
                                         topic,
                                         DirectConversationState::Active,
                                     );
                                     let room = RoomStore::with_peers(&self.data_dir, topic, addrs);
                                     let _ = room.save();
+                                    // Show the accepted friend immediately in the sidebar.
+                                    self.friend_online_cache.insert(sender);
+                                    self.mark_friends_sidebar_dirty();
                                     self.try_save_friends();
                                     self.outgoing_request_states
                                         .insert(sender, OutgoingRequestState::Accepted);
@@ -5695,22 +5692,18 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::OfflineDMQueued { message_id, label } => {
-                let entry =
-                    ChatEntry::local(&self.local_label, format!("[Offline DM queued] {label}"));
+            AppMessage::OfflineDMStatus { message_id, label, status } => {
+                let status_text = match status {
+                    OfflineDeliveryStatus::Queued => "queued",
+                    OfflineDeliveryStatus::Delivered => "delivered",
+                };
+                let entry = ChatEntry::local(
+                    &self.local_label,
+                    format!("[Offline DM {status_text}] {label}"),
+                );
                 let idx = self.entries.len();
                 self.entries_push(entry);
                 self.pending_offline_ids.insert(message_id, idx);
-                iced::Task::none()
-            }
-
-            AppMessage::OfflineDMDelivered { message_id } => {
-                if let Some(&idx) = self.pending_offline_ids.get(&message_id) {
-                    if idx < self.entries.len() {
-                        self.entries[idx].body = "[Offline DM delivered]".to_string();
-                        self.entries[idx].bump_gen();
-                    }
-                }
                 iced::Task::none()
             }
 
@@ -5790,7 +5783,7 @@ impl IcedChat {
                             // Update the in-memory ChatEntry to show delivered status.
                             if let Some(&idx) = self.pending_offline_ids.get(&_ack.message_id) {
                                 if idx < self.entries.len() {
-                                    self.entries[idx].body = "[Offline DM delivered]".to_string();
+                                    self.entries[idx].body = "[Offline DM acked]".to_string();
                                     self.entries[idx].bump_gen();
                                 }
                             }
@@ -6626,10 +6619,9 @@ impl IcedChat {
                                     .await
                                     {
                                         Ok(()) => {
-                                            // Delivery succeeded — acknowledge locally so the
-                                            // envelope is removed from the store.
-                                            let ack = MailboxAck::sign(&secret_key, &msg_id);
-                                            let _ = store.acknowledge_outgoing_and_save(&ack);
+                                            // Keep the envelope until the recipient's signed
+                                            // acknowledgement arrives via InboxEvent::AckReceived.
+                                            debug!("mailbox: retry delivered envelope {}", msg_id);
                                         }
                                         Err(_) => {
                                             // Leave in store for next retry.
@@ -12141,8 +12133,9 @@ mod tests {
             backfill_handle,
             false,
             None,
-            false,
             Arc::new(Mutex::new(dummy_discovered_rx)),
+            None,
+            false,
         );
 
         (runtime, app, local_public, peer_public)

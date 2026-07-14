@@ -14,6 +14,7 @@ use std::{
 use iroh::EndpointAddr;
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::chat_core::atomic_write::atomic_write_json;
 use crate::discovery_secret::DiscoverySecret;
@@ -136,12 +137,12 @@ impl RoomStore {
             store.data_dir = data_dir.to_path_buf();
             // Persist the migrated store so future loads skip migration.
             if let Err(err) = store.save() {
-                eprintln!("warning: failed to persist v3 room migration: {err}");
+                warn!(error = %err, "failed to persist v3 room migration");
             }
             Ok(Some(store))
         } else if store.schema_version > SCHEMA_VERSION {
             return Err(n0_error::anyerr!(
-                "unsupported room schema version {} in {}",
+                "unsupported room schema version {} in {} (expected version 3 or lower)",
                 store.schema_version,
                 path.display()
             ));

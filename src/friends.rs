@@ -102,7 +102,7 @@ pub enum FriendRelationship {
     /// This variant is kept only for backward-compatible deserialisation of
     /// old `friends.json` files; on load it is reset to `NotFriend`.
     #[deprecated(
-        since = "4.0",
+        since = "4.0.0",
         note = "use FriendRequestStore for request lifecycle instead"
     )]
     #[serde(rename = "outgoing_pending")]
@@ -114,7 +114,7 @@ pub enum FriendRelationship {
     /// This variant is kept only for backward-compatible deserialisation of
     /// old `friends.json` files; on load it is reset to `NotFriend`.
     #[deprecated(
-        since = "4.0",
+        since = "4.0.0",
         note = "use FriendRequestStore for request lifecycle instead"
     )]
     #[serde(rename = "incoming_pending")]
@@ -508,6 +508,17 @@ impl FriendsStore {
     ) -> &mut FriendRecord {
         let record = self.ensure_friend(id);
         record.last_announced_name = Some(name.into());
+        record
+    }
+
+    /// Set the relationship state for a friend record.
+    pub fn set_relationship(
+        &mut self,
+        id: FriendId,
+        relationship: FriendRelationship,
+    ) -> &mut FriendRecord {
+        let record = self.ensure_friend(id);
+        record.relationship = relationship;
         record
     }
 

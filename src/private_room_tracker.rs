@@ -42,10 +42,14 @@
 //! ).await.unwrap();
 //! ```
 
-use std::time::Instant;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::discovery_backend::{
     EncryptedDiscoveryRecord, NamespaceId, TopicDiscoveryBackend, MAX_DISCOVERY_PAYLOAD_SIZE,
@@ -189,6 +193,11 @@ impl PrivateRoomTracker {
         &self.topic
     }
 
+    /// Return a short, non-secret room identifier suitable for tracing.
+    fn topic_short(&self) -> String {
+        hex::encode(&self.topic.as_bytes()[..4])
+    }
+
     /// Return the DHT namespace used for publish/lookup.
     pub fn namespace(&self) -> &NamespaceId {
         &self.namespace
@@ -223,16 +232,20 @@ impl PrivateRoomTracker {
         )?;
         let encrypted_record = record.encrypt(&self.encryption_key(now));
         let wire_record = encrypted_record.to_bytes()?;
-        let result = self
-            .backend
-            .publish(&self.namespace, EncryptedDiscoveryRecord::new(wire_record))
-            .await;
+        let result = async {
+            self.backend
+                .publish(&self.namespace, EncryptedDiscoveryRecord::new(wire_record))
+                .await
+        }
+        .instrument(info_span!("tracker.publish", tracker = "private", room = %topic_short))
+        .await;
 
         let duration_us = start.elapsed().as_micros() as u64;
         match &result {
             Ok(()) => info!(
                 topic = %topic_short,
                 local = %local,
+                outcome = "success",
                 duration_us = duration_us,
                 "private room publish completed",
             ),
@@ -240,6 +253,7 @@ impl PrivateRoomTracker {
                 topic = %topic_short,
                 local = %local,
                 error = %e,
+                outcome = "failure",
                 duration_us = duration_us,
                 "private room publish failed",
             ),
@@ -267,7 +281,23 @@ impl PrivateRoomTracker {
         let local = self.local_endpoint_id.fmt_short();
 
         // Fetch encrypted records from the backend.
-        let encrypted = self.backend.lookup(&self.namespace).await?;
+        let encrypted = match async { self.backend.lookup(&self.namespace).await }
+            .instrument(info_span!("tracker.lookup", tracker = "private", room = %topic_short))
+            .await
+        {
+            Ok(records) => records,
+            Err(error) => {
+                warn!(
+                    topic = %topic_short,
+                    local = %local,
+                    outcome = "failure",
+                    error = %error,
+                    duration_us = start.elapsed().as_micros() as u64,
+                    "private room lookup failed",
+                );
+                return Err(error);
+            }
+        };
         let total_encrypted = encrypted.len();
 
         // Decrypt native tracker envelopes for the current and previous minute.
@@ -306,6 +336,13 @@ impl PrivateRoomTracker {
         let duration_us = start.elapsed().as_micros() as u64;
         let accepted = counters.accepted;
         let rejected = counters.total_rejected();
+        for peer in &peers {
+            tracing::trace!(
+                topic = %topic_short,
+                candidate = %peer.fmt_short(),
+                "private room candidate accepted for join",
+            );
+        }
         if accepted > 0 {
             info!(
                 topic = %topic_short,
@@ -323,6 +360,7 @@ impl PrivateRoomTracker {
                 self_filtered = counters.self_filtered,
                 duplicates = counters.duplicates,
                 duration_us = duration_us,
+                outcome = "success",
                 "private room discovery found peers",
             );
         } else {
@@ -334,6 +372,7 @@ impl PrivateRoomTracker {
                 accepted = accepted,
                 rejected = rejected,
                 duration_us = duration_us,
+                outcome = "success",
                 "private room discovery returned no peers",
             );
         }
@@ -341,7 +380,11 @@ impl PrivateRoomTracker {
         Ok(peers)
     }
 
-    /// Shut down the tracker, releasing backend resources.
+    /// Consume the tracker for use by a continuous runner.
+    pub fn into_inner(self) -> Self {
+        self
+    }
+
     ///
     /// Fires the cancellation token and calls [`shutdown`](TopicDiscoveryBackend::shutdown)
     /// on the backend.
@@ -353,6 +396,97 @@ impl PrivateRoomTracker {
         self.cancel.cancel();
         let _ = self.backend.shutdown().await;
         info!(topic = %topic_short, "private room tracker shut down");
+    }
+}
+
+/// Runs private-room publication and discovery in the background.
+pub struct PrivateContinuousTracker {
+    cancel: CancellationToken,
+    task_handle: tokio::task::JoinHandle<()>,
+    tracker: Arc<PrivateRoomTracker>,
+}
+
+impl std::fmt::Debug for PrivateContinuousTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivateContinuousTracker")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PrivateContinuousTracker {
+    /// Start periodic private-room publish/discover loops.
+    pub fn start(
+        tracker: PrivateRoomTracker,
+        _config: crate::public_room_continuous::ContinuousTrackerConfig,
+        new_peers_tx: mpsc::Sender<Vec<EndpointId>>,
+    ) -> Self {
+        let tracker = Arc::new(tracker);
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task_tracker = Arc::clone(&tracker);
+        let task_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    _ = task_cancel.cancelled() => {
+                        info!(topic = %task_tracker.topic_short(), "private DHT tracker cancelled");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        if let Err(error) = task_tracker.publish_once().await {
+                            // Publication failure is non-fatal: discovery can still
+                            // use records published by other room members. Keep the
+                            // fallback explicit so stale advertisements are visible.
+                            warn!(
+                                topic = %task_tracker.topic_short(),
+                                operation = "publish",
+                                fallback = "continue_without_local_refresh",
+                                error = %error,
+                                "DHT degraded; private-room publish unavailable",
+                            );
+                        }
+                        match task_tracker.discover_once().await {
+                            Ok(peers) => {
+                                if new_peers_tx.send(peers).await.is_err() {
+                                    warn!(
+                                        topic = %task_tracker.topic_short(),
+                                        operation = "discover",
+                                        fallback = "stop_peer_forwarding",
+                                        "private DHT peer channel closed",
+                                    );
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                // A transient DHT outage must not shut down the
+                                // room; continue with peers already in the mesh.
+                                warn!(
+                                    topic = %task_tracker.topic_short(),
+                                    operation = "discover",
+                                    fallback = "continue_with_existing_peers",
+                                    error = %error,
+                                    "DHT degraded; private-room discovery unavailable",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            cancel,
+            task_handle,
+            tracker,
+        }
+    }
+
+    /// Stop background work and release the DHT backend.
+    pub async fn shutdown(self) {
+        self.cancel.cancel();
+        let _ = self.task_handle.await;
+        if let Ok(tracker) = Arc::try_unwrap(self.tracker) {
+            tracker.shutdown().await;
+        }
     }
 }
 
