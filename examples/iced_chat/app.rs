@@ -887,6 +887,11 @@ pub enum Screen {
     Settings,
     /// Peer profile overlay — shows shared files with Download buttons.
     PeerProfile(PublicKey),
+    /// Full-screen image preview within the chat panel (sidebar stays visible).
+    ImagePreview {
+        topic: TopicId,
+        entry_index: usize,
+    },
 }
 
 // ── Per-conversation runtime state ─────────────────────────────────────
@@ -956,6 +961,9 @@ pub struct ConversationLive {
     pub pending_events: VecDeque<NetEvent>,
     /// Number of unread events received while hidden.
     pub unread: u64,
+    /// Whether persisted history has been loaded from ChatHistoryStore
+    /// and replayed into this conversation's entries.
+    pub history_loaded: bool,
 }
 
 impl ConversationLive {
@@ -985,6 +993,7 @@ impl ConversationLive {
             neighbors: HashSet::new(),
             pending_events: VecDeque::new(),
             unread: 0,
+            history_loaded: false,
         }
     }
 
@@ -999,6 +1008,8 @@ impl ConversationLive {
 pub struct IcedChat {
     // ── Navigation ──
     screen: Screen,
+    /// Screen to return to when closing image preview.
+    previous_screen: Option<Screen>,
     /// Pending topic we're connecting to (used during the async handoff
     /// from clicking a room to actually subscribing).
     pending_topic: Option<TopicId>,
@@ -1304,6 +1315,7 @@ struct SidebarChatsRow {
     preview: String,
     unread: u64,
     last_seen_at_unix_ms: u64,
+    online: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1500,7 +1512,7 @@ pub enum AppMessage {
     OutboxRetryResult(Vec<(u64, bool)>),
     MessageSent(String, u64, MessageHash),
     FileSent(String),
-    DownloadDone(String),
+    DownloadDone(String, PathBuf),
     /// File downloaded from a peer's shared profile — carries the saved path
     /// for the "Open" button.
     DownloadDonePeerFile(String, PathBuf),
@@ -1702,6 +1714,10 @@ pub enum AppMessage {
     InviteWhisperInputChanged(String),
     /// Send a room invite via whisper to the entered peer key.
     InviteSendWhisper,
+    /// Open the image at the given entry index in full-panel preview.
+    OpenImagePreview(usize),
+    /// Close the image preview and return to the previous screen.
+    CloseImagePreview,
 }
 
 // ── Performance metrics ──────────────────────────────────────────────
@@ -2292,6 +2308,7 @@ impl IcedChat {
         let app_settings = AppSettings::load(&data_dir);
         Self {
             screen: Screen::ChatList,
+            previous_screen: None,
             pending_topic: None,
             room_history,
             room_history_dirty: false,
@@ -2911,6 +2928,100 @@ impl IcedChat {
             .into()
     }
 
+    /// Convert a persisted `HistoryEntry` to a `ChatEntry` for in-memory replay.
+    ///
+    /// Returns `None` for entries whose kind or sender cannot be resolved.
+    fn history_entry_to_chat_entry(
+        hist: &HistoryEntry,
+        _topic: &TopicId,
+        local_hex: &str,
+    ) -> Option<ChatEntry> {
+        let kind = match hist.kind.as_str() {
+            "system" => ChatKind::System,
+            "text" | "image" => {
+                if hist.sender.is_empty() || hist.sender == local_hex {
+                    ChatKind::Local
+                } else {
+                    ChatKind::Remote
+                }
+            }
+            _ => return None,
+        };
+
+        let label = match kind {
+            ChatKind::System => "System".to_string(),
+            ChatKind::Local => "You".to_string(),
+            ChatKind::Remote => {
+                // Truncated public key as label
+                hist.sender[..hist.sender.len().min(16)].to_string()
+            }
+        };
+
+        let sender_key = match kind {
+            ChatKind::Remote => {
+                PublicKey::from_str(&hist.sender).ok()
+            }
+            ChatKind::Local => {
+                PublicKey::from_str(local_hex).ok()
+            }
+            ChatKind::System => None,
+        };
+
+        let is_image = hist.kind == "image";
+
+        if is_image {
+            let handle = hist
+                .image_bytes
+                .as_ref()
+                .map(|bytes| iced::widget::image::Handle::from_bytes(bytes.clone()));
+            Some(ChatEntry {
+                kind,
+                label,
+                body: hist.text_preview.clone(),
+                message_hash: None,
+                edited: false,
+                reactions: Vec::new(),
+                label_text: None,
+                reactions_text: None,
+                formatted_time: None,
+                image_handle: handle,
+                avatar_handle: None,
+                image_bytes: hist.image_bytes.clone(),
+                image_identifier: hist.image_identifier.clone(),
+                image_error: None,
+                timestamp: Some(hist.timestamp as i64),
+                event_id: hist.event_id,
+                delivery_state: hist.delivery_state.clone(),
+                sender_key,
+                download: None,
+                widget_gen: 0,
+            })
+        } else {
+            Some(ChatEntry {
+                kind,
+                label,
+                body: hist.text_preview.clone(),
+                message_hash: None,
+                edited: false,
+                reactions: Vec::new(),
+                label_text: None,
+                reactions_text: None,
+                formatted_time: None,
+                image_handle: None,
+                avatar_handle: None,
+                image_bytes: None,
+                image_identifier: None,
+                image_error: None,
+                timestamp: Some(hist.timestamp as i64),
+                event_id: hist.event_id,
+                delivery_state: hist.delivery_state.clone(),
+                sender_key,
+                download: None,
+                widget_gen: 0,
+            })
+        }
+    }
+
     fn push_system(&mut self, text: impl Into<String>) {
         let entry = ChatEntry::system(text);
         self.entries_push(entry);
@@ -3087,7 +3198,7 @@ impl IcedChat {
             AppMessage::OutboxRetryResult(_) => "OutboxRetryResult",
             AppMessage::MessageSent(..) => "MessageSent",
             AppMessage::FileSent(_) => "FileSent",
-            AppMessage::DownloadDone(_) => "DownloadDone",
+            AppMessage::DownloadDone(..) => "DownloadDone",
             AppMessage::DownloadDonePeerFile(..) => "DownloadDonePeerFile",
             AppMessage::DownloadFailed(_) => "DownloadFailed",
             AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
@@ -3098,6 +3209,8 @@ impl IcedChat {
             AppMessage::DownloadPeerFile(..) => "DownloadPeerFile",
             AppMessage::OpenPeerProfile(..) => "OpenPeerProfile",
             AppMessage::ClosePeerProfile => "ClosePeerProfile",
+            AppMessage::OpenImagePreview(..) => "OpenImagePreview",
+            AppMessage::CloseImagePreview => "CloseImagePreview",
             AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
             AppMessage::ImageDownloaded { .. } => "ImageDownloaded",
             AppMessage::FriendAdded { .. } => "FriendAdded",
@@ -3983,9 +4096,23 @@ impl IcedChat {
                     }
                 }
 
-                // History is persisted to disk but not replayed into the UI on
-                // room open — only messages from the current session are shown.
-                // Use the /history command or the log viewer for past messages.
+                // Load persisted history and replay it into the UI.
+                // Entries are prepended (oldest first) so they appear before
+                // any current-session system messages.
+                {
+                    let local_hex = self.local_public.to_string();
+                    let history_entries: Vec<HistoryEntry> = {
+                        let chat_history = self.chat_history.lock().unwrap();
+                        chat_history.for_topic(&topic).into_iter().cloned().collect()
+                    };
+                    for hist_entry in &history_entries {
+                        if let Some(chat_entry) =
+                            Self::history_entry_to_chat_entry(hist_entry, &topic, &local_hex)
+                        {
+                            self.entries_push(chat_entry);
+                        }
+                    }
+                }
 
                 // Replay queued or previously-sent messages after a reconnect.
                 // The signed bytes are reused verbatim, so retries cannot create
@@ -6142,6 +6269,7 @@ impl IcedChat {
                         let progress_queue = self.download_progress_queue.clone();
                         let name_copy = filename.clone();
                         let safety = self.public_room_safety.clone();
+                        let downloads_dir = self.boru_downloads_dir.clone();
                         iced::Task::perform(
                             async move {
                                 use boru_chat::chat_callbacks::TransferKind;
@@ -6170,17 +6298,17 @@ impl IcedChat {
                                 )
                                 .await
                                 .map_err(|e| format!("Download: {e}"))?;
-                                let dest =
-                                    std::env::current_dir().unwrap_or_default().join(&name_copy);
+                                let dest = downloads_dir.join(&name_copy);
+                                let _ = std::fs::create_dir_all(&downloads_dir);
                                 blob_store
                                     .blobs()
-                                    .export(ticket.hash(), dest)
+                                    .export(ticket.hash(), dest.clone())
                                     .await
                                     .map_err(|e| format!("Export: {e}"))?;
-                                Ok(name_copy)
+                                Ok((name_copy, dest))
                             },
-                            |r: Result<String, String>| match r {
-                                Ok(name) => AppMessage::DownloadDone(name),
+                            |r: Result<(String, PathBuf), String>| match r {
+                                Ok((name, path)) => AppMessage::DownloadDone(name, path),
                                 Err(e) => AppMessage::DownloadFailed(e),
                             },
                         )
@@ -6271,21 +6399,14 @@ impl IcedChat {
                 self.push_system(format!("Sharing: {name}"));
                 iced::Task::none()
             }
-            AppMessage::DownloadDone(name) => {
-                self.push_system(format!("Saved: {name}"));
-                if let Some(idx) = self.entries.iter().position(|entry| {
-                    entry
-                        .download
-                        .as_ref()
-                        .is_some_and(|download| download.name == name)
-                }) {
+            AppMessage::DownloadDone(name, path) => {
+                self.push_system(format!("*{name}* is complete"));
+                if let Some(idx) = self.download_entry_index {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
                             download.state = DownloadState::Completed {
                                 saved_name: name.clone(),
-                                saved_path: Some(
-                                    std::env::current_dir().unwrap_or_default().join(&name),
-                                ),
+                                saved_path: Some(path),
                             };
                             self.layout_cache.borrow_mut().invalidate_from(idx);
                         }
@@ -6295,13 +6416,8 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::DownloadDonePeerFile(name, path) => {
-                self.push_system(format!("Downloaded: {name}"));
-                if let Some(idx) = self.entries.iter().position(|entry| {
-                    entry
-                        .download
-                        .as_ref()
-                        .is_some_and(|download| download.name == name)
-                }) {
+                self.push_system(format!("*{name}* is complete"));
+                if let Some(idx) = self.download_entry_index {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
                             download.state = DownloadState::Completed {
@@ -6436,18 +6552,42 @@ impl IcedChat {
             }
 
             AppMessage::OpenPeerProfile(peer) => {
-                if self.profile_cache.contains_key(&peer) {
-                    self.screen = Screen::PeerProfile(peer);
-                } else {
-                    self.push_system(format!(
-                        "No profile data available for {}",
-                        peer.fmt_short()
-                    ));
+                if !self.profile_cache.contains_key(&peer) {
+                    // Create a minimal profile from the friend record as fallback,
+                    // so the profile page is accessible even without gossip ProfileUpdate data.
+                    let fid = FriendId::from_public_key(peer);
+                    if let Some(record) = self.friends.get(&fid) {
+                        self.profile_cache.insert(
+                            peer,
+                            PeerProfileData {
+                                display_name: record.display_label(&fid),
+                                bio: String::new(),
+                                last_updated: SystemTime::UNIX_EPOCH,
+                                shared_files: Vec::new(),
+                            },
+                        );
+                    }
                 }
+                self.screen = Screen::PeerProfile(peer);
                 iced::Task::none()
             }
             AppMessage::ClosePeerProfile => {
                 self.screen = Screen::ChatList;
+                iced::Task::none()
+            }
+            AppMessage::OpenImagePreview(entry_index) => {
+                self.previous_screen = Some(self.screen.clone());
+                self.screen = Screen::ImagePreview {
+                    topic: self.topic,
+                    entry_index,
+                };
+                iced::Task::none()
+            }
+            AppMessage::CloseImagePreview => {
+                self.screen = self
+                    .previous_screen
+                    .take()
+                    .unwrap_or(Screen::Chat { topic: self.topic });
                 iced::Task::none()
             }
 
@@ -8378,6 +8518,9 @@ impl IcedChat {
             Screen::FriendRequests => self.view_friend_requests(),
             Screen::Settings => self.view_settings_screen(),
             Screen::PeerProfile(peer) => self.view_peer_profile(*peer),
+            Screen::ImagePreview { topic: _, entry_index } => {
+                self.view_image_preview(*entry_index)
+            }
         };
 
         let content = row![
@@ -8530,7 +8673,6 @@ impl IcedChat {
 
         let ticket_join_section = self.view_sidebar_ticket_join();
         let chats_section = self.view_sidebar_chats();
-        let discovered_section = self.view_sidebar_discovered_peers();
         let friends_section = self.view_sidebar_friends();
         let requests_section = self.view_sidebar_requests();
 
@@ -8549,7 +8691,6 @@ impl IcedChat {
             }))
             .push(ticket_join_section)
             .push(chats_section)
-            .push(discovered_section)
             .push(friends_section)
             .push(requests_section)
             .push(Space::new().height(Length::Fill));
@@ -8587,33 +8728,45 @@ impl IcedChat {
                 .find(&public_topic)
                 .map(|e| e.last_seen_at_unix_ms)
                 .unwrap_or(0),
+            online: false,
         };
 
-        let mut conversations: Vec<SidebarChatsRow> = self
+        let conversations: Vec<SidebarChatsRow> = self
             .conversation_store
             .active_iter()
             .into_iter()
             .filter(|entry| entry.topic != public_topic)
-            .map(|entry| SidebarChatsRow {
-                topic: entry.topic,
-                name: entry.display_name().to_string(),
-                preview: self
-                    .room_history
-                    .find(&entry.topic)
-                    .and_then(|r| {
-                        if r.last_preview.is_empty() {
-                            None
-                        } else {
-                            Some(r.last_preview.clone())
-                        }
-                    })
-                    .unwrap_or_default(),
-                unread: self
-                    .conversations
-                    .get(&entry.topic)
-                    .map(|c| c.unread)
-                    .unwrap_or(0),
-                last_seen_at_unix_ms: entry.last_seen_at_unix_ms,
+            .map(|entry| {
+                let online = if entry.peer_id.is_empty() {
+                    false
+                } else {
+                    PublicKey::from_str(&entry.peer_id)
+                        .ok()
+                        .map(|pk| self.friend_online_cache.contains(&pk))
+                        .unwrap_or(false)
+                };
+                SidebarChatsRow {
+                    topic: entry.topic,
+                    name: entry.display_name().to_string(),
+                    preview: self
+                        .room_history
+                        .find(&entry.topic)
+                        .and_then(|r| {
+                            if r.last_preview.is_empty() {
+                                None
+                            } else {
+                                Some(r.last_preview.clone())
+                            }
+                        })
+                        .unwrap_or_default(),
+                    unread: self
+                        .conversations
+                        .get(&entry.topic)
+                        .map(|c| c.unread)
+                        .unwrap_or(0),
+                    last_seen_at_unix_ms: entry.last_seen_at_unix_ms,
+                    online,
+                }
             })
             .collect();
 
@@ -8649,7 +8802,7 @@ impl IcedChat {
         let mut section = Column::new().spacing(SPACE_2);
 
         section = section.push(
-            container(text("Chats").size(TYPO_XS).style(text_muted_style))
+            container(text("Conversations").size(TYPO_XS).style(text_muted_style))
                 .padding(iced::Padding {
                     top: SPACE_8,
                     right: SPACE_12,
@@ -8667,6 +8820,7 @@ impl IcedChat {
             dep.public_room.unread,
             selected_topic.clone(),
             dep.public_room.last_seen_at_unix_ms,
+            dep.public_room.online,
         ));
 
         for row in &dep.conversations {
@@ -8678,6 +8832,7 @@ impl IcedChat {
                 row.unread,
                 selected_topic.clone(),
                 row.last_seen_at_unix_ms,
+                row.online,
             ));
         }
 
@@ -8765,16 +8920,18 @@ impl IcedChat {
         unread: u64,
         selected_topic: Rc<Cell<Option<TopicId>>>,
         last_seen_at_unix_ms: u64,
+        online: bool,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, text, Column};
         use iced::Length;
 
-        let _theme = Self::theme_from_dark(dark_mode);
+        let theme = Self::theme_from_dark(dark_mode);
 
+        let status_dot = if online { "●" } else { "○" };
         let display_name = if unread > 0 {
-            format!("{}  [{}]", name, unread)
+            format!("{} {}  [{}]", status_dot, name, unread)
         } else {
-            name
+            format!("{} {}", status_dot, name)
         };
 
         let preview_text = if preview.is_empty() {
@@ -9143,6 +9300,11 @@ impl IcedChat {
                         .on_press(AppMessage::OpenFriendChat(friend.peer))
                         .padding([SPACE_2, SPACE_6]),
                 )
+                .push(
+                    button(text("Profile").size(TYPO_XS))
+                        .on_press(AppMessage::OpenPeerProfile(friend.peer))
+                        .padding([SPACE_2, SPACE_6]),
+                )
                 .spacing(SPACE_4)
                 .align_y(Alignment::Center)
                 .padding([SPACE_4, SPACE_12])
@@ -9498,7 +9660,7 @@ impl IcedChat {
     fn view_chat_log(&self) -> iced::widget::Scrollable<'_, AppMessage> {
         use iced::widget::space;
         use iced::widget::text::Wrapping;
-        use iced::widget::{container, scrollable, text, Column, Row};
+        use iced::widget::{button, container, scrollable, text, Column, Row};
         use iced::Length;
 
         let _start = std::time::Instant::now();
@@ -9618,7 +9780,20 @@ impl IcedChat {
             };
 
             let label_text = entry.label_text.as_deref().unwrap_or(&entry.label);
-            let label_el = text(label_text).size(TYPO_XS).color(label_color);
+            let label_el: iced::Element<'_, AppMessage> =
+                if matches!(entry.kind, ChatKind::Remote) {
+                    if let Some(sender_key) = entry.sender_key {
+                        button(text(label_text).size(TYPO_XS).color(label_color))
+                            .on_press(AppMessage::OpenPeerProfile(sender_key))
+                            .padding(0)
+                            .style(|_t, _s| iced::widget::button::Style::default())
+                            .into()
+                    } else {
+                        text(label_text).size(TYPO_XS).color(label_color).into()
+                    }
+                } else {
+                    text(label_text).size(TYPO_XS).color(label_color).into()
+                };
 
             let body_el = text(&entry.body)
                 .size(self.chat_text_size)
@@ -9694,9 +9869,12 @@ impl IcedChat {
             if let Some(handle) = self.image_handle_for_entry(entry) {
                 let img = iced::widget::image(handle)
                     .content_fit(iced::ContentFit::ScaleDown)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(300.0));
-                col = col.push(img);
+                    .width(Length::Fixed(200.0));
+                let thumbnail = iced::widget::button(img)
+                    .on_press(AppMessage::OpenImagePreview(i))
+                    .padding(0)
+                    .style(|_t, _s| iced::widget::button::Style::default());
+                col = col.push(thumbnail);
             } else if entry.image_error.is_some() || entry.image_identifier.is_some() {
                 use iced::widget::{container, text, Column};
                 let error_text = entry
@@ -9880,6 +10058,83 @@ impl IcedChat {
                 }));
                 s
             })
+            .into()
+    }
+
+    /// Full-panel image preview: renders the image at full panel width with a
+    /// "Back" button at the top. The sidebar remains visible — only the main
+    /// panel content switches to the preview.
+    fn view_image_preview(&self, entry_index: usize) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, scrollable, text, Column};
+        use iced::{Alignment, Length};
+
+        let theme = self.theme();
+        let back_btn = button(text("← Back").size(TYPO_MD))
+            .on_press(AppMessage::CloseImagePreview)
+            .padding([SPACE_6, SPACE_12])
+            .style(|_t, _s| iced::widget::button::Style::default());
+
+        let image_element: iced::Element<'_, AppMessage> =
+            if let Some(entry) = self.entries.get(entry_index) {
+                if let Some(handle) = self.image_handle_for_entry(entry) {
+                    iced::widget::image(handle)
+                        .content_fit(iced::ContentFit::Contain)
+                        .width(Length::FillPortion(1))
+                        .height(Length::FillPortion(1))
+                        .into()
+                } else if entry.image_error.is_some() {
+                    let error_text = entry
+                        .image_error
+                        .as_deref()
+                        .unwrap_or("Image preview unavailable");
+                    column![
+                        text("🖼 Image unavailable")
+                            .size(TYPO_SM)
+                            .color(text_system(&theme)),
+                        text(error_text)
+                            .size(TYPO_XS)
+                            .color(text_system(&theme)),
+                    ]
+                    .spacing(SPACE_4)
+                    .align_x(Alignment::Center)
+                    .into()
+                } else {
+                    text("Image not available")
+                        .size(TYPO_MD)
+                        .color(text_system(&theme))
+                        .into()
+                }
+            } else {
+                text("Image not found")
+                    .size(TYPO_MD)
+                    .color(text_system(&theme))
+                    .into()
+            };
+
+        let content = Column::new()
+            .push(
+                container(back_btn)
+                    .width(Length::Fill)
+                    .padding([SPACE_4, SPACE_8]),
+            )
+            .push(
+                scrollable(
+                    container(image_element)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |t| container_primary(t))
             .into()
     }
 
