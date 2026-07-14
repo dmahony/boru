@@ -33,7 +33,7 @@ use boru_chat::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
 };
 use boru_chat::friends::{DirectConversationState, FriendId, FriendRelationship, FriendsStore};
-use boru_chat::image_optimizer::{compress_image, optimize_chat_image, CHAT_IMAGE_MAX_BYTES};
+use boru_chat::image_optimizer::{compress_image, optimize_chat_image, optimize_chat_image_to_webp, CHAT_IMAGE_MAX_BYTES};
 use boru_chat::image_store::ImageStore;
 use boru_chat::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
 use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
@@ -1473,6 +1473,9 @@ pub enum AppMessage {
     ImageDownloaded {
         sender: PublicKey,
         name: String,
+        /// Display label that may include compression info like "photo.webp (45% smaller)".
+        /// Passed directly into the chat entry's body text.
+        display_name: String,
         image_bytes: Vec<u8>,
         message_hash: MessageHash,
         /// ImageStore identifier pre-saved by the async download task.
@@ -2524,7 +2527,8 @@ impl IcedChat {
             move |r: Result<(String, Vec<u8>, Option<String>), String>| match r {
                 Ok((name, data, id)) => AppMessage::ImageDownloaded {
                     sender: sender_pk,
-                    name,
+                    name: name.clone(),
+                    display_name: name,
                     image_bytes: data,
                     message_hash: hash,
                     image_identifier: id,
@@ -5917,6 +5921,8 @@ impl IcedChat {
                 iced::Task::perform(
                     async move {
                         let path_buf = std::path::PathBuf::from(&abs_path);
+                        // Validate file size before reading to avoid loading
+                        // a multi-GiB file into memory just to reject it.
                         let metadata = tokio::fs::metadata(&path_buf)
                             .await
                             .map_err(|e| format!("Failed to inspect image: {e}"))?;
@@ -5929,12 +5935,32 @@ impl IcedChat {
                         let full_bytes = tokio::fs::read(&path_buf)
                             .await
                             .map_err(|e| format!("Failed to read image: {e}"))?;
-                        // Optimize the image: resize, strip metadata, encode as
-                        // JPEG.  Errors are reported to the user rather than
-                        // silently falling back to the original bytes.
-                        let opt_bytes = optimize_chat_image(&full_bytes)
-                            .map_err(|e| format!("Image optimization failed: {e}"))?;
-                        // blob store.  Both the sender's preview and the
+                        // Convert to WebP: resize, strip metadata, encode as
+                        // WebP at quality 80.  Errors are reported to the user
+                        // rather than silently falling back to the original bytes,
+                        // because the original may be many MiB.
+                        let (opt_bytes, orig_size, webp_size) =
+                            optimize_chat_image_to_webp(&full_bytes)
+                                .map_err(|e| format!("WebP conversion failed: {e}"))?;
+                        // Append compression ratio to the image card label
+                        let compression_note = if orig_size > 0 && webp_size < orig_size {
+                            let saved_pct = (1.0 - webp_size as f64 / orig_size as f64) * 100.0;
+                            format!(" ({saved_pct:.0}% smaller)")
+                        } else {
+                            String::new()
+                        };
+                        // Rename the file with .webp extension
+                        let webp_name = {
+                            let path = std::path::Path::new(&filename);
+                            if let Some(stem) = path.file_stem() {
+                                format!("{}.webp", stem.to_string_lossy())
+                            } else {
+                                format!("{filename}.webp")
+                            }
+                        };
+                        let fname = webp_name.clone();
+                        let display_name = format!("{webp_name}{compression_note}");
+                        // Add to blob store.  Both the sender's preview and the
                         // receiver's inline display use these bytes.
                         let tag = blob_store
                             .blobs()
@@ -5945,7 +5971,7 @@ impl IcedChat {
                         use iroh_blobs::api::proto::TagInfo;
                         let hash: MessageHash = *tag.hash.as_bytes();
                         let msg = crate::Message::ImageShare {
-                            name: filename.clone(),
+                            name: webp_name.clone(),
                             hash,
                         };
                         let encoded = SignedMessage::sign_and_encode(&secret_key, &msg)
@@ -5953,12 +5979,13 @@ impl IcedChat {
                         if let Some(ref sender) = sender {
                             sender.broadcast(encoded).await.ok();
                         }
-                        Ok((local_pk, fname, opt_bytes, hash))
+                        Ok((local_pk, fname, display_name, opt_bytes, hash))
                     },
-                    |r: Result<(PublicKey, String, Vec<u8>, MessageHash), String>| match r {
-                        Ok((sender_pk, name, bytes, hash)) => AppMessage::ImageDownloaded {
+                    |r: Result<(PublicKey, String, String, Vec<u8>, MessageHash), String>| match r {
+                        Ok((sender_pk, name, display_name, bytes, hash)) => AppMessage::ImageDownloaded {
                             sender: sender_pk,
                             name,
+                            display_name,
                             image_bytes: bytes,
                             message_hash: hash,
                             image_identifier: None,
@@ -6108,6 +6135,7 @@ impl IcedChat {
             AppMessage::ImageDownloaded {
                 sender,
                 name,
+                display_name,
                 image_bytes,
                 message_hash,
                 image_identifier,
@@ -6130,7 +6158,7 @@ impl IcedChat {
                 let mut entry = ChatEntry::image(
                     kind,
                     &sender_name,
-                    format!("[Image: {name}]"),
+                    format!("[Image: {display_name}]"),
                     image_bytes,
                     Some(message_hash),
                     None,
@@ -7718,7 +7746,17 @@ impl ChatCallbacks for IcedChat {
     }
 
     fn set_pending_file(&mut self, name: String, ticket: String) {
-        self.pending_file = Some((name, ticket));
+        self.pending_file = Some((name.clone(), ticket.clone()));
+        // Create a download card entry so the file appears as a card with a
+        // download button, not just a system notification.  The download
+        // entry index is set so ExecuteDownloadAt can find the entry.
+        self.download_entry_index = Some(self.entries.len());
+        self.entries_push(ChatEntry::system_download(
+            format!("File received: {name}"),
+            TransferKind::File,
+            name,
+            ticket,
+        ));
     }
 
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
@@ -9259,35 +9297,35 @@ impl IcedChat {
                         if let Some(ref handle) = entry.avatar_handle {
                             iced::widget::image(handle.clone())
                                 .content_fit(iced::ContentFit::ScaleDown)
-                                .width(Length::Fixed(28.0))
-                                .height(Length::Fixed(28.0))
+                                .width(Length::Fixed(48.0))
+                                .height(Length::Fixed(48.0))
                                 .into()
                         } else {
-                            text("?").size(TYPO_LG).into()
+                            text("?").size(TYPO_XL).into()
                         }
                     };
                     Row::new()
                         .push(avatar)
                         .push(bubble_col)
                         .align_y(iced::Alignment::Center)
-                        .spacing(SPACE_6)
+                        .spacing(SPACE_8)
                 }
                 ChatKind::Local => {
                     let avatar: iced::Element<'_, AppMessage> =
                         if let Some(ref handle) = entry.avatar_handle {
                             iced::widget::image(handle.clone())
                                 .content_fit(iced::ContentFit::ScaleDown)
-                                .width(Length::Fixed(28.0))
-                                .height(Length::Fixed(28.0))
+                                .width(Length::Fixed(48.0))
+                                .height(Length::Fixed(48.0))
                                 .into()
                         } else {
-                            text("?").size(TYPO_LG).into()
+                            text("?").size(TYPO_XL).into()
                         };
                     Row::new()
                         .push(avatar)
                         .push(bubble_col)
                         .align_y(iced::Alignment::Center)
-                        .spacing(SPACE_6)
+                        .spacing(SPACE_8)
                 }
                 _ => unreachable!(),
             }

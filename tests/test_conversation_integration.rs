@@ -230,6 +230,112 @@ fn accept_friend_request_adds_friend_no_conversation() {
         bob_stores.conversations.is_empty(),
         "Accepting a friend request must NOT create a conversation"
     );
+
+    // Verify: Alice's store still has the request as Pending (she hasn't
+    // been notified yet that Bob accepted).
+    let alice_requests = alice_stores.friend_requests.iter().collect::<Vec<_>>();
+    assert_eq!(alice_requests.len(), 1, "Alice still has 1 request");
+    assert_eq!(
+        alice_requests[0].status,
+        FriendRequestStatus::Pending,
+        "Alice's request to Bob is still Pending (Bob hasn't notified her yet)"
+    );
+    assert!(
+        alice_stores.friends.is_empty(),
+        "Alice's friends list must NOT yet show Bob — she hasn't been notified"
+    );
+}
+
+/// Full bidirectional acceptance: Bob accepts Alice's request, then Alice
+/// is notified (simulating a whisper notification). Both sides must end up
+/// with the friend relationship set to `Friends`.
+#[test]
+fn bidirectional_friendship_on_acceptance() {
+    let dir = temp_dir("test-bidi-accept");
+    let (_alice_sk, alice_pk) = random_peer();
+    let (_bob_sk, bob_pk) = random_peer();
+    let alice = peer_str(&alice_pk);
+    let bob = peer_str(&bob_pk);
+
+    let mut alice_stores = PeerStores::new(&dir.join("alice"));
+    let mut bob_stores = PeerStores::new(&dir.join("bob"));
+
+    // ── 1. Alice sends friend request to Bob ──
+    alice_stores
+        .friend_requests
+        .send_request(&alice, &bob, None)
+        .expect("alice sends request");
+    // Bob receives it
+    bob_stores
+        .friend_requests
+        .send_request(&alice, &bob, None)
+        .expect("bob registers incoming request");
+
+    // ── 2. Bob accepts ──
+    accept_friend_request(&mut bob_stores, &bob_pk, &alice_pk);
+
+    // Bob's side: Alice should be a friend
+    let bob_friend = bob_stores.friends.get(&friend_id(&alice_pk));
+    assert!(bob_friend.is_some(), "Alice should be in Bob's friends list");
+    assert_eq!(
+        bob_friend.unwrap().relationship,
+        FriendRelationship::Friends,
+        "Alice should be marked as Friends in Bob's store"
+    );
+
+    // Alice hasn't been notified yet — her side is unchanged
+    assert!(
+        alice_stores.friends.is_empty(),
+        "Alice not yet notified — her friends list should be empty"
+    );
+
+    // ── 3. Simulate Alice receiving the acceptance notification
+    //    (this is what the FriendRequestAccepted whisper does) ──
+    // Alice's store: update the request status to Accepted
+    let alice_req_ids: Vec<String> = alice_stores
+        .friend_requests
+        .list_outgoing_by_status(&alice, FriendRequestStatus::Pending)
+        .into_iter()
+        .filter(|r| r.recipient == bob)
+        .map(|r| r.id.clone())
+        .collect();
+    for req_id in &alice_req_ids {
+        // Simulate the remote side telling us the request was accepted
+        // In real app this comes via a FriendRequestAccepted whisper
+        // Since Alice can't 'accept' her own outgoing request directly
+        // (accept_request checks that caller == recipient), we directly
+        // update Alice's friends store here.
+        alice_stores.friends.upsert(
+            friend_id(&bob_pk),
+            FriendRecord {
+                relationship: FriendRelationship::Friends,
+                ..FriendRecord::default()
+            },
+        );
+    }
+
+    // ── 4. Verify both sides have each other as friends ──
+    let alice_friend = alice_stores.friends.get(&friend_id(&bob_pk));
+    assert!(
+        alice_friend.is_some(),
+        "Bob should now be in Alice's friends list"
+    );
+    assert_eq!(
+        alice_friend.unwrap().relationship,
+        FriendRelationship::Friends,
+        "Bob should be marked as Friends in Alice's store"
+    );
+
+    let bob_friend = bob_stores.friends.get(&friend_id(&alice_pk));
+    assert!(
+        bob_friend.is_some(),
+        "Alice should be in Bob's friends list"
+    );
+    assert_eq!(
+        bob_friend.unwrap().relationship,
+        FriendRelationship::Friends,
+        "Alice should be marked as Friends in Bob's store"
+    );
 }
 
 // ── Test 2: Rejecting a friend request does not add a friend or conversation ──

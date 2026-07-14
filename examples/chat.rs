@@ -54,7 +54,7 @@ use boru_chat::chat_core::{
     RoomInviteV2, SignedMessage, StatusContext, Ticket,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
-use boru_chat::contact::direct_topic;
+use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_chat::conversations::ConversationStore;
 use boru_chat::friend_request::{FriendRequest, FriendRequestStatus, FriendRequestStore};
 use boru_chat::friends::{FriendId, FriendRecord, FriendsStore};
@@ -1864,7 +1864,49 @@ async fn handle_whisper_event_loop(
                 let label = tui.resolve_name(&peer);
                 tui.push_system(format!("[Whisper] Disconnected from {label}"));
             }
-            WhisperEvent::Control { .. } => {}
+            WhisperEvent::Control { from, content } => {
+                match SignedContactMessage::verify(&content, Some(from)) {
+                    Ok((sender, ContactAction::FriendRequestAccepted)) => {
+                        // Our outgoing friend request was accepted
+                        let fid = FriendId::from_public_key(sender);
+                        let record = tui.friends.ensure_friend(fid);
+                        record.relationship = FriendRelationship::Friends;
+                        tui.friends_dirty = true;
+                        if let Err(err) = tui.friends.save() {
+                            tracing::debug!(error = %err, "failed to save friends store after FriendRequestAccepted");
+                        }
+                        let label = tui.resolve_name(&sender);
+                        tui.push_system(format!("{label} accepted your friend request"));
+                    }
+                    Ok((sender, ContactAction::ConversationInvite { topic, addrs }))
+                        if addrs.iter().all(|addr| addr.id == sender) =>
+                    {
+                        // Check if this is a response to our outgoing request
+                        let local_str = tui.local_public.to_string();
+                        let sender_str = sender.to_string();
+                        let is_outgoing = tui.friend_request_store.iter().any(|r| {
+                            r.requester == local_str
+                                && r.recipient == sender_str
+                                && r.status == FriendRequestStatus::Pending
+                        });
+                        if is_outgoing {
+                            let fid = FriendId::from_public_key(sender);
+                            let record = tui.friends.ensure_friend(fid);
+                            record.relationship = FriendRelationship::Friends;
+                            tui.friends_dirty = true;
+                            if let Err(err) = tui.friends.save() {
+                                tracing::debug!(error = %err, "failed to save friends store after ConversationInvite");
+                            }
+                            let label = tui.resolve_name(&sender);
+                            tui.push_system(format!("{label} accepted your friend request and opened a conversation"));
+                        }
+                    }
+                    Ok((_sender, _action)) => {}
+                    Err(err) => {
+                        tracing::debug!("invalid contact control message: {err:#}");
+                    }
+                }
+            }
             WhisperEvent::MailboxEnvelope { .. } => {}
             WhisperEvent::MailboxAck { .. } => {}
             _ => {}
@@ -2717,7 +2759,8 @@ async fn handle_friend_requests_key(_key: KeyEvent, tui: &mut TuiState) -> Resul
                 let _ = tui.friend_request_store.accept_request(&id, &local_pk);
                 if let Ok(pk) = requester.parse::<PublicKey>() {
                     let fid = FriendId::from_public_key(pk);
-                    tui.friends.ensure_friend(fid);
+                    let record = tui.friends.ensure_friend(fid);
+                    record.relationship = FriendRelationship::Friends;
                     tui.friends_dirty = true;
                 }
                 tui.push_system(format!("Accepted friend request from {requester}"));

@@ -1,19 +1,24 @@
 //! Image preprocessing for chat wire transport.
 //!
-//! Provides two public functions:
+//! Provides three public functions:
 //!
 //! * [`optimize_chat_image`] — full resize + quality-retry JPEG compression for
 //!   the sender-side wire path.  Validates inputs, strips metadata, composites
 //!   PNG alpha, and rejects images that cannot meet the 2 MiB wire-size cap.
 //!
+//! * [`optimize_chat_image_to_webp`] — similar to [`optimize_chat_image`] but
+//!   encodes as lossless WebP instead of JPEG.  Also returns the compression
+//!   ratio so the UI can display a size-savings note.
+//!
 //! * [`compress_image`] — lightweight display-thumbnailing helper for
 //!   receiver-side safe rendering.  Delegates to [`optimize_chat_image`] but
 //!   falls back to the original bytes on any error.
 //!
-//! Both functions operate on raw bytes and return raw bytes, so they can be
+//! All functions operate on raw bytes and return raw bytes, so they can be
 //! tested without a running endpoint, blob store, or GUI.
 
 use image::codecs::jpeg::JpegEncoder;
+use image::codecs::webp::WebPEncoder;
 use image::{GenericImageView, ImageEncoder, RgbaImage};
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -185,6 +190,123 @@ pub fn optimize_chat_image(raw: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(feature = "gui")]
 pub fn compress_image(raw: &[u8]) -> Vec<u8> {
     optimize_chat_image(raw).unwrap_or_else(|_| raw.to_vec())
+}
+
+/// Validate, resize, and re-encode an image as lossless WebP for chat wire transport.
+///
+/// Accepts any format the `image` crate can decode (JPEG, PNG, BMP, GIF, etc.).
+/// Applies the same validation as [`optimize_chat_image`] (size limits, animated
+/// PNG rejection, alpha compositing, dimension cap) but encodes as lossless WebP
+/// (VP8L) instead of JPEG.  Lossless WebP preserves full visual detail while
+/// typically achieving smaller output than PNG, especially for screenshots and
+/// flat-color images.
+///
+/// Also returns compression metadata alongside the bytes so callers can display
+/// a size-savings note.
+///
+/// Returns `Ok((webp_bytes, original_size, webp_size))` or
+/// `Err(user_facing_error_message)`.
+///
+/// **Note:** The built-in WebP encoder in the `image` crate only supports
+/// lossless encoding, avoiding a C FFI dependency on `libwebp`.  For lossy
+/// WebP with quality control, wrap the `webp` crate directly instead.
+pub fn optimize_chat_image_to_webp(
+    raw: &[u8],
+) -> Result<(Vec<u8>, usize, usize), String> {
+    if raw.is_empty() {
+        return Err("Image is empty.".to_string());
+    }
+    if raw.len() > CHAT_IMAGE_MAX_BYTES {
+        return Err(format!(
+            "Image is {:.1} MiB, exceeding the {} MiB limit.",
+            raw.len() as f64 / (1024.0 * 1024.0),
+            CHAT_IMAGE_MAX_BYTES / (1024 * 1024),
+        ));
+    }
+
+    // ── Reject animated PNG early ──────────────────────────────────
+    {
+        const ACTL: &[u8] = b"acTL";
+        if raw.windows(ACTL.len()).any(|w| w == ACTL) {
+            let header_region = raw.len().min(1024);
+            if raw[..header_region].windows(ACTL.len()).any(|w| w == ACTL) {
+                return Err(
+                    "Animated PNGs are not supported. Please use a static image.".to_string(),
+                );
+            }
+        }
+    }
+
+    // ── Decode (auto-orients via EXIF if present) ──────────────────
+    let img = image::load_from_memory(raw)
+        .map_err(|_| "Unsupported or corrupt image format.".to_string())?;
+
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return Err("Image has zero dimensions.".to_string());
+    }
+
+    // ── Composite PNG alpha onto white ─────────────────────────────
+    let rgb_pixels = if img.color().has_alpha() {
+        let rgba = img.to_rgba8();
+        let mut white_bg = RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
+        image::imageops::overlay(&mut white_bg, &rgba, 0, 0);
+        let pixels: Vec<u8> = white_bg
+            .pixels()
+            .flat_map(|p| vec![p[0], p[1], p[2]])
+            .collect();
+        image::RgbImage::from_raw(w, h, pixels)
+            .ok_or_else(|| "Failed to construct RGB buffer.".to_string())?
+    } else {
+        img.to_rgb8()
+    };
+
+    // ── Resize (never upscale) ─────────────────────────────────────
+    let max_dim = w.max(h);
+    let (new_w, new_h) = if max_dim > INLINE_IMAGE_MAX_DIM {
+        let ratio = INLINE_IMAGE_MAX_DIM as f64 / max_dim as f64;
+        (
+            (w as f64 * ratio).round().max(1.0) as u32,
+            (h as f64 * ratio).round().max(1.0) as u32,
+        )
+    } else {
+        (w, h)
+    };
+
+    let resized = if new_w != w || new_h != h {
+        image::imageops::resize(
+            &rgb_pixels,
+            new_w,
+            new_h,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        rgb_pixels
+    };
+
+    // ── Encode as lossless WebP ────────────────────────────────────
+    //
+    // The `image` crate's built-in WebP encoder only supports lossless
+    // encoding (VP8L), which avoids a C FFI dependency on libwebp.
+    // Lossless WebP typically achieves 25–35% smaller output than PNG
+    // and is comparable or smaller than JPEG for screenshots and
+    // flat-color images.  For photographic content, the dimension cap
+    // (1280 px longest edge) already reduces the pixel count, and
+    // lossless WebP preserves full detail.
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let encoder = WebPEncoder::new_lossless(&mut buf);
+    encoder
+        .write_image(
+            resized.as_raw(),
+            new_w,
+            new_h,
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|_| "WebP encoding failed.".to_string())?;
+
+    let webp_bytes = buf.into_inner();
+    let webp_size = webp_bytes.len();
+    Ok((webp_bytes, raw.len(), webp_size))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
