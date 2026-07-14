@@ -352,7 +352,7 @@ impl SessionManagerActor {
                                         let wh = self.whisper_handle.clone();
                                         let event_tx = self.event_tx.clone();
                                         debug!(
-                                            %peer,
+                                            peer = %peer.fmt_short(),
                                             attempt = entry.reconnect_attempt,
                                             backoff = ?initial_delay,
                                             "scheduling reconnect"
@@ -373,7 +373,7 @@ impl SessionManagerActor {
                                                     Err(_e) => {
                                                         attempts += 1;
                                                         if attempts >= remaining_attempts {
-                                                            warn!(%peer, "reconnect exhausted after {attempts} retries");
+                                                            warn!(peer = %peer.fmt_short(), attempts, "reconnect exhausted");
                                                             let _ = event_tx.send(
                                                                 SessionEvent::StatusChanged {
                                                                     peer,
@@ -386,7 +386,7 @@ impl SessionManagerActor {
                                                         delay = delay
                                                             .saturating_mul(2)
                                                             .min(BACKOFF_MAX);
-                                                        debug!(%peer, attempt = attempts, backoff = ?delay, "reconnect retry");
+                                                        debug!(peer = %peer.fmt_short(), attempt = attempts, backoff = ?delay, "reconnect retry");
                                                     }
                                                 }
                                             }
