@@ -4,14 +4,17 @@
 //! with dynamic room switching — like Telegram/Signal.
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use parking_lot::Mutex as ParkingMutex;
+use rustc_hash::FxHashMap;
 
 use boru_chat::api::{GossipSender, GossipTopic};
 use boru_chat::backfill::BackfillHandle;
@@ -911,7 +914,7 @@ pub struct ConversationLive {
     /// continue to receive events.
     pub forward_handle: Option<n0_future::task::JoinHandle<()>>,
     /// Pending forwarder handle awaiting transfer.
-    pub forward_handle_slot: Arc<StdMutex<Option<n0_future::task::JoinHandle<()>>>>,
+    pub forward_handle_slot: Arc<ParkingMutex<Option<n0_future::task::JoinHandle<()>>>>,
     /// The gossip topic for this conversation.
     pub topic: TopicId,
     /// Ticket string for sharing this conversation.
@@ -925,9 +928,9 @@ pub struct ConversationLive {
     /// Whether to auto-scroll to the latest message.
     pub follow_latest: bool,
     /// Name cache: peer PublicKey → display name.
-    pub names: HashMap<PublicKey, String>,
+    pub names: FxHashMap<PublicKey, String>,
     /// Maps content hash to stable event id for self-sent messages.
-    pub self_sent_events: HashMap<MessageHash, u64>,
+    pub self_sent_events: FxHashMap<MessageHash, u64>,
     /// Number of entries already saved to ChatHistoryStore.
     pub history_saved_count: usize,
     /// Cached layout for the chat log.
@@ -952,7 +955,7 @@ pub struct ConversationLive {
     /// Transfer ID for the active download.
     pub active_download_transfer_id: Option<TransferId>,
     /// TransferId → entry index cache for O(1) progress update lookups.
-    pub transfer_id_to_index: HashMap<TransferId, usize>,
+    pub transfer_id_to_index: FxHashMap<TransferId, usize>,
 
     // ── Network peers ──
     /// Set of gossip neighbors for this conversation.
@@ -972,14 +975,14 @@ impl ConversationLive {
         Self {
             sender: None,
             forward_handle: None,
-            forward_handle_slot: Arc::new(StdMutex::new(None)),
+            forward_handle_slot: Arc::new(ParkingMutex::new(None)),
             topic,
             ticket_str: String::new(),
             entries: Vec::new(),
             composer_text: String::new(),
             follow_latest: true,
-            names: HashMap::new(),
-            self_sent_events: HashMap::new(),
+            names: FxHashMap::default(),
+            self_sent_events: FxHashMap::default(),
             history_saved_count: 0,
             layout_cache: std::cell::RefCell::new(LayoutCache::new(TYPO_SM)),
             scroll_offset: 0.0,
@@ -989,7 +992,7 @@ impl ConversationLive {
             pending_image: VecDeque::new(),
             download_entry_index: None,
             active_download_transfer_id: None,
-            transfer_id_to_index: HashMap::new(),
+            transfer_id_to_index: FxHashMap::default(),
             neighbors: HashSet::new(),
             pending_events: VecDeque::new(),
             unread: 0,
@@ -1019,7 +1022,7 @@ pub struct IcedChat {
     // ── Multi-conversation state ──
     /// Per-conversation runtime state. Each direct chat or group room
     /// keeps its own subscription, entries, and composer.
-    conversations: HashMap<TopicId, ConversationLive>,
+    conversations: FxHashMap<TopicId, ConversationLive>,
 
     // ── ChatList state ──
     room_history: RoomHistoryStore,
@@ -1052,14 +1055,14 @@ pub struct IcedChat {
     active_download_transfer_id: Option<TransferId>,
     /// TransferId → entry index cache for O(1) progress update lookups.
     /// Populated lazily in handle_download_progress; cleared on room switch.
-    transfer_id_to_index: HashMap<TransferId, usize>,
-    names: HashMap<PublicKey, String>,
+    transfer_id_to_index: FxHashMap<TransferId, usize>,
+    names: FxHashMap<PublicKey, String>,
     /// Active conversation gossip sender.
     sender: Option<GossipSender>,
     /// JoinHandle for the active conversation's event forwarder.
     forward_handle: Option<task::JoinHandle<()>>,
     /// Pending forwarder handle slot for async transitions.
-    forward_handle_slot: Arc<StdMutex<Option<task::JoinHandle<()>>>>,
+    forward_handle_slot: Arc<ParkingMutex<Option<task::JoinHandle<()>>>>,
 
     // ── Shared network state ──
     secret_key: SecretKey,
@@ -1105,12 +1108,12 @@ pub struct IcedChat {
     /// is needed outside the normal ~60s cycle.
     needs_conn_refresh: bool,
     /// Maps protocol message hashes to event_ids for delivery state resolution.
-    self_sent_events: HashMap<MessageHash, u64>,
+    self_sent_events: FxHashMap<MessageHash, u64>,
 
     /// Maps offline mail envelope message_ids to ChatEntry indices for
     /// updating delivery status when an AckReceived or MailboxReplayed event
     /// arrives for a queued offline DM.
-    pending_offline_ids: HashMap<String, usize>,
+    pending_offline_ids: FxHashMap<String, usize>,
 
     /// Whether to auto-scroll to the latest message.
     follow_latest: bool,
@@ -1136,9 +1139,9 @@ pub struct IcedChat {
     /// Per-user image storage, backed by `<data_dir>/files/` (or `BORU_CHAT_FILES_DIR`).
     image_store: ImageStore,
     /// Persistent chat message history (loaded on startup, saved on each message).
-    chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
+    chat_history: Arc<ParkingMutex<ChatHistoryStore>>,
     /// Durable outgoing messages, shared with the active room lifecycle.
-    outbox: Arc<std::sync::Mutex<OutboxStore>>,
+    outbox: Arc<ParkingMutex<OutboxStore>>,
     /// Whether chat history has unsaved changes.
     chat_history_dirty: bool,
     /// Number of entries that have already been saved to chat_history
@@ -1176,11 +1179,11 @@ pub struct IcedChat {
     profile_image_identifier: Option<String>,
     /// Cached profile image handles for remote peers, keyed by PublicKey.
     /// `None` means the peer announced a ticket but the blob hasn't been downloaded yet.
-    friend_image_handles: HashMap<PublicKey, Option<iced::widget::image::Handle>>,
+    friend_image_handles: FxHashMap<PublicKey, Option<iced::widget::image::Handle>>,
     /// Last-seen profile image ticket string per peer.
     /// Used to avoid re-invalidating and re-downloading when the same ticket
     /// is re-announced in a periodic AboutMe broadcast (see ConnMonitorTick).
-    friend_image_tickets: HashMap<PublicKey, String>,
+    friend_image_tickets: FxHashMap<PublicKey, String>,
     /// Queue of profile image tickets that arrived via AboutMe, awaiting async download.
     /// Each entry is (peer_public_key, blob_ticket_string).
     /// Downloaded entries are removed one-at-a-time each update tick to allow
@@ -1190,7 +1193,7 @@ pub struct IcedChat {
     /// ticket arrives for that peer.  Used in the sidebar lazy dependency keys
     /// so the friends/discovered-peers list re-renders only when a peer's
     /// profile actually changes, not on every ConnMonitorTick.
-    friend_profile_versions: HashMap<PublicKey, u64>,
+    friend_profile_versions: FxHashMap<PublicKey, u64>,
     /// Performance metrics for the last render — used by regression tests.
     perf: std::cell::RefCell<PerfMetrics>,
     /// Whether this is the user's first run (no room history, no friends, no chats).
@@ -1203,7 +1206,7 @@ pub struct IcedChat {
     /// Outgoing request state per peer — tracks UI-level request lifecycle.
     /// None = no request sent to this peer.
     /// Some(OutgoingRequestState) = current state of the request.
-    outgoing_request_states: HashMap<PublicKey, OutgoingRequestState>,
+    outgoing_request_states: FxHashMap<PublicKey, OutgoingRequestState>,
     /// Structured list of join-request items exposed to the main-menu ViewModel.
     /// Rebuilt after every state change; deduplicated by request ID.
     join_request_list: Vec<JoinRequestItem>,
@@ -1213,7 +1216,7 @@ pub struct IcedChat {
     friend_request_error: String,
     /// Queue of download progress events from background download tasks.
     /// Drained on each ConnMonitorTick and converted into AppMessage::DownloadProgress.
-    download_progress_queue: Arc<StdMutex<VecDeque<TransferProgress>>>,
+    download_progress_queue: Arc<ParkingMutex<VecDeque<TransferProgress>>>,
     /// Public-room safety enforcement (rate limits, size limits, download queue bounding).
     /// `None` (default) means private-room behavior — all safety checks are skipped.
     pub public_room_safety: Option<Arc<PublicRoomSafety>>,
@@ -1236,7 +1239,7 @@ pub struct IcedChat {
     pub discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
     /// Debounce buffer for NeighborUp/NeighborDown events.
     /// Maps `PublicKey -> is_online`. Flushed on every ConnMonitorTick (~1s).
-    pending_neighbor_status: HashMap<PublicKey, bool>,
+    pending_neighbor_status: FxHashMap<PublicKey, bool>,
 
     // ── Invite menu state ──
     /// Whether the "Copied!" feedback is shown for the friend ID.
@@ -1255,7 +1258,7 @@ pub struct IcedChat {
     /// Per-room continuous DHT trackers for private rooms with discovery enabled.
     /// Started when creating/joining a DHT-enabled room; shut down when
     /// leaving or deleting the room.
-    room_trackers: HashMap<TopicId, SharedTracker>,
+    room_trackers: FxHashMap<TopicId, SharedTracker>,
     /// Whether the create-room dialog is currently shown.
     show_create_room_dialog: bool,
 
@@ -1263,7 +1266,7 @@ pub struct IcedChat {
     /// Peers whose shared files we hide from UI and ignore in ProfileUpdate.
     blocked_sharers: HashSet<PublicKey>,
     /// Cached profile data received from peers via ProfileUpdate gossip.
-    profile_cache: HashMap<PublicKey, PeerProfileData>,
+    profile_cache: FxHashMap<PublicKey, PeerProfileData>,
     /// Rate-limiter for periodic ProfileUpdate broadcasts (at most once per 30 seconds).
     profile_update_throttle: ProfileUpdateThrottle,
     /// Persistent profile store (display name, bio, sharing controls).
@@ -2342,17 +2345,17 @@ impl IcedChat {
             room_history_dirty: false,
             join_ticket_input: String::new(),
             chat_list_error: String::new(),
-            conversations: HashMap::new(),
+            conversations: FxHashMap::default(),
             entries: Vec::new(),
             composer_text: String::new(),
             help_visible: false,
             pending_file: None,
-            pending_offline_ids: HashMap::new(),
+            pending_offline_ids: FxHashMap::default(),
             pending_image: VecDeque::new(),
             download_entry_index: None,
             active_download_transfer_id: None,
-            transfer_id_to_index: HashMap::new(),
-            names: HashMap::new(),
+            transfer_id_to_index: FxHashMap::default(),
+            names: FxHashMap::default(),
             topic: initial_topic,
             ticket_str: String::new(),
             secret_key,
@@ -2370,7 +2373,7 @@ impl IcedChat {
             net_tx,
             backfill_handle,
             forward_handle: None,
-            forward_handle_slot: Arc::new(StdMutex::new(None)),
+            forward_handle_slot: Arc::new(ParkingMutex::new(None)),
             friends,
             friends_dirty: false,
             friend_mgr,
@@ -2385,7 +2388,7 @@ impl IcedChat {
             heartbeat_counter: 2,
             conn_refresh_in_flight: false,
             needs_conn_refresh: false,
-            self_sent_events: HashMap::new(),
+            self_sent_events: FxHashMap::default(),
 
             follow_latest: true,
             total_content_height: std::cell::Cell::new(0.0),
@@ -2401,8 +2404,10 @@ impl IcedChat {
             notice,
             data_dir: data_dir.clone(),
             image_store,
-            chat_history,
-            outbox: Arc::new(std::sync::Mutex::new(OutboxStore::load_or_default(
+            chat_history: Arc::new(ParkingMutex::new(ChatHistoryStore::load_or_default(
+                &data_dir,
+            ))),
+            outbox: Arc::new(ParkingMutex::new(OutboxStore::load_or_default(
                 &data_dir,
             ))),
             chat_history_dirty: false,
@@ -2419,36 +2424,36 @@ impl IcedChat {
             profile_image_handle,
             profile_image_ticket,
             profile_image_identifier,
-            friend_image_handles: HashMap::new(),
-            friend_image_tickets: HashMap::new(),
+            friend_image_handles: FxHashMap::default(),
+            friend_image_tickets: FxHashMap::default(),
             pending_profile_image_tickets: std::collections::VecDeque::new(),
-            friend_profile_versions: HashMap::new(),
+            friend_profile_versions: FxHashMap::default(),
             perf: std::cell::RefCell::new(PerfMetrics::default()),
             first_run,
             layout_cache: std::cell::RefCell::new(LayoutCache::new(app_settings.chat_text_size)),
             friend_request_store: FriendRequestStore::load_or_default(&data_dir),
-            outgoing_request_states: HashMap::new(),
+            outgoing_request_states: FxHashMap::default(),
             join_request_list: Vec::new(),
             friend_request_search_input: String::new(),
             friend_request_error: String::new(),
-            download_progress_queue: Arc::new(StdMutex::new(VecDeque::new())),
+            download_progress_queue: Arc::new(ParkingMutex::new(VecDeque::new())),
             public_room_safety: None,
             conversation_store: ConversationStore::load_or_default(&data_dir),
             discovered_peers: Vec::new(),
             discovered_online_cache: HashSet::new(),
             continuous_tracker,
             discovered_peers_rx,
-            pending_neighbor_status: HashMap::new(),
+            pending_neighbor_status: FxHashMap::default(),
             friend_id_copied: false,
             show_invite_menu: false,
             invite_whisper_input: String::new(),
             dht,
             private_dht_disabled,
             create_room_dht_enabled: false,
-            room_trackers: HashMap::new(),
+            room_trackers: FxHashMap::default(),
             show_create_room_dialog: false,
             blocked_sharers: HashSet::new(),
-            profile_cache: HashMap::new(),
+            profile_cache: FxHashMap::default(),
             profile_update_throttle: ProfileUpdateThrottle::default(),
             profile_store: UserProfileStore::load(&data_dir, local_public)
                 .unwrap_or_else(|_| UserProfileStore::empty_at(&data_dir, local_public)),
@@ -3670,7 +3675,7 @@ impl IcedChat {
             if let Some(ref id) = entry.image_identifier {
                 history_entry.image_identifier = Some(id.clone());
             }
-            self.chat_history.lock().unwrap().push(history_entry);
+            self.chat_history.lock().push(history_entry);
         }
         self.history_saved_count = current_count;
         self.chat_history_dirty = true;
@@ -3782,7 +3787,7 @@ fn private_topic(a: &PublicKey, b: &PublicKey) -> TopicId {
     direct_topic(a, b)
 }
 
-fn online_friends_from_store(friends: &FriendsStore) -> HashMap<PublicKey, String> {
+fn online_friends_from_store(friends: &FriendsStore) -> FxHashMap<PublicKey, String> {
     friends
         .iter()
         .filter(|(_, record)| record.status.online)
@@ -3797,6 +3802,7 @@ fn online_friends_from_store(friends: &FriendsStore) -> HashMap<PublicKey, Strin
 // ── Update ────────────────────────────────────────────────────────────
 
 impl IcedChat {
+    #[profiling::function]
     pub fn update(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
         let _timer = PerfTracker::timer("update_msg", Self::log_variant(&message));
         debug!(message = Self::log_variant(&message), "app update");
@@ -3994,7 +4000,7 @@ impl IcedChat {
                             net_tx,
                             None,
                         );
-                        *forward_handle_slot.lock().unwrap() = Some(forward_handle);
+                        *forward_handle_slot.lock() = Some(forward_handle);
 
                         // Broadcast our presence (AboutMe + periodic Presence/Heartbeat
                         // handled by ConnMonitorTick).
@@ -4230,7 +4236,7 @@ impl IcedChat {
                             net_tx,
                             None,
                         );
-                        *forward_handle_slot.lock().unwrap() = Some(forward_handle);
+                        *forward_handle_slot.lock() = Some(forward_handle);
 
                         // Broadcast our presence (AboutMe + periodic Presence/Heartbeat
                         // handled by ConnMonitorTick).
@@ -4284,7 +4290,7 @@ impl IcedChat {
             } => {
                 self.pending_topic = None;
                 self.sender = Some(sender.clone());
-                self.forward_handle = self.forward_handle_slot.lock().unwrap().take();
+                self.forward_handle = self.forward_handle_slot.lock().take();
 
                 // Store continuous tracker if one was provided (private room with DHT).
                 if let Some(tracker) = room_tracker {
@@ -4326,7 +4332,7 @@ impl IcedChat {
                 {
                     let local_hex = self.local_public.to_string();
                     let history_entries: Vec<HistoryEntry> = {
-                        let chat_history = self.chat_history.lock().unwrap();
+                        let chat_history = self.chat_history.lock();
                         chat_history.for_topic(&topic).into_iter().cloned().collect()
                     };
                     #[cfg(feature = "gui")]
@@ -4357,7 +4363,7 @@ impl IcedChat {
                 // The signed bytes are reused verbatim, so retries cannot create
                 // a second logical message or invalidate message-hash dedup.
                 let replay = {
-                    let outbox = self.outbox.lock().unwrap();
+                    let outbox = self.outbox.lock();
                     outbox
                         .pending()
                         .into_iter()
@@ -4372,16 +4378,14 @@ impl IcedChat {
                         let _ = self
                             .outbox
                             .lock()
-                            .unwrap()
                             .update_delivery_state(*id, DeliveryState::Sent);
                         let _ = self
                             .chat_history
                             .lock()
-                            .unwrap()
                             .update_delivery_state(*id, DeliveryState::Sent);
                     }
-                    let _ = self.outbox.lock().unwrap().save();
-                    let _ = self.chat_history.lock().unwrap().save();
+                    let _ = self.outbox.lock().save();
+                    let _ = self.chat_history.lock().save();
                     task::spawn(async move {
                         for (_, bytes) in replay {
                             let _ = sender.broadcast(bytes.into()).await;
@@ -4625,7 +4629,7 @@ impl IcedChat {
                             net_tx,
                             None,
                         );
-                        *forward_handle_slot.lock().unwrap() = Some(forward_handle);
+                        *forward_handle_slot.lock() = Some(forward_handle);
 
                         let msg = SignedMessage::sign_and_encode(
                             &sk,
@@ -5011,7 +5015,7 @@ impl IcedChat {
                     // Remove room and chat history (not just go back — delete it)
                     self.room_history.remove(&topic);
                     self.room_history_dirty = true;
-                    self.chat_history.lock().unwrap().remove_topic(&topic);
+                    self.chat_history.lock().remove_topic(&topic);
                     self.chat_history_dirty = true;
                     self.persist_room_history();
                     self.try_save_chat_history();
@@ -5497,7 +5501,7 @@ impl IcedChat {
                     Err(e) => return iced::Task::done(AppMessage::ErrorMsg(e.to_string())),
                 };
                 let event_id = {
-                    let mut store = self.chat_history.lock().unwrap();
+                    let mut store = self.chat_history.lock();
                     let entry = HistoryEntry::new(
                         self.topic,
                         local_hex,
@@ -5510,7 +5514,7 @@ impl IcedChat {
                     id
                 };
                 {
-                    let mut outbox = self.outbox.lock().unwrap();
+                    let mut outbox = self.outbox.lock();
                     let _ = outbox.push(OutboxEntry::new(event_id, self.topic, encoded.to_vec()));
                     let _ = outbox.save();
                 }
@@ -6289,8 +6293,8 @@ impl IcedChat {
                 // attempts remain queued for the next periodic retry.
                 let mut changed = false;
                 {
-                    let mut outbox = self.outbox.lock().unwrap();
-                    let mut history = self.chat_history.lock().unwrap();
+                    let mut outbox = self.outbox.lock();
+                    let mut history = self.chat_history.lock();
                     for (event_id, delivered) in results {
                         let _ = outbox.increment_retry(event_id);
                         if delivered
@@ -6331,10 +6335,10 @@ impl IcedChat {
                 let outbox_arc = self.outbox.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
-                        let mut history = history_arc.lock().unwrap();
+                        let mut history = history_arc.lock();
                         let _ = history.update_delivery_state(event_id, DeliveryState::Sent);
                         let _ = history.save();
-                        let mut outbox = outbox_arc.lock().unwrap();
+                        let mut outbox = outbox_arc.lock();
                         let _ = outbox.update_delivery_state(event_id, DeliveryState::Sent);
                         let _ = outbox.save();
                     }),
@@ -6527,9 +6531,8 @@ impl IcedChat {
                                     {
                                         let progress_queue = progress_queue.clone();
                                         move |progress| {
-                                            if let Ok(mut queue) = progress_queue.lock() {
-                                                queue.push_back(progress);
-                                            }
+                                            let mut queue = progress_queue.lock();
+                                            queue.push_back(progress);
                                         }
                                     },
                                     safety.as_deref(),
@@ -6607,9 +6610,8 @@ impl IcedChat {
                             {
                                 let progress_queue = progress_queue.clone();
                                 move |progress| {
-                                    if let Ok(mut queue) = progress_queue.lock() {
-                                        queue.push_back(progress);
-                                    }
+                                    let mut queue = progress_queue.lock();
+                                    queue.push_back(progress);
                                 }
                             },
                             None::<&boru_chat::public_room_safety::PublicRoomSafety>,
@@ -6910,7 +6912,7 @@ impl IcedChat {
                 // cannot lose a message or falsely advance its UI state.
                 if let Some(sender) = self.sender.clone() {
                     let pending: Vec<(u64, Vec<u8>)> = {
-                        let outbox = self.outbox.lock().unwrap();
+                        let outbox = self.outbox.lock();
                         outbox
                             .pending()
                             .into_iter()
@@ -7113,14 +7115,15 @@ impl IcedChat {
                     ));
                 }
 
-                if let Ok(mut queue) = self.download_progress_queue.lock() {
-                    // Coalesce Progress events per transfer ID: only the latest
-                    // progress per active download per tick survives.  Terminal
-                    // events (Started, Completed, Failed, Cancelled) always pass
-                    // through so the UI stays correct.
-                    use std::collections::HashMap;
-                    let mut latest: HashMap<TransferId, TransferProgress> = HashMap::new();
-                    let mut terminals: Vec<TransferProgress> = Vec::new();
+                // Coalesce Progress events per transfer ID: only the latest
+                // progress per active download per tick survives.  Terminal
+                // events (Started, Completed, Failed, Cancelled) always pass
+                // through so the UI stays correct.
+                use rustc_hash::FxHashMap;
+                let mut latest: FxHashMap<TransferId, TransferProgress> = FxHashMap::default();
+                let mut terminals: Vec<TransferProgress> = Vec::new();
+                {
+                    let mut queue = self.download_progress_queue.lock();
                     for progress in queue.drain(..) {
                         match &progress {
                             TransferProgress::Progress { id, .. } => {
@@ -7131,12 +7134,12 @@ impl IcedChat {
                             }
                         }
                     }
-                    for progress in terminals {
-                        tasks.push(iced::Task::done(AppMessage::DownloadProgress(progress)));
-                    }
-                    for progress in latest.into_values() {
-                        tasks.push(iced::Task::done(AppMessage::DownloadProgress(progress)));
-                    }
+                } // explicit drop of queue guard before mutable borrows below
+                for progress in terminals {
+                    tasks.push(iced::Task::done(AppMessage::DownloadProgress(progress)));
+                }
+                for progress in latest.into_values() {
+                    tasks.push(iced::Task::done(AppMessage::DownloadProgress(progress)));
                 }
 
                 // ── Seen-on-visibility: when user is at bottom of log,
@@ -7148,7 +7151,7 @@ impl IcedChat {
                         {
                             ui_entry.delivery_state = DeliveryState::Seen;
                             ui_entry.bump_gen();
-                            let mut store = self.chat_history.lock().unwrap();
+                            let mut store = self.chat_history.lock();
                             let _ =
                                 store.update_delivery_state(ui_entry.event_id, DeliveryState::Seen);
                         }
@@ -7641,7 +7644,7 @@ impl IcedChat {
 
             AppMessage::ConfirmClearHistory => {
                 self.history_confirm_clear = false;
-                self.chat_history.lock().unwrap().clear();
+                self.chat_history.lock().clear();
                 self.chat_history_dirty = true;
                 iced::Task::none()
             }
@@ -7765,7 +7768,7 @@ impl IcedChat {
                         Err(e) => return iced::Task::done(AppMessage::ErrorMsg(e.to_string())),
                     };
                     let event_id = {
-                        let mut store = self.chat_history.lock().unwrap();
+                        let mut store = self.chat_history.lock();
                         let entry = HistoryEntry::new(
                             self.topic,
                             local_hex,
@@ -7778,7 +7781,7 @@ impl IcedChat {
                         id
                     };
                     {
-                        let mut outbox = self.outbox.lock().unwrap();
+                        let mut outbox = self.outbox.lock();
                         let _ =
                             outbox.push(OutboxEntry::new(event_id, self.topic, encoded.to_vec()));
                         let _ = outbox.save();
@@ -7872,8 +7875,8 @@ impl IcedChat {
     /// messages, friend room metadata, or the active-room file behind.
     fn purge_room_history(&mut self, topic: TopicId) -> Result<(), String> {
         let report = {
-            let mut chat_history = self.chat_history.lock().unwrap();
-            let mut outbox = self.outbox.lock().unwrap();
+            let mut chat_history = self.chat_history.lock();
+            let mut outbox = self.outbox.lock();
             delete_room_history(
                 &self.data_dir,
                 topic,
@@ -7891,7 +7894,6 @@ impl IcedChat {
             self.chat_history_dirty = true;
             self.chat_history
                 .lock()
-                .unwrap()
                 .save()
                 .map_err(|err| err.to_string())?;
             self.chat_history_dirty = false;
@@ -7899,7 +7901,6 @@ impl IcedChat {
         if report.outbox_entries_removed > 0 {
             self.outbox
                 .lock()
-                .unwrap()
                 .save()
                 .map_err(|err| err.to_string())?;
         }
@@ -7978,10 +7979,10 @@ impl IcedChat {
                         if entry.delivery_state == DeliveryState::Sent {
                             entry.delivery_state = DeliveryState::Delivered;
                             entry.bump_gen();
-                            let mut store = self.chat_history.lock().unwrap();
+                            let mut store = self.chat_history.lock();
                             let _ = store.update_delivery_state(event_id, DeliveryState::Delivered);
                             let _ = store.save();
-                            let mut outbox = self.outbox.lock().unwrap();
+                            let mut outbox = self.outbox.lock();
                             let _ =
                                 outbox.update_delivery_state(event_id, DeliveryState::Delivered);
                             let _ = outbox.save();
@@ -8049,7 +8050,7 @@ impl IcedChat {
                         if entry.delivery_state.can_transition_to(&DeliveryState::Seen) {
                             entry.delivery_state = DeliveryState::Seen;
                             entry.bump_gen();
-                            let mut store = self.chat_history.lock().unwrap();
+                            let mut store = self.chat_history.lock();
                             let _ = store.update_delivery_state(event_id, DeliveryState::Seen);
                         }
                     }
@@ -8070,7 +8071,7 @@ impl IcedChat {
                     entry.delivery_state = DeliveryState::Failed;
                     entry.bump_gen();
                     let eid = entry.event_id;
-                    let mut store = self.chat_history.lock().unwrap();
+                    let mut store = self.chat_history.lock();
                     let _ = store.update_delivery_state(eid, DeliveryState::Failed);
                 }
             }
@@ -8178,7 +8179,7 @@ impl IcedChat {
 
     fn try_save_chat_history(&mut self) {
         if self.chat_history_dirty {
-            let _ = self.chat_history.lock().unwrap().save();
+            let _ = self.chat_history.lock().save();
             self.chat_history_dirty = false;
         }
     }
@@ -8740,6 +8741,7 @@ impl IcedChat {
         PublicKey::from_str(&item.target_user).ok()
     }
 
+    #[profiling::function]
     pub fn view(&self) -> iced::Element<'_, AppMessage> {
         let _timer = PerfTracker::timer("view", &format!("{:?}", self.screen));
         use iced::widget::{container, row, Column};
@@ -10935,6 +10937,8 @@ impl IcedChat {
         .height(Length::Fill)
         .into()
     }
+
+    profiling::finish_frame!();
 }
 
 // ── Global keyboard shortcuts subscription ─────────────────────────────
@@ -11348,8 +11352,8 @@ mod tests {
         let ticket_b = "ticket_v2_hash_xyz".to_string();
 
         // Test the dedup logic inline (same guard as record_profile_image_ticket).
-        let mut handles: HashMap<PublicKey, Option<iced::widget::image::Handle>> = HashMap::new();
-        let mut tickets: HashMap<PublicKey, String> = HashMap::new();
+        let mut handles: std::collections::HashMap<PublicKey, Option<iced::widget::image::Handle>> = std::collections::HashMap::new();
+        let mut tickets: std::collections::HashMap<PublicKey, String> = std::collections::HashMap::new();
         let mut queue: VecDeque<(PublicKey, String)> = VecDeque::new();
 
         // First call: new ticket → should queue a download.
@@ -12935,7 +12939,7 @@ mod tests {
                     "Existing chat",
                     true,
                 ));
-            let chat_history = std::sync::Arc::new(std::sync::Mutex::new(
+            let chat_history = std::sync::Arc::new(ParkingMutex::new(
                 boru_chat::chat_history::ChatHistoryStore::empty_at(&data_dir),
             ));
             let backfill_handle = boru_chat::backfill::BackfillHandle::spawn(endpoint.clone());

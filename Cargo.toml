@@ -120,6 +120,11 @@ crossterm = { version = "0.28.1", optional = true }
 iced = { version = "0.14", default-features = false, features = ["tokio", "x11", "wayland", "tiny-skia", "image", "lazy", "wgpu"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 mimalloc = { version = "0.1", optional = true }
+profiling = { version = "1", default-features = false, features = [
+    "tracy-client",
+], optional = true }
+rustc-hash = { version = "2", optional = true }
+parking_lot = { version = "0.12" }
 
 
 [dev-dependencies]
@@ -172,7 +177,7 @@ simulator = [
 ]
 metrics = ["iroh-metrics/metrics"]
 examples = ["net", "dep:ratatui", "dep:crossterm"]
-gui = ["net", "dep:iced", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:mimalloc", "dep:rayon"]
+gui = ["net", "dep:iced", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash"]
 
 
 [[test]]
