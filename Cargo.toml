@@ -125,6 +125,8 @@ profiling = { version = "1", default-features = false, features = [
 ], optional = true }
 rustc-hash = { version = "2", optional = true }
 parking_lot = { version = "0.12" }
+rusqlite = { version = "0.39", features = ["bundled"] }
+anyhow = "1.0.103"
 
 
 [dev-dependencies]

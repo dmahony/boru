@@ -237,3 +237,8 @@ pub mod perf;
 /// [`DiagnosticEvent`]s and [`ReceivedProbe`]s.  Oldest entries are
 /// automatically evicted when storage limits are exceeded.
 pub mod diagnostics;
+
+/// Durable inbox/outbox storage.
+pub mod store;
+/// Retry queue for durable message delivery.
+pub mod retry;
