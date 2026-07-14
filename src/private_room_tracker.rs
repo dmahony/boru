@@ -549,6 +549,67 @@ mod tests {
         block_on(tracker.shutdown());
     }
 
+    /// Private-room lifecycle logs never contain room secrets, complete
+    /// invitations, or decrypted record contents.
+    ///
+    /// `n0_tracing_test` captures all crate events (including debug, info, and
+    /// warn), so this is deliberately stricter than checking only the default
+    /// subscriber filter.  The assertion is made after the real publish and
+    /// decrypt/validate path has run, rather than against a hand-built log.
+    #[test]
+    #[traced_test]
+    fn secret_safe_logging_excludes_sensitive_room_data() {
+        let topic = TopicId::from_bytes([0xABu8; 32]);
+        let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
+        let invite = crate::chat_core::RoomInviteV2::new(topic, secret);
+        let invitation = invite.encode();
+        let raw_secret = hex::encode(secret.as_bytes());
+
+        let (publisher_key, publisher) = test_identity();
+        let publisher_string = publisher.to_string();
+        let publisher_hex = hex::encode(publisher.as_bytes());
+        let (_observer_key, observer) = test_identity();
+        let backend = InMemoryDiscoveryBackend::new();
+        let publisher_tracker = PrivateRoomTracker::new(
+            Box::new(backend.clone()),
+            topic,
+            secret,
+            publisher,
+            publisher_key,
+        );
+        block_on(publisher_tracker.publish_once()).unwrap();
+
+        // This exercises decryption and validation of a real record.  The
+        // payload is the sensitive value that must not be formatted into logs.
+        let payload = crate::discovery_record::DiscoveryRecordPayload::new(&publisher);
+        let payload_bytes = postcard::to_allocvec(&payload).unwrap();
+        let payload_hex = hex::encode(payload_bytes);
+
+        let observer_tracker = PrivateRoomTracker::new(
+            Box::new(backend),
+            topic,
+            secret,
+            observer,
+            SecretKey::generate(),
+        );
+        let peers = block_on(observer_tracker.discover_once()).unwrap();
+        assert_eq!(peers, vec![publisher]);
+        block_on(observer_tracker.shutdown());
+
+        for forbidden in [
+            raw_secret.as_str(),
+            invitation.as_str(),
+            payload_hex.as_str(),
+            publisher_string.as_str(),
+            publisher_hex.as_str(),
+        ] {
+            assert!(
+                !logs_contain(forbidden),
+                "sensitive value appeared in tracing output: {forbidden}"
+            );
+        }
+    }
+
     // ── Construction ──────────────────────────────────────────────────
 
     #[test]
