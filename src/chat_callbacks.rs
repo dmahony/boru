@@ -294,12 +294,7 @@ pub trait ChatCallbacks {
     fn clear_profile_image(&mut self, _peer: PublicKey) {}
 
     /// Store profile metadata advertised by a peer. (Default no-op).
-    fn on_profile_update(
-        &mut self,
-        _peer: PublicKey,
-        _profile: UserProfile,
-    ) {
-    }
+    fn on_profile_update(&mut self, _peer: PublicKey, _profile: UserProfile) {}
 
     /// Merge a parsed peer ticket into frontend-owned durable state.
     /// Returns whether the frontend accepted the ticket.

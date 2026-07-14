@@ -147,7 +147,11 @@ impl GossipApi {
 pub struct GossipSender(mpsc::Sender<Command>);
 
 impl GossipSender {
-    pub(crate) fn new(sender: mpsc::Sender<Command>) -> Self {
+    /// Create a new `GossipSender` wrapping an mpsc channel sender.
+    ///
+    /// This is used internally by the protocol to allow broadcasting messages
+    /// to all endpoints in a gossip topic.
+    pub fn new(sender: mpsc::Sender<Command>) -> Self {
         Self(sender)
     }
 

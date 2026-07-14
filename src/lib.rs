@@ -226,3 +226,11 @@ pub mod room_docs;
 /// Enable at runtime with `BORU_PERF=1`.  Provides a global singleton
 /// that accumulates samples and prints a summary report.
 pub mod perf;
+
+/// Core diagnostics — bounded event and probe storage with sequence
+/// numbering and thread-safe query methods.
+///
+/// Always available (no feature gate).  Use [`Diagnostics`] to record
+/// [`DiagnosticEvent`]s and [`ReceivedProbe`]s.  Oldest entries are
+/// automatically evicted when storage limits are exceeded.
+pub mod diagnostics;

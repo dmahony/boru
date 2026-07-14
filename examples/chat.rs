@@ -51,11 +51,12 @@ use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_with_progress, download_candidates, fmt_relay_mode,
     handle_net_event, message_hash, refresh_bootstrap_peers, update_connection_counts, AppState,
     ChatEntry, ChatKind, ConnectionType, MeshHealth, Message, NetEvent, RoomInvitation,
-    RoomInviteV2, SignedMessage, StatusContext, Ticket,
+    RoomInviteV2, SignedMessage, StatusContext, Ticket, DIAGNOSTICS,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_chat::conversations::ConversationStore;
+use boru_chat::diagnostics::DiagnosticEventKind;
 use boru_chat::friend_request::{FriendRequest, FriendRequestStatus, FriendRequestStore};
 use boru_chat::friends::{FriendId, FriendRecord, FriendRelationship, FriendsStore};
 use boru_chat::inbox::{send_sync_request, InboxEvent, InboxHandle, InboxProtocol, INBOX_ALPN};
@@ -931,6 +932,8 @@ async fn main() -> Result<()> {
         memory_lookup.set_endpoint_info(addr.clone());
     }
 
+    DIAGNOSTICS.record(Some(topic), DiagnosticEventKind::RoomJoinStarted);
+
     let sub = if peer_ids.is_empty() {
         tracing::info!("waiting for peers to join us");
         gossip.subscribe(topic, peer_ids.clone()).await
@@ -943,6 +946,7 @@ async fn main() -> Result<()> {
         match timeout_result {
             Ok(result) => result,
             Err(_) => {
+                DIAGNOSTICS.record(Some(topic), DiagnosticEventKind::RoomJoinFailed);
                 bail_any!(
                     "timed out after 30s waiting for bootstrap peer(s) — \
                      the ticket or saved addresses may be stale; the room is \
@@ -952,8 +956,14 @@ async fn main() -> Result<()> {
         }
     };
     let sub = match sub {
-        Ok(topic) => topic,
-        Err(e) => bail_any!("failed to join gossip topic: {e}"),
+        Ok(topic_handle) => {
+            DIAGNOSTICS.record(Some(topic), DiagnosticEventKind::RoomJoined);
+            topic_handle
+        }
+        Err(e) => {
+            DIAGNOSTICS.record(Some(topic), DiagnosticEventKind::RoomJoinFailed);
+            bail_any!("failed to join gossip topic: {e}")
+        }
     };
     let (sender, receiver) = sub.split();
     tracing::info!("connected");
@@ -2737,6 +2747,15 @@ async fn handle_chat_key(
             if let Some(conv) = tui.conversations.get_mut(&topic) {
                 conv.self_sent_events.insert(msg_hash, event_id);
             }
+            // Record broadcast diagnostic event
+            DIAGNOSTICS.record(
+                Some(tui.status.topic),
+                DiagnosticEventKind::MessageBroadcast {
+                    message_id: Some(hex::encode(msg_hash)),
+                    message_hash: Some(hex::encode(msg_hash)),
+                    probe_id: None,
+                },
+            );
             match sender.broadcast(encoded_message.clone()).await {
                 Ok(()) => {
                     let mut entry = ChatEntry::local(local_label.to_string(), trimmed);

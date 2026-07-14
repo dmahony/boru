@@ -11,8 +11,8 @@ use std::{
 };
 
 use blake3::Hasher;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use n0_error::{Result, StdResultExt};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::warn;
 
 use crate::user_profile::SharedFile;
@@ -77,7 +77,10 @@ impl FileIndexer {
     /// Same as [`scan`](Self::scan) but applies profile-based filtering flags
     /// (`over_limit`, `extension_blocked`) to each file.  Still indexes all
     /// files locally — callers decide which to announce via [`SharedFile::is_announceable`].
-    pub fn scan_with_profile(&self, profile: &crate::user_profile::UserProfile) -> Result<Vec<SharedFile>> {
+    pub fn scan_with_profile(
+        &self,
+        profile: &crate::user_profile::UserProfile,
+    ) -> Result<Vec<SharedFile>> {
         ensure_shared_folder(&self.shared_folder)?;
         let files = scan_folder_with_profile(&self.shared_folder, profile)?;
         let mut state = self.state.write().expect("file index lock poisoned");
@@ -100,13 +103,17 @@ impl FileIndexer {
     /// Find an indexed file by its metadata id or by its computed content hash.
     pub fn get_shared_file(&self, hash: &str) -> Option<SharedFile> {
         let state = self.state.read().expect("file index lock poisoned");
-        state.files.values().find(|file| {
-            file.id == hash
-                || file
-                    .hash
-                    .as_ref()
-                    .is_some_and(|value| hex::encode(value) == hash)
-        }).cloned()
+        state
+            .files
+            .values()
+            .find(|file| {
+                file.id == hash
+                    || file
+                        .hash
+                        .as_ref()
+                        .is_some_and(|value| hex::encode(value) == hash)
+            })
+            .cloned()
     }
 
     /// Compute and cache a file's content hash. This is the only operation here
@@ -152,11 +159,17 @@ impl FileIndexer {
                     }
                 };
                 if let Err(error) = watcher.watch(&folder, RecursiveMode::Recursive) {
-                    warn!("failed to watch shared folder {}: {error}", folder.display());
+                    warn!(
+                        "failed to watch shared folder {}: {error}",
+                        folder.display()
+                    );
                     return;
                 }
                 for event in notify_rx {
-                    if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
+                    if matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    ) {
                         let previous = indexer.list_shared_files();
                         if indexer.scan().is_err() {
                             continue;
@@ -171,9 +184,20 @@ impl FileIndexer {
     }
 }
 
-fn emit_changes(previous: &[SharedFile], current: &[SharedFile], event: &Event, tx: &mpsc::Sender<FileChangeEvent>) {
-    let old: HashMap<_, _> = previous.iter().map(|file| (file.id.as_str(), file)).collect();
-    let new: HashMap<_, _> = current.iter().map(|file| (file.id.as_str(), file)).collect();
+fn emit_changes(
+    previous: &[SharedFile],
+    current: &[SharedFile],
+    event: &Event,
+    tx: &mpsc::Sender<FileChangeEvent>,
+) {
+    let old: HashMap<_, _> = previous
+        .iter()
+        .map(|file| (file.id.as_str(), file))
+        .collect();
+    let new: HashMap<_, _> = current
+        .iter()
+        .map(|file| (file.id.as_str(), file))
+        .collect();
     for file in current {
         if !old.contains_key(file.id.as_str()) {
             let _ = tx.send(if matches!(event.kind, EventKind::Create(_)) {
@@ -216,13 +240,19 @@ fn scan_dir(root: &Path, directory: &Path, files: &mut Vec<SharedFile>) -> Resul
             _ => continue,
         };
         if !crate::user_profile::UserProfile::symlink_is_safe(&path, root) {
-            warn!("skipping shared-folder path outside root: {}", path.display());
+            warn!(
+                "skipping shared-folder path outside root: {}",
+                path.display()
+            );
             continue;
         }
         let metadata = match std::fs::metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
-                warn!("failed to stat shared-folder path {}: {error}", path.display());
+                warn!(
+                    "failed to stat shared-folder path {}: {error}",
+                    path.display()
+                );
                 continue;
             }
         };
@@ -270,18 +300,27 @@ fn scan_dir_with_profile_checks(
         };
         // Security: symlink must not escape the shared folder.
         if !crate::user_profile::UserProfile::symlink_is_safe(&path, root) {
-            warn!("skipping shared-folder path outside root: {}", path.display());
+            warn!(
+                "skipping shared-folder path outside root: {}",
+                path.display()
+            );
             continue;
         }
         // Security: path must resolve inside the shared folder.
         if !crate::user_profile::UserProfile::is_path_contained(&path, root) {
-            warn!("skipping path that resolves outside shared folder: {}", path.display());
+            warn!(
+                "skipping path that resolves outside shared folder: {}",
+                path.display()
+            );
             continue;
         }
         let metadata = match std::fs::metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
-                warn!("failed to stat shared-folder path {}: {error}", path.display());
+                warn!(
+                    "failed to stat shared-folder path {}: {error}",
+                    path.display()
+                );
                 continue;
             }
         };
@@ -297,7 +336,10 @@ fn scan_dir_with_profile_checks(
 
             let over_limit = metadata.len() > profile.max_file_size;
             let extension_blocked = if !profile.allowed_extensions.is_empty() {
-                !profile.allowed_extensions.iter().any(|a| a.eq_ignore_ascii_case(&ext))
+                !profile
+                    .allowed_extensions
+                    .iter()
+                    .any(|a| a.eq_ignore_ascii_case(&ext))
             } else {
                 false
             };
@@ -324,17 +366,28 @@ pub fn default_shared_folder_path() -> PathBuf {
     std::env::var_os("BORU_CHAT_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            dirs_fallback_home().join(".local").join("share").join("boru")
+            dirs_fallback_home()
+                .join(".local")
+                .join("share")
+                .join("boru")
         })
         .join("shared")
 }
 
 fn dirs_fallback_home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn mime_type(path: &Path) -> String {
-    match path.extension().and_then(|ext| ext.to_str()).unwrap_or_default().to_ascii_lowercase().as_str() {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "txt" => "text/plain",
         "md" => "text/markdown",
         "json" => "application/json",
@@ -344,7 +397,8 @@ fn mime_type(path: &Path) -> String {
         "gif" => "image/gif",
         "webp" => "image/webp",
         _ => "application/octet-stream",
-    }.to_owned()
+    }
+    .to_owned()
 }
 
 #[cfg(test)]
@@ -363,7 +417,10 @@ mod tests {
         let files = indexer.scan().unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].filename, "file.txt");
-        assert_eq!(indexer.get_shared_file(&files[0].id).unwrap().path, files[0].path);
+        assert_eq!(
+            indexer.get_shared_file(&files[0].id).unwrap().path,
+            files[0].path
+        );
     }
 
     #[test]
@@ -374,7 +431,10 @@ mod tests {
         let file = indexer.scan().unwrap().pop().unwrap();
         assert!(file.hash.is_none());
         let hash = indexer.hash_for_transfer(&file.id).unwrap();
-        assert_eq!(indexer.get_shared_file(&hex::encode(hash)).unwrap().hash, Some(hash));
+        assert_eq!(
+            indexer.get_shared_file(&hex::encode(hash)).unwrap().hash,
+            Some(hash)
+        );
     }
 
     #[test]
@@ -387,7 +447,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         fs::write(dir.path().join("new.txt"), b"new").unwrap();
         let event = rx.recv_timeout(Duration::from_secs(3)).unwrap();
-        assert!(matches!(event, FileChangeEvent::Added(_) | FileChangeEvent::Modified(_)));
+        assert!(matches!(
+            event,
+            FileChangeEvent::Added(_) | FileChangeEvent::Modified(_)
+        ));
         assert_eq!(indexer.list_shared_files().len(), 1);
     }
 }

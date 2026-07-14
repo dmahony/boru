@@ -244,6 +244,34 @@ impl Gossip {
         }
     }
 
+    /// Create a minimal Gossip for testing (requires `test-utils` feature).
+    ///
+    /// Creates a real endpoint bound to port 0 (auto-assign) with relays
+    /// disabled.  The gossip actor runs on a background tokio thread.
+    /// Safe to clone — the underlying endpoint and actor are reference-counted.
+    #[cfg(feature = "test-utils")]
+    pub fn test_dummy() -> Self {
+        use std::sync::OnceLock;
+        static DUMMY: OnceLock<(Gossip, iroh::Endpoint)> = OnceLock::new();
+        let (gossip, _endpoint) = DUMMY.get_or_init(|| {
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime for test gossip");
+            let _guard = rt.enter();
+            let endpoint = rt.block_on(async {
+                iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+                    .secret_key(iroh::SecretKey::generate())
+                    .address_lookup(iroh::address_lookup::memory::MemoryLookup::new())
+                    .relay_mode(iroh::RelayMode::Disabled)
+                    .bind()
+                    .await
+                    .expect("bind test endpoint")
+            });
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            std::mem::forget(rt); // Keep the runtime alive for the test process lifetime
+            (gossip, endpoint)
+        });
+        gossip.clone()
+    }
+
     /// Get the maximum message size configured for this gossip actor.
     pub fn max_message_size(&self) -> usize {
         self.inner.max_message_size

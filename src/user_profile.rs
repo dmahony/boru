@@ -162,7 +162,11 @@ impl UserProfile {
     /// - `file_sharing_enabled` must be `true`
     /// - File size must be ≤ `max_file_size`
     /// - If `allowed_extensions` is non-empty, the extension must be in it
-    pub fn is_file_announce_allowed(&self, size: u64, extension: &str) -> std::result::Result<(), String> {
+    pub fn is_file_announce_allowed(
+        &self,
+        size: u64,
+        extension: &str,
+    ) -> std::result::Result<(), String> {
         if !self.file_sharing_enabled {
             return Err("File sharing is disabled".into());
         }
@@ -240,7 +244,9 @@ impl UserProfile {
             ));
         }
         if filename == "." || filename == ".." {
-            return Err(format!("Received filename is a directory reference: {filename:?}"));
+            return Err(format!(
+                "Received filename is a directory reference: {filename:?}"
+            ));
         }
         Ok(())
     }
@@ -382,7 +388,9 @@ pub struct SharedFile {
     pub extension_blocked: bool,
 }
 
-fn is_false(b: &bool) -> bool { !b }
+fn is_false(b: &bool) -> bool {
+    !b
+}
 
 impl SharedFile {
     /// Create a new shared file entry, deriving `id` from filename, size, and
@@ -666,7 +674,11 @@ impl UserProfileStore {
 /// Check whether a file can be announced given profile settings.
 ///
 /// Delegates to [`UserProfile::is_file_announce_allowed`].
-pub fn check_file_announce_allowed(profile: &UserProfile, size: u64, extension: &str) -> std::result::Result<(), String> {
+pub fn check_file_announce_allowed(
+    profile: &UserProfile,
+    size: u64,
+    extension: &str,
+) -> std::result::Result<(), String> {
     profile.is_file_announce_allowed(size, extension)
 }
 
@@ -715,7 +727,10 @@ mod tests {
         let err = profile.validate().unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("bio"), "error should mention bio: {msg}");
-        assert!(msg.contains("140"), "error should mention max length: {msg}");
+        assert!(
+            msg.contains("140"),
+            "error should mention max length: {msg}"
+        );
     }
 
     #[test]
@@ -743,10 +758,7 @@ mod tests {
         let now = SystemTime::now();
         let f1 = SharedFile::new("test.txt", 1024, "text/plain", now);
         let f2 = SharedFile::new("test.txt", 1024, "text/plain", now);
-        assert_eq!(
-            f1.id, f2.id,
-            "identical metadata should produce same id"
-        );
+        assert_eq!(f1.id, f2.id, "identical metadata should produce same id");
     }
 
     #[test]
@@ -1137,7 +1149,9 @@ mod tests {
     #[test]
     fn is_file_allowed_nonexistent_path_returns_err() {
         let profile = UserProfile::new(test_key());
-        let err = profile.is_file_allowed(&PathBuf::from("/nonexistent/file.txt")).unwrap_err();
+        let err = profile
+            .is_file_allowed(&PathBuf::from("/nonexistent/file.txt"))
+            .unwrap_err();
         assert!(err.contains("Cannot read file metadata"), "error: {err}");
     }
 

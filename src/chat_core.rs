@@ -29,11 +29,18 @@ use serde_byte_array::ByteArray;
 
 use crate::api::{Event, GossipReceiver};
 use crate::chat_history::DeliveryState;
+use crate::diagnostics::{DiagnosticEventKind, Diagnostics, ReceivedProbe};
 use crate::discovery_secret::DiscoverySecret;
 use crate::friends::{FriendId, FriendsStore};
 use crate::proto::TopicId;
 use crate::public_room_safety::PublicRoomSafety;
 use crate::user_profile::UserProfile;
+
+/// Global diagnostics store for recording network events and probes.
+///
+/// Lazily initialised on first access with default capacities
+/// (5 000 events, 1 000 received probes).
+pub static DIAGNOSTICS: LazyLock<Diagnostics> = LazyLock::new(Diagnostics::new);
 
 // ── Bootstrap peer resolution ─────────────────────────────────────────────────
 
@@ -899,6 +906,9 @@ pub enum Message {
     /// This is intentionally separate from `Presence`, which is a
     /// *visible* status indicator.
     Heartbeat,
+    /// A diagnostic probe sent through the normal gossip path — not displayed
+    /// as an ordinary chat message by default.
+    DiagnosticProbe(crate::diagnostics::DiagnosticProbe),
 }
 
 /// Metadata for a file advertised by a peer in [`Message::ProfileUpdate`].
@@ -1451,6 +1461,12 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                 if seen.insert(dedup_key, Instant::now()).is_none() {
                     // First time — continue processing below.
                 } else {
+                    // Dedup detected — record diagnostic event and suppress.
+                    DIAGNOSTICS.record_with_peer(
+                        None,
+                        Some(from.to_string()),
+                        DiagnosticEventKind::DuplicateMessage,
+                    );
                     tracing::debug!(
                         "dedup: duplicate message from {} (hash={}, sent_at={})",
                         from.fmt_short(),
@@ -1502,6 +1518,18 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                     return Ok(());
                 }
             }
+            // Record message received diagnostic event (for all message types
+            // that pass dedup, blocked-peer, and TTL checks).
+            DIAGNOSTICS.record_with_peer(
+                None,
+                Some(from.to_string()),
+                DiagnosticEventKind::MessageReceived {
+                    message_id: Some(hex::encode(incoming_hash)),
+                    message_hash: Some(hex::encode(incoming_hash)),
+                    probe_id: None,
+                    sender_id: Some(from.to_string()),
+                },
+            );
             match message {
                 Message::AboutMe {
                     name,
@@ -1599,6 +1627,54 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                     // mesh health timestamps, but never push to the chat log.
                     cb.record_activity(from);
                 }
+                Message::DiagnosticProbe(ref probe) => {
+                    // Diagnostic probes travel through the normal gossip path
+                    // but are NOT displayed as ordinary chat messages.  They
+                    // are recorded in the diagnostics store with full metadata
+                    // (latency, message hash, duplicate tracking).
+                    let received_at_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+
+                    // Compute the message hash from the probe content
+                    let hash = message_hash(&message);
+
+                    // Compute latency; return None if clock skew produces
+                    // a negative value.
+                    let latency_ms = if received_at_ms >= probe.sent_at_ms {
+                        Some(received_at_ms - probe.sent_at_ms)
+                    } else {
+                        None
+                    };
+
+                    let hash_hex = hex::encode(hash);
+
+                    // Record the received probe in diagnostics storage
+                    let received = ReceivedProbe {
+                        probe_id: probe.probe_id.clone(),
+                        room_id: probe.room_id.clone(),
+                        sender_id: probe.sender_id.clone(),
+                        sent_at_ms: probe.sent_at_ms,
+                        received_at_ms,
+                        latency_ms,
+                        message_hash: hash_hex.clone(),
+                        duplicate_count: 0,
+                        timestamp: chrono::Utc::now(),
+                        room_id_opt: None,
+                    };
+                    DIAGNOSTICS.record_received_probe_enhanced(received);
+
+                    // Emit diagnostic events
+                    DIAGNOSTICS.record(
+                        None,
+                        DiagnosticEventKind::ProbeReceived {
+                            probe_id: probe.probe_id.clone(),
+                            message_hash: hash_hex.clone(),
+                            sender_id: probe.sender_id.clone(),
+                        },
+                    );
+                }
                 Message::ReadReceipt { message_hash } => {
                     if from != cb.local_public() && cb.has_message(&message_hash) {
                         let name = cb.resolve_name(&from);
@@ -1629,16 +1705,31 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
             }
         }
         NetEvent::NeighborUp { peer } => {
+            DIAGNOSTICS.record_with_peer(
+                None,
+                Some(peer.to_string()),
+                DiagnosticEventKind::PeerJoinedRoom,
+            );
             cb.on_neighbor_status_change(peer, true);
         }
         NetEvent::NeighborDown { peer } => {
+            DIAGNOSTICS.record_with_peer(
+                None,
+                Some(peer.to_string()),
+                DiagnosticEventKind::PeerLeftRoom,
+            );
             cb.on_neighbor_status_change(peer, false);
         }
         NetEvent::Closed => {
+            DIAGNOSTICS.record(
+                None,
+                DiagnosticEventKind::Error("gossip receiver closed".to_string()),
+            );
             cb.push_system("The gossip receiver closed.".into());
             cb.request_quit();
         }
         NetEvent::Error(err) => {
+            DIAGNOSTICS.record(None, DiagnosticEventKind::Error(err.to_string()));
             cb.push_system(format!("Network error: {err}"));
             cb.request_quit();
         }
@@ -1669,6 +1760,47 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Create and sign a diagnostic probe message suitable for gossip broadcast.
+///
+/// Returns the signed, encoded bytes ready to send via `gossip.broadcast()`.
+/// The probe reuses the same serialisation and signing path as ordinary
+/// room messages — no separate protocol is needed.
+///
+/// When `payload` is `None`, the probe carries no diagnostic text.  The
+/// `probe_id` is auto-generated via [`crate::diagnostics::generate_probe_id`]
+/// unless one is supplied.
+pub fn broadcast_diagnostic_probe(
+    secret_key: &SecretKey,
+    room_id: &str,
+    payload: Option<String>,
+    probe_id_override: Option<String>,
+) -> Result<Bytes> {
+    let probe = crate::diagnostics::DiagnosticProbe {
+        probe_id: probe_id_override.unwrap_or_else(crate::diagnostics::generate_probe_id),
+        sender_id: secret_key.public().to_string(),
+        room_id: room_id.to_string(),
+        sent_at_ms: now_ms() as i64,
+        payload,
+    };
+
+    // Record the broadcast event in diagnostics
+    let hash_hex = {
+        let msg = Message::DiagnosticProbe(probe.clone());
+        let hash = message_hash(&msg);
+        hex::encode(hash)
+    };
+    DIAGNOSTICS.record(
+        None,
+        DiagnosticEventKind::ProbeBroadcast {
+            probe_id: probe.probe_id.clone(),
+            message_hash: hash_hex,
+        },
+    );
+
+    let message = Message::DiagnosticProbe(probe);
+    SignedMessage::sign_and_encode(secret_key, &message)
 }
 
 /// Forward raw gossip events into a [`NetEvent`] channel.
@@ -3532,7 +3664,10 @@ mod tests {
         };
         handle_net_event(self_event, &mut app).unwrap();
         // No system message should appear (ProfileUpdate doesn't generate entries)
-        assert!(app.entries.is_empty(), "ProfileUpdate should not create chat entries");
+        assert!(
+            app.entries.is_empty(),
+            "ProfileUpdate should not create chat entries"
+        );
     }
 
     // ── SignedMessage roundtrip helper ──────────────────────────────────

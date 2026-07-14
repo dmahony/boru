@@ -67,6 +67,16 @@ use tracing::{debug, info, warn};
 use crate::perf_tracker::PerfTracker;
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_chat::chat_core::RoomInvitation;
+use boru_chat::diagnostics::GuiActionError;
+use boru_chat::diagnostics::GuiActionErrorCode;
+use boru_chat::diagnostics::GuiActionHistory;
+use boru_chat::diagnostics::GuiActionId;
+use boru_chat::diagnostics::GuiActionRequest;
+use boru_chat::diagnostics::GuiActionState;
+use boru_chat::diagnostics::GuiTestCommand;
+use boru_chat::diagnostics::FailureLayer;
+use boru_chat::diagnostics::IcedMessageJournal;
+use boru_chat::diagnostics::IcedStateSnapshot;
 use iced::Color;
 
 // ── Shared ContinuousTracker wrapper ─────────────────────────────────
@@ -1278,6 +1288,23 @@ pub struct IcedChat {
     file_indexer: FileIndexer,
     /// Local folder where downloaded peer files are saved ("Boru Downloads").
     boru_downloads_dir: PathBuf,
+
+    // ── GUI test actions (MCP-driven) ──
+    /// Iced message journal for diagnostics (shared with the MCP server).
+    pub iced_diagnostics: IcedMessageJournal,
+    /// Receiver for GUI test actions from MCP.
+    pub gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
+    /// GUI action history with expected-state tracking.
+    pub gui_action_history: GuiActionHistory,
+    /// OpenRoom action currently waiting for the asynchronous room handoff to
+    /// select its requested topic.  Completion is recorded only after the
+    /// normal OpenRoom/RoomOpened path has updated both topic and screen.
+    pending_open_room_action: Option<(GuiActionId, TopicId)>,
+    /// GoToChatList action currently being handled by the normal update path.
+    pending_chat_list_action: Option<GuiActionId>,
+    /// Sender for GUI state snapshots — publishes an [`IcedStateSnapshot`] after
+    /// each `update()` so the MCP server can watch for condition changes.
+    pub gui_state_tx: tokio::sync::watch::Sender<IcedStateSnapshot>,
 }
 
 
@@ -1718,6 +1745,19 @@ pub enum AppMessage {
     OpenImagePreview(usize),
     /// Close the image preview and return to the previous screen.
     CloseImagePreview,
+
+    // ── GUI test actions (MCP-driven) ──
+    /// An action received from the MCP GUI test actions channel.
+    GuiTestActionReceived(GuiActionRequest),
+    /// A wait condition has been satisfied.
+    GuiTestWaitSatisfied(String),
+    /// A wait condition timed out.
+    GuiTestWaitTimedOut {
+        idempotency_key: String,
+        condition: String,
+        expected: String,
+        elapsed_ms: u64,
+    },
 }
 
 // ── Performance metrics ──────────────────────────────────────────────
@@ -2233,6 +2273,9 @@ impl IcedChat {
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
         dht: Option<distributed_topic_tracker::Dht>,
         private_dht_disabled: bool,
+        iced_diagnostics: IcedMessageJournal,
+        gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
+        gui_state_tx: tokio::sync::watch::Sender<IcedStateSnapshot>,
     ) -> Self {
         let (initial_topic, initial_bootstrap) =
             initial_room.unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
@@ -2433,6 +2476,12 @@ impl IcedChat {
                 dl
             },
             file_indexer: FileIndexer::new(boru_chat::file_indexer::default_shared_folder_path()),
+            iced_diagnostics,
+            gui_action_rx,
+            gui_action_history: GuiActionHistory::default(),
+            pending_open_room_action: None,
+            pending_chat_list_action: None,
+            gui_state_tx,
         }
     }
 
@@ -3284,6 +3333,9 @@ impl IcedChat {
             AppMessage::OfflineDMStatus { .. } => "OfflineDMStatus",
             AppMessage::SaveProfile => "SaveProfile",
             AppMessage::ProfileSaved => "ProfileSaved",
+            AppMessage::GuiTestActionReceived(_) => "GuiTestActionReceived",
+            AppMessage::GuiTestWaitSatisfied(_) => "GuiTestWaitSatisfied",
+            AppMessage::GuiTestWaitTimedOut { .. } => "GuiTestWaitTimedOut",
         }
     }
 }
@@ -3572,6 +3624,87 @@ fn online_friends_from_store(friends: &FriendsStore) -> HashMap<PublicKey, Strin
         .collect()
 }
 
+// ── GUI test action validation ───────────────────────────────────────
+
+impl IcedChat {
+    /// Validate a semantic GUI test command against the current UI state.
+    pub fn validate_gui_test_command(
+        &self,
+        command: &GuiTestCommand,
+    ) -> Result<(), GuiActionError> {
+        let blocking_dialog = || {
+            self.show_create_room_dialog
+                || self.history_confirm_clear
+                || self.room_delete_confirm_topic.is_some()
+        };
+        let error = |code: GuiActionErrorCode, message: String| GuiActionError::new(code, message);
+        let active_room = || matches!(self.screen, Screen::Chat { topic } if topic == self.topic);
+
+        match command {
+            GuiTestCommand::OpenRoom { room_id } => {
+                let topic = room_id.parse::<TopicId>().map_err(|_| {
+                    error(GuiActionErrorCode::UnknownRoom, format!("Room `{room_id}` is not known"))
+                })?;
+                if self.room_history.find(&topic).is_none() {
+                    return Err(error(GuiActionErrorCode::UnknownRoom, format!("Room `{room_id}` is not known")));
+                }
+                if blocking_dialog() {
+                    return Err(error(GuiActionErrorCode::BlockingDialogOpen, "A blocking dialog is open".to_string()));
+                }
+                Ok(())
+            }
+            GuiTestCommand::OpenConversation { conversation_id } => {
+                if !self.conversation_store.iter().any(|entry| entry.peer_id == *conversation_id) {
+                    return Err(error(GuiActionErrorCode::UnknownConversation, format!("Conversation `{conversation_id}` is not known")));
+                }
+                Ok(())
+            }
+            GuiTestCommand::SetComposerText { text } => {
+                if !active_room() {
+                    return Err(error(GuiActionErrorCode::NoActiveConversation, "No active room".to_string()));
+                }
+                if text.chars().count() > 4096 {
+                    return Err(error(GuiActionErrorCode::ComposerTooLong, "Composer text exceeds 4096 characters".to_string()));
+                }
+                Ok(())
+            }
+            GuiTestCommand::SubmitComposer => {
+                if !active_room() {
+                    return Err(error(GuiActionErrorCode::NoActiveConversation, "No active room".to_string()));
+                }
+                if self.composer_text.trim().is_empty() {
+                    return Err(error(GuiActionErrorCode::ComposerEmpty, "Composer is empty".to_string()));
+                }
+                if self.sender.is_none() {
+                    return Err(error(GuiActionErrorCode::SendDisabled, "Sending is disabled until the room is subscribed".to_string()));
+                }
+                if self.conversations.get(&self.topic).is_some_and(|room| room.sender.is_none()) {
+                    return Err(error(GuiActionErrorCode::RoomInactive, "The active room is inactive".to_string()));
+                }
+                if blocking_dialog() {
+                    return Err(error(GuiActionErrorCode::BlockingDialogOpen, "A blocking dialog is open".to_string()));
+                }
+                Ok(())
+            }
+            GuiTestCommand::SelectPeer { peer_id } => {
+                let peer = peer_id.parse::<PublicKey>().map_err(|_| {
+                    error(GuiActionErrorCode::UnknownPeer, format!("Peer `{peer_id}` is not known"))
+                })?;
+                let known = self.neighbors.contains(&peer)
+                    || self.discovered_peers.contains(&peer)
+                    || self.profile_cache.contains_key(&peer)
+                    || self.names.contains_key(&peer)
+                    || self.friends.get(&FriendId::from_public_key(peer)).is_some();
+                if !known {
+                    return Err(error(GuiActionErrorCode::UnknownPeer, format!("Peer `{peer_id}` is not known")));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 // ── Update ────────────────────────────────────────────────────────────
 
 impl IcedChat {
@@ -3613,6 +3746,14 @@ impl IcedChat {
                 // Keep the room subscription alive so returning is instant
                 // and the local peer stays online in the room.
                 self.screen = Screen::ChatList;
+                if let Some(action_id) = self.pending_chat_list_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
                 iced::Task::none()
             }
 
@@ -3817,10 +3958,31 @@ impl IcedChat {
             AppMessage::OpenRoom(topic) => {
                 let _timer = PerfTracker::timer("open_room", format!("topic={topic}"));
 
+                // A GUI test action is complete only after the normal room
+                // opening path has selected the requested topic and rendered
+                // the chat screen.  This covers both the cached fast path and
+                // the asynchronous subscription path.
+                let complete_open_room_action = |this: &mut Self| {
+                    if let Some((action_id, expected_topic)) =
+                        this.pending_open_room_action.take()
+                    {
+                        if expected_topic == this.topic
+                            && matches!(this.screen, Screen::Chat { topic } if topic == expected_topic)
+                        {
+                            let _ = this
+                                .gui_action_history
+                                .set_state(&action_id, GuiActionState::Completed);
+                        } else {
+                            this.pending_open_room_action = Some((action_id, expected_topic));
+                        }
+                    }
+                };
+
                 // If the topic is already active, just reveal the chat screen
                 // without tearing down the subscription.
                 if topic == self.topic {
                     self.screen = Screen::Chat { topic };
+                    complete_open_room_action(self);
                     return iced::Task::none();
                 }
 
@@ -3828,6 +3990,7 @@ impl IcedChat {
                 // the HashMap. Preserves sender, forwarder, entries, scroll,
                 // draft text, and all other per-conversation state.
                 if self.switch_to_conversation(topic) {
+                    complete_open_room_action(self);
                     return iced::Task::none();
                 }
 
@@ -4156,6 +4319,19 @@ impl IcedChat {
                 self.persist_room_history();
                 self.try_save_chat_history();
 
+                if self
+                    .pending_open_room_action
+                    .as_ref()
+                    .is_some_and(|(_, expected)| *expected == topic)
+                    && matches!(self.screen, Screen::Chat { topic: selected } if selected == topic)
+                {
+                    if let Some((action_id, _)) = self.pending_open_room_action.take() {
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Completed);
+                    }
+                }
+
                 // Insert lobby into conversations so its GossipSender survives
                 // room switches.  Without this, NewDiscoveredPeers must rely on
                 // the self.topic == lobby_topic fallback, which breaks when a
@@ -4186,6 +4362,18 @@ impl IcedChat {
 
             AppMessage::RoomJoinFailed(e) => {
                 self.pending_topic = None;
+                if let Some((action_id, expected_topic)) = self.pending_open_room_action.take() {
+                    let _ = self.gui_action_history.set_error(
+                        &action_id,
+                        GuiActionError::new(
+                            GuiActionErrorCode::InternalError,
+                            format!("Failed to open room {expected_topic}: {e}"),
+                        ),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Failed);
+                }
                 self.chat_list_error = format!("Failed to join room: {e}");
                 self.screen = Screen::ChatList;
                 iced::Task::none()
@@ -6588,6 +6776,147 @@ impl IcedChat {
                     .previous_screen
                     .take()
                     .unwrap_or(Screen::Chat { topic: self.topic });
+                iced::Task::none()
+            }
+
+            // ── GUI test actions (MCP-driven) ──
+            AppMessage::GuiTestActionReceived(action) => {
+                // Record receipt only after the message has entered the normal
+                // Iced event loop. The subscription itself remains side-effect
+                // free; validation and state changes happen below in `update`.
+                self.iced_diagnostics.record(
+                    "GuiTestActionReceived",
+                    FailureLayer::IcedUpdate,
+                    true,
+                    "",
+                    None,
+                );
+                let action_id = action.action_id.clone();
+                let _ = self.gui_action_history.record(action.clone());
+
+                let command = match serde_json::from_str::<GuiTestCommand>(&action.command) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        let _ = self.gui_action_history.set_error(
+                            &action_id,
+                            GuiActionError::new(
+                                GuiActionErrorCode::UnknownCommand,
+                                format!("Invalid GUI test command: {error}"),
+                            ),
+                        );
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Rejected);
+                        return iced::Task::none();
+                    }
+                };
+
+                if let Err(error) = command.validate() {
+                    let _ = self.gui_action_history.set_error(
+                        &action_id,
+                        GuiActionError::new(GuiActionErrorCode::InvalidArgument, error),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Rejected);
+                    return iced::Task::none();
+                }
+
+                if matches!(command, GuiTestCommand::GoToChatList) {
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_chat::diagnostics::ExpectedState::ScreenIs("ChatList".to_string()),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_chat_list_action = Some(action_id);
+                    return iced::Task::done(AppMessage::GoToChatList);
+                }
+
+                let GuiTestCommand::OpenRoom { room_id } = command else {
+                    // Other GUI commands retain their existing diagnostic-only
+                    // behavior until their dedicated action handlers land.
+                    return iced::Task::none();
+                };
+
+                let topic = match room_id.parse::<TopicId>() {
+                    Ok(topic) => topic,
+                    Err(error) => {
+                        let _ = self.gui_action_history.set_error(
+                            &action_id,
+                            GuiActionError::new(
+                                GuiActionErrorCode::InvalidArgument,
+                                format!("Invalid room_id: {error}"),
+                            ),
+                        );
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Rejected);
+                        return iced::Task::none();
+                    }
+                };
+
+                let known_room = (self.sender.is_some() && topic == self.topic)
+                    || self.conversations.contains_key(&topic)
+                    || self.room_history.rooms.iter().any(|room| room.topic == topic);
+                if !known_room {
+                    let _ = self.gui_action_history.set_error(
+                        &action_id,
+                        GuiActionError::new(
+                            GuiActionErrorCode::UnknownRoom,
+                            format!("Room {topic} has not been joined"),
+                        ),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Rejected);
+                    return iced::Task::none();
+                }
+
+                if self.show_create_room_dialog
+                    || self.history_confirm_clear
+                    || self.room_delete_confirm_topic.is_some()
+                {
+                    let _ = self.gui_action_history.set_error(
+                        &action_id,
+                        GuiActionError::new(
+                            GuiActionErrorCode::BlockingDialogOpen,
+                            "A blocking dialog is open",
+                        ),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Rejected);
+                    return iced::Task::none();
+                }
+
+                let _ = self.gui_action_history.set_expected_state(
+                    &action_id,
+                    boru_chat::diagnostics::ExpectedState::RoomSelected(topic.to_string()),
+                );
+                let _ = self
+                    .gui_action_history
+                    .set_state(&action_id, GuiActionState::AppMessageQueued);
+                self.pending_open_room_action = Some((action_id, topic));
+                iced::Task::done(AppMessage::OpenRoom(topic))
+            }
+
+            AppMessage::GuiTestWaitSatisfied(_key) => {
+                // Placeholder: wait conditions are tracked externally.
+                iced::Task::none()
+            }
+
+            AppMessage::GuiTestWaitTimedOut {
+                idempotency_key,
+                condition,
+                expected,
+                elapsed_ms,
+            } => {
+                warn!(
+                    "GUI test wait timed out: key={} condition={} expected={} elapsed={}ms",
+                    idempotency_key, condition, expected, elapsed_ms
+                );
                 iced::Task::none()
             }
 
@@ -10903,69 +11232,102 @@ impl std::hash::Hash for DiscoveredPeersRxHandle {
     }
 }
 
+/// Wrapper for the GUI test-actions channel.
+/// Uses a bounded mpsc receiver wrapped in Arc<Mutex<>>.
+struct GuiActionHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>);
+
+impl std::hash::Hash for GuiActionHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
+/// Convert one channel item into an Iced message without performing any
+/// application work. Validation and handling remain in `update`.
+fn map_gui_action(action: GuiActionRequest) -> AppMessage {
+    AppMessage::GuiTestActionReceived(action)
+}
+
 fn subscription_stream(
     rx: &RxHandle,
     friend_rx: &FriendRxHandle,
     whisper_rx: &WhisperRxHandle,
     inbox_rx: &InboxRxHandle,
     discovered_rx: &DiscoveredPeersRxHandle,
+    gui_action_rx: &GuiActionHandle,
 ) -> Pin<Box<dyn Stream<Item = AppMessage> + Send>> {
     let rx = Arc::clone(&rx.0);
     let friend_rx = Arc::clone(&friend_rx.0);
     let whisper_rx = Arc::clone(&whisper_rx.0);
     let inbox_rx = Arc::clone(&inbox_rx.0);
     let discovered_rx = Arc::clone(&discovered_rx.0);
+    let gui_action_rx = Arc::clone(&gui_action_rx.0);
     Box::pin(n0_future::stream::unfold(
-        (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx),
-        |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)| async move {
+        (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx),
+        |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)| async move {
             let mut rx_guard = rx.lock().await;
             let mut friend_guard = friend_rx.lock().await;
             let mut whisper_guard = whisper_rx.lock().await;
             let mut inbox_guard = inbox_rx.lock().await;
             let mut discovered_guard = discovered_rx.lock().await;
+            let mut gui_action_guard = gui_action_rx.lock().await;
             tokio::select! {
                 event = rx_guard.recv() => {
                     drop(whisper_guard);
                     drop(friend_guard);
                     drop(inbox_guard);
                     drop(discovered_guard);
+                    drop(gui_action_guard);
                     drop(rx_guard);
-                    event.map(|e| (AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)))
+                    event.map(|e| (AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)))
                 }
                 event = friend_guard.recv() => {
                     drop(whisper_guard);
                     drop(rx_guard);
                     drop(inbox_guard);
                     drop(discovered_guard);
+                    drop(gui_action_guard);
                     drop(friend_guard);
-                    event.map(|e| (AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)))
+                    event.map(|e| (AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)))
                 }
                 event = whisper_guard.recv() => {
                     drop(friend_guard);
                     drop(rx_guard);
                     drop(inbox_guard);
                     drop(discovered_guard);
+                    drop(gui_action_guard);
                     drop(whisper_guard);
-                    event.map(|e| (AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)))
+                    event.map(|e| (AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)))
                 }
                 event = inbox_guard.recv() => {
                     drop(friend_guard);
                     drop(rx_guard);
                     drop(whisper_guard);
                     drop(discovered_guard);
+                    drop(gui_action_guard);
                     drop(inbox_guard);
-                    event.map(|e| (AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)))
+                    event.map(|e| (AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)))
                 }
                 peers = discovered_guard.recv() => {
                     drop(friend_guard);
                     drop(rx_guard);
                     drop(whisper_guard);
                     drop(inbox_guard);
+                    drop(gui_action_guard);
                     drop(discovered_guard);
                     match peers {
-                        Some(peers) => Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx))),
+                        Some(peers) => Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
                         None => None,
                     }
+                }
+                action = gui_action_guard.recv() => {
+                    drop(friend_guard);
+                    drop(rx_guard);
+                    drop(whisper_guard);
+                    drop(inbox_guard);
+                    drop(discovered_guard);
+                    drop(gui_action_guard);
+                    action.map(|a| (map_gui_action(a), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)))
                 }
             }
         },
@@ -10979,27 +11341,40 @@ impl IcedChat {
         whisper_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
         inbox_rx: Arc<Mutex<UnboundedReceiver<InboxEvent>>>,
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
+        gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
     ) -> iced::Subscription<AppMessage> {
-        iced::Subscription::batch(vec![
+        let mut subs: Vec<iced::Subscription<AppMessage>> = vec![
             iced::time::every(std::time::Duration::from_secs(1))
                 .map(|_| AppMessage::ConnMonitorTick),
             iced::time::every(std::time::Duration::from_secs(30))
                 .map(|_| AppMessage::MeshWatchdogTick),
             iced::time::every(std::time::Duration::from_secs(30))
                 .map(|_| AppMessage::OutboxRetryTick),
-            iced::Subscription::run_with(
+        ];
+        // Main subscription stream — only added when gui_action_rx is available,
+        // because the unfold state cannot be expressed conditionally within the
+        // stream type.  If gui_action_rx is None we still need a stream, so we
+        // fall back to a dummy receiver created by dropping the sender.
+        let gui_action_inner: Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>> =
+            gui_action_rx.unwrap_or_else(|| {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                drop(tx);
+                Arc::new(Mutex::new(rx))
+            });
+        subs.push(iced::Subscription::run_with(
                 (
                     RxHandle(rx),
                     FriendRxHandle(friend_rx),
                     WhisperRxHandle(whisper_rx),
                     InboxRxHandle(inbox_rx),
                     DiscoveredPeersRxHandle(discovered_peers_rx),
+                    GuiActionHandle(gui_action_inner),
                 ),
-                |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx)| {
-                    subscription_stream(&rx, &friend_rx, &whisper_rx, &inbox_rx, &discovered_rx)
+                |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)| {
+                    subscription_stream(&rx, &friend_rx, &whisper_rx, &inbox_rx, &discovered_rx, &gui_action_rx)
                 },
-            ),
-        ])
+            ));
+        iced::Subscription::batch(subs)
     }
     /// Rebuild the internal join-request list from `outgoing_request_states`
     /// and the friend request store.
@@ -12908,6 +13283,27 @@ mod tests {
             Arc::new(Mutex::new(dummy_discovered_rx)),
             None,
             false,
+            boru_chat::diagnostics::IcedMessageJournal::default(),
+            None,
+            tokio::sync::watch::channel(boru_chat::diagnostics::IcedStateSnapshot {
+                node_id: String::new(),
+                version: String::new(),
+                active_screen: String::new(),
+                active_room: None,
+                conversation_count: 0,
+                neighbor_count: 0,
+                direct_peer_count: 0,
+                relayed_peer_count: 0,
+                mesh_health: String::new(),
+                online_friend_count: 0,
+                friend_count: 0,
+                total_entry_count: 0,
+                dark_mode: false,
+                composer_text: String::new(),
+                dialog_open: false,
+                unread_count: 0,
+                timestamp: chrono::Utc::now(),
+            }).0,
         );
 
         (runtime, app, local_public, peer_public)
@@ -14101,5 +14497,151 @@ mod tests {
             mgr.rows_invalidated.iter().all(|&i| i == 1),
             "after final clear, only row 1 (completed B) should remain"
         );
+    }
+
+    // ── GUI action channel item → AppMessage mapping tests ──
+
+    #[test]
+    fn gui_action_channel_item_maps_to_app_message() {
+        use boru_chat::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
+        let request = GuiActionRequest {
+            action_id: GuiActionId::new(),
+            requested_at_ms: chrono::Utc::now().timestamp_millis(),
+            command: serde_json::to_string(&GuiTestCommand::GoToChatList).unwrap(),
+        };
+        let message = map_gui_action(request.clone());
+        match message {
+            AppMessage::GuiTestActionReceived(received) => {
+                assert_eq!(received.action_id, request.action_id);
+                assert_eq!(received.command, request.command);
+            }
+            other => panic!("expected GuiTestActionReceived, got {:?}", other),
+        }
+    }
+
+    /// Verify that sending a GuiActionRequest through the channel preserves
+    /// its payload before the subscription maps it into an AppMessage.
+    #[test]
+    fn gui_action_channel_preserves_request_payload() {
+        use boru_chat::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let request = GuiActionRequest {
+            action_id: GuiActionId::new(),
+            requested_at_ms: chrono::Utc::now().timestamp_millis(),
+            command: serde_json::to_string(&GuiTestCommand::GoToChatList).unwrap(),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            tx.send(request.clone()).await.expect("send should succeed");
+        });
+        match rt.block_on(rx.recv()) {
+            Some(received) => {
+                assert_eq!(received.action_id, request.action_id);
+                assert_eq!(received.command, request.command);
+            }
+            None => panic!("expected a GuiActionRequest but channel closed"),
+        }
+    }
+
+    /// Verify that a SetComposerText command preserves its text payload
+    /// through the channel.
+    #[test]
+    fn gui_action_preserves_command_with_text_field() {
+        use boru_chat::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let command = GuiTestCommand::SetComposerText {
+            text: "Hello, world!".to_string(),
+        };
+        let request = GuiActionRequest {
+            action_id: GuiActionId::new(),
+            requested_at_ms: chrono::Utc::now().timestamp_millis(),
+            command: serde_json::to_string(&command).unwrap(),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            tx.send(request.clone()).await.expect("send should succeed");
+        });
+        let received = rt.block_on(rx.recv()).expect("expected a request");
+        assert_eq!(received.action_id, request.action_id);
+        let deserialized: GuiTestCommand =
+            serde_json::from_str(&received.command).expect("valid JSON command");
+        match deserialized {
+            GuiTestCommand::SetComposerText { text } => {
+                assert_eq!(text, "Hello, world!");
+            }
+            other => panic!("expected SetComposerText, got {:?}", other),
+        }
+    }
+
+    /// Verify that a ToggleDarkMode command preserves its bool payload.
+    #[test]
+    fn gui_action_preserves_command_with_bool_field() {
+        use boru_chat::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let command = GuiTestCommand::ToggleDarkMode { enabled: true };
+        let request = GuiActionRequest {
+            action_id: GuiActionId::new(),
+            requested_at_ms: chrono::Utc::now().timestamp_millis(),
+            command: serde_json::to_string(&command).unwrap(),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            tx.send(request.clone()).await.expect("send should succeed");
+        });
+        let received = rt.block_on(rx.recv()).expect("expected a request");
+        assert_eq!(received.action_id, request.action_id);
+        let deserialized: GuiTestCommand =
+            serde_json::from_str(&received.command).expect("valid JSON command");
+        match deserialized {
+            GuiTestCommand::ToggleDarkMode { enabled } => {
+                assert!(enabled, "ToggleDarkMode enabled should be true");
+            }
+            other => panic!("expected ToggleDarkMode, got {:?}", other),
+        }
+    }
+
+    /// Verify that a full channel gracefully returns TrySendError::Full.
+    #[test]
+    fn gui_action_channel_full_returns_close_semantics() {
+        use boru_chat::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let command_str = serde_json::to_string(&GuiTestCommand::GoToChatList).unwrap();
+        // Fill the channel
+        rt.block_on(async {
+            let req = GuiActionRequest {
+                action_id: GuiActionId::new(),
+                requested_at_ms: chrono::Utc::now().timestamp_millis(),
+                command: command_str.clone(),
+            };
+            assert!(tx.send(req).await.is_ok(), "first send should succeed");
+            let req = GuiActionRequest {
+                action_id: GuiActionId::new(),
+                requested_at_ms: chrono::Utc::now().timestamp_millis(),
+                command: command_str.clone(),
+            };
+            assert!(tx.send(req).await.is_ok(), "second send should succeed");
+        });
+        // The channel should be full now — try_send should fail
+        let req = GuiActionRequest {
+            action_id: GuiActionId::new(),
+            requested_at_ms: chrono::Utc::now().timestamp_millis(),
+            command: command_str.clone(),
+        };
+        match tx.try_send(req) {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // Expected: channel is full
+            }
+            other => panic!("expected Full error, got {:?}", other),
+        }
+        // Both items should still be retrievable
+        assert!(rt.block_on(rx.recv()).is_some(), "first item should be present");
+        assert!(rt.block_on(rx.recv()).is_some(), "second item should be present");
+        // Channel should be empty now (neither closed nor errored)
+        use tokio::sync::mpsc::error::TryRecvError;
+        match rx.try_recv() {
+            Err(TryRecvError::Empty) => {} // expected
+            other => panic!("expected Empty, got {:?}", other),
+        }
     }
 }
