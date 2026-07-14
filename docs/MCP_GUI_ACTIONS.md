@@ -110,11 +110,85 @@ cargo run --features gui --example iced_chat -- \
 
 ### Loopback enforcement
 
-When `--enable-gui-test-actions` is set, `main.rs` checks that the MCP bind
-address is a loopback address (`127.0.0.1` / `::1`).  If the address is not
-loopback, the application exits with an error.  The `mcp_server.rs` also
-applies a defence-in-depth check on `gui_test_actions_enabled` before
-dispatching GUI action tools.
+When `--enable-gui-test-actions` is set, the MCP listener **must** be bound to a
+loopback address.  `main.rs` rejects a non-loopback `--mcp-bind` before starting
+the application, and `mcp_server::spawn_mcp_server` repeats the check as
+defence in depth.  The check uses `SocketAddr::ip().is_loopback()`, so both
+IPv4 loopback (`127.0.0.0/8`) and IPv6 loopback (`::1`) are accepted; wildcard,
+LAN, and public addresses are rejected.
+
+This is a security invariant, not merely a recommended deployment setting:
+
+| GUI actions | MCP bind | Required result |
+|-------------|----------|-----------------|
+| disabled | any address | Server may start; non-loopback exposure emits a warning |
+| enabled | loopback | Server may start |
+| enabled | non-loopback | Startup fails; no GUI-action listener is made available |
+
+The normal diagnostic tools remain independently available on non-loopback
+binds when GUI actions are disabled.  Operators must still treat that mode as
+network-exposed and use their normal network controls; enabling GUI actions is
+never a way to make a remotely reachable MCP server safe.
+
+### Security policy (normative)
+
+The following rules define the supported security boundary.  A change that
+weakens any rule is a security-sensitive change and must add or update a
+negative test.
+
+1. **Opt-in only.** GUI actions are available only when both `--mcp` and
+   `--enable-gui-test-actions` are present.  The default is disabled.  When
+   disabled, action and GUI-observation methods return JSON-RPC `-32601`.
+2. **Local-only control.** With GUI actions enabled, the listener is loopback
+   only as specified above.  There is no authentication layer, so loopback
+   access must be treated as equivalent to local process access.
+3. **Semantic commands only.** The command enum is a closed allowlist of
+   application operations (`GoToChatList`, `OpenRoom`, `OpenConversation`,
+   `OpenFriends`, `OpenSettings`, `CloseDialog`, `SetComposerText`,
+   `SubmitComposer`, `ClearComposer`, `FocusComposer`, `SelectPeer`,
+   `ToggleDarkMode`, `ToggleHelp`, and `Wait`).
+   It does not provide pixel coordinates, keyboard/mouse injection, arbitrary
+   widget selectors, shell commands, filesystem paths, process control, or
+   unrestricted desktop control.
+4. **Bounded and validated input.** Identifiers and text are limited to
+   `GUI_TEST_COMMAND_MAX_STRING_LEN` (currently 4096 characters), identifiers
+   use only ASCII letters, digits, `-`, and `_`, control characters are rejected
+   from text, and wait timeouts are capped at 30,000 ms.  Queue admission is
+   non-blocking and bounded at 256 pending actions; rate limiting also enforces
+   a 100 ms minimum interval and 100 actions per rolling minute.
+5. **No secrets in data or logs.** MCP responses and diagnostic snapshots must
+   not contain private keys, tickets, mailbox/discovery secrets, friend
+   addresses, or chat history.  Action logs may include only the action kind,
+   bounded lengths, status, IDs, and timing; never raw composer text or secret
+   material.  IDs and room/topic identifiers remain potentially correlatable
+   metadata and must not be treated as anonymous.
+6. **Fail closed.** Invalid commands, disabled actions, queue overflow, and a
+   closed action channel are rejected with a structured error.  An accepted
+   action means only that it was queued; completion must be verified through
+   action status or GUI state and must not be inferred from queue admission.
+
+### Testable security checklist
+
+The policy is testable without a desktop-control harness:
+
+| Invariant | Required negative/positive check |
+|-----------|-----------------------------------|
+| Loopback-only binding | `test_spawn_mcp_server_rejects_non_loopback_with_gui_actions`; loopback acceptance test |
+| Opt-in gating | `enable_gui_test_actions_defaults_to_false`; disabled-method `-32601` checks |
+| No desktop escape hatch | `test_gui_test_command_rejects_dangerous_variants` and JSON unknown-variant rejection |
+| Input bounds | control-character, identifier, string-overflow, and timeout validation tests |
+| Queue/rate bounds | queue-full and rate-limit tests in the MCP adapter/action-channel suite |
+| Response secrecy | `test_gui_test_command_no_secrets_in_json`, `test_gui_action_error_no_secrets_in_serialized_output`, and diagnostic snapshot secrecy tests |
+
+Run the focused checks with:
+
+```sh
+cargo test --features gui --lib gui_test_command
+cargo test --features gui --example iced_chat mcp_server::tests
+```
+
+A policy check is not complete if it only verifies that a request was enqueued;
+the test must also assert the rejection path or the documented post-condition.
 
 ### No secrets exposed
 

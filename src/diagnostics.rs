@@ -1763,6 +1763,8 @@ pub enum GuiActionState {
     Validating,
     /// Action validation failed; will not proceed.
     Rejected,
+    /// Action could not be accepted because the bounded action queue was full.
+    QueueFull,
     /// Action has been converted to an AppMessage and queued for processing.
     AppMessageQueued,
     /// AppMessage was handled by the application state layer.
@@ -1786,6 +1788,7 @@ impl GuiActionState {
                 | GuiActionState::TimedOut
                 | GuiActionState::Failed
                 | GuiActionState::Rejected
+                | GuiActionState::QueueFull
         )
     }
 
@@ -1892,7 +1895,7 @@ impl GuiActionStatus {
     /// a structured error.
     ///
     /// Valid transitions:
-    ///   `Queued`                    → `Validating`
+    ///   `Queued`                    → `Validating` | `QueueFull`
     ///   `Validating`                → `Rejected` | `AppMessageQueued`
     ///   `AppMessageQueued`          → `AppMessageHandled`
     ///   `AppMessageHandled`         → `Completed` | `Failed` | `WaitingForExpectedState`
@@ -1902,7 +1905,7 @@ impl GuiActionStatus {
         use GuiActionState::*;
 
         let allowed = match (&self.state, &target) {
-            (Queued, Validating) => true,
+            (Queued, Validating) | (Queued, QueueFull) => true,
             (Validating, Rejected) | (Validating, AppMessageQueued) => true,
             (AppMessageQueued, AppMessageHandled) => true,
             (AppMessageHandled, Completed)
@@ -2000,6 +2003,13 @@ impl GuiActionHistory {
 
         let mut actions = self.inner.actions.lock().expect("actions lock");
         let mut order = self.inner.order.lock().expect("order lock");
+
+        // MCP records an action at enqueue time and the Iced loop records the
+        // same request when it receives it. Treat action_id as an idempotency
+        // key so the second observation does not create a duplicate entry.
+        if actions.contains_key(&request.action_id) {
+            return request.action_id;
+        }
 
         // Evict oldest terminal actions first. If none exist, evict the
         // oldest action (even active) to enforce the capacity bound.
@@ -2285,7 +2295,7 @@ impl Default for GuiActionHistory {
 /// - No secrets (keys, tickets, tokens) are exposed.
 /// - String parameters are bounded at 4096 characters.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuiWaitCondition {
     /// Whether the active screen name matches the expected value.
     ///
@@ -2349,6 +2359,18 @@ pub enum GuiWaitCondition {
     ComposerTextIs {
         /// Expected composer text content.
         expected: String,
+    },
+    /// Whether dark mode has the requested value.
+    DarkModeIs {
+        /// Expected dark-mode setting.
+        expected: bool,
+    },
+    /// Whether a previously submitted GUI action has reached a state.
+    ActionStatusIs {
+        /// Action id to inspect in [`GuiActionHistory`].
+        action_id: String,
+        /// Required lifecycle state.
+        expected: GuiActionState,
     },
     /// Whether a blocking modal dialog is currently open.
     ///
@@ -2416,12 +2438,39 @@ pub fn evaluate_wait_condition(
             None => snapshot.active_room.is_some(),
         },
         GuiWaitCondition::ComposerTextIs { expected } => snapshot.composer_text == *expected,
+        GuiWaitCondition::DarkModeIs { expected } => snapshot.dark_mode == *expected,
+        // Action predicates require the history-aware evaluator below.  The
+        // snapshot-only API must never report them as observed.
+        GuiWaitCondition::ActionStatusIs { .. } => false,
         GuiWaitCondition::DialogOpen => snapshot.dialog_open,
         GuiWaitCondition::DialogClosed => !snapshot.dialog_open,
         GuiWaitCondition::UnreadCountAtLeast { min_count } => {
             snapshot.unread_count >= *min_count as usize
         }
     }
+}
+
+/// Evaluate a GUI wait condition, including action lifecycle predicates.
+///
+/// Action conditions are true only when the requested action exists and its
+/// observed state exactly equals the expected state.  This prevents a wait
+/// from succeeding on an unobserved or merely queued action.
+pub fn evaluate_wait_condition_with_actions(
+    condition: &GuiWaitCondition,
+    snapshot: &IcedStateSnapshot,
+    journal: &IcedMessageJournal,
+    actions: &GuiActionHistory,
+) -> bool {
+    if let GuiWaitCondition::ActionStatusIs {
+        action_id,
+        expected,
+    } = condition
+    {
+        return actions
+            .get(&GuiActionId(action_id.clone()))
+            .is_some_and(|status| status.state == *expected);
+    }
+    evaluate_wait_condition(condition, snapshot, journal)
 }
 
 // =============================================================================
@@ -2456,7 +2505,7 @@ pub const MAX_ACTION_STATE_TIMEOUT_MS: i64 = 30_000;
 /// - String parameters are bounded at [`GUI_TEST_COMMAND_MAX_STRING_LEN`] chars.
 /// - No arbitrary widget IDs, coordinates, or shell commands.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "command", rename_all = "snake_case")]
+#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuiTestCommand {
     /// Navigate to the chat list (home) screen.
     GoToChatList,
@@ -2485,6 +2534,10 @@ pub enum GuiTestCommand {
     /// Submit the composer — sends whatever is currently in the composer
     /// for the active conversation.
     SubmitComposer,
+    /// Clear the composer through the normal input-change state path.
+    ClearComposer,
+    /// Focus the composer input through the native GUI focus operation.
+    FocusComposer,
     /// Select a peer by public key to view their profile or open a conversation.
     SelectPeer {
         /// Peer public key as a hex string.
@@ -2561,9 +2614,11 @@ impl GuiTestCommand {
             GuiTestCommand::ToggleHelp => Ok(()),
             GuiTestCommand::GoToChatList => Ok(()),
             GuiTestCommand::OpenFriends => Ok(()),
+            GuiTestCommand::SubmitComposer => Ok(()),
+            GuiTestCommand::ClearComposer => Ok(()),
+            GuiTestCommand::FocusComposer => Ok(()),
             GuiTestCommand::OpenSettings => Ok(()),
             GuiTestCommand::CloseDialog => Ok(()),
-            GuiTestCommand::SubmitComposer => Ok(()),
             GuiTestCommand::Wait {
                 condition,
                 timeout_ms,
@@ -2574,7 +2629,6 @@ impl GuiTestCommand {
                         GUI_TEST_COMMAND_MAX_TIMEOUT_MS
                     ));
                 }
-                // Validate the inner wait condition (string bounds check)
                 match condition {
                     GuiWaitCondition::ScreenIs { expected } => {
                         validate_gui_identifier(expected, "expected screen name")?;
@@ -2584,9 +2638,13 @@ impl GuiTestCommand {
                             validate_gui_identifier(topic, "room topic")?;
                         }
                     }
-                    GuiWaitCondition::PeerVisible { .. } => {}
-                    GuiWaitCondition::MessageVisible { .. } => {}
-                    GuiWaitCondition::GuiRevisionAtLeast { .. } => {}
+                    GuiWaitCondition::PeerVisible { .. }
+                    | GuiWaitCondition::MessageVisible { .. }
+                    | GuiWaitCondition::GuiRevisionAtLeast { .. }
+                    | GuiWaitCondition::DarkModeIs { .. }
+                    | GuiWaitCondition::DialogOpen
+                    | GuiWaitCondition::DialogClosed
+                    | GuiWaitCondition::UnreadCountAtLeast { .. } => {}
                     GuiWaitCondition::ConversationSelected { conversation_id } => {
                         if let Some(id) = conversation_id {
                             validate_gui_identifier(id, "conversation_id")?;
@@ -2595,9 +2653,9 @@ impl GuiTestCommand {
                     GuiWaitCondition::ComposerTextIs { expected } => {
                         validate_gui_text(expected, "expected composer text")?;
                     }
-                    GuiWaitCondition::DialogOpen => {}
-                    GuiWaitCondition::DialogClosed => {}
-                    GuiWaitCondition::UnreadCountAtLeast { .. } => {}
+                    GuiWaitCondition::ActionStatusIs { action_id, .. } => {
+                        validate_gui_identifier(action_id, "action_id")?;
+                    }
                 }
                 Ok(())
             }
@@ -2640,9 +2698,13 @@ impl GuiTestCommand {
                 Some(ExpectedState::ComposerTextIs(text.clone()))
             }
             GuiTestCommand::SubmitComposer => Some(ExpectedState::MessageSent),
+            GuiTestCommand::ClearComposer => Some(ExpectedState::ComposerTextIs(String::new())),
+            GuiTestCommand::FocusComposer => {
+                Some(ExpectedState::Generic("composer_focused".into()))
+            }
             GuiTestCommand::ToggleDarkMode { enabled } => Some(ExpectedState::DarkModeIs(*enabled)),
             GuiTestCommand::ToggleHelp => Some(ExpectedState::HelpVisible(true)),
-            GuiTestCommand::OpenFriends => Some(ExpectedState::ScreenIs("Friends".into())),
+            GuiTestCommand::OpenFriends => Some(ExpectedState::ScreenIs("FriendRequests".into())),
             GuiTestCommand::OpenSettings => Some(ExpectedState::ScreenIs("Settings".into())),
             // CloseDialog: depends on what screen was behind the dialog.
             GuiTestCommand::CloseDialog => None,
@@ -2677,6 +2739,11 @@ pub enum GuiActionEventKind {
     ActionRejected {
         /// Reason for rejection.
         reason: String,
+    },
+    /// Action could not be accepted because the bounded action queue was full.
+    ActionQueueFull {
+        /// Queue capacity at the time the action was rejected.
+        capacity: usize,
     },
     /// An AppMessage was queued as a result of this action.
     AppMessageQueued {
@@ -2998,80 +3065,74 @@ pub fn classify_failures(
 
 /// Handle for enqueuing GUI actions into the running Iced application.
 ///
-/// Wraps a bounded tokio mpsc Sender. The receiver side is consumed by the
-/// Iced application's subscription to produce
-/// [`AppMessage::GuiTestActionReceived`](crate::diagnostics::DiagnosticEventKind::ActionRequested)
-/// events.
-///
-/// This type lives in the library crate so both the MCP server and the Iced
-/// application can reference it without coupling to example-specific modules.
-///
-/// # Errors
-///
-/// [`GuiTestHandle::enqueue`] returns a structured [`GuiActionError`]:
-///
-/// | Error code | Condition |
-/// |---|---|
-/// | [`GuiActionErrorCode::ActionQueueFull`] | Channel at capacity |
-/// | [`GuiActionErrorCode::ActionQueueClosed`] | Receiver was dropped |
-///
-/// # Construction
-///
-/// ```
-/// # use boru_chat::diagnostics::GuiTestHandle;
-/// let (handle, receiver) = GuiTestHandle::channel(256);
-/// ```
+/// Wraps a bounded tokio mpsc Sender shared by the MCP server and Iced app.
 #[cfg(feature = "gui")]
 #[derive(Debug, Clone)]
 pub struct GuiTestHandle {
     sender: tokio::sync::mpsc::Sender<GuiActionRequest>,
+    history: GuiActionHistory,
 }
-
 #[cfg(feature = "gui")]
 impl GuiTestHandle {
-    /// Create a new handle from an existing tokio mpsc sender.
+    /// Create a handle backed by an existing bounded sender.
     pub fn new(sender: tokio::sync::mpsc::Sender<GuiActionRequest>) -> Self {
-        Self { sender }
+        Self {
+            sender,
+            history: GuiActionHistory::default(),
+        }
     }
 
-    /// Create a new bounded channel, returning the handle (sender half)
-    /// and the receiver half.
-    ///
-    /// The receiver should be consumed by the Iced subscription loop.
-    /// The capacity must be at least 1 and at most 4096.
+    /// Create a bounded GUI action channel and return its handle and receiver.
     pub fn channel(capacity: usize) -> (Self, tokio::sync::mpsc::Receiver<GuiActionRequest>) {
         let cap = capacity.clamp(1, 4096);
         let (tx, rx) = tokio::sync::mpsc::channel(cap);
-        (Self { sender: tx }, rx)
+        (
+            Self {
+                sender: tx,
+                history: GuiActionHistory::default(),
+            },
+            rx,
+        )
     }
 
-    /// Enqueue a GUI action request.
-    ///
-    /// Returns `Ok(())` if the request was successfully queued.
-    /// Returns a structured [`GuiActionError`]:
-    ///
-    /// - [`GuiActionErrorCode::ActionQueueFull`] if the channel is at capacity.
-    /// - [`GuiActionErrorCode::ActionQueueClosed`] if the receiver has been dropped.
+    /// Enqueue an action, recording it in history before attempting delivery.
     pub fn enqueue(&self, request: GuiActionRequest) -> Result<(), GuiActionError> {
         use tokio::sync::mpsc::error::TrySendError;
-        self.sender.try_send(request).map_err(|e| match e {
-            TrySendError::Full(_) => GuiActionError::new(
-                GuiActionErrorCode::ActionQueueFull,
-                format!("GUI action queue is full (capacity: {})", self.capacity()),
-            ),
-            TrySendError::Closed(_) => GuiActionError::new(
-                GuiActionErrorCode::ActionQueueClosed,
-                "GUI action channel is closed",
-            ),
+        let action_id = self.history.record(request.clone());
+        self.sender.try_send(request).map_err(|e| {
+            let (error, terminal_state) = match e {
+                TrySendError::Full(_) => (
+                    GuiActionError::new(
+                        GuiActionErrorCode::ActionQueueFull,
+                        format!("GUI action queue is full (capacity: {})", self.capacity()),
+                    ),
+                    GuiActionState::QueueFull,
+                ),
+                TrySendError::Closed(_) => (
+                    GuiActionError::new(
+                        GuiActionErrorCode::ActionQueueClosed,
+                        "GUI action channel is closed",
+                    ),
+                    GuiActionState::Rejected,
+                ),
+            };
+            let _ = self.history.set_error(&action_id, error.clone());
+            let _ = self.history.set_state(&action_id, terminal_state);
+            error
         })
     }
 
-    /// Returns the maximum capacity of the underlying channel.
+    /// Return the lifecycle history shared by MCP and the Iced application.
+    pub fn history(&self) -> GuiActionHistory {
+        self.history.clone()
+    }
+
+    /// Return the maximum capacity of the underlying channel.
     pub fn capacity(&self) -> usize {
         self.sender.max_capacity()
     }
 
-    /// Returns `true` if the receiver has been dropped (channel is closed).
+    /// Return whether the receiver has been dropped.
     pub fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
@@ -4254,6 +4315,7 @@ mod tests {
         assert!(TimedOut.is_terminal());
         assert!(Failed.is_terminal());
         assert!(Rejected.is_terminal());
+        assert!(QueueFull.is_terminal());
 
         assert!(!Queued.is_terminal());
         assert!(!Validating.is_terminal());
@@ -4271,6 +4333,7 @@ mod tests {
         assert!(!TimedOut.is_active());
         assert!(!Failed.is_active());
         assert!(!Rejected.is_active());
+        assert!(!QueueFull.is_active());
     }
 
     #[test]
@@ -4351,6 +4414,27 @@ mod tests {
 
         assert!(action.transition_to(TimedOut).is_ok());
         assert_eq!(action.state, TimedOut);
+    }
+
+    #[test]
+    fn test_gui_action_state_queue_full_is_terminal() {
+        let mut action = GuiActionStatus {
+            action_id: GuiActionId::new(),
+            state: GuiActionState::Queued,
+            requested_at_ms: 1000,
+            updated_at_ms: 1000,
+            expected_gui_revision: None,
+            observed_gui_revision: None,
+            error: None,
+            result: None,
+            expected_state: None,
+            timeout_at_ms: None,
+        };
+
+        action.transition_to(GuiActionState::QueueFull).unwrap();
+        assert_eq!(action.state, GuiActionState::QueueFull);
+        assert!(action.state.is_terminal());
+        assert!(action.transition_to(GuiActionState::Completed).is_err());
     }
 
     #[test]
@@ -4605,6 +4689,7 @@ mod tests {
             (GuiActionState::Queued, "queued"),
             (GuiActionState::Validating, "validating"),
             (GuiActionState::Rejected, "rejected"),
+            (GuiActionState::QueueFull, "queue_full"),
             (GuiActionState::AppMessageQueued, "app_message_queued"),
             (GuiActionState::AppMessageHandled, "app_message_handled"),
             (
@@ -5718,10 +5803,39 @@ mod tests {
 
     #[test]
     fn test_gui_test_command_rejects_invalid_ids_and_paths() {
-        for value in ["", "../tmp", "peer/name", "peer\\\\name", "peer;rm", "peer id", "peer\nname"] {
-            assert!(GuiTestCommand::OpenRoom { room_id: value.into() }.validate().is_err(), "accepted unsafe room id: {value:?}");
-            assert!(GuiTestCommand::OpenConversation { conversation_id: value.into() }.validate().is_err(), "accepted unsafe conversation id: {value:?}");
-            assert!(GuiTestCommand::SelectPeer { peer_id: value.into() }.validate().is_err(), "accepted unsafe peer id: {value:?}");
+        for value in [
+            "",
+            "../tmp",
+            "peer/name",
+            "peer\\\\name",
+            "peer;rm",
+            "peer id",
+            "peer\nname",
+        ] {
+            assert!(
+                GuiTestCommand::OpenRoom {
+                    room_id: value.into()
+                }
+                .validate()
+                .is_err(),
+                "accepted unsafe room id: {value:?}"
+            );
+            assert!(
+                GuiTestCommand::OpenConversation {
+                    conversation_id: value.into()
+                }
+                .validate()
+                .is_err(),
+                "accepted unsafe conversation id: {value:?}"
+            );
+            assert!(
+                GuiTestCommand::SelectPeer {
+                    peer_id: value.into()
+                }
+                .validate()
+                .is_err(),
+                "accepted unsafe peer id: {value:?}"
+            );
         }
     }
 
@@ -5895,7 +6009,7 @@ mod tests {
         let cmd = GuiTestCommand::OpenFriends;
         assert_eq!(
             cmd.expected_state(),
-            Some(ExpectedState::ScreenIs("Friends".into()))
+            Some(ExpectedState::ScreenIs("FriendRequests".into()))
         );
     }
 
@@ -6974,6 +7088,7 @@ mod tests {
             GuiActionEventKind::ActionRejected {
                 reason: "validation failed".into(),
             },
+            GuiActionEventKind::ActionQueueFull { capacity: 256 },
             GuiActionEventKind::AppMessageQueued {
                 message_variant: "SendMessage".into(),
             },
@@ -6989,7 +7104,7 @@ mod tests {
             },
         ];
 
-        assert_eq!(kinds.len(), 11, "all 11 variants must be tested");
+        assert_eq!(kinds.len(), 12, "all 12 variants must be tested");
 
         for (i, kind) in kinds.iter().enumerate() {
             let json = serde_json::to_string(kind).unwrap();
@@ -7011,7 +7126,13 @@ mod tests {
         let actions = ["a", "b", "c", "d", "e"];
 
         for (i, action) in actions.iter().enumerate() {
-            journal.record(action, GuiActionEventKind::ActionRequested, i as u64, None, "Screen");
+            journal.record(
+                action,
+                GuiActionEventKind::ActionRequested,
+                i as u64,
+                None,
+                "Screen",
+            );
             std::thread::sleep(std::time::Duration::from_millis(1));
             journal.record(
                 action,
@@ -7095,7 +7216,10 @@ mod tests {
 
         // The oldest surviving sequence should be 20 (64 evicted, so oldest of 84 total)
         let chrono: Vec<&GuiActionEvent> = all.iter().rev().collect();
-        assert_eq!(chrono[0].sequence, 20, "first chronological entry should be seq 20");
+        assert_eq!(
+            chrono[0].sequence, 20,
+            "first chronological entry should be seq 20"
+        );
 
         // entries_since(83) should be empty (nothing newer than latest)
         assert!(journal.entries_since(83, 100).is_empty());
@@ -7113,10 +7237,34 @@ mod tests {
         let journal = GuiActionEventHistory::new();
         let action_id = "lifecycle-test-1";
 
-        journal.record(action_id, GuiActionEventKind::ActionRequested, 1, None, "ChatList");
-        journal.record(action_id, GuiActionEventKind::ActionQueued, 1, None, "ChatList");
-        journal.record(action_id, GuiActionEventKind::ActionValidationStarted, 1, None, "ChatList");
-        journal.record(action_id, GuiActionEventKind::ActionValidated, 1, None, "ChatList");
+        journal.record(
+            action_id,
+            GuiActionEventKind::ActionRequested,
+            1,
+            None,
+            "ChatList",
+        );
+        journal.record(
+            action_id,
+            GuiActionEventKind::ActionQueued,
+            1,
+            None,
+            "ChatList",
+        );
+        journal.record(
+            action_id,
+            GuiActionEventKind::ActionValidationStarted,
+            1,
+            None,
+            "ChatList",
+        );
+        journal.record(
+            action_id,
+            GuiActionEventKind::ActionValidated,
+            1,
+            None,
+            "ChatList",
+        );
         journal.record(
             action_id,
             GuiActionEventKind::AppMessageQueued {
@@ -7136,8 +7284,20 @@ mod tests {
             None,
             "ChatList",
         );
-        journal.record(action_id, GuiActionEventKind::ExpectedStateObserved, 3, None, "Chat");
-        journal.record(action_id, GuiActionEventKind::ActionCompleted, 3, None, "Chat");
+        journal.record(
+            action_id,
+            GuiActionEventKind::ExpectedStateObserved,
+            3,
+            None,
+            "Chat",
+        );
+        journal.record(
+            action_id,
+            GuiActionEventKind::ActionCompleted,
+            3,
+            None,
+            "Chat",
+        );
 
         assert_eq!(journal.entry_count(), 8);
         assert_eq!(journal.latest_sequence(), 7);
@@ -7148,18 +7308,20 @@ mod tests {
 
         let expected_kinds: &[GuiActionEventKind] = &[
             // Seq 0 is ActionRequested, excluded by entries_since(0)
-            GuiActionEventKind::ActionQueued,                 // seq 1
-            GuiActionEventKind::ActionValidationStarted,      // seq 2
-            GuiActionEventKind::ActionValidated,              // seq 3
-            GuiActionEventKind::AppMessageQueued {            // seq 4
+            GuiActionEventKind::ActionQueued,            // seq 1
+            GuiActionEventKind::ActionValidationStarted, // seq 2
+            GuiActionEventKind::ActionValidated,         // seq 3
+            GuiActionEventKind::AppMessageQueued {
+                // seq 4
                 message_variant: "SendMessage".into(),
             },
-            GuiActionEventKind::AppMessageHandled {           // seq 5
+            GuiActionEventKind::AppMessageHandled {
+                // seq 5
                 message_variant: "SendMessage".into(),
                 success: true,
             },
-            GuiActionEventKind::ExpectedStateObserved,        // seq 6
-            GuiActionEventKind::ActionCompleted,              // seq 7
+            GuiActionEventKind::ExpectedStateObserved, // seq 6
+            GuiActionEventKind::ActionCompleted,       // seq 7
         ];
         // entries_since(0) returns only entries with sequence > 0 (seq 1..7).
         // expected_kinds is indexed without offset because it starts at seq 1.
@@ -7178,6 +7340,80 @@ mod tests {
     }
 
     // ── GuiTestHandle tests ───────────────────────────────────────
+
+    /// Multiple MCP producers may enqueue concurrently.  The bounded queue is
+    /// deliberately non-blocking: accepted requests are delivered exactly
+    /// once, while excess producers receive `ActionQueueFull` rather than
+    /// blocking or panicking.  Tokio's mpsc guarantees FIFO order for each
+    /// producer; no global order is promised between independently scheduled
+    /// producers.
+    #[cfg(feature = "gui")]
+    #[test]
+    fn test_gui_test_handle_concurrent_mcp_producers_are_bounded_and_unique() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use std::thread;
+
+        const CAPACITY: usize = 32;
+        const PRODUCERS: usize = 4;
+        const PER_PRODUCER: usize = 64;
+        let (handle, mut rx) = GuiTestHandle::channel(CAPACITY);
+        let barrier = Arc::new(std::sync::Barrier::new(PRODUCERS));
+        let mut workers = Vec::new();
+
+        for producer in 0..PRODUCERS {
+            let producer_handle = handle.clone();
+            let producer_barrier = Arc::clone(&barrier);
+            workers.push(thread::spawn(move || {
+                producer_barrier.wait();
+                let mut accepted = Vec::new();
+                let mut full = 0usize;
+                for sequence in 0..PER_PRODUCER {
+                    let request = GuiActionRequest {
+                        action_id: GuiActionId::new(),
+                        requested_at_ms: (producer * PER_PRODUCER + sequence) as i64,
+                        command: format!("producer_{producer}_action_{sequence}"),
+                    };
+                    match producer_handle.enqueue(request) {
+                        Ok(()) => accepted.push(sequence),
+                        Err(err) if err.code == GuiActionErrorCode::ActionQueueFull => {
+                            full += 1;
+                        }
+                        Err(err) => panic!("unexpected enqueue error: {}", err.message),
+                    }
+                }
+                (accepted.len(), full)
+            }));
+        }
+        let totals: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("producer must not panic"))
+            .collect();
+        drop(handle);
+
+        let mut received = Vec::new();
+        while let Ok(request) = rx.try_recv() {
+            received.push(request);
+        }
+        assert!(received.len() <= CAPACITY, "queue exceeded capacity");
+        assert_eq!(
+            received.len(),
+            totals.iter().map(|(accepted, _)| *accepted).sum::<usize>()
+        );
+        assert_eq!(
+            totals.iter().map(|(_, full)| *full).sum::<usize>() + received.len(),
+            PRODUCERS * PER_PRODUCER
+        );
+        let ids: HashSet<_> = received
+            .iter()
+            .map(|request| request.action_id.clone())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            received.len(),
+            "accepted action IDs must be unique"
+        );
+    }
 
     #[cfg(feature = "gui")]
     #[test]
@@ -7633,8 +7869,14 @@ mod tests {
             expired.error.as_ref().map(|error| &error.code),
             Some(&GuiActionErrorCode::ActionTimedOut)
         );
-        assert!(history.expire(&terminal).is_none(), "terminal action is unchanged");
-        assert_eq!(history.get(&terminal).unwrap().state, GuiActionState::Completed);
+        assert!(
+            history.expire(&terminal).is_none(),
+            "terminal action is unchanged"
+        );
+        assert_eq!(
+            history.get(&terminal).unwrap().state,
+            GuiActionState::Completed
+        );
     }
 
     #[test]
@@ -9061,10 +9303,7 @@ mod tests {
                 ExpectedState::DarkModeIs(true),
                 r#"{"type":"dark_mode_is","value":true}"#,
             ),
-            (
-                ExpectedState::MessageSent,
-                r#"{"type":"message_sent"}"#,
-            ),
+            (ExpectedState::MessageSent, r#"{"type":"message_sent"}"#),
             (
                 ExpectedState::HelpVisible(false),
                 r#"{"type":"help_visible","value":false}"#,
@@ -9229,15 +9468,16 @@ mod tests {
                     assert_eq!(rid, id, "recorded id should match");
 
                     // Full lifecycle: Queued -> Validating -> AppMessageQueued -> AppMessageHandled -> Completed
-                    h.transition_to(&id, GuiActionState::Validating).unwrap_or_else(|e| {
-                        // Rejected or Failed also acceptable terminal states under high concurrency
-                        // if validation conditions change
-                        if e.code == GuiActionErrorCode::InvalidArgument {
-                            // Could be from eviction — action was evicted before transition
-                            return;
-                        }
-                        panic!("transition to Validating failed: {e:?}");
-                    });
+                    h.transition_to(&id, GuiActionState::Validating)
+                        .unwrap_or_else(|e| {
+                            // Rejected or Failed also acceptable terminal states under high concurrency
+                            // if validation conditions change
+                            if e.code == GuiActionErrorCode::InvalidArgument {
+                                // Could be from eviction — action was evicted before transition
+                                return;
+                            }
+                            panic!("transition to Validating failed: {e:?}");
+                        });
                     h.transition_to(&id, GuiActionState::AppMessageQueued).ok();
                     h.transition_to(&id, GuiActionState::AppMessageHandled).ok();
                     h.transition_to(&id, GuiActionState::Completed).ok();
@@ -9253,7 +9493,10 @@ mod tests {
         // All 200 actions should be accounted for (some may have been evicted
         // but all survivors should be terminal)
         let count = history.action_count();
-        assert!(count <= 100, "history should not exceed capacity: {count} > 100");
+        assert!(
+            count <= 100,
+            "history should not exceed capacity: {count} > 100"
+        );
         assert!(count > 0, "should have at least some actions stored");
 
         // Every stored action must be terminal
@@ -9261,13 +9504,17 @@ mod tests {
             assert!(
                 a.state.is_terminal(),
                 "stored action {:?} should be terminal, was {:?}",
-                a.action_id, a.state
+                a.action_id,
+                a.state
             );
         }
 
         // No duplicate action IDs
-        let ids: std::collections::HashSet<GuiActionId> =
-            history.all_actions().into_iter().map(|a| a.action_id).collect();
+        let ids: std::collections::HashSet<GuiActionId> = history
+            .all_actions()
+            .into_iter()
+            .map(|a| a.action_id)
+            .collect();
         assert_eq!(
             ids.len(),
             history.action_count(),
@@ -9299,8 +9546,10 @@ mod tests {
                 let rid = h.record(set_req);
                 let _ = rid;
                 h.transition_to(&set_id, GuiActionState::Validating).ok();
-                h.transition_to(&set_id, GuiActionState::AppMessageQueued).ok();
-                h.transition_to(&set_id, GuiActionState::AppMessageHandled).ok();
+                h.transition_to(&set_id, GuiActionState::AppMessageQueued)
+                    .ok();
+                h.transition_to(&set_id, GuiActionState::AppMessageHandled)
+                    .ok();
                 h.transition_to(&set_id, GuiActionState::Completed).ok();
             }));
 
@@ -9317,8 +9566,10 @@ mod tests {
                 let rid = h2.record(sub_req);
                 let _ = rid;
                 h2.transition_to(&sub_id, GuiActionState::Validating).ok();
-                h2.transition_to(&sub_id, GuiActionState::AppMessageQueued).ok();
-                h2.transition_to(&sub_id, GuiActionState::AppMessageHandled).ok();
+                h2.transition_to(&sub_id, GuiActionState::AppMessageQueued)
+                    .ok();
+                h2.transition_to(&sub_id, GuiActionState::AppMessageHandled)
+                    .ok();
                 h2.transition_to(&sub_id, GuiActionState::Completed).ok();
             }));
         }
@@ -9337,8 +9588,11 @@ mod tests {
         }
 
         // Verify no ID collisions
-        let ids: std::collections::HashSet<GuiActionId> =
-            history.all_actions().into_iter().map(|a| a.action_id).collect();
+        let ids: std::collections::HashSet<GuiActionId> = history
+            .all_actions()
+            .into_iter()
+            .map(|a| a.action_id)
+            .collect();
         assert_eq!(ids.len(), history.action_count(), "no duplicate IDs");
     }
 
@@ -9371,12 +9625,17 @@ mod tests {
         let aid_a = id_a.clone();
         let t_a = std::thread::spawn(move || {
             // Drive A through full lifecycle
-            h_a.transition_to(&aid_a, GuiActionState::Validating).unwrap();
-            h_a.transition_to(&aid_a, GuiActionState::AppMessageQueued).unwrap();
-            h_a.transition_to(&aid_a, GuiActionState::AppMessageHandled).unwrap();
-            h_a.transition_to(&aid_a, GuiActionState::WaitingForExpectedState).unwrap();
+            h_a.transition_to(&aid_a, GuiActionState::Validating)
+                .unwrap();
+            h_a.transition_to(&aid_a, GuiActionState::AppMessageQueued)
+                .unwrap();
+            h_a.transition_to(&aid_a, GuiActionState::AppMessageHandled)
+                .unwrap();
+            h_a.transition_to(&aid_a, GuiActionState::WaitingForExpectedState)
+                .unwrap();
             std::thread::sleep(std::time::Duration::from_millis(10));
-            h_a.transition_to(&aid_a, GuiActionState::Completed).unwrap();
+            h_a.transition_to(&aid_a, GuiActionState::Completed)
+                .unwrap();
         });
 
         // Thread B: drive B to WaitingForExpectedState then leave it
@@ -9384,10 +9643,14 @@ mod tests {
         let h_b = history.clone();
         let aid_b = id_b.clone();
         let t_b = std::thread::spawn(move || {
-            h_b.transition_to(&aid_b, GuiActionState::Validating).unwrap();
-            h_b.transition_to(&aid_b, GuiActionState::AppMessageQueued).unwrap();
-            h_b.transition_to(&aid_b, GuiActionState::AppMessageHandled).unwrap();
-            h_b.transition_to(&aid_b, GuiActionState::WaitingForExpectedState).unwrap();
+            h_b.transition_to(&aid_b, GuiActionState::Validating)
+                .unwrap();
+            h_b.transition_to(&aid_b, GuiActionState::AppMessageQueued)
+                .unwrap();
+            h_b.transition_to(&aid_b, GuiActionState::AppMessageHandled)
+                .unwrap();
+            h_b.transition_to(&aid_b, GuiActionState::WaitingForExpectedState)
+                .unwrap();
 
             // Forcibly set timeout to the past to make check_timeouts detect it
             // even if the 10ms hasn't passed yet
@@ -9458,7 +9721,9 @@ mod tests {
                     requested_at_ms: i as i64 * 100,
                     command: format!("PreClose-{i}"),
                 };
-                handle.enqueue(req).expect("pre-close enqueue should succeed");
+                handle
+                    .enqueue(req)
+                    .expect("pre-close enqueue should succeed");
                 id
             })
             .collect();
@@ -9623,8 +9888,11 @@ mod tests {
         }
 
         // No duplicate IDs
-        let ids: std::collections::HashSet<GuiActionId> =
-            history.all_actions().into_iter().map(|a| a.action_id).collect();
+        let ids: std::collections::HashSet<GuiActionId> = history
+            .all_actions()
+            .into_iter()
+            .map(|a| a.action_id)
+            .collect();
         assert_eq!(ids.len(), history.action_count(), "no duplicate IDs");
     }
 
@@ -9750,10 +10018,7 @@ mod tests {
         // Verify all sequence entries are present
         let seq_set: std::collections::HashSet<u64> = sequences.into_iter().collect();
         for s in 0..total_expected as u64 {
-            assert!(
-                seq_set.contains(&s),
-                "sequence {s} should exist in journal"
-            );
+            assert!(seq_set.contains(&s), "sequence {s} should exist in journal");
         }
     }
 
@@ -9952,6 +10217,164 @@ mod tests {
                 a.state.is_terminal(),
                 "all actions should be terminal under lock test"
             );
+        }
+    }
+
+    #[test]
+    fn test_gui_wait_condition_load_is_deterministic() {
+        let snapshot = test_snapshot("Chat", Some("room-1"), 3, 5);
+        let journal = IcedMessageJournal::new();
+        for i in 0..100 {
+            journal.record(
+                format!("WaitLoad-{i}"),
+                FailureLayer::IcedUpdate,
+                true,
+                "",
+                None,
+            );
+        }
+        let conditions = [
+            GuiWaitCondition::ScreenIs {
+                expected: "Chat".to_string(),
+            },
+            GuiWaitCondition::RoomSelected {
+                room_topic: Some("room-1".to_string()),
+            },
+            GuiWaitCondition::PeerVisible { min_count: 3 },
+            GuiWaitCondition::MessageVisible { min_count: 5 },
+            GuiWaitCondition::GuiRevisionAtLeast {
+                expected_revision: 99,
+            },
+            GuiWaitCondition::ConversationSelected {
+                conversation_id: Some("room-1".to_string()),
+            },
+            GuiWaitCondition::ComposerTextIs {
+                expected: String::new(),
+            },
+            GuiWaitCondition::DialogClosed,
+            GuiWaitCondition::UnreadCountAtLeast { min_count: 0 },
+        ];
+
+        let started = std::time::Instant::now();
+        for _ in 0..10_000 {
+            for condition in &conditions {
+                assert!(evaluate_wait_condition(condition, &snapshot, &journal));
+            }
+        }
+        assert_eq!(journal.entry_count(), 100);
+        eprintln!(
+            "GUI wait-condition load: 90,000 evaluations in {:?}",
+            started.elapsed()
+        );
+    }
+
+    fn test_gui_request(id: &str) -> GuiActionRequest {
+        GuiActionRequest {
+            action_id: GuiActionId(id.to_string()),
+            requested_at_ms: 0,
+            command: "toggle_help".to_string(),
+        }
+    }
+
+    #[cfg(feature = "gui")]
+    #[tokio::test]
+    async fn test_gui_action_channel_closure_is_structured_and_recorded() {
+        let (handle, receiver) = GuiTestHandle::channel(1);
+        drop(receiver);
+
+        let request = test_gui_request("closed-channel");
+        let error = handle
+            .enqueue(request)
+            .expect_err("closed receiver must reject");
+        assert_eq!(error.code, GuiActionErrorCode::ActionQueueClosed);
+        assert!(error.message.contains("closed"));
+
+        let status = handle
+            .history()
+            .get(&GuiActionId("closed-channel".to_string()))
+            .expect("failed enqueue must remain observable");
+        assert_eq!(status.state, GuiActionState::Rejected);
+        assert_eq!(
+            status.error.as_ref().map(|e| e.code.clone()),
+            Some(GuiActionErrorCode::ActionQueueClosed)
+        );
+    }
+
+    #[cfg(feature = "gui")]
+    #[tokio::test]
+    async fn test_gui_action_shutdown_drains_then_receiver_closes_without_hanging() {
+        let (handle, mut receiver) = GuiTestHandle::channel(1);
+        handle
+            .enqueue(test_gui_request("shutdown-action"))
+            .expect("live receiver accepts action");
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv())
+            .await
+            .expect("receiving queued action must not hang")
+            .expect("queued action should be delivered");
+        assert_eq!(received.action_id.0, "shutdown-action");
+
+        drop(handle);
+        let closed = tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv())
+            .await
+            .expect("shutdown receive must not hang");
+        assert!(
+            closed.is_none(),
+            "receiver must observe graceful sender shutdown"
+        );
+    }
+
+    #[test]
+    fn test_unknown_and_evicted_gui_action_ids_are_not_resolved() {
+        let history = GuiActionHistory::with_capacity(1);
+        let first = history.record(test_gui_request("stale-action"));
+        assert!(history.set_state(&first, GuiActionState::Completed));
+        let second = history.record(test_gui_request("current-action"));
+
+        assert!(history
+            .get(&GuiActionId("stale-action".to_string()))
+            .is_none());
+        let error = history
+            .transition_to(
+                &GuiActionId("unknown-action".to_string()),
+                GuiActionState::Validating,
+            )
+            .expect_err("unknown action IDs must return a structured error");
+        assert_eq!(error.code, GuiActionErrorCode::InvalidArgument);
+        assert!(error.message.contains("not found"));
+        assert!(history.get(&second).is_some());
+    }
+
+    #[test]
+    fn test_gui_composer_control_commands_serialize_and_declare_state() {
+        let clear = GuiTestCommand::ClearComposer;
+        let focus = GuiTestCommand::FocusComposer;
+        assert_eq!(
+            serde_json::to_string(&clear).unwrap(),
+            r#"{"command":"clear_composer"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&focus).unwrap(),
+            r#"{"command":"focus_composer"}"#
+        );
+        assert_eq!(
+            clear.expected_state(),
+            Some(ExpectedState::ComposerTextIs(String::new()))
+        );
+        assert_eq!(
+            focus.expected_state(),
+            Some(ExpectedState::Generic("composer_focused".into()))
+        );
+        assert!(clear.validate().is_ok());
+        assert!(focus.validate().is_ok());
+    }
+
+    #[test]
+    fn test_gui_composer_control_commands_round_trip() {
+        for command in [GuiTestCommand::ClearComposer, GuiTestCommand::FocusComposer] {
+            let json = serde_json::to_string(&command).unwrap();
+            let decoded: GuiTestCommand = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, command);
         }
     }
 }

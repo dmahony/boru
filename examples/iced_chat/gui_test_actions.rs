@@ -680,4 +680,87 @@ mod tests {
         limiter.lock().unwrap().check_and_record().unwrap();
         assert_eq!(limiter.lock().unwrap().recent_actions.len(), 2);
     }
+
+    // ── Bounded-load measurements ──────────────────────────────────────
+
+    #[test]
+    fn test_rate_limiter_load_is_bounded_and_reproducible() {
+        // This deliberately does not sleep: the burst policy is a structural
+        // bound, so a fast load must admit one action and reject the rest.
+        let mut limiter = GuiActionRateLimiter::new();
+        let started = Instant::now();
+        let mut accepted = 0;
+        let mut rejected = 0;
+        for _ in 0..10_000 {
+            match limiter.check_and_record() {
+                Ok(()) => accepted += 1,
+                Err(_) => rejected += 1,
+            }
+        }
+
+        assert_eq!(accepted, 1, "a burst admits exactly the first action");
+        assert_eq!(rejected, 9_999);
+        assert!(limiter.recent_actions.len() <= MAX_ACTIONS_PER_MINUTE);
+        eprintln!(
+            "GUI rate-limit load: 10,000 checks in {:?} (accepted={accepted}, rejected={rejected})",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn test_gui_action_history_trimming_under_load() {
+        let history = GuiActionHistory::new();
+        let started = Instant::now();
+        for i in 0..10_000 {
+            history.record(ActionRecord {
+                idempotency_key: format!("load-{i}"),
+                command: "go_to_chat_list".to_string(),
+                status: ActionStatus::Processed,
+                timestamp_ms: i,
+                duration_ms: 0,
+            });
+        }
+
+        let records = history.all();
+        assert_eq!(records.len(), MAX_HISTORY);
+        assert_eq!(records.first().unwrap().idempotency_key, "load-9999");
+        assert_eq!(records.last().unwrap().idempotency_key, "load-9000");
+        assert!(history.find("load-8999").is_none());
+        assert_eq!(history.latest_sequence(), 10_000);
+        eprintln!(
+            "GUI action-history load: 10,000 records in {:?} (retained={})",
+            started.elapsed(),
+            records.len()
+        );
+    }
+
+    #[test]
+    fn test_gui_action_queue_capacity_and_drain_throughput() {
+        let (tx, mut rx) = gui_action_channel();
+        let request = || GuiActionRequest {
+            idempotency_key: generate_action_key(),
+            command: GuiTestCommand::GoToChatList,
+            created_at: Instant::now(),
+        };
+        let started = Instant::now();
+        for _ in 0..MAX_PENDING {
+            tx.try_send(request())
+                .expect("queue accepts its full capacity");
+        }
+        assert!(
+            tx.try_send(request()).is_err(),
+            "queue must reject item N+1"
+        );
+
+        let mut drained = 0;
+        while rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(drained, MAX_PENDING);
+        assert!(rx.try_recv().is_err(), "drain must leave the queue empty");
+        eprintln!(
+            "GUI action queue load: filled and drained {MAX_PENDING} items in {:?}",
+            started.elapsed()
+        );
+    }
 }

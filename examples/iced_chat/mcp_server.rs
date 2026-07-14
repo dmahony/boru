@@ -200,6 +200,24 @@ pub fn validate_no_path_or_shell(s: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate a caller-controlled GUI action identifier.
+pub fn validate_gui_action_id(s: &str, name: &str) -> Result<(), String> {
+    if s.is_empty() {
+        return Err(format!("{name} must not be empty"));
+    }
+    validate_bounded(s, MAX_PROBE_ID_LEN, name)?;
+    validate_no_control_chars(s, name)?;
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(format!(
+            "{name} contains invalid characters; only ASCII letters, digits, '-' and '_' are allowed"
+        ));
+    }
+    Ok(())
+}
+
 /// Sanitize a string for logging — truncate to `max_chars` and escape
 /// control characters so that log output is safe to display.
 ///
@@ -273,6 +291,8 @@ pub struct McpAppState {
     pub gui_action_tx: Option<boru_chat::diagnostics::GuiTestHandle>,
     /// History of GUI test actions (shared with the Iced GUI loop).
     pub gui_action_history: GuiActionHistory,
+    /// Shared lifecycle history populated at MCP enqueue and Iced receipt.
+    pub gui_action_lifecycle: boru_chat::diagnostics::GuiActionHistory,
     /// Rate limiter for GUI test actions, shared across MCP connections.
     pub gui_action_rate_limiter: Arc<Mutex<GuiActionRateLimiter>>,
     /// Latest GUI state, published by the Iced application through a watch channel.
@@ -433,6 +453,9 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                     "GUI test actions are not enabled. Start with --enable-gui-test-actions.",
                 );
             }
+            if let Err(error) = validate_gui_tool_params(&req.method, &req.params) {
+                return jsonrpc_error(req.id.clone(), -32602, "Invalid params", &error);
+            }
             handle_gui_wait_for_state(req, state).await
         }
 
@@ -442,6 +465,8 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
         | "boru_gui_get_action_status"
         | "boru_get_gui_snapshot"
         | "boru_gui_set_composer"
+        | "boru_gui_clear_composer"
+        | "boru_gui_focus_composer"
         | "boru_gui_open_room"
         | "boru_gui_open_conversation"
         | "boru_gui_submit_composer"
@@ -455,6 +480,9 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                     "GUI test actions are not enabled. Start with --enable-gui-test-actions.",
                 );
             }
+            if let Err(error) = validate_gui_tool_params(&req.method, &req.params) {
+                return jsonrpc_error(req.id.clone(), -32602, "Invalid params", &error);
+            }
             let tx = state.gui_action_tx.clone().unwrap();
             match req.method.as_str() {
                 // Read-only tools — excluded from restrictive rate limit
@@ -465,6 +493,8 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                 "boru_send_gui_action"
                 | "boru_gui_navigate"
                 | "boru_gui_set_composer"
+                | "boru_gui_clear_composer"
+                | "boru_gui_focus_composer"
                 | "boru_gui_open_room"
                 | "boru_gui_open_conversation"
                 | "boru_gui_submit_composer"
@@ -477,6 +507,8 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                         "boru_send_gui_action" => handle_send_gui_action(req, tx).await,
                         "boru_gui_navigate" => handle_gui_navigate(req, tx).await,
                         "boru_gui_set_composer" => handle_set_composer(req, tx).await,
+                        "boru_gui_clear_composer" => handle_composer_control("clear", tx).await,
+                        "boru_gui_focus_composer" => handle_composer_control("focus", tx).await,
                         "boru_gui_open_room" => handle_gui_open_room(req, tx).await,
                         "boru_gui_open_conversation" => handle_gui_open_conversation(req, tx).await,
                         "boru_gui_submit_composer" => handle_submit_composer(tx).await,
@@ -502,6 +534,9 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                     "Method not found",
                     "GUI test actions are not enabled. Start with --enable-gui-test-actions.",
                 );
+            }
+            if let Err(error) = validate_gui_tool_params(&req.method, &req.params) {
+                return jsonrpc_error(req.id.clone(), -32602, "Invalid params", &error);
             }
             if let Err(e) = check_gui_action_rate_limit(&state.gui_action_rate_limiter) {
                 return jsonrpc_error(req.id.clone(), -32000, "Rate limit exceeded", &e);
@@ -530,6 +565,59 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
     }
 }
 
+/// Validate the outer JSON object for each GUI MCP method.
+///
+/// Handler-level validation remains responsible for value types and semantic
+/// constraints. This boundary check makes the documented schemas strict:
+/// misspelled or otherwise unknown fields are rejected instead of silently
+/// ignored, and required fields are reported as JSON-RPC `-32602` errors.
+fn validate_gui_tool_params(method: &str, params: &Value) -> Result<(), String> {
+    const GUI_METHODS: &[(&str, &[&str], &[&str])] = &[
+        ("boru_send_gui_action", &["command"], &["idempotency_key"]),
+        ("boru_gui_get_action_status", &["action_id"], &[]),
+        ("boru_get_gui_snapshot", &[], &[]),
+        ("boru_gui_navigate", &["destination"], &[]),
+        ("boru_gui_set_composer", &["text"], &[]),
+        ("boru_gui_open_room", &["room_id"], &[]),
+        ("boru_gui_open_conversation", &["conversation_id"], &[]),
+        ("boru_gui_submit_composer", &[], &[]),
+        ("boru_gui_clear_composer", &[], &[]),
+        ("boru_gui_focus_composer", &[], &[]),
+        ("boru_gui_toggle_dark_mode", &["enabled"], &[]),
+        ("boru_gui_close_dialog", &[], &[]),
+        ("boru_gui_wait_for_state", &["condition"], &["timeout_ms"]),
+        (
+            "boru_run_gui_message_test",
+            &["room_id", "message_text", "expected_peer_id"],
+            &["timeout_ms"],
+        ),
+    ];
+    let Some((_, required, optional)) = GUI_METHODS.iter().find(|(name, _, _)| *name == method)
+    else {
+        return Ok(());
+    };
+    let object = match params {
+        Value::Object(object) => object,
+        Value::Null if required.is_empty() && optional.is_empty() => return Ok(()),
+        _ => return Err("params must be a JSON object".to_string()),
+    };
+    for key in object.keys() {
+        if !required
+            .iter()
+            .chain(optional.iter())
+            .any(|allowed| *allowed == key)
+        {
+            return Err(format!("Unknown argument: {key}"));
+        }
+    }
+    for key in *required {
+        if !object.contains_key(*key) {
+            return Err(format!("Missing required argument: {key}"));
+        }
+    }
+    Ok(())
+}
+
 /// `boru_send_gui_action` — send a GUI test command through the channel.
 async fn handle_send_gui_action(
     req: &JsonRpcRequest,
@@ -552,9 +640,7 @@ async fn handle_send_gui_action(
         .and_then(|v| v.as_str())
         .map(|s| {
             // Validate caller-supplied key — bounded, no control chars
-            validate_bounded(s, MAX_PROBE_ID_LEN, "idempotency_key")?;
-            validate_no_control_chars(s, "idempotency_key")?;
-            validate_no_path_or_shell(s, "idempotency_key")?;
+            validate_gui_action_id(s, "idempotency_key")?;
             Ok::<String, String>(s.to_string())
         })
         .transpose()?
@@ -646,11 +732,20 @@ async fn handle_get_gui_action_status(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "Missing required argument: action_id".to_string())?;
 
-    // Validate caller-supplied key — bounded, no control chars
-    validate_bounded(action_id, MAX_PROBE_ID_LEN, "action_id")?;
-    validate_no_control_chars(action_id, "action_id")?;
+    validate_gui_action_id(action_id, "action_id")?;
 
-    // Look up the action in the GUI action history
+    // Prefer the shared lifecycle store: it is populated at enqueue time and
+    // updated by the Iced loop, so status is observable even while pending.
+    let lifecycle_id = boru_chat::diagnostics::GuiActionId(action_id.to_string());
+    if let Some(status) = state.gui_action_lifecycle.get(&lifecycle_id) {
+        return Ok(serde_json::json!({
+            "found": true,
+            "action_id": action_id,
+            "status": status,
+        }));
+    }
+
+    // Keep compatibility with the legacy local message-test records.
     if let Some(record) = state.gui_action_history.find(action_id) {
         Ok(serde_json::json!({
             "found": true,
@@ -694,29 +789,38 @@ async fn handle_gui_wait_for_state(
         .ok_or_else(|| "GUI state notifications are unavailable".to_string())?;
     let journal = &state.iced_diagnostics;
     let evaluate = |snapshot: &IcedStateSnapshot| {
-        diagnostics::evaluate_wait_condition(&condition, snapshot, journal)
+        diagnostics::evaluate_wait_condition_with_actions(
+            &condition,
+            snapshot,
+            journal,
+            &state.gui_action_lifecycle,
+        )
     };
 
     let reached = evaluate(&*rx.borrow());
     if !reached {
-        let changed = tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            async {
-                loop {
-                    match rx.changed().await {
-                        Ok(()) if evaluate(&*rx.borrow()) => break true,
-                        Ok(()) => continue,
-                        Err(_) => break false,
-                    }
+        let changed = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+            loop {
+                match rx.changed().await {
+                    Ok(()) if evaluate(&*rx.borrow()) => break true,
+                    Ok(()) => continue,
+                    Err(_) => break false,
                 }
-            },
-        )
+            }
+        })
         .await;
         if !matches!(changed, Ok(true)) {
             let snapshot = rx.borrow().clone();
+            let closed = matches!(changed, Ok(false));
             return Ok(serde_json::json!({
                 "reached": false,
-                "timed_out": matches!(changed, Err(_)),
+                "timed_out": !closed,
+                "cancelled": closed,
+                "error": if closed {
+                    Some("GUI state notifications closed".to_string())
+                } else {
+                    Some(format!("timed out waiting for GUI condition after {timeout_ms}ms"))
+                },
                 "condition": condition,
                 "snapshot": snapshot,
             }));
@@ -1072,6 +1176,31 @@ async fn handle_submit_composer(
     }))
 }
 
+/// Queue a parameterless semantic composer control action.
+async fn handle_composer_control(
+    control: &str,
+    tx: boru_chat::diagnostics::GuiTestHandle,
+) -> Result<Value, String> {
+    let command = match control {
+        "clear" => boru_chat::diagnostics::GuiTestCommand::ClearComposer,
+        "focus" => boru_chat::diagnostics::GuiTestCommand::FocusComposer,
+        _ => return Err("unknown composer control".to_string()),
+    };
+    let action_id = crate::gui_test_actions::generate_action_key();
+    let request = boru_chat::diagnostics::GuiActionRequest {
+        action_id: boru_chat::diagnostics::GuiActionId(action_id.clone()),
+        requested_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64,
+        command: serde_json::to_string(&command)
+            .map_err(|e| format!("Failed to serialize command: {e}"))?,
+    };
+    tx.enqueue(request)
+        .map_err(|e| format!("GUI action channel error: {}", e.message))?;
+    Ok(serde_json::json!({ "sent": true, "action_id": action_id }))
+}
+
 // =============================================================================
 // boru_gui_close_dialog
 // =============================================================================
@@ -1149,52 +1278,136 @@ async fn handle_gui_close_dialog(
 const MAX_GUI_MESSAGE_TEST_TIMEOUT_MS: u64 = 60_000;
 
 /// `boru_run_local_gui_message_test` — verify the local GUI send pipeline.
-async fn handle_run_local_gui_message_test(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
-    let room_id = req.params.get("room_id").and_then(Value::as_str).ok_or_else(|| "Missing required argument: room_id".to_string())?;
-    let message_text = req.params.get("message_text").and_then(Value::as_str).ok_or_else(|| "Missing required argument: message_text".to_string())?;
-    let timeout_ms = req.params.get("timeout_ms").and_then(Value::as_u64).unwrap_or(20_000).clamp(1, MAX_GUI_MESSAGE_TEST_TIMEOUT_MS);
-    if room_id.is_empty() { return Err("room_id must not be empty".to_string()); }
+async fn handle_run_local_gui_message_test(
+    req: &JsonRpcRequest,
+    state: &McpAppState,
+) -> Result<Value, String> {
+    let room_id = req
+        .params
+        .get("room_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing required argument: room_id".to_string())?;
+    let message_text = req
+        .params
+        .get("message_text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing required argument: message_text".to_string())?;
+    let timeout_ms = req
+        .params
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(20_000)
+        .clamp(1, MAX_GUI_MESSAGE_TEST_TIMEOUT_MS);
+    if room_id.is_empty() {
+        return Err("room_id must not be empty".to_string());
+    }
     validate_bounded(room_id, MAX_GUI_ROOM_ID_LEN, "room_id")?;
-    if !room_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return Err("room_id must contain only ASCII letters, digits, '-' or '_'".to_string()); }
-    if message_text.is_empty() { return Err("message_text must not be empty".to_string()); }
-    if message_text.chars().count() > MAX_COMPOSER_LEN { return Err(format!("message_text too long (max {MAX_COMPOSER_LEN} characters)")); }
-    if message_text.chars().any(|c| c.is_control() && c != ' ') { return Err("message_text must not contain control characters".to_string()); }
+    if !room_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("room_id must contain only ASCII letters, digits, '-' or '_'".to_string());
+    }
+    if message_text.is_empty() {
+        return Err("message_text must not be empty".to_string());
+    }
+    if message_text.chars().count() > MAX_COMPOSER_LEN {
+        return Err(format!(
+            "message_text too long (max {MAX_COMPOSER_LEN} characters)"
+        ));
+    }
+    if message_text.chars().any(|c| c.is_control() && c != ' ') {
+        return Err("message_text must not contain control characters".to_string());
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-    let tx = state.gui_action_tx.clone().ok_or_else(|| "GUI action channel not available".to_string())?;
+    let tx = state
+        .gui_action_tx
+        .clone()
+        .ok_or_else(|| "GUI action channel not available".to_string())?;
     let initial_snapshot = state.gui_state_rx.as_ref().map(|rx| rx.borrow().clone());
-    let initial_entries = initial_snapshot.as_ref().map(|s| s.total_entry_count).unwrap_or(0);
+    let initial_entries = initial_snapshot
+        .as_ref()
+        .map(|s| s.total_entry_count)
+        .unwrap_or(0);
     let initial_journal = state.iced_diagnostics.latest_sequence();
     let initial_diagnostics = state.diagnostics.latest_sequence();
     let mut steps = Vec::new();
-    async fn send_action(tx: &boru_chat::diagnostics::GuiTestHandle, command: boru_chat::diagnostics::GuiTestCommand, journal: &IcedMessageJournal, deadline: tokio::time::Instant) -> Result<(String, String), String> {
+    async fn send_action(
+        tx: &boru_chat::diagnostics::GuiTestHandle,
+        command: boru_chat::diagnostics::GuiTestCommand,
+        journal: &IcedMessageJournal,
+        deadline: tokio::time::Instant,
+    ) -> Result<(String, String), String> {
         let action_id = crate::gui_test_actions::generate_action_key();
         let command_json = serde_json::to_string(&command).map_err(|e| e.to_string())?;
-        let request = boru_chat::diagnostics::GuiActionRequest { action_id: boru_chat::diagnostics::GuiActionId(action_id.clone()), requested_at_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64, command: command_json };
+        let request = boru_chat::diagnostics::GuiActionRequest {
+            action_id: boru_chat::diagnostics::GuiActionId(action_id.clone()),
+            requested_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+            command: command_json,
+        };
         let before = journal.latest_sequence();
-        tx.enqueue(request).map_err(|e| format!("GUI action enqueue failed: {}", e.message))?;
+        tx.enqueue(request)
+            .map_err(|e| format!("GUI action enqueue failed: {}", e.message))?;
         while journal.latest_sequence() <= before {
-            if tokio::time::Instant::now() >= deadline { return Err("timed out waiting for GUI action".to_string()); }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("timed out waiting for GUI action".to_string());
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         Ok((action_id, "observed_by_gui".to_string()))
     }
-    let (open_id, open_status) = send_action(&tx, crate::gui_test_actions::GuiTestCommand::OpenRoom { room_id: room_id.to_string() }, &state.iced_diagnostics, deadline).await?;
-    steps.push(serde_json::json!({"stage":"room_navigation","action_id":open_id,"state":open_status}));
+    let (open_id, open_status) = send_action(
+        &tx,
+        crate::gui_test_actions::GuiTestCommand::OpenRoom {
+            room_id: room_id.to_string(),
+        },
+        &state.iced_diagnostics,
+        deadline,
+    )
+    .await?;
+    steps.push(
+        serde_json::json!({"stage":"room_navigation","action_id":open_id,"state":open_status}),
+    );
 
-    let (set_id, set_status) = send_action(&tx, crate::gui_test_actions::GuiTestCommand::SetComposerText { text: message_text.to_string() }, &state.iced_diagnostics, deadline).await?;
-    steps.push(serde_json::json!({"stage":"composer_update","action_id":set_id,"state":set_status}));
+    let (set_id, set_status) = send_action(
+        &tx,
+        crate::gui_test_actions::GuiTestCommand::SetComposerText {
+            text: message_text.to_string(),
+        },
+        &state.iced_diagnostics,
+        deadline,
+    )
+    .await?;
+    steps
+        .push(serde_json::json!({"stage":"composer_update","action_id":set_id,"state":set_status}));
 
-    let (submit_id, submit_status) = send_action(&tx, crate::gui_test_actions::GuiTestCommand::SubmitComposer, &state.iced_diagnostics, deadline).await?;
+    let (submit_id, submit_status) = send_action(
+        &tx,
+        crate::gui_test_actions::GuiTestCommand::SubmitComposer,
+        &state.iced_diagnostics,
+        deadline,
+    )
+    .await?;
     steps.push(serde_json::json!({"stage":"composer_submission","action_id":submit_id,"state":submit_status}));
 
     let mut current = initial_snapshot;
     while tokio::time::Instant::now() < deadline {
         current = state.gui_state_rx.as_ref().map(|rx| rx.borrow().clone());
-        if current.as_ref().is_some_and(|s| s.total_entry_count > initial_entries) { break; }
+        if current
+            .as_ref()
+            .is_some_and(|s| s.total_entry_count > initial_entries)
+        {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let composer_cleared = current.as_ref().is_some_and(|s| s.composer_text.is_empty());
-    let local_message_created = current.as_ref().is_some_and(|s| s.total_entry_count > initial_entries);
+    let local_message_created = current
+        .as_ref()
+        .is_some_and(|s| s.total_entry_count > initial_entries);
     let broadcast_event = state
         .diagnostics
         .events_since(initial_diagnostics, 200, None)
@@ -1214,8 +1427,18 @@ async fn handle_run_local_gui_message_test(req: &JsonRpcRequest, state: &McpAppS
     let local_broadcast_detected = broadcast_event.is_some();
     let gui_entries = state.iced_diagnostics.entries_since(initial_journal, 200);
     let gui_state_observed = !gui_entries.is_empty() || current.is_some();
-    let first_failed_stage = if !composer_cleared { Some("local_application_state") } else if !local_message_created { Some("local_message_creation") } else if !gui_state_observed { Some("local_gui_state") } else { None };
-    Ok(serde_json::json!({"success":first_failed_stage.is_none(),"first_failed_stage":first_failed_stage,"room_id":room_id,"message_text_length":message_text.chars().count(),"verification":{"room_navigation":true,"composer_update":true,"composer_submission":true,"composer_cleared":composer_cleared,"local_message_created":local_message_created,"local_application_state":current,"local_gui_state":gui_state_observed},"steps":steps,"gui_journal_entries":gui_entries,"note":"Local GUI pipeline only; remote delivery is not verified by this tool. Query the remote node separately."}))
+    let first_failed_stage = if !composer_cleared {
+        Some("local_application_state")
+    } else if !local_message_created {
+        Some("local_message_creation")
+    } else if !gui_state_observed {
+        Some("local_gui_state")
+    } else {
+        None
+    };
+    Ok(
+        serde_json::json!({"success":first_failed_stage.is_none(),"first_failed_stage":first_failed_stage,"room_id":room_id,"message_text_length":message_text.chars().count(),"verification":{"room_navigation":true,"composer_update":true,"composer_submission":true,"composer_cleared":composer_cleared,"local_message_created":local_message_created,"local_application_state":current,"local_gui_state":gui_state_observed},"steps":steps,"gui_journal_entries":gui_entries,"note":"Local GUI pipeline only; remote delivery is not verified by this tool. Query the remote node separately."}),
+    )
 }
 
 // =============================================================================
@@ -2994,10 +3217,7 @@ mod tests {
         // The handler's warning is intentionally limited to a bounded prefix;
         // verify the same logging contract without installing a global tracing
         // subscriber (which would make the full example test suite racy).
-        let secret_text = format!(
-            "composer-secret-{}",
-            "0123456789abcdef".repeat(32)
-        );
+        let secret_text = format!("composer-secret-{}", "0123456789abcdef".repeat(32));
         let prefix = sanitize_for_log(&secret_text, 50);
         assert!(prefix.contains("... (truncated, total "));
         assert!(prefix.len() > 50);
@@ -3268,16 +3488,28 @@ mod tests {
 
             assert_eq!(response.jsonrpc, "2.0");
             assert_eq!(response.id, req.id);
-            assert!(response.error.is_none(), "unexpected adapter error: {:?}", response.error);
+            assert!(
+                response.error.is_none(),
+                "unexpected adapter error: {:?}",
+                response.error
+            );
             let result = response.result.expect("adapter should return a result");
             let object = result.as_object().expect("result should be an object");
-            assert_eq!(object.len(), 3, "response must not grow undocumented fields");
+            assert_eq!(
+                object.len(),
+                3,
+                "response must not grow undocumented fields"
+            );
             assert_eq!(result["accepted"], true);
-            let action_id = result["action_id"].as_str().expect("action_id should be a string");
+            let action_id = result["action_id"]
+                .as_str()
+                .expect("action_id should be a string");
             assert!(!action_id.is_empty());
             assert!(result["queued_at_ms"].is_i64());
 
-            let action = action_rx.try_recv().expect("adapter should enqueue the action");
+            let action = action_rx
+                .try_recv()
+                .expect("adapter should enqueue the action");
             assert_eq!(action.action_id.0, action_id);
             let command: GuiTestCommand = serde_json::from_str(&action.command).unwrap();
             assert_eq!(command, expected_command);
@@ -3293,10 +3525,16 @@ mod tests {
         assert_eq!(response.jsonrpc, "2.0");
         assert_eq!(response.id, req.id);
         assert!(response.result.is_none());
-        let error = response.error.expect("invalid destination should be an error");
+        let error = response
+            .error
+            .expect("invalid destination should be an error");
         assert_eq!(error.code, -32000);
         assert_eq!(error.message, "Internal error");
-        let details = error.data.as_ref().and_then(Value::as_str).unwrap_or_default();
+        let details = error
+            .data
+            .as_ref()
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         assert!(details.contains("Invalid destination"));
         assert!(details.contains("chat_list"));
     }
@@ -3983,6 +4221,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_send_gui_action_is_visible_to_lifecycle_status_query() {
+        let (handle, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let lifecycle = handle.history();
+        let req = make_send_gui_action_request(json!({
+            "command": { "command": "go_to_chat_list" },
+            "idempotency_key": "lifecycle_trace_42"
+        }));
+
+        let response = handle_send_gui_action(&req, handle).await.unwrap();
+        assert_eq!(response["sent"], true);
+        assert_eq!(response["idempotency_key"], "lifecycle_trace_42");
+
+        let queued = lifecycle
+            .get(&boru_chat::diagnostics::GuiActionId(
+                "lifecycle_trace_42".into(),
+            ))
+            .expect("MCP enqueue must record the action before dispatch");
+        assert_eq!(queued.state, boru_chat::diagnostics::GuiActionState::Queued);
+        assert!(queued.requested_at_ms > 0);
+        assert!(queued.updated_at_ms >= queued.requested_at_ms);
+
+        let received = rx.try_recv().expect("GUI action must reach the GUI queue");
+        assert_eq!(received.action_id.0, "lifecycle_trace_42");
+
+        let (mut state, _gossip_rx) = make_gate_test_state(true, true).await;
+        state.gui_action_lifecycle = lifecycle;
+        let status_response = handle_get_gui_action_status(
+            &make_get_action_status_request("lifecycle_trace_42"),
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(status_response["found"], true);
+        assert_eq!(status_response["status"]["state"], "queued");
+        assert!(status_response["status"]["requested_at_ms"].is_number());
+    }
+
+    #[tokio::test]
     async fn test_local_gui_message_test_does_not_require_remote_peer() {
         let (state, _rx) = make_gate_test_state(true, true).await;
         let room_id = "00".repeat(32);
@@ -4001,7 +4277,10 @@ mod tests {
         let error = handle_run_local_gui_message_test(&req, &state)
             .await
             .expect_err("mock GUI action channel is intentionally closed");
-        assert!(!error.contains("expected_peer_id"), "local-only test must not require a remote peer: {error}");
+        assert!(
+            !error.contains("expected_peer_id"),
+            "local-only test must not require a remote peer: {error}"
+        );
     }
 
     #[tokio::test]
@@ -4107,6 +4386,115 @@ mod tests {
         assert!(!response_str.contains("password"));
     }
 
+    #[test]
+    fn test_gui_tool_schema_rejects_unknown_and_missing_arguments() {
+        let cases = [
+            (
+                "boru_send_gui_action",
+                json!({"command": {}, "typo": true}),
+                "Unknown argument: typo",
+            ),
+            (
+                "boru_gui_navigate",
+                json!({"destination": "settings", "typo": true}),
+                "Unknown argument: typo",
+            ),
+            (
+                "boru_gui_set_composer",
+                json!({"typo": "text"}),
+                "Unknown argument: typo",
+            ),
+            (
+                "boru_gui_open_room",
+                json!({"room_id": "room", "extra": 1}),
+                "Unknown argument: extra",
+            ),
+            (
+                "boru_gui_open_conversation",
+                json!({}),
+                "Missing required argument: conversation_id",
+            ),
+            (
+                "boru_gui_toggle_dark_mode",
+                json!({"enabled": true, "extra": false}),
+                "Unknown argument: extra",
+            ),
+            (
+                "boru_gui_clear_composer",
+                json!({"extra": false}),
+                "Unknown argument: extra",
+            ),
+            (
+                "boru_gui_focus_composer",
+                json!({"extra": false}),
+                "Unknown argument: extra",
+            ),
+            (
+                "boru_gui_wait_for_state",
+                json!({"condition": {}, "extra": 1}),
+                "Unknown argument: extra",
+            ),
+            (
+                "boru_run_gui_message_test",
+                json!({"room_id": "r", "message_text": "m", "expected_peer_id": "p", "extra": 1}),
+                "Unknown argument: extra",
+            ),
+        ];
+        for (method, params, expected) in cases {
+            let error = validate_gui_tool_params(method, &params).unwrap_err();
+            assert_eq!(error, expected, "schema mismatch for {method}");
+        }
+    }
+
+    #[test]
+    fn test_gui_tool_schema_accepts_optional_and_parameterless_forms() {
+        assert!(validate_gui_tool_params(
+            "boru_send_gui_action",
+            &json!({
+                "command": {"command": "toggle_help"},
+                "idempotency_key": "action-1"
+            })
+        )
+        .is_ok());
+        assert!(validate_gui_tool_params(
+            "boru_gui_wait_for_state",
+            &json!({
+                "condition": {"type": "dialog_closed"},
+                "timeout_ms": 1000
+            })
+        )
+        .is_ok());
+        for method in [
+            "boru_get_gui_snapshot",
+            "boru_gui_submit_composer",
+            "boru_gui_clear_composer",
+            "boru_gui_focus_composer",
+            "boru_gui_close_dialog",
+        ] {
+            assert!(validate_gui_tool_params(method, &json!({})).is_ok());
+            assert!(validate_gui_tool_params(method, &Value::Null).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gui_adapter_rejects_unknown_argument_with_jsonrpc_invalid_params() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "boru_gui_toggle_dark_mode".to_string(),
+            params: json!({"enabled": true, "enabeld": true}),
+            id: Some(Value::Number(7.into())),
+        };
+        let response = handle_request(&req, &state).await;
+        let error = response.error.expect("unknown arguments must be rejected");
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "Invalid params");
+        assert_eq!(
+            error.data,
+            Some(Value::String("Unknown argument: enabeld".to_string()))
+        );
+    }
+
     // =============================================================================
     // Security: GUI tools gate when test mode disabled
     // =============================================================================
@@ -4157,6 +4545,7 @@ mod tests {
                 None
             },
             gui_action_history: GuiActionHistory::new(),
+            gui_action_lifecycle: boru_chat::diagnostics::GuiActionHistory::default(),
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
         };
@@ -4289,6 +4678,39 @@ mod tests {
             "boru_get_iced_state should succeed when test mode is enabled, got: {:?}",
             resp.error
         );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_gui_action_status_is_explicit_and_non_blocking() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut req = make_generic_request("boru_gui_get_action_status");
+        req.params = json!({"action_id": "stale-or-unknown-action"});
+
+        let response =
+            tokio::time::timeout(Duration::from_millis(100), handle_request(&req, &state))
+                .await
+                .expect("unknown action lookup must not hang");
+        assert!(
+            response.error.is_none(),
+            "lookup should be a diagnostic result"
+        );
+        let result = response.result.expect("lookup result");
+        assert_eq!(result["found"], false);
+        assert_eq!(result["action_id"], "stale-or-unknown-action");
+        assert!(result["note"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_unknown_gui_action_id_validation_is_structured() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut req = make_generic_request("boru_gui_get_action_status");
+        req.params = json!({"action_id": "bad\nidentifier"});
+
+        let response = handle_request(&req, &state).await;
+        let error = response.error.expect("control characters must be rejected");
+        assert_eq!(error.code, -32000);
+        assert!(error.message.contains("Internal error"));
+        assert!(error.data.unwrap().as_str().unwrap().contains("control"));
     }
 
     #[tokio::test]
@@ -4770,6 +5192,7 @@ mod tests {
             gui_test_actions_enabled: true,
             gui_action_tx: None,
             gui_action_history: GuiActionHistory::new(),
+            gui_action_lifecycle: boru_chat::diagnostics::GuiActionHistory::default(),
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
         };
@@ -4827,6 +5250,7 @@ mod tests {
             gui_test_actions_enabled: true,
             gui_action_tx: None,
             gui_action_history: GuiActionHistory::new(),
+            gui_action_lifecycle: boru_chat::diagnostics::GuiActionHistory::default(),
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
         };
@@ -4970,5 +5394,98 @@ mod tests {
         assert!(!response_str.contains("private_key"));
         assert!(!response_str.contains("ticket"));
         assert!(!response_str.contains("password"));
+    }
+
+    // =============================================================================
+    // Security abuse matrix: malformed and rejected requests must not enqueue
+    // =============================================================================
+
+    #[test]
+    fn test_malformed_json_is_rejected_before_gui_dispatch() {
+        let malformed = r#"{\"jsonrpc\":\"2.0\",\"method\":\"boru_gui_navigate\",\"params\":{"#;
+        let parsed: Result<JsonRpcRequest, _> = serde_json::from_str(malformed);
+        assert!(parsed.is_err(), "malformed JSON must never reach dispatch");
+    }
+
+    #[tokio::test]
+    async fn test_oversized_gui_command_fails_closed_without_mutation() {
+        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(4);
+        let request = make_send_gui_action_request(json!({
+            "command": {
+                "command": "set_composer_text",
+                "text": "x".repeat(boru_chat::diagnostics::GUI_TEST_COMMAND_MAX_STRING_LEN + 1)
+            }
+        }));
+        let result = handle_send_gui_action(&request, tx).await;
+        assert!(result.is_err(), "oversized command must be rejected");
+        assert!(
+            rx.try_recv().is_err(),
+            "rejected command must not mutate GUI queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_control_character_gui_command_fails_closed_without_mutation() {
+        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(4);
+        let request = make_send_gui_action_request(json!({
+            "command": {"command": "set_composer_text", "text": "safe\nunsafe"}
+        }));
+        let result = handle_send_gui_action(&request, tx).await;
+        assert!(result.is_err(), "control characters must be rejected");
+        assert!(
+            rx.try_recv().is_err(),
+            "rejected command must not mutate GUI queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_navigation_destination_fails_closed_without_mutation() {
+        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(4);
+        let request = make_navigate_request(json!({"destination": "admin_console"}));
+        let result = handle_gui_navigate(&request, tx).await;
+        assert!(result.is_err(), "unknown destinations must be rejected");
+        assert!(
+            rx.try_recv().is_err(),
+            "rejected navigation must not mutate GUI queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_queue_overflow_fails_closed_without_extra_gui_mutation() {
+        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let first = make_navigate_request(json!({"destination": "settings"}));
+        assert!(handle_gui_navigate(&first, tx.clone()).await.is_ok());
+        let second = make_navigate_request(json!({"destination": "friends"}));
+        let result = handle_gui_navigate(&second, tx).await;
+        assert!(result.is_err(), "full queue must reject the second action");
+        assert!(result.unwrap_err().contains("queue is full"));
+        let queued = rx.try_recv().expect("first action remains queued");
+        assert!(
+            rx.try_recv().is_err(),
+            "overflow must not enqueue an extra action"
+        );
+        assert!(queued.command.contains("open_settings"));
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_rejects_burst_before_gui_dispatch() {
+        let (state, _gossip_rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_gui_toggle_dark_mode");
+        request.params = json!({"enabled": true});
+        // The test state's receiver is intentionally absent, so the first
+        // request fails closed at enqueue; the second must be stopped by the
+        // shared rate limiter before the handler is reached.
+        let first = handle_request(&request, &state).await;
+        assert!(first.error.is_some());
+        let second = handle_request(&request, &state).await;
+        let error = second.error.expect("burst must be rate limited");
+        assert_eq!(error.code, -32000);
+        assert_eq!(error.message, "Rate limit exceeded");
+        assert!(error
+            .data
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("10 actions/sec"));
     }
 }

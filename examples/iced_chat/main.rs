@@ -664,6 +664,9 @@ fn main() -> Result<()> {
 
     // Create the GUI test action channel using GuiTestHandle (always — only consumed when enabled)
     let (gui_action_handle, gui_action_rx) = GuiTestHandle::channel(256);
+    // Keep one history instance shared by the MCP producer and the Iced
+    // consumer so status queries observe the same lifecycle transitions.
+    let gui_action_history = gui_action_handle.history();
 
     // Create a watch channel for GUI state snapshots (used for diagnostics)
     let (gui_state_tx, _gui_state_rx) = watch::channel(boru_chat::diagnostics::IcedStateSnapshot {
@@ -738,6 +741,7 @@ fn main() -> Result<()> {
             gui_test_actions_enabled: args.enable_gui_test_actions,
             gui_action_tx: Some(gui_action_handle),
             gui_action_history: gui_test_actions::GuiActionHistory::default(),
+            gui_action_lifecycle: gui_action_history.clone(),
             gui_action_rate_limiter: Arc::new(std::sync::Mutex::new(
                 gui_test_actions::GuiActionRateLimiter::default(),
             )),
@@ -785,6 +789,7 @@ fn main() -> Result<()> {
             iced_diagnostics,
             Some(Arc::new(tokio::sync::Mutex::new(gui_action_rx))),
             gui_state_tx,
+            gui_action_history,
         ),
         initial_topic,
     )));
