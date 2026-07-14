@@ -1397,6 +1397,34 @@ struct SidebarRequestsDependency {
     friend_request_error: String,
 }
 
+/// Dependency key for `iced::lazy`-based incremental rendering of individual
+/// chat message widgets.  When `widget_gen` has not changed between frames,
+/// iced reuses the previously-built widget tree without calling the render
+/// closure — avoiding redundant widget construction for unchanged messages.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct ChatMessageWidgetKey {
+    /// Index of this entry in the conversation's entries vec.
+    pub index: usize,
+    /// Per-entry generation counter — bumped on every mutation that affects
+    /// the on-screen rendering.
+    pub widget_gen: u64,
+    /// Whether dark mode is active.
+    pub dark_mode: bool,
+    /// Chat text size encoded as integer bits (f32 does not implement Hash).
+    pub chat_text_size_bits: u32,
+}
+
+impl ChatMessageWidgetKey {
+    pub fn new(index: usize, widget_gen: u64, dark_mode: bool, text_size: f32) -> Self {
+        Self {
+            index,
+            widget_gen,
+            dark_mode,
+            chat_text_size_bits: (text_size * 100.0) as u32,
+        }
+    }
+}
+
 /// A structured join-request item exposed by the main-menu ViewModel.
 ///
 /// Each item carries the persistent request ID, the target peer's public key,
@@ -2928,6 +2956,200 @@ impl IcedChat {
             .into()
     }
 
+    /// Incremental-rendering helper: build a single chat-entry widget tree.
+    ///
+    /// Called from `view_chat_log` via `iced::widget::lazy`.  All render-affecting
+    /// data is passed explicitly (no `&self` capture), so iced can cache the widget
+    /// tree and skip rebuilding it when the dependency key hasn't changed.
+    #[allow(clippy::too_many_arguments)]
+    fn render_chat_message_static(
+        key: &ChatMessageWidgetKey,
+        kind: ChatKind,
+        body: String,
+        label_text: String,
+        formatted_time: String,
+        avatar_handle: Option<iced::widget::image::Handle>,
+        image_handle: Option<iced::widget::image::Handle>,
+        image_error: Option<String>,
+        reactions_text: Option<String>,
+        sender_key: Option<PublicKey>,
+        download: Option<DownloadAttachment>,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::button;
+        use iced::widget::container;
+        use iced::widget::image as iced_image;
+        use iced::widget::space;
+        use iced::widget::text;
+        use iced::widget::text::Wrapping;
+        use iced::widget::Column;
+        use iced::widget::Row;
+        use iced::Alignment;
+        use iced::Length;
+
+        let idx = key.index;
+        let theme = if key.dark_mode {
+            iced::Theme::Dark
+        } else {
+            iced::Theme::Light
+        };
+        let text_size = key.chat_text_size_bits as f32 / 100.0;
+
+        let mut col = Column::new().spacing(SPACE_4).width(Length::Fill);
+
+        // ── System messages: centered, no bubble ──
+        if matches!(kind, ChatKind::System) {
+            let system_row = Row::new()
+                .push(space::horizontal())
+                .push(
+                    text(body.clone())
+                        .size(TYPO_SM)
+                        .wrapping(Wrapping::Word)
+                        .color(text_system(&theme)),
+                )
+                .push(space::horizontal())
+                .width(Length::Fill);
+            col = col.push(system_row);
+            if let Some(dw) = &download {
+                let dw_el = Self::view_download_attachment_content(idx, dw, key.dark_mode);
+                col = col.push(dw_el);
+            }
+            return col.into();
+        }
+
+        // ── Local / Remote messages ──
+        let label_color = match kind {
+            ChatKind::Local => text_local_label(&theme),
+            ChatKind::Remote => text_remote_label(&theme),
+            _ => unreachable!(),
+        };
+        let body_color = match kind {
+            ChatKind::Local => text_local_body(&theme),
+            ChatKind::Remote => text_remote_body(&theme),
+            _ => unreachable!(),
+        };
+
+        let label_str = label_text.clone();
+        let label_el: iced::Element<'static, AppMessage> =
+            if matches!(kind, ChatKind::Remote) {
+                if let Some(sk) = sender_key {
+                    button(text(label_str).size(TYPO_XS).color(label_color))
+                        .on_press(AppMessage::OpenPeerProfile(sk))
+                        .padding(0)
+                        .style(|_t, _s| iced::widget::button::Style::default())
+                        .into()
+                } else {
+                    text(label_str).size(TYPO_XS).color(label_color).into()
+                }
+            } else {
+                text(label_str).size(TYPO_XS).color(label_color).into()
+            };
+
+        let body_el = text(body.clone())
+            .size(text_size)
+            .wrapping(Wrapping::Word)
+            .width(Length::Fill)
+            .color(body_color);
+
+        let bubble = container(body_el)
+            .padding([SPACE_4, SPACE_8])
+            .style(move |t: &iced::Theme| {
+                let mut s = iced::widget::container::Style::default();
+                if let Some(bg) = bubble_bg(t, kind) {
+                    s.background = Some(bg);
+                }
+                s.border.radius = (8.0_f32).into();
+                s
+            });
+
+        let ts_el = text(formatted_time.clone()).size(TYPO_XXS).color(text_muted(&theme));
+
+        let bubble_col = Column::new()
+            .push(label_el)
+            .push(bubble)
+            .push(ts_el)
+            .spacing(SPACE_2)
+            .max_width(480.0);
+
+        let avatar: iced::Element<'static, AppMessage> = {
+            if let Some(ref handle) = avatar_handle {
+                iced_image(handle.clone())
+                    .content_fit(iced::ContentFit::ScaleDown)
+                    .width(Length::Fixed(48.0))
+                    .height(Length::Fixed(48.0))
+                    .into()
+            } else {
+                text("?").size(TYPO_XL).into()
+            }
+        };
+
+        let msg_row = match kind {
+            ChatKind::Remote => Row::new()
+                .push(avatar)
+                .push(bubble_col)
+                .align_y(Alignment::Center)
+                .spacing(SPACE_8),
+            ChatKind::Local => Row::new()
+                .push(avatar)
+                .push(bubble_col)
+                .align_y(Alignment::Center)
+                .spacing(SPACE_8),
+            _ => unreachable!(),
+        }
+        .width(Length::Fill);
+
+        col = col.push(msg_row);
+
+        // ── Image (cached handle — decoded once at construction) ──
+        if let Some(ref handle) = image_handle {
+            let img = iced_image(handle.clone())
+                .content_fit(iced::ContentFit::ScaleDown)
+                .width(Length::Fixed(200.0));
+            let thumbnail = button(img)
+                .on_press(AppMessage::OpenImagePreview(idx))
+                .padding(0)
+                .style(|_t, _s| iced::widget::button::Style::default());
+            col = col.push(thumbnail);
+        } else if let Some(ref err) = image_error {
+            let placeholder = Column::new()
+                .push(
+                    text("🖼 Image unavailable")
+                        .size(TYPO_SM)
+                        .color(text_system(&theme)),
+                )
+                .push(
+                    text(err.clone())
+                        .size(TYPO_XS)
+                        .color(color_error(&theme))
+                        .wrapping(Wrapping::Word),
+                )
+                .spacing(SPACE_2);
+            col = col.push(
+                container(placeholder)
+                    .width(Length::Fill)
+                    .padding([SPACE_8, SPACE_10])
+                    .style(move |t| container_card(t)),
+            );
+        }
+
+        // ── Reactions ──
+        if let Some(rx_text) = reactions_text {
+            let reactions_line = Row::new()
+                .push(
+                    text(rx_text)
+                        .color(text_muted(&theme))
+                        .size(TYPO_SM)
+                        .wrapping(Wrapping::Word)
+                        .width(Length::Fill),
+                )
+                .spacing(0)
+                .padding([0.0, SPACE_8])
+                .width(Length::Fill);
+            col = col.push(reactions_line);
+        }
+
+        col.into()
+    }
+
     /// Convert a persisted `HistoryEntry` to a `ChatEntry` for in-memory replay.
     ///
     /// Returns `None` for entries whose kind or sender cannot be resolved.
@@ -4099,18 +4321,35 @@ impl IcedChat {
                 // Load persisted history and replay it into the UI.
                 // Entries are prepended (oldest first) so they appear before
                 // any current-session system messages.
+                // Image entries are decoded in parallel using rayon to avoid
+                // blocking the UI thread during history replay.
                 {
                     let local_hex = self.local_public.to_string();
                     let history_entries: Vec<HistoryEntry> = {
                         let chat_history = self.chat_history.lock().unwrap();
                         chat_history.for_topic(&topic).into_iter().cloned().collect()
                     };
-                    for hist_entry in &history_entries {
-                        if let Some(chat_entry) =
-                            Self::history_entry_to_chat_entry(hist_entry, &topic, &local_hex)
-                        {
-                            self.entries_push(chat_entry);
-                        }
+                    #[cfg(feature = "gui")]
+                    let chat_entries: Vec<Option<ChatEntry>> = {
+                        use rayon::prelude::*;
+                        history_entries
+                            .par_iter()
+                            .map(|hist_entry| {
+                                Self::history_entry_to_chat_entry(hist_entry, &topic, &local_hex)
+                            })
+                            .collect()
+                    };
+                    #[cfg(not(feature = "gui"))]
+                    let chat_entries: Vec<Option<ChatEntry>> = {
+                        history_entries
+                            .iter()
+                            .map(|hist_entry| {
+                                Self::history_entry_to_chat_entry(hist_entry, &topic, &local_hex)
+                            })
+                            .collect()
+                    };
+                    for chat_entry in chat_entries.into_iter().flatten() {
+                        self.entries_push(chat_entry);
                     }
                 }
 
@@ -9748,175 +9987,42 @@ impl IcedChat {
                 }
             }
 
-            // ── System messages: centered, no bubble ──
-            if matches!(entry.kind, ChatKind::System) {
-                let system_row = Row::new()
-                    .push(space::horizontal())
-                    .push(
-                        text(&entry.body)
-                            .size(TYPO_SM)
-                            .wrapping(Wrapping::Word)
-                            .color(text_system(&theme)),
-                    )
-                    .push(space::horizontal())
-                    .width(Length::Fill);
-                col = col.push(system_row);
-                if let Some(download) = &entry.download {
-                    col = col.push(self.view_download_attachment(i, download));
-                }
-                continue;
-            }
+            // ── Entry widget via iced::lazy (incremental rendering) ──
+            // When the dependency key matches a previous frame, iced reuses
+            // the cached widget tree — only dirty entries are rebuilt.
+            let lazy_key = ChatMessageWidgetKey::new(
+                i,
+                entry.widget_gen,
+                self.dark_mode,
+                self.chat_text_size,
+            );
+            let e_kind = entry.kind;
+            let e_body = entry.body.clone();
+            let e_label_text = entry.label_text.clone().unwrap_or_default();
+            let e_formatted_time = entry.formatted_time.clone().unwrap_or_default();
+            let e_avatar_handle = entry.avatar_handle.clone();
+            let e_image_handle = entry.image_handle.clone();
+            let e_image_error = entry.image_error.clone();
+            let e_reactions_text = entry.reactions_text.clone();
+            let e_sender_key = entry.sender_key;
+            let e_download = entry.download.clone();
 
-            // ── Local / Remote messages ──
-            let label_color = match entry.kind {
-                ChatKind::Local => text_local_label(&theme),
-                ChatKind::Remote => text_remote_label(&theme),
-                _ => unreachable!(),
-            };
-            let body_color = match entry.kind {
-                ChatKind::Local => text_local_body(&theme),
-                ChatKind::Remote => text_remote_body(&theme),
-                _ => unreachable!(),
-            };
-
-            let label_text = entry.label_text.as_deref().unwrap_or(&entry.label);
-            let label_el: iced::Element<'_, AppMessage> =
-                if matches!(entry.kind, ChatKind::Remote) {
-                    if let Some(sender_key) = entry.sender_key {
-                        button(text(label_text).size(TYPO_XS).color(label_color))
-                            .on_press(AppMessage::OpenPeerProfile(sender_key))
-                            .padding(0)
-                            .style(|_t, _s| iced::widget::button::Style::default())
-                            .into()
-                    } else {
-                        text(label_text).size(TYPO_XS).color(label_color).into()
-                    }
-                } else {
-                    text(label_text).size(TYPO_XS).color(label_color).into()
-                };
-
-            let body_el = text(&entry.body)
-                .size(self.chat_text_size)
-                .wrapping(Wrapping::Word)
-                .width(Length::Fill)
-                .color(body_color);
-
-            let bubble =
-                container(body_el)
-                    .padding([SPACE_4, SPACE_8])
-                    .style(move |t: &iced::Theme| {
-                        let mut s = iced::widget::container::Style::default();
-                        if let Some(bg) = bubble_bg(t, entry.kind) {
-                            s.background = Some(bg);
-                        }
-                        s.border.radius = (8.0_f32).into();
-                        s
-                    });
-
-            let ts_text = entry.formatted_time.as_deref().unwrap_or("");
-            let ts_el = text(ts_text).size(TYPO_XXS).color(text_muted(&theme));
-
-            let bubble_col = Column::new()
-                .push(label_el)
-                .push(bubble)
-                .push(ts_el)
-                .spacing(SPACE_2)
-                .max_width(480.0);
-
-            let msg_row = match entry.kind {
-                ChatKind::Remote => {
-                    let avatar: iced::Element<'_, AppMessage> = {
-                        if let Some(ref handle) = entry.avatar_handle {
-                            iced::widget::image(handle.clone())
-                                .content_fit(iced::ContentFit::ScaleDown)
-                                .width(Length::Fixed(48.0))
-                                .height(Length::Fixed(48.0))
-                                .into()
-                        } else {
-                            text("?").size(TYPO_XL).into()
-                        }
-                    };
-                    Row::new()
-                        .push(avatar)
-                        .push(bubble_col)
-                        .align_y(iced::Alignment::Center)
-                        .spacing(SPACE_8)
-                }
-                ChatKind::Local => {
-                    let avatar: iced::Element<'_, AppMessage> =
-                        if let Some(ref handle) = entry.avatar_handle {
-                            iced::widget::image(handle.clone())
-                                .content_fit(iced::ContentFit::ScaleDown)
-                                .width(Length::Fixed(48.0))
-                                .height(Length::Fixed(48.0))
-                                .into()
-                        } else {
-                            text("?").size(TYPO_XL).into()
-                        };
-                    Row::new()
-                        .push(avatar)
-                        .push(bubble_col)
-                        .align_y(iced::Alignment::Center)
-                        .spacing(SPACE_8)
-                }
-                _ => unreachable!(),
-            }
-            .width(Length::Fill);
-
-            col = col.push(msg_row);
-
-            // ── Image (cached handle — decoded once at construction) ──
-            if let Some(handle) = self.image_handle_for_entry(entry) {
-                let img = iced::widget::image(handle)
-                    .content_fit(iced::ContentFit::ScaleDown)
-                    .width(Length::Fixed(200.0));
-                let thumbnail = iced::widget::button(img)
-                    .on_press(AppMessage::OpenImagePreview(i))
-                    .padding(0)
-                    .style(|_t, _s| iced::widget::button::Style::default());
-                col = col.push(thumbnail);
-            } else if entry.image_error.is_some() || entry.image_identifier.is_some() {
-                use iced::widget::{container, text, Column};
-                let error_text = entry
-                    .image_error
-                    .as_deref()
-                    .unwrap_or("Image preview unavailable");
-                let placeholder = Column::new()
-                    .push(
-                        text("🖼 Image unavailable")
-                            .size(TYPO_SM)
-                            .color(text_system(&theme)),
-                    )
-                    .push(
-                        text(error_text)
-                            .size(TYPO_XS)
-                            .color(color_error(&theme))
-                            .wrapping(Wrapping::Word),
-                    )
-                    .spacing(SPACE_2);
-                col = col.push(
-                    container(placeholder)
-                        .width(Length::Fill)
-                        .padding([SPACE_8, SPACE_10])
-                        .style(move |t| container_card(t)),
-                );
-            }
-
-            // ── Reactions ──
-            if let Some(ref reactions_text) = entry.reactions_text {
-                let reactions_line = Row::new()
-                    .push(
-                        text(reactions_text)
-                            .color(text_muted(&theme))
-                            .size(TYPO_SM)
-                            .wrapping(Wrapping::Word)
-                            .width(Length::Fill),
-                    )
-                    .spacing(0)
-                    .padding([0.0, SPACE_8])
-                    .width(Length::Fill);
-                col = col.push(reactions_line);
-            }
+            let entry_el = iced::widget::lazy(lazy_key, move |k: &ChatMessageWidgetKey| {
+                Self::render_chat_message_static(
+                    k,
+                    e_kind,
+                    e_body.clone(),
+                    e_label_text.clone(),
+                    e_formatted_time.clone(),
+                    e_avatar_handle.clone(),
+                    e_image_handle.clone(),
+                    e_image_error.clone(),
+                    e_reactions_text.clone(),
+                    e_sender_key,
+                    e_download.clone(),
+                )
+            });
+            col = col.push(entry_el);
         }
 
         // Bottom spacer
