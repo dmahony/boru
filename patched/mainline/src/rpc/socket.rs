@@ -211,9 +211,27 @@ impl KrpcSocket {
                 );
             }
             Err(error) => match error.kind() {
+                // WouldBlock (Unix) and TimedOut (Windows WSAETIMEDOUT/10060)
+                // are normal on UDP sockets with a read timeout set — they occur
+                // on every idle poll cycle when no packet has arrived.  Silently
+                // skip both to avoid log spam, especially on Windows where
+                // UdpSocket::set_read_timeout triggers TimedOut rather than
+                // WouldBlock.  For the upstream discussion see:
+                // https://github.com/pubky/mainline
                 ErrorKind::WouldBlock | ErrorKind::TimedOut => {}
+                ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset => {
+                    debug!(?error, "Transient UDP error (peer unreachable)")
+                }
                 _ => {
-                    warn!("IO error {error}")
+                    warn!(
+                        ?error,
+                        kind = %error.kind(),
+                        "Unexpected IO error on DHT UDP socket.  \
+                         If this includes 'os error 10060' on Windows, \
+                         ensure the patched mainline crate (ErrorKind::TimedOut \
+                         handling) is active — check Cargo.toml [patch.crates-io] \
+                         section."
+                    )
                 }
             },
         }
@@ -422,5 +440,25 @@ mod test {
         client.response(server_address, 8, response);
 
         server_thread.join().unwrap();
+    }
+
+    /// Verify that recv_from silently handles read-timeout expiry (TimedOut on
+    /// Windows / WouldBlock on Unix) without returning a value or logging
+    /// warnings — the socket is correctly idle-tolerant.
+    ///
+    /// Both ErrorKind::TimedOut (Windows WSAETIMEDOUT / os error 10060) and
+    /// ErrorKind::WouldBlock (Unix) are expected on UDP sockets with a
+    /// set_read_timeout when no datagram arrives within the interval.
+    #[test]
+    fn recv_timeout_is_silent() {
+        let mut socket = KrpcSocket::client().unwrap();
+        // READ_TIMEOUT is 50ms — wait 3x that to guarantee at least one
+        // timeout cycle on any platform.
+        thread::sleep(Duration::from_millis(150));
+        // recv_from must return None (not panic, not warn) on timeout.
+        assert!(
+            socket.recv_from().is_none(),
+            "recv_from should silently return None on read timeout"
+        );
     }
 }
