@@ -1355,10 +1355,7 @@ mod tests {
             .await
             .expect("timeout")
             .expect("channel closed");
-        assert!(
-            first.contains(&bob_ep),
-            "should discover Bob on first tick"
-        );
+        assert!(first.contains(&bob_ep), "should discover Bob on first tick");
 
         // Wait several more ticks — should not send any more non-empty batches.
         tokio::time::sleep(Duration::from_millis(200)).await;

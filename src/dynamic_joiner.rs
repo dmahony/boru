@@ -34,8 +34,8 @@ use std::{
     time::Duration,
 };
 
-use irpc::channel::mpsc;
 use iroh_base::EndpointId;
+use irpc::channel::mpsc;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
@@ -280,10 +280,7 @@ async fn run_joiner_loop(
 }
 
 /// Process a neighbor event, returning `false` if the channel is closed.
-fn handle_neighbor_event(
-    event: NeighborEvent,
-    state: &Arc<Mutex<JoinerState>>,
-) -> bool {
+fn handle_neighbor_event(event: NeighborEvent, state: &Arc<Mutex<JoinerState>>) -> bool {
     match event {
         NeighborEvent::Up(peer) => {
             let short = peer.fmt_short();
@@ -510,7 +507,8 @@ mod tests {
                 }
             }
         });
-        let sender: irpc::channel::mpsc::Sender<Command> = irpc::channel::mpsc::Sender::Tokio(cmd_tx);
+        let sender: irpc::channel::mpsc::Sender<Command> =
+            irpc::channel::mpsc::Sender::Tokio(cmd_tx);
         (GossipSender::new(sender), rx)
     }
 
@@ -674,7 +672,10 @@ mod tests {
 
         // Now try_acquire should fail.
         let p3 = semaphore.clone().try_acquire_owned();
-        assert!(p3.is_err(), "semaphore should reject more than max_concurrent");
+        assert!(
+            p3.is_err(),
+            "semaphore should reject more than max_concurrent"
+        );
 
         // Drop one permit.
         drop(p1);
@@ -780,7 +781,11 @@ mod tests {
         let joiner = DynamicPeerJoiner::start(local, gossip_sender, config);
 
         // First, tell the joiner that p2 is a known neighbor.
-        joiner.neighbor_events_tx.send(NeighborEvent::Up(p2)).await.unwrap();
+        joiner
+            .neighbor_events_tx
+            .send(NeighborEvent::Up(p2))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Now send a discovery batch containing p2.
@@ -815,11 +820,19 @@ mod tests {
         let joiner = DynamicPeerJoiner::start(local, gossip_sender, config);
 
         // Mark p2 as known.
-        joiner.neighbor_events_tx.send(NeighborEvent::Up(p2)).await.unwrap();
+        joiner
+            .neighbor_events_tx
+            .send(NeighborEvent::Up(p2))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // p2 disconnects.
-        joiner.neighbor_events_tx.send(NeighborEvent::Down(p2)).await.unwrap();
+        joiner
+            .neighbor_events_tx
+            .send(NeighborEvent::Down(p2))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Now a discovery batch with p2 should trigger a join.

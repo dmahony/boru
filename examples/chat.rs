@@ -57,7 +57,7 @@ use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_chat::conversations::ConversationStore;
 use boru_chat::friend_request::{FriendRequest, FriendRequestStatus, FriendRequestStore};
-use boru_chat::friends::{FriendId, FriendRecord, FriendsStore};
+use boru_chat::friends::{FriendId, FriendRecord, FriendRelationship, FriendsStore};
 use boru_chat::inbox::{send_sync_request, InboxEvent, InboxHandle, InboxProtocol, INBOX_ALPN};
 use boru_chat::mailbox::{MailboxAck, MailboxIdentity, MailboxStore};
 use boru_chat::room::RoomStore;
@@ -605,7 +605,12 @@ async fn main() -> Result<()> {
             match invitation {
                 RoomInvitation::Stable(invite) => {
                     tracing::info!(topic = %invite.topic, "joining room via boru1 invitation");
-                    (invite.topic, Vec::new(), Some(invite.discovery_secret), false)
+                    (
+                        invite.topic,
+                        Vec::new(),
+                        Some(invite.discovery_secret),
+                        false,
+                    )
                 }
                 RoomInvitation::Legacy(legacy) => {
                     tracing::info!(topic = %legacy.topic, "joining chat room via legacy ticket");
@@ -1898,7 +1903,9 @@ async fn handle_whisper_event_loop(
                                 tracing::debug!(error = %err, "failed to save friends store after ConversationInvite");
                             }
                             let label = tui.resolve_name(&sender);
-                            tui.push_system(format!("{label} accepted your friend request and opened a conversation"));
+                            tui.push_system(format!(
+                                "{label} accepted your friend request and opened a conversation"
+                            ));
                         }
                     }
                     Ok((_sender, _action)) => {}

@@ -70,19 +70,15 @@ fn tracker_from_invitation(
         .discovery_secret()
         .expect("stable invitation carries a discovery secret");
     let (sk, ep) = identity();
-    let tracker = PrivateRoomTracker::new(
-        Box::new(backend.clone()),
-        topic,
-        *secret,
-        ep,
-        sk,
-    );
+    let tracker = PrivateRoomTracker::new(Box::new(backend.clone()), topic, *secret, ep, sk);
     (tracker, ep)
 }
 
 /// Helper: wrap an async operation in a tokio runtime.
 fn block_on<F: std::future::Future<Output = T>, T>(f: F) -> T {
-    tokio::runtime::Runtime::new().expect("create tokio runtime").block_on(f)
+    tokio::runtime::Runtime::new()
+        .expect("create tokio runtime")
+        .block_on(f)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -332,11 +328,7 @@ fn stale_and_valid_records() {
         "C should discover B (valid), got {:?}",
         peers
     );
-    assert_eq!(
-        peers.len(),
-        2,
-        "C should discover exactly 2 unique peers"
-    );
+    assert_eq!(peers.len(), 2, "C should discover exactly 2 unique peers");
 
     block_on(tracker_a.shutdown());
     block_on(tracker_b.shutdown());
@@ -364,35 +356,27 @@ fn malformed_records_do_not_block_discovery() {
     let ns = *tracker_a.namespace();
 
     // Raw garbage (cannot even parse as EncryptedRecord envelope)
-    block_on(
-        backend.publish(
-            &ns,
-            boru_chat::discovery_backend::EncryptedDiscoveryRecord::new(vec![
-                0xde, 0xad, 0xbe, 0xef,
-            ]),
-        ),
-    )
+    block_on(backend.publish(
+        &ns,
+        boru_chat::discovery_backend::EncryptedDiscoveryRecord::new(vec![0xde, 0xad, 0xbe, 0xef]),
+    ))
     .expect("inject garbage record");
 
     // Oversized payload (exceeds MAX_DISCOVERY_PAYLOAD_SIZE)
     let oversized = vec![0xabu8; 3000];
-    block_on(
-        backend.publish(
-            &ns,
-            boru_chat::discovery_backend::EncryptedDiscoveryRecord::new(oversized),
-        ),
-    )
+    block_on(backend.publish(
+        &ns,
+        boru_chat::discovery_backend::EncryptedDiscoveryRecord::new(oversized),
+    ))
     .expect("inject oversized record");
 
     // Another mostly-garbage record that looks like an EncryptedRecord
     // but uses wrong encryption keys (random bytes the right length).
     let fake_envelope = vec![0u8; 200];
-    block_on(
-        backend.publish(
-            &ns,
-            boru_chat::discovery_backend::EncryptedDiscoveryRecord::new(fake_envelope),
-        ),
-    )
+    block_on(backend.publish(
+        &ns,
+        boru_chat::discovery_backend::EncryptedDiscoveryRecord::new(fake_envelope),
+    ))
     .expect("inject fake envelope record");
 
     // B discovers — should still find A despite the malformed records
@@ -469,10 +453,8 @@ fn stable_invitation_has_no_endpoint_info() {
     );
 
     // Legacy tickets with the same topic CAN carry peers — prove the formats differ
-    let legacy = boru_chat::chat_core::Ticket::new(
-        test_topic(),
-        vec![EndpointAddr::new(identity().1)],
-    );
+    let legacy =
+        boru_chat::chat_core::Ticket::new(test_topic(), vec![EndpointAddr::new(identity().1)]);
     let legacy_parsed = RoomInvitation::parse(&legacy.to_string()).expect("parse legacy ticket");
     assert!(
         !legacy_parsed.bootstrap_peers().is_empty(),

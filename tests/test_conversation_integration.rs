@@ -276,7 +276,10 @@ fn bidirectional_friendship_on_acceptance() {
 
     // Bob's side: Alice should be a friend
     let bob_friend = bob_stores.friends.get(&friend_id(&alice_pk));
-    assert!(bob_friend.is_some(), "Alice should be in Bob's friends list");
+    assert!(
+        bob_friend.is_some(),
+        "Alice should be in Bob's friends list"
+    );
     assert_eq!(
         bob_friend.unwrap().relationship,
         FriendRelationship::Friends,

@@ -210,9 +210,7 @@ pub fn compress_image(raw: &[u8]) -> Vec<u8> {
 /// **Note:** The built-in WebP encoder in the `image` crate only supports
 /// lossless encoding, avoiding a C FFI dependency on `libwebp`.  For lossy
 /// WebP with quality control, wrap the `webp` crate directly instead.
-pub fn optimize_chat_image_to_webp(
-    raw: &[u8],
-) -> Result<(Vec<u8>, usize, usize), String> {
+pub fn optimize_chat_image_to_webp(raw: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
     if raw.is_empty() {
         return Err("Image is empty.".to_string());
     }

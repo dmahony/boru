@@ -33,7 +33,9 @@ use boru_chat::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
 };
 use boru_chat::friends::{DirectConversationState, FriendId, FriendRelationship, FriendsStore};
-use boru_chat::image_optimizer::{compress_image, optimize_chat_image, optimize_chat_image_to_webp, CHAT_IMAGE_MAX_BYTES};
+use boru_chat::image_optimizer::{
+    compress_image, optimize_chat_image, optimize_chat_image_to_webp, CHAT_IMAGE_MAX_BYTES,
+};
 use boru_chat::image_store::ImageStore;
 use boru_chat::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
 use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
@@ -4903,13 +4905,12 @@ impl IcedChat {
                                                         )
                                                         .await
                                                         {
-                                                            Ok(()) => {
-                                                                AppMessage::OfflineDMStatus {
-                                                                    message_id: msg_id,
-                                                                    label,
-                                                                    status: OfflineDeliveryStatus::Delivered,
-                                                                }
-                                                            }
+                                                            Ok(()) => AppMessage::OfflineDMStatus {
+                                                                message_id: msg_id,
+                                                                label,
+                                                                status:
+                                                                    OfflineDeliveryStatus::Delivered,
+                                                            },
                                                             Err(_) => {
                                                                 // Peer offline; envelope is already stored for later
                                                                 // sync-based delivery.
@@ -5424,8 +5425,7 @@ impl IcedChat {
                                 let fid = FriendId::from_public_key(sender);
                                 let record = self.friends.ensure_friend(fid);
                                 record.relationship = FriendRelationship::Friends;
-                                if let Some(conversation) = record.direct_conversation.as_mut()
-                                {
+                                if let Some(conversation) = record.direct_conversation.as_mut() {
                                     conversation.state = DirectConversationState::Active;
                                 }
                                 // Show the accepted friend immediately in the sidebar.
@@ -5696,7 +5696,11 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::OfflineDMStatus { message_id, label, status } => {
+            AppMessage::OfflineDMStatus {
+                message_id,
+                label,
+                status,
+            } => {
                 let status_text = match status {
                     OfflineDeliveryStatus::Queued => "queued",
                     OfflineDeliveryStatus::Delivered => "delivered",
@@ -5982,14 +5986,16 @@ impl IcedChat {
                         Ok((local_pk, fname, display_name, opt_bytes, hash))
                     },
                     |r: Result<(PublicKey, String, String, Vec<u8>, MessageHash), String>| match r {
-                        Ok((sender_pk, name, display_name, bytes, hash)) => AppMessage::ImageDownloaded {
-                            sender: sender_pk,
-                            name,
-                            display_name,
-                            image_bytes: bytes,
-                            message_hash: hash,
-                            image_identifier: None,
-                        },
+                        Ok((sender_pk, name, display_name, bytes, hash)) => {
+                            AppMessage::ImageDownloaded {
+                                sender: sender_pk,
+                                name,
+                                display_name,
+                                image_bytes: bytes,
+                                message_hash: hash,
+                                image_identifier: None,
+                            }
+                        }
                         Err(e) => AppMessage::ErrorMsg(e),
                     },
                 )
@@ -6612,10 +6618,7 @@ impl IcedChat {
                 let peers_with_mailbox: Vec<PublicKey> = self
                     .friends
                     .iter()
-                    .filter_map(|(fid, rec)| {
-                        rec.mailbox_public_key
-                            .map(|mb| (fid, mb.identity))
-                    })
+                    .filter_map(|(fid, rec)| rec.mailbox_public_key.map(|mb| (fid, mb.identity)))
                     .map(|(_, pk)| pk)
                     .collect();
 
@@ -6625,26 +6628,18 @@ impl IcedChat {
                     iced::Task::perform(
                         async move {
                             // Load the local mailbox store (shared across all outgoing envelopes).
-                            let mut store = match MailboxStore::load(&data_dir)
-                                .ok()
-                                .flatten()
-                                .unwrap_or_else(|| {
-                                    MailboxStore::for_recipient(&data_dir, secret_key.public())
-                                })
-                            {
-                                s => s,
-                            };
+                            let mut store =
+                                match MailboxStore::load(&data_dir).ok().flatten().unwrap_or_else(
+                                    || MailboxStore::for_recipient(&data_dir, secret_key.public()),
+                                ) {
+                                    s => s,
+                                };
                             for peer in &peers_with_mailbox {
                                 let pending = store.pending_for_recipient(*peer);
                                 for envelope in pending {
                                     let msg_id = envelope.message_id();
-                                    match send_deliver(
-                                        &endpoint,
-                                        &secret_key,
-                                        *peer,
-                                        envelope,
-                                    )
-                                    .await
+                                    match send_deliver(&endpoint, &secret_key, *peer, envelope)
+                                        .await
                                     {
                                         Ok(()) => {
                                             // Keep the envelope until the recipient's signed
