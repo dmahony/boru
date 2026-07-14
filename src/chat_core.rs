@@ -835,8 +835,6 @@ pub enum Message {
         #[serde(default)]
         profile_image_ticket: Option<String>,
     },
-    /// Publish the sender's profile and metadata over gossip.
-    ProfileUpdate(UserProfile),
     /// A regular text message.
     Message {
         /// The message text.
@@ -909,6 +907,8 @@ pub enum Message {
     /// A diagnostic probe sent through the normal gossip path — not displayed
     /// as an ordinary chat message by default.
     DiagnosticProbe(crate::diagnostics::DiagnosticProbe),
+    /// Publish the sender's profile and metadata over gossip.
+    ProfileUpdate(UserProfile),
 }
 
 /// Metadata for a file advertised by a peer in [`Message::ProfileUpdate`].
@@ -4082,6 +4082,99 @@ mod tests {
             }
             other => panic!("expected Cancelled, got {other:?}"),
         }
+    }
+
+    // ── Wire compatibility tests ──────────────────────────────────────────────
+    //
+    // These tests verify that serialized messages from older versions (where
+    // the Message enum had 13 variants without ProfileUpdate) can be decoded
+    // correctly by the current code.  ProfileUpdate was inserted mid-enum
+    // at commit bf3c0cb3, shifting all later discriminants.  The fix must
+    // re-map ProfileUpdate to an explicit high discriminant (13) so all
+    // original variants keep their original values (0-12).
+
+    #[test]
+    fn old_wire_format_message_decodes_correctly() {
+        // Old wire format for Message::Message { text: "hello" }:
+        // postcard externally tagged: varint discriminant (1), then struct fields
+        //   discriminant: varint(1) = 0x01
+        //   text field (String): varint length (5) + UTF-8 bytes
+        let old_bytes = [0x01, 0x05, 0x68, 0x65, 0x6c, 0x6c, 0x6f];
+        let decoded: Message = postcard::from_bytes(&old_bytes)
+            .expect("old-format Message::Message should decode correctly");
+        assert!(
+            matches!(decoded, Message::Message { ref text } if text == "hello"),
+            "expected Message::Message(\"hello\"), got {decoded:?}"
+        );
+    }
+
+    #[test]
+    fn old_wire_format_about_me_decodes_correctly() {
+        // Old wire format for Message::AboutMe { name: "alice", profile_image_ticket: None }
+        // discriminant: varint(0) = 0x00
+        //   name: varint(5) + b"alice"
+        //   profile_image_ticket: Option<String> → serde None (postcard: 0x00 for None, or just missing?)
+        let old_bytes = [
+            0x00,             // discriminant 0 = AboutMe
+            0x05,             // name length
+            0x61, 0x6c, 0x69, 0x63, 0x65, // "alice"
+            0x00,             // profile_image_ticket: None (0 = false for Option)
+        ];
+        let decoded: Message = postcard::from_bytes(&old_bytes)
+            .expect("old-format AboutMe should decode correctly");
+        assert!(
+            matches!(decoded, Message::AboutMe { ref name, profile_image_ticket: None } if name == "alice"),
+            "expected AboutMe(\"alice\", None), got {decoded:?}"
+        );
+    }
+
+    #[test]
+    fn old_wire_format_file_share_decodes_correctly() {
+        // Old wire format for Message::FileShare { name: "doc.pdf", ticket: "tkt" }
+        // discriminant: varint(2) = 0x02
+        let old_bytes = [
+            0x02,             // discriminant 2 = FileShare
+            0x07,             // name length
+            0x64, 0x6f, 0x63, 0x2e, 0x70, 0x64, 0x66, // "doc.pdf"
+            0x03,             // ticket length
+            0x74, 0x6b, 0x74, // "tkt"
+        ];
+        let decoded: Message = postcard::from_bytes(&old_bytes)
+            .expect("old-format FileShare should decode correctly");
+        match decoded {
+            Message::FileShare { ref name, ref ticket } => {
+                assert_eq!(name, "doc.pdf");
+                assert_eq!(ticket, "tkt");
+            }
+            other => panic!("expected FileShare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn old_wire_format_presence_decodes_correctly() {
+        // Old wire format for Message::Presence (unit variant)
+        // discriminant: varint(4) = 0x04
+        let old_bytes = [0x04];
+        let decoded: Message = postcard::from_bytes(&old_bytes)
+            .expect("old-format Presence should decode correctly");
+        assert!(matches!(decoded, Message::Presence), "expected Presence, got {decoded:?}");
+    }
+
+    #[test]
+    fn new_profile_update_wire_format_not_confusable_with_old_message() {
+        // ProfileUpdate must NOT use discriminant 1 (the old Message position).
+        // Serialize a ProfileUpdate and verify the discriminant byte is NOT 0x01.
+        use crate::user_profile::UserProfile;
+        let profile = UserProfile::new(
+            PublicKey::from_bytes(&[1u8; 32]).expect("valid key"),
+        );
+        let msg = Message::ProfileUpdate(profile);
+        let bytes = postcard::to_stdvec(&msg).unwrap();
+        assert_ne!(
+            bytes[0], 0x01,
+            "ProfileUpdate MUST NOT use discriminant 1 (old Message position); first byte = {:#04x}",
+            bytes[0]
+        );
     }
 
     // ── Ticket tests ────────────────────────────────────────────────────────
