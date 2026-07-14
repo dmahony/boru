@@ -83,7 +83,7 @@ iroh-mdns-address-lookup = { version = "0.4", optional = true }
 iroh-mainline-address-lookup = { version = "0.4", optional = true }
 distributed-topic-tracker = { version = "0.3.5", default-features = false }
 ed25519-dalek = "3.0.0-rc.0"
-tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt", "macros", "time"] }
+tokio = { version = "1", optional = true, features = ["io-util", "sync", "rt", "macros", "time", "fs"] }
 
 tokio-util = { version = "0.7.12", optional = true, features = ["codec"] }
 tracing = "0.1"
@@ -98,6 +98,9 @@ x25519-dalek = { version = "2.0.1", features = ["getrandom", "static_secrets"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 async-trait = "0.1"
 iroh-blobs = { version = "0.103", default-features = false, optional = true }
+
+# filesystem notification for shared folder monitoring
+notify = { version = "6", features = [] }
 
 # test-utils dependencies (optional)
 humantime-serde = { version = "1.1.1", optional = true }

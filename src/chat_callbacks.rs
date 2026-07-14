@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::chat_core::{MessageHash, Ticket};
 use crate::chat_history::DeliveryState;
 use crate::friends::FriendId;
+use crate::user_profile::UserProfile;
 
 /// A stable identifier for a file or image transfer.
 ///
@@ -291,6 +292,14 @@ pub trait ChatCallbacks {
     /// Called when a peer broadcasts an `AboutMe` with
     /// `profile_image_ticket: None`, signalling the image was removed.
     fn clear_profile_image(&mut self, _peer: PublicKey) {}
+
+    /// Store profile metadata advertised by a peer. (Default no-op).
+    fn on_profile_update(
+        &mut self,
+        _peer: PublicKey,
+        _profile: UserProfile,
+    ) {
+    }
 
     /// Merge a parsed peer ticket into frontend-owned durable state.
     /// Returns whether the frontend accepted the ticket.

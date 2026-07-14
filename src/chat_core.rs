@@ -33,6 +33,7 @@ use crate::discovery_secret::DiscoverySecret;
 use crate::friends::{FriendId, FriendsStore};
 use crate::proto::TopicId;
 use crate::public_room_safety::PublicRoomSafety;
+use crate::user_profile::UserProfile;
 
 // ── Bootstrap peer resolution ─────────────────────────────────────────────────
 
@@ -827,6 +828,8 @@ pub enum Message {
         #[serde(default)]
         profile_image_ticket: Option<String>,
     },
+    /// Publish the sender's profile and metadata over gossip.
+    ProfileUpdate(UserProfile),
     /// A regular text message.
     Message {
         /// The message text.
@@ -896,6 +899,52 @@ pub enum Message {
     /// This is intentionally separate from `Presence`, which is a
     /// *visible* status indicator.
     Heartbeat,
+}
+
+/// Metadata for a file advertised by a peer in [`Message::ProfileUpdate`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedFileMeta {
+    /// Stable identifier assigned by the publisher.
+    pub id: String,
+    /// Basename shown to peers (never a local path).
+    pub filename: String,
+    /// File size in bytes.
+    pub size: u64,
+    /// MIME type, if known.
+    pub mime_type: String,
+    /// Unix timestamp in milliseconds of the source file's modification time.
+    pub modified_time: u64,
+    /// Content hash used to identify the file.
+    pub hash: MessageHash,
+}
+
+/// Minimum interval between profile announcements on a gossip topic.
+pub const PROFILE_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Monotonic debounce guard for profile announcements.
+#[derive(Debug, Clone, Default)]
+pub struct ProfileUpdateThrottle {
+    last_sent: Option<Instant>,
+}
+
+impl ProfileUpdateThrottle {
+    /// Return `true` and consume the current slot when an update is allowed.
+    pub fn try_acquire(&mut self, now: Instant) -> bool {
+        if self
+            .last_sent
+            .is_some_and(|last| now.duration_since(last) < PROFILE_UPDATE_INTERVAL)
+        {
+            return false;
+        }
+        self.last_sent = Some(now);
+        true
+    }
+
+    /// Clear the guard, allowing an immediate announcement after a profile
+    /// has been loaded or a gossip topic has been joined.
+    pub fn reset(&mut self) {
+        self.last_sent = None;
+    }
 }
 
 /// Content hash used by richer interaction messages to refer to a chat message.
@@ -1478,6 +1527,11 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
                                 name
                             ));
                         }
+                    }
+                }
+                Message::ProfileUpdate(profile) => {
+                    if from != cb.local_public() {
+                        cb.on_profile_update(from, profile);
                     }
                 }
                 Message::Message { text } => {
@@ -2479,6 +2533,54 @@ mod tests {
     }
 
     #[test]
+    fn message_serialization_roundtrip_profile_update() {
+        use crate::user_profile::UserProfile;
+        let mut profile = UserProfile::new(
+            PublicKey::from_bytes(&[1u8; 32]).expect("32 one-bytes is a valid ed25519 public key"),
+        );
+        profile.display_name = "alice".into();
+        profile.bio = "hello".into();
+        profile.file_sharing_enabled = true;
+        profile.max_file_size = 1024 * 1024;
+        profile.allowed_extensions = vec!["jpg".into(), "txt".into()];
+        profile.avatar_identifier = Some("avatar-id".into());
+        profile.shared_folder_path = std::path::PathBuf::from("/tmp/shared");
+        profile.allow_downloads = true;
+        let msg = Message::ProfileUpdate(profile);
+        let bytes = postcard::to_stdvec(&msg).unwrap();
+        let decoded: Message = postcard::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::ProfileUpdate(profile) => {
+                assert_eq!(profile.display_name, "alice");
+                assert_eq!(profile.bio, "hello");
+                assert!(profile.file_sharing_enabled);
+                assert!(profile.is_download_allowed());
+            }
+            _ => panic!("expected ProfileUpdate"),
+        }
+    }
+
+    #[test]
+    fn profile_update_throttle_enforces_thirty_second_interval() {
+        let start = Instant::now();
+        let mut throttle = ProfileUpdateThrottle::default();
+
+        assert!(throttle.try_acquire(start));
+        assert!(!throttle.try_acquire(start + Duration::from_secs(29)));
+        assert!(throttle.try_acquire(start + PROFILE_UPDATE_INTERVAL));
+    }
+
+    #[test]
+    fn profile_update_throttle_reset_allows_immediate_update() {
+        let start = Instant::now();
+        let mut throttle = ProfileUpdateThrottle::default();
+
+        assert!(throttle.try_acquire(start));
+        throttle.reset();
+        assert!(throttle.try_acquire(start + Duration::from_secs(1)));
+    }
+
+    #[test]
     fn message_serialization_roundtrip_text() {
         let msg = Message::Message {
             text: "hello world".into(),
@@ -3397,6 +3499,40 @@ mod tests {
         .unwrap();
 
         assert!(app.entries.iter().any(|e| e.body == "Pal left the chat"));
+    }
+
+    #[test]
+    fn handle_net_event_profile_update_calls_on_profile_update() {
+        let remote_key = SecretKey::generate();
+        let local_key = SecretKey::generate().public();
+        let mut app = test_app();
+        app.local_public = local_key;
+
+        let mut profile = UserProfile::new(remote_key.public());
+        profile.display_name = "alice".into();
+        profile.bio = "hello world".into();
+        profile.file_sharing_enabled = true;
+
+        let event = NetEvent::Message {
+            from: remote_key.public(),
+            message: Message::ProfileUpdate(profile.clone()),
+            sent_at: 1000,
+        };
+
+        // Process the event. The ProfileUpdate handler calls on_profile_update
+        // on the callback (AppState's implementation is a no-op, but the method
+        // is called without error).
+        handle_net_event(event, &mut app).unwrap();
+
+        // Our own messages should be skipped (from == local_public)
+        let self_event = NetEvent::Message {
+            from: local_key,
+            message: Message::ProfileUpdate(profile),
+            sent_at: 1001,
+        };
+        handle_net_event(self_event, &mut app).unwrap();
+        // No system message should appear (ProfileUpdate doesn't generate entries)
+        assert!(app.entries.is_empty(), "ProfileUpdate should not create chat entries");
     }
 
     // ── SignedMessage roundtrip helper ──────────────────────────────────

@@ -1874,9 +1874,25 @@ async fn handle_whisper_event_loop(
                     Ok((sender, ContactAction::FriendRequestAccepted)) => {
                         // Our outgoing friend request was accepted
                         let fid = FriendId::from_public_key(sender);
+                        let topic = direct_topic(&tui.local_public, &sender);
                         let record = tui.friends.ensure_friend(fid);
                         record.relationship = FriendRelationship::Friends;
+                        record.set_direct_conversation(topic, DirectConversationState::Active);
                         tui.friends_dirty = true;
+                        // Persist the room store for the private topic
+                        let known_addrs = tui
+                            .friends
+                            .get(&fid)
+                            .map(|r| r.known_addrs.clone())
+                            .unwrap_or_default();
+                        let room = RoomStore::with_peers(&tui.data_dir, topic, known_addrs);
+                        let _ = room.save();
+                        // Add to conversation_order if not already present
+                        if !tui.conversation_order.contains(&topic) {
+                            tui.conversation_order.push(topic);
+                            let conv = crate::chat_core::ConversationEntry::new(topic);
+                            tui.conversations.insert(topic, conv);
+                        }
                         if let Err(err) = tui.friends.save() {
                             tracing::debug!(error = %err, "failed to save friends store after FriendRequestAccepted");
                         }
@@ -1898,7 +1914,18 @@ async fn handle_whisper_event_loop(
                             let fid = FriendId::from_public_key(sender);
                             let record = tui.friends.ensure_friend(fid);
                             record.relationship = FriendRelationship::Friends;
+                            record.set_direct_conversation(topic, DirectConversationState::Active);
+                            record.record_addrs(addrs.clone());
                             tui.friends_dirty = true;
+                            // Persist the room store
+                            let room = RoomStore::with_peers(&tui.data_dir, topic, addrs);
+                            let _ = room.save();
+                            // Add to conversation_order if not already present
+                            if !tui.conversation_order.contains(&topic) {
+                                tui.conversation_order.push(topic);
+                                let conv = crate::chat_core::ConversationEntry::new(topic);
+                                tui.conversations.insert(topic, conv);
+                            }
                             if let Err(err) = tui.friends.save() {
                                 tracing::debug!(error = %err, "failed to save friends store after ConversationInvite");
                             }
@@ -2104,9 +2131,35 @@ async fn handle_ui_event(
                     // Add as a friend.
                     if let Ok(pk) = req.requester.parse::<PublicKey>() {
                         let fid = FriendId::from_public_key(pk);
-                        tui.friends.ensure_friend(fid);
+                        // Set up the private direct conversation topic
+                        let topic = direct_topic(&tui.local_public, &pk);
+                        let record = tui.friends.ensure_friend(fid);
+                        record.relationship = FriendRelationship::Friends;
+                        record.set_direct_conversation(topic, DirectConversationState::Active);
                         tui.friends_dirty = true;
+                        // Persist the room store so the topic survives restarts
+                        let known_addrs = tui
+                            .friends
+                            .get(&fid)
+                            .map(|r| r.known_addrs.clone())
+                            .unwrap_or_default();
+                        let room = RoomStore::with_peers(&tui.data_dir, topic, known_addrs);
+                        let _ = room.save();
+                        // Add to conversation_order if not already present
+                        if !tui.conversation_order.contains(&topic) {
+                            tui.conversation_order.push(topic);
+                            let conv = crate::chat_core::ConversationEntry::new(topic);
+                            tui.conversations.insert(topic, conv);
+                        }
                         tui.push_system(format!("Accepted friend request from {}", req.requester));
+                        // Send ConversationInvite back so the requester knows the topic
+                        let action = ContactAction::ConversationInvite {
+                            topic,
+                            addrs: vec![endpoint.addr()],
+                        };
+                        if let Ok(payload) = SignedContactMessage::sign(secret_key, &action) {
+                            let _ = whisper_handle.send_control(pk, payload.into()).await;
+                        }
                         // Start pinging the new friend.
                         let _ = friend_mgr.add_friend(pk, None).await;
                     }
@@ -2134,6 +2187,26 @@ async fn handle_ui_event(
                 Ok(req) => {
                     tui.push_system(format!("Friend request sent to {peer_key}"));
                     let _ = tui.friend_request_store.save();
+                    // Set up the direct conversation for the pending request
+                    if let Ok(pk) = peer_key.parse::<PublicKey>() {
+                        let fid = FriendId::from_public_key(pk);
+                        let topic = direct_topic(&tui.local_public, &pk);
+                        let record = tui.friends.ensure_friend(fid);
+                        record.set_direct_conversation(topic, DirectConversationState::Pending);
+                        tui.friends_dirty = true;
+                        let known_addrs = tui
+                            .friends
+                            .get(&fid)
+                            .map(|r| r.known_addrs.clone())
+                            .unwrap_or_default();
+                        let room = RoomStore::with_peers(&tui.data_dir, topic, known_addrs);
+                        let _ = room.save();
+                        // Send the friend request via whisper
+                        let action = ContactAction::FriendRequest { name: None };
+                        if let Ok(payload) = SignedContactMessage::sign(secret_key, &action) {
+                            let _ = whisper_handle.send_control(pk, payload.into()).await;
+                        }
+                    }
                     Ok(true)
                 }
                 Err(e) => {
@@ -2766,9 +2839,17 @@ async fn handle_friend_requests_key(_key: KeyEvent, tui: &mut TuiState) -> Resul
                 let _ = tui.friend_request_store.accept_request(&id, &local_pk);
                 if let Ok(pk) = requester.parse::<PublicKey>() {
                     let fid = FriendId::from_public_key(pk);
+                    let topic = direct_topic(&tui.local_public, &pk);
                     let record = tui.friends.ensure_friend(fid);
                     record.relationship = FriendRelationship::Friends;
+                    record.set_direct_conversation(topic, DirectConversationState::Active);
                     tui.friends_dirty = true;
+                    // Add to conversation_order if not already present
+                    if !tui.conversation_order.contains(&topic) {
+                        tui.conversation_order.push(topic);
+                        let conv = crate::chat_core::ConversationEntry::new(topic);
+                        tui.conversations.insert(topic, conv);
+                    }
                 }
                 tui.push_system(format!("Accepted friend request from {requester}"));
                 let _ = tui.friend_request_store.save();

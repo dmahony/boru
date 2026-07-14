@@ -153,6 +153,14 @@ pub mod mailbox;
 #[cfg(feature = "net")]
 pub mod whisper;
 
+/// Shared folder file indexer and change monitor.
+///
+/// Scans a local shared folder, builds an in-memory index of file metadata,
+/// and watches for filesystem changes via the `notify` crate.
+/// File hashing (blake3) is deferred to transfer time (lazy hashing).
+#[cfg(feature = "net")]
+pub mod file_indexer;
+
 /// `/iroh-chat-inbox/1` direct QUIC protocol for offline-message delivery.
 ///
 /// Uses signed, timestamped messages with authorization checks and replay
@@ -165,6 +173,13 @@ pub mod inbox;
 /// from existing peers via a dedicated QUIC ALPN.
 #[cfg(feature = "net")]
 pub mod backfill;
+
+/// Per-user profile settings and sharing controls.
+///
+/// Owns the on-disk `user_profile.json` that lives beside `secret_key.txt`.
+/// Controls file sharing, download permissions, and path security.
+#[cfg(feature = "net")]
+pub mod user_profile;
 
 /// Secure, local per-user image storage with content-addressed identifiers.
 ///
