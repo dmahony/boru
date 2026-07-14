@@ -1561,6 +1561,8 @@ pub enum GuiActionErrorCode {
     InvalidCurrentScreen,
     /// A blocking dialog (e.g. confirmation modal) is open.
     BlockingDialogOpen,
+    /// CloseDialog was requested while no application dialog was open.
+    NoDialog,
     /// No active conversation to perform the action on.
     NoActiveConversation,
     /// The composer is empty (nothing to send).
@@ -1672,7 +1674,7 @@ impl std::fmt::Display for GuiActionId {
 /// assert!(!state.matches_str("screen", "settings"));
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExpectedState {
     /// The active screen matches the given name (e.g. `"chat_list"`, `"settings"`, `"chat"`).
     ScreenIs(String),
@@ -2064,6 +2066,32 @@ impl GuiActionHistory {
         } else {
             false
         }
+    }
+
+    /// Expire an action that has not reached a terminal state.
+    ///
+    /// This is an explicit, event-driven operation: callers can schedule one
+    /// timer per action and invoke this method when it fires. Completed,
+    /// rejected, and failed actions are never changed, so a late timer cannot
+    /// interfere with unrelated GUI work.
+    pub fn expire(&self, action_id: &GuiActionId) -> Option<GuiActionStatus> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let mut actions = self.inner.actions.lock().expect("actions lock");
+        let status = actions.get_mut(action_id)?;
+        if status.state.is_terminal() {
+            return None;
+        }
+        status.state = GuiActionState::TimedOut;
+        status.updated_at_ms = now_ms;
+        status.timeout_at_ms = None;
+        status.error = Some(GuiActionError::new(
+            GuiActionErrorCode::ActionTimedOut,
+            format!("GUI action timed out after {DEFAULT_ACTION_STATE_TIMEOUT_MS}ms"),
+        ));
+        Some(status.clone())
     }
 
     /// Set the error details on an existing action.
@@ -2478,55 +2506,57 @@ pub enum GuiTestCommand {
     },
 }
 
+/// Validate an identifier supplied to a GUI action.  GUI actions are semantic
+/// commands, not a general-purpose string or command interpreter, so IDs are
+/// deliberately restricted to the portable identifier alphabet.
+fn validate_gui_identifier(value: &str, name: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{name} must not be empty"));
+    }
+    let length = value.chars().count();
+    if length > GUI_TEST_COMMAND_MAX_STRING_LEN {
+        return Err(format!(
+            "{name} too long ({length} chars, max {})",
+            GUI_TEST_COMMAND_MAX_STRING_LEN
+        ));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(format!(
+            "{name} contains invalid characters; only ASCII letters, digits, '-' and '_' are allowed"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_gui_text(value: &str, name: &str) -> Result<(), String> {
+    let length = value.chars().count();
+    if length > GUI_TEST_COMMAND_MAX_STRING_LEN {
+        return Err(format!(
+            "{name} too long ({length} chars, max {})",
+            GUI_TEST_COMMAND_MAX_STRING_LEN
+        ));
+    }
+    if value.chars().any(|c| c.is_control() && c != ' ') {
+        return Err(format!("{name} must not contain control characters"));
+    }
+    Ok(())
+}
+
 impl GuiTestCommand {
     /// Validate the command parameters.
     ///
     /// Returns `Ok(())` if the command is well-formed, or an error message.
     pub fn validate(&self) -> Result<(), String> {
         match self {
-            GuiTestCommand::OpenRoom { room_id } => {
-                if room_id.len() > GUI_TEST_COMMAND_MAX_STRING_LEN {
-                    return Err(format!(
-                        "room_id too long ({} chars, max {})",
-                        room_id.len(),
-                        GUI_TEST_COMMAND_MAX_STRING_LEN
-                    ));
-                }
-                Ok(())
-            }
+            GuiTestCommand::OpenRoom { room_id } => validate_gui_identifier(room_id, "room_id"),
             GuiTestCommand::OpenConversation { conversation_id } => {
-                if conversation_id.len() > GUI_TEST_COMMAND_MAX_STRING_LEN {
-                    return Err(format!(
-                        "conversation_id too long ({} chars, max {})",
-                        conversation_id.len(),
-                        GUI_TEST_COMMAND_MAX_STRING_LEN
-                    ));
-                }
-                Ok(())
+                validate_gui_identifier(conversation_id, "conversation_id")
             }
-            GuiTestCommand::SetComposerText { text } => {
-                if text.len() > GUI_TEST_COMMAND_MAX_STRING_LEN {
-                    return Err(format!(
-                        "Composer text too long ({} chars, max {})",
-                        text.len(),
-                        GUI_TEST_COMMAND_MAX_STRING_LEN
-                    ));
-                }
-                if text.chars().any(|c| c.is_control() && c != ' ') {
-                    return Err("Composer text must not contain control characters".to_string());
-                }
-                Ok(())
-            }
-            GuiTestCommand::SelectPeer { peer_id } => {
-                if peer_id.len() > GUI_TEST_COMMAND_MAX_STRING_LEN {
-                    return Err(format!(
-                        "peer_id too long ({} chars, max {})",
-                        peer_id.len(),
-                        GUI_TEST_COMMAND_MAX_STRING_LEN
-                    ));
-                }
-                Ok(())
-            }
+            GuiTestCommand::SetComposerText { text } => validate_gui_text(text, "Composer text"),
+            GuiTestCommand::SelectPeer { peer_id } => validate_gui_identifier(peer_id, "peer_id"),
             GuiTestCommand::ToggleDarkMode { .. } => Ok(()),
             GuiTestCommand::ToggleHelp => Ok(()),
             GuiTestCommand::GoToChatList => Ok(()),
@@ -2547,37 +2577,23 @@ impl GuiTestCommand {
                 // Validate the inner wait condition (string bounds check)
                 match condition {
                     GuiWaitCondition::ScreenIs { expected } => {
-                        if expected.len() > GUI_TEST_COMMAND_MAX_STRING_LEN {
-                            return Err(format!(
-                                "Expected screen name too long ({} chars, max {})",
-                                expected.len(),
-                                GUI_TEST_COMMAND_MAX_STRING_LEN
-                            ));
-                        }
+                        validate_gui_identifier(expected, "expected screen name")?;
                     }
                     GuiWaitCondition::RoomSelected { room_topic } => {
                         if let Some(topic) = room_topic {
-                            if topic.len() > GUI_TEST_COMMAND_MAX_STRING_LEN {
-                                return Err(format!(
-                                    "Room topic too long ({} chars, max {})",
-                                    topic.len(),
-                                    GUI_TEST_COMMAND_MAX_STRING_LEN
-                                ));
-                            }
+                            validate_gui_identifier(topic, "room topic")?;
                         }
                     }
                     GuiWaitCondition::PeerVisible { .. } => {}
                     GuiWaitCondition::MessageVisible { .. } => {}
                     GuiWaitCondition::GuiRevisionAtLeast { .. } => {}
-                    GuiWaitCondition::ConversationSelected { .. } => {}
-                    GuiWaitCondition::ComposerTextIs { expected } => {
-                        if expected.len() > GUI_TEST_COMMAND_MAX_STRING_LEN {
-                            return Err(format!(
-                                "Composer text too long ({} chars, max {})",
-                                expected.len(),
-                                GUI_TEST_COMMAND_MAX_STRING_LEN
-                            ));
+                    GuiWaitCondition::ConversationSelected { conversation_id } => {
+                        if let Some(id) = conversation_id {
+                            validate_gui_identifier(id, "conversation_id")?;
                         }
+                    }
+                    GuiWaitCondition::ComposerTextIs { expected } => {
+                        validate_gui_text(expected, "expected composer text")?;
                     }
                     GuiWaitCondition::DialogOpen => {}
                     GuiWaitCondition::DialogClosed => {}
@@ -4916,7 +4932,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_gui_revision_at_least_reached() {
         let snapshot = test_snapshot("ChatList", None, 0, 0);
         let journal = IcedMessageJournal::new();
@@ -5688,6 +5703,26 @@ mod tests {
         assert!(GuiTestCommand::SetComposerText { text: long }
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn test_gui_test_command_preserves_unicode_message_text() {
+        let text = "こんにちは 🌍 — café";
+        let command = GuiTestCommand::SetComposerText { text: text.into() };
+        assert!(command.validate().is_ok());
+        let json = serde_json::to_string(&command).unwrap();
+        assert!(json.contains(text));
+        let decoded: GuiTestCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn test_gui_test_command_rejects_invalid_ids_and_paths() {
+        for value in ["", "../tmp", "peer/name", "peer\\\\name", "peer;rm", "peer id", "peer\nname"] {
+            assert!(GuiTestCommand::OpenRoom { room_id: value.into() }.validate().is_err(), "accepted unsafe room id: {value:?}");
+            assert!(GuiTestCommand::OpenConversation { conversation_id: value.into() }.validate().is_err(), "accepted unsafe conversation id: {value:?}");
+            assert!(GuiTestCommand::SelectPeer { peer_id: value.into() }.validate().is_err(), "accepted unsafe peer id: {value:?}");
+        }
     }
 
     #[test]
@@ -7579,6 +7614,43 @@ mod tests {
     }
 
     #[test]
+    fn test_gui_action_history_expire_marks_active_action_and_preserves_terminal_action() {
+        let history = GuiActionHistory::new();
+        let active = GuiActionId::new();
+        let terminal = GuiActionId::new();
+        for id in [active.clone(), terminal.clone()] {
+            history.record(GuiActionRequest {
+                action_id: id.clone(),
+                requested_at_ms: 0,
+                command: "test".into(),
+            });
+        }
+        history.set_state(&terminal, GuiActionState::Completed);
+
+        let expired = history.expire(&active).expect("active action expires");
+        assert_eq!(expired.state, GuiActionState::TimedOut);
+        assert_eq!(
+            expired.error.as_ref().map(|error| &error.code),
+            Some(&GuiActionErrorCode::ActionTimedOut)
+        );
+        assert!(history.expire(&terminal).is_none(), "terminal action is unchanged");
+        assert_eq!(history.get(&terminal).unwrap().state, GuiActionState::Completed);
+    }
+
+    #[test]
+    fn test_gui_action_history_expire_is_idempotent() {
+        let history = GuiActionHistory::new();
+        let id = GuiActionId::new();
+        history.record(GuiActionRequest {
+            action_id: id.clone(),
+            requested_at_ms: 0,
+            command: "test".into(),
+        });
+        assert!(history.expire(&id).is_some());
+        assert!(history.expire(&id).is_none());
+    }
+
+    #[test]
     fn test_gui_action_timeout_constant_values() {
         // Verify the constants match requirements
         assert_eq!(
@@ -8971,32 +9043,35 @@ mod tests {
         let states: Vec<(ExpectedState, &str)> = vec![
             (
                 ExpectedState::ScreenIs("ChatList".to_string()),
-                r#""ChatList""#,
+                r#"{"type":"screen_is","value":"ChatList"}"#,
             ),
             (
                 ExpectedState::RoomSelected("topic123".to_string()),
-                r#""topic123""#,
+                r#"{"type":"room_selected","value":"topic123"}"#,
             ),
             (
                 ExpectedState::ConversationSelected("peer_key".to_string()),
-                r#""peer_key""#,
+                r#"{"type":"conversation_selected","value":"peer_key"}"#,
             ),
             (
                 ExpectedState::ComposerTextIs("hello".to_string()),
-                r#""hello""#,
+                r#"{"type":"composer_text_is","value":"hello"}"#,
             ),
             (
                 ExpectedState::DarkModeIs(true),
-                r#"true"#,
+                r#"{"type":"dark_mode_is","value":true}"#,
             ),
-            (ExpectedState::MessageSent, r#"null"#),
+            (
+                ExpectedState::MessageSent,
+                r#"{"type":"message_sent"}"#,
+            ),
             (
                 ExpectedState::HelpVisible(false),
-                r#"false"#,
+                r#"{"type":"help_visible","value":false}"#,
             ),
             (
                 ExpectedState::Generic("custom condition".to_string()),
-                r#""custom condition""#,
+                r#"{"type":"generic","value":"custom condition"}"#,
             ),
         ];
 

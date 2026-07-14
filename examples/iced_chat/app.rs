@@ -74,6 +74,7 @@ use boru_chat::diagnostics::GuiActionId;
 use boru_chat::diagnostics::GuiActionRequest;
 use boru_chat::diagnostics::GuiActionState;
 use boru_chat::diagnostics::GuiTestCommand;
+use boru_chat::diagnostics::DEFAULT_ACTION_STATE_TIMEOUT_MS;
 use boru_chat::diagnostics::FailureLayer;
 use boru_chat::diagnostics::IcedMessageJournal;
 use boru_chat::diagnostics::IcedStateSnapshot;
@@ -1300,8 +1301,22 @@ pub struct IcedChat {
     /// select its requested topic.  Completion is recorded only after the
     /// normal OpenRoom/RoomOpened path has updated both topic and screen.
     pending_open_room_action: Option<(GuiActionId, TopicId)>,
+    /// OpenConversation action waiting for its derived direct room to open.
+    pending_open_conversation_action: Option<(GuiActionId, PublicKey)>,
+    /// SetComposerText action waiting for the normal InputChanged path.
+    pending_set_composer_action: Option<(GuiActionId, String)>,
+    /// SubmitComposer action waiting for the normal SendPressed path.
+    pending_submit_composer_action: Option<GuiActionId>,
     /// GoToChatList action currently being handled by the normal update path.
     pending_chat_list_action: Option<GuiActionId>,
+    /// OpenFriends action waiting for the normal friend-screen navigation path.
+    pending_open_friends_action: Option<GuiActionId>,
+    /// OpenSettings action waiting for the normal settings navigation path.
+    pending_open_settings_action: Option<GuiActionId>,
+    /// CloseDialog action waiting for the normal dialog-cancel message path.
+    pending_close_dialog_action: Option<GuiActionId>,
+    /// SelectPeer action waiting for the normal peer-profile navigation path.
+    pending_select_peer_action: Option<(GuiActionId, PublicKey)>,
     /// Sender for GUI state snapshots — publishes an [`IcedStateSnapshot`] after
     /// each `update()` so the MCP server can watch for condition changes.
     pub gui_state_tx: tokio::sync::watch::Sender<IcedStateSnapshot>,
@@ -1749,6 +1764,9 @@ pub enum AppMessage {
     // ── GUI test actions (MCP-driven) ──
     /// An action received from the MCP GUI test actions channel.
     GuiTestActionReceived(GuiActionRequest),
+    /// Internal timer completion for an action that has not reached its
+    /// expected state. The handler only expires still-active actions.
+    GuiActionTimeout(GuiActionId),
     /// A wait condition has been satisfied.
     GuiTestWaitSatisfied(String),
     /// A wait condition timed out.
@@ -1758,6 +1776,38 @@ pub enum AppMessage {
         expected: String,
         elapsed_ms: u64,
     },
+}
+
+/// Map semantic GUI navigation commands to the same application messages used
+/// by the visible navigation controls.
+fn gui_navigation_message(command: &GuiTestCommand) -> Option<AppMessage> {
+    match command {
+        GuiTestCommand::OpenFriends => Some(AppMessage::OpenFriendRequests),
+        GuiTestCommand::OpenSettings => Some(AppMessage::OpenSettings),
+        _ => None,
+    }
+}
+
+/// Map the semantic dark-mode test command to the same application message
+/// emitted by the visible settings toggle.
+fn gui_dark_mode_message(command: &GuiTestCommand) -> Option<AppMessage> {
+    match command {
+        GuiTestCommand::ToggleDarkMode { enabled } => Some(AppMessage::ToggleDark(*enabled)),
+        _ => None,
+    }
+}
+
+/// Run a GUI action task alongside its one-shot timeout. The timeout message
+/// is harmless after completion because the handler checks the action state.
+fn with_gui_action_timeout(action_id: GuiActionId, action: iced::Task<AppMessage>) -> iced::Task<AppMessage> {
+    let timeout = iced::Task::perform(
+        async move {
+            tokio::time::sleep(Duration::from_millis(DEFAULT_ACTION_STATE_TIMEOUT_MS as u64)).await;
+            action_id
+        },
+        AppMessage::GuiActionTimeout,
+    );
+    iced::Task::batch(vec![action, timeout])
 }
 
 // ── Performance metrics ──────────────────────────────────────────────
@@ -2480,7 +2530,14 @@ impl IcedChat {
             gui_action_rx,
             gui_action_history: GuiActionHistory::default(),
             pending_open_room_action: None,
+            pending_open_conversation_action: None,
+            pending_set_composer_action: None,
+            pending_submit_composer_action: None,
             pending_chat_list_action: None,
+            pending_open_friends_action: None,
+            pending_open_settings_action: None,
+            pending_close_dialog_action: None,
+            pending_select_peer_action: None,
             gui_state_tx,
         }
     }
@@ -3334,6 +3391,7 @@ impl IcedChat {
             AppMessage::SaveProfile => "SaveProfile",
             AppMessage::ProfileSaved => "ProfileSaved",
             AppMessage::GuiTestActionReceived(_) => "GuiTestActionReceived",
+            AppMessage::GuiActionTimeout(_) => "GuiActionTimeout",
             AppMessage::GuiTestWaitSatisfied(_) => "GuiTestWaitSatisfied",
             AppMessage::GuiTestWaitTimedOut { .. } => "GuiTestWaitTimedOut",
         }
@@ -3627,6 +3685,48 @@ fn online_friends_from_store(friends: &FriendsStore) -> HashMap<PublicKey, Strin
 // ── GUI test action validation ───────────────────────────────────────
 
 impl IcedChat {
+    /// Return the normal application message used to close the foremost
+    /// blocking dialog. GUI test actions use the same messages as visible
+    /// Cancel buttons rather than mutating dialog state directly.
+    fn close_dialog_message(
+        show_create_room_dialog: bool,
+        history_confirm_clear: bool,
+        room_delete_confirm_topic: Option<TopicId>,
+    ) -> Result<AppMessage, GuiActionError> {
+        if show_create_room_dialog {
+            return Ok(AppMessage::CancelCreateRoom);
+        }
+        if history_confirm_clear {
+            return Ok(AppMessage::ClearHistoryRequested);
+        }
+        if let Some(topic) = room_delete_confirm_topic {
+            return Ok(AppMessage::DeleteRoomRequested(topic));
+        }
+        Err(GuiActionError::new(
+            GuiActionErrorCode::NoDialog,
+            "No application dialog is currently open",
+        ))
+    }
+
+    fn close_current_dialog(&self) -> Result<AppMessage, GuiActionError> {
+        Self::close_dialog_message(
+            self.show_create_room_dialog,
+            self.history_confirm_clear,
+            self.room_delete_confirm_topic,
+        )
+    }
+
+    fn complete_close_dialog_action(&mut self) {
+        if let Some(action_id) = self.pending_close_dialog_action.take() {
+            let _ = self
+                .gui_action_history
+                .set_state(&action_id, GuiActionState::AppMessageHandled);
+            let _ = self
+                .gui_action_history
+                .set_state(&action_id, GuiActionState::Completed);
+        }
+    }
+
     /// Validate a semantic GUI test command against the current UI state.
     pub fn validate_gui_test_command(
         &self,
@@ -3708,10 +3808,47 @@ impl IcedChat {
 // ── Update ────────────────────────────────────────────────────────────
 
 impl IcedChat {
+    fn publish_gui_state(&self) {
+        let (active_screen, active_room) = match &self.screen {
+            Screen::Chat { topic } => ("Chat", Some(topic.to_string())),
+            Screen::ChatList => ("ChatList", None),
+            Screen::FriendRequests => ("FriendRequests", None),
+            Screen::Settings => ("Settings", None),
+            Screen::PeerProfile(_) => ("PeerProfile", None),
+            Screen::ImagePreview { topic, .. } => ("ImagePreview", Some(topic.to_string())),
+        };
+        let _ = self.gui_state_tx.send(IcedStateSnapshot {
+            node_id: self.local_public.to_string(),
+            version: version_tag(),
+            active_screen: active_screen.to_string(),
+            active_room,
+            conversation_count: self.conversations.len(),
+            neighbor_count: self.neighbors.len(),
+            direct_peer_count: self.direct_peers,
+            relayed_peer_count: self.relayed_peers,
+            mesh_health: format!("{:?}", self.mesh_health),
+            online_friend_count: 0,
+            friend_count: self.friends.iter().count(),
+            total_entry_count: self.entries.len(),
+            dark_mode: self.dark_mode,
+            composer_text: self.composer_text.clone(),
+            dialog_open: self.show_create_room_dialog
+                || self.history_confirm_clear
+                || self.room_delete_confirm_topic.is_some(),
+            unread_count: 0,
+            timestamp: chrono::Utc::now(),
+        });
+    }
+
     pub fn update(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
+        let gui_action_timeout_id = match &message {
+            AppMessage::GuiTestActionReceived(action) => Some(action.action_id.clone()),
+            _ => None,
+        };
         let _timer = PerfTracker::timer("update_msg", Self::log_variant(&message));
         debug!(message = Self::log_variant(&message), "app update");
-        match message {
+        self.publish_gui_state();
+        let task = match message {
             // ── Navigation ────────────────────────────────────────────
             AppMessage::GoToChatList => {
                 // Save current room to history.
@@ -3765,6 +3902,7 @@ impl IcedChat {
 
             AppMessage::CancelCreateRoom => {
                 self.show_create_room_dialog = false;
+                self.complete_close_dialog_action();
                 iced::Task::none()
             }
 
@@ -4332,6 +4470,22 @@ impl IcedChat {
                     }
                 }
 
+                if let Some((action_id, expected_peer)) = self.pending_open_conversation_action.take() {
+                    let expected_topic = direct_topic(&self.local_public, &expected_peer);
+                    if expected_topic == topic
+                        && matches!(self.screen, Screen::Chat { topic: selected } if selected == topic)
+                    {
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::AppMessageHandled);
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Completed);
+                    } else {
+                        self.pending_open_conversation_action = Some((action_id, expected_peer));
+                    }
+                }
+
                 // Insert lobby into conversations so its GossipSender survives
                 // room switches.  Without this, NewDiscoveredPeers must rely on
                 // the self.topic == lobby_topic fallback, which breaks when a
@@ -4867,6 +5021,21 @@ impl IcedChat {
             // ── Chat ─────────────────────────────────────────────────
             AppMessage::InputChanged(text) => {
                 self.composer_text = text;
+
+                // SetComposerText completes only after the normal input path
+                // has updated the actual composer state.
+                if let Some((action_id, expected)) = self.pending_set_composer_action.take() {
+                    if self.composer_text == expected {
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::AppMessageHandled);
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Completed);
+                    } else {
+                        self.pending_set_composer_action = Some((action_id, expected));
+                    }
+                }
 
                 iced::Task::none()
             }
@@ -5468,6 +5637,14 @@ impl IcedChat {
                 local_entry.event_id = event_id;
                 local_entry.message_hash = Some(msg_hash);
                 self.entries_push(local_entry);
+                if let Some(action_id) = self.pending_submit_composer_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
                 if let Some(sender) = self.sender.clone() {
                     iced::Task::perform(
                         async move {
@@ -5592,6 +5769,14 @@ impl IcedChat {
                     self.settings_return_to = Some(self.screen.clone());
                     self.screen = Screen::Settings;
                 }
+                if let Some(action_id) = self.pending_open_settings_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
                 iced::Task::none()
             }
 
@@ -5603,6 +5788,14 @@ impl IcedChat {
             // ── Friend Requests ───────────────────────────────────────
             AppMessage::OpenFriendRequests => {
                 self.screen = Screen::FriendRequests;
+                if let Some(action_id) = self.pending_open_friends_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
                 iced::Task::none()
             }
 
@@ -6757,6 +6950,20 @@ impl IcedChat {
                     }
                 }
                 self.screen = Screen::PeerProfile(peer);
+                if self
+                    .pending_select_peer_action
+                    .as_ref()
+                    .is_some_and(|(_, expected)| *expected == peer)
+                {
+                    if let Some((action_id, _)) = self.pending_select_peer_action.take() {
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::AppMessageHandled);
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Completed);
+                    }
+                }
                 iced::Task::none()
             }
             AppMessage::ClosePeerProfile => {
@@ -6822,6 +7029,38 @@ impl IcedChat {
                     return iced::Task::none();
                 }
 
+                // Persist the command's declared post-condition before routing.
+                // This keeps the expected state visible for every action, including
+                // commands whose dedicated handler is added later.
+                if let Some(expected) = command.expected_state() {
+                    let _ = self.gui_action_history.set_expected_state(&action_id, expected);
+                }
+
+                if let GuiTestCommand::OpenConversation { conversation_id } = &command {
+                    if let Err(error) = self.validate_gui_test_command(&command) {
+                        let _ = self.gui_action_history.set_error(&action_id, error);
+                        let _ = self.gui_action_history.set_state(&action_id, GuiActionState::Rejected);
+                        return iced::Task::none();
+                    }
+                    let peer = match conversation_id.parse::<PublicKey>() {
+                        Ok(peer) => peer,
+                        Err(error) => {
+                            let _ = self.gui_action_history.set_error(
+                                &action_id,
+                                GuiActionError::new(
+                                    GuiActionErrorCode::InvalidArgument,
+                                    format!("Invalid conversation_id: {error}"),
+                                ),
+                            );
+                            let _ = self.gui_action_history.set_state(&action_id, GuiActionState::Rejected);
+                            return iced::Task::none();
+                        }
+                    };
+                    let _ = self.gui_action_history.set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_open_conversation_action = Some((action_id, peer));
+                    return iced::Task::done(AppMessage::OpenConversation(peer));
+                }
+
                 if matches!(command, GuiTestCommand::GoToChatList) {
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
@@ -6834,7 +7073,147 @@ impl IcedChat {
                     return iced::Task::done(AppMessage::GoToChatList);
                 }
 
+                // Route these commands through the same messages emitted by
+                // the real sidebar buttons. The action is completed by the
+                // ordinary message handler after the screen changes.
+                if matches!(command, GuiTestCommand::OpenFriends) {
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_chat::diagnostics::ExpectedState::ScreenIs("Friends".to_string()),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_open_friends_action = Some(action_id);
+                    return iced::Task::done(
+                        gui_navigation_message(&command).expect("OpenFriends mapping"),
+                    );
+                }
+
+                if matches!(command, GuiTestCommand::OpenSettings) {
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_chat::diagnostics::ExpectedState::ScreenIs("Settings".to_string()),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_open_settings_action = Some(action_id);
+                    return iced::Task::done(
+                        gui_navigation_message(&command).expect("OpenSettings mapping"),
+                    );
+                }
+
+                if matches!(command, GuiTestCommand::CloseDialog) {
+                    let close_message = match self.close_current_dialog() {
+                        Ok(message) => message,
+                        Err(error) => {
+                            let _ = self.gui_action_history.set_error(&action_id, error);
+                            let _ = self
+                                .gui_action_history
+                                .set_state(&action_id, GuiActionState::Rejected);
+                            return iced::Task::none();
+                        }
+                    };
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_chat::diagnostics::ExpectedState::Generic(
+                            "dialog_closed".to_string(),
+                        ),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_close_dialog_action = Some(action_id);
+                    return iced::Task::done(close_message);
+                }
+
+                if let GuiTestCommand::SetComposerText { text } = &command {
+                    if let Err(error) = self.validate_gui_test_command(&command) {
+                        let _ = self.gui_action_history.set_error(&action_id, error);
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Rejected);
+                        return iced::Task::none();
+                    }
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_chat::diagnostics::ExpectedState::ComposerTextIs(text.clone()),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_set_composer_action = Some((action_id, text.clone()));
+                    return iced::Task::done(AppMessage::InputChanged(text.clone()));
+                }
+
+                if matches!(command, GuiTestCommand::SubmitComposer) {
+                    if let Err(error) = self.validate_gui_test_command(&command) {
+                        let _ = self.gui_action_history.set_error(&action_id, error);
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Rejected);
+                        return iced::Task::none();
+                    }
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_chat::diagnostics::ExpectedState::MessageSent,
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_submit_composer_action = Some(action_id);
+                    return iced::Task::done(AppMessage::SendPressed);
+                }
+
+                if let Some(AppMessage::ToggleDark(enabled)) = gui_dark_mode_message(&command) {
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_chat::diagnostics::ExpectedState::DarkModeIs(enabled),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    return iced::Task::done(AppMessage::ToggleDark(enabled));
+                }
+
                 let GuiTestCommand::OpenRoom { room_id } = command else {
+                    if let GuiTestCommand::SelectPeer { ref peer_id } = command {
+                        if let Err(error) = self.validate_gui_test_command(&command) {
+                            let _ = self.gui_action_history.set_error(&action_id, error);
+                            let _ = self
+                                .gui_action_history
+                                .set_state(&action_id, GuiActionState::Rejected);
+                            return iced::Task::none();
+                        }
+                        let peer = match peer_id.parse::<PublicKey>() {
+                            Ok(peer) => peer,
+                            Err(error) => {
+                                let _ = self.gui_action_history.set_error(
+                                    &action_id,
+                                    GuiActionError::new(
+                                        GuiActionErrorCode::InvalidArgument,
+                                        format!("Invalid peer_id: {error}"),
+                                    ),
+                                );
+                                let _ = self
+                                    .gui_action_history
+                                    .set_state(&action_id, GuiActionState::Rejected);
+                                return iced::Task::none();
+                            }
+                        };
+                        let _ = self.gui_action_history.set_expected_state(
+                            &action_id,
+                            boru_chat::diagnostics::ExpectedState::ScreenIs(
+                                format!("PeerProfile({peer})"),
+                            ),
+                        );
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::AppMessageQueued);
+                        self.pending_select_peer_action = Some((action_id, peer));
+                        return iced::Task::done(AppMessage::OpenPeerProfile(peer));
+                    }
                     // Other GUI commands retain their existing diagnostic-only
                     // behavior until their dedicated action handlers land.
                     return iced::Task::none();
@@ -6900,6 +7279,28 @@ impl IcedChat {
                     .set_state(&action_id, GuiActionState::AppMessageQueued);
                 self.pending_open_room_action = Some((action_id, topic));
                 iced::Task::done(AppMessage::OpenRoom(topic))
+            }
+
+            AppMessage::GuiActionTimeout(action_id) => {
+                if let Some(status) = self.gui_action_history.expire(&action_id) {
+                    let expected = status
+                        .expected_state
+                        .as_ref()
+                        .map(|state| state.description())
+                        .unwrap_or_else(|| "unknown expected state".to_string());
+                    self.iced_diagnostics.record(
+                        "GuiActionTimedOut",
+                        FailureLayer::IcedUpdate,
+                        false,
+                        format!("action_id={action_id}; expected={expected}"),
+                        None,
+                    );
+                    // Publish the state observed at the timeout boundary. The
+                    // watch channel retains this latest snapshot for MCP
+                    // callers; no GUI state or unrelated task is cancelled.
+                    self.publish_gui_state();
+                }
+                iced::Task::none()
             }
 
             AppMessage::GuiTestWaitSatisfied(_key) => {
@@ -7359,6 +7760,27 @@ impl IcedChat {
 
             AppMessage::ToggleDark(enabled) => {
                 self.dark_mode = enabled;
+                if let Some(action_id) = self
+                    .gui_action_history
+                    .all_actions()
+                    .into_iter()
+                    .find(|status| {
+                        status.state == GuiActionState::AppMessageQueued
+                            && matches!(
+                                status.expected_state,
+                                Some(boru_chat::diagnostics::ExpectedState::DarkModeIs(expected))
+                                    if expected == enabled
+                            )
+                    })
+                    .map(|status| status.action_id)
+                {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
                 let settings = AppSettings {
                     dark_mode: self.dark_mode,
                     sound_enabled: self.sound_enabled,
@@ -7726,6 +8148,9 @@ impl IcedChat {
 
             AppMessage::ClearHistoryRequested => {
                 self.history_confirm_clear = !self.history_confirm_clear;
+                if !self.history_confirm_clear {
+                    self.complete_close_dialog_action();
+                }
                 iced::Task::none()
             }
 
@@ -7743,6 +8168,9 @@ impl IcedChat {
                 } else {
                     Some(topic)
                 };
+                if self.room_delete_confirm_topic.is_none() {
+                    self.complete_close_dialog_action();
+                }
                 iced::Task::none()
             }
 
@@ -7952,6 +8380,11 @@ impl IcedChat {
                 // already happened as part of SaveProfile handling.
                 iced::Task::none()
             }
+        };
+        if let Some(action_id) = gui_action_timeout_id {
+            with_gui_action_timeout(action_id, task)
+        } else {
+            task
         }
     }
 
@@ -11549,6 +11982,72 @@ mod tests {
     use chrono::{FixedOffset, TimeZone, Utc};
 
     #[test]
+    fn close_dialog_uses_the_normal_cancel_message_in_priority_order() {
+        assert!(matches!(
+            IcedChat::close_dialog_message(true, true, None),
+            Ok(AppMessage::CancelCreateRoom)
+        ));
+        assert!(matches!(
+            IcedChat::close_dialog_message(false, true, None),
+            Ok(AppMessage::ClearHistoryRequested)
+        ));
+        let topic = TopicId::from_bytes([9; 32]);
+        assert!(matches!(
+            IcedChat::close_dialog_message(false, false, Some(topic)),
+            Ok(AppMessage::DeleteRoomRequested(actual)) if actual == topic
+        ));
+    }
+
+    #[test]
+    fn close_dialog_without_an_open_dialog_returns_structured_error() {
+        let error = IcedChat::close_dialog_message(false, false, None)
+            .expect_err("CloseDialog must reject when no dialog is open");
+        assert_eq!(error.code, GuiActionErrorCode::NoDialog);
+        assert_eq!(error.message, "No application dialog is currently open");
+    }
+
+    #[test]
+    fn gui_dark_mode_command_maps_to_normal_toggle_message() {
+        assert!(matches!(
+            gui_dark_mode_message(&GuiTestCommand::ToggleDarkMode { enabled: true }),
+            Some(AppMessage::ToggleDark(true))
+        ));
+        assert!(matches!(
+            gui_dark_mode_message(&GuiTestCommand::ToggleDarkMode { enabled: false }),
+            Some(AppMessage::ToggleDark(false))
+        ));
+        assert!(gui_dark_mode_message(&GuiTestCommand::OpenSettings).is_none());
+    }
+
+    #[test]
+    fn dark_mode_settings_persist_without_changing_other_settings() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "boru-gui-dark-mode-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).expect("test settings directory should be created");
+
+        let original = AppSettings {
+            dark_mode: false,
+            sound_enabled: false,
+            chat_text_size: 17.0,
+        };
+        let toggled = AppSettings {
+            dark_mode: true,
+            sound_enabled: original.sound_enabled,
+            chat_text_size: original.chat_text_size,
+        };
+        toggled.save(&data_dir);
+        let loaded = AppSettings::load(&data_dir);
+
+        assert!(loaded.dark_mode);
+        assert!(!loaded.sound_enabled);
+        assert_eq!(loaded.chat_text_size, 17.0);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
     fn gui_file_share_ticket_is_parseable_and_has_sender_address() {
         let key = SecretKey::generate();
         let addr = EndpointAddr::new(key.public());
@@ -14643,5 +15142,121 @@ mod tests {
             Err(TryRecvError::Empty) => {} // expected
             other => panic!("expected Empty, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn gui_open_friends_uses_friend_requests_navigation_message() {
+        assert!(matches!(
+            gui_navigation_message(&GuiTestCommand::OpenFriends),
+            Some(AppMessage::OpenFriendRequests)
+        ));
+    }
+
+    #[test]
+    fn gui_open_settings_uses_settings_navigation_message() {
+        assert!(matches!(
+            gui_navigation_message(&GuiTestCommand::OpenSettings),
+            Some(AppMessage::OpenSettings)
+        ));
+    }
+
+    #[test]
+    fn gui_navigation_mapping_rejects_non_navigation_commands() {
+        assert!(gui_navigation_message(&GuiTestCommand::GoToChatList).is_none());
+    }
+
+    fn gui_update_request(command: GuiTestCommand) -> GuiActionRequest {
+        GuiActionRequest {
+            action_id: GuiActionId::new(),
+            requested_at_ms: chrono::Utc::now().timestamp_millis(),
+            command: serde_json::to_string(&command).expect("GUI command serializes"),
+        }
+    }
+
+    #[test]
+    fn gui_open_room_action_reaches_completed_via_normal_update_path() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([7; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        let request = gui_update_request(GuiTestCommand::OpenRoom {
+            room_id: topic.to_string(),
+        });
+        let action_id = request.action_id.clone();
+
+        let task = app.update(AppMessage::GuiTestActionReceived(request));
+        assert!(matches!(app.gui_action_history.get(&action_id).unwrap().state, GuiActionState::AppMessageQueued));
+        // Iced's completed task carries OpenRoom; feed that message through the
+        // same update method to exercise the real room-selection completion.
+        drop(task);
+        app.update(AppMessage::OpenRoom(topic));
+
+        assert_eq!(app.screen, Screen::Chat { topic });
+        assert_eq!(app.gui_action_history.get(&action_id).unwrap().state, GuiActionState::Completed);
+        drop(runtime);
+    }
+
+    #[test]
+    fn gui_set_composer_action_reaches_completed_via_normal_update_path() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([7; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        let request = gui_update_request(GuiTestCommand::SetComposerText {
+            text: "integration message".to_string(),
+        });
+        let action_id = request.action_id.clone();
+
+        let task = app.update(AppMessage::GuiTestActionReceived(request));
+        assert_eq!(app.gui_action_history.get(&action_id).unwrap().state, GuiActionState::AppMessageQueued);
+        drop(task);
+        app.update(AppMessage::InputChanged("integration message".to_string()));
+
+        assert_eq!(app.composer_text, "integration message");
+        assert_eq!(app.gui_action_history.get(&action_id).unwrap().state, GuiActionState::Completed);
+        drop(runtime);
+    }
+
+    #[test]
+    fn gui_submit_composer_action_creates_local_message_via_normal_update_path() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([7; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        let subscription = runtime
+            .block_on(app.gossip.subscribe(topic, vec![]))
+            .expect("test room subscription");
+        let (sender, _receiver) = subscription.split();
+        app.sender = Some(sender);
+        app.composer_text = "submitted integration message".to_string();
+        let request = gui_update_request(GuiTestCommand::SubmitComposer);
+        let action_id = request.action_id.clone();
+
+        let task = app.update(AppMessage::GuiTestActionReceived(request));
+        assert_eq!(app.gui_action_history.get(&action_id).unwrap().state, GuiActionState::AppMessageQueued);
+        drop(task);
+        app.update(AppMessage::SendPressed);
+
+        assert!(app.composer_text.is_empty());
+        assert!(app.entries.iter().any(|entry| entry.body == "submitted integration message"));
+        assert_eq!(app.gui_action_history.get(&action_id).unwrap().state, GuiActionState::Completed);
+        drop(runtime);
+    }
+
+    #[test]
+    fn gui_toggle_dark_mode_action_reaches_completed_via_normal_update_path() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let request = gui_update_request(GuiTestCommand::ToggleDarkMode { enabled: true });
+        let action_id = request.action_id.clone();
+
+        let task = app.update(AppMessage::GuiTestActionReceived(request));
+        assert_eq!(app.gui_action_history.get(&action_id).unwrap().state, GuiActionState::AppMessageQueued);
+        drop(task);
+        let _guard = runtime.handle().enter();
+        let _ = app.update(AppMessage::ToggleDark(true));
+
+        assert!(app.dark_mode);
+        assert_eq!(app.gui_action_history.get(&action_id).unwrap().state, GuiActionState::Completed);
+        drop(runtime);
     }
 }

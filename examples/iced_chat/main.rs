@@ -741,6 +741,7 @@ fn main() -> Result<()> {
             gui_action_rate_limiter: Arc::new(std::sync::Mutex::new(
                 gui_test_actions::GuiActionRateLimiter::default(),
             )),
+            gui_state_rx: Some(_gui_state_rx.clone()),
         };
 
         if let Err(e) = runtime.block_on(mcp_server::spawn_mcp_server(mcp_config, mcp_state)) {
