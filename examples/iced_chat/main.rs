@@ -443,6 +443,8 @@ fn main() -> Result<()> {
         let memory_lookup = MemoryLookup::new();
         use std::net::{Ipv4Addr, SocketAddrV4};
 
+        let mdns = MdnsAddressLookup::builder().build(secret_key.public())?;
+        let mdns_for_events = mdns.clone();
         let endpoint = {
             {
                 let ep_builder = if matches!(relay_mode, RelayMode::Disabled) {
@@ -452,7 +454,7 @@ fn main() -> Result<()> {
                 };
                 let endpoint = ep_builder
                     .secret_key(secret_key.clone())
-                    .address_lookup(MdnsAddressLookup::builder())
+                    .address_lookup(mdns)
                     .relay_mode(relay_mode.clone())
                     .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
                     .bind()
@@ -462,22 +464,15 @@ fn main() -> Result<()> {
                 if !matches!(relay_mode, RelayMode::Disabled) {
                     endpoint.online().await;
                 }
+                info!(endpoint_addr = ?endpoint.addr(), "endpoint address ready");
                 endpoint
             }
         };
         info!("> endpoint: {}", endpoint.id());
 
-        // Add mDNS local address lookup for LAN peer discovery
-        // Clone so we can subscribe to discovery events separately.
-        let mdns_for_events = if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
-            let mdns_for_events = mdns.clone();
-            if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
-                addr_lookup.add(mdns);
-            }
-            Some(mdns_for_events)
-        } else {
-            None
-        };
+        // The same mDNS service is registered with the endpoint and used for
+        // discovery events. This keeps published endpoint addresses and the
+        // event subscriber on one shared address book.
 
         // DHT address lookup disabled — no global peer resolution.
         // mDNS handles LAN discovery; relay handles connectivity.
@@ -542,7 +537,8 @@ fn main() -> Result<()> {
             // mDNS-based LAN peer discovery: when a peer appears on the LAN,
             // join them to the lobby gossip mesh directly, and forward the
             // peer ID to the UI for sidebar display.
-            if let Some(mdns) = mdns_for_events {
+            {
+                let mdns = mdns_for_events;
                 let tx = discovered_peers_tx.clone();
                 let my_id = endpoint.id();
                 tokio::spawn(async move {
