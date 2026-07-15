@@ -4421,6 +4421,23 @@ impl IcedChat {
                 self.pending_topic = None;
                 self.sender = Some(sender.clone());
 
+                // Retroactively join any pending discovered peers now that the lobby sender is available
+                let lobby_topic = Self::default_lobby_topic();
+                if topic == lobby_topic {
+                    let pending: Vec<PublicKey> = self.discovered_peers.iter().copied().collect();
+                    if !pending.is_empty() {
+                        let s = sender.clone();
+                        info!(count = pending.len(), "joining pending discovered peers to lobby mesh");
+                        tokio::spawn(async move {
+                            for peer in pending {
+                                if let Err(e) = s.join_peers(vec![peer]).await {
+                                    warn!(peer = %peer, error = %e, "retroactive join_peers failed");
+                                }
+                            }
+                        });
+                    }
+                }
+
                 self.forward_handle = self.forward_handle_slot.lock().unwrap().take();
 
                 // Store continuous tracker if one was provided (private room with DHT).
@@ -4555,6 +4572,25 @@ impl IcedChat {
                     } else {
                         self.pending_open_conversation_action = Some((action_id, expected_peer));
                     }
+                }
+
+                // Keep the lobby in conversations so its GossipSender survives
+                // room switches. This lets mDNS-discovered peers be joined to
+                // the lobby mesh regardless of which room is currently active.
+                let lobby_topic = Self::default_lobby_topic();
+                if topic == lobby_topic {
+                    let mut lobby_conv = self
+                        .conversations
+                        .remove(&topic)
+                        .unwrap_or_else(|| ConversationLive::new(topic));
+                    lobby_conv.sender = Some(sender.clone());
+                    lobby_conv.forward_handle_slot = Arc::clone(&self.forward_handle_slot);
+                    lobby_conv.ticket_str = ticket.clone();
+                    self.conversations.insert(topic, lobby_conv);
+                    info!(
+                        topic = %lobby_topic,
+                        "inserted lobby into conversations",
+                    );
                 }
 
                 if self.return_to_chat_list_after_open {
@@ -7344,7 +7380,11 @@ impl IcedChat {
                     }
                 };
 
-                let known_room = (self.sender.is_some() && topic == self.topic)
+                // The stable lobby is intentionally bootstrap-free: the
+                // diagnostic MCP action must be able to create/join it even
+                // when no room history exists yet.
+                let known_room = topic == Self::default_lobby_topic()
+                    || (self.sender.is_some() && topic == self.topic)
                     || self.conversations.contains_key(&topic)
                     || self
                         .room_history
@@ -7937,14 +7977,59 @@ impl IcedChat {
                         self.discovered_peers.push(*peer);
                     }
                 }
-                // Public room chat is disabled — no lobby mesh to join.
-                // Discovered peers are listed in the sidebar for informational
-                // purposes but are not actively connected to any gossip room.
+                // Join newly discovered peers into the lobby's gossip mesh so
+                // they become active neighbors. Without this, both ends subscribe
+                // passively and no one dials — messages go nowhere.
+                let lobby_topic = Self::default_lobby_topic();
+                // The lobby sender may be in conversations (if we've switched
+                // rooms before) or in self.sender (if the lobby is the current
+                // room).
+                let lobby_sender = self
+                    .conversations
+                    .get(&lobby_topic)
+                    .and_then(|c| c.sender.clone())
+                    .or_else(|| {
+                        if self.topic == lobby_topic {
+                            self.sender.clone()
+                        } else {
+                            None
+                        }
+                    });
+                let count = peers.len();
+                let tasks: Vec<iced::Task<AppMessage>> = peers
+                    .into_iter()
+                    .filter_map(|peer| {
+                        lobby_sender.as_ref().map(|s| s.clone()).map(|s| {
+                            iced::Task::perform(
+                                async move {
+                                    match s.join_peers(vec![peer]).await {
+                                        Ok(()) => {
+                                            info!(
+                                                peer = %peer,
+                                                "join_peers succeeded",
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                peer = %peer,
+                                                error = %e,
+                                                "join_peers failed",
+                                            );
+                                        }
+                                    }
+                                },
+                                |_| AppMessage::Noop,
+                            )
+                        })
+                    })
+                    .collect();
                 info!(
-                    count = peers.len(),
-                    "NewDiscoveredPeers: storing for sidebar display only (no public room)",
+                    count = count,
+                    tasks = tasks.len(),
+                    lobby_available = lobby_sender.is_some(),
+                    "NewDiscoveredPeers: joining lobby peers",
                 );
-                iced::Task::none()
+                iced::Task::batch(tasks)
             }
 
             AppMessage::Scrolled(offset, vp_h) => {

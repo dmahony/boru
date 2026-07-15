@@ -44,7 +44,7 @@ use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 use boru_chat::whisper::{WhisperBuilder, WHISPER_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
 #[cfg(feature = "gui")]
-use iroh_mdns_address_lookup::MdnsAddressLookup;
+use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_error::{bail_any, Result, StdResultExt};
 use tokio::sync::{watch, Mutex};
 use tracing::{error, info, warn};
@@ -389,10 +389,9 @@ fn main() -> Result<()> {
             }
             Some(Command::Logs) => None,
             None => {
-                // No initial room — user starts at the chat list.
-                // Public room chat is disabled; only LAN discovery is active.
-                info!("no command given, starting at chat list");
-                None
+                let topic = app::IcedChat::default_lobby_topic();
+                info!(topic = %topic, "opening lobby for LAN discovery mesh");
+                Some((topic, vec![]))
             }
         }
     });
@@ -469,11 +468,16 @@ fn main() -> Result<()> {
         info!("> endpoint: {}", endpoint.id());
 
         // Add mDNS local address lookup for LAN peer discovery
-        if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
+        // Clone so we can subscribe to discovery events separately.
+        let mdns_for_events = if let Ok(mdns) = MdnsAddressLookup::builder().build(endpoint.id()) {
+            let mdns_for_events = mdns.clone();
             if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
                 addr_lookup.add(mdns);
             }
-        }
+            Some(mdns_for_events)
+        } else {
+            None
+        };
 
         // Add DHT address lookup for global peer discovery via Mainline DHT.
         //
@@ -613,14 +617,38 @@ fn main() -> Result<()> {
 
         // ── DHT client for private-room DHT discovery ────────────────────
         // Keep a Dht instance so private rooms can optionally use DHT
-        // discovery. No public-room tracker is started.
+        // discovery. No public-room DHT tracker is started.
         let dht =
             distributed_topic_tracker::Dht::new(&distributed_topic_tracker::DhtConfig::default());
         let dht_for_private = dht.clone();
-        // Create a dummy discovered-peers channel that never receives —
-        // public room DHT discovery is disabled.
-        let (_dummy_tx, dummy_rx) = tokio::sync::mpsc::channel::<Vec<iroh::PublicKey>>(1);
-        let discovered_peers_rx = Arc::new(Mutex::new(dummy_rx));
+        // ── mDNS-based LAN peer discovery ───────────────────────────────
+        // Subscribe to mDNS discovery events so we can react when a new
+        // peer appears on the LAN. Forward discovered peer IDs through the
+        // same channel used by the (now-disabled) DHT continuous tracker,
+        // so the existing NewDiscoveredPeers handler processes them.
+        let (discovered_peers_tx, discovered_peers_rx_tmp) =
+            tokio::sync::mpsc::channel::<Vec<iroh::PublicKey>>(64);
+        if let Some(mdns) = mdns_for_events {
+            let tx = discovered_peers_tx.clone();
+            tokio::spawn(async move {
+                use n0_future::StreamExt;
+                let mut events = mdns.subscribe().await;
+                while let Some(event) = events.next().await {
+                    match event {
+                        DiscoveryEvent::Discovered { endpoint_info, .. } => {
+                            let peer = endpoint_info.endpoint_id;
+                            info!(peer = %peer, "mDNS discovered peer");
+                            let _ = tx.send(vec![peer]).await;
+                        }
+                        DiscoveryEvent::Expired { .. } => {
+                            // Moot — expired peers are handled by gossip NeighborDown
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+        let discovered_peers_rx = Arc::new(Mutex::new(discovered_peers_rx_tmp));
 
         Result::<_>::Ok((
             endpoint,
