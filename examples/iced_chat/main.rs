@@ -507,17 +507,11 @@ fn main() -> Result<()> {
         let blob_store = MemStore::new();
         let blobs_protocol = BlobsProtocol::new(&blob_store, None);
 
-        // Load durable chat history. Outbox entries are loaded by IcedChat
-        // alongside this store so queued messages can be replayed on reconnect.
-        let chat_history = ChatHistoryStore::load_or_default(&data_dir);
-        if !chat_history.is_empty() {
-            info!(
-                "> loaded {} chat message(s) from history",
-                chat_history.len()
-            );
-        }
-        let chat_history = Arc::new(std::sync::Mutex::new(chat_history));
+        // ── History stores (all disabled — no persistence) ────────────
+        let room_history = RoomHistoryStore::empty_at(&data_dir);
+        let chat_history = Arc::new(std::sync::Mutex::new(ChatHistoryStore::empty_at(&data_dir)));
 
+        // ── Backfill handler ──────────────────────────────────────────
         let backfill_handler = BackfillProtocolHandler::new(chat_history.clone());
 
         // ── Whisper protocol ──────────────────────────────────────────
@@ -591,12 +585,6 @@ fn main() -> Result<()> {
         let friends = FriendsStore::load_or_default(&data_dir);
         if friends.len() > 0 {
             info!("> loaded {} friend(s) from disk", friends.len());
-        }
-
-        // Load room history
-        let room_history = RoomHistoryStore::load_or_default(&data_dir);
-        if !room_history.is_empty() {
-            info!("> loaded {} room(s) from history", room_history.len());
         }
 
         // Create the network event channel (shared across rooms, tagged by topic)
