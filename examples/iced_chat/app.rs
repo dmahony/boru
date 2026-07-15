@@ -1592,6 +1592,8 @@ pub enum AppMessage {
     FriendRemoved {
         label: String,
     },
+    /// Remove a friend from the friends list (UI request).
+    RemoveFriend(PublicKey),
     FriendListResult(Vec<(String, String)>),
     /// Delete a room from history (home screen delete or /leave).
     DeleteRoom(TopicId),
@@ -3322,6 +3324,7 @@ impl IcedChat {
             AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
             AppMessage::ImageDownloaded { .. } => "ImageDownloaded",
             AppMessage::FriendAdded { .. } => "FriendAdded",
+            AppMessage::RemoveFriend(_) => "RemoveFriend",
             AppMessage::FriendRemoved { .. } => "FriendRemoved",
             AppMessage::FriendListResult(_) => "FriendListResult",
             AppMessage::DeleteRoom(_) => "DeleteRoom",
@@ -7502,6 +7505,22 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::RemoveFriend(peer) => {
+                let mgr = self.friend_mgr.clone();
+                iced::Task::perform(
+                    async move {
+                        let removed = mgr.remove_friend(&peer).await.unwrap_or(false);
+                        let label = if removed {
+                            peer.fmt_short().to_string()
+                        } else {
+                            peer.to_string()
+                        };
+                        AppMessage::FriendRemoved { label }
+                    },
+                    |msg| msg,
+                )
+            }
+
             AppMessage::FriendRemoved { label } => {
                 self.push_system(format!("Removed friend: {label}"));
                 iced::Task::none()
@@ -10145,6 +10164,11 @@ impl IcedChat {
                 .push(
                     button(text("Profile").size(TYPO_XS))
                         .on_press(AppMessage::OpenPeerProfile(friend.peer))
+                        .padding([SPACE_2, SPACE_6]),
+                )
+                .push(
+                    button(text("Remove").size(TYPO_XS))
+                        .on_press(AppMessage::RemoveFriend(friend.peer))
                         .padding([SPACE_2, SPACE_6]),
                 )
                 .spacing(SPACE_4)
