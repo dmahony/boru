@@ -621,7 +621,7 @@ impl Actor {
         }
         let reason = conn.close_reason().expect("just closed");
         let error = task_result.err();
-        debug!(%reason, ?error, "connection closed");
+        warn!(%reason, ?error, "connection closed");
         if let Some(PeerState::Active {
             active_conn_id,
             other_conns,

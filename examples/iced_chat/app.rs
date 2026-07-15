@@ -9457,8 +9457,6 @@ impl IcedChat {
         let ticket_join_section = self.view_sidebar_ticket_join();
         let chats_section = self.view_sidebar_chats();
         let discovered_peers_section = self.view_sidebar_discovered_peers();
-        let friends_section = self.view_sidebar_friends();
-        let requests_section = self.view_sidebar_requests();
 
         let content = Column::new()
             .push(container(header).padding(iced::Padding {
@@ -9476,8 +9474,6 @@ impl IcedChat {
             .push(ticket_join_section)
             .push(chats_section)
             .push(discovered_peers_section)
-            .push(friends_section)
-            .push(requests_section)
             .push(Space::new().height(Length::Fill));
 
         scrollable(content)
@@ -9791,12 +9787,11 @@ impl IcedChat {
         use iced::widget::{button, container, text, Column, Row};
         use iced::{Alignment, Length};
 
-        let theme = Self::theme_from_dark(dep.dark_mode);
         let mut section = Column::new().spacing(SPACE_2);
 
         section = section.push(
             container(
-                text("Discovered Peers")
+                text("Online Peers")
                     .size(TYPO_XS)
                     .style(text_muted_style),
             )
@@ -9811,17 +9806,12 @@ impl IcedChat {
 
         let has_peers = !dep.peers.is_empty();
         for peer in &dep.peers {
-            let status_dot = if peer.online { "●" } else { "○" };
             let mut row_el = Row::new()
                 .push(Self::peer_avatar_block(peer.avatar.clone(), peer.peer))
                 .push(
-                    text(format!("{} {}", status_dot, peer.short_key))
+                    text(format!("● {}", peer.short_key))
                         .size(TYPO_SM)
-                        .color(if peer.online {
-                            text_remote_body(&theme)
-                        } else {
-                            Self::muted_color(dep.dark_mode)
-                        })
+                        .color(text_remote_body(&Self::theme_from_dark(dep.dark_mode)))
                         .width(Length::Fill),
                 )
                 .spacing(SPACE_4)
@@ -9829,31 +9819,12 @@ impl IcedChat {
                 .padding([SPACE_4, SPACE_12])
                 .width(Length::Fill);
 
-            if peer.is_friend {
-                row_el = row_el.push(
-                    button(text("Chat").size(TYPO_XS))
-                        .on_press(AppMessage::OpenFriendChat(peer.peer))
-                        .padding([SPACE_2, SPACE_6]),
-                );
-            } else if matches!(peer.request_state, Some(OutgoingRequestState::Pending)) {
-                row_el = row_el.push(
-                    text("Sent")
-                        .size(TYPO_XS)
-                        .color(Self::muted_color(dep.dark_mode)),
-                );
-            } else if matches!(peer.request_state, Some(OutgoingRequestState::Failed(_))) {
-                row_el = row_el.push(
-                    button(text("Retry").size(TYPO_XS))
-                        .on_press(AppMessage::FriendRequestRetry(peer.peer))
-                        .padding([SPACE_2, SPACE_6]),
-                );
-            } else {
-                row_el = row_el.push(
-                    button(text("+ Add").size(TYPO_XS))
-                        .on_press(AppMessage::SendFriendRequest(peer.peer))
-                        .padding([SPACE_2, SPACE_6]),
-                );
-            }
+            // Chat button for every discovered peer (friend features disabled)
+            row_el = row_el.push(
+                button(text("Chat").size(TYPO_XS))
+                    .on_press(AppMessage::OpenFriendChat(peer.peer))
+                    .padding([SPACE_2, SPACE_6]),
+            );
 
             section = section.push(container(row_el).width(Length::Fill));
         }

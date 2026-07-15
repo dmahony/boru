@@ -479,19 +479,9 @@ fn main() -> Result<()> {
             None
         };
 
-        // Add DHT address lookup for global peer discovery via Mainline DHT.
-        //
-        // Enables peer discovery by EndpointID alone, without depending on
-        // n0's DNS server.  Tradeoffs versus DNS/Pkarr:
-        //
-        //   + No central dependency — fully decentralized
-        //   + Works in censorship-resistant or air-gapped setups
-        //   - Slower lookups (500ms–5s vs ~100ms for DNS)
-        //   - May be blocked by corporate/ISP firewalls (wide UDP port range)
-        //   - Publishing a record takes time (~seconds)
-        //
-        // DHT supplements DNS/Pkarr: if DNS fails, DHT may still resolve.
-        // Both are used alongside the default DNS/Pkarr from `presets::N0`.
+        // DHT address lookup disabled — no global peer resolution.
+        // mDNS handles LAN discovery; relay handles connectivity.
+        /*
         if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
             if let Ok(dht) = DhtAddressLookup::builder()
                 .secret_key(endpoint.secret_key().clone())
@@ -500,6 +490,7 @@ fn main() -> Result<()> {
                 addr_lookup.add(dht);
             }
         }
+        */
 
         let notice = "Direct iroh transport is operational.".to_string();
 
@@ -565,14 +556,18 @@ fn main() -> Result<()> {
                                 continue;
                             }
                             info!(peer = %peer, "mDNS discovered peer");
-                            // join_peers triggers the gossip actor to dial
-                            // the peer and establish a properly wired
-                            // gossip connection.
-                            if let Err(e) = sender.join_peers(vec![peer]).await {
-                                warn!(peer = %peer, error = %e, "join_peers failed");
-                            } else {
-                                info!(peer = %peer, "join_peers succeeded");
-                            }
+                            // Spawn join_peers in a separate task so the
+                            // mDNS event loop isn't blocked. join_peers
+                            // triggers the gossip actor to dial the peer
+                            // and establish a properly wired connection.
+                            let s = sender.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = s.join_peers(vec![peer]).await {
+                                    warn!(peer = %peer, error = %e, "join_peers failed");
+                                } else {
+                                    info!(peer = %peer, "join_peers succeeded");
+                                }
+                            });
                             // Use try_send to avoid blocking on the UI channel
                             let _ = tx.try_send(vec![peer]);
                         }
@@ -625,12 +620,8 @@ fn main() -> Result<()> {
             let _ = friend_mgr.add_friend_addrs(peer, addrs).await;
         }
 
-        // ── DHT client for private-room DHT discovery ────────────────────
-        // Keep a Dht instance so private rooms can optionally use DHT
-        // discovery. No public-room DHT tracker is started.
-        let dht =
-            distributed_topic_tracker::Dht::new(&distributed_topic_tracker::DhtConfig::default());
-        let dht_for_private = dht.clone();
+        // Private-room DHT discovery disabled.
+        let dht_for_private = None;
 
         Result::<_>::Ok((
             endpoint,
@@ -781,7 +772,7 @@ fn main() -> Result<()> {
             initial_topic.is_some() && args.command.is_none(),
             None,
             Arc::clone(&discovered_peers_rx),
-            Some(dht_for_private),
+            dht_for_private,
             args.no_dht,
             iced_diagnostics,
             Some(Arc::new(tokio::sync::Mutex::new(gui_action_rx))),
