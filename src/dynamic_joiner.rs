@@ -37,10 +37,11 @@ use std::{
 use iroh_base::EndpointId;
 use irpc::channel::mpsc;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
-use crate::api::{ApiError, Command, GossipSender};
+use crate::api::{Command, GossipSender};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -61,6 +62,11 @@ pub enum NeighborEvent {
 /// Configuration for [`DynamicPeerJoiner`].
 #[derive(Debug, Clone)]
 pub struct DynamicPeerJoinerConfig {
+    /// Maximum candidates accepted from one discovery batch.
+    /// Excess candidates are ignored and may be considered by a later cycle.
+    /// Default: 64.
+    pub max_candidates_per_batch: usize,
+
     /// Maximum number of peers being joined concurrently.
     ///
     /// Default: 5.
@@ -95,6 +101,7 @@ pub struct DynamicPeerJoinerConfig {
 impl Default for DynamicPeerJoinerConfig {
     fn default() -> Self {
         Self {
+            max_candidates_per_batch: 64,
             max_concurrent_joins: 5,
             max_retries_per_peer: 3,
             initial_retry_delay: Duration::from_secs(1),
@@ -214,15 +221,19 @@ async fn run_joiner_loop(
     config: DynamicPeerJoinerConfig,
     cancel: CancellationToken,
 ) {
-    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_joins));
+    let max_concurrent = config.max_concurrent_joins.max(1);
+    let max_batch = config.max_candidates_per_batch.max(1);
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
     let state = Arc::new(Mutex::new(JoinerState {
         known: HashSet::new(),
         pending: HashMap::new(),
         local,
     }));
+    let mut workers = JoinSet::new();
 
     info!(
-        max_concurrent = config.max_concurrent_joins,
+        max_concurrent,
+        max_candidates_per_batch = max_batch,
         max_retries = config.max_retries_per_peer,
         "dynamic joiner started",
     );
@@ -234,47 +245,39 @@ async fn run_joiner_loop(
                 debug!("dynamic joiner cancelled");
                 break;
             }
+            worker = workers.join_next(), if !workers.is_empty() => {
+                if let Some(Err(error)) = worker {
+                    debug!(error = %error, "dynamic joiner worker exited");
+                }
+            }
             event_result = neighbor_events_rx.recv() => {
                 match event_result {
                     Ok(Some(event)) => {
-                        if !handle_neighbor_event(event, &state) {
-                            break;
-                        }
+                        if !handle_neighbor_event(event, &state) { break; }
                     }
-                    Ok(None) => {
-                        debug!("dynamic joiner: neighbor event channel closed");
-                        break;
-                    }
-                    Err(_) => {
-                        debug!("dynamic joiner: neighbor event receive error");
-                        break;
-                    }
+                    Ok(None) | Err(_) => break,
                 }
             }
             batch_result = discovery_rx.recv() => {
                 match batch_result {
                     Ok(Some(batch)) => {
                         if !handle_discovery_batch(
-                            batch,
-                            &state,
-                            &semaphore,
-                            &gossip_sender,
-                            &config,
-                            &cancel,
-                        ) {
-                            break;
-                        }
+                            batch, &state, &semaphore, &gossip_sender, &config,
+                            &cancel, &mut workers, max_batch,
+                        ) { break; }
                     }
-                    Ok(None) => {
-                        debug!("dynamic joiner: discovery channel closed");
-                        break;
-                    }
-                    Err(_) => {
-                        debug!("dynamic joiner: discovery channel receive error");
-                        break;
-                    }
+                    Ok(None) | Err(_) => break,
                 }
             }
+        }
+    }
+
+    // Do not leave retry workers retaining endpoint IDs or the sender after
+    // shutdown. JoinSet aborts and drains every worker deterministically.
+    workers.abort_all();
+    while let Some(result) = workers.join_next().await {
+        if let Err(error) = result {
+            trace!(error = %error, "dynamic joiner worker cancelled");
         }
     }
 }
@@ -314,12 +317,19 @@ fn handle_discovery_batch(
     gossip_sender: &GossipSender,
     config: &DynamicPeerJoinerConfig,
     cancel: &CancellationToken,
+    workers: &mut JoinSet<()>,
+    max_batch: usize,
 ) -> bool {
     let total = peers.len();
-    let mut admissible: Vec<EndpointId> = Vec::with_capacity(total);
+    let mut admissible: Vec<EndpointId> = Vec::with_capacity(total.min(max_batch));
+    let mut batch_seen = HashSet::new();
     {
         let st = state.lock().expect("lock poisoned");
-        for peer in &peers {
+        for peer in peers.iter().take(max_batch) {
+            if !batch_seen.insert(*peer) {
+                trace!(peer = %peer.fmt_short(), "joiner: skip duplicate candidate");
+                continue;
+            }
             if *peer == st.local {
                 trace!(peer = %peer.fmt_short(), "joiner: skip self");
                 continue;
@@ -366,7 +376,7 @@ fn handle_discovery_batch(
         let cfg = config.clone();
         let short = peer.fmt_short().to_string();
 
-        tokio::task::spawn(async move {
+        workers.spawn(async move {
             attempt_join_with_retries(peer, short, sender, state_clone, cfg, permit, cancel_clone)
                 .await;
         });
@@ -704,6 +714,7 @@ mod tests {
         let gossip_sender = GossipSender::new(irpc::channel::mpsc::Sender::Tokio(cmd_tx));
 
         let config = DynamicPeerJoinerConfig {
+            max_candidates_per_batch: 64,
             max_concurrent_joins: 5,
             max_retries_per_peer: 0, // no retries in this test
             initial_retry_delay: Duration::from_millis(1),
@@ -742,6 +753,7 @@ mod tests {
         let gossip_sender = GossipSender::new(irpc::channel::mpsc::Sender::Tokio(cmd_tx));
 
         let config = DynamicPeerJoinerConfig {
+            max_candidates_per_batch: 64,
             max_concurrent_joins: 5,
             max_retries_per_peer: 0,
             ..Default::default()
@@ -773,6 +785,7 @@ mod tests {
         let gossip_sender = GossipSender::new(irpc::channel::mpsc::Sender::Tokio(cmd_tx));
 
         let config = DynamicPeerJoinerConfig {
+            max_candidates_per_batch: 64,
             max_concurrent_joins: 5,
             max_retries_per_peer: 0,
             ..Default::default()
@@ -812,6 +825,7 @@ mod tests {
         let gossip_sender = GossipSender::new(irpc::channel::mpsc::Sender::Tokio(cmd_tx));
 
         let config = DynamicPeerJoinerConfig {
+            max_candidates_per_batch: 64,
             max_concurrent_joins: 5,
             max_retries_per_peer: 0,
             ..Default::default()
@@ -882,6 +896,7 @@ mod tests {
         });
 
         let config = DynamicPeerJoinerConfig {
+            max_candidates_per_batch: 64,
             max_concurrent_joins: 5,
             max_retries_per_peer: 2, // 2 retries = 3 total attempts (0, 1, 2)
             initial_retry_delay: Duration::from_millis(5),
@@ -941,6 +956,7 @@ mod tests {
         });
 
         let config = DynamicPeerJoinerConfig {
+            max_candidates_per_batch: 64,
             max_concurrent_joins: 3,
             max_retries_per_peer: 0,
             initial_retry_delay: Duration::from_millis(1),
@@ -971,6 +987,60 @@ mod tests {
             seen.len()
         );
 
+        joiner.shutdown().await;
+    }
+
+    /// A duplicate appearing twice in one discovery response is scheduled once.
+    #[tokio::test]
+    async fn test_duplicate_candidates_in_one_batch_are_deduplicated() {
+        let local = test_endpoint(1);
+        let peer = test_endpoint(2);
+        let (cmd_tx, mut cmd_rx) = tokio_mpsc::channel::<Command>(64);
+        let sender = GossipSender::new(irpc::channel::mpsc::Sender::Tokio(cmd_tx));
+        let joiner = DynamicPeerJoiner::start(
+            local,
+            sender,
+            DynamicPeerJoinerConfig {
+                max_retries_per_peer: 0,
+                jitter_factor: 0.0,
+                ..Default::default()
+            },
+        );
+        joiner.discovery_tx.send(vec![peer, peer]).await.unwrap();
+        let command = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(command, Command::JoinPeers(peers) if peers == vec![peer]));
+        assert!(cmd_rx.try_recv().is_err());
+        joiner.shutdown().await;
+    }
+
+    /// An oversized discovery response cannot create an unbounded worker burst.
+    #[tokio::test]
+    async fn test_discovery_batch_is_hard_capped() {
+        let local = test_endpoint(1);
+        let peers: Vec<_> = (2..=4).map(test_endpoint).collect();
+        let (cmd_tx, mut cmd_rx) = tokio_mpsc::channel::<Command>(64);
+        let sender = GossipSender::new(irpc::channel::mpsc::Sender::Tokio(cmd_tx));
+        let joiner = DynamicPeerJoiner::start(
+            local,
+            sender,
+            DynamicPeerJoinerConfig {
+                max_candidates_per_batch: 1,
+                max_retries_per_peer: 0,
+                jitter_factor: 0.0,
+                ..Default::default()
+            },
+        );
+        joiner.discovery_tx.send(peers).await.unwrap();
+        let command = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(command, Command::JoinPeers(found) if found == vec![test_endpoint(2)]));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(cmd_rx.try_recv().is_err());
         joiner.shutdown().await;
     }
 

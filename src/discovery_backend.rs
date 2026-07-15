@@ -8,9 +8,21 @@
 
 use async_trait::async_trait;
 use n0_error::{ensure_any, Result};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Maximum number of records returned by a single [`TopicDiscoveryBackend::lookup`] call.
 pub const MAX_DISCOVERY_RECORDS: usize = 20;
+/// Lease duration for public-lobby advertisements.
+pub const DISCOVERY_LEASE_SECS: u64 = 600;
+/// Recommended refresh cadence (half the lease).
+pub const DISCOVERY_REFRESH_SECS: u64 = 300;
+/// Domain-separated canonical public-lobby key.
+pub const PUBLIC_LOBBY_KEY_DOMAIN: &[u8] = b"boru-chat/public-lobby/v1";
+/// Derive a lobby key without exposing names, accounts, or endpoint addresses.
+pub fn canonical_lobby_key(discovery_key: [u8; 32]) -> [u8; 32] {
+    *blake3::hash(&[PUBLIC_LOBBY_KEY_DOMAIN, &discovery_key].concat()).as_bytes()
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,12 +57,17 @@ impl From<[u8; 32]> for NamespaceId {
 pub struct EncryptedDiscoveryRecord {
     /// The encrypted payload bytes.
     pub payload: Vec<u8>,
+    /// Local lease deadline in Unix seconds; not transmitted in the payload.
+    expires_at: Option<u64>,
 }
 
 impl EncryptedDiscoveryRecord {
     /// Create a new [`EncryptedDiscoveryRecord`] with the given payload.
     pub fn new(payload: Vec<u8>) -> Self {
-        Self { payload }
+        Self {
+            payload,
+            expires_at: None,
+        }
     }
 }
 
@@ -59,6 +76,10 @@ pub fn validate_discovery_record(record: &EncryptedDiscoveryRecord) -> Result<()
     ensure_any!(
         !record.payload.is_empty(),
         "discovery record payload must not be empty"
+    );
+    ensure_any!(
+        record.payload.len() <= MAX_DISCOVERY_PAYLOAD_SIZE,
+        "discovery record payload exceeds maximum size"
     );
     Ok(())
 }
@@ -99,12 +120,34 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryDiscoveryBackend {
     records: Arc<RwLock<HashMap<NamespaceId, Vec<EncryptedDiscoveryRecord>>>>,
+    clock: Arc<AtomicU64>,
 }
 
 impl InMemoryDiscoveryBackend {
     /// Create an empty in-memory discovery backend.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a backend using a caller-controlled clock, primarily for
+    /// deterministic expiry tests.
+    pub fn with_clock(clock: Arc<AtomicU64>) -> Self {
+        Self {
+            records: Arc::new(RwLock::new(HashMap::new())),
+            clock,
+        }
+    }
+
+    fn now_secs(&self) -> u64 {
+        let value = self.clock.load(Ordering::Relaxed);
+        if value != 0 {
+            value
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        }
     }
 
     /// Number of distinct namespaces with stored records.
@@ -144,8 +187,19 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
         record: EncryptedDiscoveryRecord,
     ) -> Result<()> {
         validate_discovery_record(&record)?;
+        let mut record = record;
+        record.expires_at = Some(self.now_secs().saturating_add(DISCOVERY_LEASE_SECS));
         let mut map = self.records.write().expect("lock poisoned");
-        map.entry(*namespace).or_default().push(record);
+        let entries = map.entry(*namespace).or_default();
+        entries.retain(|r| {
+            r.expires_at
+                .map_or(true, |deadline| deadline > self.now_secs())
+        });
+        entries.push(record);
+        if entries.len() > MAX_DISCOVERY_RECORDS {
+            let excess = entries.len() - MAX_DISCOVERY_RECORDS;
+            entries.drain(..excess);
+        }
         Ok(())
     }
 
@@ -153,6 +207,10 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
         let map = self.records.read().expect("lock poisoned");
         let records = map.get(namespace).cloned().unwrap_or_default();
         let mut records = records;
+        records.retain(|r| {
+            r.expires_at
+                .map_or(true, |deadline| deadline > self.now_secs())
+        });
         records.reverse();
         records.truncate(MAX_DISCOVERY_RECORDS);
         Ok(records)
@@ -271,7 +329,7 @@ mod tests {
             backend.publish(&ns, record.clone()).await.unwrap();
             let results = backend.lookup(&ns).await.unwrap();
             assert_eq!(results.len(), 1);
-            assert_eq!(results[0], record);
+            assert_eq!(results[0].payload, record.payload);
         });
     }
 
@@ -403,6 +461,66 @@ mod tests {
                 .unwrap();
             let results = backend.lookup(&NamespaceId::new([0u8; 32])).await.unwrap();
             assert_eq!(results.len(), 1);
+        });
+    }
+
+    #[test]
+    fn canonical_lobby_key_is_domain_separated() {
+        let key = [7u8; 32];
+        assert_eq!(canonical_lobby_key(key), canonical_lobby_key(key));
+        assert_ne!(canonical_lobby_key(key), key);
+    }
+
+    #[test]
+    fn lease_expiry_uses_deterministic_clock() {
+        let clock = Arc::new(AtomicU64::new(1_000));
+        let backend = InMemoryDiscoveryBackend::with_clock(clock.clone());
+        let ns = NamespaceId::new([1u8; 32]);
+        run_async(async {
+            backend
+                .publish(&ns, EncryptedDiscoveryRecord::new(vec![1]))
+                .await
+                .unwrap();
+            assert_eq!(backend.lookup(&ns).await.unwrap().len(), 1);
+            clock.store(1_000 + DISCOVERY_LEASE_SECS, Ordering::Relaxed);
+            assert!(backend.lookup(&ns).await.unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn malformed_and_oversized_records_are_rejected() {
+        let backend = InMemoryDiscoveryBackend::new();
+        let ns = NamespaceId::new([2u8; 32]);
+        run_async(async {
+            assert!(backend
+                .publish(&ns, EncryptedDiscoveryRecord::new(Vec::new()))
+                .await
+                .is_err());
+            assert!(backend
+                .publish(
+                    &ns,
+                    EncryptedDiscoveryRecord::new(vec![0; MAX_DISCOVERY_PAYLOAD_SIZE + 1])
+                )
+                .await
+                .is_err());
+        });
+    }
+
+    #[test]
+    fn cache_retains_at_most_max_records() {
+        let backend = InMemoryDiscoveryBackend::new();
+        let ns = NamespaceId::new([3u8; 32]);
+        run_async(async {
+            for i in 0..MAX_DISCOVERY_RECORDS + 5 {
+                backend
+                    .publish(&ns, EncryptedDiscoveryRecord::new(vec![i as u8]))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                backend.lookup(&ns).await.unwrap().len(),
+                MAX_DISCOVERY_RECORDS
+            );
         });
     }
 

@@ -128,10 +128,9 @@ fn rejects_wrong_version() {
 fn rejects_corrupted_base32() {
     let invite = RoomInviteV2::new(test_topic(), test_secret());
     let mut encoded = invite.encode().into_bytes();
-    // Corrupt one character in the middle.
+    // Corrupt one character in the middle with an invalid base32 char.
     let mid = encoded.len() / 2;
-    let c = encoded[mid];
-    encoded[mid] = if c == b'x' { b'y' } else { b'x' };
+    encoded[mid] = b'@';
     let corrupt = String::from_utf8(encoded).unwrap();
     let err = RoomInviteV2::parse(&corrupt).unwrap_err();
     let msg = format!("{err}");
@@ -180,11 +179,7 @@ fn debug_shows_topic() {
 fn no_endpoint_info() {
     let invite = RoomInviteV2::new(test_topic(), test_secret());
     let encoded = invite.encode();
-    assert!(
-        !encoded.contains(':'),
-        "encoded string should not contain additional colons beyond the prefix: {encoded}"
-    );
-    // Should only contain the one colon from "boru1:"
+    // The prefix "boru1:" contains exactly one colon
     assert_eq!(
         encoded.matches(':').count(),
         1,

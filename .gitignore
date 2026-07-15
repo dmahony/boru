@@ -1,3 +1,9 @@
 /target
 .worktrees/
 *.mp4
+*.exe
+hermes-verify-script.sh
+hermes_verify.py
+hermes_verify_profile.py
+repair.py
+src/*.bak

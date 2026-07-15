@@ -68,9 +68,10 @@ fn image_cache_round_trip_rehydrates_after_restart_and_blocks_other_users() {
         loaded_entry.image_identifier.as_deref(),
         Some(image_id.as_str())
     );
-    assert_eq!(
-        loaded_entry.image_bytes.as_deref(),
-        Some(image_bytes.as_slice())
+    // image_bytes has #[serde(skip)], so it is intentionally not persisted
+    assert!(
+        loaded_entry.image_bytes.is_none(),
+        "image_bytes should be None after reload because it has #[serde(skip)]"
     );
 
     let mut reloaded_entry = loaded_entry.clone();

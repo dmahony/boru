@@ -167,6 +167,15 @@ pub fn public_room_identity(network: PublicNetwork) -> PublicRoomIdentity {
     PublicRoomIdentity::new(topic, discovery_key)
 }
 
+/// Derive the canonical gossip topic for the default public lobby.
+///
+/// All frontends and the [`crate::public_room_tracker::PublicRoomTracker`]
+/// use this helper (directly or through [`public_room_identity`]) so the
+/// gossip mesh and DHT discovery agree on the same network/version identity.
+pub fn public_lobby_topic(network: PublicNetwork) -> TopicId {
+    public_room_identity(network).topic
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -296,6 +305,21 @@ mod tests {
     }
 
     // ── PublicRoomIdentity tests ─────────────────────────────────────
+
+    /// The canonical lobby helper and full identity must agree on the gossip topic.
+    #[test]
+    fn lobby_topic_helper_matches_tracker_identity() {
+        for network in [
+            PublicNetwork::Mainnet,
+            PublicNetwork::Development,
+            PublicNetwork::Test,
+        ] {
+            assert_eq!(
+                public_lobby_topic(network),
+                public_room_identity(network).topic
+            );
+        }
+    }
 
     /// Identity uses the canonical constants.
     #[test]

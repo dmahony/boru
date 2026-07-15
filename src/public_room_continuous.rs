@@ -246,6 +246,7 @@ impl ContinuousTracker {
         // Create the DynamicPeerJoiner.
         let local_ep = *tracker.local_endpoint_id();
         let joiner_config = DynamicPeerJoinerConfig {
+            max_candidates_per_batch: 64,
             max_concurrent_joins: config.max_concurrent_joins,
             max_retries_per_peer: 3,
             initial_retry_delay: config.initial_retry_delay,

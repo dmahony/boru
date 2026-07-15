@@ -37,7 +37,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::discovery_backend::{
-    EncryptedDiscoveryRecord, NamespaceId, TopicDiscoveryBackend, MAX_DISCOVERY_PAYLOAD_SIZE,
+    canonical_lobby_key, EncryptedDiscoveryRecord, NamespaceId, TopicDiscoveryBackend,
+    MAX_DISCOVERY_PAYLOAD_SIZE,
 };
 use crate::discovery_record::create_discovery_record;
 use crate::discovery_validation::{DiscoveryRecordValidator, PeerCandidates, ValidationConfig};
@@ -165,7 +166,7 @@ impl PublicRoomTracker {
             &self.local_endpoint_id,
             &self.secret_key,
         )?;
-        let namespace = NamespaceId::new(discovery_key);
+        let namespace = NamespaceId::new(canonical_lobby_key(discovery_key));
         let result = async {
             self.backend
                 .publish(&namespace, EncryptedDiscoveryRecord::new(record.to_bytes()))
@@ -216,7 +217,7 @@ impl PublicRoomTracker {
 
         let now_minute = unix_minute(0);
         let discovery_key = self.identity.discovery_key;
-        let namespace = NamespaceId::new(discovery_key);
+        let namespace = NamespaceId::new(canonical_lobby_key(discovery_key));
 
         // Fetch encrypted records from the backend.
         let encrypted = match async { self.backend.lookup(&namespace).await }

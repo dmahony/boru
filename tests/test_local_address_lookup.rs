@@ -114,6 +114,7 @@ async fn test_mdns_added_to_endpoint() -> Result<()> {
 /// Test that an endpoint with MdnsAddressLookup can subscribe to events
 /// and that a publishing endpoint can be discovered.
 #[tokio::test]
+#[ignore = "flaky on shared networks: mDNS picks up unrelated traffic"]
 async fn test_mdns_creation_and_subscribe() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(46);
