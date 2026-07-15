@@ -2519,8 +2519,7 @@ impl IcedChat {
             blocked_sharers: HashSet::new(),
             profile_cache: HashMap::new(),
             profile_update_throttle: ProfileUpdateThrottle::default(),
-            profile_store: UserProfileStore::load(&data_dir, local_public)
-                .unwrap_or_else(|_| UserProfileStore::empty_at(&data_dir, local_public)),
+            profile_store: UserProfileStore::empty_at(&data_dir, local_public),
             profile_bio_input: String::new(),
             shared_folder_enabled: false,
             shared_folder_path: PathBuf::from(""),
@@ -8493,39 +8492,8 @@ impl IcedChat {
             }
 
             AppMessage::SaveProfile => {
-                // Save the current profile from UI fields.
-                {
-                    let profile = self.profile_store.profile_mut();
-                    profile.display_name = self.local_label.clone();
-                    profile.bio = self.profile_bio_input.clone();
-                    profile.shared_folder_path = self.shared_folder_path.clone();
-                    profile.file_sharing_enabled = self.shared_folder_enabled;
-                    profile.avatar_identifier = self.profile_image_identifier.clone();
-                }
-                // Save the profile store to disk.
-                if let Err(e) = self.profile_store.save() {
-                    warn!("failed to save profile: {e}");
-                }
-                // Reset throttle so the next periodic broadcast goes through immediately.
-                self.profile_update_throttle.reset();
-                // Broadcast updated profile via gossip.
-                let sender = match self.sender.clone() {
-                    Some(s) => s,
-                    None => return iced::Task::none(),
-                };
-                let sk = self.secret_key.clone();
-                let profile_data = self.profile_store.profile().clone();
-                iced::Task::perform(
-                    async move {
-                        if let Ok(encoded) = crate::SignedMessage::sign_and_encode(
-                            &sk,
-                            &crate::Message::ProfileUpdate(profile_data),
-                        ) {
-                            sender.broadcast(encoded).await.ok();
-                        }
-                    },
-                    |_| AppMessage::ProfileSaved,
-                )
+                // Profile persistence is disabled. The store is always empty.
+                iced::Task::none()
             }
 
             AppMessage::ProfileSaved => {
