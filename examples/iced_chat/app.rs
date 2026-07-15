@@ -4254,11 +4254,13 @@ impl IcedChat {
 
                 iced::Task::perform(
                     async move {
+                        info!("OpenRoom task: starting subscribe topic={topic}");
                         // Seed the endpoint address lookup with bootstrap peer
                         // addresses so the endpoint can resolve them by their
                         // transport info (relay URL, direct addresses) from the
                         // ticket or RoomStore — not just by public key.
                         seed_memory_lookup(&memory_lookup, &initial_addrs);
+                        info!("OpenRoom task: memory_lookup seeded");
                         // Wait for at least one gossip neighbor if we have bootstrap
                         // peers — matching the TUI behavior.  Without bootstrap
                         // peers (room creator) use subscribe() so we don't hang.

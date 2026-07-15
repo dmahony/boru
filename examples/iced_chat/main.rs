@@ -569,6 +569,48 @@ fn main() -> Result<()> {
         }
         info!("subscribed to personal inbox topic");
 
+        // Subscribe to the lobby topic so the gossip mesh is ready for
+        // LAN-discovered peers. This must happen inside runtime.block_on
+        // because gossip.subscribe() can hang in the iced event loop.
+        // Also create the discovered-peers channel for UI display.
+        let (discovered_peers_tx, discovered_peers_rx_tmp) =
+            tokio::sync::mpsc::channel::<Vec<iroh::PublicKey>>(64);
+        let lobby_topic = app::IcedChat::default_lobby_topic();
+        if let Ok(sub) = gossip.subscribe(lobby_topic, Vec::new()).await {
+            let (sender, mut receiver) = sub.split();
+            // Drain the receiver to prevent backpressure.
+            tokio::spawn(async move {
+                use n0_future::StreamExt;
+                while let Some(_event) = receiver.next().await {}
+            });
+            // mDNS-based LAN peer discovery: when a peer appears on the LAN,
+            // join them to the lobby gossip mesh directly, and forward the
+            // peer ID to the UI for sidebar display.
+            if let Some(mdns) = mdns_for_events {
+                let tx = discovered_peers_tx.clone();
+                tokio::spawn(async move {
+                    use n0_future::StreamExt;
+                    let mut events = mdns.subscribe().await;
+                    while let Some(event) = events.next().await {
+                        if let DiscoveryEvent::Discovered { endpoint_info, .. } = event {
+                            let peer = endpoint_info.endpoint_id;
+                            info!(peer = %peer, "mDNS discovered peer");
+                            if let Err(e) = sender.join_peers(vec![peer]).await {
+                                warn!(peer = %peer, error = %e, "join_peers failed");
+                            } else {
+                                info!(peer = %peer, "join_peers succeeded");
+                            }
+                            let _ = tx.send(vec![peer]).await;
+                        }
+                    }
+                });
+            }
+            info!("subscribed to lobby topic");
+        } else {
+            warn!("failed to subscribe to lobby topic");
+        }
+        let discovered_peers_rx = Arc::new(Mutex::new(discovered_peers_rx_tmp));
+
         // Spawn the backfill background actor for requesting history
         let backfill_handle = BackfillHandle::spawn(endpoint.clone());
 
@@ -621,34 +663,6 @@ fn main() -> Result<()> {
         let dht =
             distributed_topic_tracker::Dht::new(&distributed_topic_tracker::DhtConfig::default());
         let dht_for_private = dht.clone();
-        // ── mDNS-based LAN peer discovery ───────────────────────────────
-        // Subscribe to mDNS discovery events so we can react when a new
-        // peer appears on the LAN. Forward discovered peer IDs through the
-        // same channel used by the (now-disabled) DHT continuous tracker,
-        // so the existing NewDiscoveredPeers handler processes them.
-        let (discovered_peers_tx, discovered_peers_rx_tmp) =
-            tokio::sync::mpsc::channel::<Vec<iroh::PublicKey>>(64);
-        if let Some(mdns) = mdns_for_events {
-            let tx = discovered_peers_tx.clone();
-            tokio::spawn(async move {
-                use n0_future::StreamExt;
-                let mut events = mdns.subscribe().await;
-                while let Some(event) = events.next().await {
-                    match event {
-                        DiscoveryEvent::Discovered { endpoint_info, .. } => {
-                            let peer = endpoint_info.endpoint_id;
-                            info!(peer = %peer, "mDNS discovered peer");
-                            let _ = tx.send(vec![peer]).await;
-                        }
-                        DiscoveryEvent::Expired { .. } => {
-                            // Moot — expired peers are handled by gossip NeighborDown
-                        }
-                        _ => {}
-                    }
-                }
-            });
-        }
-        let discovered_peers_rx = Arc::new(Mutex::new(discovered_peers_rx_tmp));
 
         Result::<_>::Ok((
             endpoint,
