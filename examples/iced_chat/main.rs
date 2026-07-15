@@ -389,9 +389,9 @@ fn main() -> Result<()> {
             }
             Some(Command::Logs) => None,
             None => {
-                let topic = app::IcedChat::default_lobby_topic();
-                info!(topic = %topic, "opening lobby for LAN discovery mesh");
-                Some((topic, vec![]))
+                // Lobby mesh is set up inside runtime.block_on — no
+                // OpenRoom task needed here.
+                None
             }
         }
     });
