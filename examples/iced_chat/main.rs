@@ -547,12 +547,16 @@ fn main() -> Result<()> {
                 let my_id = endpoint.id();
                 tokio::spawn(async move {
                     use n0_future::StreamExt;
+                    let mut joined_peers = std::collections::HashSet::new();
                     let mut events = mdns.subscribe().await;
                     while let Some(event) = events.next().await {
                         if let DiscoveryEvent::Discovered { endpoint_info, .. } = event {
                             let peer = endpoint_info.endpoint_id;
                             if peer == my_id {
                                 debug!(peer = %peer, "mDNS discovered our own endpoint, skipping");
+                                continue;
+                            }
+                            if !joined_peers.insert(peer) {
                                 continue;
                             }
                             info!(peer = %peer, "mDNS discovered peer");

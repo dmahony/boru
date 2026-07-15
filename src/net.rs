@@ -26,7 +26,7 @@ use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, error_span, trace, warn, Instrument};
+use tracing::{debug, error, error_span, info, trace, warn, Instrument};
 
 use self::{
     address_lookup::GossipAddressLookup,
@@ -744,7 +744,7 @@ impl Actor {
                         }
                         PeerState::Pending { queue } => {
                             if queue.is_empty() {
-                                debug!(peer = %peer_id.fmt_short(), "start to dial");
+                                info!(peer = %peer_id.fmt_short(), "start to dial");
                                 self.dialer.queue_dial(peer_id, self.alpn.clone());
                             }
                             queue.push(message);

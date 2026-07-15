@@ -4227,6 +4227,7 @@ impl IcedChat {
                 let personal_topic = self.personal_room_topic();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let endpoint = self.endpoint.clone();
+                let runtime_handle = self.runtime_handle.clone();
                 let memory_lookup = self.memory_lookup.clone();
                 let data_dir = self.data_dir.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
@@ -4268,26 +4269,33 @@ impl IcedChat {
                         // peers (room creator) use subscribe() so we don't hang.
                         // Stale bootstrap peers are protected by a 30s timeout
                         // to avoid blocking the UI indefinitely.
-                        let sub: GossipTopic = if direct_conversation || bootstrap_peers.is_empty()
-                        {
-                            gossip
-                                .subscribe(topic, bootstrap_peers)
-                                .await
-                                .map_err(|e| e.to_string())?
-                        } else {
-                            tokio::time::timeout(Duration::from_secs(30), async {
-                                gossip.subscribe_and_join(topic, bootstrap_peers).await
+                        // Run gossip subscription on the dedicated Tokio runtime.
+                        // Calling it directly from an Iced task can leave the room
+                        // marked subscribed while the gossip handshake never starts.
+                        let sub: GossipTopic = runtime_handle
+                            .spawn(async move {
+                                if direct_conversation || bootstrap_peers.is_empty() {
+                                    gossip
+                                        .subscribe(topic, bootstrap_peers)
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                } else {
+                                    tokio::time::timeout(Duration::from_secs(30), async {
+                                        gossip.subscribe_and_join(topic, bootstrap_peers).await
+                                    })
+                                    .await
+                                    .map_err(|_| {
+                                        "timed out waiting for a peer to join the room — \
+                                         the saved addresses may be stale; the room is \
+                                         still subscribed, so any peer that connects \
+                                         later will work"
+                                            .to_string()
+                                    })
+                                    .and_then(|result| result.map_err(|e| e.to_string()))
+                                }
                             })
                             .await
-                            .map_err(|_| {
-                                "timed out waiting for a peer to join the room — \
-                                 the saved addresses may be stale; the room is \
-                                 still subscribed, so any peer that connects \
-                                 later will work"
-                                    .to_string()
-                            })?
-                            .map_err(|e| e.to_string())?
-                        };
+                            .map_err(|e| format!("room subscription task failed: {e}"))??;
                         let (sender, receiver) = sub.split();
                         let local_peer_addr = endpoint.watch_addr().get();
 
