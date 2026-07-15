@@ -1,0 +1,463 @@
+## Autonomous discovery and peer-joining diagnostics
+
+Extend the first MCP diagnostics implementation so an AI agent can independently test and classify room-discovery, connection, and peer-joining failures.
+
+The agent should not merely report that a peer is missing. It should collect enough structured evidence to determine the furthest stage reached and the most likely failure stage.
+
+## Required diagnostic stages
+
+Instrument the following lifecycle stages where the existing architecture exposes reliable hooks:
+
+```text
+discovery_started
+peer_discovered
+address_lookup_started
+address_resolved
+address_lookup_failed
+connection_attempt_started
+connection_established
+connection_failed
+room_subscription_started
+room_subscription_joined
+room_subscription_failed
+peer_added_to_topic
+peer_removed_from_topic
+probe_broadcast
+probe_received
+probe_timed_out
+```
+
+Do not fabricate events for stages that cannot be observed reliably. Record an `Unknown` or `NotObserved` state instead.
+
+## Extended diagnostic events
+
+Add event variants equivalent to:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DiagnosticEventKind {
+    DiscoveryStarted {
+        source: DiscoverySource,
+    },
+
+    PeerDiscovered {
+        source: DiscoverySource,
+        addresses: Vec<String>,
+    },
+
+    AddressLookupStarted {
+        source: DiscoverySource,
+    },
+
+    AddressResolved {
+        source: DiscoverySource,
+        addresses: Vec<String>,
+    },
+
+    AddressLookupFailed {
+        source: DiscoverySource,
+        error: String,
+    },
+
+    ConnectionAttemptStarted {
+        addresses: Vec<String>,
+    },
+
+    ConnectionEstablished {
+        remote_address: Option<String>,
+        transport: Option<String>,
+        used_relay: Option<bool>,
+    },
+
+    ConnectionFailed {
+        addresses: Vec<String>,
+        error: String,
+    },
+
+    RoomSubscriptionStarted,
+
+    RoomSubscriptionJoined,
+
+    RoomSubscriptionFailed {
+        error: String,
+    },
+
+    PeerAddedToTopic,
+
+    PeerRemovedFromTopic {
+        reason: Option<String>,
+    },
+
+    ProbeBroadcast {
+        probe_id: String,
+        message_hash: String,
+    },
+
+    ProbeReceived {
+        probe_id: String,
+        message_hash: String,
+        sender_id: String,
+    },
+
+    ProbeTimedOut {
+        probe_id: String,
+        timeout_ms: u64,
+    },
+
+    Error {
+        stage: String,
+        error: String,
+    },
+}
+```
+
+Preserve the existing room ID, peer ID, timestamp, node ID, and monotonic sequence fields.
+
+## Peer diagnostic state
+
+Maintain current diagnostic state for each observed peer.
+
+Suggested shape:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerDiagnosticState {
+    pub peer_id: String,
+
+    pub discovery_sources: Vec<DiscoverySource>,
+    pub discovered: bool,
+    pub discovered_at_ms: Option<i64>,
+
+    pub address_lookup_state: DiagnosticStageState,
+    pub addresses: Vec<String>,
+
+    pub connection_state: ConnectionDiagnosticState,
+    pub connected_address: Option<String>,
+    pub transport: Option<String>,
+    pub used_relay: Option<bool>,
+
+    pub subscription_state: DiagnosticStageState,
+    pub topic_member: bool,
+
+    pub last_seen_at_ms: Option<i64>,
+    pub last_error_stage: Option<String>,
+    pub last_error: Option<String>,
+}
+```
+
+Add serializable status enums:
+
+```rust
+pub enum DiagnosticStageState {
+    NotStarted,
+    InProgress,
+    Succeeded,
+    Failed,
+    NotObserved,
+}
+
+pub enum ConnectionDiagnosticState {
+    NotStarted,
+    Connecting,
+    Connected,
+    Failed,
+    Disconnected,
+    NotObserved,
+}
+```
+
+Update peer state from diagnostic events in a deterministic way.
+
+## New MCP tools
+
+Add these MCP tools.
+
+### `boru_get_peer_status`
+
+Arguments:
+
+```json
+{
+  "room_id": "...",
+  "peer_id": "..."
+}
+```
+
+Return the complete peer diagnostic state.
+
+Return a structured not-found result when the peer has never been observed.
+
+### `boru_wait_for_peer`
+
+Arguments:
+
+```json
+{
+  "room_id": "...",
+  "peer_id": "...",
+  "target_state": "topic_member",
+  "timeout_ms": 15000
+}
+```
+
+Supported target states should include:
+
+```text
+discovered
+address_resolved
+connected
+subscription_joined
+topic_member
+```
+
+Requirements:
+
+* wait asynchronously
+* do not block a Tokio runtime thread
+* clamp timeout to a maximum of 30 seconds
+* return immediately if the target state is already satisfied
+* return the latest peer state on success or timeout
+
+Suggested timeout response:
+
+```json
+{
+  "reached": false,
+  "target_state": "topic_member",
+  "timed_out": true,
+  "peer": {
+    "...": "latest peer state"
+  }
+}
+```
+
+### `boru_run_discovery_test`
+
+This tool should orchestrate a diagnostic test against an expected peer.
+
+Arguments:
+
+```json
+{
+  "room_id": "...",
+  "expected_peer_id": "...",
+  "timeout_ms": 20000,
+  "send_probe": true,
+  "probe_payload": "automatic LAN discovery test"
+}
+```
+
+The tool must:
+
+1. Validate that the local node knows the room.
+2. Capture the starting event sequence.
+3. Inspect existing peer state.
+4. Wait for the expected peer to be discovered.
+5. Wait for address resolution where observable.
+6. Wait for connection establishment where observable.
+7. Wait for room subscription or topic membership.
+8. Optionally send a diagnostic probe.
+9. Wait for delivery confirmation when the remote instance can report it through an acknowledgement or existing protocol state.
+10. Return a structured classification.
+
+Do not trigger unrelated network resets or destructive actions.
+
+If the application already continuously performs discovery, this tool should observe and wait rather than creating a second discovery implementation.
+
+## Failure classification
+
+Add a reusable classifier that accepts the collected diagnostic state and produces a structured result.
+
+Suggested response:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryTestResult {
+    pub success: bool,
+    pub room_id: String,
+    pub local_node_id: String,
+    pub expected_peer_id: String,
+
+    pub failed_stage: Option<DiscoveryFailureStage>,
+    pub summary: String,
+
+    pub evidence: DiscoveryTestEvidence,
+    pub peer: Option<PeerDiagnosticState>,
+    pub event_sequence_start: u64,
+    pub event_sequence_end: u64,
+    pub relevant_events: Vec<DiagnosticEvent>,
+
+    pub probe: Option<ProbeTestResult>,
+}
+```
+
+Suggested stages:
+
+```rust
+pub enum DiscoveryFailureStage {
+    LocalRoomUnavailable,
+    Discovery,
+    AddressResolution,
+    Connection,
+    Subscription,
+    TopicMembership,
+    ProbeBroadcast,
+    ProbeDelivery,
+    Unknown,
+}
+```
+
+Suggested evidence:
+
+```rust
+pub struct DiscoveryTestEvidence {
+    pub local_room_joined: bool,
+    pub peer_discovered: bool,
+    pub address_lookup_observed: bool,
+    pub address_resolved: bool,
+    pub connection_attempted: bool,
+    pub connection_established: bool,
+    pub subscription_started: bool,
+    pub subscription_joined: bool,
+    pub peer_in_topic: bool,
+    pub probe_broadcast: bool,
+    pub probe_received_or_acknowledged: bool,
+}
+```
+
+Classification rules should be deterministic and tested.
+
+For example:
+
+* local room missing or inactive → `LocalRoomUnavailable`
+* expected peer never discovered → `Discovery`
+* peer discovered but lookup explicitly failed → `AddressResolution`
+* address resolved but connection explicitly failed → `Connection`
+* connection established but subscription failed → `Subscription`
+* subscription joined but peer never appears as a topic member → `TopicMembership`
+* topic member present but probe could not be broadcast → `ProbeBroadcast`
+* probe broadcast but not confirmed before timeout → `ProbeDelivery`
+* insufficient or conflicting evidence → `Unknown`
+
+Do not claim a stage failed merely because no event was emitted when that stage is not observable in the current architecture.
+
+## Two-node autonomous test workflow
+
+Document how an AI agent should test both running instances:
+
+```text
+1. Call boru_get_node_status on A and B.
+2. Obtain node IDs for both instances.
+3. Call boru_get_room_status on A and B.
+4. Verify both report the same room ID.
+5. Call boru_run_discovery_test on A with B's node ID.
+6. Call boru_run_discovery_test on B with A's node ID.
+7. Compare both results.
+8. Send a probe from A.
+9. Call boru_find_received_probe on B.
+10. Repeat from B to A.
+11. Fetch relevant events from both nodes.
+12. Produce a final classification.
+```
+
+The agent should be able to distinguish asymmetric failures, for example:
+
+```text
+A discovers B, but B does not discover A.
+A connects to B, but B never reports topic membership.
+A-to-B probes work, but B-to-A probes fail.
+Both nodes discover each other, but neither establishes a connection.
+```
+
+## Optional high-level MCP tool
+
+If practical, add:
+
+```text
+boru_compare_peer_test
+```
+
+This is optional because it may require the MCP client to call both servers itself.
+
+Do not hard-code knowledge of another MCP server address into Boru Chat. The preferred design is for the AI agent to call each node independently and compare results.
+
+## Event waiting
+
+Add an internal notification mechanism so waiting tools do not poll aggressively.
+
+Suitable approaches include:
+
+* Tokio `watch`
+* Tokio `broadcast`
+* Tokio `Notify`
+* a bounded event subscription channel
+
+The persistent bounded event buffer remains the source for historical queries. Notifications are only for waking waiting tasks.
+
+Handle lagging subscribers and event-buffer eviction safely.
+
+## Timeouts and retries
+
+Record:
+
+* first attempt timestamp
+* most recent attempt timestamp
+* attempt count where available
+* last error
+* last successful stage
+
+Do not add aggressive new connection retries solely for MCP.
+
+The diagnostic layer should observe the application's normal retry behaviour.
+
+## Tests
+
+Add tests covering:
+
+1. Peer state advances from discovered to connected to topic member.
+2. Failed address lookup is classified as `AddressResolution`.
+3. Failed connection is classified as `Connection`.
+4. Subscription failure is classified as `Subscription`.
+5. Missing topic membership is classified correctly.
+6. Probe timeout is classified as `ProbeDelivery`.
+7. Missing peer discovery is classified as `Discovery`.
+8. Unknown or unobservable stages produce `Unknown`, not a false diagnosis.
+9. `boru_wait_for_peer` returns immediately when state is already satisfied.
+10. `boru_wait_for_peer` wakes when the target event arrives.
+11. Timeout values are clamped.
+12. Relevant event ranges start from the captured sequence.
+13. Event filtering does not include unrelated rooms.
+14. Asymmetric peer state can be represented.
+15. Diagnostics do not alter normal discovery retry behaviour.
+16. Existing tests continue to pass.
+
+Use paused Tokio time in unit tests where useful to avoid slow timeout tests.
+
+## Acceptance criteria
+
+This addition is complete when an MCP-connected AI agent can:
+
+1. Determine whether the expected peer was discovered.
+2. Determine whether addresses were resolved, when observable.
+3. Determine whether a connection was attempted and established, when observable.
+4. Determine whether room subscription completed.
+5. Determine whether the expected peer became a topic member.
+6. Send a diagnostic probe.
+7. Determine whether delivery was confirmed.
+8. Return the furthest successful stage.
+9. Return a deterministic likely failure stage.
+10. Explain when evidence is insufficient instead of guessing.
+11. Diagnose asymmetric behaviour by querying both LAN instances.
+12. Perform all of the above without UI automation.
+
+After implementation, include example outputs for:
+
+* complete success
+* peer never discovered
+* address lookup failure
+* connection failure
+* subscription failure
+* peer missing from topic
+* probe delivery timeout
+* insufficient evidence

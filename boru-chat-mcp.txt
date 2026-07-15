@@ -1,0 +1,590 @@
+You are working on this Rust repository:
+
+https://github.com/dmahony/iroh-gossip-chat
+
+Implement a focused first version of MCP diagnostics for Boru Chat.
+
+Do not add full GUI automation or broad application control. The purpose of this feature is to let an AI agent inspect room discovery and verify that a uniquely identifiable test message sent from one Boru instance is received by another instance on the LAN.
+
+## Scope
+
+Implement only these parts:
+
+1. A reusable diagnostics service.
+2. Structured diagnostic events.
+3. Diagnostic probe messages sent through the normal room gossip path.
+4. Receipt tracking for probes.
+5. Five core MCP tools:
+
+   * `boru_get_node_status`
+   * `boru_get_room_status`
+   * `boru_get_discovery_events`
+   * `boru_send_probe`
+   * `boru_find_received_probe`
+6. Tests and documentation for this initial version.
+
+Do not implement:
+
+* mouse or keyboard automation
+* arbitrary chat-message sending
+* arbitrary filesystem access
+* remote shell execution
+* full friend/contact management
+* all possible discovery instrumentation
+* destructive MCP tools
+* unrestricted LAN binding
+
+## Goal
+
+The intended test setup is:
+
+```text
+AI agent
+   ├── MCP connection to Boru instance A
+   └── MCP connection to Boru instance B
+
+Instance A and B are running on separate devices on the same LAN.
+```
+
+The agent should be able to:
+
+1. Query both nodes.
+2. Confirm both are in the same room.
+3. Inspect their known peers and discovery state.
+4. Send a diagnostic probe from instance A.
+5. Query instance B for the exact probe ID.
+6. Confirm that B received the same probe and message hash.
+
+## First step
+
+Before editing code:
+
+1. Inspect the existing room, discovery, message, history, acknowledgement, and Iced networking paths.
+2. Identify the smallest set of modules that must change.
+3. Provide a concise implementation plan naming the files you expect to modify.
+
+Avoid unrelated refactors.
+
+## Diagnostics service
+
+Add a reusable diagnostics module in the `boru-chat` library.
+
+Suggested shape:
+
+```rust
+#[derive(Clone)]
+pub struct Diagnostics {
+    inner: Arc<DiagnosticsInner>,
+}
+
+struct DiagnosticsInner {
+    events: Mutex<VecDeque<DiagnosticEvent>>,
+    received_probes: Mutex<HashMap<String, ReceivedProbe>>,
+    next_sequence: AtomicU64,
+    max_events: usize,
+    max_received_probes: usize,
+}
+```
+
+Use Tokio or standard synchronization primitives that fit the existing architecture.
+
+Requirements:
+
+* cloneable and thread-safe
+* bounded event storage
+* bounded received-probe storage
+* oldest records evicted when limits are reached
+* diagnostics failures must never break normal networking or chat
+* all public response types must be serializable
+
+Suggested defaults:
+
+```text
+max_events = 5000
+max_received_probes = 1000
+```
+
+## Diagnostic events
+
+Add serializable event types similar to:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticEvent {
+    pub sequence: u64,
+    pub timestamp_ms: i64,
+    pub node_id: String,
+    pub room_id: Option<String>,
+    pub peer_id: Option<String>,
+    pub kind: DiagnosticEventKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DiagnosticEventKind {
+    RoomJoinStarted,
+    RoomJoined,
+    RoomJoinFailed {
+        error: String,
+    },
+
+    PeerDiscovered {
+        source: DiscoverySource,
+        addresses: Vec<String>,
+    },
+
+    PeerJoinedRoom,
+    PeerLeftRoom,
+
+    MessageBroadcast {
+        message_id: String,
+        message_hash: String,
+        probe_id: Option<String>,
+    },
+
+    MessageReceived {
+        message_id: Option<String>,
+        message_hash: String,
+        probe_id: Option<String>,
+        sender_id: String,
+    },
+
+    DuplicateMessage {
+        message_hash: String,
+        probe_id: Option<String>,
+    },
+
+    Error {
+        stage: String,
+        error: String,
+    },
+}
+```
+
+Create a discovery-source enum:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoverySource {
+    Mdns,
+    MainlineDht,
+    Ticket,
+    Bootstrap,
+    DnsPkarr,
+    Gossip,
+    MemoryLookup,
+    Manual,
+    Unknown,
+}
+```
+
+Only report a specific source when the existing code can determine it accurately. Use `Unknown` otherwise.
+
+Each event must receive a monotonically increasing sequence number.
+
+Expose methods similar to:
+
+```rust
+pub fn record(&self, event: NewDiagnosticEvent);
+pub fn events_since(
+    &self,
+    since_sequence: u64,
+    limit: usize,
+    room_id: Option<&str>,
+) -> Vec<DiagnosticEvent>;
+pub fn latest_sequence(&self) -> u64;
+```
+
+Clamp query limits to a safe maximum such as 1000.
+
+## Room status
+
+Add a serializable room snapshot:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomDiagnosticSnapshot {
+    pub node_id: String,
+    pub room_id: String,
+    pub joined: bool,
+    pub subscribed: bool,
+    pub peer_count: usize,
+    pub peers: Vec<PeerDiagnosticSnapshot>,
+    pub discovery_sources_enabled: Vec<DiscoverySource>,
+    pub last_error: Option<String>,
+}
+```
+
+Peer status should include:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerDiagnosticSnapshot {
+    pub peer_id: String,
+    pub discovery_sources: Vec<DiscoverySource>,
+    pub addresses: Vec<String>,
+    pub connected: bool,
+    pub last_seen_timestamp_ms: Option<i64>,
+    pub last_error: Option<String>,
+}
+```
+
+Build the snapshot from existing application state where possible.
+
+Do not create a second independent model of rooms or peers unless necessary. Prefer adapting existing stores, trackers, mesh-health data, or peer state.
+
+Do not expose:
+
+* secret keys
+* discovery secrets
+* private room tickets
+* mailbox keys
+* arbitrary filesystem paths
+* bearer capabilities
+
+## Diagnostic probe messages
+
+Add a diagnostic probe message that travels through the same room gossip path as an ordinary room message.
+
+Suggested payload:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticProbe {
+    pub probe_id: String,
+    pub sender_id: String,
+    pub room_id: String,
+    pub sent_at_ms: i64,
+    pub payload: Option<String>,
+}
+```
+
+Requirements:
+
+* use the existing message serialization and signing system where possible
+* do not create a separate UDP, TCP, HTTP, or Iroh protocol just for probes
+* generate a collision-resistant probe ID when one is not supplied
+* treat the payload as inert diagnostic text
+* do not allow the payload to execute commands
+* do not display probes as ordinary chat messages by default
+* preserve the exact probe ID through serialization and receipt
+* compute and store the same message hash used by the normal message path where possible
+
+When a probe is received:
+
+1. Record the sender ID.
+2. Record the room ID.
+3. Record send and receive timestamps.
+4. Record the message hash.
+5. Track duplicates.
+6. Store it in the diagnostics service.
+7. Emit a `MessageReceived` event.
+8. Emit `DuplicateMessage` for duplicate receipt.
+
+Add:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceivedProbe {
+    pub probe_id: String,
+    pub room_id: String,
+    pub sender_id: String,
+    pub sent_at_ms: i64,
+    pub received_at_ms: i64,
+    pub latency_ms: Option<i64>,
+    pub message_hash: String,
+    pub duplicate_count: u32,
+}
+```
+
+Latency must be calculated safely. If clocks differ or the result would be negative, return `None` rather than an invalid latency.
+
+Expose:
+
+```rust
+pub fn record_received_probe(&self, probe: ReceivedProbe);
+pub fn find_received_probe(&self, probe_id: &str) -> Option<ReceivedProbe>;
+```
+
+## Instrumentation
+
+For this first version, instrument only the clearest and most reliable points:
+
+* room join started
+* room joined
+* room join failed
+* peer discovered
+* peer joined room
+* peer left room
+* probe broadcast
+* probe received
+* duplicate probe
+* relevant errors
+
+Do not attempt to instrument every low-level Iroh connection state in this first pass.
+
+Place hooks in shared application or protocol paths rather than only in Iced widget code.
+
+The TUI and GUI should continue to work normally.
+
+## MCP server
+
+Implement a local diagnostic MCP server.
+
+Choose either:
+
+1. an MCP server running inside `iced_chat`, or
+2. a dedicated MCP binary that communicates safely with the running app.
+
+Prefer the smallest design that can inspect the state of the actual running application.
+
+If MCP runs inside `iced_chat`, add flags such as:
+
+```text
+--mcp
+--mcp-bind 127.0.0.1:8765
+```
+
+Requirements:
+
+* bind to loopback by default
+* do not bind to `0.0.0.0` by default
+* print a warning if explicitly configured for a non-loopback address
+* do not expose secrets
+* use structured JSON-compatible MCP responses
+* use an established Rust MCP SDK if practical
+* keep the MCP adapter thin and call reusable diagnostics methods
+
+## MCP tools
+
+### `boru_get_node_status`
+
+No required arguments.
+
+Return:
+
+```json
+{
+  "node_id": "...",
+  "version": "...",
+  "active_room_count": 1,
+  "latest_event_sequence": 42,
+  "mcp_uptime_ms": 10000
+}
+```
+
+Include enabled discovery mechanisms when readily available.
+
+### `boru_get_room_status`
+
+Arguments:
+
+```json
+{
+  "room_id": "..."
+}
+```
+
+Return `RoomDiagnosticSnapshot`.
+
+Return a structured error if the room is unknown.
+
+### `boru_get_discovery_events`
+
+Arguments:
+
+```json
+{
+  "room_id": null,
+  "since_sequence": 0,
+  "limit": 200
+}
+```
+
+Requirements:
+
+* `room_id` is optional
+* results returned in sequence order
+* clamp limit to a safe maximum
+* include the latest sequence number in the response
+
+Suggested response:
+
+```json
+{
+  "events": [],
+  "latest_sequence": 42
+}
+```
+
+### `boru_send_probe`
+
+Arguments:
+
+```json
+{
+  "room_id": "...",
+  "probe_id": null,
+  "payload": "LAN test"
+}
+```
+
+Requirements:
+
+* generate `probe_id` when omitted
+* send through the normal room gossip path
+* reject unknown or inactive rooms
+* emit a `MessageBroadcast` diagnostic event
+* do not expose normal arbitrary-message sending
+
+Return:
+
+```json
+{
+  "probe_id": "...",
+  "room_id": "...",
+  "sender_id": "...",
+  "message_hash": "...",
+  "sent_at_ms": 0,
+  "broadcast_accepted": true
+}
+```
+
+### `boru_find_received_probe`
+
+Arguments:
+
+```json
+{
+  "probe_id": "..."
+}
+```
+
+When found:
+
+```json
+{
+  "received": true,
+  "probe": {
+    "probe_id": "...",
+    "room_id": "...",
+    "sender_id": "...",
+    "sent_at_ms": 0,
+    "received_at_ms": 0,
+    "latency_ms": 25,
+    "message_hash": "...",
+    "duplicate_count": 0
+  }
+}
+```
+
+When not found:
+
+```json
+{
+  "received": false,
+  "probe_id": "..."
+}
+```
+
+## Tests
+
+Add tests for:
+
+1. Event sequence numbers are monotonic.
+2. Event storage is bounded.
+3. Oldest events are evicted.
+4. `events_since` works.
+5. Room filtering works.
+6. Query limits are clamped.
+7. Probe IDs survive serialization.
+8. Received probes can be queried.
+9. Duplicate probes increment `duplicate_count`.
+10. Negative clock-derived latency becomes `None`.
+11. Unknown rooms return structured errors.
+12. Diagnostic output contains no secret key material.
+13. Normal text-message behavior still works.
+14. Two in-process peers can exchange a diagnostic probe through the normal gossip path.
+15. The receiving peer reports the exact probe ID.
+16. Sender and receiver report the same message hash.
+17. Existing tests continue to pass.
+
+Reuse existing multi-peer and end-to-end test infrastructure where possible.
+
+## Documentation
+
+Add:
+
+```text
+docs/MCP_DIAGNOSTICS.md
+```
+
+Document:
+
+* what the feature does
+* how to enable MCP
+* transport and bind address
+* security limitations
+* how to run two LAN instances
+* how to configure two MCP connections in Hermes
+* how to query both rooms
+* how to send a probe from A
+* how to confirm it on B
+* example success output
+* example failure output
+* current limitations
+
+Include this example agent workflow:
+
+```text
+1. Call boru_get_node_status on A and B.
+2. Call boru_get_room_status on both nodes.
+3. Confirm the room IDs match.
+4. Confirm each node sees the other peer.
+5. Call boru_send_probe on A.
+6. Save the returned probe ID and message hash.
+7. Poll boru_find_received_probe on B.
+8. Confirm the returned probe ID and hash match.
+9. Fetch boru_get_discovery_events from both nodes.
+10. Report whether discovery and delivery succeeded.
+```
+
+## Validation
+
+Run:
+
+```text
+cargo fmt --check
+cargo clippy --all-targets --all-features
+cargo test --all-features
+```
+
+If the repository’s full test suite is too expensive or contains unrelated known failures, run the most relevant tests and clearly report what was and was not run.
+
+## Acceptance criteria
+
+The first version is complete when:
+
+1. Two Boru instances can run on separate LAN devices.
+2. Each instance exposes a local MCP diagnostic interface.
+3. An agent can query node and room status on both.
+4. An agent can inspect recent room-discovery events.
+5. An agent can send a probe from instance A.
+6. Instance B records receipt of the exact probe ID.
+7. Both sides report the same message hash.
+8. Probe messages do not appear as ordinary chat messages by default.
+9. No secrets are exposed through MCP.
+10. Existing chat functionality remains working.
+
+After implementation, report:
+
+* architecture chosen
+* files changed
+* MCP tools added
+* tests added
+* validation commands and results
+* limitations
+* recommended next instrumentation points
+
+Do not make unrelated refactors.
