@@ -565,12 +565,21 @@ fn main() -> Result<()> {
                                 continue;
                             }
                             info!(peer = %peer, "mDNS discovered peer");
-                            if let Err(e) = sender.join_peers(vec![peer]).await {
-                                warn!(peer = %peer, error = %e, "join_peers failed");
-                            } else {
-                                info!(peer = %peer, "join_peers succeeded");
-                            }
-                            let _ = tx.send(vec![peer]).await;
+                            // Spawn join_peers in a separate task so we don't
+                            // block the mDNS event loop. join_peers can be slow
+                            // (it tries to dial the peer), and blocking here
+                            // causes the mDNS subscriber to back up and drop
+                            // events.
+                            let s = sender.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = s.join_peers(vec![peer]).await {
+                                    warn!(peer = %peer, error = %e, "join_peers failed");
+                                } else {
+                                    info!(peer = %peer, "join_peers succeeded");
+                                }
+                            });
+                            // Use try_send to avoid blocking on the UI channel
+                            let _ = tx.try_send(vec![peer]);
                         }
                     }
                 });
