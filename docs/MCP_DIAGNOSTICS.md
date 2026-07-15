@@ -88,6 +88,24 @@ Fetch the local node's identity and status.
 
 ---
 
+### `boru_join_lobby_room`
+
+Open the deterministic diagnostic lobby through the application's normal room
+subscription path. Call this before `boru_get_room_status`,
+`boru_run_discovery_test`, or `boru_send_probe` when the node was not started
+with an initial room. The action waits for the local `RoomJoined` diagnostic
+evidence and returns the lobby topic ID.
+
+```json
+{"method":"boru_join_lobby_room","params":{"timeout_ms":20000}}
+```
+
+A successful response contains `success: true`, `joined: true`, and `room_id`.
+If it times out, the response contains `success: false`, `timed_out: true`, and
+`events_observed` so the first missing stage can be diagnosed without guessing.
+
+---
+
 ### `boru_get_room_status`
 
 Fetch room membership and peer summary for a given room.

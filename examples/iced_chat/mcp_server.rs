@@ -19,6 +19,7 @@
 //! | `boru_get_iced_message_journal` | Recent Iced AppMessage processing history |
 //! | `boru_get_failure_analysis` | Combined failure analysis across all layers |
 //! | `boru_gui_open_room` | Send a GUI 'open room' command (requires `--enable-gui-test-actions`) |
+//! | `boru_join_lobby_room` | Open and join the stable diagnostic lobby room |
 //! | `boru_send_gui_action` | Send a GUI test action command |
 //! | `boru_gui_get_action_status` | Full status of a GUI test action by idempotency key |
 //! | `boru_gui_navigate` | Navigate to a GUI screen by destination name |
@@ -445,6 +446,17 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
         "boru_get_peer_status" => handle_get_peer_status(req, state).await,
         "boru_wait_for_peer" => handle_wait_for_peer(req, state).await,
         "boru_run_discovery_test" => handle_run_discovery_test(req, state).await,
+        "boru_join_lobby_room" => {
+            if !state.gui_test_actions_enabled || state.gui_action_tx.is_none() {
+                return jsonrpc_error(
+                    req.id.clone(),
+                    -32601,
+                    "Method not found",
+                    "GUI test actions are not enabled. Start with --enable-gui-test-actions.",
+                );
+            }
+            handle_join_lobby_room(req, state).await
+        }
         "boru_get_iced_state" => {
             if !state.gui_test_actions_enabled {
                 return jsonrpc_error(
@@ -1889,6 +1901,12 @@ async fn handle_ping(_state: &McpAppState) -> Result<Value, String> {
 /// `boru_get_node_status` — local node identity and status.
 async fn handle_get_node_status(state: &McpAppState) -> Result<Value, String> {
     let local_id = state.endpoint.id().fmt_short().to_string();
+    let relay_url = state
+        .endpoint
+        .addr()
+        .relay_urls()
+        .next()
+        .map(|u| u.to_string());
 
     Ok(serde_json::json!({
         "node_id": state.node_id.clone(),
@@ -1896,8 +1914,46 @@ async fn handle_get_node_status(state: &McpAppState) -> Result<Value, String> {
         "version": state.version.clone(),
         "active_room_count": state.rooms.lock().unwrap().len(),
         "latest_event_sequence": state.diagnostics.latest_sequence(),
-        "relay_url": serde_json::Value::Null,
+        "relay_url": relay_url,
     }))
+}
+
+/// `boru_join_lobby_room` — open the stable lobby room through the normal GUI
+/// room-opening path, then wait until the application records RoomJoined.
+async fn handle_join_lobby_room(
+    req: &JsonRpcRequest,
+    state: &McpAppState,
+) -> Result<Value, String> {
+    let timeout_ms = req
+        .params
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(20_000)
+        .clamp(1, 60_000);
+    let topic = TopicId::from_bytes(*blake3::hash(b"iroh-gossip-chat/default-lobby/v1").as_bytes());
+    let room_id = hex::encode(topic.as_bytes());
+    let tx = state.gui_action_tx.clone().ok_or_else(|| "GUI action channel not available".to_string())?;
+    let before = state.diagnostics.latest_sequence();
+    let action_id = crate::gui_test_actions::generate_action_key();
+    let command = crate::gui_test_actions::GuiTestCommand::OpenRoom { room_id: room_id.clone() };
+    let request = boru_chat::diagnostics::GuiActionRequest {
+        action_id: boru_chat::diagnostics::GuiActionId(action_id.clone()),
+        requested_at_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64,
+        command: serde_json::to_string(&command).map_err(|e| format!("Failed to serialize command: {e}"))?,
+    };
+    tx.enqueue(request).map_err(|e| format!("GUI action channel error: {}", e.message))?;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        if state.diagnostics.build_evidence(Some(topic), None).local_room_joined {
+            let mut rooms = state.rooms.lock().map_err(|e| format!("rooms lock error: {e}"))?;
+            if !rooms.contains(&topic) { rooms.push(topic); }
+            return Ok(serde_json::json!({"success": true, "room_id": room_id, "joined": true, "action_id": action_id}));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(serde_json::json!({"success": false, "room_id": room_id, "joined": false, "action_id": action_id, "timed_out": true, "events_observed": state.diagnostics.events_since(before, 200, Some(topic))}));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// `boru_get_room_status` — room membership and peer summary.
@@ -4635,6 +4691,7 @@ mod tests {
             "boru_get_gui_snapshot",
             "boru_gui_set_composer",
             "boru_gui_open_room",
+            "boru_join_lobby_room",
             "boru_gui_open_conversation",
             "boru_gui_submit_composer",
             "boru_gui_toggle_dark_mode",
@@ -4677,6 +4734,7 @@ mod tests {
             "boru_gui_navigate",
             "boru_gui_set_composer",
             "boru_gui_open_room",
+            "boru_join_lobby_room",
             "boru_gui_open_conversation",
             "boru_gui_submit_composer",
             "boru_gui_toggle_dark_mode",

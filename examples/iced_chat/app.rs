@@ -4174,9 +4174,9 @@ impl IcedChat {
                     }
                 };
 
-                // If the topic is already active, just reveal the chat screen
+                // If the topic is already active and subscribed, just reveal the chat screen
                 // without tearing down the subscription.
-                if topic == self.topic {
+                if topic == self.topic && self.sender.is_some() {
                     self.screen = Screen::Chat { topic };
                     complete_open_room_action(self);
                     return iced::Task::none();
@@ -4421,6 +4421,24 @@ impl IcedChat {
             } => {
                 self.pending_topic = None;
                 self.sender = Some(sender.clone());
+
+                // Retroactively join any pending discovered peers now that the lobby sender is available
+                let lobby_topic = Self::default_lobby_topic();
+                if topic == lobby_topic {
+                    let pending: Vec<PublicKey> = self.discovered_peers.iter().copied().collect();
+                    if !pending.is_empty() {
+                        let s = sender.clone();
+                        info!(count = pending.len(), "joining pending discovered peers to lobby mesh");
+                        tokio::spawn(async move {
+                            for peer in pending {
+                                if let Err(e) = s.join_peers(vec![peer]).await {
+                                    warn!(peer = %peer, error = %e, "retroactive join_peers failed");
+                                }
+                            }
+                        });
+                    }
+                }
+
                 self.forward_handle = self.forward_handle_slot.lock().unwrap().take();
 
                 // Store continuous tracker if one was provided (private room with DHT).
@@ -7364,7 +7382,11 @@ impl IcedChat {
                     }
                 };
 
-                let known_room = (self.sender.is_some() && topic == self.topic)
+                // The stable lobby is intentionally bootstrap-free: the
+                // diagnostic MCP action must be able to create/join it even
+                // when no room history exists yet.
+                let known_room = topic == Self::default_lobby_topic()
+                    || (self.sender.is_some() && topic == self.topic)
                     || self.conversations.contains_key(&topic)
                     || self
                         .room_history

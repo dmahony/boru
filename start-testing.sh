@@ -33,6 +33,15 @@ BIN_NAME="iced_chat-x86_64-linux"
 REMOTE_DIR="boru-test"
 SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
 
+# Connectivity mode: "dht" (no relay + DHT, default) or "relay" (uses relay server).
+# Set RELAY_MODE=relay to fall back to relay-based peer discovery.
+RELAY_MODE="${RELAY_MODE:-dht}"
+case "$RELAY_MODE" in
+    dht)    RELAY_FLAG="--no-relay" ;;
+    relay)  RELAY_FLAG="" ;;
+    *)      err "Unknown RELAY_MODE=$RELAY_MODE (use dht or relay)" && exit 1 ;;
+esac
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -41,6 +50,8 @@ NC='\033[0m'
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[ERR]${NC}   $*"; }
+
+info "Connectivity mode: ${RELAY_MODE} (${RELAY_FLAG:-default relay})"
 
 # ── Step 1: Pull latest code ───────────────────────────────────────────
 info "=== Step 1: Pulling latest code ==="
@@ -105,21 +116,21 @@ launch_on() {
     local mcp_port="$2"
     local display="$3"
     local data_dir_suffix="$4"
-    local data_dir="\${HOME}/boru-chat-data-${data_dir_suffix}"
-
-    local cmd="mkdir -p ${data_dir} && "
-    cmd+="DISPLAY=:${display} xvfb-run -a -n ${display} -s '-screen 0 1280x720x24' "
-    cmd+="\${HOME}/${REMOTE_DIR}/${BIN_NAME} "
-    cmd+="--no-relay "
-    cmd+="--mcp --mcp-bind 0.0.0.0:${mcp_port} "
-    cmd+="--data-dir ${data_dir} "
-    cmd+="--bind-port 0 "
-    cmd+="&>/dev/null &"
-    cmd+="echo \$!"
+    local data_dir="~/boru-chat-data-${data_dir_suffix}"
 
     info "Launching on ${vm} (MCP: ${vm}:${mcp_port}, display :${display}) ..."
     local pid
-    pid=$(ssh $SSH_OPTS "dan@${vm}" "bash -c '${cmd}'") || {
+    pid=$(ssh $SSH_OPTS "dan@${vm}" "
+        mkdir -p ${data_dir}
+        DISPLAY=:${display} xvfb-run -a -n ${display} -s '-screen 0 1280x720x24' \
+            ~/${REMOTE_DIR}/${BIN_NAME} \
+            ${RELAY_FLAG:+$RELAY_FLAG} \
+            --mcp --mcp-bind 0.0.0.0:${mcp_port} \
+            --data-dir ${data_dir} \
+            --bind-port 0 \
+            >/dev/null 2>&1 &
+        echo \$!
+    ") || {
         err "Launch failed on ${vm}"
         return 1
     }
