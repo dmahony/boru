@@ -51,7 +51,7 @@ use iroh_mainline_address_lookup::DhtAddressLookup;
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use n0_error::{bail_any, Result, StdResultExt};
 use tokio::sync::{watch, Mutex};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use app::IcedChat;
@@ -754,7 +754,7 @@ fn main() -> Result<()> {
         };
 
         if let Err(e) = runtime.block_on(mcp_server::spawn_mcp_server(mcp_config, mcp_state)) {
-            warn!("MCP server failed to start: {e}");
+            error!("MCP server failed to start: {e}");
         }
     }
 

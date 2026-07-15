@@ -6,6 +6,7 @@
 //!
 //! | Tool | Description |
 //! |------|-------------|
+//! | `boru_ping` | Lightweight health check (no state required) |
 //! | `boru_get_node_status` | Local node identity, version, event count |
 //! | `boru_get_room_status` | Room membership and peer summary |
 //! | `boru_get_discovery_events` | Recent diagnostic events |
@@ -319,9 +320,35 @@ fn check_gui_action_rate_limit(
 
 /// Spawn the MCP server in a background task.
 pub async fn spawn_mcp_server(config: McpConfig, state: McpAppState) -> Result<(), String> {
-    let listener = TcpListener::bind(config.bind_addr)
-        .await
+    // Use socket2 to set SO_REUSEADDR before binding, so the port can be
+    // reused immediately after the process exits (avoids TIME_WAIT orphan
+    // sockets blocking the next test run or restart).
+    let addr: std::net::SocketAddr = config.bind_addr;
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
+        .map_err(|e| format!("Failed to create MCP socket: {e}"))?;
+    socket
+        .set_reuse_address(true)
+        .map_err(|e| format!("Failed to set SO_REUSEADDR on MCP socket: {e}"))?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|e| format!("Failed to set MCP socket to non-blocking: {e}"))?;
+    let sock_addr: socket2::SockAddr = addr.into();
+    socket
+        .bind(&sock_addr)
         .map_err(|e| format!("Failed to bind MCP server: {e}"))?;
+    socket
+        .listen(128)
+        .map_err(|e| format!("Failed to listen on MCP socket: {e}"))?;
+
+    // Convert the socket2 socket into a tokio TcpListener.
+    let std_listener: std::net::TcpListener = socket.into();
+    let listener = TcpListener::from_std(std_listener)
+        .map_err(|e| format!("Failed to create tokio listener from MCP socket: {e}"))?;
 
     info!("MCP diagnostic server listening on {}", config.bind_addr);
     if !config.bind_addr.ip().is_loopback() {
@@ -409,6 +436,7 @@ async fn handle_connection(
 /// Handle a single JSON-RPC request and produce a response.
 async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcResponse {
     let result = match req.method.as_str() {
+        "boru_ping" => handle_ping(state).await,
         "boru_get_node_status" => handle_get_node_status(state).await,
         "boru_get_room_status" => handle_get_room_status(req, state).await,
         "boru_get_discovery_events" => handle_get_discovery_events(req, state).await,
@@ -843,7 +871,7 @@ async fn handle_get_gui_snapshot(state: &McpAppState) -> Result<Value, String> {
         "journal_latest_sequence": journal.latest_sequence(),
         "diagnostics_event_count": state.diagnostics.event_count(),
         "diagnostics_latest_sequence": state.diagnostics.latest_sequence(),
-        "active_rooms": state.rooms.lock().unwrap().clone(),
+        "active_rooms": state.diagnostics.joined_rooms(),
         "gui_test_actions_enabled": state.gui_test_actions_enabled,
     }))
 }
@@ -1848,6 +1876,16 @@ fn jsonrpc_success(id: Option<Value>, result: Value) -> JsonRpcResponse {
 // Tool handlers
 // =============================================================================
 
+/// `boru_ping` — lightweight health check (no state required).
+///
+/// Returns a simple `{"pong": true}` response.  This is the lightest
+/// possible MCP tool — it does not touch the endpoint, diagnostics store,
+/// or any shared state.  Clients should use this to verify MCP JSON-RPC
+/// responsiveness before calling heavier tools like `boru_get_node_status`.
+async fn handle_ping(_state: &McpAppState) -> Result<Value, String> {
+    Ok(serde_json::json!({ "pong": true }))
+}
+
 /// `boru_get_node_status` — local node identity and status.
 async fn handle_get_node_status(state: &McpAppState) -> Result<Value, String> {
     let local_id = state.endpoint.id().fmt_short().to_string();
@@ -1877,8 +1915,11 @@ async fn handle_get_room_status(
     validate_no_control_chars(room_str, "room_id")?;
     let topic = parse_topic_id(room_str)?;
 
-    let rooms = state.rooms.lock().unwrap();
-    let joined = rooms.contains(&topic);
+    // Check room membership via diagnostics evidence (shared with the app)
+    let joined = state
+        .diagnostics
+        .build_evidence(Some(topic), None)
+        .local_room_joined;
 
     if !joined {
         return Err(format!("Room not found or not joined: {room_str}"));
@@ -1962,12 +2003,13 @@ async fn handle_send_probe(req: &JsonRpcRequest, state: &McpAppState) -> Result<
     validate_no_control_chars(room_str, "room_id")?;
     let topic = parse_topic_id(room_str)?;
 
-    // Validate the room exists
+    // Validate the room exists via diagnostics evidence (shared with the app)
+    if !state
+        .diagnostics
+        .build_evidence(Some(topic), None)
+        .local_room_joined
     {
-        let rooms = state.rooms.lock().unwrap();
-        if !rooms.contains(&topic) {
-            return Err(format!("Room not found or not joined: {room_str}"));
-        }
+        return Err(format!("Room not found or not joined: {room_str}"));
     }
 
     let probe_id = req
@@ -2253,11 +2295,11 @@ async fn handle_run_discovery_test(
 
     let topic = parse_topic_id(room_str)?;
 
-    // 1. Validate that the local node knows the room
-    let local_room_joined = {
-        let rooms = state.rooms.lock().unwrap();
-        rooms.contains(&topic)
-    };
+    // 1. Validate that the local node knows the room via diagnostics evidence
+    let local_room_joined = state
+        .diagnostics
+        .build_evidence(Some(topic), None)
+        .local_room_joined;
 
     if !local_room_joined {
         return Ok(serde_json::json!({
@@ -2422,7 +2464,7 @@ async fn handle_get_iced_state(state: &McpAppState) -> Result<Value, String> {
         "journal_latest_sequence": journal.latest_sequence(),
         "diagnostics_event_count": state.diagnostics.event_count(),
         "diagnostics_latest_sequence": state.diagnostics.latest_sequence(),
-        "active_rooms": state.rooms.lock().unwrap().clone(),
+        "active_rooms": state.diagnostics.joined_rooms(),
     }))
 }
 

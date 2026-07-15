@@ -19,7 +19,7 @@ use boru_chat::chat_callbacks::{ChatCallbacks, TransferId, TransferKind, Transfe
 use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_with_safety, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
-    handle_net_event as chat_net_event, handle_net_event_with_safety, message_hash,
+    handle_net_event as chat_net_event, handle_net_event_with_safety_for_topic, message_hash,
     seed_memory_lookup, MeshHealth, MessageHash, ProfileUpdateThrottle, RoomInviteV2,
     SharedFileMeta,
 };
@@ -66,7 +66,8 @@ use tracing::{debug, info, warn};
 
 use crate::perf_tracker::PerfTracker;
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
-use boru_chat::chat_core::RoomInvitation;
+use boru_chat::chat_core::{RoomInvitation, DIAGNOSTICS};
+use boru_chat::diagnostics::DiagnosticEventKind;
 use boru_chat::diagnostics::FailureLayer;
 use boru_chat::diagnostics::GuiActionError;
 use boru_chat::diagnostics::GuiActionErrorCode;
@@ -4427,6 +4428,10 @@ impl IcedChat {
                     self.room_trackers.insert(topic, tracker);
                 }
 
+                // Record RoomJoined diagnostic event so diagnostic evidence
+                // and MCP room-membership checks reflect the active subscription.
+                DIAGNOSTICS.record(Some(topic), DiagnosticEventKind::RoomJoined);
+
                 self.screen = Screen::Chat { topic };
                 self.topic = topic;
                 self.ticket_str = ticket.clone();
@@ -8614,7 +8619,7 @@ impl IcedChat {
         self.conversation_store.touch_and_bump(topic);
         self.update_room_preview(event);
         let safety = self.public_room_safety.clone();
-        if let Err(err) = handle_net_event_with_safety(event.clone(), self, safety.as_deref()) {
+        if let Err(err) = handle_net_event_with_safety_for_topic(event.clone(), self, safety.as_deref(), Some(*topic)) {
             warn!(error = %err, "failed to handle network event");
         }
 
@@ -9561,6 +9566,7 @@ impl IcedChat {
 
         let ticket_join_section = self.view_sidebar_ticket_join();
         let chats_section = self.view_sidebar_chats();
+        let discovered_peers_section = self.view_sidebar_discovered_peers();
         let friends_section = self.view_sidebar_friends();
         let requests_section = self.view_sidebar_requests();
 
@@ -9579,6 +9585,7 @@ impl IcedChat {
             }))
             .push(ticket_join_section)
             .push(chats_section)
+            .push(discovered_peers_section)
             .push(friends_section)
             .push(requests_section)
             .push(Space::new().height(Length::Fill));

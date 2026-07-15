@@ -49,7 +49,7 @@ use boru_chat::chat_core::friend_ping::{
 };
 use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_with_progress, download_candidates, fmt_relay_mode,
-    handle_net_event, message_hash, refresh_bootstrap_peers, update_connection_counts, AppState,
+    handle_net_event_for_topic, message_hash, refresh_bootstrap_peers, update_connection_counts, AppState,
     ChatEntry, ChatKind, ConnectionType, MeshHealth, Message, NetEvent, RoomInvitation,
     RoomInviteV2, SignedMessage, StatusContext, Ticket, DIAGNOSTICS,
 };
@@ -1532,6 +1532,10 @@ async fn handle_net_event_loop(
         Some(tui.local_label.clone()),
     );
     // Sync global names.
+    let active_topic = match tui.screen {
+        TuiScreen::Chat { topic } => Some(topic),
+        _ => None,
+    };
     for (pk, name) in &tui.global_names {
         app.names.insert(*pk, name.clone());
     }
@@ -1541,7 +1545,7 @@ async fn handle_net_event_loop(
         app.self_sent_events = conv.self_sent_events.clone();
     }
 
-    handle_net_event(event.clone(), &mut app)?;
+    handle_net_event_for_topic(event.clone(), &mut app, active_topic)?;
 
     // Sync back.
     tui.status = app.status.clone();

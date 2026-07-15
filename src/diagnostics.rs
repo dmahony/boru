@@ -22,7 +22,7 @@
 //! (latency, message hash, duplicate count).  [`DiagnosticProbe`] is the
 //! wire-format probe sent through the gossip mesh.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1014,6 +1014,20 @@ impl Diagnostics {
     pub fn all_events(&self) -> Vec<DiagnosticEvent> {
         let events = self.inner.events.lock().expect("events lock");
         events.iter().cloned().collect()
+    }
+
+    /// Return unique topic IDs that have a RoomJoined event recorded.
+    pub fn joined_rooms(&self) -> Vec<TopicId> {
+        let events = self.inner.events.lock().expect("events lock");
+        let mut rooms: HashSet<TopicId> = HashSet::new();
+        for event in events.iter() {
+            if matches!(event.kind, DiagnosticEventKind::RoomJoined) {
+                if let Some(room_id) = event.room_id {
+                    rooms.insert(room_id);
+                }
+            }
+        }
+        rooms.into_iter().collect()
     }
 
     /// Build a [`DiscoveryTestEvidence`] from the stored events.

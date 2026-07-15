@@ -1414,10 +1414,24 @@ pub fn filter_net_event_with_safety(
 ///
 /// When `safety` is `None` (private-room path), every event is forwarded
 /// to `handle_net_event` unchanged.
+///
+/// `topic` is the optional room/topic context used when recording
+/// diagnostic events (`PeerJoinedRoom`/`PeerLeftRoom`) so queries
+/// scoped to a specific room can find them.
 pub fn handle_net_event_with_safety(
     event: NetEvent,
     cb: &mut impl ChatCallbacks,
     safety: Option<&PublicRoomSafety>,
+) -> Result<()> {
+    handle_net_event_with_safety_for_topic(event, cb, safety, None)
+}
+
+/// Process an event with safety checks and explicit room/topic context.
+pub fn handle_net_event_with_safety_for_topic(
+    event: NetEvent,
+    cb: &mut impl ChatCallbacks,
+    safety: Option<&PublicRoomSafety>,
+    topic: Option<TopicId>,
 ) -> Result<()> {
     let event = match safety {
         Some(s) => match filter_net_event_with_safety(event, s) {
@@ -1426,7 +1440,7 @@ pub fn handle_net_event_with_safety(
         },
         None => event,
     };
-    handle_net_event(event, cb)
+    handle_net_event_for_topic(event, cb, topic)
 }
 
 /// Process a decoded [`NetEvent`] against a [`ChatCallbacks`] implementor.
@@ -1435,7 +1449,16 @@ pub fn handle_net_event_with_safety(
 /// modification (edit/delete/reaction), typing indicators, and file
 /// sharing. Frontend-specific side-effects (persistence, connection
 /// counting, room previews) are delegated to the callbacks.
+///
+/// `topic` is the optional room/topic context used when recording
+/// diagnostic events (`PeerJoinedRoom`/`PeerLeftRoom`) so queries
+/// scoped to a specific room can find them.
 pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<()> {
+    handle_net_event_for_topic(event, cb, None)
+}
+
+/// Process a decoded event with explicit room/topic context.
+pub fn handle_net_event_for_topic(event: NetEvent, cb: &mut impl ChatCallbacks, topic: Option<TopicId>) -> Result<()> {
     let event_label = match &event {
         NetEvent::Message { .. } => "Message",
         NetEvent::NeighborUp { .. } => "NeighborUp",
@@ -1706,7 +1729,7 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
         }
         NetEvent::NeighborUp { peer } => {
             DIAGNOSTICS.record_with_peer(
-                None,
+                topic,
                 Some(peer.to_string()),
                 DiagnosticEventKind::PeerJoinedRoom,
             );
@@ -1714,7 +1737,7 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
         }
         NetEvent::NeighborDown { peer } => {
             DIAGNOSTICS.record_with_peer(
-                None,
+                topic,
                 Some(peer.to_string()),
                 DiagnosticEventKind::PeerLeftRoom,
             );
