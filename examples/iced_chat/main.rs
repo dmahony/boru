@@ -554,7 +554,6 @@ fn main() -> Result<()> {
             if let Some(mdns) = mdns_for_events {
                 let tx = discovered_peers_tx.clone();
                 let my_id = endpoint.id();
-                let ep = endpoint.clone();
                 tokio::spawn(async move {
                     use n0_future::StreamExt;
                     let mut events = mdns.subscribe().await;
@@ -566,27 +565,14 @@ fn main() -> Result<()> {
                                 continue;
                             }
                             info!(peer = %peer, "mDNS discovered peer");
-                            // First establish a QUIC connection to the peer,
-                            // then join them to the lobby gossip mesh.
-                            // join_peers alone does NOT establish connections.
-                            let s = sender.clone();
-                            let e = ep.clone();
-                            tokio::spawn(async move {
-                                match e.connect(peer, GOSSIP_ALPN).await {
-                                    Ok(conn) => {
-                                        info!(peer = %peer, "connected to peer");
-                                        drop(conn); // connection established, join can proceed
-                                        if let Err(e) = s.join_peers(vec![peer]).await {
-                                            warn!(peer = %peer, error = %e, "join_peers after connect failed");
-                                        } else {
-                                            info!(peer = %peer, "join_peers succeeded");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!(peer = %peer, error = %e, "connect to peer failed");
-                                    }
-                                }
-                            });
+                            // join_peers triggers the gossip actor to dial
+                            // the peer and establish a properly wired
+                            // gossip connection.
+                            if let Err(e) = sender.join_peers(vec![peer]).await {
+                                warn!(peer = %peer, error = %e, "join_peers failed");
+                            } else {
+                                info!(peer = %peer, "join_peers succeeded");
+                            }
                             // Use try_send to avoid blocking on the UI channel
                             let _ = tx.try_send(vec![peer]);
                         }
