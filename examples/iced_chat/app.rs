@@ -6791,80 +6791,14 @@ impl IcedChat {
                 }
             }
 
-            AppMessage::DownloadPeerFile(peer, file_idx) => {
-                let file_meta = self
-                    .profile_cache
-                    .get(&peer)
-                    .and_then(|data| data.shared_files.get(file_idx).cloned());
-                let Some(file_meta) = file_meta else {
-                    return iced::Task::done(AppMessage::ErrorMsg(
-                        "Peer profile or shared file not found.".into(),
-                    ));
-                };
+            AppMessage::DownloadPeerFile(_peer, _file_idx) => {
+                // Shared files are disabled — no-op.
+                iced::Task::none()
+            }
 
-                // Create a system_download entry so the user sees progress
-                // and an Open button when the download completes. The entry
-                // is found by the progress handler via filename matching.
-                let filename = file_meta.filename.clone();
-                let blob_hash_hex = hex::encode(file_meta.hash);
-                let entry = ChatEntry::system_download(
-                    format!("Downloading file from {}: {filename}", peer.fmt_short()),
-                    TransferKind::File,
-                    &filename,
-                    blob_hash_hex,
-                );
-                let entry_idx = self.entries.len();
-                self.entries_push(entry);
-                self.download_entry_index = Some(entry_idx);
-
-                let blob_store = self.blob_store.clone();
-                let endpoint = self.endpoint.clone();
-                let neighbors = self.neighbors.clone();
-                let downloads_dir = self.boru_downloads_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
-                let filename_copy = filename.clone();
-                let peer_pk = peer;
-                let blob_hash_arr = file_meta.hash;
-                iced::Task::perform(
-                    async move {
-                        use boru_chat::chat_callbacks::TransferKind;
-                        let blob_hash: iroh_blobs::Hash = blob_hash_arr.into();
-                        let candidates = download_candidates(peer_pk, &neighbors);
-                        download_blob_with_safety(
-                            &blob_store,
-                            &endpoint,
-                            blob_hash,
-                            candidates,
-                            filename.clone(),
-                            TransferKind::File,
-                            {
-                                let progress_queue = progress_queue.clone();
-                                move |progress| {
-                                    if let Ok(mut queue) = progress_queue.lock() {
-                                        queue.push_back(progress);
-                                    }
-                                }
-                            },
-                            None::<&boru_chat::public_room_safety::PublicRoomSafety>,
-                            peer_pk,
-                        )
-                        .await
-                        .map_err(|e| format!("Download: {e}"))?;
-                        let dest = downloads_dir.join(&filename);
-                        // Ensure the downloads directory exists before writing.
-                        let _ = std::fs::create_dir_all(&downloads_dir);
-                        blob_store
-                            .blobs()
-                            .export(blob_hash, dest.clone())
-                            .await
-                            .map_err(|e| format!("Export: {e}"))?;
-                        Ok((filename, dest))
-                    },
-                    |r: Result<(String, PathBuf), String>| match r {
-                        Ok((name, path)) => AppMessage::DownloadDonePeerFile(name, path),
-                        Err(e) => AppMessage::DownloadFailed(e),
-                    },
-                )
+            AppMessage::SaveProfile => {
+                // Profile persistence is disabled.
+                iced::Task::none()
             }
 
             AppMessage::FileSent(name) => {
@@ -11976,24 +11910,9 @@ impl IcedChat {
 
         let mut body = Column::new().spacing(SPACE_8);
 
-        // Bio section
-        body = body.push(
-            container(text(bio).size(TYPO_SM))
-                .width(Length::Fill)
-                .padding(SPACE_12)
-                .style(move |t| container_surface(t)),
-        );
-
-        // Shared files section
-        let files_header = text("Shared Files").size(TYPO_SM).style(text_muted_style);
-        body = body.push(container(files_header).padding(iced::Padding {
-            top: SPACE_8,
-            right: SPACE_12,
-            bottom: SPACE_4,
-            left: SPACE_12,
-        }));
-
-        if shared_files.is_empty() {
+        // Shared files section stripped — bio and file sharing disabled.
+        // Always shows "No shared files."
+        if true {
             body = body.push(
                 container(
                     text("No shared files.")
