@@ -47,7 +47,7 @@ use iroh_mainline_address_lookup::DhtAddressLookup;
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_error::{bail_any, Result, StdResultExt};
 use tokio::sync::{watch, Mutex};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use app::IcedChat;
@@ -553,12 +553,17 @@ fn main() -> Result<()> {
             // peer ID to the UI for sidebar display.
             if let Some(mdns) = mdns_for_events {
                 let tx = discovered_peers_tx.clone();
+                let my_id = endpoint.id();
                 tokio::spawn(async move {
                     use n0_future::StreamExt;
                     let mut events = mdns.subscribe().await;
                     while let Some(event) = events.next().await {
                         if let DiscoveryEvent::Discovered { endpoint_info, .. } = event {
                             let peer = endpoint_info.endpoint_id;
+                            if peer == my_id {
+                                debug!(peer = %peer, "mDNS discovered our own endpoint, skipping");
+                                continue;
+                            }
                             info!(peer = %peer, "mDNS discovered peer");
                             if let Err(e) = sender.join_peers(vec![peer]).await {
                                 warn!(peer = %peer, error = %e, "join_peers failed");
