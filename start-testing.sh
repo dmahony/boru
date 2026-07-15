@@ -125,7 +125,8 @@ launch_on() {
         DISPLAY=:${display} xvfb-run -a -n ${display} -s '-screen 0 1280x720x24' \
             ~/${REMOTE_DIR}/${BIN_NAME} \
             ${RELAY_FLAG:+$RELAY_FLAG} \
-            --mcp --mcp-bind 0.0.0.0:${mcp_port} \
+            --mcp --mcp-bind 127.0.0.1:${mcp_port} \
+            --enable-gui-test-actions \
             --data-dir ${data_dir} \
             --bind-port 0 \
             >/dev/null 2>&1 &

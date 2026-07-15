@@ -1372,7 +1372,6 @@ impl std::hash::Hash for SidebarAvatarHandle {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct SidebarChatsDependency {
     dark_mode: bool,
-    public_room: SidebarChatsRow,
     conversations: Vec<SidebarChatsRow>,
     is_empty: bool,
 }
@@ -4422,23 +4421,6 @@ impl IcedChat {
                 self.pending_topic = None;
                 self.sender = Some(sender.clone());
 
-                // Retroactively join any pending discovered peers now that the lobby sender is available
-                let lobby_topic = Self::default_lobby_topic();
-                if topic == lobby_topic {
-                    let pending: Vec<PublicKey> = self.discovered_peers.iter().copied().collect();
-                    if !pending.is_empty() {
-                        let s = sender.clone();
-                        info!(count = pending.len(), "joining pending discovered peers to lobby mesh");
-                        tokio::spawn(async move {
-                            for peer in pending {
-                                if let Err(e) = s.join_peers(vec![peer]).await {
-                                    warn!(peer = %peer, error = %e, "retroactive join_peers failed");
-                                }
-                            }
-                        });
-                    }
-                }
-
                 self.forward_handle = self.forward_handle_slot.lock().unwrap().take();
 
                 // Store continuous tracker if one was provided (private room with DHT).
@@ -4573,26 +4555,6 @@ impl IcedChat {
                     } else {
                         self.pending_open_conversation_action = Some((action_id, expected_peer));
                     }
-                }
-
-                // Insert lobby into conversations so its GossipSender survives
-                // room switches.  Without this, NewDiscoveredPeers must rely on
-                // the self.topic == lobby_topic fallback, which breaks when a
-                // different room is active.
-                let lobby_topic = Self::default_lobby_topic();
-                if topic == lobby_topic {
-                    let mut lobby_conv = self
-                        .conversations
-                        .remove(&topic)
-                        .unwrap_or_else(|| ConversationLive::new(topic));
-                    lobby_conv.sender = Some(sender.clone());
-                    lobby_conv.forward_handle_slot = Arc::clone(&self.forward_handle_slot);
-                    lobby_conv.ticket_str = ticket.clone();
-                    self.conversations.insert(topic, lobby_conv);
-                    info!(
-                        topic = %lobby_topic,
-                        "inserted lobby into conversations",
-                    );
                 }
 
                 if self.return_to_chat_list_after_open {
@@ -7382,11 +7344,7 @@ impl IcedChat {
                     }
                 };
 
-                // The stable lobby is intentionally bootstrap-free: the
-                // diagnostic MCP action must be able to create/join it even
-                // when no room history exists yet.
-                let known_room = topic == Self::default_lobby_topic()
-                    || (self.sender.is_some() && topic == self.topic)
+                let known_room = (self.sender.is_some() && topic == self.topic)
                     || self.conversations.contains_key(&topic)
                     || self
                         .room_history
@@ -7979,60 +7937,14 @@ impl IcedChat {
                         self.discovered_peers.push(*peer);
                     }
                 }
-                // Join newly discovered peers into the lobby's gossip mesh so
-                // they become active neighbors. Without this, both ends subscribe
-                // passively and no one dials — messages go nowhere.
-                let lobby_topic = Self::default_lobby_topic();
-                // The lobby sender may be in conversations (if we've switched
-                // rooms before) or in self.sender (if the lobby is the current
-                // room). RoomOpened never inserts into conversations, so only
-                // checking conversations.get() would miss the common case.
-                let lobby_sender = self
-                    .conversations
-                    .get(&lobby_topic)
-                    .and_then(|c| c.sender.clone())
-                    .or_else(|| {
-                        if self.topic == lobby_topic {
-                            self.sender.clone()
-                        } else {
-                            None
-                        }
-                    });
-                let count = peers.len();
-                let tasks: Vec<iced::Task<AppMessage>> = peers
-                    .into_iter()
-                    .filter_map(|peer| {
-                        lobby_sender.as_ref().map(|s| s.clone()).map(|s| {
-                            iced::Task::perform(
-                                async move {
-                                    match s.join_peers(vec![peer]).await {
-                                        Ok(()) => {
-                                            info!(
-                                                peer = %peer,
-                                                "join_peers succeeded",
-                                            );
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                peer = %peer,
-                                                error = %e,
-                                                "join_peers failed",
-                                            );
-                                        }
-                                    }
-                                },
-                                |_| AppMessage::Noop,
-                            )
-                        })
-                    })
-                    .collect();
+                // Public room chat is disabled — no lobby mesh to join.
+                // Discovered peers are listed in the sidebar for informational
+                // purposes but are not actively connected to any gossip room.
                 info!(
-                    count = count,
-                    tasks = tasks.len(),
-                    lobby_available = lobby_sender.is_some(),
-                    "NewDiscoveredPeers: joining lobby peers",
+                    count = peers.len(),
+                    "NewDiscoveredPeers: storing for sidebar display only (no public room)",
                 );
-                iced::Task::batch(tasks)
+                iced::Task::none()
             }
 
             AppMessage::Scrolled(offset, vp_h) => {
@@ -9619,40 +9531,10 @@ impl IcedChat {
     }
 
     fn sidebar_chats_dependency(&self) -> SidebarChatsDependency {
-        let public_topic = Self::default_lobby_topic();
-        let public_preview = self
-            .room_history
-            .find(&public_topic)
-            .and_then(|r| {
-                if r.last_preview.is_empty() {
-                    None
-                } else {
-                    Some(r.last_preview.clone())
-                }
-            })
-            .unwrap_or_default();
-        let public_room = SidebarChatsRow {
-            topic: public_topic,
-            name: "Public Room".to_string(),
-            preview: public_preview,
-            unread: self
-                .conversations
-                .get(&public_topic)
-                .map(|c| c.unread)
-                .unwrap_or(0),
-            last_seen_at_unix_ms: self
-                .conversation_store
-                .find(&public_topic)
-                .map(|e| e.last_seen_at_unix_ms)
-                .unwrap_or(0),
-            online: false,
-        };
-
         let conversations: Vec<SidebarChatsRow> = self
             .conversation_store
             .active_iter()
             .into_iter()
-            .filter(|entry| entry.topic != public_topic)
             .map(|entry| {
                 let online = if entry.peer_id.is_empty() {
                     false
@@ -9689,7 +9571,6 @@ impl IcedChat {
 
         SidebarChatsDependency {
             dark_mode: self.dark_mode,
-            public_room,
             conversations,
             is_empty: self.conversation_store.is_empty(),
         }
@@ -9728,17 +9609,6 @@ impl IcedChat {
                 })
                 .width(Length::Fill),
         );
-
-        section = section.push(Self::view_sidebar_conversation_row(
-            dep.dark_mode,
-            dep.public_room.topic,
-            dep.public_room.name.clone(),
-            dep.public_room.preview.clone(),
-            dep.public_room.unread,
-            selected_topic.clone(),
-            dep.public_room.last_seen_at_unix_ms,
-            dep.public_room.online,
-        ));
 
         for row in &dep.conversations {
             section = section.push(Self::view_sidebar_conversation_row(
