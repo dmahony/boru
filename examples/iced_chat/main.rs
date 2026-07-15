@@ -526,31 +526,11 @@ fn main() -> Result<()> {
         let whisper_handler = whisper_builder.protocol_handler();
         let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
 
-        // ── Inbox protocol ────────────────────────────────────────────
-        // Direct offline-message delivery via /iroh-chat-inbox/1.
-        let (inbox_handle, inbox_events_rx_tmp) = InboxHandle::new();
-        let inbox_handler =
-            InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
-
-        // Register the pending-envelopes provider so SyncRequest returns
-        // envelopes stored locally for the requesting peer.
-        {
-            let mailbox_dir = data_dir.clone();
-            let inbox_handle = inbox_handle.clone();
-            // Use tokio::spawn since set_pending_fn is async
-            let _ = tokio::spawn(async move {
-                inbox_handle
-                    .set_pending_fn(Some(Arc::new(move |requester, _since_ms| {
-                        let mut store = MailboxStore::load(&mailbox_dir)
-                            .ok()
-                            .flatten()
-                            .unwrap_or_else(|| MailboxStore::empty_at(&mailbox_dir));
-                        store.pending_for_recipient(requester)
-                    })))
-                    .await;
-            });
-        }
-        let inbox_events_rx = Arc::new(Mutex::new(inbox_events_rx_tmp));
+        // ── Inbox protocol (disabled) ──────────────────────────────────
+        // Offline mailbox is unreliable; using a dummy channel for now.
+        let (_dummy_inbox_tx, dummy_inbox_rx) = tokio::sync::mpsc::unbounded_channel();
+        #[allow(unused_mut)]
+        let mut inbox_events_rx = Arc::new(Mutex::new(dummy_inbox_rx));
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
@@ -558,16 +538,7 @@ fn main() -> Result<()> {
             .accept(FRIEND_PING_ALPN, PingHandler)
             .accept(BACKFILL_ALPN, backfill_handler)
             .accept(WHISPER_ALPN, whisper_handler)
-            .accept(INBOX_ALPN, inbox_handler)
             .spawn();
-
-        // Subscribe to the personal inbox gossip topic so peers can always
-        // deliver offline messages, independent of the visible chat room.
-        let inbox_topic = InboxHandle::inbox_topic(secret_key.public());
-        if let Err(e) = gossip.subscribe(inbox_topic, Vec::new()).await {
-            warn!(error = %e, "failed to subscribe to inbox topic");
-        }
-        info!("subscribed to personal inbox topic");
 
         // Subscribe to the lobby topic so the gossip mesh is ready for
         // LAN-discovered peers. This must happen inside runtime.block_on
