@@ -7,3 +7,4 @@ hermes_verify.py
 hermes_verify_profile.py
 repair.py
 src/*.bak
+.deploy-logs/

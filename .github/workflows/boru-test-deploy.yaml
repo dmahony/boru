@@ -1,0 +1,34 @@
+name: Boru Test Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: boru-test-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  deploy:
+    name: Build and smoke-test on self-hosted runner
+    runs-on: [self-hosted, linux, X64, boru-test]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run deploy-boru-test.sh
+        run: |
+          chmod +x ./deploy-boru-test.sh
+          ./deploy-boru-test.sh
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-logs
+          path: .deploy-logs/
