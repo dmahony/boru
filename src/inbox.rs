@@ -59,6 +59,71 @@ fn inbox_message_id(bytes: &[u8]) -> InboxMessageId {
     *blake3::hash(bytes).as_bytes()
 }
 
+// ── Delete tombstone type ──────────────────────────────────────────────────────
+
+/// Proof that the original message author authorized deletion.
+///
+/// Signed by the message's original author, not the current sender.
+/// The outer [`SignedInboxMessage`] authenticates who forwarded the
+/// tombstone; this proof authenticates that the author truly authorized
+/// the deletion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorDeleteProof {
+    /// Message ID being deleted (blake3 hash of the original signed bytes).
+    pub msg_id: [u8; 32],
+    /// The conversation this message belongs to.
+    pub conversation_id: [u8; 32],
+    /// Unix epoch seconds (replay protection on the inner proof).
+    pub created_at_unix_secs: u64,
+    /// Public key of the original message author (who authorized this deletion).
+    pub author: PublicKey,
+    /// Signature by `author` over `msg_id || conversation_id || created_at_unix_secs`.
+    pub author_signature: ByteArray<{ Signature::LENGTH }>,
+}
+
+impl AuthorDeleteProof {
+    /// The bytes that the author's signature covers.
+    fn signing_bytes(&self) -> Vec<u8> {
+        let mut bytes = self.msg_id.to_vec();
+        bytes.extend_from_slice(&self.conversation_id);
+        bytes.extend_from_slice(&self.created_at_unix_secs.to_le_bytes());
+        bytes
+    }
+
+    /// Verify that the proof was signed by the claimed author.
+    ///
+    /// Returns `Ok(())` if the signature is valid, `Err` otherwise.
+    pub fn verify(&self) -> std::result::Result<(), String> {
+        let sig = Signature::from_bytes(&self.author_signature);
+        let data = self.signing_bytes();
+        self.author
+            .verify(&data, &sig)
+            .map_err(|e| format!("invalid author delete proof signature: {e}"))
+    }
+
+    /// Create a new signed proof.
+    pub fn sign(
+        author_sk: &SecretKey,
+        msg_id: [u8; 32],
+        conversation_id: [u8; 32],
+    ) -> Self {
+        let created_at_unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut proof = Self {
+            msg_id,
+            conversation_id,
+            created_at_unix_secs,
+            author: author_sk.public(),
+            author_signature: ByteArray::new([0u8; Signature::LENGTH]),
+        };
+        let data = proof.signing_bytes();
+        proof.author_signature = ByteArray::new(author_sk.sign(&data).to_bytes());
+        proof
+    }
+}
+
 // ── Signed wire envelope ───────────────────────────────────────────────────────
 
 /// A signed, timestamped envelope for inbox protocol messages.
@@ -94,6 +159,10 @@ pub enum InboxPayload {
         /// The missed envelopes.
         envelopes: Vec<MailboxEnvelope>,
     },
+    /// Signed deletion tombstone for a previously delivered message.
+    /// The inner [`AuthorDeleteProof`] is signed by the message's original
+    /// author, proving they authorized the deletion.
+    DeleteTombstone(AuthorDeleteProof),
 }
 
 impl SignedInboxMessage {
@@ -213,6 +282,13 @@ pub enum InboxEvent {
         from: PublicKey,
         /// Only return envelopes created at or after this timestamp (ms).
         since_ms: u64,
+    },
+    /// A delete tombstone was received — the message author authorized deletion.
+    DeleteTombstoneReceived {
+        /// Public key of the peer who forwarded the tombstone.
+        from: PublicKey,
+        /// The delete proof signed by the original message author.
+        proof: AuthorDeleteProof,
     },
 }
 
@@ -499,6 +575,52 @@ impl InboxProtocol {
                 // SyncResponse is only sent, never received on the server side.
                 Ok(None)
             }
+            InboxPayload::DeleteTombstone(proof) => {
+                // 1. Verify the inner author proof signature.
+                proof.verify().map_err(|e| {
+                    n0_error::anyerr!("rejecting delete tombstone with invalid author proof: {e}")
+                })?;
+
+                // 2. Replay protection: check author's timestamp is within the replay window.
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if proof.created_at_unix_secs.abs_diff(now) > MAX_CLOCK_SKEW.as_secs() {
+                    return Err(n0_error::anyerr!(
+                        "delete tombstone author timestamp {} is outside replay window (now={now})",
+                        proof.created_at_unix_secs
+                    ));
+                }
+
+                // 3. Dedup by proof message id.
+                let mid: InboxMessageId = proof.msg_id;
+                if guard.seen_message_ids.contains_key(&mid) {
+                    return Err(n0_error::anyerr!(
+                        "duplicate delete tombstone for message {mid:?}"
+                    ));
+                }
+                let cutoff = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .saturating_sub(MAX_CLOCK_SKEW.as_secs());
+                guard.seen_message_ids.retain(|_, ts| *ts > cutoff);
+                guard.seen_message_ids.insert(
+                    mid,
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                );
+
+                // 4. Emit event so the frontend can apply the tombstone to the store.
+                let _ = guard.envelope_tx.send(InboxEvent::DeleteTombstoneReceived {
+                    from: verified_sender,
+                    proof,
+                });
+                Ok(None)
+            }
         }
     }
 }
@@ -611,6 +733,42 @@ pub async fn send_sync_request(
             "unexpected sync response payload: {other:?}"
         )),
     }
+}
+
+/// Send a delete tombstone for a message to a peer's inbox.
+///
+/// The tombstone is signed by the original message author's secret key,
+/// proving the author authorized the deletion.
+pub async fn send_delete_tombstone(
+    endpoint: &Endpoint,
+    secret_key: &SecretKey,
+    peer: PublicKey,
+    msg_id: [u8; 32],
+    conversation_id: [u8; 32],
+    author_sk: &SecretKey,
+) -> Result<()> {
+    let proof = AuthorDeleteProof::sign(author_sk, msg_id, conversation_id);
+    let signed = SignedInboxMessage::sign(secret_key, InboxPayload::DeleteTombstone(proof))?;
+    let len = signed.len() as u32;
+
+    let conn = endpoint
+        .connect(peer, INBOX_ALPN)
+        .await
+        .std_context("connect inbox for delete tombstone")?;
+    let (mut send, mut _recv) = conn
+        .open_bi()
+        .await
+        .std_context("open_bi for delete tombstone")?;
+
+    send.write_all(&len.to_be_bytes())
+        .await
+        .std_context("write delete tombstone length")?;
+    send.write_all(&signed)
+        .await
+        .std_context("write delete tombstone payload")?;
+    send.finish().std_context("finish delete tombstone")?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -731,5 +889,134 @@ mod tests {
         // seen_message_ids. We verify the verify function itself works twice.
         let (sender2, _, _) = SignedInboxMessage::verify(&encoded, Some(sk.public())).unwrap();
         assert_eq!(sender2, sk.public());
+    }
+
+    // ── AuthorDeleteProof tests (Step 12) ─────────────────────────────
+
+    #[test]
+    fn author_delete_proof_sign_and_verify() {
+        let author_sk = test_secret_key();
+        let msg_id = [1u8; 32];
+        let conv_id = [2u8; 32];
+
+        let proof = AuthorDeleteProof::sign(&author_sk, msg_id, conv_id);
+        assert_eq!(proof.author, author_sk.public());
+        assert_eq!(proof.msg_id, msg_id);
+        assert_eq!(proof.conversation_id, conv_id);
+        assert!(proof.created_at_unix_secs > 0);
+
+        // Verify should succeed
+        assert!(proof.verify().is_ok());
+    }
+
+    #[test]
+    fn author_delete_proof_rejects_wrong_author() {
+        let author_sk = test_secret_key();
+        let wrong_sk = test_secret_key();
+        let msg_id = [1u8; 32];
+        let conv_id = [2u8; 32];
+
+        let mut proof = AuthorDeleteProof::sign(&author_sk, msg_id, conv_id);
+        // Replace author with wrong key (but keep the signature from author_sk)
+        proof.author = wrong_sk.public();
+        assert!(proof.verify().is_err());
+    }
+
+    #[test]
+    fn author_delete_proof_rejects_tampered_msg_id() {
+        let author_sk = test_secret_key();
+        let msg_id = [1u8; 32];
+        let conv_id = [2u8; 32];
+
+        let mut proof = AuthorDeleteProof::sign(&author_sk, msg_id, conv_id);
+        // Tamper with the msg_id
+        proof.msg_id[0] ^= 0xFF;
+        assert!(proof.verify().is_err());
+    }
+
+    #[test]
+    fn author_delete_proof_rejects_tampered_conversation_id() {
+        let author_sk = test_secret_key();
+        let msg_id = [1u8; 32];
+        let conv_id = [2u8; 32];
+
+        let mut proof = AuthorDeleteProof::sign(&author_sk, msg_id, conv_id);
+        // Tamper with the conversation_id
+        proof.conversation_id[0] ^= 0xFF;
+        assert!(proof.verify().is_err());
+    }
+
+    #[test]
+    fn author_delete_proof_round_trips_through_postcard() {
+        let author_sk = test_secret_key();
+        let msg_id = [1u8; 32];
+        let conv_id = [2u8; 32];
+
+        let proof = AuthorDeleteProof::sign(&author_sk, msg_id, conv_id);
+        let encoded = postcard::to_stdvec(&proof).unwrap();
+        let decoded: AuthorDeleteProof = postcard::from_bytes(&encoded).unwrap();
+
+        assert_eq!(decoded.msg_id, proof.msg_id);
+        assert_eq!(decoded.conversation_id, proof.conversation_id);
+        assert_eq!(decoded.author, proof.author);
+        assert_eq!(decoded.created_at_unix_secs, proof.created_at_unix_secs);
+        assert_eq!(
+            *decoded.author_signature,
+            *proof.author_signature
+        );
+
+        // Verify still works after deserialization
+        assert!(decoded.verify().is_ok());
+    }
+
+    #[test]
+    fn author_delete_proof_wraps_in_signed_inbox_message() {
+        let author_sk = test_secret_key();
+        let sender_sk = test_secret_key();
+        let msg_id = [1u8; 32];
+        let conv_id = [2u8; 32];
+
+        let proof = AuthorDeleteProof::sign(&author_sk, msg_id, conv_id);
+        let encoded = SignedInboxMessage::sign(&sender_sk, InboxPayload::DeleteTombstone(proof)).unwrap();
+
+        // Verify the outer envelope
+        let (sender, payload, _) = SignedInboxMessage::verify(&encoded, Some(sender_sk.public())).unwrap();
+        assert_eq!(sender, sender_sk.public());
+
+        // Verify the inner proof
+        match payload {
+            InboxPayload::DeleteTombstone(inner_proof) => {
+                assert!(inner_proof.verify().is_ok());
+                assert_eq!(inner_proof.msg_id, msg_id);
+                assert_eq!(inner_proof.author, author_sk.public());
+            }
+            other => panic!("expected DeleteTombstone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn author_delete_proof_tampered_inner_proof_rejected() {
+        let author_sk = test_secret_key();
+        let sender_sk = test_secret_key();
+        let msg_id = [1u8; 32];
+        let conv_id = [2u8; 32];
+
+        let proof = AuthorDeleteProof::sign(&author_sk, msg_id, conv_id);
+        let encoded = SignedInboxMessage::sign(&sender_sk, InboxPayload::DeleteTombstone(proof)).unwrap();
+
+        // The inner proof's msg_id is somewhere in the serialized bytes.
+        // We verify that if someone tampers the inner proof AFTER the
+        // outer signed message is decoded, the inner proof verification catches it.
+
+        // Decode and tamper the inner proof
+        let (_, payload, _) = SignedInboxMessage::verify(&encoded, Some(sender_sk.public())).unwrap();
+        match payload {
+            InboxPayload::DeleteTombstone(mut inner) => {
+                inner.msg_id[0] ^= 0xFF;
+                // The inner verify should fail
+                assert!(inner.verify().is_err());
+            }
+            _ => panic!("expected DeleteTombstone"),
+        }
     }
 }

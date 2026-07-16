@@ -39,7 +39,8 @@ use boru_chat::image_optimizer::{
     compress_image, optimize_chat_image, optimize_chat_image_to_webp, CHAT_IMAGE_MAX_BYTES,
 };
 use boru_chat::image_store::ImageStore;
-use boru_chat::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
+use boru_chat::inbox::{send_ack, send_deliver, send_sync_request, AuthorDeleteProof, InboxEvent};
+use boru_chat::store::MessageStore;
 use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
 use boru_chat::net::Gossip;
 use boru_chat::outbox::{OutboxEntry, OutboxStore};
@@ -6568,6 +6569,51 @@ impl IcedChat {
                             from.fmt_short(),
                             since_ms
                         );
+                        iced::Task::none()
+                    }
+                    InboxEvent::DeleteTombstoneReceived { from, proof } => {
+                        // A remote peer forwarded a signed deletion authorisation
+                        // from the original message author.  Apply the tombstone
+                        // to the local message store to remove the inbox row and
+                        // prevent resurrection by backfill/duplicates.
+                        let store_path = self.data_dir.join("message_store.db");
+                        match MessageStore::open(&store_path) {
+                            Ok(store) => {
+                                match store.insert_tombstone(
+                                    &proof.msg_id,
+                                    &proof.conversation_id,
+                                    &proof.author,
+                                    &*proof.author_signature,
+                                ) {
+                                    Ok(true) => {
+                                        debug!(
+                                            "inbox: applied delete tombstone from {} for msg {:?}",
+                                            from.fmt_short(),
+                                            proof.msg_id
+                                        );
+                                    }
+                                    Ok(false) => {
+                                        debug!(
+                                            "inbox: delete tombstone from {} for msg {:?} was already tombstoned",
+                                            from.fmt_short(),
+                                            proof.msg_id
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "inbox: failed to apply delete tombstone from {}: {e}",
+                                            from.fmt_short()
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "inbox: failed to open message store for delete tombstone from {}: {e}",
+                                    from.fmt_short()
+                                );
+                            }
+                        }
                         iced::Task::none()
                     }
                 }
