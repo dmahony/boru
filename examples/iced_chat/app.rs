@@ -10386,6 +10386,7 @@ impl IcedChat {
         use iced::widget::text::Wrapping;
         use iced::widget::{button, column, container, row, text};
         use iced::{Color, Length};
+        use std::str::FromStr;
         let theme = self.theme();
 
         let topic_hex = self.topic.to_string();
@@ -10400,6 +10401,20 @@ impl IcedChat {
             .find(&self.topic)
             .map(|r| r.display_name())
             .unwrap_or_else(|| format!("Room {}", short_topic));
+
+        // Determine connection status for the active conversation peer
+        let peer_online = self
+            .conversation_store
+            .find(&self.topic)
+            .and_then(|entry| {
+                if entry.peer_id.is_empty() {
+                    None
+                } else {
+                    PublicKey::from_str(&entry.peer_id)
+                        .ok()
+                        .map(|pk| self.friend_online_cache.contains(&pk))
+                }
+            });
 
         let mut header = column![
             row![

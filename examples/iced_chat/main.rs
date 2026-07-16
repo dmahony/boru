@@ -572,7 +572,10 @@ fn main() -> Result<()> {
                                 if !joined_peers.insert(peer) {
                                     continue;
                                 }
-                                info!(peer = %peer, "mDNS discovered peer");
+                                // Spawn join_peers in a separate task so the
+                                // mDNS event loop isn't blocked. join_peers
+                                // triggers the gossip actor to dial the peer
+                                // and establish a properly wired connection.
                                 let s = sender.clone();
                                 tokio::spawn(async move {
                                     if let Err(e) = s.join_peers(vec![peer]).await {
