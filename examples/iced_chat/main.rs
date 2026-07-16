@@ -482,18 +482,20 @@ fn main() -> Result<()> {
         // discovery events. This keeps published endpoint addresses and the
         // event subscriber on one shared address book.
 
-        // DHT address lookup disabled — no global peer resolution.
-        // mDNS handles LAN discovery; relay handles connectivity.
-        /*
-        if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
-            if let Ok(dht) = DhtAddressLookup::builder()
-                .secret_key(endpoint.secret_key().clone())
-                .build()
-            {
-                addr_lookup.add(dht);
+        // Keep DHT address lookup available for endpoint-free `boru1:` room
+        // invitations.  mDNS still handles LAN discovery and the configured
+        // relay handles transport connectivity; this lookup is only consulted
+        // when a private-room tracker supplies a peer ID without an address.
+        if !args.no_dht {
+            if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
+                if let Ok(dht) = DhtAddressLookup::builder()
+                    .secret_key(endpoint.secret_key().clone())
+                    .build()
+                {
+                    addr_lookup.add(dht);
+                }
             }
         }
-        */
 
         let notice = "Direct iroh transport is operational.".to_string();
 
@@ -645,8 +647,14 @@ fn main() -> Result<()> {
             let _ = friend_mgr.add_friend_addrs(peer, addrs).await;
         }
 
-        // Private-room DHT discovery disabled.
-        let dht_for_private = None;
+        // Stable `boru1:` invitations intentionally carry no endpoint
+        // address.  Keep the shared tracker client in the GUI so those
+        // invitations can discover a publisher and then join it by ID.
+        let dht_for_private = (!args.no_dht).then(|| {
+            distributed_topic_tracker::Dht::new(
+                &distributed_topic_tracker::DhtConfig::default(),
+            )
+        });
 
         Result::<_>::Ok((
             endpoint,

@@ -256,7 +256,9 @@ pub fn init() {
     }
     // Set default slow threshold if not already set.
     let _ = std::env::var("BORU_PERF_SLOW_MS").unwrap_or_else(|_| {
-        std::env::set_var("BORU_PERF_SLOW_MS", "100");
+        // Rust 2024 marks environment mutation as unsafe because it can race
+        // with concurrent process environment access.
+        unsafe { std::env::set_var("BORU_PERF_SLOW_MS", "100") };
         "100".to_string()
     });
     tracing::info!(target: "perf", "perf instrumentation enabled (BORU_PERF=1)");

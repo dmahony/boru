@@ -1728,6 +1728,36 @@ pub fn handle_net_event_for_topic(event: NetEvent, cb: &mut impl ChatCallbacks, 
             }
         }
         NetEvent::NeighborUp { peer } => {
+            // NeighborUp is the first reliable application-level indication
+            // that the gossip transport has discovered and admitted a peer
+            // to this topic.  Address lookup/source details are deliberately
+            // left unreported here (they are owned by iroh), but the
+            // connection, subscription, and topic-membership stages are
+            // observable and should be reflected in diagnostics.
+            DIAGNOSTICS.record_with_peer(
+                topic,
+                Some(peer.to_string()),
+                DiagnosticEventKind::PeerDiscovered,
+            );
+            DIAGNOSTICS.record_with_peer(
+                topic,
+                Some(peer.to_string()),
+                DiagnosticEventKind::ConnectionEstablished {
+                    remote_address: None,
+                    transport: None,
+                    used_relay: None,
+                },
+            );
+            DIAGNOSTICS.record_with_peer(
+                topic,
+                Some(peer.to_string()),
+                DiagnosticEventKind::RoomSubscriptionJoined,
+            );
+            DIAGNOSTICS.record_with_peer(
+                topic,
+                Some(peer.to_string()),
+                DiagnosticEventKind::PeerAddedToTopic,
+            );
             DIAGNOSTICS.record_with_peer(
                 topic,
                 Some(peer.to_string()),

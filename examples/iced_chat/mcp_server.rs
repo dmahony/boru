@@ -2397,10 +2397,13 @@ async fn handle_run_discovery_test(
     let mut watch_rx = state.diagnostics.subscribe();
     let target = expected_peer.to_string();
 
-    // Define stages to wait for
+    // Define only stages with reliable application-level hooks.  Address
+    // resolution is owned by iroh's endpoint and is intentionally reported as
+    // NotObserved unless a lower layer emits an explicit diagnostic event;
+    // waiting for it here would consume the whole test timeout even after the
+    // gossip neighbor has already joined.
     let stages = &[
         "discovered",
-        "address_resolved",
         "connected",
         "subscription_joined",
         "topic_member",

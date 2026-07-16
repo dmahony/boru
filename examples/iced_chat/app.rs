@@ -4272,10 +4272,37 @@ impl IcedChat {
                     .filter(|room| room.topic == topic)
                     .map(|room| room.peers)
                     .unwrap_or_default();
-                let (bootstrap_peers, initial_addrs) =
+                let (mut bootstrap_peers, initial_addrs) =
                     collect_bootstrap_peers([&initial_addrs, &saved_addrs]);
                 let initial_addrs_for_save = initial_addrs.clone();
                 let direct_conversation = self.friends.iter().any(|(_, record)| {
+
+                // Include mDNS / DHT-discovered LAN peers as bootstrap addresses
+                // so the room subscription can connect to them directly instead
+                // of waiting for a peer-to-peer discovery exchange on the new
+                // topic.  Discovered peers are ID-only (no transport info
+                // needed — the endpoint's address lookup chain handles
+                // resolution), so we wrap them in a bare EndpointAddr.
+                let discovered_bootstrap_addrs: Vec<EndpointAddr> = self
+                    .discovered_peers
+                    .iter()
+                    .map(|&pk| EndpointAddr::new(pk))
+                    .collect();
+                // Merge discovered peers into the bootstrap list so they are
+                // also passed to gossip.subscribe() for the new room topic.
+                for addr in &discovered_bootstrap_addrs {
+                    if !bootstrap_peers.contains(&addr.id) {
+                        bootstrap_peers.push(addr.id);
+                    }
+                }
+                // Persist bootstrap peers for reconnection.
+                let peers_file = data_dir.join("peers.json");
+                if let Err(error) = std::fs::write(
+                    &peers_file,
+                    serde_json::to_string(&bootstrap_peers).unwrap_or_default(),
+                ) {
+                    warn!(?error, "failed to persist bootstrap peers");
+                }
                     record
                         .direct_conversation
                         .as_ref()
@@ -8559,7 +8586,7 @@ impl IcedChat {
         // ── Delivery state transitions ──
         // Echo: our own broadcast returning via gossip → Delivered
         if let NetEvent::Message {
-            from, ref message, ..
+            from, message, ..
         } = event
         {
             if *from == self.local_public {
@@ -8586,7 +8613,7 @@ impl IcedChat {
         // send ReadReceipt for incoming remote text messages ──
         let read_receipt_task = if self.follow_latest {
             if let NetEvent::Message {
-                from, ref message, ..
+                from, message, ..
             } = event
             {
                 if *from != self.local_public {

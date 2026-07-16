@@ -176,7 +176,7 @@ async fn create_endpoint(relay_url_str: &str, bind_port: u16) -> Result<(Endpoin
 async fn main() -> Result<()> {
     // Quiet down logging unless RUST_LOG is set
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "warn");
+        unsafe { std::env::set_var("RUST_LOG", "warn") };
     }
     tracing_subscriber::fmt::try_init().ok();
 
