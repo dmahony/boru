@@ -86,6 +86,9 @@ use boru_chat::{
 use iroh_mainline_address_lookup::DhtAddressLookup;
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use n0_error::{bail_any, Result, StdResultExt};
+
+/// Default relay server — user's VPS.
+const VPS_RELAY_URL: &str = "http://107.175.228.181:3340";
 use n0_future::task;
 use ratatui::{
     backend::CrosstermBackend,
@@ -645,7 +648,12 @@ async fn main() -> Result<()> {
     let relay_mode = match (args.no_relay, args.relay.clone()) {
         (true, Some(_)) => bail_any!("cannot set --no-relay and --relay at the same time"),
         (true, None) => RelayMode::Disabled,
-        (false, None) => RelayMode::Default,
+        (false, None) => RelayMode::Custom(
+            VPS_RELAY_URL
+                .parse::<RelayUrl>()
+                .expect("valid VPS relay URL")
+                .into(),
+        ),
         (false, Some(url)) => RelayMode::Custom(url.into()),
     };
     tracing::info!(relay = %fmt_relay_mode(&relay_mode), "configured relay servers");

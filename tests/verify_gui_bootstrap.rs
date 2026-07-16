@@ -25,8 +25,8 @@ use boru_chat::{
     proto::TopicId,
 };
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint, PublicKey,
-    RelayMode, SecretKey,
+    address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, tls::CaTlsConfig,
+    Endpoint, PublicKey, RelayMode, SecretKey,
 };
 use n0_error::Result;
 use n0_future::{task, time::sleep};
@@ -106,11 +106,19 @@ async fn spawn_peer(
 ) -> Result<(Router, Endpoint, PublicKey, Gossip)> {
     let ep = Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&rng.random()))
-        .address_lookup(memory)
+        .address_lookup(MemoryLookup::new())
         .relay_mode(RelayMode::Custom(relay_map))
         .alpns(vec![GOSSIP_ALPN.to_vec()])
+        // The in-process relay uses a test certificate. This matches the
+        // other local relay integration tests and keeps the test isolated
+        // from the host trust store.
+        .ca_tls_config(CaTlsConfig::insecure_skip_verify())
         .bind()
         .await?;
+    // Register the shared lookup through the endpoint's lookup manager. This
+    // is the same composition used by the room and mesh E2E tests and keeps
+    // the bootstrap address visible to the endpoint after bind().
+    ep.address_lookup()?.add(memory);
     ep.online().await;
     let pk = ep.secret_key().public();
     let gossip = Gossip::builder().spawn(ep.clone());
@@ -182,16 +190,16 @@ async fn test_gui_bootstrap_plumbing() -> Result<()> {
 
     println!("> Peer B (joiner): {}", pk_b.fmt_short());
 
-    // A joins the gossip mesh (waiting for connections)
-    let (sender_a, rx_a) = gossip_a.subscribe_and_join(topic, vec![]).await?.split();
-
-    // B joins using the bootstrap peers from the parsed ticket — THE FIX IN ACTION
-    // Old (broken) code would have passed vec![] here.
-    // New (fixed) code passes extracted_peer_ids — the peers from the ticket.
-    let (sender_b, rx_b) = gossip_b
-        .subscribe_and_join(topic, extracted_peer_ids)
-        .await?
-        .split();
+    // Use plain subscriptions so the forwarding tasks below observe the
+    // NeighborUp events. subscribe_and_join consumes those events internally,
+    // which would make the GUI-state neighbor assertion below falsely fail.
+    // B uses the bootstrap peers from the parsed ticket — THE FIX IN ACTION.
+    let (topic_a, topic_b) = tokio::try_join!(
+        gossip_a.subscribe(topic, vec![]),
+        gossip_b.subscribe(topic, extracted_peer_ids),
+    )?;
+    let (sender_a, rx_a) = topic_a.split();
+    let (sender_b, rx_b) = topic_b.split();
 
     // ── Bridge gossip events to NetEvent channels ──
     let (net_tx_a, net_rx_a) = mpsc::unbounded_channel();

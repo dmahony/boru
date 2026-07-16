@@ -134,6 +134,20 @@ impl GossipAddressLookup {
             }
         }
     }
+
+    pub(crate) fn endpoint_addr(&self, endpoint_id: EndpointId) -> Option<EndpointAddr> {
+        let guard = self.endpoints.read().expect("poisoned");
+        let info = guard.get(&endpoint_id)?;
+        let mut addr = EndpointAddr::new(endpoint_id);
+        for transport_addr in info.data.addrs() {
+            match transport_addr {
+                TransportAddr::Ip(ip) => addr = addr.with_ip_addr(*ip),
+                TransportAddr::Relay(relay) => addr = addr.with_relay_url(relay.clone()),
+                _ => {}
+            }
+        }
+        Some(addr)
+    }
 }
 
 impl AddressLookup for GossipAddressLookup {

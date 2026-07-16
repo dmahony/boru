@@ -46,11 +46,14 @@ use iroh_mainline_address_lookup::DhtAddressLookup;
 #[cfg(feature = "gui")]
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_error::{bail_any, Result, StdResultExt};
+
+/// Default relay server — user's VPS.
+const VPS_RELAY_URL: &str = "http://107.175.228.181:3340";
 use tokio::sync::{watch, Mutex};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use app::IcedChat;
+use app::{DiscoveredPeersUpdate, IcedChat};
 
 use perf_tracker::PerfTracker;
 
@@ -412,7 +415,12 @@ fn main() -> Result<()> {
     let relay_mode = match (args.no_relay, args.relay.clone()) {
         (true, Some(_)) => bail_any!("--no-relay and --relay are mutually exclusive"),
         (true, None) => RelayMode::Disabled,
-        (false, None) => RelayMode::Default,
+        (false, None) => RelayMode::Custom(
+            VPS_RELAY_URL
+                .parse::<RelayUrl>()
+                .expect("valid VPS relay URL")
+                .into(),
+        ),
         (false, Some(url)) => RelayMode::Custom(url.into()),
     };
     info!("> relay: {}", fmt_relay_mode(&relay_mode));
@@ -525,7 +533,7 @@ fn main() -> Result<()> {
         // because gossip.subscribe() can hang in the iced event loop.
         // Also create the discovered-peers channel for UI display.
         let (discovered_peers_tx, discovered_peers_rx_tmp) =
-            tokio::sync::mpsc::channel::<Vec<iroh::PublicKey>>(64);
+            tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(64);
         let lobby_topic = app::IcedChat::default_lobby_topic();
         if let Ok(sub) = gossip.subscribe(lobby_topic, Vec::new()).await {
             let (sender, mut receiver) = sub.split();
@@ -539,6 +547,7 @@ fn main() -> Result<()> {
             // peer ID to the UI for sidebar display.
             {
                 let mdns = mdns_for_events;
+                let memory_lookup_for_events = memory_lookup.clone();
                 let tx = discovered_peers_tx.clone();
                 let my_id = endpoint.id();
                 tokio::spawn(async move {
@@ -546,30 +555,46 @@ fn main() -> Result<()> {
                     let mut joined_peers = std::collections::HashSet::new();
                     let mut events = mdns.subscribe().await;
                     while let Some(event) = events.next().await {
-                        if let DiscoveryEvent::Discovered { endpoint_info, .. } = event {
-                            let peer = endpoint_info.endpoint_id;
-                            if peer == my_id {
-                                debug!(peer = %peer, "mDNS discovered our own endpoint, skipping");
-                                continue;
-                            }
-                            if !joined_peers.insert(peer) {
-                                continue;
-                            }
-                            info!(peer = %peer, "mDNS discovered peer");
-                            // Spawn join_peers in a separate task so the
-                            // mDNS event loop isn't blocked. join_peers
-                            // triggers the gossip actor to dial the peer
-                            // and establish a properly wired connection.
-                            let s = sender.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = s.join_peers(vec![peer]).await {
-                                    warn!(peer = %peer, error = %e, "join_peers failed");
-                                } else {
-                                    info!(peer = %peer, "join_peers succeeded");
+                        match event {
+                            DiscoveryEvent::Discovered { endpoint_info, .. } => {
+                                let peer = endpoint_info.endpoint_id;
+                                if peer == my_id {
+                                    debug!(peer = %peer, "mDNS discovered our own endpoint, skipping");
+                                    continue;
                                 }
-                            });
-                            // Use try_send to avoid blocking on the UI channel
-                            let _ = tx.try_send(vec![peer]);
+                                // Keep the concrete addresses in the endpoint's
+                                // shared lookup cache. mDNS can resolve the
+                                // endpoint itself, but the explicit memory entry
+                                // also makes subsequent dials deterministic.
+                                memory_lookup_for_events.set_endpoint_info(endpoint_info);
+                                if !joined_peers.insert(peer) {
+                                    continue;
+                                }
+                                info!(peer = %peer, "mDNS discovered peer");
+                                let s = sender.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = s.join_peers(vec![peer]).await {
+                                        warn!(peer = %peer, error = %e, "join_peers failed");
+                                    } else {
+                                        info!(peer = %peer, "join_peers succeeded");
+                                    }
+                                });
+                                let _ = tx.try_send(DiscoveredPeersUpdate {
+                                    added: vec![peer],
+                                    removed: Vec::new(),
+                                });
+                            }
+                            DiscoveryEvent::Expired { endpoint_id } => {
+                                memory_lookup_for_events.remove_endpoint_info(endpoint_id);
+                                if joined_peers.remove(&endpoint_id) {
+                                    info!(peer = %endpoint_id, "mDNS peer advertisement expired");
+                                    let _ = tx.try_send(DiscoveredPeersUpdate {
+                                        added: Vec::new(),
+                                        removed: vec![endpoint_id],
+                                    });
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 });

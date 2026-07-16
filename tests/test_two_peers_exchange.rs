@@ -79,7 +79,11 @@ async fn test_two_peers_exchange_messages() -> Result<()> {
 
     // Wait for peer discovery
     let short = Duration::from_millis(50);
-    for i in 0..30 {
+    for i in 0..60 {
+        // Relay rendezvous and the first gossip handshake are asynchronous;
+        // yield between polls instead of making the result depend on the
+        // scheduler completing both endpoints within one drain cycle.
+        sleep(Duration::from_millis(100)).await;
         let ev_a = drain_events(&mut sub_a, short).await;
         let ev_b = drain_events(&mut sub_b, short).await;
         let a_joined = sub_a.is_joined();

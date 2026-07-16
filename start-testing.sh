@@ -5,8 +5,8 @@
 # LAN-testing mode (xvfb-run + --no-relay + --mcp).
 #
 # VM layout:
-#   lubuntuVM-001  172.16.0.54  MCP port 8765  data ~/boru-chat-data-54
-#   lubuntuVM-002  172.16.0.55  MCP port 8766  data ~/boru-chat-data-55
+#   lubuntuVM-001  172.16.0.54  MCP port 8765  data ~/boru-test/runs/<id>/node-54
+#   lubuntuVM-002  172.16.0.55  MCP port 8766  data ~/boru-test/runs/<id>/node-55
 #
 # Prerequisites:
 #   - Rust toolchain on PATH
@@ -31,6 +31,7 @@ VM1_MCP_PORT=8765
 VM2_MCP_PORT=8766
 BIN_NAME="iced_chat-x86_64-linux"
 REMOTE_DIR="boru-test"
+INSTANCE_SCRIPT="${SCRIPT_DIR}/scripts/boru-test-instance.sh"
 SSH_OPTS="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
 
 # Connectivity mode: "dht" (no relay + DHT, default) or "relay" (uses relay server).
@@ -83,10 +84,6 @@ deploy_to() {
     info "Deploying to $vm ..."
     ssh $SSH_OPTS "dan@${vm}" "mkdir -p ~/${REMOTE_DIR}" || { err "mkdir failed on ${vm}"; return 1; }
 
-    # Kill any existing iced_chat processes (stale MCP ports)
-    ssh $SSH_OPTS "dan@${vm}" \
-        "pkill -f 'iced_chat.*--mcp' 2>/dev/null && echo '  killed stale iced_chat' || true"
-
     # Copy binary
     scp $SSH_OPTS "$BIN" "dan@${vm}:~/${REMOTE_DIR}/${BIN_NAME}" || {
         err "scp failed to ${vm}"
@@ -96,6 +93,11 @@ deploy_to() {
         err "chmod failed on ${vm}"
         return 1
     }
+    scp $SSH_OPTS "$INSTANCE_SCRIPT" "dan@${vm}:~/${REMOTE_DIR}/boru-test-instance.sh" || {
+        err "lifecycle helper copy failed on ${vm}"
+        return 1
+    }
+    ssh $SSH_OPTS "dan@${vm}" "chmod +x ~/${REMOTE_DIR}/boru-test-instance.sh"
 
     # Ensure xvfb is installed
     ssh $SSH_OPTS "dan@${vm}" \
@@ -116,22 +118,13 @@ launch_on() {
     local mcp_port="$2"
     local display="$3"
     local data_dir_suffix="$4"
-    local data_dir="~/boru-chat-data-${data_dir_suffix}"
+    local run_id="$5"
+    local data_dir="\${HOME}/${REMOTE_DIR}/runs/${run_id}/node-${data_dir_suffix}"
 
     info "Launching on ${vm} (MCP: ${vm}:${mcp_port}, display :${display}) ..."
     local pid
-    pid=$(ssh $SSH_OPTS "dan@${vm}" "
-        mkdir -p ${data_dir}
-        DISPLAY=:${display} xvfb-run -a -n ${display} -s '-screen 0 1280x720x24' \
-            ~/${REMOTE_DIR}/${BIN_NAME} \
-            ${RELAY_FLAG:+$RELAY_FLAG} \
-            --mcp --mcp-bind 127.0.0.1:${mcp_port} \
-            --enable-gui-test-actions \
-            --data-dir ${data_dir} \
-            --bind-port 0 \
-            >/dev/null 2>&1 &
-        echo \$!
-    ") || {
+    pid=$(ssh $SSH_OPTS "dan@${vm}" \
+        "~/${REMOTE_DIR}/boru-test-instance.sh start ~/${REMOTE_DIR}/${BIN_NAME} ${mcp_port} ${display} ${data_dir} '${RELAY_FLAG}'") || {
         err "Launch failed on ${vm}"
         return 1
     }
@@ -140,7 +133,7 @@ launch_on() {
     # Quick health check — wait for MCP port to become available
     info "  waiting for MCP port ${mcp_port} on ${vm} ..."
     for i in $(seq 1 15); do
-        if ssh $SSH_OPTS "dan@${vm}" "ss -tlnp 2>/dev/null | grep -q ':${mcp_port} '" 2>/dev/null; then
+        if ssh $SSH_OPTS "dan@${vm}" "ss -ltn 2>/dev/null | grep -q ':${mcp_port} '" 2>/dev/null; then
             info "  -> ${vm} MCP ready on :${mcp_port} (${i}s)"
             return 0
         fi
@@ -150,9 +143,10 @@ launch_on() {
     return 1
 }
 
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 LAUNCH_OK=true
-launch_on "$VM1" "$VM1_MCP_PORT" 99 "54" || LAUNCH_OK=false
-launch_on "$VM2" "$VM2_MCP_PORT" 98 "55" || LAUNCH_OK=false
+launch_on "$VM1" "$VM1_MCP_PORT" 99 "54" "$RUN_ID" || LAUNCH_OK=false
+launch_on "$VM2" "$VM2_MCP_PORT" 98 "55" "$RUN_ID" || LAUNCH_OK=false
 
 # ── Summary ─────────────────────────────────────────────────────────────
 echo ""
@@ -160,10 +154,14 @@ info "=== Done ==="
 echo "  Binary:    ${BIN}"
 echo "  VM1:       ${VM1}  MCP http://${VM1}:${VM1_MCP_PORT}  Xvfb :99"
 echo "  VM2:       ${VM2}  MCP http://${VM2}:${VM2_MCP_PORT}  Xvfb :98"
+echo "  Run ID:    ${RUN_ID} (data under ~/boru-test/runs/${RUN_ID}/)"
 echo ""
 echo "To stop both:"
-echo "  ssh dan@${VM1} 'pkill -f iced_chat'"
-echo "  ssh dan@${VM2} 'pkill -f iced_chat'"
+echo "  ssh dan@${VM1} '~/boru-test/boru-test-instance.sh stop'"
+echo "  ssh dan@${VM2} '~/boru-test/boru-test-instance.sh stop'"
+echo "To verify:"
+echo "  ssh dan@${VM1} '~/boru-test/boru-test-instance.sh status ${VM1_MCP_PORT}'"
+echo "  ssh dan@${VM2} '~/boru-test/boru-test-instance.sh status ${VM2_MCP_PORT}'"
 
 if [ "$LAUNCH_OK" = false ]; then
     warn "One or both VMs failed to start. Check logs on the VMs."

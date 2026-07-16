@@ -329,6 +329,9 @@ impl FriendPingActor {
 
     async fn ping_all(&mut self) {
         let peer_list: Vec<PublicKey> = self.friends.keys().copied().collect();
+        if peer_list.is_empty() {
+            return;
+        }
         for peer in peer_list {
             self.ping_one(peer).await;
         }
@@ -899,6 +902,49 @@ mod tests {
 
         // Original should reflect removal.
         assert_eq!(mgr.friend_status(&peer).await?, None);
+
+        Ok(())
+    }
+
+    /// Test: when no friends are registered, no ping events are emitted
+    /// and the manager still accepts friends added later.
+    #[tokio::test]
+    async fn test_empty_friend_list_no_ping_activity() -> Result<()> {
+        let sk = SecretKey::generate();
+        let ep = Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+            .secret_key(sk)
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddrV4>().unwrap())
+            .unwrap()
+            .bind()
+            .await?;
+
+        let (mgr, mut events) =
+            FriendPingManager::spawn(ep, Duration::from_millis(50), Duration::from_millis(500));
+
+        // Wait several ping cycles — no friends registered, so no events should fire.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Events channel should be empty (no friends to ping).
+        let got_event = tokio::time::timeout(Duration::from_millis(10), events.recv())
+            .await
+            .ok()
+            .flatten();
+        assert!(
+            got_event.is_none(),
+            "no events should be emitted when friend list is empty"
+        );
+
+        // Now add a friend and verify the manager still works.
+        let peer = SecretKey::generate().public();
+        mgr.add_friend(peer, None).await?;
+
+        let list = mgr.list_friends().await?;
+        assert_eq!(list.len(), 1, "friend should be registered after add");
+
+        // Remove the friend — back to empty.
+        assert!(mgr.remove_friend(&peer).await?);
+        let list = mgr.list_friends().await?;
+        assert!(list.is_empty(), "friend list should be empty after removal");
 
         Ok(())
     }

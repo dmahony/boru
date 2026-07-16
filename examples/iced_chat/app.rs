@@ -1242,7 +1242,7 @@ pub struct IcedChat {
     continuous_tracker: Option<ContinuousTracker>,
     /// Receiver handle for discovered peers from the DHT discovery loop.
     /// Read by the subscription stream to produce NewDiscoveredPeers events.
-    pub discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
+    pub discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
     /// Debounce buffer for NeighborUp/NeighborDown events.
     /// Maps `PublicKey -> is_online`. Flushed on every ConnMonitorTick (~1s).
     pending_neighbor_status: HashMap<PublicKey, bool>,
@@ -1486,6 +1486,24 @@ pub enum Shortcut {
 pub enum OfflineDeliveryStatus {
     Queued,
     Delivered,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscoveredPeersUpdate {
+    pub added: Vec<PublicKey>,
+    pub removed: Vec<PublicKey>,
+}
+
+fn apply_discovered_peers_update(peers: &mut Vec<PublicKey>, update: DiscoveredPeersUpdate) {
+    peers.retain(|peer| !update.removed.contains(peer));
+    for peer in update.added {
+        if update.removed.contains(&peer) {
+            continue;
+        }
+        if !peers.contains(&peer) {
+            peers.push(peer);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1744,8 +1762,8 @@ pub enum AppMessage {
         conversation_topic: TopicId,
         content: String,
     },
-    /// New peers discovered via the public-room DHT continuous tracker.
-    NewDiscoveredPeers(Vec<PublicKey>),
+    /// An update to the peers currently advertised by local discovery.
+    NewDiscoveredPeers(DiscoveredPeersUpdate),
 
     // ── Invite menu ──
     /// Toggle the invite menu popover in the current room view.
@@ -2325,7 +2343,7 @@ impl IcedChat {
         backfill_handle: BackfillHandle,
         return_to_chat_list_after_open: bool,
         continuous_tracker: Option<ContinuousTracker>,
-        discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
+        discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
         dht: Option<distributed_topic_tracker::Dht>,
         private_dht_disabled: bool,
         iced_diagnostics: IcedMessageJournal,
@@ -4177,7 +4195,16 @@ impl IcedChat {
 
                 // If the topic is already active and subscribed, just reveal the chat screen
                 // without tearing down the subscription.
-                if topic == self.topic && self.sender.is_some() {
+                // An MCP OpenRoom request is already satisfied when the
+                // requested room is selected, even if the test harness (or a
+                // just-restored GUI state) has not attached its sender yet.
+                // Do not leave the action queued while needlessly starting a
+                // second subscription for the already-selected room.
+                let pending_selected_room_action = self
+                    .pending_open_room_action
+                    .as_ref()
+                    .is_some_and(|(_, expected_topic)| *expected_topic == topic);
+                if topic == self.topic && (self.sender.is_some() || pending_selected_room_action) {
                     self.screen = Screen::Chat { topic };
                     complete_open_room_action(self);
                     return iced::Task::none();
@@ -4666,6 +4693,7 @@ impl IcedChat {
                 self.try_save_chat_history();
                 self.leave_current_room();
                 let gossip = self.gossip.clone();
+                let runtime_handle = self.runtime_handle.clone();
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
                 let label = self.local_label.clone();
@@ -4774,16 +4802,27 @@ impl IcedChat {
                         // behavior.  If no bootstrap peers are given (unlikely here
                         // since JoinFromTicket always has ticket.peers) fall back to
                         // subscribe() to avoid hanging forever.
-                        let sub = tokio::time::timeout(Duration::from_secs(30), async {
-                            if peers.is_empty() {
-                                gossip.subscribe(topic, peers).await
-                            } else {
-                                gossip.subscribe_and_join(topic, peers).await
-                            }
-                        })
-                        .await
-                        .map_err(|_| "timed out waiting for a peer to join the room".to_string())?
-                        .map_err(|e| e.to_string())?;
+                        // Run gossip subscription on the dedicated Tokio
+                        // runtime. Iced tasks are polled by the GUI executor;
+                        // doing the handshake there can leave a ticket join
+                        // marked as ready without allowing gossip to progress.
+                        let sub = runtime_handle
+                            .spawn(async move {
+                                tokio::time::timeout(Duration::from_secs(30), async {
+                                    if peers.is_empty() {
+                                        gossip.subscribe(topic, peers).await
+                                    } else {
+                                        gossip.subscribe_and_join(topic, peers).await
+                                    }
+                                })
+                                .await
+                                .map_err(|_| {
+                                    "timed out waiting for a peer to join the room".to_string()
+                                })
+                                .and_then(|result| result.map_err(|e| e.to_string()))
+                            })
+                            .await
+                            .map_err(|e| format!("room subscription task failed: {e}"))??;
                         let (sender, receiver) = sub.split();
                         if let Some((new_peers_rx, join_cancel)) = pending_dht_fanout {
                             let _join_task = boru_chat::public_room_continuous::spawn_join_fanout(
@@ -7934,11 +7973,7 @@ impl IcedChat {
             AppMessage::Noop => iced::Task::none(),
 
             AppMessage::NewDiscoveredPeers(peers) => {
-                for peer in &peers {
-                    if !self.discovered_peers.contains(peer) {
-                        self.discovered_peers.push(*peer);
-                    }
-                }
+                apply_discovered_peers_update(&mut self.discovered_peers, peers);
                 iced::Task::none()
             }
 
@@ -11620,7 +11655,7 @@ impl std::hash::Hash for InboxRxHandle {
 
 /// Wrapper for the continuous tracker's discovered-peers channel.
 /// Uses a bounded mpsc receiver wrapped in Arc<Mutex<>>.
-struct DiscoveredPeersRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>);
+struct DiscoveredPeersRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>);
 
 impl std::hash::Hash for DiscoveredPeersRxHandle {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -11674,6 +11709,17 @@ fn subscription_stream(
             // remain live until their own receivers close.  The flag is
             // intentionally local to this unfold iteration; on the next
             // item we re-check the receiver once and disable the branch again.
+            // A closed auxiliary channel must not terminate the combined
+            // application subscription.  Some optional subsystems (notably
+            // inbox/discovery in headless or feature-disabled launches) can
+            // close their sender before the GUI action channel is used.  If a
+            // closed receiver remains in `select!`, it is immediately ready on
+            // every poll and either spins or, previously, ended this stream.
+            let mut rx_open = true;
+            let mut friend_open = true;
+            let mut whisper_open = true;
+            let mut inbox_open = true;
+            let mut discovered_open = true;
             let mut gui_action_open = true;
             loop {
                 let mut rx_guard = rx.lock().await;
@@ -11683,52 +11729,64 @@ fn subscription_stream(
                 let mut discovered_guard = discovered_rx.lock().await;
                 let mut gui_action_guard = gui_action_rx.lock().await;
                 tokio::select! {
-                    event = rx_guard.recv() => {
+                    event = rx_guard.recv(), if rx_open => {
                         drop(whisper_guard);
                         drop(friend_guard);
                         drop(inbox_guard);
                         drop(discovered_guard);
                         drop(gui_action_guard);
                         drop(rx_guard);
-                        return event.map(|e| (AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)))
+                        match event {
+                            Some(e) => return Some((AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
+                            None => { rx_open = false; continue; }
+                        }
                     }
-                    event = friend_guard.recv() => {
+                    event = friend_guard.recv(), if friend_open => {
                         drop(whisper_guard);
                         drop(rx_guard);
                         drop(inbox_guard);
                         drop(discovered_guard);
                         drop(gui_action_guard);
                         drop(friend_guard);
-                        return event.map(|e| (AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)))
+                        match event {
+                            Some(e) => return Some((AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
+                            None => { friend_open = false; continue; }
+                        }
                     }
-                    event = whisper_guard.recv() => {
+                    event = whisper_guard.recv(), if whisper_open => {
                         drop(friend_guard);
                         drop(rx_guard);
                         drop(inbox_guard);
                         drop(discovered_guard);
                         drop(gui_action_guard);
                         drop(whisper_guard);
-                        return event.map(|e| (AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)))
+                        match event {
+                            Some(e) => return Some((AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
+                            None => { whisper_open = false; continue; }
+                        }
                     }
-                    event = inbox_guard.recv() => {
+                    event = inbox_guard.recv(), if inbox_open => {
                         drop(friend_guard);
                         drop(rx_guard);
                         drop(whisper_guard);
                         drop(discovered_guard);
                         drop(gui_action_guard);
                         drop(inbox_guard);
-                        return event.map(|e| (AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)))
+                        match event {
+                            Some(e) => return Some((AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
+                            None => { inbox_open = false; continue; }
+                        }
                     }
-                    peers = discovered_guard.recv() => {
+                    peers = discovered_guard.recv(), if discovered_open => {
                         drop(friend_guard);
                         drop(rx_guard);
                         drop(whisper_guard);
                         drop(inbox_guard);
                         drop(gui_action_guard);
                         drop(discovered_guard);
-                        return match peers {
-                            Some(peers) => Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
-                            None => None,
+                        match peers {
+                            Some(peers) => return Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
+                            None => { discovered_open = false; continue; }
                         }
                     }
                     action = gui_action_guard.recv(), if gui_action_open => {
@@ -11764,7 +11822,7 @@ impl IcedChat {
         friend_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
         whisper_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
         inbox_rx: Arc<Mutex<UnboundedReceiver<InboxEvent>>>,
-        discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<PublicKey>>>>,
+        discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
         gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
     ) -> iced::Subscription<AppMessage> {
         let mut subs: Vec<iced::Subscription<AppMessage>> = vec![
@@ -11967,6 +12025,23 @@ impl IcedChat {
 mod tests {
     use super::*;
     use chrono::{FixedOffset, TimeZone, Utc};
+
+    #[test]
+    fn discovered_peer_updates_remove_expired_peers_and_deduplicate_additions() {
+        let first = iroh::SecretKey::generate().public();
+        let second = iroh::SecretKey::generate().public();
+        let mut peers = vec![first, second];
+
+        apply_discovered_peers_update(
+            &mut peers,
+            DiscoveredPeersUpdate {
+                added: vec![second, first],
+                removed: vec![first],
+            },
+        );
+
+        assert_eq!(peers, vec![second]);
+    }
 
     #[test]
     fn close_dialog_uses_the_normal_cancel_message_in_priority_order() {
@@ -13735,7 +13810,7 @@ mod tests {
         });
 
         let (dummy_discovered_tx, dummy_discovered_rx) =
-            tokio::sync::mpsc::channel::<Vec<iroh::PublicKey>>(1);
+            tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(1);
 
         let app = IcedChat::new(
             secret_key,

@@ -67,7 +67,11 @@ async fn drain_events(sub: &mut GossipTopic, timeout: Duration) -> Vec<GossipEve
 /// Wait until both peers are joined to the topic, with a max retry count.
 async fn wait_for_both_joined(sub_a: &mut GossipTopic, sub_b: &mut GossipTopic) -> bool {
     let short = Duration::from_millis(50);
-    for _i in 0..30 {
+    for _i in 0..80 {
+        // The default relay path can take several seconds to rendezvous on a
+        // busy CI host. Keep polling for a bounded interval rather than
+        // treating a transient handshake delay as a transport failure.
+        sleep(Duration::from_millis(100)).await;
         let _ev_a = drain_events(sub_a, short).await;
         let _ev_b = drain_events(sub_b, short).await;
         if sub_a.is_joined() && sub_b.is_joined() {

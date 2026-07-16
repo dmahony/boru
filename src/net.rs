@@ -616,12 +616,6 @@ impl Actor {
         conn: Connection,
         task_result: Result<(), ConnectionLoopError>,
     ) {
-        if conn.close_reason().is_none() {
-            conn.close(0u32.into(), b"close from disconnect");
-        }
-        let reason = conn.close_reason().expect("just closed");
-        let error = task_result.err();
-        warn!(%reason, ?error, "connection closed");
         if let Some(PeerState::Active {
             active_conn_id,
             other_conns,
@@ -630,14 +624,27 @@ impl Actor {
         {
             if conn.stable_id() == *active_conn_id {
                 debug!("active send connection closed, mark peer as disconnected");
+                if conn.close_reason().is_none() {
+                    conn.close(0u32.into(), b"close from disconnect");
+                }
                 self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                     .await;
             } else {
-                other_conns.retain(|x| *x != conn.stable_id());
-                debug!("remaining {} other connections", other_conns.len() + 1);
+                // Backup/redundant connection — do NOT close the QUIC connection
+                // because the remote peer may be using it as their active connection.
+                // Just remove our tracking of it; the sender is dropped here, causing
+                // the idle connection_loop to finally terminate naturally.
+                other_conns.retain(|(id, _)| *id != conn.stable_id());
+                debug!(
+                    "backup connection task finished, {} backup(s) remaining",
+                    other_conns.len()
+                );
             }
         } else {
             debug!("peer already marked as disconnected");
+            if conn.close_reason().is_none() {
+                conn.close(0u32.into(), b"close from disconnect");
+            }
         }
     }
 
@@ -745,7 +752,12 @@ impl Actor {
                         PeerState::Pending { queue } => {
                             if queue.is_empty() {
                                 info!(peer = %peer_id.fmt_short(), "start to dial");
-                                self.dialer.queue_dial(peer_id, self.alpn.clone());
+                                let endpoint_addr = self
+                                    .address_lookup
+                                    .endpoint_addr(peer_id)
+                                    .unwrap_or_else(|| EndpointAddr::new(peer_id));
+                                self.dialer
+                                    .queue_dial(endpoint_addr, self.alpn.clone());
                             }
                             queue.push(message);
                         }
@@ -850,7 +862,13 @@ enum PeerState {
         active_send_tx: mpsc::Sender<ProtoMessage>,
         active_conn_id: ConnId,
         active_conn_origin: ConnOrigin,
-        other_conns: Vec<ConnId>,
+        /// Redundant connections kept alive so the QUIC connection is not
+        /// torn down on the remote peer's side.  Each entry stores the
+        /// connection ID and the message sender — keeping the sender alive
+        /// prevents the old connection_loop (which holds the receiver) from
+        /// terminating, which would close the QUIC connection and disconnect
+        /// the remote peer.
+        other_conns: Vec<(ConnId, mpsc::Sender<ProtoMessage>)>,
     },
 }
 
@@ -874,10 +892,12 @@ impl PeerState {
             // we decided to connect to this peer, so replace the passive Accept with
             // our active Dial.
             (ConnOrigin::Accept, ConnOrigin::Dial) => true,
-            // We already have an outgoing connection we initiated. The incoming
-            // connection from the same peer is redundant — keep our established
-            // connection and reject the new one.
-            (ConnOrigin::Dial, ConnOrigin::Accept) => false,
+            // Simultaneous dial: keep the incoming Accept connection and demote our
+            // own outgoing Dial.  The old Dial connection's sender is kept alive
+            // (stored in other_conns) so its connection_loop does NOT exit and does
+            // NOT close the QUIC connection — that would kill the remote peer's
+            // active connection (they promoted our Dial to their Accept).
+            (ConnOrigin::Dial, ConnOrigin::Accept) => true,
         }
     }
 
@@ -906,11 +926,12 @@ impl PeerState {
             } => {
                 if Self::should_keep_new_session(*old_origin, origin) {
                     // Keep the new connection, demote the old one.
-                    // By dropping the `send_tx` of the old connection, the send loop of
-                    // the old connection_loop will terminate, which also notifies the peer
-                    // that the old connection may be dropped.
-                    other_conns.push(*active_conn_id);
-                    *active_send_tx = send_tx;
+                    // Move the old send_tx into other_conns alongside the old
+                    // conn_id so it is NOT dropped — dropping it would cause the
+                    // old connection_loop (which holds the receiver) to exit and
+                    // close the QUIC connection, disconnecting the remote peer.
+                    let old_tx = std::mem::replace(active_send_tx, send_tx);
+                    other_conns.push((*active_conn_id, old_tx));
                     *active_conn_id = conn_id;
                     *old_origin = origin;
                     Some(Vec::new())
@@ -1029,6 +1050,22 @@ struct AddrInfo {
     direct_addresses: BTreeSet<SocketAddr>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportPath {
+    Direct,
+    Relay,
+}
+
+fn select_transport(endpoint_addr: &EndpointAddr) -> Option<TransportPath> {
+    if endpoint_addr.ip_addrs().next().is_some() {
+        Some(TransportPath::Direct)
+    } else if endpoint_addr.relay_urls().next().is_some() {
+        Some(TransportPath::Relay)
+    } else {
+        None
+    }
+}
+
 impl From<EndpointAddr> for AddrInfo {
     fn from(endpoint_addr: EndpointAddr) -> Self {
         Self {
@@ -1144,8 +1181,9 @@ impl Dialer {
         }
     }
 
-    /// Starts to dial a endpoint by [`EndpointId`].
-    fn queue_dial(&mut self, endpoint_id: EndpointId, alpn: Bytes) {
+    /// Starts to dial a endpoint using direct addresses first, then relay.
+    fn queue_dial(&mut self, endpoint_addr: EndpointAddr, alpn: Bytes) {
+        let endpoint_id = endpoint_addr.id;
         if self.is_pending(endpoint_id) {
             return;
         }
@@ -1154,10 +1192,42 @@ impl Dialer {
         let endpoint = self.endpoint.clone();
         self.pending.spawn(
             async move {
+                let selected = select_transport(&endpoint_addr);
+                debug!(
+                    peer = %endpoint_id.fmt_short(),
+                    ?selected,
+                    "select transport"
+                );
                 let res = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => None,
-                    res = endpoint.connect(endpoint_id, &alpn) => Some(res),
+                    res = async {
+                        let direct_addr = endpoint_addr.ip_addrs().next().map(|_| {
+                            endpoint_addr.ip_addrs().fold(EndpointAddr::new(endpoint_id), |addr, ip| {
+                                addr.with_ip_addr(*ip)
+                            })
+                        });
+                        let relay_addr = endpoint_addr.relay_urls().next().map(|_| {
+                            endpoint_addr.relay_urls().fold(EndpointAddr::new(endpoint_id), |addr, relay| {
+                                addr.with_relay_url(relay.clone())
+                            })
+                        });
+                        if let Some(addr) = direct_addr {
+                            match endpoint.connect(addr, &alpn).await {
+                                Ok(conn) => return Ok(conn),
+                                Err(err) if relay_addr.is_some() => {
+                                    info!(peer = %endpoint_id.fmt_short(), "direct transport failed; falling back to relay: {err}");
+                                }
+                                Err(err) => return Err(err),
+                            }
+                        }
+                        if let Some(addr) = relay_addr {
+                            info!(peer = %endpoint_id.fmt_short(), "connecting via relay transport");
+                            endpoint.connect(addr, &alpn).await
+                        } else {
+                            endpoint.connect(endpoint_id, &alpn).await
+                        }
+                    } => Some(res),
                 };
                 (endpoint_id, res)
             }
@@ -1205,7 +1275,7 @@ impl Dialer {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::time::Duration;
+    use std::{net::SocketAddr, time::Duration};
 
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
@@ -1217,6 +1287,45 @@ pub(crate) mod tests {
         RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
+
+    #[test]
+    fn peer_address_data_preserves_relay_and_direct_addresses() {
+        let endpoint_id = SecretKey::generate().public();
+        let relay_url: RelayUrl = "https://relay.example.test./".parse().unwrap();
+        let direct_one: SocketAddr = "192.0.2.10:1234".parse().unwrap();
+        let direct_two: SocketAddr = "[2001:db8::10]:5678".parse().unwrap();
+        let endpoint_addr = EndpointAddr::new(endpoint_id)
+            .with_relay_url(relay_url.clone())
+            .with_ip_addr(direct_one)
+            .with_ip_addr(direct_two);
+
+        let decoded = decode_peer_data(&encode_peer_data(&AddrInfo::from(endpoint_addr)))
+            .expect("peer address data should round-trip");
+
+        assert_eq!(decoded.relay_url, Some(relay_url));
+        assert_eq!(
+            decoded.direct_addresses,
+            [direct_one, direct_two].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn transport_selection_prefers_direct_and_falls_back_to_relay() {
+        let peer = SecretKey::generate().public();
+        let relay: RelayUrl = "https://relay.example.test./".parse().unwrap();
+        let direct: SocketAddr = "192.0.2.10:1234".parse().unwrap();
+
+        assert_eq!(
+            select_transport(&EndpointAddr::new(peer).with_ip_addr(direct)),
+            Some(TransportPath::Direct)
+        );
+        assert_eq!(
+            select_transport(&EndpointAddr::new(peer).with_relay_url(relay)),
+            Some(TransportPath::Relay)
+        );
+        assert_eq!(select_transport(&EndpointAddr::new(peer)), None);
+    }
+
     use n0_tracing_test::traced_test;
     use rand::{CryptoRng, RngExt};
     use tokio::{spawn, time::timeout};
