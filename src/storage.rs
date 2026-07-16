@@ -254,6 +254,7 @@ impl Storage {
     ///
     /// Runs schema migrations automatically so the database is always at
     /// [`CURRENT_SCHEMA_VERSION`] after this call returns.
+    /// Runs integrity check and crash-state recovery automatically.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
         let data_dir = data_dir.as_ref();
 
@@ -263,8 +264,7 @@ impl Storage {
             if !data_dir.exists() {
                 std::fs::create_dir_all(data_dir).std_context("create data dir")?;
             }
-            let _ =
-                std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700));
+            let _ = std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700));
         }
 
         let db_path = data_dir.join(DB_FILE_NAME);
@@ -276,14 +276,34 @@ impl Storage {
             let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
         }
 
-        // SQLite pragmas for safety and performance.
+        // Crash-safety pragmas: WAL journal for crash recovery, busy timeout
+        // for concurrent access, synchronous=NORMAL for performance + safety.
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;",
+            "PRAGMA journal_mode = WAL;\n             PRAGMA foreign_keys = ON;\n             PRAGMA busy_timeout = 5000;\n             PRAGMA synchronous = NORMAL;",
         )
-        .std_context("set sqlite pragmas")?;
+        .std_context("set crash-safety pragmas")?;
 
+        let storage = Self {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+
+        // Check DB integrity before touching any data.
+        storage.check_integrity()?;
+
+        // Run migrations (handles partial migration recovery internally).
+        storage.run_migrations()?;
+
+        // Recover any state left dangling by a crash.
+        storage.recover_crash_state()?;
+
+        Ok(storage)
+    }
+
+    /// Open an in-memory database (for tests).
+    pub fn memory() -> Result<Self> {
+        let conn = Connection::open_in_memory().std_context("open in-memory sqlite db")?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;\n             PRAGMA synchronous = NORMAL;")
+            .std_context("set pragmas")?;
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -291,16 +311,59 @@ impl Storage {
         Ok(storage)
     }
 
-    /// Open an in-memory database (for tests).
-    pub fn memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().std_context("open in-memory sqlite db")?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .std_context("set foreign keys pragma")?;
-        let storage = Self {
-            conn: Arc::new(Mutex::new(conn)),
-        };
-        storage.run_migrations()?;
-        Ok(storage)
+    /// Run `PRAGMA integrity_check` and return a clear error on corruption.
+    ///
+    /// Never silently deletes or rebuilds a damaged database.
+    fn check_integrity(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let result: String = conn
+            .pragma_query_value(None, "integrity_check", |row| row.get(0))
+            .std_context("integrity check")?;
+        if result != "ok" {
+            return Err(anyhow!(
+                "Database integrity check failed: {result}. \
+                 The database is corrupt and cannot be opened. Restore from backup or delete the file."
+            ).into());
+        }
+        Ok(())
+    }
+
+    /// Recover state left dangling by a crash.
+    ///
+    /// 1. **Crash-left Sent outbox** — rows stuck in `Sent` (1) are reset to
+    ///    `Pending` so the delivery engine retries them.
+    /// 2. **Preserve ACKs** — rows with status `Acked` (2) are never touched.
+    /// 3. **Stale Pending timestamps** — rows with `next_attempt_at_ms` in the
+    ///    future are reset to now so they become due immediately.
+    fn recover_crash_state(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = crate::chat_core::now_ms() as i64;
+
+        // Reset crash-left "Sent" rows back to "Pending".
+        conn.execute(
+            "UPDATE outbox SET
+                status = ?1,
+                next_attempt_at_ms = ?2,
+                last_error_code = 'crash_recovered'
+             WHERE status = ?3 AND attempts > 0",
+            params![
+                crate::store::DeliveryStatus::Pending as u8,
+                now,
+                crate::store::DeliveryStatus::Sent as u8,
+            ],
+        )
+        .std_context("recover crash-left Sent outbox")?;
+
+        // Reset stale Pending timestamps to now.
+        conn.execute(
+            "UPDATE outbox SET
+                next_attempt_at_ms = ?1
+             WHERE status = ?2 AND next_attempt_at_ms > ?3",
+            params![now, crate::store::DeliveryStatus::Pending as u8, now,],
+        )
+        .std_context("recover stale Pending outbox timestamps")?;
+
+        Ok(())
     }
 
     // ── Migrations ────────────────────────────────────────────────────
@@ -318,14 +381,27 @@ impl Storage {
         .std_context("create schema_version table")?;
 
         let current: Option<u32> = conn
-            .query_row(
-                "SELECT MAX(version) FROM schema_version",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
             .optional()
             .std_context("query schema version")?
             .flatten();
+
+        // Guard: if the database was created by a newer version of the
+        // application, refuse to open it. This prevents data loss that
+        // could occur if we silently skipped migrations.
+        if let Some(version) = current {
+            if version > CURRENT_SCHEMA_VERSION {
+                return Err(anyhow!(
+                    "Database has schema version {version}, but this application \
+                     only supports up to version {max}. The database was created \
+                     by a newer version. Upgrade the application or restore from \
+                     a backup created by an older version.",
+                    max = CURRENT_SCHEMA_VERSION,
+                ).into());
+            }
+        }
 
         let start = current.unwrap_or(0);
         if start >= CURRENT_SCHEMA_VERSION {
@@ -565,7 +641,9 @@ impl Storage {
                  FROM inbox WHERE msg_id = ?1",
             )
             .std_context("prepare get_inbox")?;
-        let mut rows = stmt.query([msg_id.as_slice()]).std_context("query get_inbox")?;
+        let mut rows = stmt
+            .query([msg_id.as_slice()])
+            .std_context("query get_inbox")?;
         if let Some(row) = rows.next().std_context("next row")? {
             Ok(Some(row_to_envelope(msg_id, row)?))
         } else {
@@ -950,7 +1028,12 @@ impl Storage {
             "INSERT OR IGNORE INTO message_attachments
                 (event_id, content_hash, display_filename, position)
              VALUES (?1, ?2, ?3, ?4)",
-            params![event_id as i64, content_hash, display_filename, position as i64],
+            params![
+                event_id as i64,
+                content_hash,
+                display_filename,
+                position as i64
+            ],
         )
         .std_context("insert message_attachment")?;
         let id = conn.last_insert_rowid();
@@ -997,9 +1080,7 @@ impl Storage {
     pub fn find_messages_for_file(&self, content_hash: &str) -> Result<Vec<u64>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT event_id FROM message_attachments WHERE content_hash = ?1",
-            )
+            .prepare("SELECT event_id FROM message_attachments WHERE content_hash = ?1")
             .std_context("prepare find_messages_for_file")?;
         let mut rows = stmt
             .query(params![content_hash])
@@ -1153,10 +1234,7 @@ impl Storage {
     }
 
     /// List collections for a profile.
-    pub fn list_collections(
-        &self,
-        profile_user_id: &str,
-    ) -> Result<Vec<FileCollection>> {
+    pub fn list_collections(&self, profile_user_id: &str) -> Result<Vec<FileCollection>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
@@ -1203,10 +1281,7 @@ impl Storage {
     }
 
     /// List items in a collection.
-    pub fn list_collection_items(
-        &self,
-        collection_id: i64,
-    ) -> Result<Vec<FileCollectionItem>> {
+    pub fn list_collection_items(&self, collection_id: i64) -> Result<Vec<FileCollectionItem>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
@@ -1232,11 +1307,7 @@ impl Storage {
     }
 
     /// Remove a file from a collection.
-    pub fn remove_from_collection(
-        &self,
-        collection_id: i64,
-        content_hash: &str,
-    ) -> Result<bool> {
+    pub fn remove_from_collection(&self, collection_id: i64, content_hash: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n = conn
             .execute(
@@ -1349,7 +1420,10 @@ impl Storage {
                 grantee_user_id: row.get(2).std_context("get grantee")?,
                 permission: row.get(3).std_context("get permission")?,
                 created_at_ms: row.get::<_, i64>(4).std_context("get created")? as u64,
-                expires_at_ms: row.get::<_, Option<i64>>(5).std_context("get expires")?.map(|v| v as u64),
+                expires_at_ms: row
+                    .get::<_, Option<i64>>(5)
+                    .std_context("get expires")?
+                    .map(|v| v as u64),
             });
         }
         Ok(results)
@@ -1396,12 +1470,7 @@ impl Storage {
     }
 
     /// Mark a download as failed with an error message.
-    pub fn fail_download(
-        &self,
-        id: i64,
-        error: &str,
-        next_retry_at_ms: Option<u64>,
-    ) -> Result<()> {
+    pub fn fail_download(&self, id: i64, error: &str, next_retry_at_ms: Option<u64>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = now_ms() as i64;
         conn.execute(
@@ -1409,12 +1478,7 @@ impl Storage {
                     retry_count = retry_count + 1, next_retry_at_ms = ?2,
                     updated_at_ms = ?3
              WHERE id = ?4",
-            params![
-                error,
-                next_retry_at_ms.map(|v| v as i64),
-                now,
-                id,
-            ],
+            params![error, next_retry_at_ms.map(|v| v as i64), now, id,],
         )
         .std_context("fail download")?;
         Ok(())
@@ -1464,11 +1528,7 @@ impl Storage {
     /// Update the manifest revision for a profile.
     /// Increments the revision counter so the next call always produces a
     /// higher revision than the previous one.
-    pub fn bump_manifest_revision(
-        &self,
-        user_id: &str,
-        manifest_hash: &str,
-    ) -> Result<u64> {
+    pub fn bump_manifest_revision(&self, user_id: &str, manifest_hash: &str) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
         let now = now_ms() as i64;
 
@@ -1500,10 +1560,7 @@ impl Storage {
     }
 
     /// Get the current manifest state for a profile.
-    pub fn get_manifest_state(
-        &self,
-        user_id: &str,
-    ) -> Result<Option<ProfileManifestState>> {
+    pub fn get_manifest_state(&self, user_id: &str) -> Result<Option<ProfileManifestState>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
@@ -1588,7 +1645,8 @@ impl Storage {
                         row.get::<_, u32>(3).std_context("get attempts")?,
                         row.get::<_, i64>(4).std_context("get next_attempt")?,
                         row.get::<_, Option<String>>(5).std_context("get error")?,
-                        row.get::<_, Option<i64>>(6).std_context("get last_attempt")?,
+                        row.get::<_, Option<i64>>(6)
+                            .std_context("get last_attempt")?,
                     ],
                 )
                 .std_context("insert legacy outbox")?;
@@ -1617,7 +1675,8 @@ impl Storage {
                     params![
                         row.get::<_, Vec<u8>>(0).std_context("get user_id")?,
                         row.get::<_, Vec<u8>>(1).std_context("get device_id")?,
-                        row.get::<_, Option<Vec<u8>>>(2).std_context("get endpoint")?,
+                        row.get::<_, Option<Vec<u8>>>(2)
+                            .std_context("get endpoint")?,
                         row.get::<_, Vec<u8>>(3).std_context("get identity_key")?,
                         row.get::<_, i64>(4).std_context("get last_seen")?,
                         row.get::<_, i64>(5).std_context("get expires_at")?,
@@ -1632,7 +1691,9 @@ impl Storage {
         // Import sync cursors.
         {
             let mut stmt = legacy
-                .prepare("SELECT peer_device_id, last_seen_msg_clock, last_sync_at_ms FROM sync_cursor")
+                .prepare(
+                    "SELECT peer_device_id, last_seen_msg_clock, last_sync_at_ms FROM sync_cursor",
+                )
                 .std_context("prepare legacy sync_cursor")?;
             let mut rows = stmt.query([]).std_context("query legacy sync cursors")?;
             let conn = self.conn.lock().unwrap();
@@ -1767,7 +1828,9 @@ fn row_to_outbox(row: &rusqlite::Row) -> Result<OutboxRow> {
         attempts: row.get(3).std_context("get attempts")?,
         next_attempt_at_ms: row.get::<_, i64>(4).std_context("get next_attempt")? as u64,
         last_error_code: row.get(5).std_context("get error_code")?,
-        last_attempt_at_ms: row.get::<_, Option<i64>>(6).std_context("get last_attempt")?
+        last_attempt_at_ms: row
+            .get::<_, Option<i64>>(6)
+            .std_context("get last_attempt")?
             .map(|v| v as u64),
     })
 }
@@ -1784,7 +1847,9 @@ fn row_to_download(row: &rusqlite::Row) -> Result<Download> {
         updated_at_ms: row.get::<_, i64>(7).std_context("get updated")? as u64,
         last_error: row.get(8).std_context("get error")?,
         retry_count: row.get::<_, i64>(9).std_context("get retries")? as u32,
-        next_retry_at_ms: row.get::<_, Option<i64>>(10).std_context("get next_retry")?
+        next_retry_at_ms: row
+            .get::<_, Option<i64>>(10)
+            .std_context("get next_retry")?
             .map(|v| v as u64),
     })
 }
@@ -1887,13 +1952,7 @@ mod tests {
     fn v2_file_object_round_trip() {
         let storage = Storage::memory().unwrap();
         storage
-            .put_file_object(
-                "abc123",
-                500,
-                "text/plain",
-                "readme.txt",
-                b"hello world",
-            )
+            .put_file_object("abc123", 500, "text/plain", "readme.txt", b"hello world")
             .unwrap();
         assert!(storage.file_object_exists("abc123").unwrap());
         let obj = storage.get_file_object("abc123").unwrap().unwrap();
@@ -1949,9 +2008,7 @@ mod tests {
         let coll_id = storage
             .ensure_collection("alice_key", "docs", Some("My docs"))
             .unwrap();
-        storage
-            .add_to_collection(coll_id, "hash2", 0)
-            .unwrap();
+        storage.add_to_collection(coll_id, "hash2", 0).unwrap();
         let items = storage.list_collection_items(coll_id).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].content_hash, "hash2");
@@ -1966,18 +2023,14 @@ mod tests {
         storage
             .grant_permission("hash3", "alice", "bob", "read", None)
             .unwrap();
-        assert!(storage
-            .check_permission("hash3", "bob", "read")
-            .unwrap());
+        assert!(storage.check_permission("hash3", "bob", "read").unwrap());
         assert!(!storage
             .check_permission("hash3", "bob", "download")
             .unwrap());
         assert!(storage
             .revoke_permission("hash3", "alice", "bob", "read")
             .unwrap());
-        assert!(!storage
-            .check_permission("hash3", "bob", "read")
-            .unwrap());
+        assert!(!storage.check_permission("hash3", "bob", "read").unwrap());
     }
 
     #[test]
@@ -1987,15 +2040,11 @@ mod tests {
         storage
             .put_file_object("hash4", 1024, "application/octet-stream", "large.bin", b"")
             .unwrap();
-        let id = storage
-            .create_download("hash4", "bob_peer", 1024)
-            .unwrap();
+        let id = storage.create_download("hash4", "bob_peer", 1024).unwrap();
         let dl = storage.get_download(id).unwrap().unwrap();
         assert_eq!(dl.state, "queued");
 
-        storage
-            .update_download_progress(id, 512, "active")
-            .unwrap();
+        storage.update_download_progress(id, 512, "active").unwrap();
         let dl = storage.get_download(id).unwrap().unwrap();
         assert_eq!(dl.bytes_downloaded, 512);
 
@@ -2019,10 +2068,7 @@ mod tests {
             .bump_manifest_revision("alice_key", "hash-b")
             .unwrap();
         assert_eq!(rev2, 2);
-        let state = storage
-            .get_manifest_state("alice_key")
-            .unwrap()
-            .unwrap();
+        let state = storage.get_manifest_state("alice_key").unwrap().unwrap();
         assert_eq!(state.revision, 2);
         assert_eq!(state.manifest_hash, "hash-b");
     }
@@ -2033,11 +2079,9 @@ mod tests {
         let version: u32 = storage
             .with_conn(|conn| {
                 Ok(conn
-                    .query_row(
-                        "SELECT MAX(version) FROM schema_version",
-                        [],
-                        |row| row.get(0),
-                    )
+                    .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                        row.get(0)
+                    })
                     .map_err(|e| anyhow!("{}", e))?)
             })
             .unwrap();
@@ -2068,5 +2112,187 @@ mod tests {
         // Attaching to a non-existent file_object should fail.
         let result = storage.attach_file_to_message(1, "no-such-hash", "x.txt", 0);
         assert!(result.is_err());
+    }
+
+    // ── Crash and corruption resilience tests (Step 16) ────────────────
+
+    #[test]
+    fn test_unsupported_schema_version_returns_error() {
+        // If the DB has a schema_version higher than CURRENT_SCHEMA_VERSION,
+        // opening should return a clear error.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("boru.db");
+
+        // Create a valid DB first
+        {
+            let storage = Storage::open(dir.path()).unwrap();
+            // Verify current schema version
+            let version: u32 = storage
+                .with_conn(|conn| {
+                    Ok(conn
+                        .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                            row.get(0)
+                        })
+                        .map_err(|e| anyhow!("{e}"))?)
+                })
+                .unwrap();
+            assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        }
+
+        // Manually insert a higher version to simulate a future-schema DB
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let future_version = CURRENT_SCHEMA_VERSION + 1;
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at_ms) VALUES (?1, ?2)",
+                params![future_version, 9999999999i64],
+            )
+            .unwrap();
+        }
+
+        // Reopening should fail
+        let result = Storage::open(dir.path());
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("schema version") || err.contains("newer version"),
+            "expected version-mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_integrity_check_fails_on_corrupt_db_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("boru.db");
+
+        // Create a valid DB
+        {
+            let _storage = Storage::open(dir.path()).unwrap();
+        }
+
+        // Corrupt it
+        std::fs::write(&db_path, b"garbage data").unwrap();
+
+        // Opening should fail
+        let result = Storage::open(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_crash_left_sent_outbox_recovered_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let msg_id = [1u8; 32];
+        let recipient = random_public_key();
+
+        // First session: insert with Sent state
+        {
+            let storage = Storage::open(dir.path()).unwrap();
+            let env = StoredEnvelope {
+                msg_id,
+                conversation_id: [2u8; 32],
+                author_user_id: random_public_key(),
+                author_device_id: random_public_key(),
+                created_at_ms: 1000,
+                expires_at_ms: 5000,
+                ciphertext: bytes::Bytes::from(vec![1, 2, 3]),
+                signature: [3u8; 64],
+                acked_at_ms: None,
+            };
+            storage.insert_inbox(&env).unwrap();
+            storage.enqueue_outbox(&msg_id, recipient, 1000).unwrap();
+            storage
+                .record_attempt(&msg_id, recipient, 2000, Some("in_flight"))
+                .unwrap();
+        }
+
+        // Second session: crash recovery
+        {
+            let storage = Storage::open(dir.path()).unwrap();
+            let due = storage.fetch_due_outbox(now_ms() + 1000).unwrap();
+            let row = due.iter().find(|r| r.msg_id == msg_id);
+            assert!(
+                row.is_some(),
+                "crash-left Sent outbox should be recovered to Pending"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stale_pending_timestamp_reset_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let msg_id = [1u8; 32];
+        let recipient = random_public_key();
+        let far_future = now_ms() + 86_400_000;
+
+        // First session: insert pending row with future timestamp via raw SQL
+        {
+            let storage = Storage::open(dir.path()).unwrap();
+            let conn = storage.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO outbox (msg_id, recipient_device_id, status, attempts, next_attempt_at_ms)
+                 VALUES (?1, ?2, ?3, 0, ?4)",
+                params![
+                    msg_id.as_slice(),
+                    recipient.as_bytes(),
+                    crate::store::DeliveryStatus::Pending as u8,
+                    far_future as i64,
+                ],
+            )
+            .unwrap();
+        }
+
+        // Second session: timestamp should be reset
+        {
+            let storage = Storage::open(dir.path()).unwrap();
+            let due = storage.fetch_due_outbox(now_ms() + 1000).unwrap();
+            let row = due.iter().find(|r| r.msg_id == msg_id);
+            assert!(
+                row.is_some(),
+                "stale pending timestamp should be recovered to due"
+            );
+        }
+    }
+
+    #[test]
+    fn test_partial_migration_resumes_on_reopen() {
+        // Verify that a partially-applied migration can resume on reopen.
+        // The IF NOT EXISTS in each migration makes re-runs idempotent.
+        let dir = tempfile::tempdir().unwrap();
+
+        // Open and close — runs all migrations
+        {
+            let _s = Storage::open(dir.path()).unwrap();
+        }
+
+        // Insert a fake partial state: remove some v2 tables, keep v1.
+        {
+            let db_path = dir.path().join("boru.db");
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS file_objects;
+                 DROP TABLE IF EXISTS downloads;
+                 DROP TABLE IF EXISTS profile_manifest_state;
+                 DELETE FROM schema_version WHERE version = 2;",
+            )
+            .unwrap();
+        }
+
+        // Reopen — should re-apply v2 migration
+        {
+            let storage = Storage::open(dir.path()).unwrap();
+            // Verify v2 tables exist again
+            assert!(storage.file_object_exists("test").is_ok());
+            // Schema version should be back to current
+            let version: u32 = storage
+                .with_conn(|conn| {
+                    Ok(conn
+                        .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                            row.get(0)
+                        })
+                        .map_err(|e| anyhow!("{e}"))?)
+                })
+                .unwrap();
+            assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        }
     }
 }
