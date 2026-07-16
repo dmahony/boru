@@ -240,5 +240,7 @@ pub mod diagnostics;
 
 /// Durable inbox/outbox storage.
 pub mod store;
+/// Relational storage layer with managed migrations.
+pub mod storage;
 /// Retry queue for durable message delivery.
 pub mod retry;
