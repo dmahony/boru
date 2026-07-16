@@ -516,11 +516,11 @@ fn main() -> Result<()> {
         let whisper_handler = whisper_builder.protocol_handler();
         let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
 
-        // ── Inbox protocol (disabled) ──────────────────────────────────
-        // Offline mailbox is unreliable; using a dummy channel for now.
-        let (_dummy_inbox_tx, dummy_inbox_rx) = tokio::sync::mpsc::unbounded_channel();
-        #[allow(unused_mut)]
-        let mut inbox_events_rx = Arc::new(Mutex::new(dummy_inbox_rx));
+        // ── Inbox protocol ─────────────────────────────────────────────
+        // Direct QUIC channels for offline message delivery to peers.
+        let (inbox_handle, inbox_events_rx_tmp) = InboxHandle::new();
+        let inbox_protocol = InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
+        let inbox_events_rx = Arc::new(Mutex::new(inbox_events_rx_tmp));
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
@@ -528,6 +528,7 @@ fn main() -> Result<()> {
             .accept(FRIEND_PING_ALPN, PingHandler)
             .accept(BACKFILL_ALPN, backfill_handler)
             .accept(WHISPER_ALPN, whisper_handler)
+            .accept(INBOX_ALPN, inbox_protocol)
             .spawn();
 
         // Subscribe to the lobby topic so the gossip mesh is ready for
@@ -610,6 +611,18 @@ fn main() -> Result<()> {
         }
         let discovered_peers_rx = Arc::new(Mutex::new(discovered_peers_rx_tmp));
 
+        // Subscribe to the personal inbox gossip topic so peers can deliver
+        // offline messages.  The subscription is kept alive independently of
+        // the visible chat room.
+        if let Err(e) = inbox_handle
+            .subscribe_inbox_topic(&gossip, local_public)
+            .await
+        {
+            warn!("failed to subscribe to inbox topic: {e}");
+        } else {
+            info!("subscribed to personal inbox topic");
+        }
+
         // Spawn the backfill background actor for requesting history
         let backfill_handle = BackfillHandle::spawn(endpoint.clone());
 
@@ -648,6 +661,13 @@ fn main() -> Result<()> {
                 .map(|record| record.known_addrs.clone())
                 .unwrap_or_default();
             let _ = friend_mgr.add_friend_addrs(peer, addrs).await;
+        }
+
+        // Seed allowed senders for inbox protocol from friends with mailbox keys.
+        // Peers without mailbox keys cannot deliver offline messages — only
+        // friends that have exchanged encryption keys are permitted.
+        for rec in friends.iter().filter_map(|(_, r)| r.mailbox_public_key) {
+            inbox_handle.add_allowed_sender(rec.identity).await;
         }
 
         // Stable `boru1:` invitations intentionally carry no endpoint
