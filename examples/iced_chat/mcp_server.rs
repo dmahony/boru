@@ -2123,7 +2123,12 @@ async fn handle_send_probe(req: &JsonRpcRequest, state: &McpAppState) -> Result<
 
     // Re-read the probe event to get the message hash
     let message_hash = {
-        let events = state.diagnostics.events_since(0, 100, Some(topic));
+        // `broadcast_diagnostic_probe` records ProbeBroadcast before the
+        // gossip topic is available and therefore has no topic filter on the
+        // event. Query the unfiltered stream here; filtering by topic would
+        // silently drop the broadcast event and return an empty hash even
+        // though the probe was accepted and delivered.
+        let events = state.diagnostics.events_since(0, 100, None);
         events
             .iter()
             .rev()
