@@ -1458,7 +1458,11 @@ pub fn handle_net_event(event: NetEvent, cb: &mut impl ChatCallbacks) -> Result<
 }
 
 /// Process a decoded event with explicit room/topic context.
-pub fn handle_net_event_for_topic(event: NetEvent, cb: &mut impl ChatCallbacks, topic: Option<TopicId>) -> Result<()> {
+pub fn handle_net_event_for_topic(
+    event: NetEvent,
+    cb: &mut impl ChatCallbacks,
+    topic: Option<TopicId>,
+) -> Result<()> {
     let event_label = match &event {
         NetEvent::Message { .. } => "Message",
         NetEvent::NeighborUp { .. } => "NeighborUp",
@@ -4168,13 +4172,13 @@ mod tests {
         //   name: varint(5) + b"alice"
         //   profile_image_ticket: Option<String> → serde None (postcard: 0x00 for None, or just missing?)
         let old_bytes = [
-            0x00,             // discriminant 0 = AboutMe
-            0x05,             // name length
+            0x00, // discriminant 0 = AboutMe
+            0x05, // name length
             0x61, 0x6c, 0x69, 0x63, 0x65, // "alice"
-            0x00,             // profile_image_ticket: None (0 = false for Option)
+            0x00, // profile_image_ticket: None (0 = false for Option)
         ];
-        let decoded: Message = postcard::from_bytes(&old_bytes)
-            .expect("old-format AboutMe should decode correctly");
+        let decoded: Message =
+            postcard::from_bytes(&old_bytes).expect("old-format AboutMe should decode correctly");
         assert!(
             matches!(decoded, Message::AboutMe { ref name, profile_image_ticket: None } if name == "alice"),
             "expected AboutMe(\"alice\", None), got {decoded:?}"
@@ -4186,16 +4190,19 @@ mod tests {
         // Old wire format for Message::FileShare { name: "doc.pdf", ticket: "tkt" }
         // discriminant: varint(2) = 0x02
         let old_bytes = [
-            0x02,             // discriminant 2 = FileShare
-            0x07,             // name length
+            0x02, // discriminant 2 = FileShare
+            0x07, // name length
             0x64, 0x6f, 0x63, 0x2e, 0x70, 0x64, 0x66, // "doc.pdf"
-            0x03,             // ticket length
+            0x03, // ticket length
             0x74, 0x6b, 0x74, // "tkt"
         ];
-        let decoded: Message = postcard::from_bytes(&old_bytes)
-            .expect("old-format FileShare should decode correctly");
+        let decoded: Message =
+            postcard::from_bytes(&old_bytes).expect("old-format FileShare should decode correctly");
         match decoded {
-            Message::FileShare { ref name, ref ticket } => {
+            Message::FileShare {
+                ref name,
+                ref ticket,
+            } => {
                 assert_eq!(name, "doc.pdf");
                 assert_eq!(ticket, "tkt");
             }
@@ -4208,9 +4215,12 @@ mod tests {
         // Old wire format for Message::Presence (unit variant)
         // discriminant: varint(4) = 0x04
         let old_bytes = [0x04];
-        let decoded: Message = postcard::from_bytes(&old_bytes)
-            .expect("old-format Presence should decode correctly");
-        assert!(matches!(decoded, Message::Presence), "expected Presence, got {decoded:?}");
+        let decoded: Message =
+            postcard::from_bytes(&old_bytes).expect("old-format Presence should decode correctly");
+        assert!(
+            matches!(decoded, Message::Presence),
+            "expected Presence, got {decoded:?}"
+        );
     }
 
     #[test]
@@ -4218,9 +4228,7 @@ mod tests {
         // ProfileUpdate must NOT use discriminant 1 (the old Message position).
         // Serialize a ProfileUpdate and verify the discriminant byte is NOT 0x01.
         use crate::user_profile::UserProfile;
-        let profile = UserProfile::new(
-            PublicKey::from_bytes(&[1u8; 32]).expect("valid key"),
-        );
+        let profile = UserProfile::new(PublicKey::from_bytes(&[1u8; 32]).expect("valid key"));
         let msg = Message::ProfileUpdate(profile);
         let bytes = postcard::to_stdvec(&msg).unwrap();
         assert_ne!(

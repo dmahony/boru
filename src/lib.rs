@@ -238,9 +238,9 @@ pub mod perf;
 /// automatically evicted when storage limits are exceeded.
 pub mod diagnostics;
 
-/// Durable inbox/outbox storage.
-pub mod store;
-/// Relational storage layer with managed migrations.
-pub mod storage;
 /// Retry queue for durable message delivery.
 pub mod retry;
+/// Relational storage layer with managed migrations.
+pub mod storage;
+/// Durable inbox/outbox storage.
+pub mod store;

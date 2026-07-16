@@ -752,9 +752,7 @@ impl Actor {
                         PeerState::Pending { queue } => {
                             if queue.is_empty() {
                                 info!(peer = %peer_id.fmt_short(), "start to dial");
-                                let endpoint_addr = match self
-                                    .address_lookup
-                                    .endpoint_addr(peer_id)
+                                let endpoint_addr = match self.address_lookup.endpoint_addr(peer_id)
                                 {
                                     Some(addr) => {
                                         info!(
@@ -767,9 +765,7 @@ impl Actor {
                                     }
                                     None => {
                                         let mut found = EndpointAddr::new(peer_id);
-                                        if let Ok(services) =
-                                            self.endpoint.address_lookup()
-                                        {
+                                        if let Ok(services) = self.endpoint.address_lookup() {
                                             let mut stream = services.resolve(peer_id);
                                             match n0_future::time::timeout(
                                                 Duration::from_secs(5),
@@ -784,8 +780,11 @@ impl Actor {
                                                     // Add it from our own published address.
                                                     let our_addr = self.endpoint.addr();
                                                     if found.relay_urls().next().is_none() {
-                                                        if let Some(relay) = our_addr.relay_urls().next() {
-                                                            found = found.with_relay_url(relay.clone());
+                                                        if let Some(relay) =
+                                                            our_addr.relay_urls().next()
+                                                        {
+                                                            found =
+                                                                found.with_relay_url(relay.clone());
                                                             info!(
                                                                 peer = %peer_id.fmt_short(),
                                                                 "added relay URL from endpoint addr: {}",
@@ -811,8 +810,7 @@ impl Actor {
                                         found
                                     }
                                 };
-                                self.dialer
-                                    .queue_dial(endpoint_addr, self.alpn.clone());
+                                self.dialer.queue_dial(endpoint_addr, self.alpn.clone());
                             }
                             queue.push(message);
                         }

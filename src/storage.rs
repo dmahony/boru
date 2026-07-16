@@ -2269,7 +2269,13 @@ mod tests {
             let db_path = dir.path().join("boru.db");
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
-                "DROP TABLE IF EXISTS file_objects;
+                "PRAGMA foreign_keys = OFF;
+                 DROP TABLE IF EXISTS file_objects;
+                 DROP TABLE IF EXISTS message_attachments;
+                 DROP TABLE IF EXISTS shared_files;
+                 DROP TABLE IF EXISTS file_collections;
+                 DROP TABLE IF EXISTS file_collection_items;
+                 DROP TABLE IF EXISTS shared_file_permissions;
                  DROP TABLE IF EXISTS downloads;
                  DROP TABLE IF EXISTS profile_manifest_state;
                  DELETE FROM schema_version WHERE version = 2;",

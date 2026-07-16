@@ -48,7 +48,7 @@ use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_error::{bail_any, Result, StdResultExt};
 
 /// Default relay server — user's VPS, secured with Cloudflare Full SSL.
-const VPS_RELAY_URL: &str = "https://boru.icedcoffee.link";
+const VPS_RELAY_URL: &str = "https://boru.chat";
 use tokio::sync::{watch, Mutex};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};

@@ -40,7 +40,6 @@ use boru_chat::image_optimizer::{
 };
 use boru_chat::image_store::ImageStore;
 use boru_chat::inbox::{send_ack, send_deliver, send_sync_request, AuthorDeleteProof, InboxEvent};
-use boru_chat::store::MessageStore;
 use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
 use boru_chat::net::Gossip;
 use boru_chat::outbox::{OutboxEntry, OutboxStore};
@@ -52,6 +51,7 @@ use boru_chat::room::RoomStore;
 use boru_chat::room_cleanup::delete_room_history;
 use boru_chat::room_docs::{self, RoomMetadata};
 use boru_chat::room_history::{RoomHistoryEntry, RoomHistoryStore};
+use boru_chat::store::MessageStore;
 use boru_chat::user_profile::{UserProfile, UserProfileStore};
 use boru_chat::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
@@ -4277,33 +4277,32 @@ impl IcedChat {
                     collect_bootstrap_peers([&initial_addrs, &saved_addrs]);
                 let initial_addrs_for_save = initial_addrs.clone();
                 let direct_conversation = self.friends.iter().any(|(_, record)| {
-
-                // Include mDNS / DHT-discovered LAN peers as bootstrap addresses
-                // so the room subscription can connect to them directly instead
-                // of waiting for a peer-to-peer discovery exchange on the new
-                // topic.  Discovered peers are ID-only (no transport info
-                // needed — the endpoint's address lookup chain handles
-                // resolution), so we wrap them in a bare EndpointAddr.
-                let discovered_bootstrap_addrs: Vec<EndpointAddr> = self
-                    .discovered_peers
-                    .iter()
-                    .map(|&pk| EndpointAddr::new(pk))
-                    .collect();
-                // Merge discovered peers into the bootstrap list so they are
-                // also passed to gossip.subscribe() for the new room topic.
-                for addr in &discovered_bootstrap_addrs {
-                    if !bootstrap_peers.contains(&addr.id) {
-                        bootstrap_peers.push(addr.id);
+                    // Include mDNS / DHT-discovered LAN peers as bootstrap addresses
+                    // so the room subscription can connect to them directly instead
+                    // of waiting for a peer-to-peer discovery exchange on the new
+                    // topic.  Discovered peers are ID-only (no transport info
+                    // needed — the endpoint's address lookup chain handles
+                    // resolution), so we wrap them in a bare EndpointAddr.
+                    let discovered_bootstrap_addrs: Vec<EndpointAddr> = self
+                        .discovered_peers
+                        .iter()
+                        .map(|&pk| EndpointAddr::new(pk))
+                        .collect();
+                    // Merge discovered peers into the bootstrap list so they are
+                    // also passed to gossip.subscribe() for the new room topic.
+                    for addr in &discovered_bootstrap_addrs {
+                        if !bootstrap_peers.contains(&addr.id) {
+                            bootstrap_peers.push(addr.id);
+                        }
                     }
-                }
-                // Persist bootstrap peers for reconnection.
-                let peers_file = data_dir.join("peers.json");
-                if let Err(error) = std::fs::write(
-                    &peers_file,
-                    serde_json::to_string(&bootstrap_peers).unwrap_or_default(),
-                ) {
-                    warn!(?error, "failed to persist bootstrap peers");
-                }
+                    // Persist bootstrap peers for reconnection.
+                    let peers_file = data_dir.join("peers.json");
+                    if let Err(error) = std::fs::write(
+                        &peers_file,
+                        serde_json::to_string(&bootstrap_peers).unwrap_or_default(),
+                    ) {
+                        warn!(?error, "failed to persist bootstrap peers");
+                    }
                     record
                         .direct_conversation
                         .as_ref()
@@ -4494,7 +4493,10 @@ impl IcedChat {
                     let pending: Vec<PublicKey> = self.discovered_peers.iter().copied().collect();
                     if !pending.is_empty() {
                         let s = sender.clone();
-                        info!(count = pending.len(), "joining pending discovered peers to lobby mesh");
+                        info!(
+                            count = pending.len(),
+                            "joining pending discovered peers to lobby mesh"
+                        );
                         tokio::spawn(async move {
                             for peer in pending {
                                 if let Err(e) = s.join_peers(vec![peer]).await {
@@ -5192,7 +5194,7 @@ impl IcedChat {
                             Ok(()) => AppMessage::Noop,
                             Err(err) => {
                                 AppMessage::ErrorMsg(format!("Could not send chat invite: {err}"))
-                            },
+                            }
                         },
                     ),
                     iced::Task::done(AppMessage::OpenRoom(topic)),
@@ -7226,7 +7228,9 @@ impl IcedChat {
                 if matches!(command, GuiTestCommand::OpenFriends) {
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
-                        boru_chat::diagnostics::ExpectedState::ScreenIs("FriendRequests".to_string()),
+                        boru_chat::diagnostics::ExpectedState::ScreenIs(
+                            "FriendRequests".to_string(),
+                        ),
                     );
                     let _ = self
                         .gui_action_history
@@ -8607,16 +8611,18 @@ impl IcedChat {
         self.conversation_store.touch_and_bump(topic);
         self.update_room_preview(event);
         let safety = self.public_room_safety.clone();
-        if let Err(err) = handle_net_event_with_safety_for_topic(event.clone(), self, safety.as_deref(), Some(*topic)) {
+        if let Err(err) = handle_net_event_with_safety_for_topic(
+            event.clone(),
+            self,
+            safety.as_deref(),
+            Some(*topic),
+        ) {
             warn!(error = %err, "failed to handle network event");
         }
 
         // ── Delivery state transitions ──
         // Echo: our own broadcast returning via gossip → Delivered
-        if let NetEvent::Message {
-            from, message, ..
-        } = event
-        {
+        if let NetEvent::Message { from, message, .. } = event {
             if *from == self.local_public {
                 let msg_hash = message_hash(message);
                 if let Some(&event_id) = self.self_sent_events.get(&msg_hash) {
@@ -8640,10 +8646,7 @@ impl IcedChat {
         // ── Auto ReadReceipt: when user is viewing the chat,
         // send ReadReceipt for incoming remote text messages ──
         let read_receipt_task = if self.follow_latest {
-            if let NetEvent::Message {
-                from, message, ..
-            } = event
-            {
+            if let NetEvent::Message { from, message, .. } = event {
                 if *from != self.local_public {
                     if let crate::Message::Message { .. } = message {
                         let msg_hash = message_hash(message);
@@ -9888,18 +9891,14 @@ impl IcedChat {
         let mut section = Column::new().spacing(SPACE_2);
 
         section = section.push(
-            container(
-                text("Online Peers")
-                    .size(TYPO_XS)
-                    .style(text_muted_style),
-            )
-            .padding(iced::Padding {
-                top: SPACE_8,
-                right: SPACE_12,
-                bottom: SPACE_4,
-                left: SPACE_12,
-            })
-            .width(Length::Fill),
+            container(text("Online Peers").size(TYPO_XS).style(text_muted_style))
+                .padding(iced::Padding {
+                    top: SPACE_8,
+                    right: SPACE_12,
+                    bottom: SPACE_4,
+                    left: SPACE_12,
+                })
+                .width(Length::Fill),
         );
 
         let has_peers = !dep.peers.is_empty();
@@ -10431,18 +10430,15 @@ impl IcedChat {
             .unwrap_or_else(|| format!("Room {}", short_topic));
 
         // Determine connection status for the active conversation peer
-        let peer_online = self
-            .conversation_store
-            .find(&self.topic)
-            .and_then(|entry| {
-                if entry.peer_id.is_empty() {
-                    None
-                } else {
-                    PublicKey::from_str(&entry.peer_id)
-                        .ok()
-                        .map(|pk| self.friend_online_cache.contains(&pk))
-                }
-            });
+        let peer_online = self.conversation_store.find(&self.topic).and_then(|entry| {
+            if entry.peer_id.is_empty() {
+                None
+            } else {
+                PublicKey::from_str(&entry.peer_id)
+                    .ok()
+                    .map(|pk| self.friend_online_cache.contains(&pk))
+            }
+        });
 
         let mut header = column![
             row![

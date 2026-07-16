@@ -279,3 +279,8 @@ mainline = { path = "patched/mainline" }
 name = "test_serde_format"
 path = "tests/test_serde_format.rs"
 required-features = ["net"]
+
+[[test]]
+name = "test_storage_integration"
+path = "tests/test_storage_integration.rs"
+required-features = ["net"]

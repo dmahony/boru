@@ -4,8 +4,8 @@ use crate::store::{MessageStore, StoredEnvelope};
 use iroh::{Endpoint, PublicKey};
 use n0_error::Result;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc;
 
 pub trait InboxSender: Send + Sync {
     fn send_deliver<'a>(
@@ -31,8 +31,18 @@ impl std::fmt::Debug for dyn InboxSender {
 }
 
 impl RetryWorker {
-    pub fn new(store: MessageStore, endpoint: Endpoint, sender: Arc<dyn InboxSender>, trigger: mpsc::Receiver<()>) -> Self {
-        Self { store, endpoint, sender, trigger }
+    pub fn new(
+        store: MessageStore,
+        endpoint: Endpoint,
+        sender: Arc<dyn InboxSender>,
+        trigger: mpsc::Receiver<()>,
+    ) -> Self {
+        Self {
+            store,
+            endpoint,
+            sender,
+            trigger,
+        }
     }
 
     pub async fn run(mut self) {
@@ -50,22 +60,39 @@ impl RetryWorker {
     }
 
     async fn process_due(&self) {
-        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-        
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
         let _ = self.store.expire_outbox(now_ms);
-        
+
         if let Ok(due) = self.store.fetch_due_outbox(now_ms) {
             for row in due {
                 if let Ok(Some(env)) = self.store.get_inbox(&row.msg_id) {
-                    match self.sender.send_deliver(&self.endpoint, row.recipient_device_id, env).await {
+                    match self
+                        .sender
+                        .send_deliver(&self.endpoint, row.recipient_device_id, env)
+                        .await
+                    {
                         Ok(_) => {
-                            // If successful we record attempt. The actual ACK comes via ALPN handler later, 
+                            // If successful we record attempt. The actual ACK comes via ALPN handler later,
                             // but we mark the next retry window in case ACK drops.
-                            let _ = self.store.record_attempt(&row.msg_id, row.recipient_device_id, now_ms + backoff_ms(row.attempts + 1), None);
+                            let _ = self.store.record_attempt(
+                                &row.msg_id,
+                                row.recipient_device_id,
+                                now_ms + backoff_ms(row.attempts + 1),
+                                None,
+                            );
                         }
                         Err(e) => {
                             let err_str = e.to_string();
-                            let _ = self.store.record_attempt(&row.msg_id, row.recipient_device_id, now_ms + backoff_ms(row.attempts + 1), Some(&err_str));
+                            let _ = self.store.record_attempt(
+                                &row.msg_id,
+                                row.recipient_device_id,
+                                now_ms + backoff_ms(row.attempts + 1),
+                                Some(&err_str),
+                            );
                         }
                     }
                 }

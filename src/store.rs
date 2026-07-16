@@ -201,7 +201,8 @@ impl MessageStore {
                 signature BLOB NOT NULL,
                 is_local INTEGER NOT NULL DEFAULT 1
             );
-            ")
+            ",
+        )
         .std_context("init schema")?;
         Ok(())
     }
@@ -329,7 +330,11 @@ impl MessageStore {
                 env.author_user_id.as_bytes(),
                 // Increment unread only if this is a new message AND
                 // the author is NOT the local user.
-                if is_new && env.author_user_id != *local_user_id { 1i32 } else { 0i32 },
+                if is_new && env.author_user_id != *local_user_id {
+                    1i32
+                } else {
+                    0i32
+                },
             ],
         )
         .std_context("upsert conversation meta")?;
@@ -530,11 +535,7 @@ impl MessageStore {
     }
 
     /// Set the muted flag for a conversation.
-    pub fn set_conversation_muted(
-        &self,
-        conversation_id: &[u8; 32],
-        muted: bool,
-    ) -> Result<()> {
+    pub fn set_conversation_muted(&self, conversation_id: &[u8; 32], muted: bool) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO conversation_meta (conversation_id, last_activity_at_ms, is_muted)
@@ -677,7 +678,9 @@ impl MessageStore {
              WHERE is_deleted = 0 AND is_archived = 0
              ORDER BY last_activity_at_ms DESC"
         };
-        let mut stmt = conn.prepare(sql).std_context("prepare list_conversations")?;
+        let mut stmt = conn
+            .prepare(sql)
+            .std_context("prepare list_conversations")?;
         let mut rows = stmt.query([]).std_context("query list_conversations")?;
         let mut results = Vec::new();
         while let Some(row) = rows.next().std_context("next row")? {
@@ -737,11 +740,8 @@ impl MessageStore {
         .std_context("insert local tombstone")?;
 
         // Remove from inbox.
-        conn.execute(
-            "DELETE FROM inbox WHERE msg_id = ?1",
-            [msg_id.as_slice()],
-        )
-        .std_context("delete inbox message")?;
+        conn.execute("DELETE FROM inbox WHERE msg_id = ?1", [msg_id.as_slice()])
+            .std_context("delete inbox message")?;
 
         // Cancel any pending outbound deliveries for this message.
         conn.execute(
@@ -815,11 +815,8 @@ impl MessageStore {
         let is_new = conn.changes() > 0;
 
         // Remove the inbox row if it exists.
-        conn.execute(
-            "DELETE FROM inbox WHERE msg_id = ?1",
-            [msg_id.as_slice()],
-        )
-        .std_context("delete inbox for tombstoned message")?;
+        conn.execute("DELETE FROM inbox WHERE msg_id = ?1", [msg_id.as_slice()])
+            .std_context("delete inbox for tombstoned message")?;
 
         // Cancel pending outbound deliveries.
         conn.execute(
@@ -879,8 +876,8 @@ fn row_to_conversation_meta(row: &rusqlite::Row) -> Result<ConversationMeta> {
     let last_message_preview: String = row.get(3).std_context("get last_message_preview")?;
 
     let last_author_blob: Option<Vec<u8>> = row.get(4).std_context("get last_author_user_id")?;
-    let last_author_user_id = last_author_blob
-        .map(|blob| PublicKey::try_from(blob.as_slice()).unwrap());
+    let last_author_user_id =
+        last_author_blob.map(|blob| PublicKey::try_from(blob.as_slice()).unwrap());
 
     let unread_count: u32 = row.get(5).std_context("get unread_count")?;
     let is_muted: bool = row.get::<_, i32>(6).std_context("get is_muted")? != 0;
@@ -1152,7 +1149,9 @@ mod tests {
         )
         .unwrap();
         let count: u32 = conn
-            .query_row("SELECT COUNT(*) FROM conversation_meta", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM conversation_meta", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(count, 1);
     }
@@ -1237,10 +1236,7 @@ mod tests {
             .unwrap();
 
         // Mark read
-        let prev = store
-            .mark_conversation_read(&conv_id)
-            .unwrap()
-            .unwrap();
+        let prev = store.mark_conversation_read(&conv_id).unwrap().unwrap();
         assert_eq!(prev, 2);
 
         // Unread should now be 0
@@ -1403,7 +1399,9 @@ mod tests {
             .unwrap();
 
         // Archive the second one
-        store.set_conversation_archived(&conv_archived, true).unwrap();
+        store
+            .set_conversation_archived(&conv_archived, true)
+            .unwrap();
 
         // Without archived → only 1
         let list = store.list_conversations(false).unwrap();
@@ -1520,19 +1518,13 @@ mod tests {
         store
             .insert_inbox_with_conversation_update(&env, &local)
             .unwrap();
-        assert_eq!(
-            store.get_unread_count(&conv_id).unwrap().unwrap(),
-            1
-        );
+        assert_eq!(store.get_unread_count(&conv_id).unwrap().unwrap(), 1);
 
         // Duplicate (e.g. from restart replay) → unread stays 1
         store
             .insert_inbox_with_conversation_update(&env, &local)
             .unwrap();
-        assert_eq!(
-            store.get_unread_count(&conv_id).unwrap().unwrap(),
-            1
-        );
+        assert_eq!(store.get_unread_count(&conv_id).unwrap().unwrap(), 1);
     }
 
     #[test]
@@ -1764,7 +1756,9 @@ mod tests {
 
             // Tombstone should block re-insertion
             assert!(!store.insert_inbox(&env).unwrap());
-            assert!(!store.insert_inbox_with_conversation_update(&env, &author).unwrap());
+            assert!(!store
+                .insert_inbox_with_conversation_update(&env, &author)
+                .unwrap());
 
             // get_inbox should return None
             assert!(store.get_inbox(&msg_id).unwrap().is_none());
@@ -1851,7 +1845,9 @@ mod tests {
             assert!(store.is_tombstoned(&msg_id).unwrap());
             let env = make_envelope(msg_id, conv_id, author);
             assert!(!store.insert_inbox(&env).unwrap());
-            assert!(!store.insert_inbox_with_conversation_update(&env, &author).unwrap());
+            assert!(!store
+                .insert_inbox_with_conversation_update(&env, &author)
+                .unwrap());
             assert!(store.get_inbox(&msg_id).unwrap().is_none());
         }
     }
@@ -1871,7 +1867,9 @@ mod tests {
             let store = MessageStore::open(&db_path).unwrap();
             let env = make_envelope(msg_id, conv_id, author);
             assert!(store.insert_inbox(&env).unwrap());
-            assert!(store.insert_tombstone(&msg_id, &conv_id, &author, &signature).unwrap());
+            assert!(store
+                .insert_tombstone(&msg_id, &conv_id, &author, &signature)
+                .unwrap());
             assert!(store.is_tombstoned(&msg_id).unwrap());
         }
 
@@ -1900,7 +1898,9 @@ mod tests {
         store.enqueue_outbox(&msg_id, recipient, 1000).unwrap();
 
         // Apply remote tombstone
-        assert!(store.insert_tombstone(&msg_id, &conv_id, &author, &signature).unwrap());
+        assert!(store
+            .insert_tombstone(&msg_id, &conv_id, &author, &signature)
+            .unwrap());
 
         // Outbound should be cancelled (not due for retry)
         let due = store.fetch_due_outbox(2000).unwrap();
@@ -1956,7 +1956,9 @@ mod tests {
 
         // Tombstone the other remotely
         let signature = [5u8; 64];
-        assert!(store.insert_tombstone(&msg_remote, &conv_id, &author, &signature).unwrap());
+        assert!(store
+            .insert_tombstone(&msg_remote, &conv_id, &author, &signature)
+            .unwrap());
 
         // Both should be tombstoned
         assert!(store.is_tombstoned(&msg_local).unwrap());
@@ -2011,7 +2013,9 @@ mod tests {
 
             // Both insert paths must reject
             assert!(!store.insert_inbox(&env).unwrap());
-            assert!(!store.insert_inbox_with_conversation_update(&env, &author).unwrap());
+            assert!(!store
+                .insert_inbox_with_conversation_update(&env, &author)
+                .unwrap());
         }
     }
 
@@ -2029,11 +2033,15 @@ mod tests {
 
         // Insert, then apply remote tombstone
         assert!(store.insert_inbox(&env).unwrap());
-        assert!(store.insert_tombstone(&msg_id, &conv_id, &author, &signature).unwrap());
+        assert!(store
+            .insert_tombstone(&msg_id, &conv_id, &author, &signature)
+            .unwrap());
 
         // Redelivery attempt should be rejected
         assert!(!store.insert_inbox(&env).unwrap());
-        assert!(!store.insert_inbox_with_conversation_update(&env, &author).unwrap());
+        assert!(!store
+            .insert_inbox_with_conversation_update(&env, &author)
+            .unwrap());
     }
 
     #[test]

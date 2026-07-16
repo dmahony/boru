@@ -18,8 +18,8 @@
 //! Set `BORU_PERF_SLOW_MS` (default 100) — any single operation exceeding
 //! that threshold logs a `warn!`-level tracing event tagged `target: "perf_slow"`.
 
-use std::collections::BTreeMap;
 use parking_lot::Mutex;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -98,10 +98,10 @@ impl PerfTracker {
         }
         let mut samples = PERF.samples.lock();
         samples.push(PerfSample {
-                label,
-                duration_ns: ns,
-                context,
-            });
+            label,
+            duration_ns: ns,
+            context,
+        });
     }
 
     /// Time a closure and record its duration.

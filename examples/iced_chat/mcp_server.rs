@@ -1932,25 +1932,48 @@ async fn handle_join_lobby_room(
         .clamp(1, 60_000);
     let topic = TopicId::from_bytes(*blake3::hash(b"iroh-gossip-chat/default-lobby/v1").as_bytes());
     let room_id = hex::encode(topic.as_bytes());
-    let tx = state.gui_action_tx.clone().ok_or_else(|| "GUI action channel not available".to_string())?;
+    let tx = state
+        .gui_action_tx
+        .clone()
+        .ok_or_else(|| "GUI action channel not available".to_string())?;
     let before = state.diagnostics.latest_sequence();
     let action_id = crate::gui_test_actions::generate_action_key();
-    let command = crate::gui_test_actions::GuiTestCommand::OpenRoom { room_id: room_id.clone() };
+    let command = crate::gui_test_actions::GuiTestCommand::OpenRoom {
+        room_id: room_id.clone(),
+    };
     let request = boru_chat::diagnostics::GuiActionRequest {
         action_id: boru_chat::diagnostics::GuiActionId(action_id.clone()),
-        requested_at_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64,
-        command: serde_json::to_string(&command).map_err(|e| format!("Failed to serialize command: {e}"))?,
+        requested_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64,
+        command: serde_json::to_string(&command)
+            .map_err(|e| format!("Failed to serialize command: {e}"))?,
     };
-    tx.enqueue(request).map_err(|e| format!("GUI action channel error: {}", e.message))?;
+    tx.enqueue(request)
+        .map_err(|e| format!("GUI action channel error: {}", e.message))?;
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
-        if state.diagnostics.build_evidence(Some(topic), None).local_room_joined {
-            let mut rooms = state.rooms.lock().map_err(|e| format!("rooms lock error: {e}"))?;
-            if !rooms.contains(&topic) { rooms.push(topic); }
-            return Ok(serde_json::json!({"success": true, "room_id": room_id, "joined": true, "action_id": action_id}));
+        if state
+            .diagnostics
+            .build_evidence(Some(topic), None)
+            .local_room_joined
+        {
+            let mut rooms = state
+                .rooms
+                .lock()
+                .map_err(|e| format!("rooms lock error: {e}"))?;
+            if !rooms.contains(&topic) {
+                rooms.push(topic);
+            }
+            return Ok(
+                serde_json::json!({"success": true, "room_id": room_id, "joined": true, "action_id": action_id}),
+            );
         }
         if tokio::time::Instant::now() >= deadline {
-            return Ok(serde_json::json!({"success": false, "room_id": room_id, "joined": false, "action_id": action_id, "timed_out": true, "events_observed": state.diagnostics.events_since(before, 200, Some(topic))}));
+            return Ok(
+                serde_json::json!({"success": false, "room_id": room_id, "joined": false, "action_id": action_id, "timed_out": true, "events_observed": state.diagnostics.events_since(before, 200, Some(topic))}),
+            );
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }

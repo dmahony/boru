@@ -7,6 +7,26 @@ a single SQLite database (`message_store.db`) that provides deterministic
 message ordering, unread tracking, durable deletion tombstones, and
 conversation metadata. This document focuses on Step 12: deletion semantics.
 
+## Progress: Steps 13–19
+
+| Step | Description | Status | Artifact |
+|---|---|---|---|
+| 13 | V2 schema: content-addressed file objects | **Done** | `storage::Storage::migrate_v2` — 8 new tables (file_objects, message_attachments, shared_files, file_collections, file_collection_items, shared_file_permissions, downloads, profile_manifest_state) |
+| 14 | Legacy JSON → SQLite migration | **Done** | `storage::Storage::import_legacy_db()` copies inbox, outbox, contacts, sync_cursor; idempotent via ON CONFLICT DO NOTHING |
+| 15 | Schema versioning and migration framework | **Done** | `schema_version` table, `CURRENT_SCHEMA_VERSION=2`, forward-only, future-schema guard, partial-migration recovery |
+| 16 | Crash and corruption resilience | **Done** | `PRAGMA integrity_check` on open, `recover_crash_state()` (Sent→Pending recovery, stale timestamp reset), `PRAGMA journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL` |
+| 17 | Repository integration test suite | **Done** | `tests/test_storage_integration.rs` — 8 deterministic tests covering outgoing queue lifecycle, exactly-once, ordering, key rotation, deletion tombstone, legacy migration, attachment integrity, mixed operations |
+| 18 | Redirect legacy message-store access | **Done** | `Storage::open()` imports existing `message_store.db`; storage integration in GUI is deferred |
+| 19 | Update storage documentation | **Done** | `docs/message-storage-design.md` (comprehensive design doc), `docs/storage-redesign.md` (this file), `README.md` updated |
+
+### Remaining Risk
+
+- `ChatHistoryStore` and `OutboxStore` (JSON) remain as the active frontend
+  persistence layer. The SQLite `Storage` is fully implemented and tested but
+  not yet wired as the primary store in the GUI.
+- A future integration pass should eliminate JSON writes entirely and make
+  `Storage` the authoritative state for the GUI.
+
 ## Deletion and Tombstone Semantics (Step 12)
 
 ### Design Principles

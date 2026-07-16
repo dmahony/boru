@@ -102,11 +102,7 @@ impl AuthorDeleteProof {
     }
 
     /// Create a new signed proof.
-    pub fn sign(
-        author_sk: &SecretKey,
-        msg_id: [u8; 32],
-        conversation_id: [u8; 32],
-    ) -> Self {
+    pub fn sign(author_sk: &SecretKey, msg_id: [u8; 32], conversation_id: [u8; 32]) -> Self {
         let created_at_unix_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -960,10 +956,7 @@ mod tests {
         assert_eq!(decoded.conversation_id, proof.conversation_id);
         assert_eq!(decoded.author, proof.author);
         assert_eq!(decoded.created_at_unix_secs, proof.created_at_unix_secs);
-        assert_eq!(
-            *decoded.author_signature,
-            *proof.author_signature
-        );
+        assert_eq!(*decoded.author_signature, *proof.author_signature);
 
         // Verify still works after deserialization
         assert!(decoded.verify().is_ok());
@@ -977,10 +970,12 @@ mod tests {
         let conv_id = [2u8; 32];
 
         let proof = AuthorDeleteProof::sign(&author_sk, msg_id, conv_id);
-        let encoded = SignedInboxMessage::sign(&sender_sk, InboxPayload::DeleteTombstone(proof)).unwrap();
+        let encoded =
+            SignedInboxMessage::sign(&sender_sk, InboxPayload::DeleteTombstone(proof)).unwrap();
 
         // Verify the outer envelope
-        let (sender, payload, _) = SignedInboxMessage::verify(&encoded, Some(sender_sk.public())).unwrap();
+        let (sender, payload, _) =
+            SignedInboxMessage::verify(&encoded, Some(sender_sk.public())).unwrap();
         assert_eq!(sender, sender_sk.public());
 
         // Verify the inner proof
@@ -1002,14 +997,16 @@ mod tests {
         let conv_id = [2u8; 32];
 
         let proof = AuthorDeleteProof::sign(&author_sk, msg_id, conv_id);
-        let encoded = SignedInboxMessage::sign(&sender_sk, InboxPayload::DeleteTombstone(proof)).unwrap();
+        let encoded =
+            SignedInboxMessage::sign(&sender_sk, InboxPayload::DeleteTombstone(proof)).unwrap();
 
         // The inner proof's msg_id is somewhere in the serialized bytes.
         // We verify that if someone tampers the inner proof AFTER the
         // outer signed message is decoded, the inner proof verification catches it.
 
         // Decode and tamper the inner proof
-        let (_, payload, _) = SignedInboxMessage::verify(&encoded, Some(sender_sk.public())).unwrap();
+        let (_, payload, _) =
+            SignedInboxMessage::verify(&encoded, Some(sender_sk.public())).unwrap();
         match payload {
             InboxPayload::DeleteTombstone(mut inner) => {
                 inner.msg_id[0] ^= 0xFF;
