@@ -7,7 +7,7 @@ STATE_DIR="${HOME}/boru-test"
 PID_FILE="${STATE_DIR}/instance.pid"
 
 usage() {
-    echo "usage: $0 start BINARY MCP_PORT DISPLAY DATA_DIR [RELAY_FLAG] | stop | status MCP_PORT" >&2
+    echo "usage: $0 start BINARY MCP_PORT DISPLAY DATA_DIR [RELAY_FLAG [RELAY_URL]] | stop | status MCP_PORT" >&2
     exit 2
 }
 
@@ -68,11 +68,17 @@ stop_instance() {
 }
 
 run_instance() {
-    local binary="$1" port="$2" display="$3" data_dir="$4" relay_flag="${5:-}"
+    local binary="$1" port="$2" display="$3" data_dir="$4" relay_flag="${5:-}" relay_url="${6:-}"
     local child
     local -a app_args=(--mcp --mcp-bind "127.0.0.1:${port}" --enable-gui-test-actions
         --data-dir "$data_dir" --bind-port 0)
-    [[ -n "$relay_flag" ]] && app_args=("$relay_flag" "${app_args[@]}")
+    if [[ -n "$relay_flag" ]]; then
+        if [[ "$relay_flag" == "--relay" && -n "$relay_url" ]]; then
+            app_args=("$relay_flag" "$relay_url" "${app_args[@]}")
+        else
+            app_args=("$relay_flag" "${app_args[@]}")
+        fi
+    fi
     trap 'kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 143' TERM INT
     # Keep xvfb-run in the foreground so it owns and reaps Xvfb on shutdown.
     DISPLAY=":${display}" xvfb-run -a -n "$display" -s '-screen 0 1280x720x24' \
@@ -82,10 +88,10 @@ run_instance() {
 }
 
 start_instance() {
-    local binary="$1" port="$2" display="$3" data_dir="$4" relay_flag="${5:-}"
+    local binary="$1" port="$2" display="$3" data_dir="$4" relay_flag="${5:-}" relay_url="${6:-}"
     mkdir -p "$STATE_DIR" "$data_dir"
     stop_instance
-    nohup setsid "$0" run "$binary" "$port" "$display" "$data_dir" "$relay_flag" \
+    nohup setsid "$0" run "$binary" "$port" "$display" "$data_dir" "$relay_flag" "$relay_url" \
         >"${data_dir}/instance.log" 2>&1 < /dev/null &
     local pid=$!
     printf '%s\n' "$pid" >"$PID_FILE"

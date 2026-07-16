@@ -115,8 +115,7 @@ tracing-subscriber = { version = "0.3", features = [
 serde_json = { version = "1", optional = true }
 rayon = { version = "1.10.0", optional = true }
 comfy-table = { version = "7.1.4", optional = true }
-ratatui = { version = "0.28.1", default-features = false, features = ["crossterm"], optional = true }
-crossterm = { version = "0.28.1", optional = true }
+
 iced = { version = "0.14", default-features = false, features = ["tokio", "x11", "wayland", "tiny-skia", "image", "lazy", "wgpu"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 mimalloc = { version = "0.1", optional = true }
@@ -179,7 +178,7 @@ simulator = [
     "dep:comfy-table",
 ]
 metrics = ["iroh-metrics/metrics"]
-examples = ["net", "dep:ratatui", "dep:crossterm"]
+examples = ["net"]
 gui = ["net", "dep:iced", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash"]
 
 
@@ -196,10 +195,6 @@ required-features = ["net", "test-utils"]
 [[bin]]
 name = "sim"
 required-features = ["simulator"]
-
-[[example]]
-name = "chat"
-required-features = ["examples"]
 
 [[example]]
 name = "setup"

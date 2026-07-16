@@ -19,7 +19,7 @@ use irpc::WithChannels;
 use n0_error::{e, stack_error};
 use n0_future::{
     task::{self, AbortOnDropHandle, JoinSet},
-    time::Instant,
+    time::{Duration, Instant},
     Stream, StreamExt as _,
 };
 use rand::{rngs::StdRng, SeedableRng};
@@ -614,7 +614,7 @@ impl Actor {
         &mut self,
         peer_id: EndpointId,
         conn: Connection,
-        task_result: Result<(), ConnectionLoopError>,
+        _task_result: Result<(), ConnectionLoopError>,
     ) {
         if let Some(PeerState::Active {
             active_conn_id,
@@ -752,10 +752,65 @@ impl Actor {
                         PeerState::Pending { queue } => {
                             if queue.is_empty() {
                                 info!(peer = %peer_id.fmt_short(), "start to dial");
-                                let endpoint_addr = self
+                                let endpoint_addr = match self
                                     .address_lookup
                                     .endpoint_addr(peer_id)
-                                    .unwrap_or_else(|| EndpointAddr::new(peer_id));
+                                {
+                                    Some(addr) => {
+                                        info!(
+                                            peer = %peer_id.fmt_short(),
+                                            "dial from gossip lookup: relay={:?} ips={:?}",
+                                            addr.relay_urls().next(),
+                                            addr.ip_addrs().cloned().collect::<Vec<_>>(),
+                                        );
+                                        addr
+                                    }
+                                    None => {
+                                        let mut found = EndpointAddr::new(peer_id);
+                                        if let Ok(services) =
+                                            self.endpoint.address_lookup()
+                                        {
+                                            let mut stream = services.resolve(peer_id);
+                                            match n0_future::time::timeout(
+                                                Duration::from_secs(5),
+                                                stream.next(),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Some(Ok(Ok(item)))) => {
+                                                    found = item.into_endpoint_addr();
+                                                    // mDNS doesn't reliably include the
+                                                    // relay URL (TXT records arrive later).
+                                                    // Add it from our own published address.
+                                                    let our_addr = self.endpoint.addr();
+                                                    if found.relay_urls().next().is_none() {
+                                                        if let Some(relay) = our_addr.relay_urls().next() {
+                                                            found = found.with_relay_url(relay.clone());
+                                                            info!(
+                                                                peer = %peer_id.fmt_short(),
+                                                                "added relay URL from endpoint addr: {}",
+                                                                relay,
+                                                            );
+                                                        }
+                                                    }
+                                                    info!(
+                                                        peer = %peer_id.fmt_short(),
+                                                        "dial from endpoint lookup: relay={:?} ips={:?}",
+                                                        found.relay_urls().next(),
+                                                        found.ip_addrs().cloned().collect::<Vec<_>>(),
+                                                    );
+                                                }
+                                                _ => {
+                                                    info!(
+                                                        peer = %peer_id.fmt_short(),
+                                                        "dial from endpoint lookup: TIMEOUT/EMPTY, using bare ID",
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        found
+                                    }
+                                };
                                 self.dialer
                                     .queue_dial(endpoint_addr, self.alpn.clone());
                             }
@@ -1188,6 +1243,13 @@ impl Dialer {
             return;
         }
         let cancel = CancellationToken::new();
+        let guard_cancel = cancel.clone();
+        // Spawn a task that cancels the dial after 15s so a hung
+        // QUIC connect doesn't block forever.
+        tokio::task::spawn(async move {
+            n0_future::time::sleep(Duration::from_secs(15)).await;
+            guard_cancel.cancel();
+        });
         self.pending_dials.insert(endpoint_id, cancel.clone());
         let endpoint = self.endpoint.clone();
         self.pending.spawn(
@@ -1212,13 +1274,23 @@ impl Dialer {
                                 addr.with_relay_url(relay.clone())
                             })
                         });
+                        // Try direct first with a short timeout so a hung
+                        // QUIC handshake falls back to the relay promptly.
                         if let Some(addr) = direct_addr {
-                            match endpoint.connect(addr, &alpn).await {
-                                Ok(conn) => return Ok(conn),
-                                Err(err) if relay_addr.is_some() => {
-                                    info!(peer = %endpoint_id.fmt_short(), "direct transport failed; falling back to relay: {err}");
+                            match n0_future::time::timeout(
+                                Duration::from_secs(5),
+                                endpoint.connect(addr, &alpn),
+                            )
+                            .await
+                            {
+                                Ok(Ok(conn)) => return Ok(conn),
+                                Ok(Err(err)) if relay_addr.is_some() => {
+                                    info!(peer = %endpoint_id.fmt_short(), "direct connect failed; falling back to relay: {err}");
                                 }
-                                Err(err) => return Err(err),
+                                Ok(Err(err)) => return Err(err),
+                                Err(_) => {
+                                    info!(peer = %endpoint_id.fmt_short(), "direct connect timed out; falling back to relay");
+                                }
                             }
                         }
                         if let Some(addr) = relay_addr {
