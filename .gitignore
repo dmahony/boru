@@ -8,3 +8,6 @@ hermes_verify_profile.py
 repair.py
 src/*.bak
 .deploy-logs/
+start-testing.sh
+deploy-boru-test.sh
+examples/lan_test.rs
