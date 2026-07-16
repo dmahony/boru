@@ -5155,8 +5155,10 @@ impl IcedChat {
             }
 
             AppMessage::OpenFriendChat(peer) => {
-                // Open the direct chat — used when an outgoing request has been
-                // accepted, or when the user clicks "Open Chat" on a friend.
+                // A Chat click is an explicit direct-chat invitation.  Do not
+                // require a prior friend-request round trip: the recipient
+                // treats this authenticated invitation as acceptance and opens
+                // the same deterministic room automatically.
                 let fid = FriendId::from_public_key(peer);
                 let topic = direct_topic(&self.local_public, &peer);
                 let known_addrs = self
@@ -5169,7 +5171,31 @@ impl IcedChat {
                 let room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                 let _ = room.save();
                 self.try_save_friends();
-                iced::Task::done(AppMessage::OpenRoom(topic))
+                let action = ContactAction::ConversationInvite {
+                    topic,
+                    addrs: vec![self.endpoint.addr()],
+                };
+                let payload = match SignedContactMessage::sign(&self.secret_key, &action) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        return iced::Task::done(AppMessage::ErrorMsg(format!(
+                            "Could not create chat invite: {err}"
+                        )));
+                    }
+                };
+                let whisper_handle = self.whisper_handle.clone();
+                iced::Task::batch(vec![
+                    iced::Task::perform(
+                        async move { whisper_handle.send_control(peer, payload.into()).await },
+                        |result| match result {
+                            Ok(()) => AppMessage::Noop,
+                            Err(err) => {
+                                AppMessage::ErrorMsg(format!("Could not send chat invite: {err}"))
+                            },
+                        },
+                    ),
+                    iced::Task::done(AppMessage::OpenRoom(topic)),
+                ])
             }
 
             AppMessage::RoomSelected(topic) => iced::Task::done(AppMessage::OpenRoom(topic)),
@@ -6224,74 +6250,30 @@ impl IcedChat {
                                 if addrs.iter().all(|addr| addr.id == sender) =>
                             {
                                 let local_pk = self.local_public;
-                                let sender_str = sender.to_string();
-                                let local_str = local_pk.to_string();
-
-                                // Check if this is a response to our outgoing request
-                                let is_outgoing = self.friend_request_store.iter().any(|r| {
-                                    r.requester == local_str
-                                        && r.recipient == sender_str
-                                        && r.status == FriendRequestStatus::Pending
-                                });
-
-                                if is_outgoing {
-                                    // This is the recipient accepting our request
-                                    let fid = FriendId::from_public_key(sender);
-                                    let record = self.friends.ensure_friend(fid);
-                                    record.record_addrs(addrs.clone());
-                                    record.relationship = FriendRelationship::Friends;
-                                    record.set_direct_conversation(
-                                        topic,
-                                        DirectConversationState::Active,
-                                    );
-                                    let room = RoomStore::with_peers(&self.data_dir, topic, addrs);
-                                    let _ = room.save();
-                                    // Show the accepted friend immediately in the sidebar.
-                                    self.friend_online_cache.insert(sender);
-                                    self.mark_friends_sidebar_dirty();
-                                    self.try_save_friends();
-                                    self.outgoing_request_states
-                                        .insert(sender, OutgoingRequestState::Accepted);
-                                    self.rebuild_join_request_list();
-                                    return iced::Task::done(AppMessage::OpenRoom(topic));
+                                // ConversationInvite is an authenticated, explicit
+                                // Chat click.  Validate the stable topic before
+                                // accepting it, then auto-accept and open it.
+                                if topic != direct_topic(&local_pk, &sender) {
+                                    debug!("ignoring contact invite with invalid direct topic");
+                                    return iced::Task::none();
                                 }
-
-                                // New incoming request — store in friend_request_store
                                 let fid = FriendId::from_public_key(sender);
                                 let record = self.friends.ensure_friend(fid);
                                 record.record_addrs(addrs.clone());
                                 record.set_direct_conversation(
                                     topic,
-                                    DirectConversationState::Pending,
+                                    DirectConversationState::Active,
                                 );
+                                record.relationship = FriendRelationship::Friends;
+                                let room = RoomStore::with_peers(&self.data_dir, topic, addrs);
+                                let _ = room.save();
                                 self.try_save_friends();
-
-                                match self.friend_request_store.send_request(
-                                    &sender_str,
-                                    &local_str,
-                                    None,
-                                ) {
-                                    Ok(_request) => {
-                                        self.requests_sidebar_revision =
-                                            self.requests_sidebar_revision.wrapping_add(1);
-                                        if let Err(err) = self.friend_request_store.save() {
-                                            debug!(
-                                                error = %err,
-                                                "failed to save friend request store"
-                                            );
-                                        }
-                                    }
-                                    Err(FriendRequestError::DuplicatePending { .. }) => {
-                                        // Already have a pending request — nothing to do
-                                    }
-                                    Err(err) => {
-                                        debug!(
-                                            error = %err,
-                                            "failed to store incoming friend request"
-                                        );
-                                    }
-                                }
-                                return iced::Task::none();
+                                self.friend_online_cache.insert(sender);
+                                self.mark_friends_sidebar_dirty();
+                                self.outgoing_request_states
+                                    .insert(sender, OutgoingRequestState::Accepted);
+                                self.rebuild_join_request_list();
+                                return iced::Task::done(AppMessage::OpenRoom(topic));
                             }
                             Ok((sender, ContactAction::AddressUpdate { addrs }))
                                 if addrs.iter().all(|addr| addr.id == sender) =>

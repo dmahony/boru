@@ -19,9 +19,9 @@ const MAX_CONTROL_CLOCK_SKEW_SECS: u64 = 24 * 60 * 60;
 ///
 /// Friend-request actions (`FriendRequest`, `FriendRequestAccepted`,
 /// `FriendRequestRejected`) are distinct from conversation actions
-/// (`ConversationInvite`).  Accepting a friend request does **not**
-/// auto-open a conversation — the user must explicitly invite their
-/// existing friend to a direct conversation.
+/// (`ConversationInvite`).  A `ConversationInvite` is also the authenticated
+/// signal emitted by the explicit Chat action; its recipient may auto-accept
+/// and open the deterministic direct room without a separate friend request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContactAction {
     /// Ask a peer to become friends (replaces `ContactRequest`).
