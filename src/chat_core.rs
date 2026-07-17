@@ -42,6 +42,9 @@ use crate::user_profile::UserProfile;
 /// (5 000 events, 1 000 received probes).
 pub static DIAGNOSTICS: LazyLock<Diagnostics> = LazyLock::new(Diagnostics::new);
 
+/// Maximum clock-skew tolerance for future-dated messages (5 minutes).
+const MAX_FUTURE_SKEW_SECS: u64 = 300;
+
 // ── Bootstrap peer resolution ─────────────────────────────────────────────────
 
 /// Collect unique bootstrap peer IDs from multiple address sources, preserving
@@ -1529,18 +1532,32 @@ pub fn handle_net_event_for_topic(
             };
 
             if from != cb.local_public() {
-                let age_secs = SystemTime::now()
+                let now_secs = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_secs()
-                    .saturating_sub(sent_at);
+                    .as_secs();
                 let ttl_secs = cb.message_ttl().as_secs();
+
+                // Check for past-expired messages.
+                let age_secs = now_secs.saturating_sub(sent_at);
                 if age_secs > ttl_secs {
                     tracing::debug!(
                         "dropping stale message from {} (age {}s > TTL {}s)",
                         from.fmt_short(),
                         age_secs,
                         ttl_secs,
+                    );
+                    return Ok(());
+                }
+
+                // Check for future-dated messages beyond clock-skew tolerance.
+                let skew_secs = sent_at.saturating_sub(now_secs);
+                if skew_secs > MAX_FUTURE_SKEW_SECS {
+                    tracing::debug!(
+                        "dropping future-dated message from {} (skew {}s > MAX_FUTURE_SKEW_SECS {}s)",
+                        from.fmt_short(),
+                        skew_secs,
+                        MAX_FUTURE_SKEW_SECS,
                     );
                     return Ok(());
                 }

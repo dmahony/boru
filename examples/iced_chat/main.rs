@@ -663,12 +663,27 @@ fn main() -> Result<()> {
             let _ = friend_mgr.add_friend_addrs(peer, addrs).await;
         }
 
-        // Seed allowed senders for inbox protocol from friends with mailbox keys.
-        // Peers without mailbox keys cannot deliver offline messages — only
-        // friends that have exchanged encryption keys are permitted.
-        for rec in friends.iter().filter_map(|(_, r)| r.mailbox_public_key) {
-            inbox_handle.add_allowed_sender(rec.identity).await;
-        }
+        // Authorize inbox traffic through the persistent repository at receipt
+        // time, rather than taking a startup snapshot.  This makes accepting,
+        // blocking/removing a contact, and mailbox-key rotation effective for
+        // already-running connections and also reconstructs correctly after a
+        // restart.
+        let friends_data_dir = data_dir.clone();
+        inbox_handle
+            .set_authorization_fn(Some(Arc::new(move |peer| {
+                let Ok(store) = FriendsStore::load(&friends_data_dir) else {
+                    return false;
+                };
+                let authorized = store.iter().any(|(id, record)| {
+                    id.parse_public_key().ok() == Some(peer)
+                        && record.relationship.can_message()
+                        && record
+                            .mailbox_public_key
+                            .is_some_and(|mailbox| mailbox.identity == peer)
+                });
+                authorized
+            })))
+            .await;
 
         // Stable `boru1:` invitations intentionally carry no endpoint
         // address.  Keep the shared tracker client in the GUI so those

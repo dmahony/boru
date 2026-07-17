@@ -234,6 +234,11 @@ fn signing_bytes(timestamp: u64, inner: &InboxPayload) -> Vec<u8> {
 pub struct InboxInner {
     /// Set of senders whose messages are currently accepted (contact/allowed peers).
     pub allowed_senders: HashSet<PublicKey>,
+    /// Live authorization lookup used at connection/message receipt time.
+    ///
+    /// This deliberately is not a snapshot: contact lifecycle changes must
+    /// take effect without restarting the inbox protocol.
+    pub authorization_fn: Option<Arc<dyn Fn(PublicKey) -> bool + Send + Sync>>,
     /// Deduplication: message ids seen within the replay window.
     pub seen_message_ids: HashMap<InboxMessageId, u64>,
     /// Channel to forward received envelopes to the frontend.
@@ -248,6 +253,10 @@ impl std::fmt::Debug for InboxInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InboxInner")
             .field("allowed_senders", &self.allowed_senders)
+            .field(
+                "authorization_fn",
+                &self.authorization_fn.as_ref().map(|_| "Some(...)"),
+            )
             .field("seen_message_ids", &self.seen_message_ids)
             .field("envelope_tx", &self.envelope_tx)
             .field("pending_fn", &self.pending_fn.as_ref().map(|_| "Some(...)"))
@@ -302,6 +311,7 @@ impl InboxHandle {
         let (envelope_tx, envelope_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Mutex::new(InboxInner {
             allowed_senders: HashSet::new(),
+            authorization_fn: None,
             seen_message_ids: HashMap::new(),
             envelope_tx,
             pending_fn: None,
@@ -337,6 +347,20 @@ impl InboxHandle {
     /// Replace the set of allowed senders.
     pub async fn set_allowed_senders(&self, peers: HashSet<PublicKey>) {
         self.inner.lock().await.allowed_senders = peers;
+    }
+
+    /// Install the repository-backed authorization lookup.
+    ///
+    /// The callback is evaluated for every incoming connection and every
+    /// request on an existing connection.  The legacy allowed-sender set is
+    /// retained for callers that do not configure a repository (and for
+    /// backwards-compatible tests), but production frontends should use this
+    /// method rather than maintaining a permission cache.
+    pub async fn set_authorization_fn(
+        &self,
+        f: Option<Arc<dyn Fn(PublicKey) -> bool + Send + Sync>>,
+    ) {
+        self.inner.lock().await.authorization_fn = f;
     }
 
     /// Set a function that provides pending envelopes for SyncRequest.
@@ -422,7 +446,12 @@ impl ProtocolHandler for InboxProtocol {
         // Check authorization before accepting any streams.
         {
             let guard = self.inner.lock().await;
-            if !guard.allowed_senders.contains(&remote_id) {
+            let authorized = guard
+                .authorization_fn
+                .as_ref()
+                .map(|f| f(remote_id))
+                .unwrap_or_else(|| guard.allowed_senders.contains(&remote_id));
+            if !authorized {
                 return Err(AcceptError::from_err(n0_error::anyerr!(
                     "inbox connection from unauthorized peer {}",
                     remote_id.fmt_short()
@@ -515,6 +544,21 @@ impl InboxProtocol {
 
         let mut guard = inner.lock().await;
 
+        // Re-check against the live repository for every message.  A peer
+        // may have been blocked/removed while its QUIC connection remained
+        // open; a connection-level check alone would incorrectly accept it.
+        let authorized = guard
+            .authorization_fn
+            .as_ref()
+            .map(|f| f(verified_sender))
+            .unwrap_or_else(|| guard.allowed_senders.contains(&verified_sender));
+        if !authorized {
+            return Err(n0_error::anyerr!(
+                "inbox message from unauthorized peer {}",
+                verified_sender.fmt_short()
+            ));
+        }
+
         match payload {
             InboxPayload::Deliver(envelope) => {
                 // Dedup by message_id.
@@ -547,6 +591,10 @@ impl InboxProtocol {
                 Ok(None)
             }
             InboxPayload::Ack(ack) => {
+                // Verify the inner MailboxAck signature before forwarding.
+                ack.verify(verified_sender).map_err(|e| {
+                    n0_error::anyerr!("inbox: rejecting ack with invalid signature: {e}")
+                })?;
                 let _ = guard.envelope_tx.send(InboxEvent::AckReceived {
                     from: verified_sender,
                     ack,
@@ -771,6 +819,7 @@ pub async fn send_delete_tombstone(
 mod tests {
     use super::*;
     use iroh::SecretKey;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Helpers to create deterministic test messages.
     fn test_secret_key() -> SecretKey {
@@ -865,6 +914,35 @@ mod tests {
         // After removing, it's not allowed.
         handle.remove_allowed_sender(&peer).await;
         assert!(!handle.is_allowed_sender(&peer).await);
+    }
+
+    /// Authorization is evaluated for each message, so revocation takes effect
+    /// without rebuilding the protocol handler or restarting the process.
+    #[tokio::test]
+    async fn inbox_live_authorization_rejects_after_revocation() {
+        let peer_sk = test_secret_key();
+        let peer = peer_sk.public();
+        let (handle, _rx) = InboxHandle::new();
+        let live = Arc::new(AtomicBool::new(true));
+        let live_for_lookup = Arc::clone(&live);
+        handle
+            .set_authorization_fn(Some(Arc::new(move |candidate| {
+                candidate == peer && live_for_lookup.load(Ordering::SeqCst)
+            })))
+            .await;
+
+        let request =
+            SignedInboxMessage::sign(&peer_sk, InboxPayload::SyncRequest { since_ms: 0 }).unwrap();
+        assert!(
+            InboxProtocol::handle_request(&handle.inner(), peer, &request)
+                .await
+                .is_ok()
+        );
+
+        live.store(false, Ordering::SeqCst);
+        let result = InboxProtocol::handle_request(&handle.inner(), peer, &request).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unauthorized"));
     }
 
     /// Verify that duplicate message ids are rejected (dedup).

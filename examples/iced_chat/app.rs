@@ -8788,11 +8788,12 @@ impl IcedChat {
 
     fn try_save_friends(&mut self) {
         if self.friends_dirty {
+            // Authorization is derived from friends.json at inbox receipt
+            // time, so persist relationship/key changes before returning to
+            // the event loop.  An async snapshot can race an incoming
+            // message and leave a newly accepted contact unauthorized.
             self.friends_dirty = false;
-            let friends = self.friends.clone();
-            let _ = std::thread::spawn(move || {
-                let _ = friends.save();
-            });
+            let _ = self.friends.save();
         }
     }
 

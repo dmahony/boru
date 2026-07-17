@@ -8,6 +8,15 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::chat_core::DIAGNOSTICS;
+use crate::diagnostics::DiagnosticEventKind;
+use crate::proto::TopicId;
+
+/// Helper: produce a stable 8-char hex prefix from a 32-byte hash.
+fn short_id(id: &[u8; 32]) -> String {
+    hex::encode(&id[..4])
+}
+
 pub type MessageId = [u8; 32];
 
 /// Delivery status of an outbox message.
@@ -57,6 +66,9 @@ pub struct OutboxRow {
     pub next_attempt_at_ms: u64,
     pub last_error_code: Option<String>,
     pub last_attempt_at_ms: Option<u64>,
+    pub lease_owner: Option<String>,
+    pub locked_until_ms: Option<u64>,
+    pub expires_at_ms: Option<u64>,
 }
 
 /// Per-conversation metadata tracked in SQLite.
@@ -249,7 +261,34 @@ impl MessageStore {
             ],
         )
         .std_context("insert inbox")?;
-        Ok(conn.changes() > 0)
+        let is_new = conn.changes() > 0;
+        // Record diagnostic event.
+        let msg_short = short_id(&env.msg_id);
+        let conv_prefix = short_id(&env.conversation_id);
+        let peer = Some(env.author_user_id.to_string());
+        if is_new {
+            DIAGNOSTICS.record_with_peer(
+                None,
+                peer.as_deref(),
+                DiagnosticEventKind::IncomingPersisted {
+                    message_id_short: Some(msg_short),
+                    conversation_id_prefix: Some(conv_prefix),
+                    peer_id: peer.clone(),
+                    delivery_state: "Inbox".to_string(),
+                },
+            );
+        } else {
+            DIAGNOSTICS.record_with_peer(
+                None,
+                peer.as_deref(),
+                DiagnosticEventKind::DuplicateReceived {
+                    message_id_short: Some(msg_short),
+                    conversation_id_prefix: Some(conv_prefix),
+                    peer_id: peer.clone(),
+                },
+            );
+        }
+        Ok(is_new)
     }
 
     /// Inserts an envelope and atomically updates conversation metadata,
@@ -338,6 +377,33 @@ impl MessageStore {
             ],
         )
         .std_context("upsert conversation meta")?;
+
+        // Record diagnostic event.
+        let msg_short = short_id(&env.msg_id);
+        let conv_prefix = short_id(&env.conversation_id);
+        let peer = Some(env.author_user_id.to_string());
+        if is_new {
+            DIAGNOSTICS.record_with_peer(
+                None,
+                peer.as_deref(),
+                DiagnosticEventKind::IncomingPersisted {
+                    message_id_short: Some(msg_short),
+                    conversation_id_prefix: Some(conv_prefix),
+                    peer_id: peer.clone(),
+                    delivery_state: "Inbox".to_string(),
+                },
+            );
+        } else {
+            DIAGNOSTICS.record_with_peer(
+                None,
+                peer.as_deref(),
+                DiagnosticEventKind::DuplicateReceived {
+                    message_id_short: Some(msg_short),
+                    conversation_id_prefix: Some(conv_prefix),
+                    peer_id: peer.clone(),
+                },
+            );
+        }
 
         Ok(is_new)
     }
@@ -922,6 +988,20 @@ impl MessageStore {
             ],
         )
         .std_context("insert outbox")?;
+        let is_new = conn.changes() > 0;
+        if is_new {
+            let peer = recipient_device_id.to_string();
+            DIAGNOSTICS.record_with_peer(
+                None,
+                Some(&peer),
+                DiagnosticEventKind::MessageQueued {
+                    message_id_short: Some(short_id(msg_id)),
+                    conversation_id_prefix: None,
+                    peer_id: Some(peer.clone()),
+                    delivery_state: "Pending".to_string(),
+                },
+            );
+        }
         Ok(())
     }
 
@@ -937,6 +1017,20 @@ impl MessageStore {
             ],
         )
         .std_context("mark acked")?;
+        if conn.changes() > 0 {
+            let peer = recipient_device_id.to_string();
+            DIAGNOSTICS.record_with_peer(
+                None,
+                Some(&peer),
+                DiagnosticEventKind::AckReceived {
+                    message_id_short: Some(short_id(msg_id)),
+                    conversation_id_prefix: None,
+                    peer_id: Some(peer.clone()),
+                    attempt_count: 0,
+                    elapsed_ms: None,
+                },
+            );
+        }
         Ok(())
     }
 
@@ -973,6 +1067,46 @@ impl MessageStore {
             ],
         )
         .std_context("record attempt")?;
+        if conn.changes() > 0 {
+            let peer = recipient_device_id.to_string();
+            let msg_short = short_id(msg_id);
+            let delay = next_attempt_at_ms.saturating_sub(now_ms);
+            if let Some(err) = error_code {
+                let category = if err.contains("timeout") || err.contains("Connection") {
+                    "connection".to_string()
+                } else if err.contains("reject") || err.contains("unauthorized") {
+                    "rejected".to_string()
+                } else if err.contains("expir") {
+                    "expired".to_string()
+                } else {
+                    "transient".to_string()
+                };
+                DIAGNOSTICS.record_with_peer(
+                    None,
+                    Some(&peer),
+                    DiagnosticEventKind::RetryScheduled {
+                        message_id_short: Some(msg_short),
+                        conversation_id_prefix: None,
+                        peer_id: Some(peer.clone()),
+                        attempt_count: 0, // actual count read from DB separately
+                        retry_delay_ms: delay,
+                        failure_category: category,
+                    },
+                );
+            } else {
+                DIAGNOSTICS.record_with_peer(
+                    None,
+                    Some(&peer),
+                    DiagnosticEventKind::DeliveryAttemptStarted {
+                        message_id_short: Some(msg_short),
+                        conversation_id_prefix: None,
+                        peer_id: Some(peer.clone()),
+                        attempt_count: 0,
+                        retry_delay_ms: None,
+                    },
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1017,6 +1151,9 @@ impl MessageStore {
                 next_attempt_at_ms: next_attempt_at_ms as u64,
                 last_error_code,
                 last_attempt_at_ms: last_attempt_at_ms.map(|v| v as u64),
+                lease_owner: None,
+                locked_until_ms: None,
+                expires_at_ms: None,
             });
         }
         Ok(results)
@@ -1038,7 +1175,44 @@ impl MessageStore {
                 ],
             )
             .std_context("expire outbox")?;
+        if count > 0 {
+            DIAGNOSTICS.record(
+                None,
+                DiagnosticEventKind::MessageExpired {
+                    message_id_short: None,
+                    conversation_id_prefix: None,
+                    peer_id: None,
+                    delivery_state: format!("{:?}", DeliveryStatus::Expired),
+                },
+            );
+        }
         Ok(count)
+    }
+
+    /// Remove an outbox entry entirely (e.g. sender cancellation).
+    ///
+    /// Returns `true` if a row was deleted.
+    pub fn remove_outbox_entry(&self, msg_id: &MessageId) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM outbox WHERE msg_id = ?1",
+            [msg_id.as_slice()],
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
+
+    /// Remove all outbox entries for a specific recipient.
+    ///
+    /// Returns the number of rows deleted.
+    pub fn remove_outbox_for_recipient(&self, recipient: &PublicKey) -> usize {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM outbox WHERE recipient_device_id = ?1",
+            [recipient.as_bytes()],
+        )
+        .map(|n| n as usize)
+        .unwrap_or(0)
     }
 }
 

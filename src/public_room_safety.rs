@@ -1093,7 +1093,7 @@ mod tests {
             message: crate::chat_core::Message::Message {
                 text: "hello".into(),
             },
-            sent_at: crate::chat_core::now_ms(),
+            sent_at: crate::chat_core::now_secs(),
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, Some(&safety));
         assert!(result.is_ok(), "safe message should be processed");
@@ -1112,7 +1112,7 @@ mod tests {
             message: crate::chat_core::Message::Message {
                 text: "a".repeat(4097),
             },
-            sent_at: crate::chat_core::now_ms(),
+            sent_at: crate::chat_core::now_secs(),
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, Some(&safety));
         assert!(result.is_ok(), "safety rejects should return Ok(())");
@@ -1136,7 +1136,7 @@ mod tests {
             message: crate::chat_core::Message::Message {
                 text: "a".repeat(4097),
             },
-            sent_at: crate::chat_core::now_ms(),
+            sent_at: crate::chat_core::now_secs(),
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
         assert!(result.is_ok(), "private room should process all events");
@@ -1158,7 +1158,7 @@ mod tests {
             message: crate::chat_core::Message::Message {
                 text: "a".repeat(4097),
             },
-            sent_at: crate::chat_core::now_ms(),
+            sent_at: crate::chat_core::now_secs(),
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
         assert!(result.is_ok());

@@ -198,6 +198,60 @@ pub enum DiagnosticEventKind {
         /// The JSON-serialized command string.
         command_json: String,
     },
+
+    // ── Store-layer persistence events ──────────────────────────────
+    /// A new message was persisted to the inbox.
+    IncomingPersisted {
+        message_id_short: Option<String>,
+        conversation_id_prefix: Option<String>,
+        peer_id: Option<String>,
+        delivery_state: String,
+    },
+    /// A duplicate message was received (not persisted).
+    DuplicateReceived {
+        message_id_short: Option<String>,
+        conversation_id_prefix: Option<String>,
+        peer_id: Option<String>,
+    },
+    /// An outbound message was queued for delivery.
+    MessageQueued {
+        message_id_short: Option<String>,
+        conversation_id_prefix: Option<String>,
+        peer_id: Option<String>,
+        delivery_state: String,
+    },
+    /// An acknowledgement was received for an outbound message.
+    AckReceived {
+        message_id_short: Option<String>,
+        conversation_id_prefix: Option<String>,
+        peer_id: Option<String>,
+        attempt_count: u32,
+        elapsed_ms: Option<u64>,
+    },
+    /// A delivery retry was scheduled after an attempt.
+    RetryScheduled {
+        message_id_short: Option<String>,
+        conversation_id_prefix: Option<String>,
+        peer_id: Option<String>,
+        attempt_count: u32,
+        retry_delay_ms: u64,
+        failure_category: String,
+    },
+    /// A delivery attempt for an outbound message started.
+    DeliveryAttemptStarted {
+        message_id_short: Option<String>,
+        conversation_id_prefix: Option<String>,
+        peer_id: Option<String>,
+        attempt_count: u32,
+        retry_delay_ms: Option<u64>,
+    },
+    /// An outbound message expired and was removed from the outbox.
+    MessageExpired {
+        message_id_short: Option<String>,
+        conversation_id_prefix: Option<String>,
+        peer_id: Option<String>,
+        delivery_state: String,
+    },
 }
 
 // =============================================================================
