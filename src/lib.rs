@@ -147,6 +147,8 @@ pub mod friend_request;
 /// duplicate suppression via stable event IDs.
 #[cfg(feature = "net")]
 pub mod outbox;
+/// Single-owner durable offline delivery worker.
+pub mod outbox_delivery;
 
 /// Encrypted recipient-hosted mailbox for offline direct-message delivery.
 #[cfg(feature = "net")]
@@ -238,8 +240,8 @@ pub mod perf;
 /// automatically evicted when storage limits are exceeded.
 pub mod diagnostics;
 
-/// Retry queue for durable message delivery.
-pub mod retry;
+// Durable offline delivery is owned by `outbox_delivery`; no second retry loop
+// is registered here.
 /// Relational storage layer with managed migrations.
 pub mod storage;
 /// Durable inbox/outbox storage.
