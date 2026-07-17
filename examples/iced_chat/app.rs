@@ -6401,7 +6401,8 @@ impl IcedChat {
                             return iced::Task::perform(
                                 async move {
                                     match send_sync_request(&endpoint, &sk, peer2, 0).await {
-                                        Ok(envelopes) => {
+                                        Ok(page) => {
+                                            let envelopes = page.envelopes;
                                             let mut store = MailboxStore::load(&dd)
                                                 .ok()
                                                 .flatten()

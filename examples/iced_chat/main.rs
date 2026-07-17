@@ -29,7 +29,7 @@ use boru_chat::chat_core::friend_ping::{
 use boru_chat::chat_history::ChatHistoryStore;
 use boru_chat::friends::{FriendId, FriendsStore};
 use boru_chat::inbox::{InboxHandle, InboxProtocol, INBOX_ALPN};
-use boru_chat::mailbox::MailboxStore;
+use boru_chat::mailbox::{MailboxStore, MAX_SYNC_ENVELOPES};
 use boru_chat::net::{Gossip, GOSSIP_ALPN};
 use boru_chat::proto::TopicId;
 use boru_chat::room::RoomStore;

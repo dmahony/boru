@@ -1198,6 +1198,71 @@ impl Storage {
             .unwrap_or(false))
     }
 
+    /// Query pending outbound envelopes addressed to a specific recipient,
+    /// bounded by count and total encoded size, ordered by creation time.
+    ///
+    /// Returns (envelopes, has_more). When the returned page is empty, has_more
+    /// is always false. The caller uses the last envelope's `created_at` as a
+    /// continuation cursor for the next page.
+    pub fn query_pending_outbound_for_recipient(
+        &self,
+        recipient: &PublicKey,
+        since_ms: u64,
+        max_count: usize,
+        max_bytes: usize,
+    ) -> Result<(Vec<MailboxEnvelope>, bool)> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT envelope, created_at_ms
+                 FROM dm_outbox
+                 WHERE recipient_id = ?1 AND created_at_ms >= ?2
+                 ORDER BY created_at_ms ASC, message_id ASC
+                 LIMIT ?3",
+            )
+            .std_context("prepare query_pending_outbound_for_recipient")?;
+        // Query max_count + 1 to detect has_more
+        let limit = (max_count + 1) as i64;
+        let mut rows = stmt
+            .query(params![recipient.as_bytes(), since_ms as i64, limit])
+            .std_context("query pending outbound")?;
+
+        let mut envelopes = Vec::with_capacity(max_count);
+        let mut total_bytes = 0usize;
+        let mut has_extra = false;
+
+        while let Some(row) = rows.next().std_context("next outbound row")? {
+            let envelope_bytes: Vec<u8> = row
+                .get(0)
+                .std_context("get envelope bytes")?;
+            let _created_at_ms: i64 = row
+                .get(1)
+                .std_context("get created_at_ms")?;
+
+            // If we already have a full page, just note there's an extra row
+            if envelopes.len() >= max_count {
+                has_extra = true;
+                continue;
+            }
+
+            let envelope: MailboxEnvelope = postcard::from_bytes(&envelope_bytes)
+                .std_context("decode envelope")?;
+            let encoded_size = envelope_bytes.len();
+
+            // Check size bound
+            if total_bytes.saturating_add(encoded_size) > max_bytes && !envelopes.is_empty() {
+                has_extra = true;
+                continue;
+            }
+
+            total_bytes += encoded_size;
+            envelopes.push(envelope);
+        }
+
+        let has_more = has_extra;
+        Ok((envelopes, has_more))
+    }
+
     // ── Inbox (v1) ────────────────────────────────────────────────────
 
     /// Idempotent insert into inbox.
@@ -1767,6 +1832,26 @@ impl Storage {
             });
         }
         Ok(results)
+    }
+
+    /// Get a single sync cursor for a specific peer.
+    pub fn get_sync_cursor(&self, peer_device_id: &iroh::PublicKey) -> Result<Option<SyncCursorRow>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn
+            .query_row(
+                "SELECT peer_device_id, last_seen_msg_clock, last_sync_at_ms FROM sync_cursor WHERE peer_device_id = ?1",
+                [peer_device_id.as_bytes()],
+                |row| {
+                    Ok(SyncCursorRow {
+                        peer_device_id: row.get(0)?,
+                        last_seen_msg_clock: row.get(1)?,
+                        last_sync_at_ms: row.get::<_, i64>(2)? as u64,
+                    })
+                },
+            )
+            .optional()
+            .std_context("get sync_cursor for peer")?;
+        Ok(result)
     }
 
     // ── File objects (v2) ─────────────────────────────────────────────
@@ -2818,6 +2903,86 @@ mod tests {
             .unwrap();
         let cursors = storage.list_sync_cursors().unwrap();
         assert_eq!(cursors.len(), 1);
+    }
+
+    #[test]
+    fn v1_get_sync_cursor_by_peer() {
+        let storage = Storage::memory().unwrap();
+        let peer = random_public_key();
+        let other = random_public_key();
+
+        // Returns None for unregistered peer.
+        assert!(storage.get_sync_cursor(&peer).unwrap().is_none());
+
+        // Upsert and verify per-peer lookup.
+        storage
+            .upsert_sync_cursor(&peer, Some(b"clock-1"), 1000)
+            .unwrap();
+        let cursor = storage.get_sync_cursor(&peer).unwrap().unwrap();
+        assert_eq!(cursor.last_sync_at_ms, 1000);
+        assert_eq!(cursor.last_seen_msg_clock, Some(b"clock-1".to_vec()));
+
+        // Other peer still returns None.
+        assert!(storage.get_sync_cursor(&other).unwrap().is_none());
+
+        // Update and verify.
+        storage
+            .upsert_sync_cursor(&peer, Some(b"clock-2"), 2000)
+            .unwrap();
+        let cursor = storage.get_sync_cursor(&peer).unwrap().unwrap();
+        assert_eq!(cursor.last_sync_at_ms, 2000);
+        assert_eq!(cursor.last_seen_msg_clock, Some(b"clock-2".to_vec()));
+    }
+
+    #[test]
+    fn v1_query_pending_outbound_for_recipient_pagination() {
+        let storage = Storage::memory().unwrap();
+        let sender_sk = iroh::SecretKey::generate();
+        let sender = sender_sk.public();
+        let recipient_sk = iroh::SecretKey::generate();
+        let recipient_id = recipient_sk.public();
+        let recipient = MailboxPublicKey {
+            identity: recipient_id,
+            encryption: [0u8; 32],
+        };
+        let conv_id = [1u8; 32];
+
+        // Insert 5 outbound messages from sender to recipient.
+        for i in 0..5u64 {
+            let request_key = format!("req-{i}");
+            let plaintext = format!("hello {i}");
+            storage
+                .queue_outgoing_dm(conv_id, sender, &request_key, &plaintext, recipient, &sender_sk)
+                .unwrap();
+        }
+
+        // Query with max_count=3 should return 3 with has_more=true.
+        let (page, has_more) = storage
+            .query_pending_outbound_for_recipient(&recipient_id, 0, 3, 10_000_000)
+            .unwrap();
+        assert_eq!(page.len(), 3);
+        assert!(has_more, "should have more pages");
+
+        // Query with max_count=10 should return all 5 with has_more=false.
+        let (page, has_more) = storage
+            .query_pending_outbound_for_recipient(&recipient_id, 0, 10, 10_000_000)
+            .unwrap();
+        assert_eq!(page.len(), 5);
+        assert!(!has_more, "should not have more pages");
+
+        // Query scoped by recipient: other_recipient gets nothing.
+        let other_recipient = iroh::SecretKey::generate().public();
+        let (page, has_more) = storage
+            .query_pending_outbound_for_recipient(&other_recipient, 0, 10, 10_000_000)
+            .unwrap();
+        assert_eq!(page.len(), 0);
+        assert!(!has_more);
+
+        // Query with since_ms limited.
+        let (page, _) = storage
+            .query_pending_outbound_for_recipient(&recipient_id, 9_999_999_999, 10, 10_000_000)
+            .unwrap();
+        assert_eq!(page.len(), 0);
     }
 
     // ── V2 file-object tables ──────────────────────────────────────
