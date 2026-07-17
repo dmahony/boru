@@ -7,14 +7,31 @@ boru-chat uses multiple distinct QUIC-based protocols, each with its own ALPN
 
 | Protocol | ALPN | Type | Purpose | Persistence |
 |----------|------|------|---------|-------------|
-| Gossip | `/iroh-gossip/1` | Broadcast | Room-based message broadcasting via PlumTree | None (transient) |
-| Inbox | `/iroh-chat-inbox/1` | Direct | Offline message delivery, ACKs, deletion tombstones | InboxEvent emission |
+| Gossip | `/iroh-gossip/1` | Broadcast | Room-based message broadcasting via PlumTree; one independent mesh per room topic | None (transient) |
+| Inbox | `/iroh-chat-inbox/1` | Direct request/response | Offline message delivery, ACKs, sync responses, and deletion tombstones; not a gossip topic | InboxEvent emission |
 | Backfill | `/iroh-chat-backfill/1` | Direct | Historical message sync for late-joining peers | Reads ChatHistoryStore |
-| Whisper | `/iroh-chat-whisper/1` | Direct | Private 1:1 QUIC channels for DMs and file transfer | None (transient) |
+| Whisper | `/iroh-chat-whisper/1` | Direct session | Online private 1:1 QUIC messages, control frames, and file transfer | None (transient) |
 | Friend Ping | `/iroh-chat-ping/1` | Direct | Connectivity checks between friends | None (transient) |
 | Catalogue retrieval | `/iroh-chat-catalogue/1` | Direct | Signed, requester-filtered file catalogue retrieval | Per-peer verified cache |
 | Transfer authorisation | `/iroh-chat-transfer-auth/1` | Direct | Request-time permission check and signed blob descriptor | None (short-lived descriptor) |
 | Blob transfer | iroh-blobs | Direct | Content-addressed file transfer | iroh-blobs store + download state |
+
+## Responsibility boundaries
+
+| Concern | Single owner | Not responsible for |
+|---|---|---|
+| Peer discovery | mDNS/DHT/memory lookup plus the room discovery tracker | QUIC connection success, topic membership, or message delivery |
+| Relay fallback | iroh endpoint address resolution/transport | Selecting application retries or re-enqueueing messages |
+| Gossip room membership | `GossipTopic`/`GossipSender` for that room or conversation | Offline mailbox delivery or direct-message ACKs |
+| Online 1:1 session | Whisper and `session_manager` | Durable mailbox state |
+| Offline mailbox wire path | Inbox ALPN (`INBOX_ALPN`) | Peer discovery, room gossip, or retry policy |
+| Durable offline retry | `OutboxDeliveryWorker` design owner | A second retry loop in Whisper or Inbox |
+| History recovery | Backfill request/response | Live room membership maintenance |
+
+A successful discovery event is not evidence of a connection; a connected
+Whisper session is not evidence of a delivered offline envelope; and writing to
+a QUIC stream is not an acknowledgement. Each boundary must be verified by its
+own protocol event or signed application acknowledgement.
 
 ## Gossip Protocol (`/iroh-gossip/1`)
 
@@ -36,9 +53,13 @@ The gossip protocol combines two algorithms:
 
 ### Topic Model
 
-All protocol messages are namespaced by a 32-byte `TopicId`. Each topic is an
-independent gossip swarm with its own routing tables and connections. Joining
-multiple topics increases the number of open connections.
+All protocol messages are namespaced by a 32-byte `TopicId`. Each room or direct
+conversation topic is an independent gossip swarm with its own routing tables
+and connections. The GUI retains each live room/conversation subscription while
+it is active or backgrounded; dropping the sender and receiver leaves the topic.
+The inbox protocol deliberately has no personal inbox gossip topic: offline
+delivery uses the direct inbox ALPN below, so it does not depend on room
+membership or an unrelated gossip subscription.
 
 ### Wire Format
 
@@ -47,11 +68,13 @@ messages wrapped in the iroh QUIC stream abstraction.
 
 ## Inbox Protocol (`/iroh-chat-inbox/1`)
 
-### Purpose
+### Responsibility
 
-The inbox protocol provides reliable, asynchronous direct message delivery
-between peers. Messages are delivered even when the recipient is offline
-(the sender stores them in the recipient's mailbox via the protocol).
+The inbox protocol is the single wire path for asynchronous/offline mailbox
+delivery. The sender owns durable queuing and retry scheduling; this protocol
+only authenticates, transports, persists/forwards, and acknowledges one
+envelope at a time. It does not discover peers, maintain gossip membership, or
+own retry policy.
 
 ### Security
 
@@ -91,9 +114,15 @@ When a peer reconnects after being offline:
 2. The online peer queries its `MailboxStore` for pending envelopes addressed
    to the requester and created at or after `since_ms`.
 3. The online peer responds with `SyncResponse { envelopes }`.
-4. The reconnecting peer processes each envelope through `accept_incoming()`,
-   which is idempotent (replayed envelopes return the authenticated payload
-   without duplicate insertion).
+4. The reconnecting peer processes each envelope through the durable incoming
+   acceptance transaction, which is idempotent (replayed envelopes return the
+   authenticated payload without duplicate insertion).
+
+`pending_fn` is the inbox handler's provider for producing bounded
+`SyncResponse` pages. Production startup installs it from the durable mailbox
+store; it filters by authenticated recipient and clamps the requester cursor to
+the retention window before applying count/size limits. A received
+`SyncRequested` event by itself is only an observation, not a response.
 
 ### Delete Tombstone Protocol
 
@@ -128,10 +157,13 @@ At most one backfill request per remote `PublicKey` is served concurrently.
 
 ## Whisper Protocol (`/iroh-chat-whisper/1`)
 
-### Purpose
+### Responsibility
 
-Direct QUIC channels for private 1:1 conversations, separate from the
-gossip broadcast mesh. Used for both direct messages and file transfer.
+Whisper owns the live, online 1:1 session: direct chat frames, control frames,
+and file-transfer coordination. It is separate from room gossip and from the
+inbox ALPN. Mailbox wire variants remain for compatibility with older peers,
+but the active offline fallback is `send_deliver`/`send_ack` on the inbox ALPN;
+frontends must not enqueue or process the same envelope through both paths.
 
 ### Architecture
 
@@ -148,6 +180,10 @@ gossip broadcast mesh. Used for both direct messages and file transfer.
 Each whisper connection carries bi-directional streams with length-prefixed,
 postcard-encoded frames. Connections are established on demand when the user
 initiates a DM and are maintained for the duration of the conversation.
+
+`session_manager` owns whisper reconnect/backoff and collision resolution.
+`OutboxDeliveryWorker` is the sole owner of durable mailbox retry/lease state;
+whisper sessions must not add a second mailbox retry loop.
 
 ## Friend Ping Protocol (`/iroh-chat-ping/1`)
 
@@ -172,6 +208,13 @@ boru-chat uses several discovery mechanisms, not all of which are QUIC protocols
 | DHT (public rooms) | WAN | iroh-mainline-address-lookup (Mainline DHT) |
 | DHT (private rooms) | WAN | Same DHT, but namespace-isolated via `DiscoverySecret` |
 | Memory lookup | Local | In-process address book for bootstrap peers |
+
+Discovery resolves endpoint IDs to usable addresses and feeds room joiners or
+direct transports. It does not imply a connection, topic membership, or
+message delivery. `DynamicPeerJoiner` owns bounded retry for discovered gossip
+joins; `SessionManager` owns whisper session reconnect; the durable outbox
+worker owns offline-message retry. These retry domains are intentionally
+separate.
 
 ### Public Rooms
 

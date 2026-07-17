@@ -20,7 +20,7 @@ fn offline_mailbox_replays_after_restart_and_ack_removes_once() {
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].open(&recipient).unwrap(), b"offline hello");
 
-    let ack = MailboxAck::sign(&recipient, id);
+    let ack = MailboxAck::sign(&recipient, id, sender.public());
     assert!(restarted.acknowledge(&ack).unwrap());
     assert!(!restarted.acknowledge(&ack).unwrap());
     restarted.save().unwrap();
@@ -63,7 +63,7 @@ fn mailbox_rejects_tampering_and_wrong_ack_signer() {
     let envelope = identity.seal(&sender, b"secret").unwrap();
     let id = envelope.message_id();
     store.enqueue(envelope, &[sender.public()]).unwrap();
-    let bad_ack = MailboxAck::sign(&SecretKey::generate(), id);
+    let bad_ack = MailboxAck::sign(&SecretKey::generate(), id, sender.public());
     assert!(store.acknowledge(&bad_ack).is_err());
 }
 
@@ -175,7 +175,7 @@ fn mailbox_lost_ack_stays_pending_across_restart() {
     assert_eq!(pending[0].message_id(), msg_id);
 
     // After ack, envelope is removed.
-    let ack = MailboxAck::sign(&recipient, msg_id);
+    let ack = MailboxAck::sign(&recipient, msg_id, sender.public());
     assert!(loaded.acknowledge(&ack).unwrap());
     assert!(
         loaded.pending_for_recipient(recipient.public()).is_empty(),

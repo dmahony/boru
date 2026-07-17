@@ -15,8 +15,6 @@
 //!
 //! # Lifecycle
 //!
-//! * [`InboxHandle::subscribe`] — subscribe to this node's own inbox topic
-//!   at startup so it stays alive independently of the visible chat room.
 //! * [`InboxProtocol`] — registered as a protocol handler so remote peers
 //!   can deliver envelopes to this node.
 //! * Received envelopes are forwarded via an mpsc channel to the frontend,
@@ -38,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 use tokio::sync::{mpsc, Mutex};
 
-use crate::mailbox::{MailboxAck, MailboxEnvelope};
+use crate::mailbox::{MailboxAck, MailboxEnvelope, MAX_SYNC_LOOKBACK};
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -47,6 +45,10 @@ pub const INBOX_ALPN: &[u8] = b"/iroh-chat-inbox/1";
 
 /// Max clock skew for replay protection (24 hours).
 const MAX_CLOCK_SKEW: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// A sync requester's `since_ms` must not be more than this far in the future.
+/// Small forward skew is tolerated for clock drift between peers.
+const MAX_SYNC_FUTURE_SKEW_MS: u64 = 300_000; // 5 minutes
 
 /// Max payload size for a single inbox message (10 MB).
 const MAX_INBOX_PAYLOAD: usize = 10 * 1024 * 1024;
@@ -150,10 +152,18 @@ pub enum InboxPayload {
         /// Only return envelopes created at or after this timestamp (ms).
         since_ms: u64,
     },
-    /// Response containing missed envelopes.
+    /// Response containing a page of missed envelopes.
     SyncResponse {
-        /// The missed envelopes.
+        /// The missed envelopes in this page.
         envelopes: Vec<MailboxEnvelope>,
+        /// Creation timestamp (ms) of the last envelope in this page.
+        /// The requester uses this as `since_ms` for the next page request.
+        /// Absent when envelopes is empty.
+        #[serde(default)]
+        last_created_at_ms: Option<u64>,
+        /// True when more pages exist after this one.
+        #[serde(default)]
+        has_more: bool,
     },
     /// Signed deletion tombstone for a previously delivered message.
     /// The inner [`AuthorDeleteProof`] is signed by the message's original
@@ -228,6 +238,14 @@ fn signing_bytes(timestamp: u64, inner: &InboxPayload) -> Vec<u8> {
     bytes
 }
 
+/// Current wall clock in milliseconds since UNIX epoch.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 // ── Inbox protocol state ───────────────────────────────────────────────────────
 
 /// Inbox protocol state shared across connections.
@@ -245,8 +263,11 @@ pub struct InboxInner {
     pub envelope_tx: mpsc::UnboundedSender<InboxEvent>,
     /// Optional provider that returns pending envelopes for a SyncRequest.
     /// The function receives (requester_public_key, since_ms) and returns
-    /// envelopes that should be delivered to the requester.
-    pub pending_fn: Option<Arc<dyn Fn(PublicKey, u64) -> Vec<MailboxEnvelope> + Send + Sync>>,
+    /// (envelopes, has_more). The protocol handler derives last_created_at_ms
+    /// from the last envelope in the page.
+    pub pending_fn: Option<
+        Arc<dyn Fn(PublicKey, u64) -> (Vec<MailboxEnvelope>, bool) + Send + Sync>,
+    >,
 }
 
 impl std::fmt::Debug for InboxInner {
@@ -366,38 +387,15 @@ impl InboxHandle {
     /// Set a function that provides pending envelopes for SyncRequest.
     ///
     /// The function receives `(requester_public_key, since_ms)` and returns
-    /// envelopes that should be delivered to the requester.  Called from
-    /// the protocol handler when a SyncRequest arrives.
+    /// `(envelopes, has_more)`. Called from the protocol handler when a
+    /// SyncRequest arrives.
     pub async fn set_pending_fn(
         &self,
-        f: Option<Arc<dyn Fn(PublicKey, u64) -> Vec<MailboxEnvelope> + Send + Sync>>,
+        f: Option<
+            Arc<dyn Fn(PublicKey, u64) -> (Vec<MailboxEnvelope>, bool) + Send + Sync>,
+        >,
     ) {
         self.inner.lock().await.pending_fn = f;
-    }
-
-    /// Inbox topic — derived from the local PublicKey for personal inbox subscriptions.
-    pub fn inbox_topic(local_public: PublicKey) -> crate::proto::TopicId {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"iroh-chat-inbox/v1");
-        hasher.update(local_public.as_bytes());
-        (*hasher.finalize().as_bytes()).into()
-    }
-
-    /// Subscribe to this node's personal inbox gossip topic.
-    ///
-    /// This **must** be called at startup and the subscription kept alive
-    /// independently of the visible chat room, so peers can always deliver
-    /// offline messages even when the user is not in an active chat room.
-    pub async fn subscribe_inbox_topic(
-        &self,
-        gossip: &crate::net::Gossip,
-        local_public: PublicKey,
-    ) -> Result<()> {
-        let topic = Self::inbox_topic(local_public);
-        // Subscribe without any bootstrap peers — the inbox topic is passive;
-        // peers connect to us when they want to deliver an envelope.
-        gossip.subscribe(topic, Vec::new()).await?;
-        Ok(())
     }
 }
 
@@ -482,11 +480,15 @@ impl ProtocolHandler for InboxProtocol {
             // Dispatch and optionally produce a response.
             let result = Self::handle_request(&inner, remote_id, &buf).await;
             match result {
-                Ok(Some(response_envelopes)) => {
-                    // SyncRequest: send back a SyncResponse.
+                Ok(Some((response_envelopes, has_more))) => {
+                    // SyncRequest: send back a paginated SyncResponse.
                     if let Some(ref sk) = secret_key {
+                        let last_created_at_ms =
+                            response_envelopes.last().map(|e| e.created_at);
                         let payload = InboxPayload::SyncResponse {
                             envelopes: response_envelopes,
+                            last_created_at_ms,
+                            has_more,
                         };
                         match SignedInboxMessage::sign(sk, payload) {
                             Ok(signed) => {
@@ -533,12 +535,12 @@ impl ProtocolHandler for InboxProtocol {
 
 impl InboxProtocol {
     /// Dispatch a verified inbox message and return pending envelopes
-    /// when the caller should send a SyncResponse back.
+    /// and a has_more flag when the caller should send a SyncResponse back.
     async fn handle_request(
         inner: &Arc<Mutex<InboxInner>>,
         sender: PublicKey,
         buf: &[u8],
-    ) -> Result<Option<Vec<MailboxEnvelope>>> {
+    ) -> Result<Option<(Vec<MailboxEnvelope>, bool)>> {
         // Verify the signed message.
         let (verified_sender, payload, _sent_at) = SignedInboxMessage::verify(buf, Some(sender))?;
 
@@ -561,13 +563,33 @@ impl InboxProtocol {
 
         match payload {
             InboxPayload::Deliver(envelope) => {
+                // The authenticated transport identity and the envelope's
+                // original sender must agree.  Otherwise a peer could relay
+                // somebody else's envelope and cause the recipient to send
+                // an acknowledgement to the wrong identity.
+                if envelope.from != verified_sender {
+                    return Err(n0_error::anyerr!(
+                        "inbox envelope sender mismatch: transport={}, envelope={}",
+                        verified_sender,
+                        envelope.from
+                    ));
+                }
                 // Dedup by message_id.
                 let mid = inbox_message_id(
                     &postcard::to_stdvec(&envelope)
                         .map_err(|e| n0_error::anyerr!("encode envelope for id: {e}"))?,
                 );
                 if guard.seen_message_ids.contains_key(&mid) {
-                    return Err(n0_error::anyerr!("duplicate inbox message {mid:?}"));
+                    // A duplicate is valid replay, not a rejected message.
+                    // Forward it again so the application can re-validate
+                    // its durable state and re-acknowledge it.  This is
+                    // essential when the original acknowledgement was lost
+                    // after the recipient committed the message.
+                    let _ = guard.envelope_tx.send(InboxEvent::EnvelopeReceived {
+                        from: verified_sender,
+                        envelope,
+                    });
+                    return Ok(None);
                 }
                 // Prune stale dedup entries.
                 let cutoff = SystemTime::now()
@@ -602,15 +624,31 @@ impl InboxProtocol {
                 Ok(None)
             }
             InboxPayload::SyncRequest { since_ms } => {
+                // Validate the requester-supplied timestamp before passing it
+                // to the provider.  A malicious or buggy peer must not be able
+                // to trigger an unbounded or future-windowed scan.
+                let now = now_ms();
+                if since_ms > now.saturating_add(MAX_SYNC_FUTURE_SKEW_MS) {
+                    return Err(n0_error::anyerr!(
+                        "sync request from {} has since_ms {since_ms} which is >{MAX_SYNC_FUTURE_SKEW_MS}ms in the future (now={now})",
+                        verified_sender.fmt_short()
+                    ));
+                }
+                // Clamp to the local retention window as a defence-in-depth
+                // measure — the provider also clamps, but a protocol-level
+                // check prevents an out-of-range value from ever reaching it.
+                let floor = now.saturating_sub(MAX_SYNC_LOOKBACK.as_millis() as u64);
+                let effective_since = since_ms.max(floor);
+
                 // Try the pending_fn provider first.
                 if let Some(ref f) = guard.pending_fn {
-                    let envelopes = f(verified_sender, since_ms);
-                    Ok(Some(envelopes))
+                    let (envelopes, has_more) = f(verified_sender, effective_since);
+                    Ok(Some((envelopes, has_more)))
                 } else {
                     // Fall back to emitting an event when no provider is set.
                     let _ = guard.envelope_tx.send(InboxEvent::SyncRequested {
                         from: verified_sender,
-                        since_ms,
+                        since_ms: effective_since,
                     });
                     Ok(None)
                 }
@@ -731,13 +769,26 @@ pub async fn send_ack(
     Ok(())
 }
 
+/// Result of a sync request, containing a page of envelopes and pagination info.
+#[derive(Debug, Clone)]
+pub struct SyncResponsePage {
+    /// The missed envelopes in this page.
+    pub envelopes: Vec<MailboxEnvelope>,
+    /// Creation timestamp (ms) of the last envelope in this page.
+    /// The requester uses this as `since_ms` for the next page request.
+    /// None when envelopes is empty.
+    pub last_created_at_ms: Option<u64>,
+    /// True when more pages exist after this one.
+    pub has_more: bool,
+}
+
 /// Send a sync request to a peer to retrieve missed envelopes.
 pub async fn send_sync_request(
     endpoint: &Endpoint,
     secret_key: &SecretKey,
     peer: PublicKey,
     since_ms: u64,
-) -> Result<Vec<MailboxEnvelope>> {
+) -> Result<SyncResponsePage> {
     let signed = SignedInboxMessage::sign(secret_key, InboxPayload::SyncRequest { since_ms })?;
     let len = signed.len() as u32;
 
@@ -772,7 +823,15 @@ pub async fn send_sync_request(
     let (_sender, payload, _sent_at) = SignedInboxMessage::verify(&resp_buf, Some(peer))?;
 
     match payload {
-        InboxPayload::SyncResponse { envelopes } => Ok(envelopes),
+        InboxPayload::SyncResponse {
+            envelopes,
+            last_created_at_ms,
+            has_more,
+        } => Ok(SyncResponsePage {
+            envelopes,
+            last_created_at_ms,
+            has_more,
+        }),
         other => Err(n0_error::anyerr!(
             "unexpected sync response payload: {other:?}"
         )),
@@ -818,6 +877,7 @@ pub async fn send_delete_tombstone(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mailbox::MailboxIdentity;
     use iroh::SecretKey;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -868,36 +928,6 @@ mod tests {
         assert!(result.is_err(), "should reject tampered message");
     }
 
-    /// Verify that inbox_topic is deterministic and repeatable.
-    #[test]
-    fn inbox_topic_is_deterministic() {
-        let sk = test_secret_key();
-        let pk = sk.public();
-        let topic1 = InboxHandle::inbox_topic(pk);
-        let topic2 = InboxHandle::inbox_topic(pk);
-        assert_eq!(topic1, topic2, "inbox topic must be deterministic");
-
-        // Different keys produce different topics.
-        let other = test_secret_key().public();
-        let topic3 = InboxHandle::inbox_topic(other);
-        assert_ne!(
-            topic1, topic3,
-            "different keys must produce different topics"
-        );
-    }
-
-    /// Verify that InboxHandle::subscribe_inbox_topic produces consistent topic derivation.
-    #[test]
-    fn inbox_topic_derivation_is_stable() {
-        // The derivation prefix "iroh-chat-inbox/v1" should not change accidentally.
-        let sk = test_secret_key();
-        let pk = sk.public();
-        let topic = InboxHandle::inbox_topic(pk);
-        // Recomputed from the same key should match.
-        let topic_again = InboxHandle::inbox_topic(pk);
-        assert_eq!(topic.as_bytes(), topic_again.as_bytes());
-    }
-
     /// Verify that add_allowed_sender and remove_allowed_sender work correctly.
     #[tokio::test]
     async fn inbox_handle_manages_allowed_senders() {
@@ -945,9 +975,64 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("unauthorized"));
     }
 
-    /// Verify that duplicate message ids are rejected (dedup).
+    /// A committed envelope must be re-deliverable when the first ACK was
+    /// lost.  The application-level handler uses this event to run its
+    /// idempotent persistence path and send the same ACK again.
+    #[tokio::test]
+    async fn valid_duplicate_delivery_is_forwarded_for_reack() {
+        let sender_sk = test_secret_key();
+        let recipient_sk = test_secret_key();
+        let recipient = MailboxIdentity::from_secret(&recipient_sk);
+        let envelope = recipient.seal(&sender_sk, b"persist me").unwrap();
+        let (handle, mut events) = InboxHandle::new();
+        handle.add_allowed_sender(sender_sk.public()).await;
+
+        let wire =
+            SignedInboxMessage::sign(&sender_sk, InboxPayload::Deliver(envelope.clone())).unwrap();
+        InboxProtocol::handle_request(&handle.inner(), sender_sk.public(), &wire)
+            .await
+            .unwrap();
+        InboxProtocol::handle_request(&handle.inner(), sender_sk.public(), &wire)
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            match events.recv().await.expect("delivery event") {
+                InboxEvent::EnvelopeReceived {
+                    from,
+                    envelope: got,
+                } => {
+                    assert_eq!(from, sender_sk.public());
+                    assert_eq!(got.message_id(), envelope.message_id());
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+    }
+
+    /// A relay must not be able to make the recipient acknowledge an envelope
+    /// on behalf of a different original sender.
+    #[tokio::test]
+    async fn delivery_rejects_transport_and_envelope_sender_mismatch() {
+        let envelope_sender = test_secret_key();
+        let transport_sender = test_secret_key();
+        let recipient = MailboxIdentity::from_secret(&test_secret_key());
+        let envelope = recipient.seal(&envelope_sender, b"private").unwrap();
+        let (handle, _events) = InboxHandle::new();
+        handle.add_allowed_sender(transport_sender.public()).await;
+        let wire =
+            SignedInboxMessage::sign(&transport_sender, InboxPayload::Deliver(envelope)).unwrap();
+        let error =
+            InboxProtocol::handle_request(&handle.inner(), transport_sender.public(), &wire)
+                .await
+                .expect_err("mismatched sender must be rejected");
+        assert!(error.to_string().contains("sender mismatch"));
+    }
+
+    /// Verify that duplicate wire messages remain verifiable; the protocol
+    /// forwards valid duplicates to the application for re-acknowledgement.
     #[test]
-    fn inbox_dedup_rejects_duplicate_messages() {
+    fn inbox_dedup_accepts_duplicate_wire_messages() {
         // This test verifies the dedup logic in handle_message.
         // We create a SignedInboxMessage, encode it, and verify it passes
         // verification once. Then we simulate the dedup by checking that
@@ -963,6 +1048,103 @@ mod tests {
         // seen_message_ids. We verify the verify function itself works twice.
         let (sender2, _, _) = SignedInboxMessage::verify(&encoded, Some(sk.public())).unwrap();
         assert_eq!(sender2, sk.public());
+    }
+
+    // ── SyncRequest authorization tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn sync_request_rejects_future_timestamp() {
+        let sk = test_secret_key();
+        let (handle, _rx) = InboxHandle::new();
+        handle.add_allowed_sender(sk.public()).await;
+
+        // since_ms far in the future — beyond the skew tolerance.
+        let far_future = now_ms() + MAX_SYNC_FUTURE_SKEW_MS + 60_000;
+        let request = SignedInboxMessage::sign(
+            &sk,
+            InboxPayload::SyncRequest {
+                since_ms: far_future,
+            },
+        )
+        .unwrap();
+
+        let result = InboxProtocol::handle_request(&handle.inner(), sk.public(), &request).await;
+        assert!(result.is_err(), "future timestamp should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("sync request"),
+            "error should mention sync request, got: {err}"
+        );
+        assert!(
+            err.contains("in the future"),
+            "error should mention future, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_request_slightly_future_timestamp_is_allowed() {
+        let sk = test_secret_key();
+        let (handle, _rx) = InboxHandle::new();
+        handle.add_allowed_sender(sk.public()).await;
+
+        // since_ms slightly in the future — within the skew tolerance.
+        let slight_future = now_ms() + 30_000; // 30 seconds
+        let request = SignedInboxMessage::sign(
+            &sk,
+            InboxPayload::SyncRequest {
+                since_ms: slight_future,
+            },
+        )
+        .unwrap();
+
+        let result = InboxProtocol::handle_request(&handle.inner(), sk.public(), &request).await;
+        assert!(
+            result.is_ok(),
+            "slightly future timestamp should be allowed: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_request_ancient_timestamp_is_clamped_not_rejected() {
+        let sk = test_secret_key();
+        let (handle, _rx) = InboxHandle::new();
+        handle.add_allowed_sender(sk.public()).await;
+
+        // since_ms far in the past — the handler should clamp it, not reject it.
+        let ancient = 1; // epoch + 1ms
+        let request = SignedInboxMessage::sign(
+            &sk,
+            InboxPayload::SyncRequest {
+                since_ms: ancient,
+            },
+        )
+        .unwrap();
+
+        let result = InboxProtocol::handle_request(&handle.inner(), sk.public(), &request).await;
+        assert!(
+            result.is_ok(),
+            "ancient timestamp should be clamped, not rejected: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_request_unauthorized_peer_is_rejected() {
+        let peer_sk = test_secret_key();
+        let peer = peer_sk.public();
+        let (handle, _rx) = InboxHandle::new();
+
+        // Do NOT add the peer to allowed_senders — they are unauthorized.
+        let request = SignedInboxMessage::sign(
+            &peer_sk,
+            InboxPayload::SyncRequest { since_ms: 0 },
+        )
+        .unwrap();
+        let result = InboxProtocol::handle_request(&handle.inner(), peer, &request).await;
+        assert!(result.is_err(), "unauthorized peer must be rejected");
+        assert!(
+            result.unwrap_err().to_string().contains("unauthorized"),
+            "error should mention unauthorized"
+        );
     }
 
     // ── AuthorDeleteProof tests (Step 12) ─────────────────────────────

@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use bytes::Bytes;
 use iroh::PublicKey;
 use n0_error::{Result, StdResultExt};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -95,6 +95,23 @@ pub struct ConversationMeta {
     pub is_archived: bool,
     /// Whether the conversation has been locally deleted (soft delete).
     pub is_deleted: bool,
+}
+
+/// Outcome of accepting an incoming message into durable local storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncomingMessageResult {
+    Inserted,
+    Duplicate,
+    Conflict,
+    Rejected,
+}
+
+/// Durable replay bookkeeping for an incoming message id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncomingReplayMetadata {
+    pub first_received_at_ms: u64,
+    pub last_received_at_ms: u64,
+    pub receive_count: u64,
 }
 
 /// Durable local storage for inbox and outbox messages.
@@ -213,10 +230,187 @@ impl MessageStore {
                 signature BLOB NOT NULL,
                 is_local INTEGER NOT NULL DEFAULT 1
             );
+
+            -- Durable replay bookkeeping for incoming acceptance.  This is
+            -- separate from inbox so duplicate deliveries remain observable
+            -- without mutating message history or conversation ordering.
+            CREATE TABLE IF NOT EXISTS incoming_replay (
+                msg_id BLOB PRIMARY KEY,
+                first_received_at_ms INTEGER NOT NULL,
+                last_received_at_ms INTEGER NOT NULL,
+                receive_count INTEGER NOT NULL DEFAULT 1
+            );
             ",
         )
         .std_context("init schema")?;
         Ok(())
+    }
+
+    /// Accept an incoming message and all derived conversation state in one
+    /// SQLite transaction.  The message id is stable and immutable: reusing
+    /// it with different envelope fields is a conflict, never an update.
+    pub fn accept_incoming_message(
+        &self,
+        env: &StoredEnvelope,
+        local_user_id: &PublicKey,
+    ) -> Result<IncomingMessageResult> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .std_context("begin incoming acceptance transaction")?;
+
+        let tombstoned: bool = tx
+            .query_row(
+                "SELECT 1 FROM message_tombstones WHERE msg_id = ?1",
+                [env.msg_id.as_slice()],
+                |row| row.get::<_, i32>(0).map(|v| v != 0),
+            )
+            .unwrap_or(false);
+        if tombstoned {
+            tx.commit()
+                .std_context("commit rejected incoming message")?;
+            return Ok(IncomingMessageResult::Rejected);
+        }
+
+        let existing = tx
+            .query_row(
+                "SELECT conversation_id, author_user_id, author_device_id,
+                        created_at_ms, expires_at_ms, ciphertext, signature, acked_at_ms
+                 FROM inbox WHERE msg_id = ?1",
+                [env.msg_id.as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .std_context("lookup incoming message id")?;
+
+        if let Some((
+            conversation_id,
+            author_user_id,
+            author_device_id,
+            created_at,
+            expires_at,
+            ciphertext,
+            signature,
+            acked_at,
+        )) = existing
+        {
+            let matches = conversation_id == env.conversation_id.as_slice()
+                && author_user_id == env.author_user_id.as_bytes()
+                && author_device_id == env.author_device_id.as_bytes()
+                && created_at == env.created_at_ms as i64
+                && expires_at == env.expires_at_ms as i64
+                && ciphertext == env.ciphertext.as_ref()
+                && signature == env.signature.as_slice()
+                && acked_at == env.acked_at_ms.map(|v| v as i64);
+            if !matches {
+                tx.commit()
+                    .std_context("commit conflicting incoming message")?;
+                return Ok(IncomingMessageResult::Conflict);
+            }
+
+            tx.execute(
+                "UPDATE incoming_replay
+                 SET last_received_at_ms = ?2, receive_count = receive_count + 1
+                 WHERE msg_id = ?1",
+                params![env.msg_id.as_slice(), unix_now_ms() as i64],
+            )
+            .std_context("update incoming replay metadata")?;
+            tx.commit()
+                .std_context("commit duplicate incoming message")?;
+            return Ok(IncomingMessageResult::Duplicate);
+        }
+
+        let acked = env.acked_at_ms.map(|v| v as i64);
+        tx.execute(
+            "INSERT INTO inbox (
+                msg_id, conversation_id, author_user_id, author_device_id,
+                created_at_ms, expires_at_ms, ciphertext, signature, acked_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                env.msg_id.as_slice(),
+                env.conversation_id.as_slice(),
+                env.author_user_id.as_bytes(),
+                env.author_device_id.as_bytes(),
+                env.created_at_ms as i64,
+                env.expires_at_ms as i64,
+                env.ciphertext.as_ref(),
+                env.signature.as_slice(),
+                acked,
+            ],
+        )
+        .std_context("insert incoming message")?;
+
+        let now = unix_now_ms();
+        tx.execute(
+            "INSERT INTO incoming_replay
+             (msg_id, first_received_at_ms, last_received_at_ms, receive_count)
+             VALUES (?1, ?2, ?2, 1)",
+            params![env.msg_id.as_slice(), now as i64],
+        )
+        .std_context("insert incoming replay metadata")?;
+
+        let preview = format!("[{} bytes]", env.ciphertext.len());
+        let unread_increment = if env.author_user_id != *local_user_id {
+            1
+        } else {
+            0
+        };
+        tx.execute(
+            "INSERT INTO conversation_meta (
+                conversation_id, last_message_id, last_activity_at_ms,
+                last_message_preview, last_author_user_id, unread_count
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(conversation_id) DO UPDATE SET
+                last_message_id = excluded.last_message_id,
+                last_activity_at_ms = excluded.last_activity_at_ms,
+                last_message_preview = excluded.last_message_preview,
+                last_author_user_id = excluded.last_author_user_id,
+                unread_count = conversation_meta.unread_count + excluded.unread_count",
+            params![
+                env.conversation_id.as_slice(),
+                env.msg_id.as_slice(),
+                now as i64,
+                preview,
+                env.author_user_id.as_bytes(),
+                unread_increment,
+            ],
+        )
+        .std_context("update incoming conversation metadata")?;
+        tx.commit().std_context("commit incoming acceptance")?;
+        Ok(IncomingMessageResult::Inserted)
+    }
+
+    /// Return durable replay metadata for a message id.
+    pub fn get_incoming_replay_metadata(
+        &self,
+        msg_id: &MessageId,
+    ) -> Result<Option<IncomingReplayMetadata>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT first_received_at_ms, last_received_at_ms, receive_count
+             FROM incoming_replay WHERE msg_id = ?1",
+            [msg_id.as_slice()],
+            |row| {
+                Ok(IncomingReplayMetadata {
+                    first_received_at_ms: row.get::<_, i64>(0)? as u64,
+                    last_received_at_ms: row.get::<_, i64>(1)? as u64,
+                    receive_count: row.get::<_, i64>(2)? as u64,
+                })
+            },
+        )
+        .optional()
+        .std_context("get incoming replay metadata")
     }
 
     // ── Basic inbox/outbox operations (existing) ──────────────────────
@@ -1194,12 +1388,9 @@ impl MessageStore {
     /// Returns `true` if a row was deleted.
     pub fn remove_outbox_entry(&self, msg_id: &MessageId) -> bool {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM outbox WHERE msg_id = ?1",
-            [msg_id.as_slice()],
-        )
-        .map(|n| n > 0)
-        .unwrap_or(false)
+        conn.execute("DELETE FROM outbox WHERE msg_id = ?1", [msg_id.as_slice()])
+            .map(|n| n > 0)
+            .unwrap_or(false)
     }
 
     /// Remove all outbox entries for a specific recipient.
@@ -1221,6 +1412,84 @@ impl MessageStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incoming_acceptance_persists_replay_metadata_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = other_public_key(8);
+        let env = make_envelope([8u8; 32], [6u8; 32], random_public_key());
+        {
+            let store = MessageStore::open(dir.path().join("messages.db")).unwrap();
+            assert_eq!(
+                store.accept_incoming_message(&env, &local).unwrap(),
+                IncomingMessageResult::Inserted
+            );
+            assert_eq!(
+                store.accept_incoming_message(&env, &local).unwrap(),
+                IncomingMessageResult::Duplicate
+            );
+        }
+        let reopened = MessageStore::open(dir.path().join("messages.db")).unwrap();
+        let replay = reopened
+            .get_incoming_replay_metadata(&env.msg_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.receive_count, 2);
+        assert_eq!(
+            reopened.get_unread_count(&env.conversation_id).unwrap(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn incoming_acceptance_rejects_tombstoned_message() {
+        let store = MessageStore::memory().unwrap();
+        let env = make_envelope([4u8; 32], [5u8; 32], random_public_key());
+        store
+            .insert_tombstone(&env.msg_id, &env.conversation_id, &env.author_user_id, &[])
+            .unwrap();
+        assert_eq!(
+            store
+                .accept_incoming_message(&env, &other_public_key(8))
+                .unwrap(),
+            IncomingMessageResult::Rejected
+        );
+        assert!(store
+            .get_conversation_meta(&env.conversation_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn incoming_acceptance_is_idempotent_and_detects_conflicts() {
+        let store = MessageStore::memory().unwrap();
+        let local = other_public_key(8);
+        let remote = random_public_key();
+        let conv = [9u8; 32];
+        let env = make_envelope([7u8; 32], conv, remote);
+
+        assert_eq!(
+            store.accept_incoming_message(&env, &local).unwrap(),
+            IncomingMessageResult::Inserted
+        );
+        let first = store.get_conversation_meta(&conv).unwrap().unwrap();
+        assert_eq!(first.unread_count, 1);
+        assert_eq!(
+            store.accept_incoming_message(&env, &local).unwrap(),
+            IncomingMessageResult::Duplicate
+        );
+        let second = store.get_conversation_meta(&conv).unwrap().unwrap();
+        assert_eq!(second.unread_count, 1);
+        assert_eq!(second.last_activity_at_ms, first.last_activity_at_ms);
+
+        let mut conflict = env.clone();
+        conflict.ciphertext = Bytes::from(vec![99, 98]);
+        assert_eq!(
+            store.accept_incoming_message(&conflict, &local).unwrap(),
+            IncomingMessageResult::Conflict
+        );
+        assert_eq!(store.get_unread_count(&conv).unwrap(), Some(1));
+    }
 
     fn random_public_key() -> PublicKey {
         let mut bytes = [0u8; 32];

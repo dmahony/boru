@@ -40,6 +40,7 @@ use crate::{
 };
 
 mod address_lookup;
+mod address_resolution;
 mod util;
 
 /// ALPN protocol name

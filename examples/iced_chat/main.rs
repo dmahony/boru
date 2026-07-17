@@ -519,6 +519,28 @@ fn main() -> Result<()> {
         // ── Inbox protocol ─────────────────────────────────────────────
         // Direct QUIC channels for offline message delivery to peers.
         let (inbox_handle, inbox_events_rx_tmp) = InboxHandle::new();
+        // Serve reconnect sync from the durable mailbox owner.  The provider
+        // applies the bounded retention/count/size policy in
+        // `pending_for_recipient_since`; the requester-supplied timestamp is
+        // therefore only a resume hint, never an unrestricted query.
+        let mailbox_data_dir = data_dir.clone();
+        inbox_handle
+            .set_pending_fn(Some(Arc::new(move |requester, since_ms| {
+                let page = MailboxStore::load(&mailbox_data_dir)
+                    .ok()
+                    .flatten()
+                    .map(|mut store| {
+                        store.pending_for_recipient_since(requester, since_ms)
+                    })
+                    .unwrap_or_default();
+                // If the page is at the envelope limit there may be more;
+                // the byte limit could also cause truncation.  This is a
+                // best-effort has_more signal; true pagination requires
+                // the SQLite-backed provider.
+                let has_more = page.len() >= MAX_SYNC_ENVELOPES;
+                (page, has_more)
+            })))
+            .await;
         let inbox_protocol = InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
         let inbox_events_rx = Arc::new(Mutex::new(inbox_events_rx_tmp));
 
@@ -610,18 +632,6 @@ fn main() -> Result<()> {
             warn!("failed to subscribe to lobby topic");
         }
         let discovered_peers_rx = Arc::new(Mutex::new(discovered_peers_rx_tmp));
-
-        // Subscribe to the personal inbox gossip topic so peers can deliver
-        // offline messages.  The subscription is kept alive independently of
-        // the visible chat room.
-        if let Err(e) = inbox_handle
-            .subscribe_inbox_topic(&gossip, local_public)
-            .await
-        {
-            warn!("failed to subscribe to inbox topic: {e}");
-        } else {
-            info!("subscribed to personal inbox topic");
-        }
 
         // Spawn the backfill background actor for requesting history
         let backfill_handle = BackfillHandle::spawn(endpoint.clone());

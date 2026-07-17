@@ -1042,7 +1042,10 @@ mod tests {
         .await
         .map_err(|_| n0_error::anyerr!("mailbox envelope timed out"))?;
         handle_b
-            .send_mailbox_ack(peer_a, MailboxAck::sign(&sk_b, received.message_id()))
+            .send_mailbox_ack(
+                peer_a,
+                MailboxAck::sign(&sk_b, received.message_id(), received.from),
+            )
             .await?;
         assert_eq!(received.message_id(), message_id);
 

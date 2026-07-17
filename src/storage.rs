@@ -36,13 +36,13 @@ use n0_error::{Result, StdResultExt};
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-use crate::mailbox::{seal_for, MailboxEnvelope, MailboxPublicKey};
+use crate::mailbox::{seal_for, MailboxAck, MailboxEnvelope, MailboxPublicKey};
 use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 4;
+const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -284,6 +284,9 @@ pub struct DmMessageRow {
     pub sequence: u64,
     pub request_key: String,
     pub plaintext: Vec<u8>,
+    /// Local insertion time. This is informational only; it is deliberately
+    /// not part of the history ordering key because remote clocks are untrusted.
+    pub created_at_ms: u64,
 }
 
 #[allow(missing_docs)]
@@ -292,6 +295,13 @@ pub struct DmOutboxRow {
     pub message_id: MessageId,
     pub recipient: PublicKey,
     pub envelope: MailboxEnvelope,
+}
+
+/// Deterministic failures used to verify acknowledgement rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckProcessingFault {
+    /// Fail after acknowledgement state is written, before commit.
+    Database,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -465,7 +475,8 @@ impl Storage {
                      by a newer version. Upgrade the application or restore from \
                      a backup created by an older version.",
                     max = CURRENT_SCHEMA_VERSION,
-                ).into());
+                )
+                .into());
             }
         }
 
@@ -481,6 +492,7 @@ impl Storage {
                 2 => self.migrate_v2(&conn)?,
                 3 => self.migrate_v3(&conn)?,
                 4 => self.migrate_v4(&conn)?,
+                5 => self.migrate_v5(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -748,6 +760,24 @@ impl Storage {
         Ok(())
     }
 
+    /// V5 adds durable, idempotent acknowledgement records and a message
+    /// acknowledgement timestamp.
+    fn migrate_v5(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "ALTER TABLE dm_messages ADD COLUMN acknowledged_at_ms INTEGER;
+             CREATE TABLE dm_acknowledgements (
+                 message_id BLOB PRIMARY KEY,
+                 original_sender_id BLOB NOT NULL,
+                 recipient_id BLOB NOT NULL,
+                 acknowledged_at_ms INTEGER NOT NULL,
+                 status TEXT,
+                 signature BLOB NOT NULL
+             );",
+        )
+        .std_context("migrate v5 acknowledgements")?;
+        Ok(())
+    }
+
     /// Atomically create and queue an outgoing direct message.
     pub fn queue_outgoing_dm(
         &self,
@@ -759,7 +789,13 @@ impl Storage {
         sender_secret: &SecretKey,
     ) -> Result<OutgoingDm> {
         self.queue_outgoing_dm_inner(
-            conversation_id, sender, request_key, plaintext, recipient, sender_secret, None,
+            conversation_id,
+            sender,
+            request_key,
+            plaintext,
+            recipient,
+            sender_secret,
+            None,
         )
     }
 
@@ -825,26 +861,27 @@ impl Storage {
             stored_plaintext,
             stored_logical,
             stored_envelope,
-        )) = tx.query_row(
-            "SELECT m.message_id, m.conversation_id, m.sender_id, m.recipient_id,
+        )) = tx
+            .query_row(
+                "SELECT m.message_id, m.conversation_id, m.sender_id, m.recipient_id,
                     m.plaintext, m.logical_message, o.envelope
              FROM dm_messages m JOIN dm_outbox o USING (message_id)
              WHERE m.request_key = ?1",
-            [request_key],
-            |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, Vec<u8>>(5)?,
-                    row.get::<_, Vec<u8>>(6)?,
-                ))
-            },
-        )
-        .optional()
-        .std_context("look up outgoing dm idempotency key")?
+                [request_key],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .std_context("look up outgoing dm idempotency key")?
         {
             if stored_plaintext != plaintext
                 || stored_id.as_slice() != message_id
@@ -854,11 +891,20 @@ impl Storage {
             {
                 return Err(anyhow!("idempotency key is already bound to another message").into());
             }
-            let mut id = [0; 32]; id.copy_from_slice(&stored_id);
-            let envelope: MailboxEnvelope = postcard::from_bytes(&stored_envelope).std_context("decode stored mailbox envelope")?;
-            let sequence = postcard::from_bytes::<LogicalDm>(&stored_logical).std_context("decode stored logical message")?.sequence;
+            let mut id = [0; 32];
+            id.copy_from_slice(&stored_id);
+            let envelope: MailboxEnvelope = postcard::from_bytes(&stored_envelope)
+                .std_context("decode stored mailbox envelope")?;
+            let sequence = postcard::from_bytes::<LogicalDm>(&stored_logical)
+                .std_context("decode stored logical message")?
+                .sequence;
             tx.commit().std_context("commit idempotent outgoing dm")?;
-            return Ok(OutgoingDm { message_id: id, sequence, logical_message: stored_logical.to_vec(), envelope });
+            return Ok(OutgoingDm {
+                message_id: id,
+                sequence,
+                logical_message: stored_logical.to_vec(),
+                envelope,
+            });
         }
         let sequence = tx.query_row("SELECT next_sequence FROM dm_sender_sequences WHERE conversation_id = ?1 AND sender_id = ?2", params![conversation_id.as_slice(), sender.as_bytes()], |row| row.get::<_, i64>(0)).optional().std_context("read outgoing dm sequence")?.unwrap_or(1) as u64;
         let unsigned = postcard::to_stdvec(&(
@@ -913,11 +959,65 @@ impl Storage {
     #[allow(missing_docs)]
     pub fn get_dm_message(&self, message_id: &MessageId) -> Result<Option<DmMessageRow>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT conversation_id, sender_id, recipient_id, sequence, request_key, plaintext FROM dm_messages WHERE message_id = ?1", [message_id.as_slice()], |row| {
+        conn.query_row("SELECT conversation_id, sender_id, recipient_id, sequence, request_key, plaintext, created_at_ms FROM dm_messages WHERE message_id = ?1", [message_id.as_slice()], |row| {
             let c: Vec<u8> = row.get(0)?; let mut conversation_id = [0; 32]; conversation_id.copy_from_slice(&c);
             let sender_bytes: Vec<u8> = row.get(1)?; let recipient_bytes: Vec<u8> = row.get(2)?;
-            Ok(DmMessageRow { message_id: *message_id, conversation_id, sender: PublicKey::try_from(sender_bytes.as_slice()).map_err(|_| rusqlite::Error::InvalidQuery)?, recipient: PublicKey::try_from(recipient_bytes.as_slice()).map_err(|_| rusqlite::Error::InvalidQuery)?, sequence: row.get::<_, i64>(3)? as u64, request_key: row.get(4)?, plaintext: row.get(5)? })
+            Ok(DmMessageRow { message_id: *message_id, conversation_id, sender: PublicKey::try_from(sender_bytes.as_slice()).map_err(|_| rusqlite::Error::InvalidQuery)?, recipient: PublicKey::try_from(recipient_bytes.as_slice()).map_err(|_| rusqlite::Error::InvalidQuery)?, sequence: row.get::<_, i64>(3)? as u64, request_key: row.get(4)?, plaintext: row.get(5)?, created_at_ms: row.get::<_, i64>(6)? as u64 })
         }).optional().std_context("get dm message")
+    }
+
+    /// List direct-message history using a clock-independent, deterministic
+    /// order. A sender's persistent sequence is the primary key; sender and
+    /// message id are stable tie-breakers for messages from different senders.
+    ///
+    /// `offset`/`limit` pagination is stable because this order never uses the
+    /// local insertion time or a remote timestamp. Retries therefore remain a
+    /// single row and cannot move an existing message in history.
+    pub fn list_dm_messages(
+        &self,
+        conversation_id: [u8; 32],
+        offset: u32,
+        limit: Option<u32>,
+    ) -> Result<Vec<DmMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let pagination = match limit {
+            Some(n) => format!(" LIMIT {n} OFFSET {offset}"),
+            None => format!(" LIMIT -1 OFFSET {offset}"),
+        };
+        let sql = format!(
+            "SELECT message_id, sender_id, recipient_id, sequence, request_key,
+                    plaintext, created_at_ms
+             FROM dm_messages
+             WHERE conversation_id = ?1
+             ORDER BY sequence ASC, sender_id ASC, message_id ASC{}",
+            pagination
+        );
+        let mut stmt = conn.prepare(&sql).std_context("prepare list dm messages")?;
+        let mut rows = stmt
+            .query([conversation_id.as_slice()])
+            .std_context("query dm messages")?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().std_context("next dm message")? {
+            let message_id: Vec<u8> = row.get(0).map_err(|e| anyhow!(e))?;
+            let sender_bytes: Vec<u8> = row.get(1).map_err(|e| anyhow!(e))?;
+            let recipient_bytes: Vec<u8> = row.get(2).map_err(|e| anyhow!(e))?;
+            let conversation_id_bytes = conversation_id;
+            result.push(DmMessageRow {
+                message_id: message_id
+                    .try_into()
+                    .map_err(|_| anyhow!("invalid stored dm message id"))?,
+                conversation_id: conversation_id_bytes,
+                sender: PublicKey::try_from(sender_bytes.as_slice())
+                    .map_err(|_| anyhow!("invalid stored dm sender"))?,
+                recipient: PublicKey::try_from(recipient_bytes.as_slice())
+                    .map_err(|_| anyhow!("invalid stored dm recipient"))?,
+                sequence: row.get::<_, i64>(3).map_err(|e| anyhow!(e))? as u64,
+                request_key: row.get(4).map_err(|e| anyhow!(e))?,
+                plaintext: row.get(5).map_err(|e| anyhow!(e))?,
+                created_at_ms: row.get::<_, i64>(6).map_err(|e| anyhow!(e))? as u64,
+            });
+        }
+        Ok(result)
     }
 
     #[allow(missing_docs)]
@@ -940,6 +1040,162 @@ impl Storage {
         )
         .optional()
         .std_context("get dm outbox")
+    }
+
+    /// Process an acknowledgement from a recipient without exposing any
+    /// partially-applied state.  The acknowledgement id is the stable
+    /// mailbox-envelope id (not the logical DM id).
+    pub fn process_outgoing_ack(&self, from: PublicKey, ack: &MailboxAck) -> Result<bool> {
+        self.process_outgoing_ack_inner(from, ack, None)
+    }
+
+    /// Test-only fault injection point for acknowledgement transaction tests.
+    pub fn process_outgoing_ack_with_fault(
+        &self,
+        from: PublicKey,
+        ack: &MailboxAck,
+        fault: AckProcessingFault,
+    ) -> Result<bool> {
+        self.process_outgoing_ack_inner(from, ack, Some(fault))
+    }
+
+    fn process_outgoing_ack_inner(
+        &self,
+        from: PublicKey,
+        ack: &MailboxAck,
+        fault: Option<AckProcessingFault>,
+    ) -> Result<bool> {
+        const MAX_ACK_MESSAGE_ID_LEN: usize = 128;
+        if ack.message_id.len() > MAX_ACK_MESSAGE_ID_LEN {
+            return Err(anyhow!("acknowledgement message id is too long").into());
+        }
+        // Verify the signed contract before taking the database lock.
+        ack.verify(from)?;
+        let id_bytes = hex::decode(&ack.message_id)
+            .map_err(|e| anyhow!("invalid acknowledgement message id: {e}"))?;
+        if id_bytes.len() != 32 {
+            return Err(anyhow!("acknowledgement message id must be 32 bytes").into());
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .std_context("begin acknowledgement transaction")?;
+
+        // Duplicate valid acknowledgements are harmless, including after the
+        // sender has already removed its outbox row.
+        let already_recorded: bool = tx
+            .query_row(
+                "SELECT 1 FROM dm_acknowledgements WHERE message_id = ?1",
+                [id_bytes.as_slice()],
+                |_| Ok(true),
+            )
+            .optional()
+            .std_context("look up acknowledgement")?
+            .unwrap_or(false);
+        if already_recorded {
+            tx.commit()
+                .std_context("commit duplicate acknowledgement")?;
+            return Ok(false);
+        }
+
+        // Find the outbox row by the mailbox envelope's stable id.  This
+        // prevents an acknowledgement for a different envelope from being
+        // attached to a merely similar logical message.
+        let mut stmt = tx
+            .prepare(
+                "SELECT m.message_id, m.sender_id, m.recipient_id, o.recipient_id,
+                        o.envelope
+                 FROM dm_messages m
+                 JOIN dm_outbox o ON o.message_id = m.message_id
+                 WHERE m.acknowledged_at_ms IS NULL",
+            )
+            .std_context("prepare acknowledgement message lookup")?;
+        let mut rows = stmt
+            .query([])
+            .std_context("query acknowledgement message lookup")?;
+        let mut matched: Option<(MessageId, Vec<u8>, Vec<u8>, Vec<u8>)> = None;
+        while let Some(row) = rows.next().std_context("next acknowledgement row")? {
+            let logical_id: Vec<u8> = row
+                .get(0)
+                .std_context("get stored acknowledgement message id")?;
+            let envelope_bytes: Vec<u8> = row
+                .get(4)
+                .std_context("get stored acknowledgement envelope")?;
+            let envelope: MailboxEnvelope = postcard::from_bytes(&envelope_bytes)
+                .std_context("decode stored acknowledgement envelope")?;
+            if envelope.message_id().as_bytes() == ack.message_id.as_bytes() {
+                let stored_sender: Vec<u8> =
+                    row.get(1).std_context("get acknowledgement sender")?;
+                let stored_recipient: Vec<u8> =
+                    row.get(2).std_context("get acknowledgement recipient")?;
+                let outbox_recipient: Vec<u8> = row.get(3).std_context("get outbox recipient")?;
+                matched = Some((
+                    logical_id
+                        .try_into()
+                        .map_err(|_| anyhow!("invalid stored message id"))?,
+                    stored_sender,
+                    stored_recipient,
+                    outbox_recipient,
+                ));
+                break;
+            }
+        }
+        drop(rows);
+        drop(stmt);
+        let Some((logical_id, sender_id, message_recipient, outbox_recipient)) = matched else {
+            return Err(anyhow!("acknowledgement refers to an unknown message").into());
+        };
+        if sender_id.as_slice() != ack.original_sender.as_bytes() {
+            return Err(anyhow!("acknowledgement original sender mismatch").into());
+        }
+        if message_recipient != outbox_recipient || message_recipient.as_slice() != from.as_bytes()
+        {
+            return Err(anyhow!("acknowledgement recipient mismatch").into());
+        }
+
+        let acked_at = ack.acknowledged_at_ms as i64;
+        tx.execute(
+            "INSERT INTO dm_acknowledgements
+             (message_id, original_sender_id, recipient_id, acknowledged_at_ms, status, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id_bytes.as_slice(),
+                ack.original_sender.as_bytes(),
+                ack.recipient.as_bytes(),
+                acked_at,
+                ack.status.as_deref(),
+                ack.signature.as_slice(),
+            ],
+        )
+        .std_context("insert acknowledgement")?;
+        tx.execute(
+            "UPDATE dm_messages SET acknowledged_at_ms = ?1 WHERE message_id = ?2",
+            params![acked_at, &logical_id],
+        )
+        .std_context("mark message acknowledged")?;
+        tx.execute("DELETE FROM dm_outbox WHERE message_id = ?1", [&logical_id])
+            .std_context("remove acknowledged outbox entry")?;
+        if fault == Some(AckProcessingFault::Database) {
+            return Err(anyhow!("injected acknowledgement database failure").into());
+        }
+        tx.commit()
+            .std_context("commit acknowledgement transaction")?;
+        Ok(true)
+    }
+
+    /// Return whether a logical DM has been acknowledged.
+    pub fn dm_acknowledged(&self, message_id: &MessageId) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT acknowledged_at_ms IS NOT NULL FROM dm_messages WHERE message_id = ?1",
+                [message_id.as_slice()],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .std_context("check dm acknowledgement")?
+            .unwrap_or(false))
     }
 
     // ── Inbox (v1) ────────────────────────────────────────────────────
@@ -1150,7 +1406,12 @@ impl Storage {
                  WHERE status != ?1 AND status != ?2 AND next_attempt_at_ms <= ?3
                    AND (locked_until_ms IS NULL OR locked_until_ms <= ?3)
                  ORDER BY next_attempt_at_ms, rowid LIMIT ?4",
-                params![DeliveryStatus::Acked as u8, DeliveryStatus::Expired as u8, now_ms as i64, limit],
+                params![
+                    DeliveryStatus::Acked as u8,
+                    DeliveryStatus::Expired as u8,
+                    now_ms as i64,
+                    limit
+                ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
@@ -1165,7 +1426,13 @@ impl Storage {
                 "UPDATE outbox SET lease_owner = ?1, locked_until_ms = ?2
                  WHERE msg_id = ?3 AND recipient_device_id = ?4
                    AND (locked_until_ms IS NULL OR locked_until_ms <= ?5)",
-                params![lease_owner, locked_until as i64, &msg_blob, &recipient_blob, now_ms as i64],
+                params![
+                    lease_owner,
+                    locked_until as i64,
+                    &msg_blob,
+                    &recipient_blob,
+                    now_ms as i64
+                ],
             )
             .std_context("claim outbox row")?;
         if changed != 1 {
@@ -1194,6 +1461,82 @@ impl Storage {
         Ok(Some(row))
     }
 
+    /// Atomically claim the oldest due row addressed to one peer.
+    pub fn claim_due_outbox_for_peer(
+        &self,
+        now_ms: u64,
+        recipient_device_id: iroh::PublicKey,
+        lease_owner: &str,
+        lease_duration_ms: u64,
+    ) -> Result<Option<OutboxRow>> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn
+            .unchecked_transaction()
+            .std_context("begin peer outbox claim")?;
+        let recipient = recipient_device_id.as_bytes();
+        let candidate: Option<MessageId> = tx
+            .query_row(
+                "SELECT msg_id FROM outbox
+             WHERE recipient_device_id = ?1 AND status != ?2 AND status != ?3
+               AND next_attempt_at_ms <= ?4
+               AND (locked_until_ms IS NULL OR locked_until_ms <= ?4)
+             ORDER BY next_attempt_at_ms, rowid LIMIT 1",
+                params![
+                    recipient,
+                    DeliveryStatus::Acked as u8,
+                    DeliveryStatus::Expired as u8,
+                    now_ms as i64
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("select peer outbox claim candidate")?;
+        let Some(msg_id) = candidate else {
+            tx.commit().std_context("commit empty peer outbox claim")?;
+            return Ok(None);
+        };
+        let locked_until = now_ms.saturating_add(lease_duration_ms);
+        let changed = tx
+            .execute(
+                "UPDATE outbox SET lease_owner = ?1, locked_until_ms = ?2
+             WHERE msg_id = ?3 AND recipient_device_id = ?4
+               AND (locked_until_ms IS NULL OR locked_until_ms <= ?5)",
+                params![
+                    lease_owner,
+                    locked_until as i64,
+                    msg_id.as_slice(),
+                    recipient,
+                    now_ms as i64
+                ],
+            )
+            .std_context("claim peer outbox row")?;
+        if changed != 1 {
+            tx.rollback()
+                .std_context("rollback lost peer outbox claim")?;
+            return Ok(None);
+        }
+        let mut stmt = tx
+            .prepare(
+                "SELECT msg_id, recipient_device_id, status, attempts,
+                    next_attempt_at_ms, last_error_code, last_attempt_at_ms,
+                    lease_owner, locked_until_ms, expires_at_ms
+             FROM outbox WHERE msg_id = ?1 AND recipient_device_id = ?2",
+            )
+            .std_context("prepare claimed peer outbox row")?;
+        let mut rows = stmt
+            .query(params![msg_id.as_slice(), recipient])
+            .std_context("query claimed peer outbox row")?;
+        let row_ref = rows
+            .next()
+            .std_context("next claimed peer outbox row")?
+            .ok_or_else(|| anyhow!("claimed peer outbox row disappeared"))?;
+        let row = row_to_outbox(row_ref)?;
+        drop(rows);
+        drop(stmt);
+        tx.commit().std_context("commit peer outbox claim")?;
+        Ok(Some(row))
+    }
+
     /// Finish a claimed attempt and release its lease.
     pub fn finish_outbox_attempt(
         &self,
@@ -1205,7 +1548,11 @@ impl Storage {
         error_code: Option<&str>,
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        let status = if success { DeliveryStatus::Sent } else { DeliveryStatus::Pending };
+        let status = if success {
+            DeliveryStatus::Sent
+        } else {
+            DeliveryStatus::Pending
+        };
         let changed = conn
             .execute(
                 "UPDATE outbox SET attempts = attempts + 1, last_attempt_at_ms = ?1,
@@ -1213,9 +1560,16 @@ impl Storage {
                         lease_owner = NULL, locked_until_ms = NULL
                  WHERE msg_id = ?5 AND recipient_device_id = ?6
                    AND lease_owner = ?7 AND status != ?8",
-                params![now_ms() as i64, next_attempt_at_ms as i64, error_code, status as u8,
-                    msg_id.as_slice(), recipient_device_id.as_bytes(), lease_owner,
-                    DeliveryStatus::Acked as u8],
+                params![
+                    now_ms() as i64,
+                    next_attempt_at_ms as i64,
+                    error_code,
+                    status as u8,
+                    msg_id.as_slice(),
+                    recipient_device_id.as_bytes(),
+                    lease_owner,
+                    DeliveryStatus::Acked as u8
+                ],
             )
             .std_context("finish outbox attempt")?;
         Ok(changed == 1)
@@ -1260,23 +1614,35 @@ impl Storage {
         lease_owner: &str,
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        let changed = conn.execute(
-            "UPDATE outbox SET lease_owner = NULL, locked_until_ms = NULL
+        let changed = conn
+            .execute(
+                "UPDATE outbox SET lease_owner = NULL, locked_until_ms = NULL
              WHERE msg_id = ?1 AND recipient_device_id = ?2 AND lease_owner = ?3",
-            params![msg_id.as_slice(), recipient_device_id.as_bytes(), lease_owner],
-        ).std_context("release outbox lease")?;
+                params![
+                    msg_id.as_slice(),
+                    recipient_device_id.as_bytes(),
+                    lease_owner
+                ],
+            )
+            .std_context("release outbox lease")?;
         Ok(changed == 1)
     }
 
     /// Expire leases whose deadlines have passed, making them immediately due.
     pub fn recover_stale_outbox_leases(&self, now_ms: u64) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
-        let changed = conn.execute(
-            "UPDATE outbox SET lease_owner = NULL, locked_until_ms = NULL
+        let changed = conn
+            .execute(
+                "UPDATE outbox SET lease_owner = NULL, locked_until_ms = NULL
              WHERE locked_until_ms IS NOT NULL AND locked_until_ms <= ?1
                AND status != ?2 AND status != ?3",
-            params![now_ms as i64, DeliveryStatus::Acked as u8, DeliveryStatus::Expired as u8],
-        ).std_context("recover stale outbox leases")?;
+                params![
+                    now_ms as i64,
+                    DeliveryStatus::Acked as u8,
+                    DeliveryStatus::Expired as u8
+                ],
+            )
+            .std_context("recover stale outbox leases")?;
         Ok(changed)
     }
 
@@ -2816,11 +3182,22 @@ mod tests {
         let msg_id = [7u8; 32];
         let peer = random_public_key();
         storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
-        let claimed = storage.claim_due_outbox(100, "worker-a", 1_000, 1).unwrap().unwrap();
+        let claimed = storage
+            .claim_due_outbox(100, "worker-a", 1_000, 1)
+            .unwrap()
+            .unwrap();
         assert_eq!(claimed.lease_owner.as_deref(), Some("worker-a"));
-        assert!(storage.claim_due_outbox(100, "worker-b", 1_000, 1).unwrap().is_none());
-        assert!(storage.finish_outbox_attempt(&msg_id, peer, "worker-a", false, 100, Some("reset")).unwrap());
-        assert!(storage.claim_due_outbox(100, "worker-b", 1_000, 1).unwrap().is_some());
+        assert!(storage
+            .claim_due_outbox(100, "worker-b", 1_000, 1)
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .finish_outbox_attempt(&msg_id, peer, "worker-a", false, 100, Some("reset"))
+            .unwrap());
+        assert!(storage
+            .claim_due_outbox(100, "worker-b", 1_000, 1)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -2830,9 +3207,15 @@ mod tests {
         let peer = random_public_key();
         storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
         storage.claim_due_outbox(100, "dead-worker", 10, 1).unwrap();
-        assert!(storage.claim_due_outbox(109, "new-worker", 10, 1).unwrap().is_none());
+        assert!(storage
+            .claim_due_outbox(109, "new-worker", 10, 1)
+            .unwrap()
+            .is_none());
         assert_eq!(storage.recover_stale_outbox_leases(110).unwrap(), 1);
-        assert!(storage.claim_due_outbox(110, "new-worker", 10, 1).unwrap().is_some());
+        assert!(storage
+            .claim_due_outbox(110, "new-worker", 10, 1)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -2884,16 +3267,24 @@ mod tests {
         {
             let storage = Storage::open(dir.path()).unwrap();
             storage.enqueue_outbox(&msg_id, peer, t0).unwrap();
-            storage.claim_due_outbox(t0, "crashed-worker", 30_000, 1).unwrap();
+            storage
+                .claim_due_outbox(t0, "crashed-worker", 30_000, 1)
+                .unwrap();
             // locked_until_ms = t0 + 30_000
         }
         // After reopen, recover_crash_state sees locked_until_ms
         // is still in the future — does NOT clear it.
         let storage = Storage::open(dir.path()).unwrap();
         // Lease still valid: claim with a different owner should fail.
-        assert!(storage.claim_due_outbox(t0 + 100, "replacement", 10, 1).unwrap().is_none());
+        assert!(storage
+            .claim_due_outbox(t0 + 100, "replacement", 10, 1)
+            .unwrap()
+            .is_none());
         // After lease expires, claim should succeed.
-        assert!(storage.claim_due_outbox(t0 + 30_001, "replacement", 10, 1).unwrap().is_some());
+        assert!(storage
+            .claim_due_outbox(t0 + 30_001, "replacement", 10, 1)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -2936,12 +3327,9 @@ mod tests {
         // Finish with success — schedule next attempt far in the future
         let done = storage
             .finish_outbox_attempt(
-                &msg_id,
-                peer,
-                "worker-1",
-                true,            // success
-                200_000,         // next_attempt_at_ms (far future)
-                None,            // no error
+                &msg_id, peer, "worker-1", true,    // success
+                200_000, // next_attempt_at_ms (far future)
+                None,    // no error
             )
             .unwrap();
         assert!(done, "finish_outbox_attempt should succeed");
@@ -2987,7 +3375,9 @@ mod tests {
         assert_eq!(claimed_a.locked_until_ms, Some(30_100));
 
         // Worker B tries to claim — must fail because the row is locked
-        let claimed_b = storage.claim_due_outbox(100, "worker-b", 30_000, 1).unwrap();
+        let claimed_b = storage
+            .claim_due_outbox(100, "worker-b", 30_000, 1)
+            .unwrap();
         assert!(claimed_b.is_none(), "worker-b must not claim locked row");
 
         // Worker A releases
@@ -3017,7 +3407,9 @@ mod tests {
         // "dead-worker" claims all 3 with a short lease (10ms)
         for i in 0..3 {
             let id = [30 + i as u8; 32];
-            storage.claim_due_outbox(100, "dead-worker", 10, 10).unwrap();
+            storage
+                .claim_due_outbox(100, "dead-worker", 10, 10)
+                .unwrap();
         }
 
         // At t=109 lease still valid — nothing to recover
@@ -3050,9 +3442,7 @@ mod tests {
         storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
 
         // Worker A claims with short lease (10ms)
-        storage
-            .claim_due_outbox(100, "worker-a", 10, 1)
-            .unwrap();
+        storage.claim_due_outbox(100, "worker-a", 10, 1).unwrap();
 
         // At t=109: still locked — worker B cannot claim
         assert!(storage
@@ -3109,9 +3499,7 @@ mod tests {
         {
             let storage = Storage::open(dir.path()).unwrap();
             storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
-            storage
-                .claim_due_outbox(100, "crash-worker", 1, 1)
-                .unwrap();
+            storage.claim_due_outbox(100, "crash-worker", 1, 1).unwrap();
             // locked_until_ms = 100 + 1 = 101
         }
         // "crash" — process dies
@@ -3154,12 +3542,8 @@ mod tests {
         // Worker B (non-owner) tries to finish — must fail
         let wrong = storage
             .finish_outbox_attempt(
-                &msg_id,
-                peer,
-                "worker-b", // wrong owner
-                true,
-                200_000,
-                None,
+                &msg_id, peer, "worker-b", // wrong owner
+                true, 200_000, None,
             )
             .unwrap();
         assert!(!wrong, "non-owner must not finish the attempt");
@@ -3225,17 +3609,13 @@ mod tests {
             .claim_due_outbox(200, "worker", 30_000, 1)
             .unwrap()
             .unwrap();
-        assert_eq!(claimed2.attempts, 1, "attempts should be 1 after first finish");
+        assert_eq!(
+            claimed2.attempts, 1,
+            "attempts should be 1 after first finish"
+        );
         assert_eq!(claimed2.last_error_code.as_deref(), Some("err1"));
         storage
-            .finish_outbox_attempt(
-                &msg_id,
-                peer,
-                "worker",
-                false,
-                300,
-                Some("err2"),
-            )
+            .finish_outbox_attempt(&msg_id, peer, "worker", false, 300, Some("err2"))
             .unwrap();
 
         // Third attempt: attempts 2 → 3
@@ -3243,7 +3623,10 @@ mod tests {
             .claim_due_outbox(300, "worker", 30_000, 1)
             .unwrap()
             .unwrap();
-        assert_eq!(claimed3.attempts, 2, "attempts should be 2 after second finish");
+        assert_eq!(
+            claimed3.attempts, 2,
+            "attempts should be 2 after second finish"
+        );
         assert_eq!(claimed3.last_error_code.as_deref(), Some("err2"));
     }
 
@@ -3260,9 +3643,7 @@ mod tests {
         assert!(before.iter().any(|r| r.msg_id == msg_id));
 
         // Claim with long lease
-        storage
-            .claim_due_outbox(100, "worker", 30_000, 1)
-            .unwrap();
+        storage.claim_due_outbox(100, "worker", 30_000, 1).unwrap();
 
         // After claim: fetch_due_outbox should NOT return it (live lease)
         let after = storage.fetch_due_outbox(100).unwrap();
@@ -3301,7 +3682,10 @@ mod tests {
             .claim_due_outbox(500, "worker", 30_000, 10)
             .unwrap()
             .expect("first claim");
-        assert_eq!(r1.msg_id, [42u8; 32], "earliest next_attempt (100) should be first");
+        assert_eq!(
+            r1.msg_id, [42u8; 32],
+            "earliest next_attempt (100) should be first"
+        );
         // Finish to push next_attempt far into the future so this entry
         // won't be picked up again by subsequent claims.
         storage
@@ -3312,7 +3696,10 @@ mod tests {
             .claim_due_outbox(500, "worker", 30_000, 10)
             .unwrap()
             .expect("second claim");
-        assert_eq!(r2.msg_id, [41u8; 32], "middle next_attempt (200) should be second");
+        assert_eq!(
+            r2.msg_id, [41u8; 32],
+            "middle next_attempt (200) should be second"
+        );
         storage
             .finish_outbox_attempt(&[41u8; 32], peer, "worker", false, 999_999, None)
             .unwrap();
@@ -3321,6 +3708,9 @@ mod tests {
             .claim_due_outbox(500, "worker", 30_000, 10)
             .unwrap()
             .expect("third claim");
-        assert_eq!(r3.msg_id, [40u8; 32], "latest next_attempt (300) should be third");
+        assert_eq!(
+            r3.msg_id, [40u8; 32],
+            "latest next_attempt (300) should be third"
+        );
     }
 }

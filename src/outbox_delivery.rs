@@ -11,12 +11,92 @@ use crate::{
 use iroh::PublicKey;
 use n0_error::Result;
 use std::{
+    collections::HashMap,
     future::Future,
     pin::Pin,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc;
+
+/// Source of a peer-online notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReachabilitySource {
+    /// Peer was discovered through multicast DNS.
+    Mdns,
+    /// Peer address was resolved through a relay.
+    Relay,
+    /// A friend ping confirmed the peer is online.
+    FriendPing,
+    /// A direct connection was established.
+    DirectConnection,
+    /// A known peer was restored during application startup.
+    Startup,
+}
+
+/// A coalesced peer-online event consumed by the delivery worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerReachable {
+    /// The peer whose pending messages should be retried.
+    pub peer: PublicKey,
+    /// Addresses observed for the peer, retained for endpoint-cache updates.
+    pub addresses: Vec<String>,
+    /// The subsystem that established reachability.
+    pub source: ReachabilitySource,
+}
+
+/// Non-blocking, debounced reconnect notification sender.
+#[derive(Clone, Debug)]
+pub struct ReconnectDeliveryTrigger {
+    tx: mpsc::Sender<PeerReachable>,
+    state: Arc<Mutex<HashMap<PublicKey, (Instant, PeerReachable)>>>,
+    debounce: Duration,
+}
+
+impl ReconnectDeliveryTrigger {
+    /// Create a trigger and bounded receiver pair.
+    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<PeerReachable>) {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        (
+            Self {
+                tx,
+                state: Arc::new(Mutex::new(HashMap::new())),
+                debounce: Duration::from_secs(2),
+            },
+            rx,
+        )
+    }
+    /// Configure the duplicate-notification debounce interval.
+    pub fn with_debounce(mut self, debounce: Duration) -> Self {
+        self.debounce = debounce;
+        self
+    }
+    /// Submit a peer-online event without blocking the network event loop.
+    /// Returns false when it was debounced or the bounded queue is full.
+    pub fn notify(&self, event: PeerReachable) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        if let Some((last, previous)) = state.get_mut(&event.peer) {
+            let changed = previous.addresses != event.addresses || previous.source != event.source;
+            *previous = event.clone();
+            if !changed && now.duration_since(*last) < self.debounce {
+                return false;
+            }
+            *last = now;
+        } else {
+            state.insert(event.peer, (now, event.clone()));
+        }
+        self.tx.try_send(event).is_ok()
+    }
+    /// Return the latest address/source snapshot for a peer.
+    pub fn latest(&self, peer: PublicKey) -> Option<PeerReachable> {
+        self.state
+            .lock()
+            .unwrap()
+            .get(&peer)
+            .map(|(_, e)| e.clone())
+    }
+}
 
 /// Whether a delivery failure can be retried automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,6 +341,29 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
         attempted
     }
 
+    /// Retry only due rows for a peer that just became reachable. The bound
+    /// prevents an online event from monopolising the delivery worker.
+    pub async fn run_once_for_peer(&self, peer: PublicKey, max_attempts: u32) -> usize {
+        let now = unix_ms();
+        let _ = self.storage.recover_stale_outbox_leases(now);
+        let _ = self.storage.expire_outbox(now);
+        let mut attempted = 0;
+        while attempted < max_attempts.max(1) {
+            let row = match self.storage.claim_due_outbox_for_peer(
+                now,
+                peer,
+                &self.lease_owner,
+                self.lease_duration_ms,
+            ) {
+                Ok(Some(row)) => row,
+                Ok(None) | Err(_) => break,
+            };
+            attempted += 1;
+            self.process_claim(row).await;
+        }
+        attempted as usize
+    }
+
     async fn process_claim(&self, row: OutboxRow) {
         let msg_id = row.msg_id;
         let peer = row.recipient_device_id;
@@ -302,6 +405,24 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             tokio::select! {
                 Some(_) = self.trigger.recv() => { self.run_once().await; }
                 _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => { self.run_once().await; }
+                else => break,
+            }
+        }
+    }
+
+    /// Run normal retries plus bounded retries triggered by peer reachability.
+    pub async fn run_with_reconnects(
+        mut self,
+        mut reconnects: mpsc::Receiver<PeerReachable>,
+        max_attempts: u32,
+    ) {
+        loop {
+            tokio::select! {
+                Some(event) = reconnects.recv() => {
+                    self.run_once_for_peer(event.peer, max_attempts).await;
+                }
+                Some(_) = self.trigger.recv() => { self.run_once().await; }
+                _ = tokio::time::sleep(Duration::from_secs(30)) => { self.run_once().await; }
                 else => break,
             }
         }
@@ -351,5 +472,27 @@ mod tests {
     fn backoff_is_bounded() {
         assert_eq!(backoff_ms(0), 5_000);
         assert_eq!(backoff_ms(99), 21_600_000);
+    }
+
+    #[test]
+    fn reconnect_trigger_debounces_duplicate_online_events_and_keeps_latest_addresses() {
+        let peer = iroh::SecretKey::generate().public();
+        let (trigger, mut rx) = ReconnectDeliveryTrigger::channel(4);
+        let first = PeerReachable {
+            peer,
+            addresses: vec!["127.0.0.1:1".into()],
+            source: ReachabilitySource::Mdns,
+        };
+        assert!(trigger.notify(first.clone()));
+        assert!(!trigger.notify(first.clone()));
+        assert!(rx.try_recv().is_ok());
+
+        let updated = PeerReachable {
+            addresses: vec!["127.0.0.1:2".into()],
+            source: ReachabilitySource::DirectConnection,
+            ..first
+        };
+        assert!(trigger.notify(updated.clone()));
+        assert_eq!(trigger.latest(peer), Some(updated));
     }
 }

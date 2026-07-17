@@ -169,8 +169,8 @@ pub mod file_indexer;
 /// `/iroh-chat-inbox/1` direct QUIC protocol for offline-message delivery.
 ///
 /// Uses signed, timestamped messages with authorization checks and replay
-/// protection.  The inbox topic is subscribed at startup and kept alive
-/// independently of the visible chat room.
+/// protection.  Delivery is direct QUIC via the inbox ALPN; it is independent
+/// of room gossip topics and the visible chat room.
 #[cfg(feature = "net")]
 pub mod inbox;
 

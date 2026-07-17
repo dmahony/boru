@@ -18,6 +18,8 @@ use n0_future::{
 
 use crate::friends::{FriendId, FriendsStore};
 
+use super::address_resolution::{resolve_candidates, ResolutionInputs};
+
 pub(crate) struct RetentionOpts {
     /// How long to keep received endpoint info records alive before pruning them
     retention: Duration,
@@ -146,7 +148,17 @@ impl GossipAddressLookup {
                 _ => {}
             }
         }
-        Some(addr)
+        resolve_candidates(
+            endpoint_id,
+            ResolutionInputs {
+                persisted: Some(addr),
+                ..Default::default()
+            },
+        )
+        .candidates
+        .into_iter()
+        .next()
+        .map(|candidate| candidate.addr)
     }
 }
 

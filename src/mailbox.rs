@@ -29,6 +29,13 @@ const NONCE_LEN: usize = 12;
 const SIGNATURE_LEN: usize = Signature::LENGTH;
 /// Default retention period for unacknowledged envelopes.
 pub const DEFAULT_MAILBOX_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Maximum number of envelopes returned by one reconnect sync response.
+pub const MAX_SYNC_ENVELOPES: usize = 64;
+/// Maximum postcard-encoded envelope bytes returned by one sync response.
+pub const MAX_SYNC_RESPONSE_BYTES: usize = 512 * 1024;
+/// A requester cannot force an unbounded historical scan.  The server only
+/// serves the mailbox retention window, regardless of the requested cursor.
+pub const MAX_SYNC_LOOKBACK: Duration = DEFAULT_MAILBOX_TTL;
 /// On-disk mailbox filename.
 pub const MAILBOX_FILE_NAME: &str = "mailbox.json";
 
@@ -224,38 +231,104 @@ pub fn seal_for(
     seal(sender, recipient, payload)
 }
 
+/// Version of the signed acknowledgement wire contract.
+pub const ACKNOWLEDGEMENT_VERSION: u32 = 1;
+
 /// A recipient-signed acknowledgement for one envelope.
+///
+/// The signature covers every field except `signature`, in this exact order:
+/// `(version, message_id, original_sender, recipient, acknowledged_at_ms,
+/// status)`, encoded with postcard.  Keeping the field order and encoding
+/// explicit makes verification deterministic across implementations.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MailboxAck {
-    /// Recipient identity that signed the acknowledgement.
-    pub recipient: PublicKey,
+pub struct MessageAcknowledgement {
+    /// Protocol version of the acknowledgement contract.
+    pub version: u32,
     /// Envelope identifier being acknowledged.
     pub message_id: String,
-    /// Recipient signature over the identity and message identifier.
+    /// Identity that originally authored/sent the envelope.
+    pub original_sender: PublicKey,
+    /// Recipient identity that signed the acknowledgement.
+    pub recipient: PublicKey,
+    /// Unix epoch milliseconds when processing completed.
+    pub acknowledged_at_ms: u64,
+    /// Optional application-level processing result.
+    pub status: Option<String>,
+    /// Recipient signature over all preceding semantic fields.
     pub signature: ByteArray<SIGNATURE_LEN>,
 }
 
-impl MailboxAck {
-    /// Sign an acknowledgement after successfully processing a message.
-    pub fn sign(recipient: &SecretKey, message_id: impl Into<String>) -> Self {
-        let message_id = message_id.into();
-        let data = postcard::to_stdvec(&(recipient.public(), &message_id))
-            .expect("postcard encoding cannot fail");
-        Self {
-            recipient: recipient.public(),
-            message_id,
-            signature: ByteArray::new(recipient.sign(&data).to_bytes()),
-        }
+/// Backwards-compatible protocol name used by the inbox and mailbox APIs.
+pub type MailboxAck = MessageAcknowledgement;
+
+impl MessageAcknowledgement {
+    fn signing_bytes(&self) -> Vec<u8> {
+        postcard::to_stdvec(&(
+            self.version,
+            &self.message_id,
+            self.original_sender,
+            self.recipient,
+            self.acknowledged_at_ms,
+            &self.status,
+        ))
+        .expect("postcard encoding cannot fail")
     }
+
+    /// Sign an accepted acknowledgement after successfully processing a message.
+    pub fn sign(
+        recipient: &SecretKey,
+        message_id: impl Into<String>,
+        original_sender: PublicKey,
+    ) -> Self {
+        Self::sign_at(
+            recipient,
+            message_id,
+            original_sender,
+            now_ms(),
+            Some("accepted".to_string()),
+        )
+    }
+
+    /// Construct a signed acknowledgement at a supplied timestamp.
+    ///
+    /// This is public so protocol tests and deterministic integrations can use
+    /// a fixed timestamp without depending on the system clock.
+    pub fn sign_at(
+        recipient: &SecretKey,
+        message_id: impl Into<String>,
+        original_sender: PublicKey,
+        acknowledged_at_ms: u64,
+        status: Option<String>,
+    ) -> Self {
+        let mut ack = Self {
+            version: ACKNOWLEDGEMENT_VERSION,
+            message_id: message_id.into(),
+            original_sender,
+            recipient: recipient.public(),
+            acknowledged_at_ms,
+            status,
+            signature: ByteArray::new([0u8; SIGNATURE_LEN]),
+        };
+        ack.signature = ByteArray::new(recipient.sign(&ack.signing_bytes()).to_bytes());
+        ack
+    }
+
     /// Verify the acknowledgement signature against the expected recipient key.
     pub fn verify(&self, expected: PublicKey) -> Result<()> {
+        if self.version != ACKNOWLEDGEMENT_VERSION {
+            return Err(n0_error::anyerr!(
+                "unsupported mailbox acknowledgement version {}",
+                self.version
+            ));
+        }
         if self.recipient != expected {
             return Err(n0_error::anyerr!("mailbox acknowledgement signer mismatch"));
         }
-        let data = postcard::to_stdvec(&(self.recipient, &self.message_id))
-            .expect("postcard encoding cannot fail");
         self.recipient
-            .verify(&data, &Signature::from_bytes(&self.signature))
+            .verify(
+                &self.signing_bytes(),
+                &Signature::from_bytes(&self.signature),
+            )
             .map_err(|e| n0_error::anyerr!("verify mailbox acknowledgement: {e}"))
     }
 }
@@ -276,6 +349,19 @@ pub struct MailboxStore {
 }
 fn default_schema() -> u32 {
     SCHEMA_VERSION
+}
+
+/// Result of accepting an authenticated incoming envelope.
+///
+/// A duplicate has already been durably retained. Callers must not insert it
+/// into user-visible history again, but should still acknowledge it so a lost
+/// acknowledgement can be recovered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IncomingAcceptance {
+    /// The envelope was newly retained.
+    Inserted,
+    /// The envelope was already retained and was not inserted again.
+    Duplicate,
 }
 
 impl MailboxStore {
@@ -414,16 +500,45 @@ impl MailboxStore {
         envelope: MailboxEnvelope,
         allowed_senders: &[PublicKey],
     ) -> Result<(String, Vec<u8>)> {
+        let (id, payload, _) =
+            self.accept_incoming_with_status(identity, envelope, allowed_senders)?;
+        Ok((id, payload))
+    }
+
+    /// Accept an incoming envelope and report whether it was newly retained.
+    ///
+    /// Validation and decryption happen for every delivery, including
+    /// duplicates. If the message id is already present, all immutable
+    /// envelope fields are compared before returning `Duplicate`; a mismatch
+    /// is rejected rather than allowing an id collision to alter stored state.
+    pub fn accept_incoming_with_status(
+        &mut self,
+        identity: &MailboxIdentity,
+        envelope: MailboxEnvelope,
+        allowed_senders: &[PublicKey],
+    ) -> Result<(String, Vec<u8>, IncomingAcceptance)> {
         let payload = envelope.validate_for(identity, allowed_senders, self.ttl)?;
         let id = envelope.message_id();
-        // Reconnects and restarts may replay an envelope.  Idempotent
-        // acceptance avoids injecting it twice while still returning the
-        // authenticated payload to the caller.
-        if !self.entries.contains_key(&id) {
-            self.enqueue(envelope, allowed_senders)?;
-            self.save()?;
+        // Reconnects and restarts may replay an envelope. Idempotent
+        // acceptance avoids injecting it twice while still allowing an ack.
+        if let Some(existing) = self.entries.get(&id) {
+            if existing.from != envelope.from
+                || existing.recipient != envelope.recipient
+                || existing.ephemeral != envelope.ephemeral
+                || existing.nonce != envelope.nonce
+                || existing.ciphertext != envelope.ciphertext
+                || existing.created_at != envelope.created_at
+                || existing.signature != envelope.signature
+            {
+                return Err(n0_error::anyerr!(
+                    "conflicting mailbox envelope for message id {id}"
+                ));
+            }
+            return Ok((id, payload, IncomingAcceptance::Duplicate));
         }
-        Ok((id, payload))
+        self.enqueue(envelope, allowed_senders)?;
+        self.save()?;
+        Ok((id, payload, IncomingAcceptance::Inserted))
     }
 
     /// Remove an acknowledged outgoing envelope and persist the removal.
@@ -449,15 +564,49 @@ impl MailboxStore {
     /// were encrypted for a specific peer and have not yet been
     /// acknowledged.
     pub fn pending_for_recipient(&mut self, who: PublicKey) -> Vec<MailboxEnvelope> {
+        self.pending_for_recipient_since(who, 0)
+    }
+
+    /// Return a bounded, deterministic sync page for `who`.
+    ///
+    /// `since_ms` is merely a resume hint supplied by the peer; it is clamped
+    /// to the local retention window and never causes an unrestricted scan.
+    /// The page is ordered by `(created_at, message_id)` and is bounded by both
+    /// envelope count and encoded response size.  Callers can resume with the
+    /// last returned envelope's creation time (and rely on idempotent message
+    /// acceptance for equal-timestamp boundaries).
+    pub fn pending_for_recipient_since(
+        &mut self,
+        who: PublicKey,
+        since_ms: u64,
+    ) -> Vec<MailboxEnvelope> {
         self.expire();
+        let now = now_ms();
+        let floor = now.saturating_sub(MAX_SYNC_LOOKBACK.as_millis() as u64);
+        let since_ms = since_ms.max(floor);
         let mut entries: Vec<_> = self
             .entries
             .values()
-            .filter(|e| e.recipient.identity == who)
+            .filter(|e| e.recipient.identity == who && e.created_at >= since_ms)
             .cloned()
             .collect();
         entries.sort_by_key(|entry| (entry.created_at, entry.message_id()));
-        entries
+        let mut page = Vec::with_capacity(entries.len().min(MAX_SYNC_ENVELOPES));
+        let mut encoded_bytes = 0usize;
+        for entry in entries {
+            if page.len() >= MAX_SYNC_ENVELOPES {
+                break;
+            }
+            let size = postcard::to_stdvec(&entry)
+                .map(|bytes| bytes.len())
+                .unwrap_or(usize::MAX);
+            if encoded_bytes.saturating_add(size) > MAX_SYNC_RESPONSE_BYTES {
+                break;
+            }
+            encoded_bytes += size;
+            page.push(entry);
+        }
+        page
     }
 
     /// Number of retained entries after applying retention.
@@ -485,7 +634,57 @@ mod tests {
     }
 
     #[test]
-    fn incoming_acceptance_is_idempotent_after_replay() {
+    fn sync_page_is_bounded_and_recipient_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let recipient = SecretKey::generate();
+        let sender = SecretKey::generate();
+        let other_recipient = SecretKey::generate();
+        let identity = MailboxIdentity::from_secret(&recipient);
+        let other_identity = MailboxIdentity::from_secret(&other_recipient);
+        let mut store = MailboxStore::for_recipient(dir.path(), recipient.public());
+
+        for i in 0..(MAX_SYNC_ENVELOPES + 8) {
+            let mut env = identity.seal(&sender, format!("sync-{i}").as_bytes()).unwrap();
+            env.created_at = now_ms().saturating_sub(i as u64);
+            store.entries.insert(env.message_id(), env);
+        }
+        let other = other_identity.seal(&sender, b"not for requester").unwrap();
+        store.entries.insert(other.message_id(), other);
+
+        let page = store.pending_for_recipient_since(recipient.public(), 0);
+        assert_eq!(page.len(), MAX_SYNC_ENVELOPES);
+        assert!(page.iter().all(|e| e.recipient.identity == recipient.public()));
+        let encoded: usize = page
+            .iter()
+            .map(|e| postcard::to_stdvec(e).unwrap().len())
+            .sum();
+        assert!(encoded <= MAX_SYNC_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn incoming_acceptance_reports_duplicate_without_reinserting() {
+        let dir = tempfile::tempdir().unwrap();
+        let recipient = SecretKey::generate();
+        let sender = SecretKey::generate();
+        let identity = MailboxIdentity::from_secret(&recipient);
+        let mut store = MailboxStore::for_recipient(dir.path(), recipient.public());
+        let env = identity.seal(&sender, b"signed payload").unwrap();
+
+        let first = store
+            .accept_incoming_with_status(&identity, env.clone(), &[sender.public()])
+            .unwrap();
+        assert_eq!(first.2, IncomingAcceptance::Inserted);
+        let second = store
+            .accept_incoming_with_status(&identity, env, &[sender.public()])
+            .unwrap();
+        assert_eq!(second.2, IncomingAcceptance::Duplicate);
+        assert_eq!(first.0, second.0);
+        assert_eq!(first.1, second.1);
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn incoming_acceptance_legacy_api_remains_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let recipient = SecretKey::generate();
         let sender = SecretKey::generate();
@@ -524,8 +723,41 @@ mod tests {
         let mut store = MailboxStore::empty_at(dir.path());
         store.enqueue_outgoing(envelope).unwrap();
 
-        let ack = MailboxAck::sign(&recipient, message_id);
+        let ack = MailboxAck::sign(&recipient, message_id, sender.public());
         assert!(store.acknowledge_outgoing(&ack).unwrap());
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn acknowledgement_signature_covers_every_semantic_field() {
+        let signer = SecretKey::generate();
+        let original_sender = SecretKey::generate().public();
+        let mut ack = MailboxAck::sign_at(
+            &signer,
+            "message-1",
+            original_sender,
+            1_700_000_000_000,
+            Some("accepted".to_string()),
+        );
+        let valid = ack.clone();
+        assert!(valid.verify(signer.public()).is_ok());
+
+        ack.version += 1;
+        assert!(ack.verify(signer.public()).is_err());
+        ack = valid.clone();
+        ack.message_id.push('x');
+        assert!(ack.verify(signer.public()).is_err());
+        ack = valid.clone();
+        ack.original_sender = SecretKey::generate().public();
+        assert!(ack.verify(signer.public()).is_err());
+        ack = valid.clone();
+        ack.recipient = SecretKey::generate().public();
+        assert!(ack.verify(signer.public()).is_err());
+        ack = valid.clone();
+        ack.acknowledged_at_ms += 1;
+        assert!(ack.verify(signer.public()).is_err());
+        ack = valid.clone();
+        ack.status = Some("rejected".to_string());
+        assert!(ack.verify(signer.public()).is_err());
     }
 }

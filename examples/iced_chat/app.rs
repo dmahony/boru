@@ -40,7 +40,7 @@ use boru_chat::image_optimizer::{
 };
 use boru_chat::image_store::ImageStore;
 use boru_chat::inbox::{send_ack, send_deliver, send_sync_request, AuthorDeleteProof, InboxEvent};
-use boru_chat::mailbox::{seal_for, MailboxAck, MailboxIdentity, MailboxStore};
+use boru_chat::mailbox::{seal_for, IncomingAcceptance, MailboxAck, MailboxIdentity, MailboxStore};
 use boru_chat::net::Gossip;
 use boru_chat::outbox::{OutboxEntry, OutboxStore};
 use boru_chat::private_room_tracker::{PrivateContinuousTracker, PrivateRoomTracker};
@@ -1565,7 +1565,7 @@ pub enum AppMessage {
     WhisperEvent(WhisperEvent),
     /// An event from the inbox (offline-message) protocol.
     InboxEvent(InboxEvent),
-    /// Results of periodic durable outbox retry attempts.
+    /// Results of the GUI's legacy mailbox retry pass.
     OutboxRetryResult(Vec<(u64, bool)>),
     MessageSent(String, u64, MessageHash),
     FileSent(String),
@@ -1620,7 +1620,7 @@ pub enum AppMessage {
     ConnMonitorTick,
     /// Periodic tick for mesh quiescence watchdog.
     MeshWatchdogTick,
-    /// Periodic tick (30s) to retry undelivered outgoing mailbox envelopes.
+    /// Periodic tick for the GUI's legacy mailbox retry pass.
     OutboxRetryTick,
 
     /// Toggle dark mode on/off.
@@ -6410,26 +6410,32 @@ impl IcedChat {
                                                 });
                                             let identity = MailboxIdentity::from_secret(&sk);
                                             let mut texts = Vec::new();
+                                            let mut ack_ids = Vec::new();
                                             for env in envelopes {
-                                                match store.accept_incoming(
+                                                match store.accept_incoming_with_status(
                                                     &identity,
                                                     env,
                                                     &[peer2],
                                                 ) {
-                                                    Ok((msg_id, plaintext)) => {
-                                                        if let Ok(text) =
-                                                            String::from_utf8(plaintext)
-                                                        {
-                                                            texts.push((msg_id, text));
+                                                    Ok((msg_id, plaintext, acceptance)) => {
+                                                        // Replayed envelopes must still be ACKed, but
+                                                        // only newly inserted messages may be surfaced
+                                                        // in the conversation UI.  Sync is a backfill
+                                                        // path, not permission to duplicate history.
+                                                        ack_ids.push(msg_id.clone());
+                                                        if acceptance == IncomingAcceptance::Inserted {
+                                                            if let Ok(text) = String::from_utf8(plaintext) {
+                                                                texts.push((msg_id, text));
+                                                            }
                                                         }
                                                     }
                                                     Err(_) => {}
                                                 }
                                             }
                                             let _ = store.save();
-                                            // Send acks for accepted envelopes.
-                                            for (msg_id, _) in &texts {
-                                                let ack = MailboxAck::sign(&sk, msg_id);
+                                            // Send acks for new and replayed envelopes.
+                                            for msg_id in &ack_ids {
+                                                let ack = MailboxAck::sign(&sk, msg_id, peer2);
                                                 let _ = send_ack(&endpoint, &sk, peer2, ack).await;
                                             }
                                             AppMessage::MailboxReplayed { peer: peer2, texts }
@@ -6504,9 +6510,22 @@ impl IcedChat {
                             s => s,
                         };
                         let identity = MailboxIdentity::from_secret(&self.secret_key);
-                        match store.accept_incoming(&identity, envelope, &[from]) {
-                            Ok((msg_id, plaintext)) => {
-                                if let Ok(text) = String::from_utf8(plaintext) {
+                        match store.accept_incoming_with_status(&identity, envelope, &[from]) {
+                            Ok((msg_id, plaintext, acceptance)) => {
+                                if acceptance == IncomingAcceptance::Duplicate {
+                                    let peer = from.to_string();
+                                    DIAGNOSTICS.record_with_peer(
+                                        None,
+                                        Some(&peer),
+                                        DiagnosticEventKind::DuplicateReceived {
+                                            message_id_short: Some(
+                                                msg_id.chars().take(12).collect(),
+                                            ),
+                                            conversation_id_prefix: None,
+                                            peer_id: Some(peer.clone()),
+                                        },
+                                    );
+                                } else if let Ok(text) = String::from_utf8(plaintext) {
                                     let entry = ChatEntry::remote(
                                         format!("Offline DM from {label}"),
                                         text,
@@ -6516,14 +6535,17 @@ impl IcedChat {
                                     );
                                     self.entries_push(entry);
                                 }
-                                // Persist accepted state.
+                                // Persist accepted state. Duplicates remain
+                                // unchanged, but are acknowledged below.
                                 let _ = store.save();
-                                // Send acknowledgement via async task.
+                                // Send an acknowledgement for both new and
+                                // duplicate deliveries: the prior ack may have
+                                // been lost after durable acceptance.
                                 let endpoint = self.endpoint.clone();
                                 let sk = self.secret_key.clone();
                                 return iced::Task::perform(
                                     async move {
-                                        let ack = MailboxAck::sign(&sk, &msg_id);
+                                        let ack = MailboxAck::sign(&sk, &msg_id, from);
                                         let _ = send_ack(&endpoint, &sk, from, ack).await;
                                     },
                                     |_| AppMessage::Noop,

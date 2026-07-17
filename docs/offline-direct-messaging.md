@@ -172,7 +172,7 @@ current source. Existing tests that call older APIs such as `with_ttl`,
 
 ## Transport and protocol behaviour
 
-### Inbox protocol
+### Inbox protocol (single offline-delivery path)
 
 `INBOX_ALPN` is `/iroh-chat-inbox/1`. Frames are a 4-byte big-endian length
 followed by postcard bytes. `SignedInboxMessage` signs timestamp plus inner
@@ -187,9 +187,11 @@ Supported payloads are:
 - `SyncResponse { envelopes }`
 - `DeleteTombstone(AuthorDeleteProof)`
 
-For `Deliver`, protocol deduplication is held in an in-memory
-`HashMap<InboxMessageId, u64>`. A duplicate returns an error; it is not a
-persistent inbox deduplication record. The handler emits an event to the GUI.
+For `Deliver`, transport-level replay tracking and durable application-level
+idempotency are separate. The handler authenticates the sender and emits the
+envelope to the GUI; the mailbox acceptance transaction is authoritative for
+whether a message is new or a valid duplicate. A valid duplicate is not
+reinserted, but still receives a regenerated signed ACK.
 
 The incoming stream receives only a one-byte minimal response for normal
 messages. The actual signed `MailboxAck` is sent later by the GUI through a
@@ -198,24 +200,31 @@ that the sender received an application ACK.
 
 ### Sync
 
-`send_sync_request()` can request a signed `SyncResponse`. A handler only
-returns envelopes automatically when `InboxInner.pending_fn` is configured.
-Otherwise it emits `InboxEvent::SyncRequested` and returns no response. The
-startup code constructs `InboxHandle` and the protocol, but this audit found
-no GUI call configuring `set_pending_fn`.
+A reconnecting peer sends `SyncRequest { since_ms }`, where `since_ms` is a
+resume hint for the last envelope timestamp it has processed. The request is
+not an authorization mechanism and is not trusted as an unrestricted query:
+the serving mailbox clamps it to its local retention window, filters by the
+authenticated requester's recipient identity, and returns a deterministic page
+ordered by `(created_at, message_id)`. Each page is capped at 64 envelopes and
+512 KiB of encoded envelope data. A peer resumes pagination from the last
+returned timestamp; equal-timestamp replay is safe because normal incoming
+acceptance is idempotent by message ID.
 
-On `WhisperEvent::Connected`, the GUI attempts `send_sync_request(peer, 0)`
-when it has a mailbox key for that peer. It processes returned envelopes with
-`MailboxStore::accept_incoming` and sends acks. The `SyncRequested` GUI event
-handler only logs/debugs and returns; it does not query SQLite or construct a
-response.
+`send_sync_request()` verifies the signed response before returning it. Every
+returned envelope must then pass the same recipient, sender authorization,
+expiry, signature, decryption, and durable idempotent acceptance path as an
+ordinary `Deliver`; sync is replay/backfill, not a second delivery protocol.
+The serving GUI installs the provider from the durable mailbox store before
+starting the inbox protocol. If no provider is installed, a `SyncRequested`
+event is only an observation and no response is produced.
 
-### Whisper mailbox frames
+### Whisper mailbox frames (compatibility only)
 
-Whisper has `MailboxEnvelope` and `MailboxAck` wire variants and emits
-corresponding events. The GUI explicitly ignores both event variants. The
-active fallback uses the separate inbox ALPN helper `send_deliver`, not the
-Whisper mailbox-frame API.
+Whisper has `MailboxEnvelope` and `MailboxAck` wire variants for wire
+compatibility and lower-level tests, and emits corresponding events. The GUI
+does not use those variants for offline delivery. The sole active fallback is
+the separate inbox ALPN helper `send_deliver`/`send_ack`; the same envelope must
+not be queued in both transports.
 
 ## Authorization and key exchange
 

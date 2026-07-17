@@ -92,7 +92,10 @@ fn retry_with_same_request_key_but_different_recipient_is_rejected() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("idempotency key"));
-    assert_eq!(storage.next_dm_sequence([4; 32], sender.public()).unwrap(), 2);
+    assert_eq!(
+        storage.next_dm_sequence([4; 32], sender.public()).unwrap(),
+        2
+    );
     assert!(storage.get_dm_message(&first.message_id).unwrap().is_some());
 }
 
@@ -106,8 +109,18 @@ fn conflicting_retry_rolls_back_without_advancing_sequence() {
     assert!(storage
         .queue_outgoing_dm([3; 32], sender.public(), "same", "different", key, &sender)
         .is_err());
-    assert_eq!(storage.next_dm_sequence([3; 32], sender.public()).unwrap(), 2);
-    assert_eq!(storage.get_dm_message(&first.message_id).unwrap().unwrap().plaintext, b"one");
+    assert_eq!(
+        storage.next_dm_sequence([3; 32], sender.public()).unwrap(),
+        2
+    );
+    assert_eq!(
+        storage
+            .get_dm_message(&first.message_id)
+            .unwrap()
+            .unwrap()
+            .plaintext,
+        b"one"
+    );
 }
 
 #[test]
@@ -123,7 +136,10 @@ fn encryption_failure_rolls_back_all_outgoing_dm_rows() {
         OutgoingDmFault::Encryption,
     );
     assert!(result.is_err());
-    assert_eq!(storage.next_dm_sequence([5; 32], sender.public()).unwrap(), 1);
+    assert_eq!(
+        storage.next_dm_sequence([5; 32], sender.public()).unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -139,7 +155,10 @@ fn database_failure_rolls_back_all_outgoing_dm_rows() {
         OutgoingDmFault::Database,
     );
     assert!(result.is_err());
-    assert_eq!(storage.next_dm_sequence([6; 32], sender.public()).unwrap(), 1);
+    assert_eq!(
+        storage.next_dm_sequence([6; 32], sender.public()).unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -198,4 +217,135 @@ fn concurrent_handles_allocate_distinct_sequences() {
     let mut sequences = [first.join().unwrap(), second.join().unwrap()];
     sequences.sort_unstable();
     assert_eq!(sequences, [1, 2]);
+}
+
+#[test]
+fn direct_message_history_has_deterministic_clock_independent_order_and_pagination() {
+    let (dir, storage, local_recipient, _) = setup();
+    let conversation = [9; 32];
+    let recipient = MailboxIdentity::from_secret(&local_recipient).public_key();
+    let sender_a = SecretKey::generate();
+    let sender_b = SecretKey::generate();
+
+    // Insert in an intentionally different order from the history order.
+    let b1 = storage
+        .queue_outgoing_dm(
+            conversation,
+            sender_b.public(),
+            "b1",
+            "b1",
+            recipient,
+            &sender_b,
+        )
+        .unwrap();
+    let a1 = storage
+        .queue_outgoing_dm(
+            conversation,
+            sender_a.public(),
+            "a1",
+            "a1",
+            recipient,
+            &sender_a,
+        )
+        .unwrap();
+    let a2 = storage
+        .queue_outgoing_dm(
+            conversation,
+            sender_a.public(),
+            "a2",
+            "a2",
+            recipient,
+            &sender_a,
+        )
+        .unwrap();
+
+    let mut expected = vec![
+        (
+            b1.sequence,
+            sender_b.public().as_bytes().to_vec(),
+            b1.message_id,
+        ),
+        (
+            a1.sequence,
+            sender_a.public().as_bytes().to_vec(),
+            a1.message_id,
+        ),
+        (
+            a2.sequence,
+            sender_a.public().as_bytes().to_vec(),
+            a2.message_id,
+        ),
+    ];
+    expected.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+
+    let all = storage.list_dm_messages(conversation, 0, None).unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|row| (row.sequence, row.sender.as_bytes().to_vec(), row.message_id))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        all.iter()
+            .map(|row| row.plaintext.as_slice())
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|(_, _, id)| all
+                .iter()
+                .find(|row| row.message_id == *id)
+                .unwrap()
+                .plaintext
+                .as_slice())
+            .collect::<Vec<_>>()
+    );
+
+    // Page boundaries are stable and do not depend on insertion timestamps.
+    let first_page = storage.list_dm_messages(conversation, 0, Some(2)).unwrap();
+    let second_page = storage.list_dm_messages(conversation, 2, Some(2)).unwrap();
+    assert_eq!(
+        first_page
+            .iter()
+            .chain(second_page.iter())
+            .map(|row| row.message_id)
+            .collect::<Vec<_>>(),
+        all.iter().map(|row| row.message_id).collect::<Vec<_>>()
+    );
+
+    // A retry is the same stable row, not a new history entry.
+    let retry = storage
+        .queue_outgoing_dm(
+            conversation,
+            sender_a.public(),
+            "a1",
+            "a1",
+            recipient,
+            &sender_a,
+        )
+        .unwrap();
+    assert_eq!(retry.message_id, a1.message_id);
+    assert_eq!(
+        storage
+            .list_dm_messages(conversation, 0, None)
+            .unwrap()
+            .len(),
+        3
+    );
+
+    // Reopening the database preserves both sequence order and page order.
+    drop(storage);
+    let reopened = Storage::open(dir.path()).unwrap();
+    let after_restart = reopened.list_dm_messages(conversation, 0, None).unwrap();
+    assert_eq!(
+        after_restart
+            .iter()
+            .map(|row| row.message_id)
+            .collect::<Vec<_>>(),
+        all.iter().map(|row| row.message_id).collect::<Vec<_>>()
+    );
 }
