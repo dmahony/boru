@@ -42,7 +42,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 5;
+const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -493,6 +493,7 @@ impl Storage {
                 3 => self.migrate_v3(&conn)?,
                 4 => self.migrate_v4(&conn)?,
                 5 => self.migrate_v5(&conn)?,
+                6 => self.migrate_v6(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -775,6 +776,26 @@ impl Storage {
              );",
         )
         .std_context("migrate v5 acknowledgements")?;
+        Ok(())
+    }
+
+    /// V6 adds sync dedup tracking to prevent duplicate envelope delivery
+    /// during repeat sync requests.  Every message id served via SyncResponse
+    /// is recorded in sync_dedup.  The query_pending_outbound_for_recipient
+    /// method filters out already-served ids so that subsequent sync requests
+    /// from the same peer only receive newly-pending envelopes.
+    fn migrate_v6(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sync_dedup (
+                message_id BLOB NOT NULL,
+                recipient_id BLOB NOT NULL,
+                served_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (message_id, recipient_id)
+            );
+            CREATE INDEX idx_sync_dedup_recipient
+                ON sync_dedup(recipient_id);",
+        )
+        .std_context("migrate v6 sync dedup")?;
         Ok(())
     }
 
@@ -1204,6 +1225,11 @@ impl Storage {
     /// Returns (envelopes, has_more). When the returned page is empty, has_more
     /// is always false. The caller uses the last envelope's `created_at` as a
     /// continuation cursor for the next page.
+    ///
+    /// Validation and replay protection:
+    /// - Expired envelopes (older than DEFAULT_MAILBOX_TTL) are excluded
+    /// - Already-served message IDs (via record_sync_served) are excluded
+    /// - The requester-supplied since_ms is used for cursor-based pagination
     pub fn query_pending_outbound_for_recipient(
         &self,
         recipient: &PublicKey,
@@ -1212,19 +1238,30 @@ impl Storage {
         max_bytes: usize,
     ) -> Result<(Vec<MailboxEnvelope>, bool)> {
         let conn = self.conn.lock().unwrap();
+        let now = now_ms();
+        let ttl_ms = crate::mailbox::DEFAULT_MAILBOX_TTL.as_millis() as u64;
+        let expiry_cutoff = now.saturating_sub(ttl_ms);
+        let effective_since = since_ms.max(expiry_cutoff);
         let mut stmt = conn
             .prepare(
-                "SELECT envelope, created_at_ms
-                 FROM dm_outbox
-                 WHERE recipient_id = ?1 AND created_at_ms >= ?2
-                 ORDER BY created_at_ms ASC, message_id ASC
+                "SELECT o.message_id, o.envelope, o.created_at_ms
+                 FROM dm_outbox o
+                 WHERE o.recipient_id = ?1
+                   AND o.created_at_ms >= ?2
+                   AND o.created_at_ms >= ?4
+                   AND NOT EXISTS (
+                       SELECT 1 FROM sync_dedup d
+                       WHERE d.message_id = o.message_id
+                         AND d.recipient_id = o.recipient_id
+                   )
+                 ORDER BY o.created_at_ms ASC, o.message_id ASC
                  LIMIT ?3",
             )
             .std_context("prepare query_pending_outbound_for_recipient")?;
         // Query max_count + 1 to detect has_more
         let limit = (max_count + 1) as i64;
         let mut rows = stmt
-            .query(params![recipient.as_bytes(), since_ms as i64, limit])
+            .query(params![recipient.as_bytes(), effective_since as i64, limit, expiry_cutoff as i64])
             .std_context("query pending outbound")?;
 
         let mut envelopes = Vec::with_capacity(max_count);
@@ -1232,11 +1269,14 @@ impl Storage {
         let mut has_extra = false;
 
         while let Some(row) = rows.next().std_context("next outbound row")? {
-            let envelope_bytes: Vec<u8> = row
+            let message_id_blob: Vec<u8> = row
                 .get(0)
+                .std_context("get message_id")?;
+            let envelope_bytes: Vec<u8> = row
+                .get(1)
                 .std_context("get envelope bytes")?;
             let _created_at_ms: i64 = row
-                .get(1)
+                .get(2)
                 .std_context("get created_at_ms")?;
 
             // If we already have a full page, just note there's an extra row
@@ -1261,6 +1301,42 @@ impl Storage {
 
         let has_more = has_extra;
         Ok((envelopes, has_more))
+    }
+
+    /// Record that a set of message IDs were served via SyncResponse to a
+    /// specific recipient.  Subsequent sync requests from the same recipient
+    /// will exclude these envelopes, providing replay protection.
+    pub fn record_sync_served(
+        &self,
+        recipient: &PublicKey,
+        message_ids: &[[u8; 32]],
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        for msg_id in message_ids {
+            conn.execute(
+                "INSERT OR IGNORE INTO sync_dedup (message_id, recipient_id, served_at_ms)
+                 VALUES (?1, ?2, ?3)",
+                params![msg_id.as_slice(), recipient.as_bytes(), now],
+            )
+            .std_context("insert sync_dedup")?;
+        }
+        Ok(())
+    }
+
+    /// Remove sync dedup entries older than the retention window.  Call this
+    /// periodically or during startup to keep the sync_dedup table from growing
+    /// unboundedly as old envelopes expire and are naturally excluded.
+    pub fn prune_sync_dedup(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let ttl_ms = crate::mailbox::DEFAULT_MAILBOX_TTL.as_millis() as u64;
+        let cutoff = (now_ms() as i64).saturating_sub(ttl_ms as i64);
+        conn.execute(
+            "DELETE FROM sync_dedup WHERE served_at_ms < ?1",
+            params![cutoff],
+        )
+        .std_context("prune sync_dedup")?;
+        Ok(())
     }
 
     // ── Inbox (v1) ────────────────────────────────────────────────────
@@ -2908,8 +2984,8 @@ mod tests {
     #[test]
     fn v1_get_sync_cursor_by_peer() {
         let storage = Storage::memory().unwrap();
-        let peer = random_public_key();
-        let other = random_public_key();
+        let peer = iroh::SecretKey::generate().public();
+        let other = iroh::SecretKey::generate().public();
 
         // Returns None for unregistered peer.
         assert!(storage.get_sync_cursor(&peer).unwrap().is_none());
@@ -2978,11 +3054,93 @@ mod tests {
         assert_eq!(page.len(), 0);
         assert!(!has_more);
 
-        // Query with since_ms limited.
+        // Query with since_ms beyond current time.
+        let far_future_ms = now_ms() + 86_400_000; // 1 day in the future
         let (page, _) = storage
-            .query_pending_outbound_for_recipient(&recipient_id, 9_999_999_999, 10, 10_000_000)
+            .query_pending_outbound_for_recipient(&recipient_id, far_future_ms, 10, 10_000_000)
             .unwrap();
         assert_eq!(page.len(), 0);
+    }
+
+    #[test]
+    fn v1_sync_dedup_replay_protection() {
+        let storage = Storage::memory().unwrap();
+        let sender_sk = iroh::SecretKey::generate();
+        let sender = sender_sk.public();
+        let recipient_sk = iroh::SecretKey::generate();
+        let recipient_id = recipient_sk.public();
+        let recipient = MailboxPublicKey {
+            identity: recipient_id,
+            encryption: [0u8; 32],
+        };
+        let conv_id = [2u8; 32];
+
+        // Insert 3 outbound messages, capturing their raw message_id.
+        let mut msg_ids: Vec<[u8; 32]> = Vec::new();
+        for i in 0..3u64 {
+            let request_key = format!("dedup-req-{i}");
+            let plaintext = format!("dedup-test {i}");
+            let outgoing = storage
+                .queue_outgoing_dm(
+                    conv_id, sender, &request_key, &plaintext, recipient, &sender_sk,
+                )
+                .unwrap();
+            msg_ids.push(outgoing.message_id);
+        }
+
+        // First call returns all 3.
+        let (page, _) = storage
+            .query_pending_outbound_for_recipient(&recipient_id, 0, 10, 10_000_000)
+            .unwrap();
+        assert_eq!(page.len(), 3, "first call should return all 3");
+
+        // Record first 2 message IDs as already served.
+        storage.record_sync_served(&recipient_id, &msg_ids[..2]).unwrap();
+
+        // Second call should return only the 3rd envelope.
+        let (page2, _) = storage
+            .query_pending_outbound_for_recipient(&recipient_id, 0, 10, 10_000_000)
+            .unwrap();
+        assert_eq!(page2.len(), 1, "second call should skip served envelopes");
+        let second_mid = page2[0].message_id();
+        let third_mid = page[2].message_id();
+        assert_eq!(
+            second_mid, third_mid,
+            "remaining envelope should be the 3rd"
+        );
+
+        // Record the 3rd as served too.
+        storage
+            .record_sync_served(&recipient_id, &msg_ids[2..])
+            .unwrap();
+
+        // Third call should return nothing.
+        let (page3, _) = storage
+            .query_pending_outbound_for_recipient(&recipient_id, 0, 10, 10_000_000)
+            .unwrap();
+        assert_eq!(
+            page3.len(),
+            0,
+            "third call should return nothing when all served"
+        );
+
+        // Stale dedup pruning should not affect recent entries.
+        storage.prune_sync_dedup().unwrap();
+        let (page4, _) = storage
+            .query_pending_outbound_for_recipient(&recipient_id, 0, 10, 10_000_000)
+            .unwrap();
+        assert_eq!(
+            page4.len(),
+            0,
+            "after prune, still nothing (entries are fresh)"
+        );
+
+        // Other recipient still sees nothing.
+        let other_recipient = iroh::SecretKey::generate().public();
+        let (page5, _) = storage
+            .query_pending_outbound_for_recipient(&other_recipient, 0, 10, 10_000_000)
+            .unwrap();
+        assert_eq!(page5.len(), 0);
     }
 
     // ── V2 file-object tables ──────────────────────────────────────

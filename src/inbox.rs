@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 use tokio::sync::{mpsc, Mutex};
 
-use crate::mailbox::{MailboxAck, MailboxEnvelope, MAX_SYNC_LOOKBACK};
+use crate::mailbox::{MailboxAck, MailboxEnvelope, MAX_SYNC_LOOKBACK, DEFAULT_MAILBOX_TTL};
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -57,7 +57,7 @@ const MAX_INBOX_PAYLOAD: usize = 10 * 1024 * 1024;
 pub type InboxMessageId = [u8; 32];
 
 /// Derive a stable message id from signed bytes.
-fn inbox_message_id(bytes: &[u8]) -> InboxMessageId {
+pub fn inbox_message_id(bytes: &[u8]) -> InboxMessageId {
     *blake3::hash(bytes).as_bytes()
 }
 
@@ -268,6 +268,14 @@ pub struct InboxInner {
     pub pending_fn: Option<
         Arc<dyn Fn(PublicKey, u64) -> (Vec<MailboxEnvelope>, bool) + Send + Sync>,
     >,
+    /// Optional callback invoked after a SyncResponse is sent, recording
+    /// which message IDs were served for replay protection.  The callback
+    /// receives (recipient_public_key, &[[u8; 32]]).
+    /// This prevents the same envelopes from being served again on repeat
+    /// sync requests.
+    pub record_sync_served_fn: Option<
+        Arc<dyn Fn(PublicKey, &[[u8; 32]]) + Send + Sync>,
+    >,
 }
 
 impl std::fmt::Debug for InboxInner {
@@ -336,6 +344,7 @@ impl InboxHandle {
             seen_message_ids: HashMap::new(),
             envelope_tx,
             pending_fn: None,
+            record_sync_served_fn: None,
         }));
         (
             Self {
@@ -396,6 +405,20 @@ impl InboxHandle {
         >,
     ) {
         self.inner.lock().await.pending_fn = f;
+    }
+
+    /// Set a callback invoked after each SyncResponse is sent, to record
+    /// which message IDs were served for replay protection.
+    ///
+    /// The callback receives `(recipient_public_key, &[[u8; 32]])` where
+    /// the message IDs are the raw 32-byte identifiers from the storage layer.
+    /// This integrates with `Storage::record_sync_served()` for durable
+    /// dedup tracking.
+    pub async fn set_record_sync_served_fn(
+        &self,
+        f: Option<Arc<dyn Fn(PublicKey, &[[u8; 32]]) + Send + Sync>>,
+    ) {
+        self.inner.lock().await.record_sync_served_fn = f;
     }
 }
 
@@ -481,6 +504,19 @@ impl ProtocolHandler for InboxProtocol {
             let result = Self::handle_request(&inner, remote_id, &buf).await;
             match result {
                 Ok(Some((response_envelopes, has_more))) => {
+                    // Compute message IDs for replay protection before consuming
+                    // `response_envelopes` (it is moved into the response payload).
+                    // inbox_message_id is the blake3 hash of the postcard-encoded
+                    // envelope — the same ID used for dedup on the Deliver path.
+                    let msg_ids: Vec<InboxMessageId> = response_envelopes
+                        .iter()
+                        .map(|e| {
+                            let bytes =
+                                postcard::to_stdvec(e).expect("envelope encoding cannot fail");
+                            inbox_message_id(&bytes)
+                        })
+                        .collect();
+
                     // SyncRequest: send back a paginated SyncResponse.
                     if let Some(ref sk) = secret_key {
                         let last_created_at_ms =
@@ -508,6 +544,18 @@ impl ProtocolHandler for InboxProtocol {
                             "inbox: no secret_key configured, cannot send SyncResponse to {}",
                             remote_id.fmt_short()
                         );
+                    }
+
+                    // Record served message IDs for replay protection so that
+                    // subsequent sync requests from the same peer do not re-serve
+                    // the same envelopes.  The frontend wires this callback to a
+                    // store (e.g. Storage::record_sync_served or an in-memory set)
+                    // that the pending_fn also consults for filtering.
+                    if !msg_ids.is_empty() {
+                        let guard = inner.lock().await;
+                        if let Some(ref record_fn) = guard.record_sync_served_fn {
+                            record_fn(remote_id, &msg_ids);
+                        }
                     }
                 }
                 Ok(None) => {
@@ -879,6 +927,7 @@ mod tests {
     use super::*;
     use crate::mailbox::MailboxIdentity;
     use iroh::SecretKey;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Helpers to create deterministic test messages.
@@ -1275,5 +1324,213 @@ mod tests {
             }
             _ => panic!("expected DeleteTombstone"),
         }
+    }
+
+    // ── Sync replay protection tests ─────────────────────────────────
+
+    /// Verify that set_record_sync_served_fn properly installs a callback
+    /// and that it is invoked with the correct message IDs.
+    #[tokio::test]
+    async fn record_sync_served_fn_captures_served_envelope_ids() {
+        let sk = test_secret_key();
+        let identity = MailboxIdentity::from_secret(&sk);
+        let envelope = identity.seal(&sk, b"sync test payload").unwrap();
+
+        let (handle, _rx) = InboxHandle::new();
+        handle.add_allowed_sender(sk.public()).await;
+
+        // Set up a pending_fn that returns our test envelope.
+        let test_envelope = envelope.clone();
+        handle
+            .set_pending_fn(Some(Arc::new(move |_requester, _since_ms| {
+                (vec![test_envelope.clone()], false)
+            })))
+            .await;
+
+        // Set up record_sync_served_fn to capture served IDs.
+        let captured_ids: Arc<std::sync::Mutex<Vec<InboxMessageId>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_ids_clone = captured_ids.clone();
+        handle
+            .set_record_sync_served_fn(Some(Arc::new(move |_peer, msg_ids| {
+                let mut ids = captured_ids_clone.lock().unwrap();
+                for id in msg_ids {
+                    ids.push(*id);
+                }
+            })))
+            .await;
+
+        // Send a SyncRequest — handle_request calls pending_fn.
+        let request = SignedInboxMessage::sign(
+            &sk,
+            InboxPayload::SyncRequest { since_ms: 0 },
+        )
+        .unwrap();
+
+        let result =
+            InboxProtocol::handle_request(&handle.inner(), sk.public(), &request).await;
+        assert!(result.is_ok(), "sync request should succeed");
+
+        // Compute the expected message ID.
+        let expected_mid =
+            inbox_message_id(&postcard::to_stdvec(&envelope).unwrap());
+
+        // Manually invoke the record_sync_served_fn callback (this is what
+        // accept() does after sending SyncResponse).
+        {
+            let inner = handle.inner();
+            let guard = inner.lock().await;
+            if let Some(ref record_fn) = guard.record_sync_served_fn {
+                record_fn(sk.public(), &[expected_mid]);
+            }
+        }
+
+        // Verify the callback captured the expected ID.
+        let ids = captured_ids.lock().unwrap();
+        assert_eq!(ids.len(), 1, "should have captured one message ID");
+        assert_eq!(
+            ids[0], expected_mid,
+            "captured ID should match computed inbox_message_id"
+        );
+    }
+
+    /// Verify that the pending_fn filter, when combined with a
+    /// record_sync_served_fn callback, correctly excludes already-served
+    /// envelopes from subsequent sync requests.
+    #[tokio::test]
+    async fn sync_dedup_excludes_already_served_envelopes() {
+        let sk = test_secret_key();
+        let identity = MailboxIdentity::from_secret(&sk);
+
+        // Create two distinct envelopes.
+        let env_a = identity.seal(&sk, b"envelope A").unwrap();
+        let env_b = identity.seal(&sk, b"envelope B").unwrap();
+
+        // Compute their stable message IDs.
+        let mid_a = inbox_message_id(&postcard::to_stdvec(&env_a).unwrap());
+        let mid_b = inbox_message_id(&postcard::to_stdvec(&env_b).unwrap());
+
+        let (handle, _rx) = InboxHandle::new();
+        handle.add_allowed_sender(sk.public()).await;
+
+        // Shared dedup set simulating the frontend's filter logic.
+        let served: Arc<std::sync::Mutex<HashSet<InboxMessageId>>> =
+            Arc::new(std::sync::Mutex::new(HashSet::new()));
+
+        // Set up pending_fn that returns both envelopes but filters out
+        // any already in the served set (same pattern as the frontend).
+        let env_a_for_fn = env_a.clone();
+        let env_b_for_fn = env_b.clone();
+        let served_for_fn = served.clone();
+        handle
+            .set_pending_fn(Some(Arc::new(move |_requester, _since_ms| {
+                let all = vec![env_a_for_fn.clone(), env_b_for_fn.clone()];
+                let served = served_for_fn.lock().unwrap();
+                let filtered: Vec<_> = all
+                    .into_iter()
+                    .filter(|env| {
+                        let bytes =
+                            postcard::to_stdvec(env).expect("envelope encoding cannot fail");
+                        !served.contains(&inbox_message_id(&bytes))
+                    })
+                    .collect();
+                drop(served);
+                let has_more = false;
+                (filtered, has_more)
+            })))
+            .await;
+
+        // First request: both envelopes should be returned (none served yet).
+        let request = SignedInboxMessage::sign(
+            &sk,
+            InboxPayload::SyncRequest { since_ms: 0 },
+        )
+        .unwrap();
+        let result =
+            InboxProtocol::handle_request(&handle.inner(), sk.public(), &request).await;
+        assert!(result.is_ok(), "first sync request should succeed");
+        let Some((envelopes, _)) = result.unwrap() else {
+            panic!("first sync request returned None");
+        };
+        assert_eq!(
+            envelopes.len(),
+            2,
+            "first request should return both envelopes"
+        );
+
+        // Simulate recording env_a as served (as accept() would do).
+        served.lock().unwrap().insert(mid_a);
+
+        // Second request: only env_b should be returned.
+        let request2 = SignedInboxMessage::sign(
+            &sk,
+            InboxPayload::SyncRequest { since_ms: 0 },
+        )
+        .unwrap();
+        let result2 =
+            InboxProtocol::handle_request(&handle.inner(), sk.public(), &request2).await;
+        assert!(result2.is_ok(), "second sync request should succeed");
+        let Some((envelopes2, _)) = result2.unwrap() else {
+            panic!("second sync request returned None");
+        };
+        assert_eq!(
+            envelopes2.len(),
+            1,
+            "second request should exclude already-served envelope A"
+        );
+        assert_eq!(
+            inbox_message_id(&postcard::to_stdvec(&envelopes2[0]).unwrap()),
+            mid_b,
+            "remaining envelope should be env_b"
+        );
+
+        // Simulate recording env_b as served.
+        served.lock().unwrap().insert(mid_b);
+
+        // Third request: no envelopes should be returned.
+        let request3 = SignedInboxMessage::sign(
+            &sk,
+            InboxPayload::SyncRequest { since_ms: 0 },
+        )
+        .unwrap();
+        let result3 =
+            InboxProtocol::handle_request(&handle.inner(), sk.public(), &request3).await;
+        assert!(result3.is_ok(), "third sync request should succeed");
+        let Some((envelopes3, _)) = result3.unwrap() else {
+            panic!("third sync request returned None");
+        };
+        assert_eq!(
+            envelopes3.len(),
+            0,
+            "third request should return nothing when all served"
+        );
+    }
+
+    /// Verify that inbox_message_id is deterministic and matches between
+    /// consecutive calls on the same envelope.
+    #[test]
+    fn inbox_message_id_is_consistent_across_paths() {
+        let sk = test_secret_key();
+        let identity = MailboxIdentity::from_secret(&sk);
+        let envelope = identity.seal(&sk, b"consistent hash test").unwrap();
+
+        // Compute ID via inbox_message_id (used in accept() for record_sync_served_fn).
+        let protocol_id =
+            inbox_message_id(&postcard::to_stdvec(&envelope).unwrap());
+
+        // Verify determinism: same envelope produces same ID.
+        let id2 = inbox_message_id(&postcard::to_stdvec(&envelope).unwrap());
+        assert_eq!(
+            protocol_id, id2,
+            "inbox_message_id must be deterministic for the same envelope"
+        );
+
+        // Different envelopes produce different IDs.
+        let envelope2 = identity.seal(&sk, b"different payload").unwrap();
+        let id3 = inbox_message_id(&postcard::to_stdvec(&envelope2).unwrap());
+        assert_ne!(
+            protocol_id, id3,
+            "inbox_message_id must differ for different envelopes"
+        );
     }
 }

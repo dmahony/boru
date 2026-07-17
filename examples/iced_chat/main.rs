@@ -16,6 +16,7 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -28,7 +29,7 @@ use boru_chat::chat_core::friend_ping::{
 };
 use boru_chat::chat_history::ChatHistoryStore;
 use boru_chat::friends::{FriendId, FriendsStore};
-use boru_chat::inbox::{InboxHandle, InboxProtocol, INBOX_ALPN};
+use boru_chat::inbox::{inbox_message_id, InboxHandle, InboxMessageId, InboxProtocol, INBOX_ALPN};
 use boru_chat::mailbox::{MailboxStore, MAX_SYNC_ENVELOPES};
 use boru_chat::net::{Gossip, GOSSIP_ALPN};
 use boru_chat::proto::TopicId;
@@ -519,20 +520,52 @@ fn main() -> Result<()> {
         // ── Inbox protocol ─────────────────────────────────────────────
         // Direct QUIC channels for offline message delivery to peers.
         let (inbox_handle, inbox_events_rx_tmp) = InboxHandle::new();
+        // Shared set tracking which message IDs have been served via
+        // SyncResponse.  The record_sync_served_fn callback inserts IDs
+        // after each response; the pending_fn filters them out so that
+        // repeated sync requests from the same peer do not re-serve the
+        // same envelopes (replay protection).
+        let served_ids: Arc<std::sync::Mutex<HashSet<InboxMessageId>>> =
+            Arc::new(std::sync::Mutex::new(HashSet::new()));
+        // Wire the callback so the protocol handler records served
+        // message IDs after each SyncResponse.
+        let served_ids_for_record = served_ids.clone();
+        inbox_handle
+            .set_record_sync_served_fn(Some(Arc::new(move |_peer, msg_ids| {
+                let mut set = served_ids_for_record.lock().unwrap();
+                for id in msg_ids {
+                    set.insert(*id);
+                }
+            })))
+            .await;
         // Serve reconnect sync from the durable mailbox owner.  The provider
         // applies the bounded retention/count/size policy in
         // `pending_for_recipient_since`; the requester-supplied timestamp is
         // therefore only a resume hint, never an unrestricted query.
+        // Already-served message IDs (tracked in `served_ids`) are filtered
+        // out to prevent duplicate delivery on replay sync requests.
         let mailbox_data_dir = data_dir.clone();
+        let served_ids_for_filter = served_ids.clone();
         inbox_handle
             .set_pending_fn(Some(Arc::new(move |requester, since_ms| {
-                let page = MailboxStore::load(&mailbox_data_dir)
+                let mut page = MailboxStore::load(&mailbox_data_dir)
                     .ok()
                     .flatten()
                     .map(|mut store| {
                         store.pending_for_recipient_since(requester, since_ms)
                     })
                     .unwrap_or_default();
+                // Filter out envelopes that have already been served via
+                // a previous SyncResponse (replay protection).  The same
+                // inbox_message_id hash is used both when recording served
+                // IDs and when filtering, ensuring consistent dedup.
+                let served = served_ids_for_filter.lock().unwrap();
+                page.retain(|env| {
+                    let bytes = postcard::to_stdvec(env)
+                        .expect("envelope encoding cannot fail");
+                    !served.contains(&inbox_message_id(&bytes))
+                });
+                drop(served);
                 // If the page is at the envelope limit there may be more;
                 // the byte limit could also cause truncation.  This is a
                 // best-effort has_more signal; true pagination requires

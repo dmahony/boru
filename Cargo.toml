@@ -294,3 +294,8 @@ required-features = ["net"]
 name = "test_crash_recovery"
 path = "tests/test_crash_recovery.rs"
 required-features = ["net"]
+
+[[test]]
+name = "test_sync_after_downtime"
+path = "tests/test_sync_after_downtime.rs"
+required-features = ["net"]

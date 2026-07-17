@@ -20,9 +20,10 @@ use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_with_safety, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     handle_net_event as chat_net_event, handle_net_event_with_safety_for_topic, message_hash,
-    seed_memory_lookup, MeshHealth, MessageHash, ProfileUpdateThrottle, RoomInviteV2,
+    now_ms, seed_memory_lookup, MeshHealth, MessageHash, ProfileUpdateThrottle, RoomInviteV2,
     SharedFileMeta,
 };
+use boru_chat::storage::Storage;
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_chat::conversations::{
@@ -6400,51 +6401,81 @@ impl IcedChat {
                             let peer2 = peer;
                             return iced::Task::perform(
                                 async move {
-                                    match send_sync_request(&endpoint, &sk, peer2, 0).await {
-                                        Ok(page) => {
-                                            let envelopes = page.envelopes;
-                                            let mut store = MailboxStore::load(&dd)
-                                                .ok()
-                                                .flatten()
-                                                .unwrap_or_else(|| {
-                                                    MailboxStore::for_recipient(&dd, sk.public())
-                                                });
-                                            let identity = MailboxIdentity::from_secret(&sk);
-                                            let mut texts = Vec::new();
-                                            let mut ack_ids = Vec::new();
-                                            for env in envelopes {
-                                                match store.accept_incoming_with_status(
-                                                    &identity,
-                                                    env,
-                                                    &[peer2],
-                                                ) {
-                                                    Ok((msg_id, plaintext, acceptance)) => {
-                                                        // Replayed envelopes must still be ACKed, but
-                                                        // only newly inserted messages may be surfaced
-                                                        // in the conversation UI.  Sync is a backfill
-                                                        // path, not permission to duplicate history.
-                                                        ack_ids.push(msg_id.clone());
-                                                        if acceptance == IncomingAcceptance::Inserted {
-                                                            if let Ok(text) = String::from_utf8(plaintext) {
-                                                                texts.push((msg_id, text));
+                                    // Open storage for durable cursor persistence.
+                                    let storage = Storage::open(&dd).ok();
+                                    // Read the last-synced cursor position, or 0 if none.
+                                    let since_ms = storage
+                                        .as_ref()
+                                        .and_then(|s| s.get_sync_cursor(&peer2).ok().flatten())
+                                        .map(|c| c.last_sync_at_ms)
+                                        .unwrap_or(0);
+
+                                    let identity = MailboxIdentity::from_secret(&sk);
+                                    let mut store = MailboxStore::load(&dd)
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or_else(|| {
+                                            MailboxStore::for_recipient(&dd, sk.public())
+                                        });
+                                    let mut texts = Vec::new();
+                                    let mut ack_ids = Vec::new();
+                                    let mut cursor = since_ms;
+
+                                    loop {
+                                        match send_sync_request(&endpoint, &sk, peer2, cursor).await
+                                        {
+                                            Ok(page) => {
+                                                for env in page.envelopes {
+                                                    match store.accept_incoming_with_status(
+                                                        &identity,
+                                                        env,
+                                                        &[peer2],
+                                                    ) {
+                                                        Ok((msg_id, plaintext, acceptance)) => {
+                                                            // Replayed envelopes must still be ACKed, but
+                                                            // only newly inserted messages may be surfaced
+                                                            // in the conversation UI.  Sync is a backfill
+                                                            // path, not permission to duplicate history.
+                                                            ack_ids.push(msg_id.clone());
+                                                            if acceptance == IncomingAcceptance::Inserted {
+                                                                if let Ok(text) = String::from_utf8(plaintext) {
+                                                                    texts.push((msg_id, text));
+                                                                }
                                                             }
                                                         }
+                                                        Err(_) => {}
                                                     }
-                                                    Err(_) => {}
+                                                }
+
+                                                if page.has_more {
+                                                    cursor = page.last_created_at_ms.unwrap_or(cursor);
+                                                } else {
+                                                    break;
                                                 }
                                             }
-                                            let _ = store.save();
-                                            // Send acks for new and replayed envelopes.
-                                            for msg_id in &ack_ids {
-                                                let ack = MailboxAck::sign(&sk, msg_id, peer2);
-                                                let _ = send_ack(&endpoint, &sk, peer2, ack).await;
+                                            Err(e) => {
+                                                return AppMessage::ErrorMsg(format!(
+                                                    "Mailbox sync failed: {e}"
+                                                ));
                                             }
-                                            AppMessage::MailboxReplayed { peer: peer2, texts }
                                         }
-                                        Err(e) => AppMessage::ErrorMsg(format!(
-                                            "Mailbox sync failed: {e}"
-                                        )),
                                     }
+
+                                    let _ = store.save();
+                                    // Persist the cursor so subsequent reconnects resume from here.
+                                    if let Some(stg) = &storage {
+                                        let _ = stg.upsert_sync_cursor(
+                                            &peer2,
+                                            None,
+                                            now_ms(),
+                                        );
+                                    }
+                                    // Send acks for all processed envelopes (new + replayed).
+                                    for msg_id in &ack_ids {
+                                        let ack = MailboxAck::sign(&sk, msg_id, peer2);
+                                        let _ = send_ack(&endpoint, &sk, peer2, ack).await;
+                                    }
+                                    AppMessage::MailboxReplayed { peer: peer2, texts }
                                 },
                                 std::convert::identity,
                             );
