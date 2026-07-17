@@ -61,9 +61,6 @@ pub mod public_room_safety;
 #[cfg(feature = "net")]
 pub mod public_room_tracker;
 pub mod topic_derivation;
-/// Tor-specific address and ticket scaffolding for the custom transport redesign.
-#[cfg(feature = "net")]
-pub mod tor_transport;
 
 /// Per-room discovery secrets — cryptographically random 32-byte keys
 /// that isolate private rooms on the DHT.
