@@ -4,9 +4,17 @@ use anyhow::anyhow;
 use bytes::Bytes;
 use iroh::PublicKey;
 use n0_error::{Result, StdResultExt};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+use crate::diagnostics::{DIAGNOSTICS, DiagnosticEventKind};
+use crate::proto::TopicId;
+
+/// Helper: produce a stable 8-char hex prefix from a 32-byte hash.
+fn short_id(id: &[u8; 32]) -> String {
+    hex::encode(&id[..4])
+}
 
 pub type MessageId = [u8; 32];
 
@@ -229,6 +237,23 @@ impl MessageStore {
             return Ok(false);
         }
 
+        let pending_from_sender: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM inbox WHERE author_user_id = ?1 AND acked_at_ms IS NULL",
+                [env.author_user_id.as_bytes()],
+                |row| row.get(0),
+            )
+            .std_context("count pending sender messages")?;
+        if pending_from_sender as usize >= crate::abuse_controls::MAX_PENDING_MESSAGES_PER_SENDER {
+            return Err(anyhow!("pending messages per sender limit reached").into());
+        }
+        let pending_total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM inbox WHERE acked_at_ms IS NULL", [], |row| row.get(0))
+            .std_context("count pending recipient messages")?;
+        if pending_total as usize >= crate::abuse_controls::MAX_PENDING_MESSAGES_PER_RECIPIENT {
+            return Err(anyhow!("pending messages per recipient limit reached").into());
+        }
+
         let acked = env.acked_at_ms.map(|v| v as i64);
         conn.execute(
             "INSERT INTO inbox (
@@ -249,7 +274,34 @@ impl MessageStore {
             ],
         )
         .std_context("insert inbox")?;
-        Ok(conn.changes() > 0)
+        let is_new = conn.changes() > 0;
+        // Record diagnostic event.
+        let msg_short = short_id(&env.msg_id);
+        let conv_prefix = short_id(&env.conversation_id);
+        let peer = Some(env.author_user_id.to_string());
+        if is_new {
+            DIAGNOSTICS.record_with_peer(
+                None,
+                peer.clone().as_deref(),
+                DiagnosticEventKind::IncomingPersisted {
+                    message_id_short: Some(msg_short),
+                    conversation_id_prefix: Some(conv_prefix),
+                    peer_id: peer.clone(),
+                    delivery_state: "Inbox".to_string(),
+                },
+            );
+        } else {
+            DIAGNOSTICS.record_with_peer(
+                None,
+                peer.clone().as_deref(),
+                DiagnosticEventKind::DuplicateReceived {
+                    message_id_short: Some(msg_short),
+                    conversation_id_prefix: Some(conv_prefix),
+                    peer_id: peer,
+                },
+            );
+        }
+        Ok(is_new)
     }
 
     /// Inserts an envelope and atomically updates conversation metadata,
@@ -338,6 +390,33 @@ impl MessageStore {
             ],
         )
         .std_context("upsert conversation meta")?;
+
+        // Record diagnostic event.
+        let msg_short = short_id(&env.msg_id);
+        let conv_prefix = short_id(&env.conversation_id);
+        let peer = Some(env.author_user_id.to_string());
+        if is_new {
+            DIAGNOSTICS.record_with_peer(
+                None,
+                peer.clone().as_deref(),
+                DiagnosticEventKind::IncomingPersisted {
+                    message_id_short: Some(msg_short),
+                    conversation_id_prefix: Some(conv_prefix),
+                    peer_id: peer.clone(),
+                    delivery_state: "Inbox".to_string(),
+                },
+            );
+        } else {
+            DIAGNOSTICS.record_with_peer(
+                None,
+                peer.clone().as_deref(),
+                DiagnosticEventKind::DuplicateReceived {
+                    message_id_short: Some(msg_short),
+                    conversation_id_prefix: Some(conv_prefix),
+                    peer_id: peer,
+                },
+            );
+        }
 
         Ok(is_new)
     }
@@ -922,6 +1001,20 @@ impl MessageStore {
             ],
         )
         .std_context("insert outbox")?;
+        let is_new = conn.changes() > 0;
+        if is_new {
+            let peer = recipient_device_id.to_string();
+            DIAGNOSTICS.record_with_peer(
+                None,
+                Some(&peer),
+                DiagnosticEventKind::MessageQueued {
+                    message_id_short: Some(short_id(msg_id)),
+                    conversation_id_prefix: None,
+                    peer_id: Some(peer.clone()),
+                    delivery_state: "Pending".to_string(),
+                },
+            );
+        }
         Ok(())
     }
 
@@ -937,6 +1030,20 @@ impl MessageStore {
             ],
         )
         .std_context("mark acked")?;
+        if conn.changes() > 0 {
+            let peer = recipient_device_id.to_string();
+            DIAGNOSTICS.record_with_peer(
+                None,
+                Some(&peer),
+                DiagnosticEventKind::AckReceived {
+                    message_id_short: Some(short_id(msg_id)),
+                    conversation_id_prefix: None,
+                    peer_id: Some(peer.clone()),
+                    attempt_count: 0,
+                    elapsed_ms: None,
+                },
+            );
+        }
         Ok(())
     }
 
@@ -973,6 +1080,46 @@ impl MessageStore {
             ],
         )
         .std_context("record attempt")?;
+        if conn.changes() > 0 {
+            let peer = recipient_device_id.to_string();
+            let msg_short = short_id(msg_id);
+            let delay = next_attempt_at_ms.saturating_sub(now_ms);
+            if let Some(err) = error_code {
+                let category = if err.contains("timeout") || err.contains("Connection") {
+                    "connection".to_string()
+                } else if err.contains("reject") || err.contains("unauthorized") {
+                    "rejected".to_string()
+                } else if err.contains("expir") {
+                    "expired".to_string()
+                } else {
+                    "transient".to_string()
+                };
+                DIAGNOSTICS.record_with_peer(
+                    None,
+                    Some(&peer),
+                    DiagnosticEventKind::RetryScheduled {
+                        message_id_short: Some(msg_short),
+                        conversation_id_prefix: None,
+                        peer_id: Some(peer.clone()),
+                        attempt_count: 0, // actual count read from DB separately
+                        retry_delay_ms: delay,
+                        failure_category: category,
+                    },
+                );
+            } else {
+                DIAGNOSTICS.record_with_peer(
+                    None,
+                    Some(&peer),
+                    DiagnosticEventKind::DeliveryAttemptStarted {
+                        message_id_short: Some(msg_short),
+                        conversation_id_prefix: None,
+                        peer_id: Some(peer.clone()),
+                        attempt_count: 0,
+                        retry_delay_ms: None,
+                    },
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1038,7 +1185,75 @@ impl MessageStore {
                 ],
             )
             .std_context("expire outbox")?;
+        if count > 0 {
+            DIAGNOSTICS.record(
+                None,
+                DiagnosticEventKind::MessageExpired {
+                    message_id_short: None,
+                    conversation_id_prefix: None,
+                    peer_id: None,
+                    delivery_state: format!("{:?}", DeliveryStatus::Expired),
+                },
+            );
+        }
         Ok(count)
+    }
+
+    /// Remove an outbox entry entirely (e.g. sender cancellation).
+    ///
+    /// Returns `true` if a row was deleted.
+    pub fn remove_outbox_entry(&self, msg_id: &MessageId) -> bool {
+        let conn = self.conn.lock().unwrap();
+        let recipient: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT recipient_device_id FROM outbox WHERE msg_id = ?1",
+                [msg_id.as_slice()],
+                |row| row.get(0),
+            )
+            .ok();
+        let removed = conn
+            .execute("DELETE FROM outbox WHERE msg_id = ?1", [msg_id.as_slice()])
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        if removed {
+            let peer_text = recipient
+                .and_then(|bytes| PublicKey::try_from(bytes.as_slice()).ok())
+                .map(|peer| peer.to_string());
+            DIAGNOSTICS.record_with_peer(
+                None,
+                peer_text.clone().as_deref(),
+                DiagnosticEventKind::DeliveryCancelled {
+                    message_id_short: Some(short_id(msg_id)),
+                    conversation_id_prefix: None,
+                    peer_id: peer_text.clone(),
+                    delivery_state: "Cancelled".to_string(),
+                },
+            );
+        }
+        removed
+    }
+
+    /// Remove all outbox entries for a specific recipient.
+    ///
+    /// Returns the number of rows deleted.
+    pub fn remove_outbox_for_recipient(&self, recipient: &PublicKey) -> usize {
+        let conn = self.conn.lock().unwrap();
+        let removed = conn
+            .execute(
+                "DELETE FROM outbox WHERE recipient_device_id = ?1",
+                [recipient.as_bytes()],
+            )
+            .map(|n| n as usize)
+            .unwrap_or(0);
+        if removed > 0 {
+            let peer = recipient.to_string();
+            DIAGNOSTICS.record_with_peer(
+                None,
+                Some(&peer),
+                DiagnosticEventKind::OutboxCleared { remaining_count: 0 },
+            );
+        }
+        removed
     }
 }
 
@@ -1178,9 +1393,11 @@ mod tests {
 
         // 1. Remote sends a message → unread should be 1
         let env1 = make_envelope(msg_id1, conv_id, remote);
-        assert!(store
-            .insert_inbox_with_conversation_update(&env1, &local)
-            .unwrap());
+        assert!(
+            store
+                .insert_inbox_with_conversation_update(&env1, &local)
+                .unwrap()
+        );
         let meta = store.get_conversation_meta(&conv_id).unwrap().unwrap();
         assert_eq!(meta.unread_count, 1);
         assert!(!meta.is_muted);
@@ -1188,17 +1405,21 @@ mod tests {
         assert!(!meta.is_deleted);
 
         // 2. Duplicate of same message → unread should NOT increment
-        assert!(!store
-            .insert_inbox_with_conversation_update(&env1, &local)
-            .unwrap());
+        assert!(
+            !store
+                .insert_inbox_with_conversation_update(&env1, &local)
+                .unwrap()
+        );
         let meta = store.get_conversation_meta(&conv_id).unwrap().unwrap();
         assert_eq!(meta.unread_count, 1);
 
         // 3. Second remote message → unread should be 2
         let env2 = make_envelope(msg_id2, conv_id, remote);
-        assert!(store
-            .insert_inbox_with_conversation_update(&env2, &local)
-            .unwrap());
+        assert!(
+            store
+                .insert_inbox_with_conversation_update(&env2, &local)
+                .unwrap()
+        );
         let meta = store.get_conversation_meta(&conv_id).unwrap().unwrap();
         assert_eq!(meta.unread_count, 2);
     }
@@ -1211,9 +1432,11 @@ mod tests {
 
         // Local user sends a message → unread should be 0
         let env = make_envelope([1u8; 32], conv_id, local);
-        assert!(store
-            .insert_inbox_with_conversation_update(&env, &local)
-            .unwrap());
+        assert!(
+            store
+                .insert_inbox_with_conversation_update(&env, &local)
+                .unwrap()
+        );
         let meta = store.get_conversation_meta(&conv_id).unwrap().unwrap();
         assert_eq!(meta.unread_count, 0);
     }
@@ -1756,9 +1979,11 @@ mod tests {
 
             // Tombstone should block re-insertion
             assert!(!store.insert_inbox(&env).unwrap());
-            assert!(!store
-                .insert_inbox_with_conversation_update(&env, &author)
-                .unwrap());
+            assert!(
+                !store
+                    .insert_inbox_with_conversation_update(&env, &author)
+                    .unwrap()
+            );
 
             // get_inbox should return None
             assert!(store.get_inbox(&msg_id).unwrap().is_none());
@@ -1845,9 +2070,11 @@ mod tests {
             assert!(store.is_tombstoned(&msg_id).unwrap());
             let env = make_envelope(msg_id, conv_id, author);
             assert!(!store.insert_inbox(&env).unwrap());
-            assert!(!store
-                .insert_inbox_with_conversation_update(&env, &author)
-                .unwrap());
+            assert!(
+                !store
+                    .insert_inbox_with_conversation_update(&env, &author)
+                    .unwrap()
+            );
             assert!(store.get_inbox(&msg_id).unwrap().is_none());
         }
     }
@@ -1867,9 +2094,11 @@ mod tests {
             let store = MessageStore::open(&db_path).unwrap();
             let env = make_envelope(msg_id, conv_id, author);
             assert!(store.insert_inbox(&env).unwrap());
-            assert!(store
-                .insert_tombstone(&msg_id, &conv_id, &author, &signature)
-                .unwrap());
+            assert!(
+                store
+                    .insert_tombstone(&msg_id, &conv_id, &author, &signature)
+                    .unwrap()
+            );
             assert!(store.is_tombstoned(&msg_id).unwrap());
         }
 
@@ -1898,9 +2127,11 @@ mod tests {
         store.enqueue_outbox(&msg_id, recipient, 1000).unwrap();
 
         // Apply remote tombstone
-        assert!(store
-            .insert_tombstone(&msg_id, &conv_id, &author, &signature)
-            .unwrap());
+        assert!(
+            store
+                .insert_tombstone(&msg_id, &conv_id, &author, &signature)
+                .unwrap()
+        );
 
         // Outbound should be cancelled (not due for retry)
         let due = store.fetch_due_outbox(2000).unwrap();
@@ -1956,9 +2187,11 @@ mod tests {
 
         // Tombstone the other remotely
         let signature = [5u8; 64];
-        assert!(store
-            .insert_tombstone(&msg_remote, &conv_id, &author, &signature)
-            .unwrap());
+        assert!(
+            store
+                .insert_tombstone(&msg_remote, &conv_id, &author, &signature)
+                .unwrap()
+        );
 
         // Both should be tombstoned
         assert!(store.is_tombstoned(&msg_local).unwrap());
@@ -2013,9 +2246,11 @@ mod tests {
 
             // Both insert paths must reject
             assert!(!store.insert_inbox(&env).unwrap());
-            assert!(!store
-                .insert_inbox_with_conversation_update(&env, &author)
-                .unwrap());
+            assert!(
+                !store
+                    .insert_inbox_with_conversation_update(&env, &author)
+                    .unwrap()
+            );
         }
     }
 
@@ -2033,15 +2268,19 @@ mod tests {
 
         // Insert, then apply remote tombstone
         assert!(store.insert_inbox(&env).unwrap());
-        assert!(store
-            .insert_tombstone(&msg_id, &conv_id, &author, &signature)
-            .unwrap());
+        assert!(
+            store
+                .insert_tombstone(&msg_id, &conv_id, &author, &signature)
+                .unwrap()
+        );
 
         // Redelivery attempt should be rejected
         assert!(!store.insert_inbox(&env).unwrap());
-        assert!(!store
-            .insert_inbox_with_conversation_update(&env, &author)
-            .unwrap());
+        assert!(
+            !store
+                .insert_inbox_with_conversation_update(&env, &author)
+                .unwrap()
+        );
     }
 
     #[test]

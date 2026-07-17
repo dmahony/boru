@@ -8,7 +8,7 @@ use std::{
 
 use bytes::Bytes;
 use n0_future::time::{Duration, Instant};
-use rand::{rngs::ChaCha12Rng, seq::IteratorRandom, Rng, RngExt, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng, rngs::ChaCha12Rng, seq::IteratorRandom};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, debug_span, info, info_span, trace, warn};
 

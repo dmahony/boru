@@ -480,7 +480,6 @@ pub fn spawn_conversation_forwarder(
                 safety,
             ));
         // Bridge: tag each NetEvent with the topic and forward to the shared channel
-        use n0_future::StreamExt;
         while let Some(event) = inner_rx.recv().await {
             if net_tx
                 .send(ConversationNetEvent::new(topic, event))

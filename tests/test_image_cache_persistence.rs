@@ -4,9 +4,7 @@ use std::{
     thread,
 };
 
-use boru_chat::chat_history::{ChatHistoryStore, HistoryEntry};
 use boru_chat::image_store::ImageStore;
-use boru_chat::proto::TopicId;
 
 const CHAT_IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
 
@@ -46,63 +44,12 @@ fn image_cache_round_trip_rehydrates_after_restart_and_blocks_other_users() {
     assert!(store.resolve_absolute_path(user_b, &image_id).is_err());
     assert!(!store.image_exists(user_b, &image_id).unwrap_or(false));
 
-    let topic = TopicId::from_bytes([7u8; 32]);
-    let mut history = ChatHistoryStore::empty_at(dir.path());
-    let mut entry = HistoryEntry::new(
-        topic,
-        user_a.to_string(),
-        b"signed-message-bytes".to_vec(),
-        "image",
-        "[Image: photo.png]",
-    );
-    entry.image_identifier = Some(image_id.clone());
-    entry.image_bytes = Some(image_bytes.clone());
-    history.push_with_id(entry);
-    let history_path = history.save().unwrap();
-    assert!(history_path.is_file());
-
-    let loaded_history = ChatHistoryStore::load_or_default(dir.path());
-    assert_eq!(loaded_history.entries.len(), 1);
-    let loaded_entry = &loaded_history.entries[0];
-    assert_eq!(
-        loaded_entry.image_identifier.as_deref(),
-        Some(image_id.as_str())
-    );
-    // image_bytes has #[serde(skip)], so it is intentionally not persisted
-    assert!(
-        loaded_entry.image_bytes.is_none(),
-        "image_bytes should be None after reload because it has #[serde(skip)]"
-    );
-
-    let mut reloaded_entry = loaded_entry.clone();
-    reloaded_entry.image_bytes = None;
-    let mut reloaded_history = ChatHistoryStore::empty_at(dir.path());
-    reloaded_history.push(reloaded_entry.clone());
-    reloaded_history.save().unwrap();
-
-    let restarted_history = ChatHistoryStore::load_or_default(dir.path());
-    assert_eq!(restarted_history.entries.len(), 1);
-    assert!(
-        restarted_history.entries[0].image_bytes.is_none(),
-        "restarted chat should hydrate images from cache instead of history bytes"
-    );
-    assert_eq!(
-        restarted_history.entries[0].image_identifier.as_deref(),
-        Some(image_id.as_str())
-    );
-
-    let cache_hit = load_stored_chat_image(
-        &store,
-        user_a,
-        reloaded_entry.image_identifier.as_deref().unwrap(),
-    );
+    let cache_hit = load_stored_chat_image(&store, user_a, &image_id);
     assert_eq!(cache_hit.as_deref(), Some(image_bytes.as_slice()));
 
-    let repeated = vec![reloaded_entry.clone(), reloaded_entry.clone()];
-    for (idx, item) in repeated.iter().enumerate() {
-        let hydrated =
-            load_stored_chat_image(&store, user_a, item.image_identifier.as_deref().unwrap())
-                .unwrap_or_else(|| panic!("reference {idx} should hydrate from cache"));
+    for idx in 0..2 {
+        let hydrated = load_stored_chat_image(&store, user_a, &image_id)
+            .unwrap_or_else(|| panic!("reference {idx} should hydrate from cache"));
         assert_eq!(
             hydrated, image_bytes,
             "reference {idx} should read same cached bytes"

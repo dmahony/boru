@@ -471,8 +471,8 @@ impl DiscoveryRecordValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery_record::{create_discovery_record, DISCOVERY_RECORD_CONTENT_VERSION};
-    use distributed_topic_tracker::{unix_minute, Record};
+    use crate::discovery_record::{DISCOVERY_RECORD_CONTENT_VERSION, create_discovery_record};
+    use distributed_topic_tracker::{Record, unix_minute};
 
     // ── Helpers ───────────────────────────────────────────────────────
 

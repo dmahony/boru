@@ -39,20 +39,20 @@ use std::{
 
 use bytes::Bytes;
 use iroh::{
+    Endpoint, EndpointAddr, PublicKey,
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
-    Endpoint, EndpointAddr, PublicKey,
 };
-use n0_error::{bail_any, Result};
+use n0_error::{Result, bail_any};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, trace, warn};
 
 /// Timeout error message emitted when a backfill request exceeds the deadline.
 const BACKFILL_TIMEOUT_MSG: &str = "backfill timed out";
 
-use crate::chat_core::{filter_net_event_with_safety, NetEvent, SignedMessage};
+use crate::chat_core::{NetEvent, SignedMessage, filter_net_event_with_safety};
 use crate::chat_history::ChatHistoryStore;
 use crate::public_room_safety::PublicRoomSafety;
 
@@ -721,8 +721,6 @@ mod tests {
         // the delay fires first on the server side.
         let data_dir = temp_store_path("slow_timeout");
         let history_store = ChatHistoryStore::empty_at(data_dir);
-        // Save so the store file exists (serves backfill reads)
-        let _ = history_store.save();
         let store = Arc::new(Mutex::new(history_store));
         let slow_handler = DelayedBackfillHandler {
             history_store: store.clone(),

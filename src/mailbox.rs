@@ -4,6 +4,11 @@
 //! message and only accepts envelopes signed by an explicitly authorized
 //! sender.  Entries remain until the recipient signs an acknowledgement, or
 //! until the configured retention period expires.
+//!
+//! **NOTE**: The persistent [`MailboxStore`] is a legacy migration reader.
+//! Writing to `mailbox.json` has been removed.  The protocol types
+//! ([`MailboxEnvelope`], [`MailboxAck`], [`MailboxIdentity`]) are retained
+//! because they are used by the inbox and whisper protocols.
 
 use std::{
     collections::HashMap,
@@ -13,8 +18,8 @@ use std::{
 };
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
 use iroh::{PublicKey, SecretKey, Signature};
 use n0_error::{Result, StdResultExt};
@@ -22,13 +27,9 @@ use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 use x25519_dalek::{PublicKey as EncryptionPublicKey, StaticSecret};
 
-use crate::chat_core::atomic_write::atomic_write_json;
-
 const SCHEMA_VERSION: u32 = 1;
 const NONCE_LEN: usize = 12;
 const SIGNATURE_LEN: usize = Signature::LENGTH;
-/// Default retention period for unacknowledged envelopes.
-pub const DEFAULT_MAILBOX_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// On-disk mailbox filename.
 pub const MAILBOX_FILE_NAME: &str = "mailbox.json";
 
@@ -127,28 +128,6 @@ impl MailboxEnvelope {
         MailboxIdentity::from_secret(recipient).open(self)
     }
 
-    /// Validate authorization, recipient identity, signature, and retention
-    /// before handing an incoming replay to the normal message pipeline.
-    pub fn validate_for(
-        &self,
-        identity: &MailboxIdentity,
-        allowed_senders: &[PublicKey],
-        ttl: Duration,
-    ) -> Result<Vec<u8>> {
-        if !allowed_senders.contains(&self.from) {
-            return Err(n0_error::anyerr!("mailbox sender is not authorized"));
-        }
-        let now = now_ms();
-        if self.created_at > now.saturating_add(60_000)
-            || now.saturating_sub(self.created_at) > ttl.as_millis() as u64
-        {
-            return Err(n0_error::anyerr!(
-                "mailbox envelope is expired or from the future"
-            ));
-        }
-        identity.open(self)
-    }
-
     fn open_with(&self, identity: &MailboxIdentity) -> Result<Vec<u8>> {
         verify_signature(self)?;
         let expected = identity.public_key();
@@ -161,10 +140,16 @@ impl MailboxEnvelope {
             .secret
             .diffie_hellman(&EncryptionPublicKey::from(self.ephemeral));
         let key = derive_key(shared.as_bytes());
-        Aes256Gcm::new_from_slice(&key)
+        let plaintext = Aes256Gcm::new_from_slice(&key)
             .expect("32-byte key")
             .decrypt(Nonce::from_slice(&self.nonce), self.ciphertext.as_ref())
-            .map_err(|_| n0_error::anyerr!("mailbox ciphertext authentication failed"))
+            .map_err(|_| n0_error::anyerr!("mailbox ciphertext authentication failed"))?;
+        if plaintext.len() > crate::abuse_controls::MAX_DECRYPTED_MESSAGE_SIZE {
+            return Err(n0_error::anyerr!(
+                "decrypted mailbox message exceeds maximum size"
+            ));
+        }
+        Ok(plaintext)
     }
 }
 
@@ -173,6 +158,11 @@ fn seal(
     recipient: MailboxPublicKey,
     payload: &[u8],
 ) -> Result<MailboxEnvelope> {
+    if payload.len() > crate::abuse_controls::MAX_DECRYPTED_MESSAGE_SIZE {
+        return Err(n0_error::anyerr!(
+            "mailbox plaintext exceeds maximum message size"
+        ));
+    }
     let ephemeral_secret = StaticSecret::random();
     let ephemeral = EncryptionPublicKey::from(&ephemeral_secret);
     let shared = ephemeral_secret.diffie_hellman(&EncryptionPublicKey::from(recipient.encryption));
@@ -260,8 +250,13 @@ impl MailboxAck {
     }
 }
 
+/// Legacy mailbox store — **read-only migration reader**.
+///
+/// Persistence is now handled by SQLite. This type only exists to load
+/// any existing `mailbox.json` data for migration.
+///
+/// Writing, envelope ingestion, and acknowledgement methods have been removed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-/// Durable encrypted mailbox state.
 pub struct MailboxStore {
     #[serde(default = "default_schema")]
     schema_version: u32,
@@ -286,19 +281,13 @@ impl MailboxStore {
             recipient: None,
             entries: HashMap::new(),
             data_dir: data_dir.into(),
-            ttl: DEFAULT_MAILBOX_TTL,
+            ttl: Duration::from_secs(7 * 24 * 60 * 60),
         }
     }
-    /// Create a mailbox bound to one recipient identity; this is the secure production constructor.
+    /// Create a mailbox bound to one recipient identity.
     pub fn for_recipient(data_dir: impl Into<PathBuf>, recipient: PublicKey) -> Self {
         let mut s = Self::empty_at(data_dir);
         s.recipient = Some(recipient);
-        s
-    }
-    /// Create a mailbox with a custom retention period.
-    pub fn with_ttl(data_dir: impl Into<PathBuf>, ttl: Duration) -> Self {
-        let mut s = Self::empty_at(data_dir);
-        s.ttl = ttl;
         s
     }
     /// Load a mailbox, returning None when it has not been created yet.
@@ -319,155 +308,8 @@ impl MailboxStore {
             ));
         }
         store.data_dir = data_dir.as_ref().to_path_buf();
-        store.ttl = DEFAULT_MAILBOX_TTL;
+        store.ttl = Duration::from_secs(7 * 24 * 60 * 60);
         Ok(Some(store))
-    }
-    /// Persist atomically and remove expired entries.
-    pub fn save(&self) -> Result<PathBuf> {
-        let mut copy = self.clone();
-        copy.expire();
-        let path = self.data_dir.join(MAILBOX_FILE_NAME);
-        atomic_write_json(&path, &copy, "mailbox store")?;
-        Ok(path)
-    }
-    fn expire(&mut self) {
-        let cutoff = now_ms().saturating_sub(self.ttl.as_millis() as u64);
-        self.entries.retain(|_, e| e.created_at > cutoff);
-    }
-    /// Enqueue only a valid, authenticated envelope from an allowed sender.
-    pub fn enqueue(
-        &mut self,
-        envelope: MailboxEnvelope,
-        allowed_senders: &[PublicKey],
-    ) -> Result<String> {
-        verify_signature(&envelope)?;
-        if !allowed_senders.contains(&envelope.from) {
-            return Err(n0_error::anyerr!("mailbox sender is not authorized"));
-        }
-        if let Some(recipient) = self.recipient {
-            if envelope.recipient.identity != recipient {
-                return Err(n0_error::anyerr!("mailbox recipient mismatch"));
-            }
-        } else {
-            self.recipient = Some(envelope.recipient.identity);
-        }
-        let id = envelope.message_id();
-        if self.entries.contains_key(&id) {
-            return Err(n0_error::anyerr!("duplicate mailbox message"));
-        }
-        self.entries.insert(id.clone(), envelope);
-        Ok(id)
-    }
-    /// Store an outgoing envelope without recipient or authorization checks.
-    ///
-    /// Unlike [`enqueue`], this accepts envelopes addressed to *other* peers
-    /// (the sender's own outgoing messages).  Signature verification is
-    /// skipped because the envelope was just created locally.  Duplicate
-    /// message ids are still rejected.
-    pub fn enqueue_outgoing(&mut self, envelope: MailboxEnvelope) -> Result<String> {
-        let id = envelope.message_id();
-        if self.entries.contains_key(&id) {
-            return Err(n0_error::anyerr!("duplicate mailbox message"));
-        }
-        self.entries.insert(id.clone(), envelope);
-        Ok(id)
-    }
-    /// Return pending opaque envelopes in replay order.
-    pub fn pending(&mut self) -> Result<Vec<MailboxEnvelope>> {
-        self.expire();
-        let mut entries: Vec<_> = self.entries.values().cloned().collect();
-        // HashMap iteration order is unstable; deterministic replay order keeps
-        // reconnect behavior consistent across restarts.
-        entries.sort_by_key(|entry| (entry.created_at, entry.message_id()));
-        Ok(entries)
-    }
-    /// Remove an entry only after a valid acknowledgement signed by the recipient.
-    pub fn acknowledge(&mut self, ack: &MailboxAck) -> Result<bool> {
-        let recipient = self
-            .recipient
-            .ok_or_else(|| n0_error::anyerr!("mailbox recipient is not configured"))?;
-        ack.verify(recipient)?;
-        Ok(self.entries.remove(&ack.message_id).is_some())
-    }
-
-    /// Remove an outgoing envelope after verifying the acknowledgement against
-    /// the recipient encoded in that envelope.
-    ///
-    /// Outgoing stores are not bound to the local identity: their `recipient`
-    /// field is either unset or describes an incoming mailbox.  The signer of
-    /// an outgoing acknowledgement is the remote envelope recipient, so using
-    /// [`acknowledge`] here would verify against the wrong identity.
-    pub fn acknowledge_outgoing(&mut self, ack: &MailboxAck) -> Result<bool> {
-        let Some(envelope) = self.entries.get(&ack.message_id) else {
-            return Ok(false);
-        };
-        ack.verify(envelope.recipient.identity)?;
-        Ok(self.entries.remove(&ack.message_id).is_some())
-    }
-
-    /// Authenticate and decrypt an incoming envelope before durably accepting
-    /// its opaque ciphertext. The returned plaintext can then be handed to the
-    /// normal signed-message pipeline by the application.
-    pub fn accept_incoming(
-        &mut self,
-        identity: &MailboxIdentity,
-        envelope: MailboxEnvelope,
-        allowed_senders: &[PublicKey],
-    ) -> Result<(String, Vec<u8>)> {
-        let payload = envelope.validate_for(identity, allowed_senders, self.ttl)?;
-        let id = envelope.message_id();
-        // Reconnects and restarts may replay an envelope.  Idempotent
-        // acceptance avoids injecting it twice while still returning the
-        // authenticated payload to the caller.
-        if !self.entries.contains_key(&id) {
-            self.enqueue(envelope, allowed_senders)?;
-            self.save()?;
-        }
-        Ok((id, payload))
-    }
-
-    /// Remove an acknowledged outgoing envelope and persist the removal.
-    pub fn acknowledge_and_save(&mut self, ack: &MailboxAck) -> Result<bool> {
-        let removed = self.acknowledge(ack)?;
-        if removed {
-            self.save()?;
-        }
-        Ok(removed)
-    }
-
-    /// Remove and persist an acknowledged outgoing envelope.
-    pub fn acknowledge_outgoing_and_save(&mut self, ack: &MailboxAck) -> Result<bool> {
-        let removed = self.acknowledge_outgoing(ack)?;
-        if removed {
-            self.save()?;
-        }
-        Ok(removed)
-    }
-    /// Return pending envelopes whose recipient identity matches `who`.
-    ///
-    /// Used by the inbox SyncResponse handler to serve envelopes that
-    /// were encrypted for a specific peer and have not yet been
-    /// acknowledged.
-    pub fn pending_for_recipient(&mut self, who: PublicKey) -> Vec<MailboxEnvelope> {
-        self.expire();
-        let mut entries: Vec<_> = self
-            .entries
-            .values()
-            .filter(|e| e.recipient.identity == who)
-            .cloned()
-            .collect();
-        entries.sort_by_key(|entry| (entry.created_at, entry.message_id()));
-        entries
-    }
-
-    /// Number of retained entries after applying retention.
-    pub fn len(&mut self) -> usize {
-        self.expire();
-        self.entries.len()
-    }
-    /// Whether the store is empty (after applying retention).
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 }
 
@@ -484,48 +326,60 @@ mod tests {
         assert_eq!(env.open(&recipient).unwrap(), b"private");
     }
 
-    #[test]
-    fn incoming_acceptance_is_idempotent_after_replay() {
-        let dir = tempfile::tempdir().unwrap();
-        let recipient = SecretKey::generate();
-        let sender = SecretKey::generate();
-        let identity = MailboxIdentity::from_secret(&recipient);
-        let mut store = MailboxStore::for_recipient(dir.path(), recipient.public());
-        let env = identity.seal(&sender, b"signed payload").unwrap();
+    // ── MailboxAck tests ────────────────────────────────────────────────
 
-        let first = store
-            .accept_incoming(&identity, env.clone(), &[sender.public()])
-            .unwrap();
-        let second = store
-            .accept_incoming(&identity, env, &[sender.public()])
-            .unwrap();
-        assert_eq!(first, second);
-        assert_eq!(store.len(), 1);
+    #[test]
+    fn mailbox_ack_sign_verify_roundtrip() {
+        let sk = SecretKey::generate();
+        let ack = MailboxAck::sign(&sk, "test_msg_id");
+        assert_eq!(ack.recipient, sk.public());
+        assert_eq!(ack.message_id, "test_msg_id");
+        assert!(ack.verify(sk.public()).is_ok());
     }
 
     #[test]
-    fn incoming_validation_rejects_unauthorized_sender() {
-        let recipient = SecretKey::generate();
-        let sender = SecretKey::generate();
-        let identity = MailboxIdentity::from_secret(&recipient);
-        let env = identity.seal(&sender, b"private").unwrap();
-        let result = env.validate_for(&identity, &[], DEFAULT_MAILBOX_TTL);
-        assert!(result.is_err());
+    fn mailbox_ack_rejects_wrong_recipient() {
+        let signer = SecretKey::generate();
+        let wrong = SecretKey::generate();
+        let ack = MailboxAck::sign(&signer, "test_msg_id");
+        let result = ack.verify(wrong.public());
+        assert!(result.is_err(), "should reject ack signed by different peer");
+        assert!(
+            result.unwrap_err().to_string().contains("signer mismatch"),
+            "error should mention signer mismatch"
+        );
     }
 
     #[test]
-    fn outgoing_ack_uses_envelope_recipient_when_store_is_unconfigured() {
-        let dir = tempfile::tempdir().unwrap();
-        let sender = SecretKey::generate();
-        let recipient = SecretKey::generate();
-        let recipient_identity = MailboxIdentity::from_secret(&recipient);
-        let envelope = recipient_identity.seal(&sender, b"outgoing").unwrap();
-        let message_id = envelope.message_id();
-        let mut store = MailboxStore::empty_at(dir.path());
-        store.enqueue_outgoing(envelope).unwrap();
+    fn mailbox_ack_rejects_tampered_message_id() {
+        let sk = SecretKey::generate();
+        let mut ack = MailboxAck::sign(&sk, "original_msg_id");
+        ack.message_id = "tampered_msg_id".to_string();
+        let result = ack.verify(sk.public());
+        assert!(result.is_err(), "should reject ack with tampered message_id");
+    }
 
-        let ack = MailboxAck::sign(&recipient, message_id);
-        assert!(store.acknowledge_outgoing(&ack).unwrap());
-        assert!(store.is_empty());
+    #[test]
+    fn mailbox_ack_rejects_tampered_signature() {
+        let sk = SecretKey::generate();
+        let mut ack = MailboxAck::sign(&sk, "test_msg_id");
+        // Flip bits in the signature bytes.
+        let mut sig_bytes = *ack.signature;
+        sig_bytes[0] ^= 0xFF;
+        sig_bytes[sig_bytes.len() - 1] ^= 0xFF;
+        ack.signature = ByteArray::new(sig_bytes);
+        let result = ack.verify(sk.public());
+        assert!(result.is_err(), "should reject ack with tampered signature");
+    }
+
+    #[test]
+    fn mailbox_ack_round_trips_through_postcard() {
+        let sk = SecretKey::generate();
+        let ack = MailboxAck::sign(&sk, "persist_test");
+        let encoded = postcard::to_stdvec(&ack).unwrap();
+        let decoded: MailboxAck = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.recipient, sk.public());
+        assert_eq!(decoded.message_id, "persist_test");
+        assert!(decoded.verify(sk.public()).is_ok());
     }
 }

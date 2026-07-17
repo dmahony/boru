@@ -1,14 +1,14 @@
 //! Utilities used in the protocol implementation
 
 use std::{
-    collections::{hash_map, BinaryHeap, HashMap},
+    collections::{BinaryHeap, HashMap, hash_map},
     hash::Hash,
 };
 
 use n0_future::time::Instant;
 use rand::{
-    seq::{IteratorRandom, SliceRandom},
     Rng, RngExt,
+    seq::{IteratorRandom, SliceRandom},
 };
 
 /// Implement methods, display, debug and conversion traits for 32 byte identifiers.

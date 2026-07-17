@@ -21,7 +21,6 @@ use boru_chat::chat_core::{
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     handle_net_event as chat_net_event, handle_net_event_with_safety_for_topic, message_hash,
     seed_memory_lookup, MeshHealth, MessageHash, ProfileUpdateThrottle, RoomInviteV2,
-    SharedFileMeta,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
@@ -902,6 +901,8 @@ pub enum Screen {
     PeerProfile(PublicKey),
     /// Full-screen image preview within the chat panel (sidebar stays visible).
     ImagePreview { topic: TopicId, entry_index: usize },
+    /// Owner-facing file library — \"My Profile → Shared Files\" view.
+    FileLibrary,
 }
 
 // ── Per-conversation runtime state ─────────────────────────────────────
@@ -1286,7 +1287,17 @@ pub struct IcedChat {
     shared_folder_path: PathBuf,
     /// Indexes and watches the shared folder for file changes.
     file_indexer: FileIndexer,
-    /// Local folder where downloaded peer files are saved ("Boru Downloads").
+    /// Owner-facing file library state.
+    file_library: crate::file_library::LocalFileLibraryState,
+    /// SQLite storage for file objects, shared files, collections, etc.
+    /// Created lazily: `None` before the first file library operation.
+    storage: Option<boru_chat::storage::Storage>,
+    /// Per-peer profile UI state (search, filter, pagination, cached data).
+    peer_profile_states: HashMap<PublicKey, PeerProfileUiState>,
+    /// Root directory for content-addressed managed file storage.
+    /// Files are stored as `library_dir / <hex-prefix> / <hex-hash>`.
+    file_library_dir: PathBuf,
+    /// Local folder where downloaded peer files are saved (Boru Downloads).
     boru_downloads_dir: PathBuf,
 
     // ── GUI test actions (MCP-driven) ──
@@ -1330,8 +1341,135 @@ pub struct PeerProfileData {
     pub bio: String,
     /// When this profile data was last received (SystemTime). Used for eviction.
     pub last_updated: SystemTime,
-    /// Shared file metadata announced by the peer.
-    pub shared_files: Vec<SharedFileMeta>,
+}
+
+/// UI state for the peer profile view (About + Shared Files).
+///
+/// Manages search, filter, pagination, and the cached remote catalogue data
+/// loaded from the local SQLite store.
+#[derive(Debug, Clone)]
+pub struct PeerProfileUiState {
+    /// Search query for filtering shared files by name.
+    pub search_text: String,
+    /// Optional collection name filter (None = all collections).
+    pub selected_collection: Option<String>,
+    /// Current page (0-indexed) for pagination.
+    pub page: usize,
+    /// Items per page.
+    pub page_size: usize,
+    /// Filtered + sorted file rows for the current page.
+    pub displayed_rows: Vec<DisplayedRemoteFile>,
+    /// All cached file rows from storage (unfiltered, for searching).
+    pub all_cached_files: Vec<boru_chat::storage::RemoteSharedFileRow>,
+    /// Collections from the cached catalogue.
+    pub cached_collections: Vec<boru_chat::storage::RemoteCollectionRow>,
+    /// Catalogue metadata (revision, timestamps).
+    pub catalogue_meta: Option<boru_chat::storage::RemoteCatalogueRow>,
+    /// Whether a refresh is in-flight.
+    pub refreshing: bool,
+    /// Last error message to display (if any).
+    pub error: Option<String>,
+}
+
+impl PeerProfileUiState {
+    fn new() -> Self {
+        Self {
+            search_text: String::new(),
+            selected_collection: None,
+            page: 0,
+            page_size: 25,
+            displayed_rows: Vec::new(),
+            all_cached_files: Vec::new(),
+            cached_collections: Vec::new(),
+            catalogue_meta: None,
+            refreshing: false,
+            error: None,
+        }
+    }
+
+    /// Total pages based on the current filter + page size.
+    fn total_pages(&self) -> usize {
+        if self.page_size == 0 {
+            return 0;
+        }
+        (self.displayed_rows.len() + self.page_size - 1) / self.page_size
+    }
+
+    /// Current page's file rows (slice of displayed_rows).
+    fn current_page_rows(&self) -> &[DisplayedRemoteFile] {
+        let start = self.page * self.page_size;
+        let end = std::cmp::min(start + self.page_size, self.displayed_rows.len());
+        if start >= self.displayed_rows.len() {
+            &[]
+        } else {
+            &self.displayed_rows[start..end]
+        }
+    }
+
+    /// Rebuild `displayed_rows` from `all_cached_files` applying search + collection filter.
+    fn apply_filter(&mut self) {
+        let query = self.search_text.to_lowercase();
+        let filtered: Vec<_> = self
+            .all_cached_files
+            .iter()
+            .filter(|f| {
+                // Collection filter
+                if let Some(ref coll) = self.selected_collection {
+                    if f.collection_name.as_deref() != Some(coll.as_str()) {
+                        return false;
+                    }
+                }
+                // Search filter
+                if !query.is_empty() {
+                    if !f.display_filename.to_lowercase().contains(&query)
+                        && !f
+                            .description
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(&query)
+                    {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        // Determine staleness: if we have a catalogue_meta, show as stale if not fetched recently
+        let is_catalogue_stale = self
+            .catalogue_meta
+            .as_ref()
+            .map(|m| {
+                let elapsed = now_ms().saturating_sub(m.fetched_at_ms as i64);
+                elapsed > 300_000 // 5 minutes
+            })
+            .unwrap_or(true);
+        self.displayed_rows = filtered
+            .into_iter()
+            .map(|row| {
+                let is_stale = is_catalogue_stale;
+                let available = !row.content_hash.is_empty();
+                DisplayedRemoteFile {
+                    row,
+                    is_stale,
+                    available,
+                }
+            })
+            .collect();
+        // Reset to first page
+        self.page = 0;
+    }
+}
+
+/// A file row prepared for display in the peer profile shared files list.
+#[derive(Debug, Clone)]
+pub struct DisplayedRemoteFile {
+    pub row: boru_chat::storage::RemoteSharedFileRow,
+    /// Whether the cached data is considered stale.
+    pub is_stale: bool,
+    /// Whether the file is available for download (has a content hash).
+    pub available: bool,
 }
 
 /// Tracks the UI-level lifecycle of an outgoing friend request.
@@ -1568,7 +1706,6 @@ pub enum AppMessage {
     /// Results of periodic durable outbox retry attempts.
     OutboxRetryResult(Vec<(u64, bool)>),
     MessageSent(String, u64, MessageHash),
-    FileSent(String),
     DownloadDone(String, PathBuf),
     /// File downloaded from a peer's shared profile — carries the saved path
     /// for the "Open" button.
@@ -1576,7 +1713,6 @@ pub enum AppMessage {
     DownloadFailed(String),
     OpenDownloadedFile(String),
     ErrorMsg(String),
-    ExecuteFileSend(String),
     ExecuteDownload,
     /// Start downloading the attachment belonging to a specific chat entry.
     /// Keeping the entry index in the message allows multiple file rows to
@@ -1590,6 +1726,14 @@ pub enum AppMessage {
     OpenPeerProfile(PublicKey),
     /// Close the peer profile panel and return to the previous screen.
     ClosePeerProfile,
+    /// Refresh the peer's cached catalogue.
+    PeerProfileRefresh(PublicKey),
+    /// Search query changed in the peer profile shared files list.
+    PeerProfileSearchChanged(PublicKey, String),
+    /// Filter by collection in the peer profile.
+    PeerProfileCollectionFilter(PublicKey, Option<String>),
+    /// Go to a specific page in the peer profile shared files.
+    PeerProfilePage(PublicKey, usize),
     ExecuteImageSend(String),
     ImageDownloaded {
         sender: PublicKey,
@@ -1778,6 +1922,38 @@ pub enum AppMessage {
     /// Close the image preview and return to the previous screen.
     CloseImagePreview,
 
+    // ── File Library (owner-facing shared-files view) ──
+    /// Navigate to the owner-facing file library screen.
+    NavigateToFileLibrary,
+    /// Close the file library and return to settings.
+    CloseFileLibrary,
+    /// Start the Add File workflow.
+    FileLibraryAddFile,
+    /// Search text changed in the file library search bar.
+    FileLibrarySearchChanged(String),
+    /// Filter changed in the file library filter picker.
+    FileLibraryFilterChanged(crate::file_library::FileLibraryFilter),
+    /// Sort changed in the file library sort picker.
+    FileLibrarySortChanged(crate::file_library::FileLibrarySort),
+    /// Open native file picker to select a source file for the library.
+    FileLibrarySelectSource,
+    /// Source file selected from the native file picker.
+    FileLibrarySourceSelected(std::path::PathBuf),
+    /// Display name changed in the Add File workflow.
+    FileLibraryDisplayNameChanged(String),
+    /// Description changed in the Add File workflow.
+    FileLibraryDescriptionChanged(String),
+    /// Storage mode changed in the Add File workflow.
+    FileLibraryStorageModeChanged(crate::file_library::StorageMode),
+    /// Toggle a collection selection in the Add File workflow.
+    FileLibraryCollectionToggle(i64),
+    /// Confirm and validate the current Add File configuration.
+    FileLibraryConfirmAdd,
+    /// Cancel the Add File workflow and return to the file list.
+    FileLibraryCancelAdd,
+    /// Clear the last error display in the file library.
+    FileLibraryClearError,
+
     // ── GUI test actions (MCP-driven) ──
     /// An action received from the MCP GUI test actions channel.
     GuiTestActionReceived(GuiActionRequest),
@@ -1793,6 +1969,10 @@ pub enum AppMessage {
         expected: String,
         elapsed_ms: u64,
     },
+    /// Retry delivery of a failed/expired message by event_id.
+    RetryMessage(u64),
+    /// Cancel a pending/retrying message by event_id.
+    CancelMessage(u64),
 }
 
 /// Map semantic GUI navigation commands to the same application messages used
@@ -2550,6 +2730,14 @@ impl IcedChat {
                 dl
             },
             file_indexer: FileIndexer::new(boru_chat::file_indexer::default_shared_folder_path()),
+            file_library: crate::file_library::LocalFileLibraryState::new(),
+            storage: None,
+            peer_profile_states: HashMap::new(),
+            file_library_dir: {
+                let fl = data_dir.join("file_library");
+                let _ = std::fs::create_dir_all(&fl);
+                fl
+            },
             iced_diagnostics,
             gui_action_rx,
             gui_action_history,
@@ -3326,20 +3514,37 @@ impl IcedChat {
             AppMessage::InboxEvent(_) => "InboxEvent",
             AppMessage::OutboxRetryResult(_) => "OutboxRetryResult",
             AppMessage::MessageSent(..) => "MessageSent",
-            AppMessage::FileSent(_) => "FileSent",
             AppMessage::DownloadDone(..) => "DownloadDone",
             AppMessage::DownloadDonePeerFile(..) => "DownloadDonePeerFile",
             AppMessage::DownloadFailed(_) => "DownloadFailed",
             AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
             AppMessage::ErrorMsg(_) => "ErrorMsg",
-            AppMessage::ExecuteFileSend(_) => "ExecuteFileSend",
             AppMessage::ExecuteDownload => "ExecuteDownload",
             AppMessage::ExecuteDownloadAt(_) => "ExecuteDownloadAt",
             AppMessage::DownloadPeerFile(..) => "DownloadPeerFile",
             AppMessage::OpenPeerProfile(..) => "OpenPeerProfile",
             AppMessage::ClosePeerProfile => "ClosePeerProfile",
+            AppMessage::PeerProfileRefresh(..) => "PeerProfileRefresh",
+            AppMessage::PeerProfileSearchChanged(..) => "PeerProfileSearchChanged",
+            AppMessage::PeerProfileCollectionFilter(..) => "PeerProfileCollectionFilter",
+            AppMessage::PeerProfilePage(..) => "PeerProfilePage",
             AppMessage::OpenImagePreview(..) => "OpenImagePreview",
             AppMessage::CloseImagePreview => "CloseImagePreview",
+            AppMessage::NavigateToFileLibrary => "NavigateToFileLibrary",
+            AppMessage::CloseFileLibrary => "CloseFileLibrary",
+            AppMessage::FileLibraryAddFile => "FileLibraryAddFile",
+            AppMessage::FileLibrarySearchChanged(_) => "FileLibrarySearchChanged",
+            AppMessage::FileLibraryFilterChanged(_) => "FileLibraryFilterChanged",
+            AppMessage::FileLibrarySortChanged(_) => "FileLibrarySortChanged",
+            AppMessage::FileLibrarySelectSource => "FileLibrarySelectSource",
+            AppMessage::FileLibrarySourceSelected(_) => "FileLibrarySourceSelected",
+            AppMessage::FileLibraryDisplayNameChanged(_) => "FileLibraryDisplayNameChanged",
+            AppMessage::FileLibraryDescriptionChanged(_) => "FileLibraryDescriptionChanged",
+            AppMessage::FileLibraryStorageModeChanged(_) => "FileLibraryStorageModeChanged",
+            AppMessage::FileLibraryCollectionToggle(_) => "FileLibraryCollectionToggle",
+            AppMessage::FileLibraryConfirmAdd => "FileLibraryConfirmAdd",
+            AppMessage::FileLibraryCancelAdd => "FileLibraryCancelAdd",
+            AppMessage::FileLibraryClearError => "FileLibraryClearError",
             AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
             AppMessage::ImageDownloaded { .. } => "ImageDownloaded",
             AppMessage::FriendAdded { .. } => "FriendAdded",
@@ -3418,6 +3623,8 @@ impl IcedChat {
             AppMessage::GuiActionTimeout(_) => "GuiActionTimeout",
             AppMessage::GuiTestWaitSatisfied(_) => "GuiTestWaitSatisfied",
             AppMessage::GuiTestWaitTimedOut { .. } => "GuiTestWaitTimedOut",
+            AppMessage::RetryMessage(_) => "RetryMessage",
+            AppMessage::CancelMessage(_) => "CancelMessage",
         }
     }
 }
@@ -3896,6 +4103,7 @@ impl IcedChat {
             Screen::Settings => ("Settings", None),
             Screen::PeerProfile(_) => ("PeerProfile", None),
             Screen::ImagePreview { topic, .. } => ("ImagePreview", Some(topic.to_string())),
+            Screen::FileLibrary => ("FileLibrary", None),
         };
         let _ = self.gui_state_tx.send(IcedStateSnapshot {
             node_id: self.local_public.to_string(),
@@ -5241,32 +5449,6 @@ impl IcedChat {
                 }
                 self.composer_text.clear();
 
-                if let Some(path) = trimmed.strip_prefix("/send ") {
-                    let path = path.trim().to_string();
-                    return iced::Task::perform(
-                        async move {
-                            let path_buf = std::path::PathBuf::from(&path);
-                            let abs_path = std::path::absolute(&path_buf)
-                                .map_err(|_| format!("Invalid path: {path}"))?;
-                            if !abs_path.exists() {
-                                return Err(format!("File not found: {path}"));
-                            }
-                            let filename = path_buf
-                                .file_name()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_default();
-                            if filename.is_empty() {
-                                return Err("Invalid file path.".to_string());
-                            }
-                            Ok(format!("{filename}|{}|{path}", abs_path.display()))
-                        },
-                        |r: Result<String, String>| match r {
-                            Ok(v) => AppMessage::ExecuteFileSend(v),
-                            Err(e) => AppMessage::ErrorMsg(e),
-                        },
-                    );
-                }
-
                 if let Some(path) = trimmed.strip_prefix("/image ") {
                     let path = path.trim().to_string();
                     return iced::Task::perform(
@@ -5727,75 +5909,6 @@ impl IcedChat {
                     );
                 }
 
-                if let Some(rest) = trimmed.strip_prefix("/whisper-file ") {
-                    // ── Whisper file transfer ──────────────────────────────
-                    let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
-                    if parts.len() < 2 {
-                        self.push_system("Usage: /whisper-file <peer-key|friend-alias> <path>");
-                        return iced::Task::none();
-                    }
-                    let target = parts[0].trim().to_string();
-                    let path = parts[1].trim().to_string();
-                    let peer_key = self.resolve_peer_key(&target);
-                    let peer_key = match peer_key {
-                        Some(pk) => pk,
-                        None => {
-                            self.push_system(format!(
-                                "Unknown peer: {target}. Use a public key or friend alias."
-                            ));
-                            return iced::Task::none();
-                        }
-                    };
-                    let path_buf = std::path::PathBuf::from(&path);
-                    let abs_path = match std::path::absolute(&path_buf) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            self.push_system(format!("Failed to resolve path: {e}"));
-                            return iced::Task::none();
-                        }
-                    };
-                    if !abs_path.exists() {
-                        self.push_system(format!("File not found: {path}"));
-                        return iced::Task::none();
-                    }
-                    let filename = path_buf
-                        .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if filename.is_empty() {
-                        self.push_system("Invalid file path.");
-                        return iced::Task::none();
-                    }
-                    let blob_store = self.blob_store.clone();
-                    let whisper_handle = self.whisper_handle.clone();
-                    let endpoint = self.endpoint.clone();
-                    let fname = filename.clone();
-                    self.push_system(format!("[Whisper] Hashing file: {filename}..."));
-                    return iced::Task::perform(
-                        async move {
-                            let tag = blob_store
-                                .blobs()
-                                .add_path(abs_path)
-                                .await
-                                .map_err(|e| format!("Failed to hash file: {e}"))?;
-                            let ticket = blob_ticket_string(
-                                endpoint.watch_addr().get(),
-                                tag.hash,
-                                tag.format,
-                            );
-                            whisper_handle
-                                .send_file(peer_key, fname.clone(), ticket)
-                                .await
-                                .map_err(|e| format!("Whisper file failed: {e}"))?;
-                            Ok::<String, String>(fname)
-                        },
-                        |r: Result<String, String>| match r {
-                            Ok(name) => AppMessage::FileSent(name),
-                            Err(e) => AppMessage::ErrorMsg(e),
-                        },
-                    );
-                }
-
                 // Normal text message
                 let _timer = PerfTracker::timer("send_message", "text");
                 let text = trimmed.clone();
@@ -5872,7 +5985,7 @@ impl IcedChat {
                             if is_image {
                                 AppMessage::ExecuteImageSend(encoded)
                             } else {
-                                AppMessage::ExecuteFileSend(encoded)
+                                AppMessage::ExecuteImageSend(encoded)
                             }
                         } else {
                             AppMessage::Noop
@@ -6362,23 +6475,7 @@ impl IcedChat {
                             self.entries_push(entry);
                         }
                     }
-                    boru_chat::whisper::WhisperEvent::FileTransfer { from, name, ticket } => {
-                        let label = self
-                            .names
-                            .get(&from)
-                            .cloned()
-                            .unwrap_or_else(|| from.fmt_short().to_string());
-                        self.pending_file = Some((name.clone(), ticket.clone()));
-                        self.download_entry_index = Some(self.entries.len());
-                        self.entries_push(ChatEntry::system_download(
-                            format!(
-                                "[Whisper from {label}] File received: {name}. Use the card below to download it."
-                            ),
-                            TransferKind::File,
-                            name,
-                            ticket,
-                        ));
-                    }
+
                     boru_chat::whisper::WhisperEvent::Connected { peer } => {
                         let label = self
                             .names
@@ -6656,6 +6753,43 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::RetryMessage(event_id) => {
+                // Reset a failed/expired/retrying message back to Queued so the
+                // next OutboxRetryTick picks it up for re-sending.
+                if let Some(entry) = self.entries.iter_mut().find(|e| e.event_id == event_id) {
+                    if entry.delivery_state.can_retry() {
+                        entry.delivery_state = DeliveryState::Queued;
+                        entry.bump_gen();
+                        let mut history = self.chat_history.lock().unwrap();
+                        let _ = history.update_delivery_state(event_id, DeliveryState::Queued);
+                        let _ = history.save();
+                        let mut outbox = self.outbox.lock().unwrap();
+                        let _ = outbox.update_delivery_state(event_id, DeliveryState::Queued);
+                        let _ = outbox.save();
+                        self.layout_cache.borrow_mut().clear();
+                    }
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::CancelMessage(event_id) => {
+                // Cancel a pending/retrying message.
+                if let Some(entry) = self.entries.iter_mut().find(|e| e.event_id == event_id) {
+                    if entry.delivery_state.can_cancel() {
+                        entry.delivery_state = DeliveryState::Cancelled;
+                        entry.bump_gen();
+                        let mut history = self.chat_history.lock().unwrap();
+                        let _ = history.update_delivery_state(event_id, DeliveryState::Cancelled);
+                        let _ = history.save();
+                        let mut outbox = self.outbox.lock().unwrap();
+                        let _ = outbox.update_delivery_state(event_id, DeliveryState::Cancelled);
+                        let _ = outbox.save();
+                        self.layout_cache.borrow_mut().clear();
+                    }
+                }
+                iced::Task::none()
+            }
+
             AppMessage::MessageSent(_text, event_id, msg_hash) => {
                 if let Some(entry) = self.entries.iter_mut().find(|e| e.event_id == event_id) {
                     entry.delivery_state = DeliveryState::Sent;
@@ -6676,47 +6810,6 @@ impl IcedChat {
                         let _ = outbox.save();
                     }),
                     |_| AppMessage::Noop,
-                )
-            }
-
-            AppMessage::ExecuteFileSend(encoded) => {
-                let parts: Vec<&str> = encoded.splitn(3, '|').collect();
-                if parts.len() < 3 {
-                    return iced::Task::none();
-                }
-                let filename = parts[0].to_string();
-                let abs_path = parts[1].to_string();
-
-                let blob_store = self.blob_store.clone();
-                let sender = self.sender.clone();
-                let secret_key = self.secret_key.clone();
-                let endpoint = self.endpoint.clone();
-                let fname = filename.clone();
-
-                iced::Task::perform(
-                    async move {
-                        let tag = blob_store
-                            .blobs()
-                            .add_path(std::path::PathBuf::from(&abs_path))
-                            .await
-                            .map_err(|e| format!("Failed to hash file: {e}"))?;
-                        let ticket_str =
-                            blob_ticket_string(endpoint.watch_addr().get(), tag.hash, tag.format);
-                        let msg = crate::Message::FileShare {
-                            name: filename.clone(),
-                            ticket: ticket_str,
-                        };
-                        let encoded = SignedMessage::sign_and_encode(&secret_key, &msg)
-                            .map_err(|e| format!("Failed to sign: {e}"))?;
-                        if let Some(ref sender) = sender {
-                            sender.broadcast(encoded).await.ok();
-                        }
-                        Ok(fname)
-                    },
-                    |r: Result<String, String>| match r {
-                        Ok(name) => AppMessage::FileSent(name),
-                        Err(e) => AppMessage::ErrorMsg(e),
-                    },
                 )
             }
 
@@ -6905,10 +6998,6 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::FileSent(name) => {
-                self.push_system(format!("Sharing: {name}"));
-                iced::Task::none()
-            }
             AppMessage::DownloadDone(name, path) => {
                 self.push_system(format!("*{name}* is complete"));
                 if let Some(idx) = self.download_entry_index {
@@ -7073,12 +7162,13 @@ impl IcedChat {
                                 display_name: record.display_label(&fid),
                                 bio: String::new(),
                                 last_updated: SystemTime::UNIX_EPOCH,
-                                shared_files: Vec::new(),
                             },
                         );
                     }
                 }
                 self.screen = Screen::PeerProfile(peer);
+                // Initialise or reset the UI state and load from storage.
+                self.load_peer_profile_from_storage(peer);
                 if self
                     .pending_select_peer_action
                     .as_ref()
@@ -7099,6 +7189,41 @@ impl IcedChat {
                 self.screen = Screen::ChatList;
                 iced::Task::none()
             }
+            AppMessage::PeerProfileRefresh(peer) => {
+                self.load_peer_profile_from_storage(peer);
+                iced::Task::none()
+            }
+            AppMessage::PeerProfileSearchChanged(peer, query) => {
+                let state = self
+                    .peer_profile_states
+                    .entry(peer)
+                    .or_insert_with(PeerProfileUiState::new);
+                state.search_text = query;
+                state.page = 0;
+                state.apply_filter();
+                iced::Task::none()
+            }
+            AppMessage::PeerProfileCollectionFilter(peer, collection) => {
+                let state = self
+                    .peer_profile_states
+                    .entry(peer)
+                    .or_insert_with(PeerProfileUiState::new);
+                state.selected_collection = collection;
+                state.page = 0;
+                state.apply_filter();
+                iced::Task::none()
+            }
+            AppMessage::PeerProfilePage(peer, page) => {
+                let state = self
+                    .peer_profile_states
+                    .entry(peer)
+                    .or_insert_with(PeerProfileUiState::new);
+                let total = state.total_pages();
+                if page < total {
+                    state.page = page;
+                }
+                iced::Task::none()
+            }
             AppMessage::OpenImagePreview(entry_index) => {
                 self.previous_screen = Some(self.screen.clone());
                 self.screen = Screen::ImagePreview {
@@ -7112,6 +7237,252 @@ impl IcedChat {
                     .previous_screen
                     .take()
                     .unwrap_or(Screen::Chat { topic: self.topic });
+                iced::Task::none()
+            }
+            AppMessage::NavigateToFileLibrary => {
+                self.screen = Screen::FileLibrary;
+                iced::Task::none()
+            }
+            AppMessage::CloseFileLibrary => {
+                self.screen = Screen::Settings;
+                iced::Task::none()
+            }
+            AppMessage::FileLibraryAddFile => {
+                // Start the Add File workflow
+                self.file_library.add_file_state =
+                    Some(crate::file_library::AddFileState::default());
+                iced::Task::none()
+            }
+            AppMessage::FileLibrarySearchChanged(query) => {
+                self.file_library.search_text = query;
+                self.file_library.apply_filter_and_sort();
+                iced::Task::none()
+            }
+            AppMessage::FileLibraryFilterChanged(filter) => {
+                self.file_library.filter = filter;
+                self.file_library.apply_filter_and_sort();
+                iced::Task::none()
+            }
+            AppMessage::FileLibrarySortChanged(sort) => {
+                self.file_library.sort = sort;
+                self.file_library.apply_filter_and_sort();
+                iced::Task::none()
+            }
+            AppMessage::FileLibrarySelectSource => {
+                // Open native file picker
+                let task = iced::Task::perform(
+                    async {
+                        #[cfg(feature = "gui")]
+                        {
+                            rfd::AsyncFileDialog::new()
+                                .set_title("Select a file to share")
+                                .pick_file()
+                                .await
+                                .map(|handle| handle.path().to_path_buf())
+                        }
+                        #[cfg(not(feature = "gui"))]
+                        {
+                            let _ = rfd::AsyncFileDialog::new();
+                            None::<std::path::PathBuf>
+                        }
+                    },
+                    |path| match path {
+                        Some(p) => AppMessage::FileLibrarySourceSelected(p),
+                        None => AppMessage::Noop,
+                    },
+                );
+                task
+            }
+            AppMessage::FileLibrarySourceSelected(path) => {
+                if let Some(ref mut add_state) = self.file_library.add_file_state {
+                    add_state.source_path = Some(path.clone());
+                    add_state.step = crate::file_library::AddFileStep::Configure;
+                    // Set default display name from filename
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        add_state.display_name = name.to_string();
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::FileLibraryDisplayNameChanged(name) => {
+                if let Some(ref mut add_state) = self.file_library.add_file_state {
+                    add_state.display_name = name;
+                }
+                iced::Task::none()
+            }
+            AppMessage::FileLibraryDescriptionChanged(desc) => {
+                if let Some(ref mut add_state) = self.file_library.add_file_state {
+                    add_state.description = desc;
+                }
+                iced::Task::none()
+            }
+            AppMessage::FileLibraryStorageModeChanged(mode) => {
+                if let Some(ref mut add_state) = self.file_library.add_file_state {
+                    add_state.storage_mode = mode;
+                }
+                iced::Task::none()
+            }
+            AppMessage::FileLibraryCollectionToggle(id) => {
+                if let Some(ref mut add_state) = self.file_library.add_file_state {
+                    if let Some(pos) = add_state.selected_collections.iter().position(|c| *c == id)
+                    {
+                        add_state.selected_collections.remove(pos);
+                    } else {
+                        add_state.selected_collections.push(id);
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::FileLibraryConfirmAdd => {
+                let (
+                    source_path,
+                    display_name,
+                    description,
+                    storage_mode,
+                    collection_ids,
+                    profile_user_id,
+                ) = if let Some(ref add_state) = self.file_library.add_file_state {
+                    let source_path = add_state.source_path.clone();
+                    let display_name = add_state.display_name.clone();
+                    let description = if add_state.description.is_empty() {
+                        None
+                    } else {
+                        Some(add_state.description.clone())
+                    };
+                    let storage_mode = add_state.storage_mode;
+                    let collection_ids = add_state.selected_collections.clone();
+                    let profile_user_id = self.local_public.to_string();
+                    (
+                        source_path,
+                        display_name,
+                        description,
+                        storage_mode,
+                        collection_ids,
+                        profile_user_id,
+                    )
+                } else {
+                    (
+                        None,
+                        String::new(),
+                        None,
+                        crate::file_library::StorageMode::Import,
+                        vec![],
+                        String::new(),
+                    )
+                };
+
+                if let Some(path) = source_path {
+                    // Validate first.
+                    match crate::file_library::validate_file_for_library(
+                        &path,
+                        &display_name,
+                        description.as_deref(),
+                    ) {
+                        Ok(_) => {
+                            // Lazy-init the storage on first use.
+                            if self.storage.is_none() {
+                                self.storage = Some(
+                                    boru_chat::storage::Storage::open(&self.data_dir)
+                                        .unwrap_or_else(|e| {
+                                            tracing::warn!("Failed to open storage: {e}");
+                                            boru_chat::storage::Storage::memory().expect(
+                                                "Cannot open in-memory database for file library",
+                                            )
+                                        }),
+                                );
+                            }
+                            let storage = self.storage.as_ref().unwrap();
+                            let library_dir = self.file_library_dir.clone();
+                            let metadata_id = format!("fl-add-{}", boru_chat::chat_core::now_ms());
+                            let cancel = tokio_util::sync::CancellationToken::new();
+                            let profile_user_id_clone = profile_user_id.clone();
+                            let display_name_clone = display_name.clone();
+                            let description_clone = description.clone();
+                            let storage_mode_clone = storage_mode;
+
+                            // Spawn an async task for the import/reference operation.
+                            // In the current single-threaded Iced update loop, we do the
+                            // operation synchronously via the blocking file_library_ops
+                            // functions (they use std::fs, not tokio::fs). For large files,
+                            // this should be moved to a background task with a progress
+                            // subscription.
+                            let result = match storage_mode_clone {
+                                crate::file_library::StorageMode::Import => {
+                                    crate::file_library_ops::import_file(
+                                        &path,
+                                        &display_name_clone,
+                                        description_clone.as_deref(),
+                                        &library_dir,
+                                        storage,
+                                        &profile_user_id_clone,
+                                        &metadata_id,
+                                        &collection_ids,
+                                        &cancel,
+                                        None,
+                                    )
+                                    .map_err(|e| e.to_string())
+                                }
+                                crate::file_library::StorageMode::Reference => {
+                                    crate::file_library_ops::offer_referenced_file(
+                                        &path,
+                                        &display_name_clone,
+                                        description_clone.as_deref(),
+                                        &library_dir,
+                                        storage,
+                                        &profile_user_id_clone,
+                                        &metadata_id,
+                                        &collection_ids,
+                                        &cancel,
+                                        None,
+                                    )
+                                    .map_err(|e| e.to_string())
+                                }
+                            };
+
+                            match result {
+                                Ok(content_hash) => {
+                                    // Clear add file workflow.
+                                    self.file_library.add_file_state = None;
+                                    self.file_library.last_error = None;
+
+                                    // Add the new file to the library rows.
+                                    self.file_library.all_rows.push(
+                                        crate::file_library::FileLibraryRow {
+                                            content_hash: content_hash.clone(),
+                                            display_filename: display_name_clone,
+                                            description: description_clone,
+                                            size: 0, // Will need to look up from file_object
+                                            mime_type: "application/octet-stream".into(),
+                                            offered: true,
+                                            is_imported: storage_mode_clone
+                                                == crate::file_library::StorageMode::Import,
+                                            source_available: true,
+                                            collections: vec![],
+                                            created_at_ms: boru_chat::chat_core::now_ms(),
+                                        },
+                                    );
+                                    self.file_library.apply_filter_and_sort();
+                                }
+                                Err(err) => {
+                                    self.file_library.last_error = Some(err);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.file_library.last_error = Some(e.to_string());
+                        }
+                    }
+                } else {
+                    self.file_library.last_error = Some("No source file selected".into());
+                }
+                iced::Task::none()
+            }
+            AppMessage::FileLibraryCancelAdd => {
+                self.file_library.add_file_state = None;
+                iced::Task::none()
+            }
+            AppMessage::FileLibraryClearError => {
+                self.file_library.clear_error();
                 iced::Task::none()
             }
 
@@ -8713,7 +9084,10 @@ impl IcedChat {
                     && entry.event_id > 0
                     && matches!(
                         entry.delivery_state,
-                        DeliveryState::Queued | DeliveryState::Sent
+                        DeliveryState::Queued
+                            | DeliveryState::Sending
+                            | DeliveryState::Sent
+                            | DeliveryState::Retrying
                     )
                 {
                     entry.delivery_state = DeliveryState::Failed;
@@ -8927,20 +9301,6 @@ impl IcedChat {
         let shared_path = profile.shared_folder_path.clone();
         let shared_enabled = profile.file_sharing_enabled;
 
-        // Scan shared folder for files to announce.
-        let shared_file_meta: Vec<SharedFileMeta> = if shared_enabled {
-            // Ensure folder exists and scan.
-            let _ = self.file_indexer.scan();
-            self.file_indexer
-                .list_shared_files()
-                .iter()
-                .filter(|f| f.is_announceable())
-                .map(|f| f.to_shared_file_meta())
-                .collect()
-        } else {
-            Vec::new()
-        };
-
         iced::Task::perform(
             async move {
                 let profile = UserProfile {
@@ -8953,7 +9313,6 @@ impl IcedChat {
                     allow_downloads: false,
                     max_file_size: 100 * 1024 * 1024,
                     allowed_extensions: Vec::new(),
-                    shared_files: shared_file_meta,
                 };
                 if let Ok(encoded) =
                     SignedMessage::sign_and_encode(&sk, &crate::Message::ProfileUpdate(profile))
@@ -9084,7 +9443,6 @@ impl ChatCallbacks for IcedChat {
                 display_name: profile.display_name,
                 bio: profile.bio,
                 last_updated: SystemTime::now(),
-                shared_files: profile.shared_files,
             },
         );
     }
@@ -9122,20 +9480,6 @@ impl ChatCallbacks for IcedChat {
     ) {
         let entry = ChatEntry::remote(label, text, hash, sent_at, Some(peer));
         self.entries_push(entry);
-    }
-
-    fn set_pending_file(&mut self, name: String, ticket: String) {
-        self.pending_file = Some((name.clone(), ticket.clone()));
-        // Create a download card entry so the file appears as a card with a
-        // download button, not just a system notification.  The download
-        // entry index is set so ExecuteDownloadAt can find the entry.
-        self.download_entry_index = Some(self.entries.len());
-        self.entries_push(ChatEntry::system_download(
-            format!("File received: {name}"),
-            TransferKind::File,
-            name,
-            ticket,
-        ));
     }
 
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
@@ -9405,6 +9749,7 @@ impl IcedChat {
                 topic: _,
                 entry_index,
             } => self.view_image_preview(*entry_index),
+            Screen::FileLibrary => self.view_file_library(),
         };
 
         let content = row![
@@ -10644,12 +10989,63 @@ impl IcedChat {
             let ts_text = entry.formatted_time.as_deref().unwrap_or("");
             let ts_el = text(ts_text).size(TYPO_XXS).color(text_muted(&theme));
 
-            let bubble_col = Column::new()
+            // ── Delivery state info and action buttons ──
+            let mut bubble_col = Column::new()
                 .push(label_el)
                 .push(bubble)
                 .push(ts_el)
                 .spacing(SPACE_2)
                 .max_width(480.0);
+
+            // Show delivery state label for local messages with a non-default state
+            if matches!(entry.kind, ChatKind::Local) && entry.event_id > 0 {
+                let state = &entry.delivery_state;
+                let state_icon = state.display_icon();
+                let state_label = state.user_label();
+
+                // State indicator row
+                let state_color = if state.is_terminal() && !matches!(state, DeliveryState::Seen) {
+                    // Red for failed/expired/cancelled
+                    Color::from_rgb(0.8, 0.2, 0.2)
+                } else if matches!(state, DeliveryState::Seen | DeliveryState::Delivered) {
+                    // Green for delivered/seen
+                    Color::from_rgb(0.2, 0.7, 0.2)
+                } else {
+                    text_muted(&theme)
+                };
+                let state_text = text(format!(" {} {}", state_icon, state_label))
+                    .size(TYPO_XXS)
+                    .color(state_color);
+
+                // Action buttons for retry/cancel
+                let mut actions = Row::new().spacing(SPACE_4);
+                if state.can_retry() {
+                    actions = actions.push(
+                        button(
+                            text(" Retry ")
+                                .size(TYPO_XXS)
+                                .color(Color::from_rgb(0.2, 0.5, 0.9)),
+                        )
+                        .on_press(AppMessage::RetryMessage(entry.event_id))
+                        .style(|_t, _s| iced::widget::button::Style::default()),
+                    );
+                }
+                if state.can_cancel() {
+                    actions = actions.push(
+                        button(text(" Cancel ").size(TYPO_XXS).color(text_muted(&theme)))
+                            .on_press(AppMessage::CancelMessage(entry.event_id))
+                            .style(|_t, _s| iced::widget::button::Style::default()),
+                    );
+                }
+
+                let info_row = Row::new()
+                    .push(state_text)
+                    .push(space::horizontal())
+                    .push(actions)
+                    .spacing(SPACE_4);
+
+                bubble_col = bubble_col.push(info_row);
+            }
 
             let msg_row = match entry.kind {
                 ChatKind::Remote => {
@@ -11029,6 +11425,365 @@ impl IcedChat {
         .into()
     }
 
+    fn view_file_library(&self) -> iced::Element<'_, AppMessage> {
+        use crate::file_library::{FileLibraryFilter, FileLibrarySort};
+        use iced::widget::{
+            button, container, pick_list, row, scrollable, text, text_input, Column, Row, Space,
+        };
+        use iced::{Alignment, Length};
+
+        // If the Add File workflow is active, show the add file wizard
+        if self.file_library.add_file_state.is_some() {
+            return self.view_add_file();
+        }
+
+        let state = &self.file_library;
+
+        // ── Header ──
+        let header = row![
+            text("Shared Files").size(TYPO_LG).width(Length::Fill),
+            button(text("Add File").size(TYPO_SM))
+                .on_press(AppMessage::FileLibraryAddFile)
+                .padding([SPACE_6, SPACE_12]),
+            button(text("Close").size(TYPO_MD))
+                .on_press(AppMessage::CloseFileLibrary)
+                .padding(SPACE_4)
+                .style(BUTTON_GHOST),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(SPACE_8);
+
+        // ── Search + Filter + Sort controls ──
+        let search_input = text_input("Search files...", &state.search_text)
+            .on_input(|s| AppMessage::FileLibrarySearchChanged(s))
+            .size(TYPO_SM)
+            .width(Length::Fixed(200.0))
+            .padding([SPACE_4, SPACE_8]);
+
+        let filter_picker = pick_list(FileLibraryFilter::ALL, Some(state.filter), |f| {
+            AppMessage::FileLibraryFilterChanged(f)
+        })
+        .text_size(TYPO_SM)
+        .padding([SPACE_4, SPACE_8]);
+
+        let sort_picker = pick_list(FileLibrarySort::ALL, Some(state.sort), |s| {
+            AppMessage::FileLibrarySortChanged(s)
+        })
+        .text_size(TYPO_SM)
+        .padding([SPACE_4, SPACE_8]);
+
+        let controls = row![search_input, filter_picker, sort_picker]
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center);
+
+        // ── File list ──
+        let mut file_list = Column::new().spacing(SPACE_4).width(Length::Fill);
+
+        if state.rows.is_empty() {
+            let empty_msg = if state.all_rows.is_empty() {
+                "No shared files yet. Click \"Add File\" to share your first file."
+            } else {
+                "No files match the current filter."
+            };
+            file_list = file_list.push(
+                text(empty_msg)
+                    .size(TYPO_SM)
+                    .style(text_muted_style)
+                    .width(Length::Fill),
+            );
+        } else {
+            for (i, row) in state.rows.iter().enumerate() {
+                let selected = state.selected_index == Some(i);
+                let size_str = if row.size > 1024 * 1024 {
+                    format!("{:.1} MB", row.size as f64 / (1024.0 * 1024.0))
+                } else if row.size > 1024 {
+                    format!("{:.1} KB", row.size as f64 / 1024.0)
+                } else {
+                    format!("{} B", row.size)
+                };
+
+                let status = if row.offered { "Offered" } else { "Disabled" };
+                let source = if row.is_imported {
+                    "Imported"
+                } else {
+                    "Referenced"
+                };
+
+                let file_row = container(
+                    Row::new()
+                        .push(
+                            Column::new()
+                                .push(text(&row.display_filename).size(TYPO_SM))
+                                .push(
+                                    text(format!(
+                                        "{} — {} — {} — {}",
+                                        size_str, row.mime_type, status, source
+                                    ))
+                                    .size(TYPO_XS)
+                                    .style(text_muted_style),
+                                )
+                                .spacing(SPACE_2)
+                                .width(Length::Fill),
+                        )
+                        .push(row!("→").align_y(Alignment::Center))
+                        .spacing(SPACE_8)
+                        .align_y(Alignment::Center)
+                        .padding(SPACE_8),
+                )
+                .width(Length::Fill)
+                .style(move |t| {
+                    let mut s = iced::widget::container::Style::default();
+                    s.background = Some(iced::Background::Color(if selected {
+                        iced::Color::from_rgba(0.2, 0.4, 0.8, 0.15)
+                    } else if i % 2 == 0 {
+                        iced::Color::from_rgba(0.0, 0.0, 0.0, 0.03)
+                    } else {
+                        iced::Color::TRANSPARENT
+                    }));
+                    s.border = iced::Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    };
+                    s
+                });
+
+                file_list = file_list.push(file_row);
+            }
+        }
+
+        // ── Error display ──
+        let content = if let Some(ref error) = state.last_error {
+            Column::new()
+                .push(header)
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(controls)
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(file_list)
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(
+                    container(
+                        text(error)
+                            .size(TYPO_SM)
+                            .color(iced::Color::from_rgb(0.9, 0.3, 0.2)),
+                    )
+                    .padding(SPACE_8)
+                    .width(Length::Fill),
+                )
+                .spacing(SPACE_4)
+                .padding(SPACE_24)
+        } else {
+            Column::new()
+                .push(header)
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(controls)
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(file_list)
+                .spacing(SPACE_4)
+                .padding(SPACE_24)
+        };
+
+        container(
+            scrollable(
+                container(content)
+                    .width(Length::Fill)
+                    .center_x(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |t| container_primary(t))
+        .into()
+    }
+
+    fn view_add_file(&self) -> iced::Element<'_, AppMessage> {
+        use crate::file_library::{AddFileStep, StorageMode};
+        use iced::widget::{
+            button, container, radio, row, scrollable, text, text_input, toggler, Column, Row,
+            Space,
+        };
+        use iced::{Alignment, Length};
+
+        let add_state = self
+            .file_library
+            .add_file_state
+            .as_ref()
+            .expect("view_add_file called without add_file_state");
+
+        let header: iced::Element<'_, AppMessage> = row![
+            text("Add File to Library")
+                .size(TYPO_LG)
+                .width(Length::Fill),
+            button(text("Cancel").size(TYPO_SM))
+                .on_press(AppMessage::FileLibraryCancelAdd)
+                .padding([SPACE_4, SPACE_8])
+                .style(BUTTON_GHOST),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(SPACE_8)
+        .into();
+
+        let mut content = Column::new().spacing(SPACE_12).padding(SPACE_24);
+
+        // Step indicator
+        let step_text = match add_state.step {
+            AddFileStep::SelectFile => "Step 1: Select a file",
+            AddFileStep::Configure => "Step 2: Configure file metadata",
+            AddFileStep::Validating => "Validating...",
+            AddFileStep::Error(_) => "Validation Error",
+        };
+        content = content.push(text(step_text).size(TYPO_MD));
+
+        match add_state.step {
+            AddFileStep::SelectFile => {
+                content = content.push(
+                    Column::new()
+                        .spacing(SPACE_8)
+                        .push(
+                            text("Click the button below to choose a file from your computer.")
+                                .size(TYPO_SM),
+                        )
+                        .push(
+                            button(text("Select File").size(TYPO_SM))
+                                .on_press(AppMessage::FileLibrarySelectSource)
+                                .padding([SPACE_8, SPACE_16]),
+                        ),
+                );
+            }
+            AddFileStep::Configure => {
+                // Source file display
+                if let Some(ref path) = add_state.source_path {
+                    content = content.push(
+                        row![
+                            text("Source:").size(TYPO_SM),
+                            text(path.to_string_lossy().to_string())
+                                .size(TYPO_SM)
+                                .style(text_muted_style),
+                        ]
+                        .spacing(SPACE_8),
+                    );
+                }
+
+                // Display name
+                content = content.push(
+                    Column::new()
+                        .spacing(SPACE_4)
+                        .push(text("Display Name").size(TYPO_SM))
+                        .push(
+                            text_input("Enter display name...", &add_state.display_name)
+                                .on_input(|s| AppMessage::FileLibraryDisplayNameChanged(s))
+                                .size(TYPO_SM)
+                                .padding([SPACE_4, SPACE_8]),
+                        ),
+                );
+
+                // Description
+                content = content.push(
+                    Column::new()
+                        .spacing(SPACE_4)
+                        .push(text("Description (optional)").size(TYPO_SM))
+                        .push(
+                            text_input("Enter description...", &add_state.description)
+                                .on_input(|s| AppMessage::FileLibraryDescriptionChanged(s))
+                                .size(TYPO_SM)
+                                .padding([SPACE_4, SPACE_8]),
+                        ),
+                );
+
+                // Storage mode
+                content = content.push(
+                    Column::new()
+                        .spacing(SPACE_4)
+                        .push(text("Storage Mode").size(TYPO_SM))
+                        .push(
+                            radio(
+                                StorageMode::Import.label(),
+                                StorageMode::Import,
+                                Some(add_state.storage_mode),
+                                |m| AppMessage::FileLibraryStorageModeChanged(m),
+                            )
+                            .size(TYPO_SM),
+                        )
+                        .push(
+                            text(StorageMode::Import.description())
+                                .size(TYPO_XS)
+                                .style(text_muted_style),
+                        )
+                        .push(Space::new().height(Length::Fixed(SPACE_4)))
+                        .push(
+                            radio(
+                                StorageMode::Reference.label(),
+                                StorageMode::Reference,
+                                Some(add_state.storage_mode),
+                                |m| AppMessage::FileLibraryStorageModeChanged(m),
+                            )
+                            .size(TYPO_SM),
+                        )
+                        .push(
+                            text(StorageMode::Reference.description())
+                                .size(TYPO_XS)
+                                .style(text_muted_style),
+                        ),
+                );
+
+                // Confirm button
+                content = content.push(
+                    button(text("Validate & Add File").size(TYPO_SM))
+                        .on_press(AppMessage::FileLibraryConfirmAdd)
+                        .padding([SPACE_8, SPACE_16]),
+                );
+            }
+            AddFileStep::Validating => {
+                content =
+                    content.push(text("Validating file before adding to library...").size(TYPO_SM));
+            }
+            AddFileStep::Error(ref msg) => {
+                content = content.push(
+                    Column::new()
+                        .spacing(SPACE_8)
+                        .push(
+                            text(msg)
+                                .size(TYPO_SM)
+                                .color(iced::Color::from_rgb(0.9, 0.3, 0.2)),
+                        )
+                        .push(
+                            button(text("Back").size(TYPO_SM))
+                                .on_press(AppMessage::FileLibraryCancelAdd)
+                                .padding([SPACE_6, SPACE_12]),
+                        ),
+                );
+            }
+        }
+
+        // Error display (outside state machine actions)
+        if let Some(ref error) = self.file_library.last_error {
+            content = content.push(
+                container(
+                    text(error)
+                        .size(TYPO_SM)
+                        .color(iced::Color::from_rgb(0.9, 0.3, 0.2)),
+                )
+                .padding(SPACE_8)
+                .width(Length::Fill),
+            );
+        }
+
+        container(
+            scrollable(
+                container(content)
+                    .width(Length::Fill)
+                    .center_x(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |t| container_primary(t))
+        .into()
+    }
+
     fn settings_cached_key(&self) -> SettingsCachedKey {
         let mesh_health_label = match &self.mesh_health {
             MeshHealth::Good => "Mesh: healthy".to_string(),
@@ -11316,6 +12071,29 @@ impl IcedChat {
 
         let data_card = section_card("DATA", vec![clear_history_row.into()]);
 
+        // ── Shared Files navigation ──
+        let shared_files_row = Row::new()
+            .push(
+                Column::new()
+                    .push(text("Shared Files").size(TYPO_MD))
+                    .push(
+                        text("Manage files shared with peers via your profile.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(
+                button(text("Manage").size(TYPO_SM))
+                    .on_press(AppMessage::NavigateToFileLibrary)
+                    .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+        let shared_files_card = section_card("SHARED FILES", vec![shared_files_row.into()]);
+
         // ── Bottom navigation ──
         let nav_row = Row::new()
             .push(
@@ -11351,6 +12129,8 @@ impl IcedChat {
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(relay_card)
             .push(data_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(shared_files_card)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(nav_row)
             .spacing(SPACE_6)
@@ -11975,10 +12755,70 @@ impl IcedChat {
         &self.join_request_list
     }
 
+    /// Load remote catalogue data from the local SQLite store for a peer.
+    ///
+    /// Initialises (or resets) the UI state with cached files, collections,
+    /// and catalogue metadata.  Fires a refresh task to fetch fresh data
+    /// from the remote peer if the cache is stale or missing.
+    fn load_peer_profile_from_storage(&mut self, peer: PublicKey) {
+        let state = self
+            .peer_profile_states
+            .entry(peer)
+            .or_insert_with(PeerProfileUiState::new);
+
+        // Reset to loading state
+        state.refreshing = true;
+        state.error = None;
+
+        if let Some(ref storage) = self.storage {
+            // Load catalogue metadata
+            match storage.get_remote_catalogue_meta(&peer) {
+                Ok(Some(meta)) => state.catalogue_meta = Some(meta),
+                Ok(None) => state.catalogue_meta = None,
+                Err(e) => {
+                    state.error = Some(format!("Failed to load catalogue metadata: {e}"));
+                    state.catalogue_meta = None;
+                }
+            }
+
+            // Load cached files
+            match storage.get_remote_shared_files(&peer) {
+                Ok(files) => state.all_cached_files = files,
+                Err(e) => {
+                    state.error = Some(format!("Failed to load shared files: {e}"));
+                    state.all_cached_files.clear();
+                }
+            }
+
+            // Load cached collections
+            match storage.get_remote_collections(&peer) {
+                Ok(collections) => state.cached_collections = collections,
+                Err(e) => {
+                    state.error = Some(format!("Failed to load collections: {e}"));
+                    state.cached_collections.clear();
+                }
+            }
+        } else {
+            // No storage available — show empty state with a hint
+            state.all_cached_files.clear();
+            state.cached_collections.clear();
+            state.catalogue_meta = None;
+        }
+
+        state.apply_filter();
+        state.refreshing = false;
+    }
+
     /// View a peer's profile showing their display name, bio, and
     /// shared files with Download buttons.
+    ///
+    /// Displays cached/verified remote metadata from the local SQLite
+    /// catalogue cache (populated by the Remote File Catalogue protocol).
+    /// Falls back to gossip-based ProfileUpdate data when available.
     fn view_peer_profile(&self, peer: PublicKey) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{
+            button, container, pick_list, row, scrollable, text, text_input, Column, Row, Space,
+        };
         use iced::{Alignment, Length};
 
         let profile_data = self.profile_cache.get(&peer);
@@ -11990,82 +12830,37 @@ impl IcedChat {
             .as_ref()
             .map(|p| p.bio.as_str())
             .unwrap_or("No bio");
-        let shared_files = profile_data
-            .as_ref()
-            .map(|p| p.shared_files.clone())
-            .unwrap_or_default();
 
+        // ── UI state from remote catalogue cache ──
+        let ui_state = self.peer_profile_states.get(&peer);
+        let has_catalogue = ui_state
+            .as_ref()
+            .map(|s| s.catalogue_meta.is_some())
+            .unwrap_or(false);
+        let is_refreshing = ui_state.as_ref().map(|s| s.refreshing).unwrap_or(false);
+        let has_cached_files = ui_state
+            .as_ref()
+            .map(|s| !s.all_cached_files.is_empty())
+            .unwrap_or(false);
+        let has_error = ui_state
+            .as_ref()
+            .map(|s| s.error.is_some())
+            .unwrap_or(false);
+
+        // ── Header ──
         let header = Row::new()
+            .push(text("Peer Profile").size(TYPO_SM).style(text_muted_style))
             .push(text(display_name.clone()).size(TYPO_LG).width(Length::Fill))
             .push(
                 button(text("✕").size(TYPO_MD))
                     .on_press(AppMessage::ClosePeerProfile)
                     .padding([SPACE_4, SPACE_8])
-                    .style(move |t, _status| {
-                        let mut s = iced::widget::button::Style::default();
-                        s.background = None;
-                        s.text_color = text_muted(t);
-                        s
-                    }),
+                    .style(BUTTON_GHOST),
             )
             .align_y(Alignment::Center)
             .spacing(SPACE_12);
 
-        let mut body = Column::new().spacing(SPACE_8);
-
-        // Shared files section stripped — bio and file sharing disabled.
-        // Always shows "No shared files."
-        if true {
-            body = body.push(
-                container(
-                    text("No shared files.")
-                        .size(TYPO_SM)
-                        .style(text_muted_style),
-                )
-                .width(Length::Fill)
-                .padding(SPACE_12)
-                .style(move |t| container_surface(t)),
-            );
-        } else {
-            for (idx, file) in shared_files.iter().enumerate() {
-                let size_label = DownloadAttachment::total_bytes_label(file.size);
-                let filename = file.filename.clone();
-                let mime_type = file.mime_type.clone();
-                let file_row = Row::new()
-                    .push(
-                        Column::new()
-                            .push(text(filename).size(TYPO_SM))
-                            .push(
-                                text(format!("{}  •  {}", size_label, mime_type))
-                                    .size(TYPO_XS)
-                                    .style(text_muted_style),
-                            )
-                            .spacing(SPACE_2)
-                            .width(Length::Fill),
-                    )
-                    .push(
-                        button(text("Download").size(TYPO_SM))
-                            .on_press(AppMessage::DownloadPeerFile(peer, idx))
-                            .padding([SPACE_6, SPACE_12]),
-                    )
-                    .align_y(Alignment::Center)
-                    .spacing(SPACE_8)
-                    .padding(iced::Padding {
-                        top: SPACE_8,
-                        right: SPACE_12,
-                        bottom: SPACE_8,
-                        left: SPACE_12,
-                    });
-
-                body = body.push(
-                    container(file_row)
-                        .width(Length::Fill)
-                        .style(move |t| container_surface(t)),
-                );
-            }
-        }
-
-        let content = Column::new()
+        let mut content = Column::new()
             .push(
                 container(header)
                     .width(Length::Fill)
@@ -12076,14 +12871,399 @@ impl IcedChat {
                         left: SPACE_12,
                     }),
             )
-            .push(body)
-            .push(Space::new().height(Length::Fill));
+            .spacing(SPACE_8)
+            .padding(iced::Padding {
+                top: SPACE_4,
+                right: SPACE_12,
+                bottom: SPACE_12,
+                left: SPACE_12,
+            });
 
-        container(scrollable(content))
+        // ── About section ──
+        content = content.push(
+            container(
+                Column::new()
+                    .push(text("About").size(TYPO_SM).style(text_muted_style))
+                    .push(Space::new().height(SPACE_4))
+                    .push(
+                        text(format!("ID: {}", peer.fmt_short()))
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .push(text(bio).size(TYPO_SM))
+                    .spacing(SPACE_2),
+            )
             .width(Length::Fill)
-            .height(Length::Fill)
-            .style(container_primary)
-            .into()
+            .padding(SPACE_12)
+            .style(move |t| container_surface(t)),
+        );
+
+        // ── Shared Files section header + controls ──
+        let mut shared_header = Row::new()
+            .push(text("Shared Files").size(TYPO_SM).style(text_muted_style))
+            .width(Length::Fill);
+        if is_refreshing {
+            shared_header =
+                shared_header.push(text(" (refreshing…)").size(TYPO_XS).style(text_muted_style));
+        }
+        let shared_header = shared_header.push(
+            button(text("↻").size(TYPO_SM))
+                .on_press(AppMessage::PeerProfileRefresh(peer))
+                .padding([SPACE_2, SPACE_6])
+                .style(BUTTON_GHOST),
+        );
+
+        // ── State determination ──
+        // Determine which state to show: loading, offline cached, permission denied, etc.
+        enum ProfileFileState {
+            Loading,
+            PermissionDenied,
+            OfflineCached,
+            EmptyCatalogue,
+            NoStorage,
+            Files(Vec<DisplayedRemoteFile>),
+        }
+
+        let file_state = if is_refreshing && !has_cached_files {
+            ProfileFileState::Loading
+        } else if has_cached_files {
+            if let Some(ref st) = ui_state {
+                let page_rows = st.current_page_rows();
+                if page_rows.is_empty() {
+                    ProfileFileState::EmptyCatalogue
+                } else {
+                    ProfileFileState::Files(page_rows.to_vec())
+                }
+            } else {
+                ProfileFileState::EmptyCatalogue
+            }
+        } else if has_catalogue {
+            // Catalogue meta exists but no files — empty catalogue
+            ProfileFileState::EmptyCatalogue
+        } else if has_error {
+            ProfileFileState::NoStorage
+        } else if !self.storage.is_some() {
+            ProfileFileState::NoStorage
+        } else {
+            ProfileFileState::EmptyCatalogue
+        };
+
+        // ── Search + Collection filter bar (only when files exist) ──
+        let search_text = ui_state
+            .as_ref()
+            .map(|s| s.search_text.clone())
+            .unwrap_or_default();
+        let collections = ui_state
+            .as_ref()
+            .map(|s| s.cached_collections.clone())
+            .unwrap_or_default();
+        let selected_collection = ui_state
+            .as_ref()
+            .and_then(|s| s.selected_collection.clone());
+
+        let controls = row![text_input("Search files...", &search_text)
+            .on_input(move |q| AppMessage::PeerProfileSearchChanged(peer, q))
+            .size(TYPO_SM)
+            .width(Length::Fixed(180.0))
+            .padding([SPACE_4, SPACE_8]),]
+        .spacing(SPACE_8)
+        .align_y(Alignment::Center);
+
+        // Collection filter buttons (if collections exist)
+        let collection_filters: Option<iced::Element<'_, AppMessage>> = if collections.len() > 1 {
+            let mut coll_row = Row::new().spacing(SPACE_4).align_y(Alignment::Center);
+            // "All" button
+            let all_btn = if selected_collection.is_none() {
+                button(text("All").size(TYPO_XS))
+                    .padding([SPACE_2, SPACE_6])
+                    .style(move |t, _s| {
+                        let mut s = iced::widget::button::Style::default();
+                        s.background = Some(iced::Background::Color(accent_primary(t)));
+                        s.text_color = iced::Color::WHITE;
+                        s
+                    })
+            } else {
+                button(text("All").size(TYPO_XS))
+                    .on_press(AppMessage::PeerProfileCollectionFilter(peer, None))
+                    .padding([SPACE_2, SPACE_6])
+            };
+            coll_row = coll_row.push(all_btn);
+
+            for coll in &collections {
+                let is_selected = selected_collection.as_deref() == Some(coll.name.as_str());
+                let btn = if is_selected {
+                    button(text(&coll.name).size(TYPO_XS))
+                        .padding([SPACE_2, SPACE_6])
+                        .style(move |t, _s| {
+                            let mut s = iced::widget::button::Style::default();
+                            s.background = Some(iced::Background::Color(accent_primary(t)));
+                            s.text_color = iced::Color::WHITE;
+                            s
+                        })
+                } else {
+                    button(text(&coll.name).size(TYPO_XS))
+                        .on_press(AppMessage::PeerProfileCollectionFilter(
+                            peer,
+                            Some(coll.name.clone()),
+                        ))
+                        .padding([SPACE_2, SPACE_6])
+                };
+                coll_row = coll_row.push(btn);
+            }
+            Some(coll_row.into())
+        } else {
+            None
+        };
+
+        // ── File list ──
+        let mut files_section = Column::new().spacing(SPACE_4).width(Length::Fill);
+
+        match file_state {
+            ProfileFileState::Loading => {
+                files_section = files_section.push(
+                    text("Loading shared files…")
+                        .size(TYPO_SM)
+                        .style(text_muted_style),
+                );
+            }
+            ProfileFileState::PermissionDenied => {
+                files_section = files_section.push(
+                    container(
+                        text("Access denied. This peer has not granted you permission to view their shared files.")
+                            .size(TYPO_SM)
+                            .style(text_muted_style),
+                    )
+                    .width(Length::Fill)
+                    .padding(SPACE_12)
+                    .style(move |t| container_surface(t)),
+                );
+            }
+            ProfileFileState::OfflineCached => {
+                files_section = files_section.push(
+                    container(
+                        Column::new()
+                            .push(
+                                text("Peer is offline. Showing cached data.")
+                                    .size(TYPO_XS)
+                                    .color(iced::Color::from_rgb(0.8, 0.6, 0.0)),
+                            )
+                            .spacing(SPACE_4),
+                    )
+                    .width(Length::Fill)
+                    .padding(SPACE_12)
+                    .style(move |t| container_surface(t)),
+                );
+            }
+            ProfileFileState::EmptyCatalogue => {
+                files_section = files_section.push(
+                    container(
+                        text("No shared files to display.")
+                            .size(TYPO_SM)
+                            .style(text_muted_style),
+                    )
+                    .width(Length::Fill)
+                    .padding(SPACE_12)
+                    .style(move |t| container_surface(t)),
+                );
+            }
+            ProfileFileState::NoStorage => {
+                files_section = files_section.push(
+                    container(
+                        Column::new()
+                            .push(
+                                text("File library not initialised.")
+                                    .size(TYPO_SM)
+                                    .style(text_muted_style),
+                            )
+                            .push(
+                                text("Create or import at least one file in your own library to initialise the storage layer.")
+                                    .size(TYPO_XS)
+                                    .style(text_muted_style),
+                            )
+                            .spacing(SPACE_4),
+                    )
+                    .width(Length::Fill)
+                    .padding(SPACE_12)
+                    .style(move |t| container_surface(t)),
+                );
+            }
+            ProfileFileState::Files(page_rows) => {
+                // Show controls
+                files_section = files_section.push(controls);
+
+                // Collection filter buttons
+                if let Some(coll_filter) = collection_filters {
+                    files_section = files_section.push(coll_filter);
+                }
+
+                // Error overlay (if any)
+                if let Some(ref err) = ui_state.and_then(|s| s.error.clone()) {
+                    files_section = files_section.push(
+                        container(
+                            text(err)
+                                .size(TYPO_XS)
+                                .color(iced::Color::from_rgb(0.9, 0.3, 0.2)),
+                        )
+                        .width(Length::Fill)
+                        .padding(SPACE_8),
+                    );
+                }
+
+                // Stale indicator
+                let is_stale = ui_state
+                    .as_ref()
+                    .map(|s| {
+                        s.displayed_rows
+                            .first()
+                            .map(|f| f.is_stale)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if is_stale {
+                    files_section = files_section.push(
+                        container(
+                            text("⚠ Cached data may be stale. Pull to refresh.")
+                                .size(TYPO_XS)
+                                .color(iced::Color::from_rgb(0.8, 0.6, 0.0)),
+                        )
+                        .width(Length::Fill)
+                        .padding([SPACE_2, SPACE_4]),
+                    );
+                }
+
+                // File rows
+                for disp_file in &page_rows {
+                    let f = &disp_file.row;
+                    let size_label = DownloadAttachment::total_bytes_label(f.size);
+                    let mime_type = &f.mime_type;
+                    let filename = &f.display_filename;
+                    let has_desc = f.description.is_some();
+                    let description = f.description.as_deref().unwrap_or("");
+                    let coll_name = f.collection_name.as_deref().unwrap_or("Uncategorised");
+                    let revision = f.file_revision;
+                    let available = disp_file.available;
+
+                    let mut file_info = Column::new().push(text(filename).size(TYPO_SM)).push(
+                        text(format!("{}  •  {}", size_label, mime_type))
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    );
+
+                    if has_desc {
+                        file_info =
+                            file_info.push(text(description).size(TYPO_XS).style(text_muted_style));
+                    }
+
+                    // Second metadata row: collection, revision
+                    file_info = file_info.push(
+                        text(format!("Collection: {}  •  v{}", coll_name, revision))
+                            .size(TYPO_XXS)
+                            .style(text_muted_style),
+                    );
+
+                    let mut file_row = Row::new()
+                        .push(file_info.width(Length::Fill))
+                        .align_y(Alignment::Center)
+                        .spacing(SPACE_8)
+                        .padding(iced::Padding {
+                            top: SPACE_8,
+                            right: SPACE_12,
+                            bottom: SPACE_8,
+                            left: SPACE_12,
+                        });
+
+                    // Download button (only when file is available)
+                    if available {
+                        file_row = file_row.push(
+                            button(text("Download").size(TYPO_SM))
+                                .on_press(AppMessage::DownloadPeerFile(peer, f.position as usize))
+                                .padding([SPACE_6, SPACE_12]),
+                        );
+                    } else {
+                        file_row = file_row
+                            .push(text("Unavailable").size(TYPO_XS).style(text_muted_style));
+                    }
+
+                    files_section = files_section.push(
+                        container(file_row)
+                            .width(Length::Fill)
+                            .style(move |t| container_surface(t)),
+                    );
+                }
+
+                // ── Pagination controls ──
+                if let Some(ref st) = ui_state {
+                    let total_pages = st.total_pages();
+                    if total_pages > 1 {
+                        let current_page = st.page;
+                        let mut page_controls =
+                            Row::new().align_y(Alignment::Center).spacing(SPACE_8);
+
+                        // Previous button (disabled by omitting on_press when at first page)
+                        let prev_btn = if current_page > 0 {
+                            button(text("◀").size(TYPO_SM))
+                                .on_press(AppMessage::PeerProfilePage(peer, current_page - 1))
+                                .padding([SPACE_4, SPACE_8])
+                        } else {
+                            button(text("◀").size(TYPO_SM)).padding([SPACE_4, SPACE_8])
+                        };
+                        page_controls = page_controls.push(prev_btn);
+
+                        // Page indicator
+                        page_controls = page_controls.push(
+                            text(format!("Page {} of {}", current_page + 1, total_pages))
+                                .size(TYPO_XS)
+                                .style(text_muted_style),
+                        );
+
+                        // Next button (disabled by omitting on_press when at last page)
+                        let next_btn = if current_page + 1 < total_pages {
+                            button(text("▶").size(TYPO_SM))
+                                .on_press(AppMessage::PeerProfilePage(peer, current_page + 1))
+                                .padding([SPACE_4, SPACE_8])
+                        } else {
+                            button(text("▶").size(TYPO_SM)).padding([SPACE_4, SPACE_8])
+                        };
+                        page_controls = page_controls.push(next_btn);
+
+                        files_section = files_section.push(
+                            container(page_controls)
+                                .width(Length::Fill)
+                                .center_x(Length::Fill)
+                                .padding(SPACE_8),
+                        );
+                    }
+                }
+            }
+        }
+
+        // ── Assemble final view ──
+        content = content.push(
+            container(
+                Column::new()
+                    .push(shared_header)
+                    .push(Space::new().height(SPACE_4))
+                    .push(files_section)
+                    .spacing(SPACE_4),
+            )
+            .width(Length::Fill)
+            .padding(SPACE_12)
+            .style(move |t| container_surface(t)),
+        );
+
+        container(
+            scrollable(
+                container(content)
+                    .width(Length::Fill)
+                    .center_x(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |t| container_primary(t))
+        .into()
     }
 }
 

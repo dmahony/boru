@@ -21,7 +21,7 @@ permissions: `0o700` for the directory, `0o600` for the database file.
 
 ```
 <data_dir>/
-├── boru.db               # SQLite relational storage (V2, current)
+├── boru.db               # SQLite relational storage (V5, current)
 ├── chat_history.json      # Per-room chat history (legacy JSON, still active)
 ├── outbox.json            # Outgoing message delivery state (legacy JSON, still active)
 ├── conversations.json     # Conversation metadata (JSON)
@@ -48,7 +48,7 @@ permissions: `0o700` for the directory, `0o600` for the database file.
 
 | File | Format | Module | Purpose |
 |---|---|---|---|
-| `boru.db` | SQLite V2 | `storage::Storage` | Primary relational store: inbox, outbox, contacts, sync cursors, file objects, attachments, shared files, collections, permissions, downloads, profile manifest state |
+| `boru.db` | SQLite V5 | `storage::Storage` | Primary relational store: inbox, outbox, contacts, sync cursors, file objects, attachments, shared files, collections, permissions, downloads, profile manifest state, and transactional outgoing DMs |
 | `message_store.db` | SQLite V1 | `store::MessageStore` | Legacy store, now a migration source. Read by `Storage::import_legacy_db()` |
 | `chat_history.json` | JSON V1 | `chat_history::ChatHistoryStore` | Per-room chat message history. Still the active frontend persistence layer |
 | `outbox.json` | JSON V1 | `outbox::OutboxStore` | Outgoing message queue and delivery state. Still active |
@@ -89,7 +89,9 @@ On every `Storage::open()`:
 ### Schema: Version 1 (message delivery)
 
 The V1 schema is identical to the legacy `MessageStore` schema and provides a
-linear migration path.
+linear migration path. See [`offline-direct-messaging.md`](offline-direct-messaging.md)
+for the delivery state machine, retry policy, ack semantics, and ordering
+guarantees built on top of this schema.
 
 | Table | Purpose | Key columns |
 |---|---|---|
@@ -112,6 +114,64 @@ Extends V1 with file-object storage and sharing infrastructure.
 | `shared_file_permissions` | Per-peer grants on shared files | `(content_hash, grantor, grantee, permission)` PK, optional `expires_at_ms` |
 | `downloads` | Durable download state machine | Auto-increment `id`, `state` (queued/active/paused/completed/failed), `bytes_downloaded`, retry tracking |
 | `profile_manifest_state` | Manifest revision tracking | `user_id` PK, monotonically increasing `revision`, `manifest_hash` |
+
+### Remote catalogue and download state
+
+The SQLite file stores the authoritative local file objects, shared-file offers,
+collections, per-peer permission grants, and manifest revision. It does not
+store a reusable remote access ticket. A remote catalogue is a signed,
+requester-specific snapshot derived from these rows at request time; the
+frontend may cache the last verified snapshot per peer, but that cache is not an
+authority and is never reused for another requester.
+
+The manifest revision is monotonic and changes whenever the offered catalogue
+changes. A revision notification is only a refresh hint. Retrieval returns
+`NotModified` when the caller's known revision is current. File access still
+re-checks the current `offered` flag, block/contact relationship, permission,
+availability, content hash, and file revision before creating a descriptor.
+
+The `downloads` table records durable local operation state, progress, retries,
+and pause/cancel/failure status. Blob bytes may live in the iroh-blobs store;
+large file rows can retain a `blob_hash` reference rather than inline data.
+Temporary output files are not authoritative storage. A completed download is
+installed only after size and BLAKE3 verification and atomic rename. Pause or
+cancellation removes the temporary output, while verified chunks retained by
+the blob store may be reused on a later attempt; byte-range resume of the
+partial destination is not supported.
+
+### Schema: Version 3 (file verification)
+
+Extends V2 with file availability tracking.
+
+| Table | Purpose | Key columns |
+|---|---|---|
+| `file_verification` | Per-file availability state | `(content_hash, profile_user_id)` PK, `availability` (Unverified/Available/Missing/Changed), `verified_at_ms`, `original_hash`, `original_size` |
+
+Tracks whether the source file is available, missing, or changed since the last
+verification. The `original_hash` and `original_size` are preserved even when
+the file changes on disk, requiring explicit owner action to accept a new
+version.
+
+### Schema: Version 4 (replacement tracking + operations)
+
+Extends V3 with file replacement tracking, storage management, and operation
+progress.
+
+| Table | Purpose | Key columns |
+|---|---|---|
+| `file_replacements` | File version replacement history | `(replaced_hash, replacement_hash)` PK, `profile_user_id`, `replaced_at_ms` |
+| `cleanup_operations` | Unreferenced file cleanup tracking | Auto-increment `id`, `content_hash`, `state` (pending/in_progress/completed/failed), `bytes_freed` |
+| `operation_progress` | Long-running operation progress | `id` (TEXT PK), `kind`, `stage`, `bytes_processed`, `total_bytes`, `status` (running/completed/failed/cancelled), `progress_pct` |
+
+Additionally, V4 adds a `revision` column to `shared_files` for versioning.
+
+### Current Schema Version
+
+The database is currently at **V5** (`CURRENT_SCHEMA_VERSION = 5`). V5 adds
+`dm_conversations`, `dm_sender_sequences`, `dm_messages`, and `dm_outbox`.
+`Storage::queue_outgoing_dm` creates the conversation, allocates a persistent
+sender sequence, signs the logical message, seals the mailbox envelope, and
+inserts the visible message plus exact retry envelope in one transaction.
 
 ### Migration System
 
@@ -302,3 +362,112 @@ Images uploaded by users are stored outside SQLite, rooted at `<data_dir>/files/
    extension (via `safe_extension()`), but `optimize_chat_image` always emits
    JPEG. The store works around this with magic-byte detection, but the
    extension contract is not fully clean.
+
+---
+
+## Local Profile File Library
+
+The local profile file library manages files that the user offers to share
+with peers. It is implemented in `examples/iced_chat/file_library.rs` (state
+and types) and `examples/iced_chat/file_library_ops.rs` (operations).
+
+### Architecture
+
+The file library has two storage modes:
+
+| Mode | Description | Disk Behavior | Durability |
+|------|-------------|---------------|------------|
+| **Import** | File content is copied into the content-addressed managed store | Copy to `library_dir/<prefix>/<hash>` | Survives deletion of the original; uses extra disk space |
+| **Reference** | Points to the original file on disk; no copy | Source path stored in `library_dir/.refs/<hash>` | Original must remain accessible |
+
+### Module Structure
+
+| File | Purpose |
+|------|---------|
+| `file_library.rs` | Types: `FileLibraryFilter`, `FileLibrarySort`, `LocalFileLibraryState`, `FileLibraryRow`, `AddFileState`, `StorageMode`, `ChangedFileAction`, `RemovalMode`, `CleanupCandidateRow`, `FileDetailData`, `PaginationState`, `OperationProgress`, file validation functions (`validate_file_for_library`, `validate_offer_metadata`), filter/sort application |
+| `file_library_ops.rs` | Operations: hashing (`hash_file_streaming`), import (`import_file`), reference (`offer_referenced_file`), object reuse (`find_or_create_file_object`), change detection (`detect_changed_file`, `update_referenced_file_to_new_version`), removal (`remove_offer_from_profile`, `delete_imported_copy`), cleanup (`cleanup_unreferenced_imported_objects`), startup recovery (`startup_recovery`), path privacy (`sanitize_path_for_log`, `verify_row_safe_for_remote`) |
+
+### Key Design Decisions
+
+1. **Content-addressed storage** — Imported files are stored at
+   `library_dir/<first-2-hex-chars>/<full-hex-hash>`. The 2-character prefix
+   creates 256 buckets, keeping directory listings manageable even with
+   millions of files.
+
+2. **Private source path registry** — Referenced file source paths are stored
+   in a side directory (`library_dir/.refs/<hash>`) rather than in the
+   database. This ensures source paths are never exposed in DB dumps or
+   backups.
+
+3. **Object reuse** — Files with the same BLAKE3 hash and size share one
+   `file_objects` row, regardless of whether the first instance was imported
+   or referenced. This is enforced by the `shared_files` PK
+   `(content_hash, profile_user_id)` and the `INSERT OR IGNORE` semantics of
+   `put_file_object`.
+
+4. **No local paths in remote data** — `FileLibraryRow` never exposes full
+   source paths. The `display_filename` field contains only the user-chosen
+   display name. The `verify_row_safe_for_remote()` function enforces this
+   contract at the API boundary.
+
+### File Hashing
+
+- Uses BLAKE3 in streaming mode (64 KiB chunks, never loads whole file into
+  memory).
+- Supports cancellation via `CancellationToken` and progress reporting via
+  `watch::Sender<HashProgress>`.
+- Progress is reported every 1 MiB for large files.
+
+### Import Workflow
+
+```
+1. Validate source file (exist, regular, readable, not symlink, non-zero)
+2. Stream-hash with BLAKE3 (cancellable, with progress)
+3. Compute managed path: library_dir/<prefix>/<hash>
+4. Copy to temp file: library_dir/.tmp_<hash>.import
+5. Verify copied file hash (streaming, no progress)
+6. Atomic rename: .tmp_<hash>.import → <hash>
+7. Insert/reuse file_object row in DB
+8. Insert shared_file row
+9. Assign to selected collections
+10. Increment profile manifest revision
+```
+
+If the file object already exists (same hash+size), steps 4-6 are skipped.
+
+### Startup Recovery
+
+On application startup, `startup_recovery()` performs:
+
+1. **Stale temp cleanup** — removes `.tmp_*.import` files left by crashes
+2. **Operation recovery** — marks interrupted `operation_progress` rows as failed
+3. **Orphan detection** — finds shared_files without file_objects and vice versa
+4. **Existence checks** — verifies referenced file sources exist, imported
+   managed files exist; marks missing files as `"Missing"`
+5. **No auto-hashing** — specifically avoids re-hashing all referenced files
+   to prevent startup delay
+
+### Privacy Protections
+
+- **`sanitize_path_for_log()`**: Redacts home directories (`~`), temp paths
+  (`<temp>`), and library paths (`<library>`) from log output.
+- **`verify_row_safe_for_remote()`**: Rejects `FileLibraryRow` entries where
+  display_filename contains path separators, absolute path indicators, or
+  the description contains sensitive patterns (`/home/`, `.ssh`, `secret`,
+  `password`).
+- **Bulk check** `verify_all_rows_safe_for_remote()`: Validates all rows at
+  once, returning violations with row indices.
+
+### What Is Not Yet Networked
+
+**The local profile file library prepares and manages offered files. It does
+not yet publish catalogues or serve downloads to peers.** Specifically:
+
+- No catalogue publication — shared file metadata is not broadcast to peers
+- No download transport — peers cannot request or receive file bytes
+- No remote browsing — peers cannot see each other's file libraries
+- No sync protocol — file library changes are not propagated to connected peers
+
+These features are planned for future iterations. The current implementation
+provides the local storage and management infrastructure on which the
+networked features will be built.

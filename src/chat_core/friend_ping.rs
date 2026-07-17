@@ -23,7 +23,7 @@ use std::{
 };
 
 use iroh::{Endpoint, EndpointAddr, PublicKey};
-use n0_error::{bail_any, Result};
+use n0_error::{Result, bail_any};
 use tokio::sync::{mpsc, oneshot};
 use tracing::trace;
 

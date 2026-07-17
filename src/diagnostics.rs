@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -197,6 +197,341 @@ pub enum DiagnosticEventKind {
         action_id: String,
         /// The JSON-serialized command string.
         command_json: String,
+    },
+
+    // ── Message delivery lifecycle events ──────────────────────────────
+    /// A message was queued into the outbox for delivery.
+    MessageQueued {
+        /// Short message ID (first 8 hex chars of hash).
+        message_id_short: Option<String>,
+        /// Conversation ID prefix (first 8 hex chars).
+        conversation_id_prefix: Option<String>,
+        /// Peer ID (recipient for outgoing, sender for incoming).
+        peer_id: Option<String>,
+        /// Delivery state at queuing time.
+        delivery_state: String,
+    },
+    /// An outbox entry was claimed by the sender for delivery.
+    OutboxClaimed {
+        /// Short message ID (first 8 hex chars of hash).
+        message_id_short: Option<String>,
+        /// Conversation ID prefix (first 8 hex chars).
+        conversation_id_prefix: Option<String>,
+        /// Peer ID this message is being delivered to.
+        peer_id: Option<String>,
+        /// Number of delivery attempts so far.
+        attempt_count: u32,
+        /// Current delivery state.
+        delivery_state: String,
+    },
+    /// A delivery attempt to a remote peer was started.
+    DeliveryAttemptStarted {
+        /// Short message ID.
+        message_id_short: Option<String>,
+        /// Conversation ID prefix.
+        conversation_id_prefix: Option<String>,
+        /// Peer ID.
+        peer_id: Option<String>,
+        /// Attempt number (1-based).
+        attempt_count: u32,
+        /// Retry delay in ms before this attempt.
+        retry_delay_ms: Option<u64>,
+    },
+    /// Address resolution completed for a delivery attempt.
+    DeliveryAddressResolved {
+        /// Peer ID.
+        peer_id: Option<String>,
+        /// Whether resolution succeeded.
+        resolved: bool,
+        /// Elapsed time in ms.
+        elapsed_ms: Option<u64>,
+    },
+    /// Connection result for a delivery attempt.
+    DeliveryConnectionResult {
+        /// Peer ID.
+        peer_id: Option<String>,
+        /// Whether connection was established.
+        connected: bool,
+        /// Elapsed time in ms.
+        elapsed_ms: Option<u64>,
+        /// Transport used (e.g. "relay", "direct").
+        transport: Option<String>,
+    },
+    /// Envelope was successfully sent to the peer.
+    EnvelopeSent {
+        /// Short message ID.
+        message_id_short: Option<String>,
+        /// Conversation ID prefix.
+        conversation_id_prefix: Option<String>,
+        /// Peer ID.
+        peer_id: Option<String>,
+        /// Attempt number that succeeded.
+        attempt_count: u32,
+        /// Delivery state after the send.
+        delivery_state: String,
+        /// Elapsed time in ms for this attempt.
+        elapsed_ms: Option<u64>,
+    },
+    /// A retry was scheduled after a failed delivery attempt.
+    RetryScheduled {
+        /// Short message ID.
+        message_id_short: Option<String>,
+        /// Conversation ID prefix.
+        conversation_id_prefix: Option<String>,
+        /// Peer ID.
+        peer_id: Option<String>,
+        /// Attempt number that failed.
+        attempt_count: u32,
+        /// Retry delay in ms before next attempt.
+        retry_delay_ms: u64,
+        /// Categorized failure reason.
+        failure_category: String,
+    },
+    /// The recipient explicitly rejected the message.
+    RecipientRejected {
+        /// Short message ID.
+        message_id_short: Option<String>,
+        /// Conversation ID prefix.
+        conversation_id_prefix: Option<String>,
+        /// Peer ID of the rejecting peer.
+        peer_id: Option<String>,
+        /// Reason for rejection.
+        reason: Option<String>,
+    },
+    /// An incoming message was persisted successfully.
+    IncomingPersisted {
+        /// Short message ID.
+        message_id_short: Option<String>,
+        /// Conversation ID prefix.
+        conversation_id_prefix: Option<String>,
+        /// Peer ID of the sender.
+        peer_id: Option<String>,
+        /// Delivery state after persistence.
+        delivery_state: String,
+    },
+    /// A duplicate incoming message was received (already persisted or
+    /// tombstoned).
+    DuplicateReceived {
+        /// Short message ID.
+        message_id_short: Option<String>,
+        /// Conversation ID prefix.
+        conversation_id_prefix: Option<String>,
+        /// Peer ID of the sender.
+        peer_id: Option<String>,
+    },
+    /// An acknowledgment was sent to a peer for a received message.
+    AckSent {
+        /// Short message ID.
+        message_id_short: Option<String>,
+        /// Conversation ID prefix.
+        conversation_id_prefix: Option<String>,
+        /// Peer ID the ack was sent to.
+        peer_id: Option<String>,
+    },
+    /// An acknowledgment was received from a peer for a previously sent
+    /// message.
+    AckReceived {
+        /// Short message ID.
+        message_id_short: Option<String>,
+        /// Conversation ID prefix.
+        conversation_id_prefix: Option<String>,
+        /// Peer ID of the acknowledging peer.
+        peer_id: Option<String>,
+        /// Attempt count at the time of acknowledgement.
+        attempt_count: u32,
+        /// Elapsed time in ms since the message was queued.
+        elapsed_ms: Option<u64>,
+    },
+    /// The outbox was cleared (all entries removed).
+    OutboxCleared {
+        /// Number of entries that were removed.
+        remaining_count: usize,
+    },
+    /// A message expired before delivery completed.
+    MessageExpired {
+        /// Short message ID.
+        message_id_short: Option<String>,
+        /// Conversation ID prefix.
+        conversation_id_prefix: Option<String>,
+        /// Peer ID.
+        peer_id: Option<String>,
+        /// Delivery state at expiry time.
+        delivery_state: String,
+    },
+    /// Delivery of a message was cancelled.
+    DeliveryCancelled {
+        /// Short message ID.
+        message_id_short: Option<String>,
+        /// Conversation ID prefix.
+        conversation_id_prefix: Option<String>,
+        /// Peer ID.
+        peer_id: Option<String>,
+        /// Delivery state at cancellation time.
+        delivery_state: String,
+    },
+    /// An inbox sync operation with a peer was started.
+    SyncStarted {
+        /// Peer ID.
+        peer_id: Option<String>,
+    },
+    /// An inbox sync operation with a peer completed.
+    SyncCompleted {
+        /// Peer ID.
+        peer_id: Option<String>,
+        /// Elapsed time in ms.
+        elapsed_ms: Option<u64>,
+        /// Number of messages synced.
+        message_count: usize,
+    },
+
+    // ── Catalogue lifecycle events (server side) ───────────────────────
+    /// A catalogue protocol request was received from a remote peer.
+    CatalogueRequestReceived {
+        /// The request type (e.g. "GetCatalogue", "GetFileDetails",
+        /// "GetCataloguePage").
+        request_type: String,
+        /// Catalogue revision known by the requester, if any.
+        known_revision: Option<u64>,
+    },
+    /// A catalogue was successfully built for a requesting peer.
+    CatalogueBuilt {
+        /// Catalogue revision that was built.
+        revision: u64,
+        /// Number of files included in the catalogue.
+        file_count: usize,
+        /// Number of collections included.
+        collection_count: usize,
+    },
+    /// A catalogue response was sent (or would have been sent) to a peer.
+    CatalogueResponseSent {
+        /// Response type (e.g. "Catalogue", "CataloguePage", "NotModified",
+        /// "PermissionDenied", "FileDetails", "InternalError").
+        response_type: String,
+        /// Catalogue revision, if applicable.
+        revision: Option<u64>,
+        /// Response payload size in bytes.
+        response_bytes: usize,
+    },
+    /// A catalogue operation failed — building, page retrieval, or file
+    /// details lookup.
+    CatalogueError {
+        /// Stable error category (e.g. "access_denied", "profile_not_found",
+        /// "invalid_peer", "serialization", "validation", "timeout",
+        /// "internal").
+        error_category: String,
+        /// Human-readable error details (never contains secrets or paths).
+        error: String,
+    },
+
+    // ── Catalogue fetch lifecycle events (client side) ─────────────────
+    /// A remote catalogue fetch was initiated by the local node.
+    CatalogueFetchStarted {
+        /// Known revision passed to the peer, if any.
+        known_revision: Option<u64>,
+    },
+    /// A remote catalogue fetch completed successfully.
+    CatalogueFetchCompleted {
+        /// Received catalogue revision.
+        revision: u64,
+        /// Number of files in the received catalogue.
+        file_count: usize,
+        /// Total elapsed time for the fetch in milliseconds.
+        elapsed_ms: u64,
+    },
+    /// A remote catalogue fetch failed.
+    CatalogueFetchFailed {
+        /// Stable error category (e.g. "connection_failed", "timeout",
+        /// "permission_denied", "rate_limited", "signature_mismatch",
+        /// "validation", "deserialization", "unexpected_response",
+        /// "internal").
+        error_category: String,
+        /// Human-readable error details.
+        error: String,
+    },
+
+    // ── File access/transfer authorisation events ──────────────────────
+    /// A file access request was received from a remote peer.
+    FileAccessRequestReceived {
+        /// Shared file identifier (opaque id, not a path).
+        shared_file_id: String,
+        /// Expected content hash (short, first 8 hex chars).
+        content_hash_short: String,
+    },
+    /// A file access request was resolved with an outcome.
+    FileAccessOutcome {
+        /// Shared file identifier.
+        shared_file_id: String,
+        /// Outcome ("granted", "permission_denied", "not_found",
+        /// "unavailable", "changed", "blocked", "disabled", "busy",
+        /// "rate_limited", "unsupported_version").
+        outcome: String,
+        /// Elapsed time handling the request in milliseconds.
+        elapsed_ms: u64,
+    },
+    /// Blob preparation lifecycle event for a file transfer.
+    BlobPreparation {
+        /// Content hash of the blob being prepared (short).
+        content_hash_short: String,
+        /// Outcome ("started", "succeeded", "failed").
+        outcome: String,
+        /// Error category if outcome is "failed".
+        error_category: Option<String>,
+    },
+
+    // ── Blob download lifecycle events (client side) ───────────────────
+    /// A blob download from a remote peer was started.
+    BlobDownloadStarted {
+        /// Content hash being downloaded (short, first 8 hex chars).
+        content_hash_short: String,
+        /// Expected total file size in bytes.
+        total_bytes: u64,
+    },
+    /// Intermediate progress during a blob download.
+    BlobDownloadProgress {
+        /// Content hash (short).
+        content_hash_short: String,
+        /// Bytes received so far.
+        bytes_so_far: u64,
+        /// Expected total bytes.
+        total_bytes: u64,
+    },
+    /// A blob download completed successfully.
+    BlobDownloadCompleted {
+        /// Content hash (short).
+        content_hash_short: String,
+        /// Total bytes written to the destination.
+        bytes_written: u64,
+        /// Elapsed time in milliseconds.
+        elapsed_ms: u64,
+    },
+    /// A blob download failed.
+    BlobDownloadFailed {
+        /// Content hash (short).
+        content_hash_short: String,
+        /// Stable error category (e.g. "timeout", "hash_mismatch",
+        /// "io_error", "cancelled", "peer_unreachable", "internal").
+        error_category: String,
+        /// Human-readable error details (never contains paths or secrets).
+        error: String,
+    },
+
+    // ── Catalogue notification and refresh lifecycle events ────────────
+    /// A catalogue revision notice was received and processed.
+    CatalogueNoticeProcessed {
+        /// Revision advertised in the notice.
+        revision: u64,
+        /// Verification outcome ("verified", "signature_mismatch",
+        /// "missing_signature", "owner_mismatch").
+        verification: String,
+    },
+    /// A catalogue refresh was triggered or suppressed.
+    CatalogueRefreshEvent {
+        /// Outcome ("scheduled", "rate_limited", "not_newer", "loading",
+        /// "fetch_started", "fetch_completed", "fetch_failed").
+        outcome: String,
+        /// Cache state before this event (e.g. "Current", "Stale",
+        /// "Unknown", "OfflineCached").
+        cache_state_before: String,
     },
 }
 
@@ -884,11 +1219,7 @@ impl Diagnostics {
     /// Returns 0 if no events have been recorded yet.
     pub fn latest_sequence(&self) -> u64 {
         let val = self.inner.next_sequence.load(Ordering::Relaxed);
-        if val == 0 {
-            0
-        } else {
-            val - 1
-        }
+        if val == 0 { 0 } else { val - 1 }
     }
 
     /// Subscribe to new event notifications via Tokio watch.
@@ -949,7 +1280,7 @@ impl Diagnostics {
         &self,
         id: String,
         peer: PublicKey,
-        discovery_source: DiscoverySource,
+        _discovery_source: DiscoverySource,
         room_id: Option<TopicId>,
     ) {
         let now_ms = std::time::SystemTime::now()
@@ -1148,6 +1479,12 @@ impl Default for Diagnostics {
         Self::new()
     }
 }
+
+/// Global diagnostics singleton for recording structured diagnostic events.
+///
+/// Lazily initialised on first access with default capacities
+/// (5 000 events, 1 000 received probes).
+pub static DIAGNOSTICS: LazyLock<Diagnostics> = LazyLock::new(Diagnostics::new);
 
 // =============================================================================
 // Room and peer diagnostic snapshots
@@ -1457,11 +1794,7 @@ impl IcedMessageJournal {
     /// Return the most recently assigned sequence number (0 if no entries).
     pub fn latest_sequence(&self) -> u64 {
         let val = self.inner.next_sequence.load(Ordering::Relaxed);
-        if val == 0 {
-            0
-        } else {
-            val - 1
-        }
+        if val == 0 { 0 } else { val - 1 }
     }
 
     /// Return the total number of entries currently stored.
@@ -2890,11 +3223,7 @@ impl GuiActionEventHistory {
     /// Return the most recently assigned sequence number (0 if no entries).
     pub fn latest_sequence(&self) -> u64 {
         let val = self.inner.next_sequence.load(Ordering::Relaxed);
-        if val == 0 {
-            0
-        } else {
-            val - 1
-        }
+        if val == 0 { 0 } else { val - 1 }
     }
 
     /// Return the total number of entries currently stored.
@@ -3787,9 +4116,11 @@ mod tests {
 
         let peer1_events = diag.events_since_filtered(0, 100, Some(room), Some("peer1"));
         assert_eq!(peer1_events.len(), 1);
-        assert!(peer1_events
-            .iter()
-            .all(|e| e.peer_id.as_deref() == Some("peer1")));
+        assert!(
+            peer1_events
+                .iter()
+                .all(|e| e.peer_id.as_deref() == Some("peer1"))
+        );
     }
 
     #[test]
@@ -4538,15 +4869,19 @@ mod tests {
         };
         history.record(request);
 
-        assert!(history
-            .transition_to(&id, GuiActionState::Validating)
-            .is_ok());
+        assert!(
+            history
+                .transition_to(&id, GuiActionState::Validating)
+                .is_ok()
+        );
         let status = history.get(&id).unwrap();
         assert_eq!(status.state, GuiActionState::Validating);
 
-        assert!(history
-            .transition_to(&id, GuiActionState::Completed)
-            .is_err());
+        assert!(
+            history
+                .transition_to(&id, GuiActionState::Completed)
+                .is_err()
+        );
         let status = history.get(&id).unwrap();
         assert_eq!(status.state, GuiActionState::Validating);
 
@@ -5768,40 +6103,54 @@ mod tests {
         assert!(GuiTestCommand::CloseDialog.validate().is_ok());
         assert!(GuiTestCommand::SubmitComposer.validate().is_ok());
         assert!(GuiTestCommand::ToggleHelp.validate().is_ok());
-        assert!(GuiTestCommand::ToggleDarkMode { enabled: true }
+        assert!(
+            GuiTestCommand::ToggleDarkMode { enabled: true }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            GuiTestCommand::SetComposerText {
+                text: "hello".into()
+            }
             .validate()
-            .is_ok());
-        assert!(GuiTestCommand::SetComposerText {
-            text: "hello".into()
-        }
-        .validate()
-        .is_ok());
+            .is_ok()
+        );
     }
 
     #[test]
     fn test_gui_test_command_validate_rejects_control_chars() {
-        assert!(GuiTestCommand::SetComposerText { text: "\n".into() }
+        assert!(
+            GuiTestCommand::SetComposerText { text: "\n".into() }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            GuiTestCommand::SetComposerText { text: "\r".into() }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            GuiTestCommand::SetComposerText { text: "\t".into() }
+                .validate()
+                .is_err()
+        );
+        assert!(
+            GuiTestCommand::SetComposerText {
+                text: "\x00".into()
+            }
             .validate()
-            .is_err());
-        assert!(GuiTestCommand::SetComposerText { text: "\r".into() }
-            .validate()
-            .is_err());
-        assert!(GuiTestCommand::SetComposerText { text: "\t".into() }
-            .validate()
-            .is_err());
-        assert!(GuiTestCommand::SetComposerText {
-            text: "\x00".into()
-        }
-        .validate()
-        .is_err());
+            .is_err()
+        );
     }
 
     #[test]
     fn test_gui_test_command_validate_rejects_overflow() {
         let long = "a".repeat(GUI_TEST_COMMAND_MAX_STRING_LEN + 1);
-        assert!(GuiTestCommand::SetComposerText { text: long }
-            .validate()
-            .is_err());
+        assert!(
+            GuiTestCommand::SetComposerText { text: long }
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
@@ -5855,14 +6204,16 @@ mod tests {
 
     #[test]
     fn test_gui_test_command_validate_rejects_excessive_timeout() {
-        assert!(GuiTestCommand::Wait {
-            condition: GuiWaitCondition::ScreenIs {
-                expected: "ChatList".into()
-            },
-            timeout_ms: GUI_TEST_COMMAND_MAX_TIMEOUT_MS + 1,
-        }
-        .validate()
-        .is_err());
+        assert!(
+            GuiTestCommand::Wait {
+                condition: GuiWaitCondition::ScreenIs {
+                    expected: "ChatList".into()
+                },
+                timeout_ms: GUI_TEST_COMMAND_MAX_TIMEOUT_MS + 1,
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
@@ -5877,51 +6228,61 @@ mod tests {
     #[test]
     fn test_gui_test_command_validate_rejects_long_room_id() {
         let long = "a".repeat(GUI_TEST_COMMAND_MAX_STRING_LEN + 1);
-        assert!(GuiTestCommand::OpenRoom { room_id: long }
-            .validate()
-            .is_err());
+        assert!(
+            GuiTestCommand::OpenRoom { room_id: long }
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
     fn test_gui_test_command_validate_rejects_long_conversation_id() {
         let long = "a".repeat(GUI_TEST_COMMAND_MAX_STRING_LEN + 1);
-        assert!(GuiTestCommand::OpenConversation {
-            conversation_id: long,
-        }
-        .validate()
-        .is_err());
+        assert!(
+            GuiTestCommand::OpenConversation {
+                conversation_id: long,
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
     fn test_gui_test_command_validate_rejects_long_peer_id() {
         let long = "a".repeat(GUI_TEST_COMMAND_MAX_STRING_LEN + 1);
-        assert!(GuiTestCommand::SelectPeer { peer_id: long }
-            .validate()
-            .is_err());
+        assert!(
+            GuiTestCommand::SelectPeer { peer_id: long }
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
     fn test_gui_test_command_validate_rejects_long_wait_screen_name() {
         let long = "a".repeat(GUI_TEST_COMMAND_MAX_STRING_LEN + 1);
-        assert!(GuiTestCommand::Wait {
-            condition: GuiWaitCondition::ScreenIs { expected: long },
-            timeout_ms: 1000,
-        }
-        .validate()
-        .is_err());
+        assert!(
+            GuiTestCommand::Wait {
+                condition: GuiWaitCondition::ScreenIs { expected: long },
+                timeout_ms: 1000,
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
     fn test_gui_test_command_validate_rejects_long_wait_room_topic() {
         let long = "a".repeat(GUI_TEST_COMMAND_MAX_STRING_LEN + 1);
-        assert!(GuiTestCommand::Wait {
-            condition: GuiWaitCondition::RoomSelected {
-                room_topic: Some(long),
-            },
-            timeout_ms: 1000,
-        }
-        .validate()
-        .is_err());
+        assert!(
+            GuiTestCommand::Wait {
+                condition: GuiWaitCondition::RoomSelected {
+                    room_topic: Some(long),
+                },
+                timeout_ms: 1000,
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     // ── Security: no shell / filesystem / keyboard / mouse variants ──
@@ -6047,18 +6408,22 @@ mod tests {
         // CloseDialog — depends on current state
         assert!(GuiTestCommand::CloseDialog.expected_state().is_none());
         // SelectPeer — may open conversation or profile
-        assert!(GuiTestCommand::SelectPeer {
-            peer_id: "abc".into()
-        }
-        .expected_state()
-        .is_none());
+        assert!(
+            GuiTestCommand::SelectPeer {
+                peer_id: "abc".into()
+            }
+            .expected_state()
+            .is_none()
+        );
         // Wait — condition is tracked separately
-        assert!(GuiTestCommand::Wait {
-            condition: GuiWaitCondition::PeerVisible { min_count: 1 },
-            timeout_ms: 1000,
-        }
-        .expected_state()
-        .is_none());
+        assert!(
+            GuiTestCommand::Wait {
+                condition: GuiWaitCondition::PeerVisible { min_count: 1 },
+                timeout_ms: 1000,
+            }
+            .expected_state()
+            .is_none()
+        );
     }
 
     // ── Security: GuiActionError / GuiActionErrorCode ─────────────────
@@ -6121,9 +6486,11 @@ mod tests {
         assert!(status.transition_to(GuiActionState::Validating).is_ok());
 
         // Validating → AppMessageQueued (valid)
-        assert!(status
-            .transition_to(GuiActionState::AppMessageQueued)
-            .is_ok());
+        assert!(
+            status
+                .transition_to(GuiActionState::AppMessageQueued)
+                .is_ok()
+        );
 
         // AppMessageQueued → Completed (invalid: must go through AppMessageHandled first)
         assert!(status.transition_to(GuiActionState::Completed).is_err());
@@ -6147,9 +6514,11 @@ mod tests {
         // Terminal state → any other state should fail
         assert!(status.transition_to(GuiActionState::Queued).is_err());
         assert!(status.transition_to(GuiActionState::Validating).is_err());
-        assert!(status
-            .transition_to(GuiActionState::AppMessageQueued)
-            .is_err());
+        assert!(
+            status
+                .transition_to(GuiActionState::AppMessageQueued)
+                .is_err()
+        );
     }
 
     #[test]
@@ -6185,15 +6554,21 @@ mod tests {
         };
 
         assert!(status.transition_to(GuiActionState::Validating).is_ok());
-        assert!(status
-            .transition_to(GuiActionState::AppMessageQueued)
-            .is_ok());
-        assert!(status
-            .transition_to(GuiActionState::AppMessageHandled)
-            .is_ok());
-        assert!(status
-            .transition_to(GuiActionState::WaitingForExpectedState)
-            .is_ok());
+        assert!(
+            status
+                .transition_to(GuiActionState::AppMessageQueued)
+                .is_ok()
+        );
+        assert!(
+            status
+                .transition_to(GuiActionState::AppMessageHandled)
+                .is_ok()
+        );
+        assert!(
+            status
+                .transition_to(GuiActionState::WaitingForExpectedState)
+                .is_ok()
+        );
         assert!(status.transition_to(GuiActionState::Completed).is_ok());
         assert!(status.state.is_terminal());
     }
@@ -6234,12 +6609,16 @@ mod tests {
         };
 
         assert!(status.transition_to(GuiActionState::Validating).is_ok());
-        assert!(status
-            .transition_to(GuiActionState::AppMessageQueued)
-            .is_ok());
-        assert!(status
-            .transition_to(GuiActionState::AppMessageHandled)
-            .is_ok());
+        assert!(
+            status
+                .transition_to(GuiActionState::AppMessageQueued)
+                .is_ok()
+        );
+        assert!(
+            status
+                .transition_to(GuiActionState::AppMessageHandled)
+                .is_ok()
+        );
         assert!(status.transition_to(GuiActionState::Failed).is_ok());
         assert!(status.state.is_terminal());
     }
@@ -6260,15 +6639,21 @@ mod tests {
         };
 
         assert!(status.transition_to(GuiActionState::Validating).is_ok());
-        assert!(status
-            .transition_to(GuiActionState::AppMessageQueued)
-            .is_ok());
-        assert!(status
-            .transition_to(GuiActionState::AppMessageHandled)
-            .is_ok());
-        assert!(status
-            .transition_to(GuiActionState::WaitingForExpectedState)
-            .is_ok());
+        assert!(
+            status
+                .transition_to(GuiActionState::AppMessageQueued)
+                .is_ok()
+        );
+        assert!(
+            status
+                .transition_to(GuiActionState::AppMessageHandled)
+                .is_ok()
+        );
+        assert!(
+            status
+                .transition_to(GuiActionState::WaitingForExpectedState)
+                .is_ok()
+        );
         assert!(status.transition_to(GuiActionState::TimedOut).is_ok());
         assert!(status.state.is_terminal());
     }
@@ -6384,19 +6769,25 @@ mod tests {
         history.record(request);
 
         // Valid: Queued → Validating
-        assert!(history
-            .transition_to(&aid, GuiActionState::Validating)
-            .is_ok());
+        assert!(
+            history
+                .transition_to(&aid, GuiActionState::Validating)
+                .is_ok()
+        );
 
         // Invalid: Validating → Completed (skip AppMessageQueued)
-        assert!(history
-            .transition_to(&aid, GuiActionState::Completed)
-            .is_err());
+        assert!(
+            history
+                .transition_to(&aid, GuiActionState::Completed)
+                .is_err()
+        );
 
         // Valid: Validating → Rejected
-        assert!(history
-            .transition_to(&aid, GuiActionState::Rejected)
-            .is_ok());
+        assert!(
+            history
+                .transition_to(&aid, GuiActionState::Rejected)
+                .is_ok()
+        );
 
         // Terminal: cannot transition further
         assert!(history.transition_to(&aid, GuiActionState::Queued).is_err());
@@ -6405,12 +6796,14 @@ mod tests {
     #[test]
     fn test_gui_action_history_transition_to_unknown_id() {
         let history = GuiActionHistory::new();
-        assert!(history
-            .transition_to(
-                &GuiActionId("nonexistent".into()),
-                GuiActionState::Completed
-            )
-            .is_err());
+        assert!(
+            history
+                .transition_to(
+                    &GuiActionId("nonexistent".into()),
+                    GuiActionState::Completed
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -10345,9 +10738,11 @@ mod tests {
         assert!(history.set_state(&first, GuiActionState::Completed));
         let second = history.record(test_gui_request("current-action"));
 
-        assert!(history
-            .get(&GuiActionId("stale-action".to_string()))
-            .is_none());
+        assert!(
+            history
+                .get(&GuiActionId("stale-action".to_string()))
+                .is_none()
+        );
         let error = history
             .transition_to(
                 &GuiActionId("unknown-action".to_string()),

@@ -254,12 +254,15 @@ fn message_ordering() {
             .expect("fetch after partial");
         let ids: Vec<MessageId> = due.iter().map(|r| r.msg_id).collect();
         // B and C should still be in FIFO order after any sent/preceding entries
-        let pos_b = ids.iter().position(|id| id == &msg_b).expect("B should be due");
-        let pos_c = ids.iter().position(|id| id == &msg_c).expect("C should be due");
-        assert!(
-            pos_b < pos_c,
-            "B should appear before C in the due queue"
-        );
+        let pos_b = ids
+            .iter()
+            .position(|id| id == &msg_b)
+            .expect("B should be due");
+        let pos_c = ids
+            .iter()
+            .position(|id| id == &msg_c)
+            .expect("C should be due");
+        assert!(pos_b < pos_c, "B should appear before C in the due queue");
     }
 }
 

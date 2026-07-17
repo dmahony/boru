@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::{
-    util::{idbytes_impls, TimeBoundCache},
-    PeerIdentity, IO,
+    IO, PeerIdentity,
+    util::{TimeBoundCache, idbytes_impls},
 };
 
 /// A message identifier, which is the message content's blake3 hash.

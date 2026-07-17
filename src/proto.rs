@@ -48,7 +48,7 @@
 use std::{fmt, hash::Hash};
 
 use bytes::Bytes;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 mod hyparview;
 mod plumtree;
@@ -131,12 +131,12 @@ mod test {
     use std::{collections::HashSet, env, fmt, str::FromStr};
 
     use n0_tracing_test::traced_test;
-    use rand::{rngs::ChaCha12Rng, SeedableRng};
+    use rand::{SeedableRng, rngs::ChaCha12Rng};
 
     use super::{Command, Config, Event};
     use crate::proto::{
-        sim::{LatencyConfig, Network, NetworkConfig},
         Scope, TopicId,
+        sim::{LatencyConfig, Network, NetworkConfig},
     };
 
     #[test]

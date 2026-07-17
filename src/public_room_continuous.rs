@@ -33,10 +33,10 @@ use std::time::{Duration, Instant};
 use tokio::{
     sync::mpsc,
     task::JoinHandle,
-    time::{interval, sleep, MissedTickBehavior},
+    time::{MissedTickBehavior, interval, sleep},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, trace, warn, Instrument};
+use tracing::{Instrument, debug, info, info_span, trace, warn};
 
 use crate::api::GossipSender;
 use crate::dynamic_joiner::{DynamicPeerJoiner, DynamicPeerJoinerConfig, NeighborEvent};

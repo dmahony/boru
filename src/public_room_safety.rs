@@ -164,7 +164,7 @@ impl PublicRoomSafety {
         if !times.contains_key(peer) && times.len() >= MAX_TRACKED_PEERS {
             return false;
         }
-        let peer_times = times.entry(*peer).or_insert_with(Vec::new);
+        let peer_times = times.entry(*peer).or_default();
 
         // Prune entries outside the window.
         peer_times.retain(|t| now.duration_since(*t) < window_duration);
@@ -922,37 +922,6 @@ mod tests {
     }
 
     #[test]
-    fn filter_drops_file_share_over_limit() {
-        let safety = default_safety();
-        let peer = test_peer(4);
-
-        for _ in 0..5 {
-            let event = crate::chat_core::NetEvent::Message {
-                from: peer,
-                message: crate::chat_core::Message::FileShare {
-                    name: "file.bin".into(),
-                    ticket: "ticket123".into(),
-                },
-                sent_at: 1000,
-            };
-            let result = crate::chat_core::filter_net_event_with_safety(event, &safety);
-            assert!(result.is_some(), "file share should be allowed");
-        }
-
-        // 6th file share should be dropped.
-        let event = crate::chat_core::NetEvent::Message {
-            from: peer,
-            message: crate::chat_core::Message::FileShare {
-                name: "extra.bin".into(),
-                ticket: "ticket456".into(),
-            },
-            sent_at: 1000,
-        };
-        let result = crate::chat_core::filter_net_event_with_safety(event, &safety);
-        assert!(result.is_none(), "6th file share should be dropped");
-    }
-
-    #[test]
     fn filter_passes_text_message_unchanged() {
         let safety = default_safety();
         let peer = test_peer(5);
@@ -1093,7 +1062,7 @@ mod tests {
             message: crate::chat_core::Message::Message {
                 text: "hello".into(),
             },
-            sent_at: crate::chat_core::now_ms(),
+            sent_at: crate::chat_core::now_secs(),
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, Some(&safety));
         assert!(result.is_ok(), "safe message should be processed");
@@ -1112,7 +1081,7 @@ mod tests {
             message: crate::chat_core::Message::Message {
                 text: "a".repeat(4097),
             },
-            sent_at: crate::chat_core::now_ms(),
+            sent_at: crate::chat_core::now_secs(),
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, Some(&safety));
         assert!(result.is_ok(), "safety rejects should return Ok(())");
@@ -1125,7 +1094,7 @@ mod tests {
 
     #[test]
     fn handle_net_event_without_safety_passes_private_events() {
-        let safety = default_safety();
+        let _safety = default_safety();
         let peer = test_peer(3);
         let mut app = test_app();
 
@@ -1136,7 +1105,7 @@ mod tests {
             message: crate::chat_core::Message::Message {
                 text: "a".repeat(4097),
             },
-            sent_at: crate::chat_core::now_ms(),
+            sent_at: crate::chat_core::now_secs(),
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
         assert!(result.is_ok(), "private room should process all events");
@@ -1158,7 +1127,7 @@ mod tests {
             message: crate::chat_core::Message::Message {
                 text: "a".repeat(4097),
             },
-            sent_at: crate::chat_core::now_ms(),
+            sent_at: crate::chat_core::now_secs(),
         };
         let result = crate::chat_core::handle_net_event_with_safety(event, &mut app, None);
         assert!(result.is_ok());

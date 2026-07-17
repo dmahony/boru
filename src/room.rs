@@ -276,10 +276,12 @@ mod tests {
         fs::write(room_file_path(&dir), "not json").expect("write invalid file");
         let result = RoomStore::load(&dir);
         assert!(result.is_err(), "invalid room file should fail");
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("failed to parse room file"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to parse room file")
+        );
     }
 
     #[test]

@@ -63,10 +63,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use n0_error::{bail_any, Result, StdResultExt};
+use n0_error::{Result, StdResultExt, bail_any};
 use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 use crate::{
     api::{Event as GossipEvent, GossipReceiver, GossipSender},

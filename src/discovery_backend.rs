@@ -7,7 +7,7 @@
 //! validation path.
 
 use async_trait::async_trait;
-use n0_error::{ensure_any, Result};
+use n0_error::{Result, ensure_any};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -193,7 +193,7 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
         let entries = map.entry(*namespace).or_default();
         entries.retain(|r| {
             r.expires_at
-                .map_or(true, |deadline| deadline > self.now_secs())
+                .is_none_or(|deadline| deadline > self.now_secs())
         });
         entries.push(record);
         if entries.len() > MAX_DISCOVERY_RECORDS {
@@ -209,7 +209,7 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
         let mut records = records;
         records.retain(|r| {
             r.expires_at
-                .map_or(true, |deadline| deadline > self.now_secs())
+                .is_none_or(|deadline| deadline > self.now_secs())
         });
         records.reverse();
         records.truncate(MAX_DISCOVERY_RECORDS);
@@ -304,10 +304,12 @@ mod tests {
         let record = EncryptedDiscoveryRecord::new(vec![]);
         let result = validate_discovery_record(&record);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("must not be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
     }
 
     #[test]
@@ -492,17 +494,21 @@ mod tests {
         let backend = InMemoryDiscoveryBackend::new();
         let ns = NamespaceId::new([2u8; 32]);
         run_async(async {
-            assert!(backend
-                .publish(&ns, EncryptedDiscoveryRecord::new(Vec::new()))
-                .await
-                .is_err());
-            assert!(backend
-                .publish(
-                    &ns,
-                    EncryptedDiscoveryRecord::new(vec![0; MAX_DISCOVERY_PAYLOAD_SIZE + 1])
-                )
-                .await
-                .is_err());
+            assert!(
+                backend
+                    .publish(&ns, EncryptedDiscoveryRecord::new(Vec::new()))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                backend
+                    .publish(
+                        &ns,
+                        EncryptedDiscoveryRecord::new(vec![0; MAX_DISCOVERY_PAYLOAD_SIZE + 1])
+                    )
+                    .await
+                    .is_err()
+            );
         });
     }
 

@@ -9,12 +9,14 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 #![cfg_attr(iroh_docsrs, feature(doc_cfg))]
 #![allow(unexpected_cfgs)]
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+#![allow(clippy::large_enum_variant)]
 
-#[cfg(feature = "net")]
-pub use net::Gossip;
 #[cfg(feature = "net")]
 #[doc(inline)]
 pub use net::GOSSIP_ALPN as ALPN;
+#[cfg(feature = "net")]
+pub use net::Gossip;
 
 #[cfg(feature = "net")]
 pub mod api;
@@ -130,7 +132,6 @@ pub mod room_cleanup;
 /// epoch-versioned upgrades with deterministic conflict resolution.
 #[cfg(feature = "net")]
 // pub mod room_secret_migration;
-
 /// Active-session chat message state. No chat messages are persisted.
 #[cfg(feature = "net")]
 pub mod chat_history;
@@ -156,6 +157,14 @@ pub mod mailbox;
 #[cfg(feature = "net")]
 pub mod whisper;
 
+/// Inbox protocol — direct QUIC protocol for offline-message delivery.
+///
+/// Uses signed, timestamped messages with authorization checks and replay
+/// protection.  The inbox topic is subscribed at startup and kept alive
+/// independently of the visible chat room.
+#[cfg(feature = "net")]
+pub mod inbox;
+
 /// Shared folder file indexer and change monitor.
 ///
 /// Scans a local shared folder, builds an in-memory index of file metadata,
@@ -163,14 +172,6 @@ pub mod whisper;
 /// File hashing (blake3) is deferred to transfer time (lazy hashing).
 #[cfg(feature = "net")]
 pub mod file_indexer;
-
-/// `/iroh-chat-inbox/1` direct QUIC protocol for offline-message delivery.
-///
-/// Uses signed, timestamped messages with authorization checks and replay
-/// protection.  The inbox topic is subscribed at startup and kept alive
-/// independently of the visible chat room.
-#[cfg(feature = "net")]
-pub mod inbox;
 
 /// Backfill protocol — lets late-joining peers request message history
 /// from existing peers via a dedicated QUIC ALPN.
@@ -230,6 +231,54 @@ pub mod room_docs;
 /// that accumulates samples and prints a summary report.
 pub mod perf;
 
+/// Streaming blob download from remote peers via iroh-blobs.
+///
+/// Downloads are streamed directly to a temporary file to avoid loading the
+/// entire blob into memory.  After download the content is BLAKE3-hashed and
+/// verified against the expected content hash, then atomically renamed.
+#[cfg(feature = "net")]
+pub mod blob_downloader;
+/// Per-peer catalogue builder — constructs a signed catalogue for a
+/// specific requesting peer, applying permission and visibility rules.
+#[cfg(feature = "net")]
+pub mod catalogue_builder;
+/// Client for fetching remote file catalogues over the catalogue protocol.
+#[cfg(feature = "net")]
+pub mod catalogue_client;
+/// QUIC protocol handler for the Remote File Catalogue service.
+///
+/// Accepts connections on `CATALOGUE_ALPN`, authenticates via iroh's
+/// connection identity, enforces rate limits, validates protocol versions,
+/// evaluates contact/block state, builds per-peer signed catalogues
+/// (via [`crate::catalogue_builder`]), and returns versioned responses.
+#[cfg(feature = "net")]
+pub mod catalogue_handler;
+/// Signed file catalogue — a self-contained, verifiable snapshot of a
+/// profile's shared files and collections, suitable for gossip-based
+/// distribution.
+#[cfg(feature = "net")]
+pub mod catalogue_model;
+/// Lightweight catalogue revision notification — signed hints broadcast over
+/// gossip to signal that a peer's catalogue has changed.
+#[cfg(feature = "net")]
+pub mod catalogue_notify;
+/// Catalogue protocol request and response types for the Remote File
+/// Catalogue QUIC protocol (`/iroh-chat-catalogue/1`).
+///
+/// Defines [`CatalogRequest`] (GetCatalogue with known_revision,
+/// GetFileDetails) and [`CatalogResponse`] (NotModified, Catalogue,
+/// FileDetails, NotFound, PermissionDenied, RateLimited,
+/// UnsupportedVersion, InternalError) with stable error codes, payload
+/// limits, and pagination support.
+#[cfg(feature = "net")]
+pub mod catalogue_protocol;
+/// Cache refresh policy for remote file catalogues.
+///
+/// Event-driven state machine that decides when to refresh a cached
+/// catalogue based on triggers (profile open, revision notice, staleness,
+/// manual refresh, missing file).  No continuous polling.
+#[cfg(feature = "net")]
+pub mod catalogue_refresh;
 /// Core diagnostics — bounded event and probe storage with sequence
 /// numbering and thread-safe query methods.
 ///
@@ -237,10 +286,98 @@ pub mod perf;
 /// [`DiagnosticEvent`]s and [`ReceivedProbe`]s.  Oldest entries are
 /// automatically evicted when storage limits are exceeded.
 pub mod diagnostics;
+/// File access request and response types — protocol for requesting
+/// download permission on a specific shared file from its owner.
+#[cfg(feature = "net")]
+pub mod file_access;
+/// QUIC protocol handler for the File Transfer Authorisation service.
+///
+/// Accepts connections on `TRANSFER_AUTH_ALPN`, authenticates via iroh's
+/// connection identity, validates requests, evaluates block/contact state and
+/// per-file permissions, verifies availability and content identity, prepares
+/// blobs, issues short-lived signed download descriptors, and records
+/// diagnostics.  Bounded concurrency via global + per-peer semaphores.
+#[cfg(feature = "net")]
+pub mod file_access_handler;
+/// Prepare offered files for iroh-blobs export.
+///
+/// Handles registration of imported and referenced files with the iroh-blobs
+/// store.  Referenced files are temporarily imported (copied to a managed temp
+/// directory, hash-verified, registered, then cleaned up) so the source is
+/// never modified.  Imported files are registered from their inline storage.
+#[cfg(feature = "net")]
+pub mod file_offer;
+/// Wire-protocol versioning for Remote File Catalogue QUIC protocols.
+///
+/// Provides envelope helpers that prefix every frame with a 4-byte protocol
+/// version and 4-byte payload length, so unsupported versions can be rejected
+/// before deserialization.
+#[cfg(feature = "net")]
+pub mod protocol_version;
 
+/// Upload concurrency controls — owner-side limits on concurrent blob
+/// preparations, verification/registration tasks, per-peer queue depth,
+/// request timeouts, and optional per-peer cooldown.
+///
+/// Used by [`file_access_handler::FileAccessHandler`] to prevent resource
+/// exhaustion from multiple simultaneous download requests.
+/// See [`upload_concurrency::UploadConcurrencyConfig`] for field-level docs.
+#[cfg(feature = "net")]
+pub mod upload_concurrency;
+
+/// Abuse-control utilities for the Remote File Catalogue protocol and
+/// file-transfer authorisation handlers.
+///
+/// Provides display-text sanitisation, filesystem-safe filename
+/// sanitisation, per-peer sliding-window rate limiting, invalid-signature
+/// tracking, MIME type length validation, and total catalogue byte-size
+/// validation.
+///
+/// **All remote metadata is treated as untrusted**, even when
+/// cryptographically signed.  A valid signature proves authorship but does
+/// not guarantee that the content is safe to render or use as a local
+/// filesystem path.
+#[cfg(feature = "net")]
+pub mod abuse_controls;
+
+/// Download concurrency controls — client-side limits on concurrent background
+/// downloads, per-peer in-flight limits, verification transitions, queued →
+/// active start rate, and progress-update DB write throttle.
+///
+/// Used by [`download_manager::DownloadManager`] to prevent resource
+/// exhaustion when downloading many files simultaneously.
+/// See [`download_concurrency::DownloadConcurrencyConfig`] for field-level docs.
+#[cfg(feature = "net")]
+pub mod download_concurrency;
+
+/// Durable download state machine — tracks file transfers from remote peers.
+///
+/// Defines the [`DownloadState`] enum with validated transitions and the
+/// [`DownloadRecord`] struct for persisted download tracking.  Records are
+/// created **before** any network transfer begins.
+pub mod download;
+/// Download state machine runtime — transfer worker owning all
+/// network-driven state transitions for the durable download lifecycle.
+///
+/// Provides [`DownloadManager`](download_manager::DownloadManager) (the
+/// background actor) and [`DownloadHandle`](download_manager::DownloadHandle)
+/// (the safe frontend handle).  Frontends must use [`DownloadHandle`] and
+/// **never** call `storage.transition_download()` directly.
+#[cfg(feature = "net")]
+pub mod download_manager;
 /// Retry queue for durable message delivery.
 pub mod retry;
+/// Safe destination path handling — derive trustworthy local filenames from
+/// untrusted remote display names.
+pub mod safe_destination;
 /// Relational storage layer with managed migrations.
 pub mod storage;
 /// Durable inbox/outbox storage.
 pub mod store;
+
+/// Authoritative delivery-state machine for offline direct-message reliability.
+///
+/// Defines the single source of truth for outbound message lifecycle:
+/// [`DeliveryState`] enum with validated transitions, restart recovery
+/// rules, terminal-state semantics, and u8 wire encoding.
+pub mod delivery_state;

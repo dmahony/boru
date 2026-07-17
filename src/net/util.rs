@@ -1,31 +1,31 @@
 //! Utilities for boru-chat networking
 
 use std::{
-    collections::{hash_map, HashMap},
+    collections::{HashMap, hash_map},
     io,
     time::Duration,
 };
 
 use bytes::{Bytes, BytesMut};
 use iroh::{
-    endpoint::{Connection, RecvStream, SendStream},
     EndpointId,
+    endpoint::{Connection, RecvStream, SendStream},
 };
 use n0_error::{e, stack_error};
 use n0_future::{
-    task::JoinSet,
-    time::{sleep_until, Instant},
     FuturesUnordered, StreamExt,
+    task::JoinSet,
+    time::{Instant, sleep_until},
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::mpsc,
 };
-use tracing::{debug, trace, Instrument};
+use tracing::{Instrument, debug, trace};
 
 use super::{InEvent, ProtoMessage};
-use crate::proto::{util::TimerMap, TopicId};
+use crate::proto::{TopicId, util::TimerMap};
 
 /// Errors related to message writing
 #[allow(missing_docs)]

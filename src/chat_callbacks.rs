@@ -19,6 +19,15 @@ use crate::chat_history::DeliveryState;
 use crate::friends::FriendId;
 use crate::user_profile::UserProfile;
 
+// ── Forward-declare for the trait ──────────────────────────────────────────
+
+/// Per-peer catalogue revision cache and refresh rate limiter.
+///
+/// See [`crate::catalogue_notify::PeerRevisionCache`] for full docs.
+/// This re-export avoids a direct dependency on the `catalogue_notify`
+/// module in the callback trait.
+pub use crate::catalogue_notify::CatalogueRevisionNotice;
+
 /// A stable identifier for a file or image transfer.
 ///
 /// Generated locally when a transfer is initiated. Used to correlate
@@ -206,11 +215,7 @@ pub trait ChatCallbacks {
         sent_at: Option<u64>,
     );
 
-    /// Record a pending file download: `(filename, ticket_string)`.
-    fn set_pending_file(&mut self, name: String, ticket: String);
-
     /// Record a pending image download: `(filename, blob_hash, sender_pk)`.
-    /// The frontend should automatically download and render the image.
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey);
 
     /// Check whether any chat entry has the given protocol message hash.
@@ -295,6 +300,22 @@ pub trait ChatCallbacks {
 
     /// Store profile metadata advertised by a peer. (Default no-op).
     fn on_profile_update(&mut self, _peer: PublicKey, _profile: UserProfile) {}
+
+    /// Called when a valid [`CatalogueRevisionNotice`] indicates that a
+    /// peer's file catalogue has a newer revision available.
+    ///
+    /// The default implementation is a no-op. Frontends should override this
+    /// to schedule an asynchronous catalogue fetch via
+    /// [`crate::catalogue_client::fetch_remote_catalogue`].
+    ///
+    /// # Important
+    ///
+    /// This callback is already rate-limited and deduplicated — the caller
+    /// (`handle_net_event_for_topic`) has verified the signature, checked the
+    /// revision cache, and confirmed that the refresh cooldown has elapsed.
+    /// The frontend can safely initiate a fetch without additional guards.
+    fn on_catalogue_revision_notice(&mut self, _peer: PublicKey, _notice: CatalogueRevisionNotice) {
+    }
 
     /// Merge a parsed peer ticket into frontend-owned durable state.
     /// Returns whether the frontend accepted the ticket.

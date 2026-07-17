@@ -84,8 +84,8 @@ mod tests {
         friends::{DirectConversationState, FriendId, FriendRecord},
         outbox::OutboxEntry,
         proto::TopicId,
-        room::{RoomStore, ROOM_FILE_NAME},
-        room_history::{RoomHistoryStore, ROOM_HISTORY_FILE_NAME},
+        room::{ROOM_FILE_NAME, RoomStore},
+        room_history::{ROOM_HISTORY_FILE_NAME, RoomHistoryStore},
     };
     use std::{
         fs,
@@ -226,34 +226,44 @@ mod tests {
             outbox.entries().iter().filter(|e| e.topic == other).count(),
             1
         );
-        assert!(friends
-            .get(&FriendId::new("friend-1"))
-            .unwrap()
-            .rooms
-            .get(&target)
-            .is_none());
-        assert!(friends
-            .get(&FriendId::new("friend-1"))
-            .unwrap()
-            .direct_conversation()
-            .is_none());
-        assert!(friends
-            .get(&FriendId::new("friend-2"))
-            .unwrap()
-            .rooms
-            .get(&target)
-            .is_none());
-        assert!(friends
-            .get(&FriendId::new("friend-2"))
-            .unwrap()
-            .rooms
-            .get(&other)
-            .is_some());
-        assert!(friends
-            .get(&FriendId::new("friend-2"))
-            .unwrap()
-            .direct_conversation()
-            .is_some());
+        assert!(
+            friends
+                .get(&FriendId::new("friend-1"))
+                .unwrap()
+                .rooms
+                .get(&target)
+                .is_none()
+        );
+        assert!(
+            friends
+                .get(&FriendId::new("friend-1"))
+                .unwrap()
+                .direct_conversation()
+                .is_none()
+        );
+        assert!(
+            friends
+                .get(&FriendId::new("friend-2"))
+                .unwrap()
+                .rooms
+                .get(&target)
+                .is_none()
+        );
+        assert!(
+            friends
+                .get(&FriendId::new("friend-2"))
+                .unwrap()
+                .rooms
+                .get(&other)
+                .is_some()
+        );
+        assert!(
+            friends
+                .get(&FriendId::new("friend-2"))
+                .unwrap()
+                .direct_conversation()
+                .is_some()
+        );
         assert!(!dir.join(ROOM_FILE_NAME).exists());
         assert!(!dir.join(ROOM_HISTORY_FILE_NAME).exists());
     }

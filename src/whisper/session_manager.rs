@@ -410,7 +410,7 @@ impl SessionManagerActor {
                             trace!(%peer, "ignoring disconnect for unknown session");
                         }
                     }
-                    WhisperEvent::Message { .. } | WhisperEvent::FileTransfer { .. } => {
+                    WhisperEvent::Message { .. } => {
                         // These are handled by the GUI directly.
                     }
                 }
@@ -756,8 +756,8 @@ mod tests {
     async fn create_dummy_whisper_handle() -> (WhisperHandle, mpsc::UnboundedReceiver<WhisperEvent>)
     {
         use crate::whisper::WhisperBuilder;
-        use iroh::endpoint::presets;
         use iroh::Endpoint;
+        use iroh::endpoint::presets;
 
         let sk = SecretKey::generate();
         let endpoint = Endpoint::builder(presets::N0DisableRelay)

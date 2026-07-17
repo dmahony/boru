@@ -13,11 +13,10 @@ use std::{
 };
 
 use iroh::PublicKey;
-use n0_error::{bail_any, Result, StdResultExt};
+use n0_error::{Result, StdResultExt, bail_any};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::chat_core::atomic_write::atomic_write_json;
-use crate::chat_core::SharedFileMeta;
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -115,10 +114,6 @@ pub struct UserProfile {
     /// Allowed file extensions for incoming files (empty = all allowed).
     #[serde(default)]
     pub allowed_extensions: Vec<String>,
-
-    /// File metadata announced in ProfileUpdate broadcasts.
-    #[serde(default)]
-    pub shared_files: Vec<SharedFileMeta>,
 }
 
 impl Default for UserProfile {
@@ -138,7 +133,6 @@ impl Default for UserProfile {
             allow_downloads: false,
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             allowed_extensions: Vec::new(),
-            shared_files: Vec::new(),
         }
     }
 }
@@ -423,22 +417,6 @@ impl SharedFile {
     /// kept in the local index but not published to peers.
     pub fn is_announceable(&self) -> bool {
         !self.over_limit && !self.extension_blocked
-    }
-
-    /// Convert to the wire-format metadata for ProfileUpdate announcements.
-    pub fn to_shared_file_meta(&self) -> crate::chat_core::SharedFileMeta {
-        crate::chat_core::SharedFileMeta {
-            id: self.id.clone(),
-            filename: self.filename.clone(),
-            size: self.size,
-            mime_type: self.mime_type.clone(),
-            modified_time: self
-                .modified_time
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64,
-            hash: self.hash.unwrap_or([0u8; 32]),
-        }
     }
 }
 
@@ -1187,53 +1165,5 @@ mod tests {
         profile.max_file_size = 1024;
         assert!(check_file_announce_allowed(&profile, 512, "txt").is_ok());
         assert!(check_file_announce_allowed(&profile, 2048, "txt").is_err());
-    }
-
-    #[test]
-    fn shared_file_to_meta_contains_all_fields() {
-        let now = SystemTime::now();
-        let mut file = SharedFile::new("photo.jpg", 42_000, "image/jpeg", now);
-        file.path = PathBuf::from("/shared/photo.jpg");
-        file.hash = Some([0xab; 32]);
-        let meta = file.to_shared_file_meta();
-        assert_eq!(meta.id, file.id);
-        assert_eq!(meta.filename, "photo.jpg");
-        assert_eq!(meta.size, 42_000);
-        assert_eq!(meta.mime_type, "image/jpeg");
-        assert_eq!(meta.hash, [0xab; 32]);
-        // modified_time should be > 0
-        assert!(meta.modified_time > 0, "modified_time should be positive");
-    }
-
-    #[test]
-    fn profile_update_with_shared_files_roundtrips() {
-        use crate::chat_core::Message;
-        let now = SystemTime::now();
-        let mut file = SharedFile::new("doc.pdf", 100_000, "application/pdf", now);
-        file.hash = Some([0xcd; 32]);
-        let meta = file.to_shared_file_meta();
-
-        let mut profile = UserProfile::new(test_key());
-        profile.display_name = "bob".into();
-        profile.bio = "sharing files".into();
-        profile.file_sharing_enabled = true;
-        profile.avatar_identifier = Some("avatar-id".into());
-        profile.shared_folder_path = std::path::PathBuf::from("/tmp/shared");
-        profile.allow_downloads = true;
-        profile.shared_files = vec![meta];
-
-        let msg = Message::ProfileUpdate(profile);
-        let bytes = postcard::to_stdvec(&msg).unwrap();
-        let decoded: Message = postcard::from_bytes(&bytes).unwrap();
-        match decoded {
-            Message::ProfileUpdate(profile) => {
-                assert_eq!(profile.display_name, "bob");
-                assert_eq!(profile.shared_files.len(), 1);
-                assert_eq!(profile.shared_files[0].filename, "doc.pdf");
-                assert_eq!(profile.shared_files[0].size, 100_000);
-                assert_eq!(profile.shared_files[0].hash, [0xcd; 32]);
-            }
-            _ => panic!("expected ProfileUpdate"),
-        }
     }
 }

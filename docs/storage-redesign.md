@@ -13,11 +13,61 @@ conversation metadata. This document focuses on Step 12: deletion semantics.
 |---|---|---|---|
 | 13 | V2 schema: content-addressed file objects | **Done** | `storage::Storage::migrate_v2` — 8 new tables (file_objects, message_attachments, shared_files, file_collections, file_collection_items, shared_file_permissions, downloads, profile_manifest_state) |
 | 14 | Legacy JSON → SQLite migration | **Done** | `storage::Storage::import_legacy_db()` copies inbox, outbox, contacts, sync_cursor; idempotent via ON CONFLICT DO NOTHING |
-| 15 | Schema versioning and migration framework | **Done** | `schema_version` table, `CURRENT_SCHEMA_VERSION=2`, forward-only, future-schema guard, partial-migration recovery |
-| 16 | Crash and corruption resilience | **Done** | `PRAGMA integrity_check` on open, `recover_crash_state()` (Sent→Pending recovery, stale timestamp reset), `PRAGMA journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL` |
-| 17 | Repository integration test suite | **Done** | `tests/test_storage_integration.rs` — 8 deterministic tests covering outgoing queue lifecycle, exactly-once, ordering, key rotation, deletion tombstone, legacy migration, attachment integrity, mixed operations |
+| 15 | Schema versioning and migration framework | **Done** | `schema_version` table, `CURRENT_SCHEMA_VERSION=4`, forward-only, future-schema guard, partial-migration recovery |
+| 16 | Crash and corruption resilience | **Done** | `PRAGMA integrity_check` on open, `recover_crash_state()` (Sent→Pending recovery, stale timestamp reset), WAL, busy timeout, and synchronous=NORMAL. See [`offline-direct-messaging.md`](offline-direct-messaging.md) for delivery-state crash recovery semantics |
+| 17 | Repository integration test suite | **Done** | `tests/test_storage_integration.rs` — deterministic tests covering queue lifecycle, exactly-once, ordering, key rotation, deletion tombstone, migration, attachments, and mixed operations |
 | 18 | Redirect legacy message-store access | **Done** | `Storage::open()` imports existing `message_store.db`; storage integration in GUI is deferred |
-| 19 | Update storage documentation | **Done** | `docs/message-storage-design.md` (comprehensive design doc), `docs/storage-redesign.md` (this file), `README.md` updated |
+| 19 | Update storage documentation | **Done** | `docs/message-storage-design.md`, `docs/storage-redesign.md`, and `README.md` updated |
+| 20 | Operation progress tracking | **Done** | `operation_progress` table with stable IDs and progress APIs |
+| 21 | Startup recovery | **Done** | `startup_recovery()` removes stale temp files, recovers interrupted operations, detects orphans, and checks missing managed bytes |
+| 22 | Privacy and safety checks | **Done** | Path sanitisation and remote-safe row validation helpers |
+| 23 | Integration tests | **Done** | `tests/test_file_library_integration.rs` covers imported/referenced lifecycles, collections, deduplication, and failures |
+| 24 | Update documentation | **Done** | Storage documentation updated |
+| 25 | Quality suite | **Done** | Formatting, clippy, full test suite, and file-library coverage completed |
+| 26 | V3 schema: file verification | **Done** | `storage::Storage::migrate_v3` — `file_verification` availability tracking |
+| 27 | V4 schema: replacement tracking + operations | **Done** | `storage::Storage::migrate_v4` — replacement, cleanup, operation tables and shared-file revisions |
+| 28 | File library integration tests (V3/V4) | **Done** | Coverage for verification, version tracking, and cleanup operations |
+| 29 | Update storage documentation (V3/V4) | **Done** | Schema documentation updated for V3 and V4 |
+
+### Step 21: Startup Recovery
+
+The file library includes a comprehensive startup recovery sequence:
+
+1. **Stale temp file cleanup** — removes `.tmp_*.import` files left by interrupted import operations.
+2. **Interrupted operation recovery** — marks all `operation_progress` rows still in `running` or `cancelled` status as `failed` with reason `"startup_recovery"`.
+3. **Orphan detection** — finds `shared_files` rows without a matching `file_object` (orphaned shared_files) and `file_object` rows without any `shared_files`, `message_attachments`, or `downloads` referencing them (orphaned file objects).
+4. **Cheap metadata checks** — checks referenced file source existence on disk (without hashing), checks managed file existence for imported files. Files with missing sources are marked as `"Missing"` in verification state.
+5. **No auto-hashing** — referenced files are NOT re-hashed at startup to avoid startup delay.
+
+Storage methods added for recovery:
+- `list_incomplete_operations()` — lists running operations
+- `fail_all_incomplete_operations(reason)` — fails all running/cancelled ops
+- `list_orphaned_shared_file_hashes(profile)` — shared_files without file_objects
+- `list_orphaned_file_objects()` — file_objects without associations
+
+### Step 22: Privacy and Safety
+
+The file library implements several privacy protections:
+
+- **Path sanitization** — `sanitize_path_for_log()` redacts home directories (`~`), temp paths (`<temp>`), and internal library paths (`<library>`) from log output.
+- **Remote-safe verification** — `verify_row_safe_for_remote()` checks each `FileLibraryRow` field for:
+  - Path separators in `display_filename`
+  - Absolute path indicators (`/`, `~`, `.`, `C:`, `D:`)
+  - Sensitive patterns in descriptions (`/home/`, `.ssh`, `secret`, `password`)
+  - Malformed MIME types
+- **Bulk verification** — `verify_all_rows_safe_for_remote()` checks all rows at once, returning violations with indices.
+
+### Steps 23-25: Integration Tests, Docs, Quality
+
+Integration tests in `tests/test_file_library_integration.rs` cover:
+- Imported file full lifecycle (add → restart → edit → disable → re-enable → remove → clean)
+- Referenced file lifecycle (add → restart → verify → change → detect → update → remove)
+- Shared object across chat messages and profile offers
+- Collection CRUD
+- Deduplication
+- Failure modes (missing source, orphaned records, corrupted data)
+
+See `docs/message-storage-design.md` for the full storage architecture documentation.
 
 ### Remaining Risk
 
@@ -27,7 +77,35 @@ conversation metadata. This document focuses on Step 12: deletion semantics.
 - A future integration pass should eliminate JSON writes entirely and make
   `Storage` the authoritative state for the GUI.
 
-## Deletion and Tombstone Semantics (Step 12)
+## Remote catalogue storage boundary
+
+Remote file sharing uses the SQLite V4 rows as the authoritative source for
+`shared_files`, collections, file objects, permissions, downloads, and manifest
+revision. A signed catalogue is a requester-specific response projection, not a
+stored public manifest and not a reusable capability. The catalogue cache is
+keyed by peer and revision; `NotModified` avoids replacing a verified snapshot.
+Permission and block state are evaluated again for every access request.
+
+Only safe metadata crosses the network: content hash, sanitized display name,
+description, size, MIME type, collection name, and file revision. Local source
+paths, internal IDs, permission records, blob tickets, and unrestricted
+addresses remain private. Public sharing is deferred; the default visibility
+is enabled offers to confirmed friends, with explicit per-file `read` grants
+for non-friends and no access for blocked peers.
+
+File access returns a short-lived requester-bound signed descriptor. The actual
+bytes move through iroh-blobs, are streamed to temporary output, and are
+installed only after size/BLAKE3 verification and atomic rename. Pause or
+cancellation removes temporary output; retained verified blob chunks may make a
+later attempt faster, but temporary-file byte-range resume is not provided.
+
+### Step 33 documentation scope
+
+The complete catalogue, authorisation, visibility, privacy, abuse-limit, and
+transfer semantics are documented in [`ARCHITECTURE.md`](../ARCHITECTURE.md),
+[`protocol-layers.md`](protocol-layers.md),
+[`message-storage-design.md`](message-storage-design.md), and
+[`testing.md`](testing.md).
 
 ### Design Principles
 

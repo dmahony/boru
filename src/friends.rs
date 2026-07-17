@@ -11,7 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::chat_core::{atomic_write::atomic_write_json, Ticket};
+use crate::chat_core::{Ticket, atomic_write::atomic_write_json};
 use crate::mailbox::MailboxPublicKey;
 use crate::proto::TopicId;
 use iroh::{EndpointAddr, PublicKey};

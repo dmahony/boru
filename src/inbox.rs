@@ -23,9 +23,9 @@
 //!   which stores them in the local MailboxStore and broadcasts acknowledgements.
 
 use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use iroh::{
@@ -36,7 +36,15 @@ use iroh::{
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
+
+static INBOX_CONNECTIONS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+#[derive(Debug, Default)]
+struct PeerRateState {
+    invalid_messages: VecDeque<Instant>,
+    acknowledgements: VecDeque<Instant>,
+}
 
 use crate::mailbox::{MailboxAck, MailboxEnvelope};
 
@@ -49,7 +57,7 @@ pub const INBOX_ALPN: &[u8] = b"/iroh-chat-inbox/1";
 const MAX_CLOCK_SKEW: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Max payload size for a single inbox message (10 MB).
-const MAX_INBOX_PAYLOAD: usize = 10 * 1024 * 1024;
+const MAX_INBOX_PAYLOAD: usize = crate::abuse_controls::MAX_ENVELOPE_SIZE;
 
 /// Stable identifier for a message (blake3 hash of signed bytes).
 pub type InboxMessageId = [u8; 32];
@@ -242,6 +250,8 @@ pub struct InboxInner {
     /// The function receives (requester_public_key, since_ms) and returns
     /// envelopes that should be delivered to the requester.
     pub pending_fn: Option<Arc<dyn Fn(PublicKey, u64) -> Vec<MailboxEnvelope> + Send + Sync>>,
+    /// Per-peer protocol counters, pruned to a one-minute window.
+    peer_rates: HashMap<PublicKey, PeerRateState>,
 }
 
 impl std::fmt::Debug for InboxInner {
@@ -305,6 +315,7 @@ impl InboxHandle {
             seen_message_ids: HashMap::new(),
             envelope_tx,
             pending_fn: None,
+            peer_rates: HashMap::new(),
         }));
         (
             Self {
@@ -419,6 +430,13 @@ impl ProtocolHandler for InboxProtocol {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let remote_id = connection.remote_id();
 
+        let connection_limit = INBOX_CONNECTIONS
+            .get_or_init(|| Arc::new(Semaphore::new(crate::abuse_controls::MAX_CONCURRENT_INBOX_CONNECTIONS)))
+            .clone();
+        let _connection_permit = connection_limit.try_acquire_owned().map_err(|_| {
+            AcceptError::from_err(n0_error::anyerr!("inbox connection limit reached"))
+        })?;
+
         // Check authorization before accepting any streams.
         {
             let guard = self.inner.lock().await;
@@ -457,7 +475,7 @@ impl ProtocolHandler for InboxProtocol {
                     // SyncRequest: send back a SyncResponse.
                     if let Some(ref sk) = secret_key {
                         let payload = InboxPayload::SyncResponse {
-                            envelopes: response_envelopes,
+                            envelopes: bound_sync_response(response_envelopes),
                         };
                         match SignedInboxMessage::sign(sk, payload) {
                             Ok(signed) => {
@@ -510,8 +528,16 @@ impl InboxProtocol {
         sender: PublicKey,
         buf: &[u8],
     ) -> Result<Option<Vec<MailboxEnvelope>>> {
-        // Verify the signed message.
-        let (verified_sender, payload, _sent_at) = SignedInboxMessage::verify(buf, Some(sender))?;
+        let (verified_sender, payload, _sent_at) = match SignedInboxMessage::verify(buf, Some(sender)) {
+            Ok(value) => value,
+            Err(error) => {
+                let mut guard = inner.lock().await;
+                if !record_invalid_message(&mut guard, sender) {
+                    return Err(n0_error::anyerr!("invalid inbox-message rate exceeded"));
+                }
+                return Err(error);
+            }
+        };
 
         let mut guard = inner.lock().await;
 
@@ -532,6 +558,9 @@ impl InboxProtocol {
                     .as_secs()
                     .saturating_sub(MAX_CLOCK_SKEW.as_secs());
                 guard.seen_message_ids.retain(|_, ts| *ts > cutoff);
+                if guard.seen_message_ids.len() >= crate::abuse_controls::MAX_REPLAY_METADATA_ENTRIES {
+                    return Err(n0_error::anyerr!("inbox replay metadata limit reached"));
+                }
                 guard.seen_message_ids.insert(
                     mid,
                     SystemTime::now()
@@ -547,6 +576,14 @@ impl InboxProtocol {
                 Ok(None)
             }
             InboxPayload::Ack(ack) => {
+                // Verify the inner ack signature — whoever signed the outer
+                // SignedInboxMessage must also be the ack recipient.
+                ack.verify(verified_sender).map_err(|e| {
+                    n0_error::anyerr!("rejecting ack with invalid inner signature: {e}")
+                })?;
+                if !record_ack(&mut guard, verified_sender) {
+                    return Err(n0_error::anyerr!("inbox acknowledgement rate exceeded"));
+                }
                 let _ = guard.envelope_tx.send(InboxEvent::AckReceived {
                     from: verified_sender,
                     ack,
@@ -602,6 +639,9 @@ impl InboxProtocol {
                     .as_secs()
                     .saturating_sub(MAX_CLOCK_SKEW.as_secs());
                 guard.seen_message_ids.retain(|_, ts| *ts > cutoff);
+                if guard.seen_message_ids.len() >= crate::abuse_controls::MAX_REPLAY_METADATA_ENTRIES {
+                    return Err(n0_error::anyerr!("inbox replay metadata limit reached"));
+                }
                 guard.seen_message_ids.insert(
                     mid,
                     SystemTime::now()
@@ -621,6 +661,43 @@ impl InboxProtocol {
     }
 }
 
+fn record_invalid_message(inner: &mut InboxInner, peer: PublicKey) -> bool {
+    let now = Instant::now();
+    let state = inner.peer_rates.entry(peer).or_default();
+    prune_rate_window(&mut state.invalid_messages, now);
+    state.invalid_messages.push_back(now);
+    state.invalid_messages.len() as u32 <= crate::abuse_controls::MAX_INVALID_MESSAGES_PER_PEER
+}
+
+fn record_ack(inner: &mut InboxInner, peer: PublicKey) -> bool {
+    let now = Instant::now();
+    let state = inner.peer_rates.entry(peer).or_default();
+    prune_rate_window(&mut state.acknowledgements, now);
+    state.acknowledgements.push_back(now);
+    state.acknowledgements.len() as u32 <= crate::abuse_controls::MAX_ACKS_PER_PEER
+}
+
+fn prune_rate_window(events: &mut VecDeque<Instant>, now: Instant) {
+    let cutoff = now.checked_sub(Duration::from_secs(60)).unwrap_or(now);
+    while events.front().is_some_and(|timestamp| *timestamp <= cutoff) {
+        events.pop_front();
+    }
+}
+
+fn bound_sync_response(mut envelopes: Vec<MailboxEnvelope>) -> Vec<MailboxEnvelope> {
+    envelopes.truncate(crate::abuse_controls::MAX_SYNC_RESPONSE_COUNT);
+    let mut total = 0usize;
+    envelopes.retain(|envelope| {
+        let size = postcard::to_stdvec(envelope).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
+        if size > crate::abuse_controls::MAX_SYNC_RESPONSE_BYTES.saturating_sub(total) {
+            return false;
+        }
+        total = total.saturating_add(size);
+        true
+    });
+    envelopes
+}
+
 // ── Sending methods ─────────────────────────────────────────────────────────────
 
 /// Send a fully-signed envelope to a peer's inbox.
@@ -631,6 +708,9 @@ pub async fn send_deliver(
     envelope: MailboxEnvelope,
 ) -> Result<()> {
     let signed = SignedInboxMessage::sign(secret_key, InboxPayload::Deliver(envelope))?;
+    if signed.len() > crate::abuse_controls::MAX_ENVELOPE_SIZE {
+        return Err(n0_error::anyerr!("inbox envelope exceeds maximum size"));
+    }
     let len = signed.len() as u32;
 
     let conn = endpoint
@@ -661,6 +741,9 @@ pub async fn send_ack(
     ack: MailboxAck,
 ) -> Result<()> {
     let signed = SignedInboxMessage::sign(secret_key, InboxPayload::Ack(ack))?;
+    if signed.len() > crate::abuse_controls::MAX_ENVELOPE_SIZE {
+        return Err(n0_error::anyerr!("inbox envelope exceeds maximum size"));
+    }
     let len = signed.len() as u32;
 
     let conn = endpoint
@@ -691,6 +774,9 @@ pub async fn send_sync_request(
     since_ms: u64,
 ) -> Result<Vec<MailboxEnvelope>> {
     let signed = SignedInboxMessage::sign(secret_key, InboxPayload::SyncRequest { since_ms })?;
+    if signed.len() > crate::abuse_controls::MAX_ENVELOPE_SIZE {
+        return Err(n0_error::anyerr!("inbox envelope exceeds maximum size"));
+    }
     let len = signed.len() as u32;
 
     let conn = endpoint
@@ -745,6 +831,9 @@ pub async fn send_delete_tombstone(
 ) -> Result<()> {
     let proof = AuthorDeleteProof::sign(author_sk, msg_id, conversation_id);
     let signed = SignedInboxMessage::sign(secret_key, InboxPayload::DeleteTombstone(proof))?;
+    if signed.len() > crate::abuse_controls::MAX_ENVELOPE_SIZE {
+        return Err(n0_error::anyerr!("inbox envelope exceeds maximum size"));
+    }
     let len = signed.len() as u32;
 
     let conn = endpoint
@@ -1015,5 +1104,183 @@ mod tests {
             }
             _ => panic!("expected DeleteTombstone"),
         }
+    }
+
+    // ── Inbox ACK handler tests ─────────────────────────────────────────
+
+    fn make_inner() -> (Arc<Mutex<InboxInner>>, mpsc::UnboundedReceiver<InboxEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let inner = Arc::new(Mutex::new(InboxInner {
+            allowed_senders: HashSet::new(),
+            seen_message_ids: HashMap::new(),
+            envelope_tx: tx,
+            pending_fn: None,
+            peer_rates: HashMap::new(),
+        }));
+        (inner, rx)
+    }
+
+    /// Create a SignedInboxMessage (outer) wrapping an Ack with the given inner
+    /// MailboxAck, signed by outer_sk.
+    fn sign_ack_envelope(outer_sk: &SecretKey, ack: MailboxAck) -> Vec<u8> {
+        SignedInboxMessage::sign(outer_sk, InboxPayload::Ack(ack)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn inbox_ack_valid_ack_accepted() {
+        let sk = test_secret_key();
+        let (inner, mut rx) = make_inner();
+        let ack = MailboxAck::sign(&sk, "msg-001");
+        let buf = sign_ack_envelope(&sk, ack);
+
+        let result = InboxProtocol::handle_request(&inner, sk.public(), &buf).await;
+        assert!(result.is_ok(), "valid ack should be accepted: {:?}", result);
+
+        // Verify the event was emitted.
+        let event = rx.try_recv().expect("should emit AckReceived event");
+        match event {
+            InboxEvent::AckReceived { from, ack } => {
+                assert_eq!(from, sk.public());
+                assert_eq!(ack.message_id, "msg-001");
+                assert!(ack.verify(sk.public()).is_ok());
+            }
+            other => panic!("expected AckReceived, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inbox_ack_rejects_wrong_outer_sender() {
+        let sk = test_secret_key();
+        let wrong = test_secret_key();
+        let (inner, mut _rx) = make_inner();
+        let ack = MailboxAck::sign(&sk, "msg-001");
+        let buf = sign_ack_envelope(&sk, ack);
+
+        // connection remote_id is `wrong`, but the message is signed by `sk`.
+        let result = InboxProtocol::handle_request(&inner, wrong.public(), &buf).await;
+        assert!(result.is_err(), "should reject outer sender mismatch");
+        assert!(
+            result.unwrap_err().to_string().contains("sender mismatch"),
+            "error should mention sender mismatch"
+        );
+
+        // No event should be emitted.
+        assert!(
+            _rx.try_recv().is_err(),
+            "no event should be emitted on rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbox_ack_rejects_tampered_outer_signature() {
+        let sk = test_secret_key();
+        let (inner, mut _rx) = make_inner();
+        let ack = MailboxAck::sign(&sk, "msg-001");
+        let mut buf = sign_ack_envelope(&sk, ack);
+        // Corrupt a byte in the outer envelope.
+        buf[20] ^= 0xFF;
+
+        let result = InboxProtocol::handle_request(&inner, sk.public(), &buf).await;
+        assert!(result.is_err(), "should reject tampered outer signature");
+
+        assert!(
+            _rx.try_recv().is_err(),
+            "no event should be emitted on rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbox_ack_rejects_inner_wrong_recipient() {
+        let outer_sk = test_secret_key();
+        let other_sk = test_secret_key();
+        let (inner, mut _rx) = make_inner();
+        // Inner ack is signed by `other_sk`, but the outer envelope is signed
+        // by `outer_sk`.  The handler now verifies that the inner ack's
+        // recipient matches the outer signer.
+        let ack = MailboxAck::sign(&other_sk, "msg-001");
+        let buf = sign_ack_envelope(&outer_sk, ack);
+
+        let result = InboxProtocol::handle_request(&inner, outer_sk.public(), &buf).await;
+        assert!(
+            result.is_err(),
+            "should reject ack where inner recipient differs from outer sender"
+        );
+
+        assert!(
+            _rx.try_recv().is_err(),
+            "no event should be emitted on rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbox_ack_rejects_inner_tampered_message_id() {
+        let sk = test_secret_key();
+        let (inner, mut _rx) = make_inner();
+        let mut ack = MailboxAck::sign(&sk, "msg-001");
+        ack.message_id = "tampered".to_string();
+        let buf = sign_ack_envelope(&sk, ack);
+
+        let result = InboxProtocol::handle_request(&inner, sk.public(), &buf).await;
+        assert!(
+            result.is_err(),
+            "should reject ack with tampered inner message_id"
+        );
+
+        assert!(
+            _rx.try_recv().is_err(),
+            "no event should be emitted on rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbox_ack_rejects_inner_tampered_signature() {
+        let sk = test_secret_key();
+        let (inner, mut _rx) = make_inner();
+        let mut ack = MailboxAck::sign(&sk, "msg-001");
+        // Flip bits in the inner ack's signature.
+        let mut sig = *ack.signature;
+        sig[5] ^= 0xFF;
+        ack.signature = ByteArray::new(sig);
+        let buf = sign_ack_envelope(&sk, ack);
+
+        let result = InboxProtocol::handle_request(&inner, sk.public(), &buf).await;
+        assert!(
+            result.is_err(),
+            "should reject ack with tampered inner signature"
+        );
+
+        assert!(
+            _rx.try_recv().is_err(),
+            "no event should be emitted on rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbox_ack_rate_limit_exceeded() {
+        let sk = test_secret_key();
+        let (inner, mut _rx) = make_inner();
+
+        // The inbox uses abuse_controls::MAX_ACKS_PER_PEER for the rate limit.
+        // Send that many valid acks; they should all succeed.
+        for i in 0..crate::abuse_controls::MAX_ACKS_PER_PEER {
+            let ack = MailboxAck::sign(&sk, format!("msg-{i:03}"));
+            let buf = sign_ack_envelope(&sk, ack);
+            let result = InboxProtocol::handle_request(&inner, sk.public(), &buf).await;
+            assert!(result.is_ok(), "ack {i} should be accepted: {:?}", result);
+        }
+
+        // The next ack should be rate-limited.
+        let ack = MailboxAck::sign(&sk, "rate-limited-msg");
+        let buf = sign_ack_envelope(&sk, ack);
+        let result = InboxProtocol::handle_request(&inner, sk.public(), &buf).await;
+        assert!(
+            result.is_err(),
+            "ack exceeding rate limit should be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("rate exceeded"),
+            "error should mention rate exceeded: {err}"
+        );
     }
 }

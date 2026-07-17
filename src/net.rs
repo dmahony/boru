@@ -1,7 +1,7 @@
 //! Networking for the `boru-chat` protocol
 
 use std::{
-    collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque, hash_map::Entry},
     net::SocketAddr,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -9,24 +9,24 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_concurrency::stream::{stream_group, StreamGroup};
+use futures_concurrency::stream::{StreamGroup, stream_group};
 use iroh::{
+    Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, Watcher,
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
-    Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, Watcher,
 };
 use irpc::WithChannels;
 use n0_error::{e, stack_error};
 use n0_future::{
+    Stream, StreamExt as _,
     task::{self, AbortOnDropHandle, JoinSet},
     time::{Duration, Instant},
-    Stream, StreamExt as _,
 };
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, error_span, info, trace, warn, Instrument};
+use tracing::{Instrument, debug, error, error_span, info, trace, warn};
 
 use self::{
     address_lookup::GossipAddressLookup,
@@ -1350,11 +1350,11 @@ pub(crate) mod tests {
     use bytes::Bytes;
     use futures_concurrency::future::TryJoin;
     use iroh::{
+        RelayMap, RelayMode, SecretKey,
         address_lookup::memory::MemoryLookup,
-        endpoint::{presets, BindError},
+        endpoint::{BindError, presets},
         protocol::Router,
         tls::CaTlsConfig,
-        RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
 
@@ -1803,8 +1803,8 @@ pub(crate) mod tests {
 
         // advance and check that the topic is now subscribed
         actor.steps(3).await; // handle our subscribe;
-                              // get peer connection;
-                              // receive the other peer's information for a NeighborUp
+        // get peer connection;
+        // receive the other peer's information for a NeighborUp
         let state = actor.topics.get(&topic).expect("get registered topic");
         assert!(state.joined());
 

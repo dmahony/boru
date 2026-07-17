@@ -9,10 +9,10 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use super::{
+    DEFAULT_MAX_MESSAGE_SIZE, PeerData, PeerIdentity,
     hyparview::{self, InEvent as SwarmIn},
     plumtree::{self, GossipEvent, InEvent as GossipIn, Scope},
     state::MessageKind,
-    PeerData, PeerIdentity, DEFAULT_MAX_MESSAGE_SIZE,
 };
 use crate::proto::MIN_MAX_MESSAGE_SIZE;
 

@@ -6,7 +6,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, RwLock},
+    sync::{Arc, RwLock, mpsc},
     time::UNIX_EPOCH,
 };
 

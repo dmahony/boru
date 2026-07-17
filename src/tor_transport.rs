@@ -6,7 +6,7 @@
 use std::{fmt, str::FromStr};
 
 use iroh_base::{CustomAddr, EndpointAddr, PublicKey, TransportAddr};
-use n0_error::{bail_any, AnyError, Result, StdResultExt};
+use n0_error::{AnyError, Result, StdResultExt, bail_any};
 #[cfg(feature = "tor-transport")]
 use n0_watcher::Watchable;
 use serde::{Deserialize, Serialize};
@@ -163,16 +163,16 @@ mod tor_transport_impl {
     use arti_client::TorClient;
     use futures::{Stream, StreamExt};
     use iroh::{
-        endpoint::transports::{CustomEndpoint, CustomSender, CustomTransport, RecvInfo},
         PublicKey,
+        endpoint::transports::{CustomEndpoint, CustomSender, CustomTransport, RecvInfo},
     };
     use noq_udp::RecvMeta;
     use safelog::DisplayRedacted;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+    use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
     use tor_cell::relaycell::msg::Connected;
     use tor_hsservice::{
-        config::OnionServiceConfigBuilder, handle_rend_requests, HsNickname, StreamRequest,
+        HsNickname, StreamRequest, config::OnionServiceConfigBuilder, handle_rend_requests,
     };
 
     #[derive(Debug, Clone)]

@@ -23,7 +23,7 @@ use std::{
 };
 
 use n0_error::{Result, StdResultExt};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 /// Atomically write JSON-serialised `data` to `path`, with a round-trip
 /// validation check before the old file is replaced.

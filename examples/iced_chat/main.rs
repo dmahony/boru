@@ -6,6 +6,8 @@
 //!   cargo run --features gui --example iced_chat join <ticket>  # join room
 
 mod app;
+mod file_library;
+mod file_library_ops;
 mod gui_test_actions;
 mod log_viewer;
 mod mcp_server;
@@ -48,7 +50,7 @@ use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_error::{bail_any, Result, StdResultExt};
 
 /// Default relay server — user's VPS, secured with Cloudflare Full SSL.
-const VPS_RELAY_URL: &str = "https://boru.chat";
+const VPS_RELAY_URL: &str = "https://boru.chat:8443";
 use tokio::sync::{watch, Mutex};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};

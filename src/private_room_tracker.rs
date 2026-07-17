@@ -49,18 +49,18 @@ use std::{
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::discovery_backend::{
-    EncryptedDiscoveryRecord, NamespaceId, TopicDiscoveryBackend, MAX_DISCOVERY_PAYLOAD_SIZE,
+    EncryptedDiscoveryRecord, MAX_DISCOVERY_PAYLOAD_SIZE, NamespaceId, TopicDiscoveryBackend,
 };
 use crate::discovery_record::create_discovery_record;
 use crate::discovery_secret::DiscoverySecret;
 use crate::discovery_validation::{DiscoveryRecordValidator, PeerCandidates, ValidationConfig};
 use crate::proto::TopicId;
 use distributed_topic_tracker::{
-    encryption_keypair, unix_minute, EncryptedRecord, Record, RotationHandle,
-    TopicId as TrackerTopicId,
+    EncryptedRecord, Record, RotationHandle, TopicId as TrackerTopicId, encryption_keypair,
+    unix_minute,
 };
 use iroh::{EndpointId, SecretKey};
 use n0_error::Result;

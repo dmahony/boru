@@ -35,7 +35,6 @@ struct RxTestPeer {
     entries: Vec<ChatEntry>,
     names: HashMap<PublicKey, String>,
     neighbors: std::collections::HashSet<PublicKey>,
-    pending_file: Option<(String, String)>,
     pending_image: Option<(String, MessageHash, PublicKey)>,
     blob_store: MemStore,
     endpoint: iroh::Endpoint,
@@ -73,9 +72,7 @@ impl ChatCallbacks for RxTestPeer {
         self.log.push(format!("[{label}] {text}"));
         self.entries.push(ChatEntry::remote(label, text));
     }
-    fn set_pending_file(&mut self, name: String, ticket: String) {
-        self.pending_file = Some((name, ticket));
-    }
+
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
         self.log.push(format!(
             "[set_pending_image] name={name} hash={} from={}",
@@ -280,7 +277,6 @@ async fn test_receiver_downloads_image_entry() -> Result<()> {
         entries: Vec::new(),
         names: HashMap::new(),
         neighbors: std::collections::HashSet::new(),
-        pending_file: None,
         pending_image: None,
         blob_store: blob_store_b.clone(),
         endpoint: ep_b.clone(),

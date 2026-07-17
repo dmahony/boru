@@ -80,7 +80,7 @@ impl DiscoverySecret {
 // know to handle cloned copies with appropriate care.
 impl Clone for DiscoverySecret {
     fn clone(&self) -> Self {
-        Self { bytes: self.bytes }
+        *self
     }
 }
 

@@ -248,6 +248,16 @@ name = "gen_stress_data"
 path = "tests/gen_stress_data.rs"
 required-features = ["net", "test-utils"]
 
+[[test]]
+name = "test_offline_delivery_integration"
+path = "tests/test_offline_delivery_integration.rs"
+required-features = ["net", "test-utils"]
+
+[[test]]
+name = "test_deterministic_harness"
+path = "tests/test_deterministic_harness.rs"
+required-features = ["net", "test-utils"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "iroh_docsrs"]
@@ -284,3 +294,24 @@ required-features = ["net"]
 name = "test_storage_integration"
 path = "tests/test_storage_integration.rs"
 required-features = ["net"]
+
+[[test]]
+name = "test_remote_catalogue_integration"
+path = "tests/test_remote_catalogue_integration.rs"
+required-features = ["net"]
+
+[[test]]
+name = "test_download_integration"
+path = "tests/test_download_integration.rs"
+required-features = ["net"]
+
+[[test]]
+name = "test_ui_file_sharing_integration"
+path = "tests/test_ui_file_sharing_integration.rs"
+required-features = ["net"]
+
+[[test]]
+name = "test_hostile_input"
+path = "tests/test_hostile_input.rs"
+required-features = ["net"]
+

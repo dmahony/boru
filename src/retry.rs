@@ -1,11 +1,16 @@
 #![allow(missing_docs)]
 
+use crate::diagnostics::{DIAGNOSTICS, DiagnosticEventKind};
 use crate::store::{MessageStore, StoredEnvelope};
 use iroh::{Endpoint, PublicKey};
 use n0_error::Result;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
+
+use crate::abuse_controls::{MAX_CONCURRENT_DELIVERY_ATTEMPTS, MAX_RETRY_QUEUE_SIZE};
+
+static DELIVERY_LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 pub trait InboxSender: Send + Sync {
     fn send_deliver<'a>(
@@ -67,8 +72,42 @@ impl RetryWorker {
 
         let _ = self.store.expire_outbox(now_ms);
 
-        if let Ok(due) = self.store.fetch_due_outbox(now_ms) {
+        if let Ok(mut due) = self.store.fetch_due_outbox(now_ms) {
+            // A corrupt or maliciously large queue must not spawn unbounded
+            // delivery work in one tick.
+            due.truncate(MAX_RETRY_QUEUE_SIZE);
+            let limiter = DELIVERY_LIMIT
+                .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_DELIVERY_ATTEMPTS)));
             for row in due {
+                let Ok(_permit) = limiter.clone().try_acquire_owned() else {
+                    break;
+                };
+                let peer_id = row.recipient_device_id.to_string();
+                let msg_short = hex::encode(&row.msg_id[..4]);
+                let attempt_count = row.attempts;
+                DIAGNOSTICS.record_with_peer(
+                    None,
+                    Some(&peer_id),
+                    DiagnosticEventKind::OutboxClaimed {
+                        message_id_short: Some(msg_short.clone()),
+                        conversation_id_prefix: None,
+                        peer_id: Some(peer_id.clone()),
+                        attempt_count,
+                        delivery_state: format!("{:?}", row.status),
+                    },
+                );
+                DIAGNOSTICS.record_with_peer(
+                    None,
+                    Some(&peer_id),
+                    DiagnosticEventKind::DeliveryAttemptStarted {
+                        message_id_short: Some(msg_short.clone()),
+                        conversation_id_prefix: None,
+                        peer_id: Some(peer_id.clone()),
+                        attempt_count,
+                        retry_delay_ms: Some(row.next_attempt_at_ms.saturating_sub(now_ms)),
+                    },
+                );
+
                 if let Ok(Some(env)) = self.store.get_inbox(&row.msg_id) {
                     match self
                         .sender
@@ -84,14 +123,51 @@ impl RetryWorker {
                                 now_ms + backoff_ms(row.attempts + 1),
                                 None,
                             );
+                            DIAGNOSTICS.record_with_peer(
+                                None,
+                                Some(&peer_id.clone()),
+                                DiagnosticEventKind::EnvelopeSent {
+                                    message_id_short: Some(msg_short),
+                                    conversation_id_prefix: None,
+                                    peer_id: Some(peer_id.clone()),
+                                    attempt_count,
+                                    delivery_state: "SentAwaitingAck".to_string(),
+                                    elapsed_ms: None,
+                                },
+                            );
                         }
                         Err(e) => {
                             let err_str = e.to_string();
+                            let delay = backoff_ms(row.attempts + 1);
                             let _ = self.store.record_attempt(
                                 &row.msg_id,
                                 row.recipient_device_id,
-                                now_ms + backoff_ms(row.attempts + 1),
+                                now_ms + delay,
                                 Some(&err_str),
+                            );
+                            let category = if err_str.contains("timeout")
+                                || err_str.contains("Connection")
+                            {
+                                "connection".to_string()
+                            } else if err_str.contains("reject") || err_str.contains("unauthorized")
+                            {
+                                "rejected".to_string()
+                            } else if err_str.contains("expir") {
+                                "expired".to_string()
+                            } else {
+                                "transient".to_string()
+                            };
+                            DIAGNOSTICS.record_with_peer(
+                                None,
+                                Some(&peer_id.clone()),
+                                DiagnosticEventKind::RetryScheduled {
+                                    message_id_short: Some(msg_short),
+                                    conversation_id_prefix: None,
+                                    peer_id: Some(peer_id.clone()),
+                                    attempt_count,
+                                    retry_delay_ms: delay,
+                                    failure_category: category,
+                                },
                             );
                         }
                     }
@@ -119,6 +195,8 @@ mod tests {
     use crate::store::MessageId;
     use bytes::Bytes;
 
+    // MockSender for testing
+    #[allow(dead_code)]
     struct MockSender {
         success: bool,
     }

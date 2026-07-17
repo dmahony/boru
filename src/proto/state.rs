@@ -1,6 +1,6 @@
 //! The protocol state of the `boru-chat` protocol.
 
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map};
 
 use n0_future::time::{Duration, Instant};
 use rand::{Rng, SeedableRng};
@@ -10,9 +10,9 @@ use tracing::trace;
 use crate::{
     metrics::Metrics,
     proto::{
+        Config, MIN_MAX_MESSAGE_SIZE, PeerData, PeerIdentity,
         topic::{self, Command},
         util::idbytes_impls,
-        Config, PeerData, PeerIdentity, MIN_MAX_MESSAGE_SIZE,
     },
 };
 

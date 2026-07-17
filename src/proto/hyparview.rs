@@ -10,11 +10,11 @@ use std::collections::{HashMap, HashSet};
 
 use derive_more::{From, Sub};
 use n0_future::time::Duration;
-use rand::{rngs::ThreadRng, Rng};
+use rand::{Rng, rngs::ThreadRng};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use super::{util::IndexSet, PeerData, PeerIdentity, PeerInfo, IO};
+use super::{IO, PeerData, PeerIdentity, PeerInfo, util::IndexSet};
 
 /// Input event for HyParView
 #[derive(Debug)]
@@ -433,7 +433,9 @@ where
                     .pick_random_without(&[&sender], &mut self.rng)
                 {
                     None => {
-                        unreachable!("if the peer was not added, there are at least two peers in our active view.");
+                        unreachable!(
+                            "if the peer was not added, there are at least two peers in our active view."
+                        );
                     }
                     Some(next) => {
                         let message = Message::ForwardJoin(ForwardJoin {

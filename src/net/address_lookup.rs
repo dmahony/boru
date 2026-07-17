@@ -1,13 +1,13 @@
 //! An address lookup service to gather addressing info collected from gossip Join and ForwardJoin messages.
 
 use std::{
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{BTreeMap, btree_map::Entry},
     sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
-use iroh::address_lookup::{self, AddressLookup, EndpointData, EndpointInfo};
 use iroh::EndpointAddr;
+use iroh::address_lookup::{self, AddressLookup, EndpointData, EndpointInfo};
 use iroh_base::{EndpointId, TransportAddr};
 use n0_future::{
     boxed::BoxStream,
@@ -175,7 +175,7 @@ impl AddressLookup for GossipAddressLookup {
 mod tests {
     use super::{GossipAddressLookup, RetentionOpts};
     use crate::friends::{FriendId, FriendRecord, FriendsStore};
-    use iroh::{address_lookup::AddressLookup, EndpointAddr, SecretKey};
+    use iroh::{EndpointAddr, SecretKey, address_lookup::AddressLookup};
     use n0_future::StreamExt;
     use rand::{RngExt, SeedableRng};
     use std::sync::{Arc, Mutex};

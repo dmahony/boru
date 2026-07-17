@@ -379,12 +379,12 @@ mod tests {
         buf.extend_from_slice(b"IHDR");
         buf.extend_from_slice(ihdr_data);
         buf.extend_from_slice(&[0x9e, 0xfb, 0xb3, 0x5f]); // CRC (pre-computed)
-                                                          // acTL chunk: num_frames=1, num_plays=0
+        // acTL chunk: num_frames=1, num_plays=0
         buf.extend_from_slice(&8u32.to_be_bytes());
         buf.extend_from_slice(b"acTL");
         buf.extend_from_slice(&[0u8, 0, 0, 1, 0, 0, 0, 0]);
         buf.extend_from_slice(&[0x98, 0xde, 0x93, 0xcc]); // CRC (pre-computed)
-                                                          // IEND
+        // IEND
         buf.extend_from_slice(&[0u8, 0, 0, 0, 0, 73, 69, 78, 68, 0xae, 0x42, 0x60, 0x82]);
         buf
     }

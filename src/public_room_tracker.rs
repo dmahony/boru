@@ -34,16 +34,16 @@
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::discovery_backend::{
-    canonical_lobby_key, EncryptedDiscoveryRecord, NamespaceId, TopicDiscoveryBackend,
-    MAX_DISCOVERY_PAYLOAD_SIZE,
+    EncryptedDiscoveryRecord, MAX_DISCOVERY_PAYLOAD_SIZE, NamespaceId, TopicDiscoveryBackend,
+    canonical_lobby_key,
 };
 use crate::discovery_record::create_discovery_record;
 use crate::discovery_validation::{DiscoveryRecordValidator, PeerCandidates, ValidationConfig};
-use crate::public_room::{public_room_identity, PublicNetwork, PublicRoomIdentity};
-use distributed_topic_tracker::{unix_minute, Record};
+use crate::public_room::{PublicNetwork, PublicRoomIdentity, public_room_identity};
+use distributed_topic_tracker::{Record, unix_minute};
 use iroh::{EndpointId, SecretKey};
 use n0_error::Result;
 

@@ -22,25 +22,20 @@ use std::{
 
 use bytes::Bytes;
 use iroh::{Endpoint, EndpointAddr, EndpointId, PublicKey, RelayMode, SecretKey};
-use n0_error::{bail_any, Result, StdResultExt};
+use n0_error::{Result, StdResultExt, bail_any};
 use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 
 use crate::api::{Event, GossipReceiver};
 use crate::chat_history::DeliveryState;
-use crate::diagnostics::{DiagnosticEventKind, Diagnostics, ReceivedProbe};
+use crate::diagnostics::ReceivedProbe;
+pub use crate::diagnostics::{DIAGNOSTICS, DiagnosticEventKind, Diagnostics};
 use crate::discovery_secret::DiscoverySecret;
 use crate::friends::{FriendId, FriendsStore};
 use crate::proto::TopicId;
 use crate::public_room_safety::PublicRoomSafety;
 use crate::user_profile::UserProfile;
-
-/// Global diagnostics store for recording network events and probes.
-///
-/// Lazily initialised on first access with default capacities
-/// (5 000 events, 1 000 received probes).
-pub static DIAGNOSTICS: LazyLock<Diagnostics> = LazyLock::new(Diagnostics::new);
 
 // ── Bootstrap peer resolution ─────────────────────────────────────────────────
 
@@ -716,10 +711,6 @@ impl ChatCallbacks for AppState {
         self.push_entry(entry, true);
     }
 
-    fn set_pending_file(&mut self, name: String, ticket: String) {
-        self.pending_file = Some((name, ticket));
-    }
-
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
         self.pending_image.push((name, hash, from));
     }
@@ -840,13 +831,6 @@ pub enum Message {
         /// The message text.
         text: String,
     },
-    /// Announce a file available for download.
-    FileShare {
-        /// The file name (basename only, no path).
-        name: String,
-        /// BlobTicket serialized to string.
-        ticket: String,
-    },
     /// Graceful goodbye — the sender is leaving the chat.
     /// This is a best-effort notification: the gossip protocol also
     /// detects disconnection via NeighborDown events.
@@ -909,23 +893,13 @@ pub enum Message {
     DiagnosticProbe(crate::diagnostics::DiagnosticProbe),
     /// Publish the sender's profile and metadata over gossip.
     ProfileUpdate(UserProfile),
-}
-
-/// Metadata for a file advertised by a peer in [`Message::ProfileUpdate`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SharedFileMeta {
-    /// Stable identifier assigned by the publisher.
-    pub id: String,
-    /// Basename shown to peers (never a local path).
-    pub filename: String,
-    /// File size in bytes.
-    pub size: u64,
-    /// MIME type, if known.
-    pub mime_type: String,
-    /// Unix timestamp in milliseconds of the source file's modification time.
-    pub modified_time: u64,
-    /// Content hash used to identify the file.
-    pub hash: MessageHash,
+    /// A lightweight, signed notification that the sender's file catalogue
+    /// revision has changed.
+    ///
+    /// This is a hint only — recipients should verify the signature, check
+    /// the revision against their cache, and may schedule a direct catalogue
+    /// fetch.  No catalogue entries are included.
+    CatalogueRevisionNotice(crate::catalogue_notify::CatalogueRevisionNotice),
 }
 
 /// Minimum interval between profile announcements on a gossip topic.
@@ -1375,10 +1349,7 @@ pub fn filter_net_event_with_safety(
             }
 
             // ── Blob announcement check ────────────────────────
-            let is_blob = matches!(
-                message,
-                Message::ImageShare { .. } | Message::FileShare { .. }
-            );
+            let is_blob = matches!(message, Message::ImageShare { .. });
             if is_blob && !safety.check_blob_announcement(&from) {
                 tracing::debug!(
                     "safety: dropped blob announcement from {}",
@@ -1544,6 +1515,19 @@ pub fn handle_net_event_for_topic(
                     );
                     return Ok(());
                 }
+                // ── Future timestamp (clock skew) check ────────────
+                // Reject messages whose sent_at is too far in the future
+                // to protect against clock-skew manipulation and replay.
+                let skew_secs = sent_at.saturating_sub(now_secs());
+                if skew_secs > MAX_FUTURE_SKEW_SECS {
+                    tracing::debug!(
+                        "dropping future-dated message from {} (skew {}s > max {}s)",
+                        from.fmt_short(),
+                        skew_secs,
+                        MAX_FUTURE_SKEW_SECS,
+                    );
+                    return Ok(());
+                }
             }
             // Record message received diagnostic event (for all message types
             // that pass dedup, blocked-peer, and TTL checks).
@@ -1589,6 +1573,70 @@ pub fn handle_net_event_for_topic(
                         cb.on_profile_update(from, profile);
                     }
                 }
+                Message::CatalogueRevisionNotice(notice) => {
+                    use crate::catalogue_notify::{
+                        NoRefreshReason, PeerRevisionCache, ShouldRefresh,
+                    };
+
+                    if from == cb.local_public() {
+                        // Don't process our own notification.
+                        if tracing::enabled!(tracing::Level::TRACE) {
+                            tracing::trace!("skipping own CatalogueRevisionNotice");
+                        }
+                    } else if notice.owner_id != from {
+                        // The claimed owner does not match the gossip sender.
+                        tracing::warn!(
+                            peer = %from.fmt_short(),
+                            claimed_owner = %notice.owner_id.fmt_short(),
+                            "CatalogueRevisionNotice: owner_id mismatch — ignoring spoofed notice"
+                        );
+                    } else if let Err(e) = notice.verify() {
+                        // Signature invalid — ignore the notice.
+                        tracing::warn!(
+                            peer = %from.fmt_short(),
+                            error = %e,
+                            "CatalogueRevisionNotice: signature verification failed"
+                        );
+                    } else {
+                        // Notice is valid — evaluate against the per-peer cache
+                        // (thread-safe static, shared across all event handlers).
+                        use std::sync::Mutex as StdMutex;
+                        static CACHE: std::sync::LazyLock<StdMutex<PeerRevisionCache>> =
+                            std::sync::LazyLock::new(|| StdMutex::new(PeerRevisionCache::new()));
+
+                        let peer_hex = from.to_string();
+                        let now = Instant::now();
+                        let should = CACHE
+                            .lock()
+                            .expect("catalogue revision cache lock")
+                            .evaluate(&peer_hex, notice.revision, now);
+                        match should {
+                            ShouldRefresh::Yes => {
+                                tracing::debug!(
+                                    peer = %from.fmt_short(),
+                                    revision = notice.revision,
+                                    "CatalogueRevisionNotice: scheduling catalogue refresh"
+                                );
+                                cb.on_catalogue_revision_notice(from, notice);
+                            }
+                            ShouldRefresh::No(NoRefreshReason::NotNewer { cached, .. }) => {
+                                tracing::trace!(
+                                    peer = %from.fmt_short(),
+                                    cached,
+                                    received = notice.revision,
+                                    "CatalogueRevisionNotice: ignored (not newer)"
+                                );
+                            }
+                            ShouldRefresh::No(NoRefreshReason::RateLimited { remaining_ms }) => {
+                                tracing::trace!(
+                                    peer = %from.fmt_short(),
+                                    remaining_ms,
+                                    "CatalogueRevisionNotice: ignored (rate limited)"
+                                );
+                            }
+                        }
+                    }
+                }
                 Message::Message { text } => {
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);
@@ -1606,22 +1654,6 @@ pub fn handle_net_event_for_topic(
                             Some(incoming_hash),
                             Some(sent_at),
                         );
-                    }
-                }
-                Message::FileShare { name, ticket } => {
-                    if from != cb.local_public() {
-                        let fid = FriendId::from_public_key(from);
-                        if cb.is_friend(&from) {
-                            cb.friend_mark_online(fid);
-                        }
-                        if !is_muted {
-                            let sender_name = cb.resolve_name(&from);
-                            cb.push_system(format!(
-                                "{} shared a file: {} (type /download to fetch it)",
-                                sender_name, name
-                            ));
-                            cb.set_pending_file(name, ticket);
-                        }
                     }
                 }
                 Message::ImageShare { name, hash } => {
@@ -1802,6 +1834,13 @@ const ROSTER_MARKER: u8 = 0xFF;
 
 /// Default maximum age of a received message before it is rejected as stale.
 pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(3600);
+
+/// Maximum allowed clock skew (future timestamp) in seconds.
+///
+/// Messages whose `sent_at` is more than this many seconds ahead of the
+/// receiver's clock are rejected to guard against clock-skew manipulation
+/// and replay attacks.
+pub const MAX_FUTURE_SKEW_SECS: u64 = 300; // 5 minutes
 
 /// Return the current Unix epoch time in seconds.
 pub fn now_secs() -> u64 {
@@ -2780,23 +2819,6 @@ mod tests {
     }
 
     #[test]
-    fn message_serialization_roundtrip_file_share() {
-        let msg = Message::FileShare {
-            name: "photo.png".into(),
-            ticket: "ticket123".into(),
-        };
-        let bytes = postcard::to_stdvec(&msg).unwrap();
-        let decoded: Message = postcard::from_bytes(&bytes).unwrap();
-        match decoded {
-            Message::FileShare { name, ticket } => {
-                assert_eq!(name, "photo.png");
-                assert_eq!(ticket, "ticket123");
-            }
-            _ => panic!("expected FileShare"),
-        }
-    }
-
-    #[test]
     fn message_serialization_roundtrip_image_share() {
         let msg = Message::ImageShare {
             name: "cat.jpg".into(),
@@ -3166,24 +3188,6 @@ mod tests {
     }
 
     #[test]
-    fn handle_net_event_file_share_sets_pending() {
-        let remote_key = SecretKey::generate();
-        let mut app = test_app();
-
-        let event = NetEvent::Message {
-            from: remote_key.public(),
-            message: Message::FileShare {
-                name: "doc.pdf".into(),
-                ticket: "abc123".into(),
-            },
-            sent_at: now_secs(),
-        };
-        handle_net_event(event, &mut app).unwrap();
-        assert_eq!(app.pending_file, Some(("doc.pdf".into(), "abc123".into())));
-        assert!(app.entries.iter().any(|e| e.body.contains("doc.pdf")));
-    }
-
-    #[test]
     fn handle_net_event_closed_sets_quit() {
         let mut app = test_app();
         handle_net_event(NetEvent::Closed, &mut app).unwrap();
@@ -3274,10 +3278,11 @@ mod tests {
             !app.friends_dirty,
             "friends should NOT be marked dirty from gossip-level NeighborUp alone"
         );
-        assert!(app
-            .entries
-            .iter()
-            .any(|e| e.body == "alice joined the chat"));
+        assert!(
+            app.entries
+                .iter()
+                .any(|e| e.body == "alice joined the chat")
+        );
     }
 
     #[test]
@@ -3666,10 +3671,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(app
-            .entries
-            .iter()
-            .any(|e| e.body == "Buddy joined the chat"));
+        assert!(
+            app.entries
+                .iter()
+                .any(|e| e.body == "Buddy joined the chat")
+        );
     }
 
     #[test]
@@ -4018,9 +4024,11 @@ mod tests {
         let lookup = iroh::address_lookup::memory::MemoryLookup::new();
         seed_memory_lookup(&lookup, &[]);
         // Should not panic — verify by checking nothing was added
-        assert!(lookup
-            .get_endpoint_info(SecretKey::generate().public())
-            .is_none());
+        assert!(
+            lookup
+                .get_endpoint_info(SecretKey::generate().public())
+                .is_none()
+        );
     }
 
     // ── TransferProgress lifecycle tests ────────────────────────────────
@@ -4186,28 +4194,23 @@ mod tests {
     }
 
     #[test]
-    fn old_wire_format_file_share_decodes_correctly() {
+    fn old_wire_format_file_share_fails_to_decode() {
         // Old wire format for Message::FileShare { name: "doc.pdf", ticket: "tkt" }
-        // discriminant: varint(2) = 0x02
+        // This variant was removed when the remote file catalogue system
+        // replaced direct gossip-based file-sharing. Old messages now fail
+        // to decode — the new system uses the catalogue protocol instead.
         let old_bytes = [
-            0x02, // discriminant 2 = FileShare
+            0x02, // discriminant 2 = old FileShare (now removed)
             0x07, // name length
             0x64, 0x6f, 0x63, 0x2e, 0x70, 0x64, 0x66, // "doc.pdf"
             0x03, // ticket length
             0x74, 0x6b, 0x74, // "tkt"
         ];
-        let decoded: Message =
-            postcard::from_bytes(&old_bytes).expect("old-format FileShare should decode correctly");
-        match decoded {
-            Message::FileShare {
-                ref name,
-                ref ticket,
-            } => {
-                assert_eq!(name, "doc.pdf");
-                assert_eq!(ticket, "tkt");
-            }
-            other => panic!("expected FileShare, got {other:?}"),
-        }
+        let result: Result<Message, _> = postcard::from_bytes(&old_bytes);
+        assert!(
+            result.is_err(),
+            "old FileShare format should fail to decode after removal"
+        );
     }
 
     #[test]
