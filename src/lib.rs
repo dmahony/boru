@@ -94,6 +94,10 @@ pub mod contact;
 #[cfg(feature = "net")]
 pub mod chat_callbacks;
 
+/// Bounded admission and resource controls for file downloads.
+#[cfg(feature = "net")]
+pub mod download_limits;
+
 /// Durable friends list storage for the chat frontends.
 #[cfg(feature = "net")]
 pub mod friends;
@@ -183,6 +187,13 @@ pub mod backfill;
 #[cfg(feature = "net")]
 pub mod user_profile;
 
+/// Remote-safe representation of shared file entries for wire transfer.
+#[cfg(feature = "net")]
+pub mod catalogue_model;
+
+/// Durable download states and post-transfer verification helpers.
+pub mod download;
+
 /// Secure, local per-user image storage with content-addressed identifiers.
 ///
 /// Stores images below `<data_dir>/files` with hashed user directories and
@@ -243,3 +254,17 @@ pub mod diagnostics;
 pub mod storage;
 /// Durable inbox/outbox storage.
 pub mod store;
+
+/// Catalogue retrieval protocol — versioned request/response wire wrappers.
+///
+/// Always available (no feature gate).  Defines [`CatalogWireRequest`],
+/// [`CatalogWireResponse`], inner [`CatalogRequest`]/[`CatalogResponse`]
+/// enums, and wire-safe [`CatalogErrorCode`].
+pub mod catalogue_protocol;
+
+/// File access protocol — versioned request/response wire wrappers.
+///
+/// Always available (no feature gate).  Defines [`FileAccessWireRequest`],
+/// [`FileAccessWireResponse`], inner [`FileAccessRequest`]/[`FileAccessResponse`]
+/// types, and wire-safe [`FileAccessErrorCode`].
+pub mod file_access_protocol;
