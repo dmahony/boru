@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 use tokio::sync::{mpsc, Mutex};
 
-use crate::mailbox::{MailboxAck, MailboxEnvelope, MAX_SYNC_LOOKBACK, DEFAULT_MAILBOX_TTL};
+use crate::mailbox::{MailboxAck, MailboxEnvelope, DEFAULT_MAILBOX_TTL, MAX_SYNC_LOOKBACK};
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -265,17 +265,14 @@ pub struct InboxInner {
     /// The function receives (requester_public_key, since_ms) and returns
     /// (envelopes, has_more). The protocol handler derives last_created_at_ms
     /// from the last envelope in the page.
-    pub pending_fn: Option<
-        Arc<dyn Fn(PublicKey, u64) -> (Vec<MailboxEnvelope>, bool) + Send + Sync>,
-    >,
+    pub pending_fn:
+        Option<Arc<dyn Fn(PublicKey, u64) -> (Vec<MailboxEnvelope>, bool) + Send + Sync>>,
     /// Optional callback invoked after a SyncResponse is sent, recording
     /// which message IDs were served for replay protection.  The callback
     /// receives (recipient_public_key, &[[u8; 32]]).
     /// This prevents the same envelopes from being served again on repeat
     /// sync requests.
-    pub record_sync_served_fn: Option<
-        Arc<dyn Fn(PublicKey, &[[u8; 32]]) + Send + Sync>,
-    >,
+    pub record_sync_served_fn: Option<Arc<dyn Fn(PublicKey, &[[u8; 32]]) + Send + Sync>>,
 }
 
 impl std::fmt::Debug for InboxInner {
@@ -400,9 +397,7 @@ impl InboxHandle {
     /// SyncRequest arrives.
     pub async fn set_pending_fn(
         &self,
-        f: Option<
-            Arc<dyn Fn(PublicKey, u64) -> (Vec<MailboxEnvelope>, bool) + Send + Sync>,
-        >,
+        f: Option<Arc<dyn Fn(PublicKey, u64) -> (Vec<MailboxEnvelope>, bool) + Send + Sync>>,
     ) {
         self.inner.lock().await.pending_fn = f;
     }
@@ -519,8 +514,7 @@ impl ProtocolHandler for InboxProtocol {
 
                     // SyncRequest: send back a paginated SyncResponse.
                     if let Some(ref sk) = secret_key {
-                        let last_created_at_ms =
-                            response_envelopes.last().map(|e| e.created_at);
+                        let last_created_at_ms = response_envelopes.last().map(|e| e.created_at);
                         let payload = InboxPayload::SyncResponse {
                             envelopes: response_envelopes,
                             last_created_at_ms,
@@ -1161,13 +1155,8 @@ mod tests {
 
         // since_ms far in the past — the handler should clamp it, not reject it.
         let ancient = 1; // epoch + 1ms
-        let request = SignedInboxMessage::sign(
-            &sk,
-            InboxPayload::SyncRequest {
-                since_ms: ancient,
-            },
-        )
-        .unwrap();
+        let request =
+            SignedInboxMessage::sign(&sk, InboxPayload::SyncRequest { since_ms: ancient }).unwrap();
 
         let result = InboxProtocol::handle_request(&handle.inner(), sk.public(), &request).await;
         assert!(
@@ -1183,11 +1172,8 @@ mod tests {
         let (handle, _rx) = InboxHandle::new();
 
         // Do NOT add the peer to allowed_senders — they are unauthorized.
-        let request = SignedInboxMessage::sign(
-            &peer_sk,
-            InboxPayload::SyncRequest { since_ms: 0 },
-        )
-        .unwrap();
+        let request =
+            SignedInboxMessage::sign(&peer_sk, InboxPayload::SyncRequest { since_ms: 0 }).unwrap();
         let result = InboxProtocol::handle_request(&handle.inner(), peer, &request).await;
         assert!(result.is_err(), "unauthorized peer must be rejected");
         assert!(
@@ -1361,19 +1347,14 @@ mod tests {
             .await;
 
         // Send a SyncRequest — handle_request calls pending_fn.
-        let request = SignedInboxMessage::sign(
-            &sk,
-            InboxPayload::SyncRequest { since_ms: 0 },
-        )
-        .unwrap();
+        let request =
+            SignedInboxMessage::sign(&sk, InboxPayload::SyncRequest { since_ms: 0 }).unwrap();
 
-        let result =
-            InboxProtocol::handle_request(&handle.inner(), sk.public(), &request).await;
+        let result = InboxProtocol::handle_request(&handle.inner(), sk.public(), &request).await;
         assert!(result.is_ok(), "sync request should succeed");
 
         // Compute the expected message ID.
-        let expected_mid =
-            inbox_message_id(&postcard::to_stdvec(&envelope).unwrap());
+        let expected_mid = inbox_message_id(&postcard::to_stdvec(&envelope).unwrap());
 
         // Manually invoke the record_sync_served_fn callback (this is what
         // accept() does after sending SyncResponse).
@@ -1441,13 +1422,9 @@ mod tests {
             .await;
 
         // First request: both envelopes should be returned (none served yet).
-        let request = SignedInboxMessage::sign(
-            &sk,
-            InboxPayload::SyncRequest { since_ms: 0 },
-        )
-        .unwrap();
-        let result =
-            InboxProtocol::handle_request(&handle.inner(), sk.public(), &request).await;
+        let request =
+            SignedInboxMessage::sign(&sk, InboxPayload::SyncRequest { since_ms: 0 }).unwrap();
+        let result = InboxProtocol::handle_request(&handle.inner(), sk.public(), &request).await;
         assert!(result.is_ok(), "first sync request should succeed");
         let Some((envelopes, _)) = result.unwrap() else {
             panic!("first sync request returned None");
@@ -1462,13 +1439,9 @@ mod tests {
         served.lock().unwrap().insert(mid_a);
 
         // Second request: only env_b should be returned.
-        let request2 = SignedInboxMessage::sign(
-            &sk,
-            InboxPayload::SyncRequest { since_ms: 0 },
-        )
-        .unwrap();
-        let result2 =
-            InboxProtocol::handle_request(&handle.inner(), sk.public(), &request2).await;
+        let request2 =
+            SignedInboxMessage::sign(&sk, InboxPayload::SyncRequest { since_ms: 0 }).unwrap();
+        let result2 = InboxProtocol::handle_request(&handle.inner(), sk.public(), &request2).await;
         assert!(result2.is_ok(), "second sync request should succeed");
         let Some((envelopes2, _)) = result2.unwrap() else {
             panic!("second sync request returned None");
@@ -1488,13 +1461,9 @@ mod tests {
         served.lock().unwrap().insert(mid_b);
 
         // Third request: no envelopes should be returned.
-        let request3 = SignedInboxMessage::sign(
-            &sk,
-            InboxPayload::SyncRequest { since_ms: 0 },
-        )
-        .unwrap();
-        let result3 =
-            InboxProtocol::handle_request(&handle.inner(), sk.public(), &request3).await;
+        let request3 =
+            SignedInboxMessage::sign(&sk, InboxPayload::SyncRequest { since_ms: 0 }).unwrap();
+        let result3 = InboxProtocol::handle_request(&handle.inner(), sk.public(), &request3).await;
         assert!(result3.is_ok(), "third sync request should succeed");
         let Some((envelopes3, _)) = result3.unwrap() else {
             panic!("third sync request returned None");
@@ -1515,8 +1484,7 @@ mod tests {
         let envelope = identity.seal(&sk, b"consistent hash test").unwrap();
 
         // Compute ID via inbox_message_id (used in accept() for record_sync_served_fn).
-        let protocol_id =
-            inbox_message_id(&postcard::to_stdvec(&envelope).unwrap());
+        let protocol_id = inbox_message_id(&postcard::to_stdvec(&envelope).unwrap());
 
         // Verify determinism: same envelope produces same ID.
         let id2 = inbox_message_id(&postcard::to_stdvec(&envelope).unwrap());

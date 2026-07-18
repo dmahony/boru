@@ -33,7 +33,7 @@ use bytes::Bytes;
 use iroh::{PublicKey, SecretKey};
 
 use boru_chat::{
-    mailbox::{MailboxPublicKey},
+    mailbox::MailboxPublicKey,
     storage::Storage,
     store::{MessageId, StoredEnvelope},
 };
@@ -82,7 +82,14 @@ fn queue_dm(
     let request_key = format!("sync-test-{idx}");
     let plaintext = format!("sync integration message {idx}");
     storage
-        .queue_outgoing_dm(conv_id, sender_sk.public(), &request_key, &plaintext, recipient, sender_sk)
+        .queue_outgoing_dm(
+            conv_id,
+            sender_sk.public(),
+            &request_key,
+            &plaintext,
+            recipient,
+            sender_sk,
+        )
         .expect("queue DM")
         .message_id
 }
@@ -159,9 +166,7 @@ fn sync_pagination_multipage() {
     let mb_pk = mailbox_pk(&recipient_sk);
     let mut all_ids = Vec::new();
     for i in 0..10u64 {
-        all_ids.push(queue_dm(
-            &storage, &sender_sk, mb_pk, conv_id, i,
-        ));
+        all_ids.push(queue_dm(&storage, &sender_sk, mb_pk, conv_id, i));
     }
 
     // Single-page count-limit test: max_count=3 returns 3 with has_more=true.
@@ -305,9 +310,9 @@ fn sync_rejects_wrong_recipient() {
     let bob_mb = mailbox_pk(&bob_sk);
 
     queue_dm(&storage, &sender_sk, alice_mb, conv_id, 0); // msg for Alice
-    queue_dm(&storage, &sender_sk, bob_mb, conv_id, 1);   // msg for Bob
+    queue_dm(&storage, &sender_sk, bob_mb, conv_id, 1); // msg for Bob
     queue_dm(&storage, &sender_sk, alice_mb, conv_id, 2); // msg for Alice
-    queue_dm(&storage, &sender_sk, bob_mb, conv_id, 3);   // msg for Bob
+    queue_dm(&storage, &sender_sk, bob_mb, conv_id, 3); // msg for Bob
 
     // Alice's sync query: should see only Alice's 2 messages.
     let (alice_page, _) = storage
@@ -704,20 +709,12 @@ fn sync_prune_does_not_remove_recent() {
     let (page, _) = storage
         .query_pending_outbound_for_recipient(&recipient_pk, 0, 100, 1_000_000)
         .expect("sync after prune");
-    assert_eq!(
-        page.len(),
-        0,
-        "after prune, served entries still excluded"
-    );
+    assert_eq!(page.len(), 0, "after prune, served entries still excluded");
 
     // New uns served messages should still be visible.
     queue_dm(&storage, &sender_sk, mb_pk, conv_id, 2);
     let (page2, _) = storage
         .query_pending_outbound_for_recipient(&recipient_pk, 0, 100, 1_000_000)
         .expect("sync after prune + new message");
-    assert_eq!(
-        page2.len(),
-        1,
-        "new unserved message visible after prune"
-    );
+    assert_eq!(page2.len(), 1, "new unserved message visible after prune");
 }

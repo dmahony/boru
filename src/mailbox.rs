@@ -644,7 +644,9 @@ mod tests {
         let mut store = MailboxStore::for_recipient(dir.path(), recipient.public());
 
         for i in 0..(MAX_SYNC_ENVELOPES + 8) {
-            let mut env = identity.seal(&sender, format!("sync-{i}").as_bytes()).unwrap();
+            let mut env = identity
+                .seal(&sender, format!("sync-{i}").as_bytes())
+                .unwrap();
             env.created_at = now_ms().saturating_sub(i as u64);
             store.entries.insert(env.message_id(), env);
         }
@@ -653,7 +655,9 @@ mod tests {
 
         let page = store.pending_for_recipient_since(recipient.public(), 0);
         assert_eq!(page.len(), MAX_SYNC_ENVELOPES);
-        assert!(page.iter().all(|e| e.recipient.identity == recipient.public()));
+        assert!(page
+            .iter()
+            .all(|e| e.recipient.identity == recipient.public()));
         let encoded: usize = page
             .iter()
             .map(|e| postcard::to_stdvec(e).unwrap().len())

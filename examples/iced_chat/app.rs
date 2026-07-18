@@ -23,7 +23,6 @@ use boru_chat::chat_core::{
     now_ms, seed_memory_lookup, MeshHealth, MessageHash, ProfileUpdateThrottle, RoomInviteV2,
     SharedFileMeta,
 };
-use boru_chat::storage::Storage;
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_chat::conversations::{
@@ -52,6 +51,7 @@ use boru_chat::room::RoomStore;
 use boru_chat::room_cleanup::delete_room_history;
 use boru_chat::room_docs::{self, RoomMetadata};
 use boru_chat::room_history::{RoomHistoryEntry, RoomHistoryStore};
+use boru_chat::storage::Storage;
 use boru_chat::store::MessageStore;
 use boru_chat::user_profile::{UserProfile, UserProfileStore};
 use boru_chat::whisper::{WhisperEvent, WhisperHandle};
@@ -6411,12 +6411,10 @@ impl IcedChat {
                                         .unwrap_or(0);
 
                                     let identity = MailboxIdentity::from_secret(&sk);
-                                    let mut store = MailboxStore::load(&dd)
-                                        .ok()
-                                        .flatten()
-                                        .unwrap_or_else(|| {
-                                            MailboxStore::for_recipient(&dd, sk.public())
-                                        });
+                                    let mut store =
+                                        MailboxStore::load(&dd).ok().flatten().unwrap_or_else(
+                                            || MailboxStore::for_recipient(&dd, sk.public()),
+                                        );
                                     let mut texts = Vec::new();
                                     let mut ack_ids = Vec::new();
                                     let mut cursor = since_ms;
@@ -6437,8 +6435,12 @@ impl IcedChat {
                                                             // in the conversation UI.  Sync is a backfill
                                                             // path, not permission to duplicate history.
                                                             ack_ids.push(msg_id.clone());
-                                                            if acceptance == IncomingAcceptance::Inserted {
-                                                                if let Ok(text) = String::from_utf8(plaintext) {
+                                                            if acceptance
+                                                                == IncomingAcceptance::Inserted
+                                                            {
+                                                                if let Ok(text) =
+                                                                    String::from_utf8(plaintext)
+                                                                {
                                                                     texts.push((msg_id, text));
                                                                 }
                                                             }
@@ -6448,7 +6450,8 @@ impl IcedChat {
                                                 }
 
                                                 if page.has_more {
-                                                    cursor = page.last_created_at_ms.unwrap_or(cursor);
+                                                    cursor =
+                                                        page.last_created_at_ms.unwrap_or(cursor);
                                                 } else {
                                                     break;
                                                 }
@@ -6464,11 +6467,7 @@ impl IcedChat {
                                     let _ = store.save();
                                     // Persist the cursor so subsequent reconnects resume from here.
                                     if let Some(stg) = &storage {
-                                        let _ = stg.upsert_sync_cursor(
-                                            &peer2,
-                                            None,
-                                            now_ms(),
-                                        );
+                                        let _ = stg.upsert_sync_cursor(&peer2, None, now_ms());
                                     }
                                     // Send acks for all processed envelopes (new + replayed).
                                     for msg_id in &ack_ids {
