@@ -1261,7 +1261,12 @@ impl Storage {
         // Query max_count + 1 to detect has_more
         let limit = (max_count + 1) as i64;
         let mut rows = stmt
-            .query(params![recipient.as_bytes(), effective_since as i64, limit, expiry_cutoff as i64])
+            .query(params![
+                recipient.as_bytes(),
+                effective_since as i64,
+                limit,
+                expiry_cutoff as i64
+            ])
             .std_context("query pending outbound")?;
 
         let mut envelopes = Vec::with_capacity(max_count);
@@ -1269,15 +1274,9 @@ impl Storage {
         let mut has_extra = false;
 
         while let Some(row) = rows.next().std_context("next outbound row")? {
-            let message_id_blob: Vec<u8> = row
-                .get(0)
-                .std_context("get message_id")?;
-            let envelope_bytes: Vec<u8> = row
-                .get(1)
-                .std_context("get envelope bytes")?;
-            let _created_at_ms: i64 = row
-                .get(2)
-                .std_context("get created_at_ms")?;
+            let message_id_blob: Vec<u8> = row.get(0).std_context("get message_id")?;
+            let envelope_bytes: Vec<u8> = row.get(1).std_context("get envelope bytes")?;
+            let _created_at_ms: i64 = row.get(2).std_context("get created_at_ms")?;
 
             // If we already have a full page, just note there's an extra row
             if envelopes.len() >= max_count {
@@ -1285,8 +1284,8 @@ impl Storage {
                 continue;
             }
 
-            let envelope: MailboxEnvelope = postcard::from_bytes(&envelope_bytes)
-                .std_context("decode envelope")?;
+            let envelope: MailboxEnvelope =
+                postcard::from_bytes(&envelope_bytes).std_context("decode envelope")?;
             let encoded_size = envelope_bytes.len();
 
             // Check size bound
@@ -1911,7 +1910,10 @@ impl Storage {
     }
 
     /// Get a single sync cursor for a specific peer.
-    pub fn get_sync_cursor(&self, peer_device_id: &iroh::PublicKey) -> Result<Option<SyncCursorRow>> {
+    pub fn get_sync_cursor(
+        &self,
+        peer_device_id: &iroh::PublicKey,
+    ) -> Result<Option<SyncCursorRow>> {
         let conn = self.conn.lock().unwrap();
         let result = conn
             .query_row(
@@ -2486,12 +2488,207 @@ impl Storage {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = now_ms() as i64;
+        let changed = conn
+            .execute(
+                "UPDATE downloads SET bytes_downloaded = ?1, state = ?2, updated_at_ms = ?3
+             WHERE id = ?4 AND state != 'paused'",
+                params![bytes_downloaded as i64, state, now, id],
+            )
+            .std_context("update download progress")?;
+        if changed == 0 {
+            let state: Option<String> = conn
+                .query_row(
+                    "SELECT state FROM downloads WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .std_context("check download state after progress update")?;
+            match state.as_deref() {
+                Some("paused") => {
+                    return Err(anyhow!("download is paused; active work must be cancelled").into())
+                }
+                Some(_) => return Err(anyhow!("download progress update affected no rows").into()),
+                None => return Err(anyhow!("download not found").into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Pause a non-terminal download without discarding its durable state.
+    ///
+    /// The update is deliberately narrow: it changes only the state and
+    /// timestamp.  The expected content hash, peer/file metadata, byte count,
+    /// retry information, and any transfer temporary data owned by the
+    /// download worker are therefore retained for a later resume.  A worker
+    /// that races with this call is rejected by [`Self::update_download_progress`]
+    /// once the row is paused, which prevents stale transfer progress from
+    /// moving the download out of `paused`.
+    ///
+    /// Pausing an already-paused download is idempotent.  Terminal downloads
+    /// cannot be paused because doing so would make their durable outcome
+    /// ambiguous.
+    pub fn pause_download(&self, id: i64) -> Result<()> {
+        const TERMINAL_STATES: &[&str] = &[
+            "complete",
+            "completed",
+            "cancelled",
+            "failed",
+            "version_mismatch",
+        ];
+
+        let conn = self.conn.lock().unwrap();
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT state FROM downloads WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("look up download before pause")?;
+        let Some(current) = current else {
+            return Err(anyhow!("download not found").into());
+        };
+        if current == "paused" {
+            return Ok(());
+        }
+        if TERMINAL_STATES.contains(&current.as_str()) {
+            return Err(anyhow!("cannot pause terminal download in state {current}").into());
+        }
+
+        let now = now_ms() as i64;
         conn.execute(
-            "UPDATE downloads SET bytes_downloaded = ?1, state = ?2, updated_at_ms = ?3
-             WHERE id = ?4",
-            params![bytes_downloaded as i64, state, now, id],
+            "UPDATE downloads SET state = 'paused', updated_at_ms = ?1
+             WHERE id = ?2 AND state = ?3",
+            params![now, id, current],
         )
-        .std_context("update download progress")?;
+        .std_context("pause download")?;
+        Ok(())
+    }
+
+    /// Begin a truthful resume of a paused download.
+    ///
+    /// Resuming never jumps directly back to byte transfer. The worker must
+    /// first resolve the peer and obtain a new permission/descriptor, because
+    /// descriptors are short-lived and permissions may have changed while the
+    /// download was paused or the process was stopped. Persisted progress and
+    /// the expected content hash are retained for content-addressed chunk reuse.
+    pub fn resume_download(&self, id: i64) -> Result<()> {
+        const RESUME_IN_PROGRESS: &[&str] = &[
+            "resolving_peer",
+            "requesting_permission",
+            "downloading",
+            "verifying",
+        ];
+
+        let conn = self.conn.lock().unwrap();
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT state FROM downloads WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("look up download before resume")?;
+        let Some(current) = current else {
+            return Err(anyhow!("download not found").into());
+        };
+        if current == "paused" {
+            let now = now_ms() as i64;
+            conn.execute(
+                "UPDATE downloads SET state = 'resolving_peer', last_error = NULL,
+                        next_retry_at_ms = NULL, updated_at_ms = ?1
+                 WHERE id = ?2 AND state = 'paused'",
+                params![now, id],
+            )
+            .std_context("resume download")?;
+            return Ok(());
+        }
+        if RESUME_IN_PROGRESS.contains(&current.as_str()) {
+            return Ok(());
+        }
+        Err(anyhow!("cannot resume download in state {current}").into())
+    }
+
+    /// Accept a freshly authorised resume only when its descriptor still
+    /// names the original content. A changed hash is recorded as a terminal
+    /// version mismatch rather than silently downloading different content.
+    ///
+    /// Callers that have an expiry value should prefer
+    /// [`Self::accept_resumed_descriptor_at`], which rejects stale descriptors
+    /// before transfer starts.
+    pub fn accept_resumed_descriptor(
+        &self,
+        id: i64,
+        descriptor_content_hash: &str,
+        total_bytes: u64,
+    ) -> Result<()> {
+        self.accept_resumed_descriptor_at(id, descriptor_content_hash, total_bytes, u64::MAX, 0)
+    }
+
+    /// Accept a fresh descriptor while checking its expiry at a supplied time.
+    ///
+    /// Supplying the clock makes expiry handling deterministic in tests and
+    /// keeps a previously issued descriptor from being reused after it has
+    /// expired. An expired descriptor is recorded as a failed resume and the
+    /// download remains paused so a later retry must obtain another grant.
+    pub fn accept_resumed_descriptor_at(
+        &self,
+        id: i64,
+        descriptor_content_hash: &str,
+        total_bytes: u64,
+        expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let expected: Option<(String, String)> = conn
+            .query_row(
+                "SELECT content_hash, state FROM downloads WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .std_context("look up download before accepting descriptor")?;
+        let Some((expected_hash, state)) = expected else {
+            return Err(anyhow!("download not found").into());
+        };
+        if state != "resolving_peer" && state != "requesting_permission" {
+            return Err(anyhow!("download is not awaiting resume authorisation").into());
+        }
+        if now_ms >= expires_at_ms {
+            conn.execute(
+                "UPDATE downloads SET state = 'paused',
+                        last_error = ?1, updated_at_ms = ?2 WHERE id = ?3",
+                params![
+                    "resume descriptor expired; fresh permission required",
+                    now_ms as i64,
+                    id
+                ],
+            )
+            .std_context("record expired resume descriptor")?;
+            return Err(anyhow!("resume descriptor expired").into());
+        }
+        let now = now_ms as i64;
+        if expected_hash != descriptor_content_hash {
+            conn.execute(
+                "UPDATE downloads SET state = 'version_mismatch',
+                        last_error = ?1, updated_at_ms = ?2 WHERE id = ?3",
+                params![
+                    format!("resume descriptor hash mismatch: expected {expected_hash}, got {descriptor_content_hash}"),
+                    now,
+                    id
+                ],
+            )
+            .std_context("record resume version mismatch")?;
+            return Err(anyhow!("resume descriptor content hash mismatch").into());
+        }
+        conn.execute(
+            "UPDATE downloads SET state = 'downloading', total_bytes = ?1,
+                    last_error = NULL, next_retry_at_ms = NULL, updated_at_ms = ?2
+             WHERE id = ?3",
+            params![total_bytes as i64, now, id],
+        )
+        .std_context("accept resumed descriptor")?;
         Ok(())
     }
 
@@ -2499,14 +2696,52 @@ impl Storage {
     pub fn fail_download(&self, id: i64, error: &str, next_retry_at_ms: Option<u64>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = now_ms() as i64;
-        conn.execute(
-            "UPDATE downloads SET state = 'failed', last_error = ?1,
+        let changed = conn
+            .execute(
+                "UPDATE downloads SET state = 'failed', last_error = ?1,
                     retry_count = retry_count + 1, next_retry_at_ms = ?2,
                     updated_at_ms = ?3
-             WHERE id = ?4",
-            params![error, next_retry_at_ms.map(|v| v as i64), now, id,],
-        )
-        .std_context("fail download")?;
+             WHERE id = ?4 AND state != 'paused'",
+                params![error, next_retry_at_ms.map(|v| v as i64), now, id,],
+            )
+            .std_context("fail download")?;
+        if changed == 0 {
+            let state: Option<String> = conn
+                .query_row(
+                    "SELECT state FROM downloads WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .std_context("check download state after failure")?;
+            if state.as_deref() == Some("paused") {
+                return Err(anyhow!("download is paused; active work must be cancelled").into());
+            }
+            if state.is_none() {
+                return Err(anyhow!("download not found").into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark a download complete after its temporary output has been verified
+    /// and atomically installed by the download worker.
+    pub fn complete_download(&self, id: i64, bytes_downloaded: u64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        let changed = conn
+            .execute(
+                "UPDATE downloads SET state = 'complete', bytes_downloaded = ?1,
+                        last_error = NULL, next_retry_at_ms = NULL, updated_at_ms = ?2
+                 WHERE id = ?3 AND state NOT IN ('complete', 'cancelled', 'paused')",
+                params![bytes_downloaded as i64, now, id],
+            )
+            .std_context("complete download")?;
+        if changed == 0 {
+            return Err(
+                anyhow!("download {id} does not exist or cannot transition to complete").into(),
+            );
+        }
         Ok(())
     }
 
@@ -3028,7 +3263,14 @@ mod tests {
             let request_key = format!("req-{i}");
             let plaintext = format!("hello {i}");
             storage
-                .queue_outgoing_dm(conv_id, sender, &request_key, &plaintext, recipient, &sender_sk)
+                .queue_outgoing_dm(
+                    conv_id,
+                    sender,
+                    &request_key,
+                    &plaintext,
+                    recipient,
+                    &sender_sk,
+                )
                 .unwrap();
         }
 
@@ -3082,7 +3324,12 @@ mod tests {
             let plaintext = format!("dedup-test {i}");
             let outgoing = storage
                 .queue_outgoing_dm(
-                    conv_id, sender, &request_key, &plaintext, recipient, &sender_sk,
+                    conv_id,
+                    sender,
+                    &request_key,
+                    &plaintext,
+                    recipient,
+                    &sender_sk,
                 )
                 .unwrap();
             msg_ids.push(outgoing.message_id);
@@ -3095,7 +3342,9 @@ mod tests {
         assert_eq!(page.len(), 3, "first call should return all 3");
 
         // Record first 2 message IDs as already served.
-        storage.record_sync_served(&recipient_id, &msg_ids[..2]).unwrap();
+        storage
+            .record_sync_served(&recipient_id, &msg_ids[..2])
+            .unwrap();
 
         // Second call should return only the 3rd envelope.
         let (page2, _) = storage
@@ -3252,6 +3501,182 @@ mod tests {
         assert_eq!(dl.state, "failed");
         assert_eq!(dl.last_error.as_deref(), Some("connection reset"));
         assert_eq!(dl.retry_count, 1);
+    }
+
+    #[test]
+    fn pause_preserves_partial_state_and_is_idempotent() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object(
+                "pause-hash",
+                4096,
+                "application/octet-stream",
+                "payload.bin",
+                b"",
+            )
+            .unwrap();
+        // Exercise pause from each active phase used by the transfer worker.
+        for (index, state) in ["resolving_peer", "requesting_permission", "downloading"]
+            .into_iter()
+            .enumerate()
+        {
+            let hash = format!("pause-hash-{index}");
+            storage
+                .put_file_object(&hash, 4096, "application/octet-stream", "payload.bin", b"")
+                .unwrap();
+            let id = storage.create_download(&hash, "peer-a", 4096).unwrap();
+            storage.update_download_progress(id, 1234, state).unwrap();
+            storage.pause_download(id).unwrap();
+            let paused = storage.get_download(id).unwrap().unwrap();
+            assert_eq!(paused.state, "paused");
+            assert_eq!(paused.content_hash, hash);
+            assert_eq!(paused.remote_peer, "peer-a");
+            assert_eq!(paused.bytes_downloaded, 1234);
+            assert_eq!(paused.total_bytes, 4096);
+
+            // A repeated user action must not reset progress or fail.
+            storage.pause_download(id).unwrap();
+            let repeated = storage.get_download(id).unwrap().unwrap();
+            assert_eq!(repeated.state, "paused");
+            assert_eq!(repeated.bytes_downloaded, 1234);
+
+            // Move back to an active state before exercising the next phase.
+            // Pausing is intentionally idempotent, but it must not implicitly
+            // resume work just because a test (or caller) wants another pause.
+            storage.resume_download(id).unwrap();
+        }
+    }
+
+    #[test]
+    fn paused_download_rejects_late_worker_progress() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object("pause-race", 100, "application/octet-stream", "x.bin", b"")
+            .unwrap();
+        let id = storage
+            .create_download("pause-race", "peer-b", 100)
+            .unwrap();
+        storage
+            .update_download_progress(id, 40, "transferring")
+            .unwrap();
+        storage.pause_download(id).unwrap();
+
+        let result = storage.update_download_progress(id, 80, "transferring");
+        assert!(
+            result.is_err(),
+            "stale active work must be rejected after pause"
+        );
+        let paused = storage.get_download(id).unwrap().unwrap();
+        assert_eq!(paused.state, "paused");
+        assert_eq!(paused.bytes_downloaded, 40);
+    }
+
+    #[test]
+    fn pause_rejects_terminal_and_unknown_downloads() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object("pause-terminal", 1, "application/octet-stream", "x", b"")
+            .unwrap();
+        let id = storage
+            .create_download("pause-terminal", "peer-c", 1)
+            .unwrap();
+        storage.update_download_progress(id, 1, "complete").unwrap();
+        assert!(storage.pause_download(id).is_err());
+        assert!(storage.pause_download(i64::MAX).is_err());
+    }
+
+    #[test]
+    fn resume_revalidates_descriptor_before_transfer() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object(
+                "resume-hash",
+                4096,
+                "application/octet-stream",
+                "payload.bin",
+                b"",
+            )
+            .unwrap();
+        let id = storage
+            .create_download("resume-hash", "peer-a", 4096)
+            .unwrap();
+        storage
+            .update_download_progress(id, 1024, "downloading")
+            .unwrap();
+        storage.pause_download(id).unwrap();
+        storage.resume_download(id).unwrap();
+
+        let resolving = storage.get_download(id).unwrap().unwrap();
+        assert_eq!(resolving.state, "resolving_peer");
+        assert_eq!(resolving.bytes_downloaded, 1024);
+        assert_eq!(resolving.content_hash, "resume-hash");
+
+        let mismatch = storage.accept_resumed_descriptor(id, "changed-hash", 4096);
+        assert!(mismatch.is_err());
+        let stopped = storage.get_download(id).unwrap().unwrap();
+        assert_eq!(stopped.state, "version_mismatch");
+        assert!(stopped.last_error.unwrap().contains("hash mismatch"));
+    }
+
+    #[test]
+    fn resume_accepts_fresh_descriptor_and_is_idempotent_while_active() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object(
+                "resume-ok",
+                200,
+                "application/octet-stream",
+                "payload.bin",
+                b"",
+            )
+            .unwrap();
+        let id = storage.create_download("resume-ok", "peer-b", 200).unwrap();
+        storage.pause_download(id).unwrap();
+        storage.resume_download(id).unwrap();
+        storage
+            .accept_resumed_descriptor(id, "resume-ok", 200)
+            .unwrap();
+        assert_eq!(
+            storage.get_download(id).unwrap().unwrap().state,
+            "downloading"
+        );
+        storage.resume_download(id).unwrap();
+        assert_eq!(
+            storage.get_download(id).unwrap().unwrap().state,
+            "downloading"
+        );
+    }
+
+    #[test]
+    fn expired_resume_descriptor_keeps_download_paused() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object("resume-expired", 20, "application/octet-stream", "x", b"")
+            .unwrap();
+        let id = storage
+            .create_download("resume-expired", "peer-d", 20)
+            .unwrap();
+        storage.pause_download(id).unwrap();
+        storage.resume_download(id).unwrap();
+        let result = storage.accept_resumed_descriptor_at(id, "resume-expired", 20, 99, 100);
+        assert!(result.is_err());
+        let download = storage.get_download(id).unwrap().unwrap();
+        assert_eq!(download.state, "paused");
+        assert!(download.last_error.unwrap().contains("expired"));
+    }
+
+    #[test]
+    fn resume_rejects_terminal_and_unknown_downloads() {
+        let storage = Storage::memory().unwrap();
+        assert!(storage.resume_download(i64::MAX).is_err());
+        storage
+            .put_file_object("resume-terminal", 1, "application/octet-stream", "x", b"")
+            .unwrap();
+        let id = storage
+            .create_download("resume-terminal", "peer-c", 1)
+            .unwrap();
+        storage.update_download_progress(id, 1, "complete").unwrap();
+        assert!(storage.resume_download(id).is_err());
     }
 
     #[test]

@@ -46,6 +46,24 @@ mod util;
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 
+/// ALPN for the remote file catalogue protocol.
+///
+/// Provides signed, requester-filtered catalogue snapshots that list
+/// files available for download from a peer.  See `docs/protocol-layers.md`
+/// for the full protocol specification.
+/// This constant is not yet registered on any router — registration is
+/// deferred until the catalogue handler module is built.
+pub const FILE_CATALOG_ALPN: &[u8] = b"/boru-file-catalog/1";
+
+/// ALPN for the file access (transfer authorisation) protocol.
+///
+/// Performs a request-time permission, availability, and integrity check
+/// before issuing a short-lived signed download descriptor.  See
+/// `docs/protocol-layers.md` for the full protocol specification.
+/// This constant is not yet registered on any router — registration is
+/// deferred until the file access handler module is built.
+pub const FILE_ACCESS_ALPN: &[u8] = b"/boru-file-access/1";
+
 /// Channel capacity for the send queue (one per connection)
 const SEND_QUEUE_CAP: usize = 64;
 /// Channel capacity for the ToActor message queue (single)
@@ -1358,6 +1376,67 @@ pub(crate) mod tests {
         RelayMap, RelayMode, SecretKey,
     };
     use n0_error::{AnyError, Result, StdResultExt};
+
+    // ---- ALPN constant stability and uniqueness ----
+
+    /// All ALPN protocol constants defined in the crate.
+    /// When adding a new ALPN, add it here too so the conflict test catches
+    /// accidental duplicates.
+    const ALL_ALPNS: &[&[&[u8]]] = &[
+        &[super::GOSSIP_ALPN],
+        &[super::FILE_CATALOG_ALPN],
+        &[super::FILE_ACCESS_ALPN],
+        &[crate::inbox::INBOX_ALPN],
+        &[crate::backfill::BACKFILL_ALPN],
+        &[crate::whisper::WHISPER_ALPN],
+        &[crate::chat_core::friend_ping::FRIEND_PING_ALPN],
+    ];
+
+    #[test]
+    fn file_catalog_alpn_has_expected_value() {
+        assert_eq!(
+            super::FILE_CATALOG_ALPN,
+            b"/boru-file-catalog/1",
+            "FILE_CATALOG_ALPN must not change without updating all peers"
+        );
+    }
+
+    #[test]
+    fn file_access_alpn_has_expected_value() {
+        assert_eq!(
+            super::FILE_ACCESS_ALPN,
+            b"/boru-file-access/1",
+            "FILE_ACCESS_ALPN must not change without updating all peers"
+        );
+    }
+
+    #[test]
+    fn no_alpn_conflicts() {
+        // Collect every ALPN into a flat Vec<&[u8]>.
+        let mut all: Vec<&[u8]> = Vec::new();
+        for group in ALL_ALPNS {
+            all.extend_from_slice(group);
+        }
+
+        // Check for duplicates by sorting and comparing neighbours.
+        let mut sorted = all.clone();
+        sorted.sort();
+        for pair in sorted.windows(2) {
+            assert_ne!(
+                pair[0],
+                pair[1],
+                "duplicate ALPN detected: {:?}",
+                std::str::from_utf8(pair[0]).unwrap_or("<non-utf8>")
+            );
+        }
+
+        // Sanity: we have more than just the gossip ALPN.
+        assert!(
+            all.len() >= 3,
+            "expected at least 3 ALPN constants, found {}",
+            all.len()
+        );
+    }
 
     #[test]
     fn peer_address_data_preserves_relay_and_direct_addresses() {

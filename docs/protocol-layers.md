@@ -12,8 +12,8 @@ boru-chat uses multiple distinct QUIC-based protocols, each with its own ALPN
 | Backfill | `/iroh-chat-backfill/1` | Direct | Historical message sync for late-joining peers | Reads ChatHistoryStore |
 | Whisper | `/iroh-chat-whisper/1` | Direct session | Online private 1:1 QUIC messages, control frames, and file transfer | None (transient) |
 | Friend Ping | `/iroh-chat-ping/1` | Direct | Connectivity checks between friends | None (transient) |
-| Catalogue retrieval | `/iroh-chat-catalogue/1` | Direct | Signed, requester-filtered file catalogue retrieval | Per-peer verified cache |
-| Transfer authorisation | `/iroh-chat-transfer-auth/1` | Direct | Request-time permission check and signed blob descriptor | None (short-lived descriptor) |
+| Catalogue retrieval | `/boru-file-catalog/1` | Direct | Signed, requester-filtered file catalogue retrieval | Per-peer verified cache |
+| Transfer authorisation | `/boru-file-access/1` | Direct | Request-time permission check and signed blob descriptor | None (short-lived descriptor) |
 | Blob transfer | iroh-blobs | Direct | Content-addressed file transfer | iroh-blobs store + download state |
 
 ## Responsibility boundaries
@@ -233,7 +233,7 @@ topic and the secret can find each other on the DHT.
 
 The file-sharing protocols are separate from gossip. A revision notification is
 advisory and contains no file bytes or access grant. The requester fetches a
-fresh signed snapshot over `/iroh-chat-catalogue/1`; the client verifies the
+fresh signed snapshot over `/boru-file-catalog/1`; the client verifies the
 frame version, transport identity, owner identity, signature, bounds, and field
 limits before caching it. `known_revision` enables `NotModified`; cache refresh
 is event-driven (new revision, manual refresh, stale cache, or missing item),
@@ -250,7 +250,7 @@ blob ticket, or unrestricted address.
 ### Transfer authorisation
 
 To retrieve one entry, the requester sends its shared-file/content hash and
-expected file revision over `/iroh-chat-transfer-auth/1`. The owner repeats the
+expected file revision over `/boru-file-access/1`. The owner repeats the
 block, relationship, permission, offer, availability, expected-hash, and
 expected-version checks at request time. A grant returns a signed download
 descriptor bound to owner, requester, file, content hash, size, blob format,
@@ -260,9 +260,14 @@ an inaccessible file exists.
 
 The descriptor authorises an iroh-blobs content-addressed transfer. The client
 streams into a temporary file, verifies expected size and BLAKE3 content hash,
-and atomically renames only verified output. Pause/cancellation removes the
-temporary file. iroh-blobs may reuse verified chunks on a later request, but the
-output file is re-streamed; temporary-file byte-range resume is not supported.
+and atomically renames only verified output. iroh-blobs 0.103.0 stores verified
+BAO chunks by content hash and, on a later request for the same blob, computes
+the missing chunk ranges and fetches only those ranges. Thus an interrupted
+transfer can reuse retained partial chunks, and a complete blob can be served
+locally. This is not byte-range resume of the temporary/destination file: the
+application does not append to a prior output offset, and the output is only
+installed after complete verification. If the partial blob is garbage-collected,
+the next transfer starts over.
 
 ### Limits and errors
 
