@@ -45,21 +45,79 @@ pub enum CatalogErrorCode {
     /// An internal server error occurred. No details are disclosed.
     InternalError,
 }
-
 impl<'de> Deserialize<'de> for CatalogErrorCode {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        // Use a Visitor to read the string, then match known values or fall
-        // back safely to InternalError.
-        struct CatalogErrorCodeVisitor;
+        struct CatalogErrorCodeEnumVisitor;
 
-        impl<'de> serde::de::Visitor<'de> for CatalogErrorCodeVisitor {
+        impl<'de> serde::de::Visitor<'de> for CatalogErrorCodeEnumVisitor {
             type Value = CatalogErrorCode;
 
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a snake_case error code string")
+                f.write_str("CatalogErrorCode")
+            }
+
+            fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::EnumAccess<'de>,
+            {
+                // Use a seed that accepts both:
+                //   - u32 variant index (postcard: binary compact format)
+                //   - string variant name (JSON: human-readable format)
+                let (code, _) = serde::de::EnumAccess::variant_seed(data, CatalogErrorCodeSeed)?;
+                Ok(code)
+            }
+        }
+
+        const VARIANTS: &[&str] = &[
+            "permission_denied",
+            "not_found",
+            "invalid_request",
+            "unsupported_version",
+            "rate_limited",
+            "busy",
+            "response_too_large",
+            "internal_error",
+        ];
+        deserializer.deserialize_enum("CatalogErrorCode", VARIANTS, CatalogErrorCodeEnumVisitor)
+    }
+}
+
+/// Seed that deserializes a `CatalogErrorCode` from either a u32 (postcard
+/// variant index) or a string (JSON variant name). Unknown values are mapped
+/// to [`CatalogErrorCode::InternalError`].
+struct CatalogErrorCodeSeed;
+
+impl<'de> serde::de::DeserializeSeed<'de> for CatalogErrorCodeSeed {
+    type Value = CatalogErrorCode;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CodeSeedVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for CodeSeedVisitor {
+            type Value = CatalogErrorCode;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a u32 variant index or a snake_case variant name string")
+            }
+
+            fn visit_u32<E: serde::de::Error>(self, v: u32) -> Result<CatalogErrorCode, E> {
+                Ok(match v {
+                    0 => CatalogErrorCode::PermissionDenied,
+                    1 => CatalogErrorCode::NotFound,
+                    2 => CatalogErrorCode::InvalidRequest,
+                    3 => CatalogErrorCode::UnsupportedVersion,
+                    4 => CatalogErrorCode::RateLimited,
+                    5 => CatalogErrorCode::Busy,
+                    6 => CatalogErrorCode::ResponseTooLarge,
+                    7 => CatalogErrorCode::InternalError,
+                    _ => CatalogErrorCode::InternalError,
+                })
             }
 
             fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<CatalogErrorCode, E> {
@@ -79,7 +137,7 @@ impl<'de> Deserialize<'de> for CatalogErrorCode {
             }
         }
 
-        deserializer.deserialize_str(CatalogErrorCodeVisitor)
+        deserializer.deserialize_any(CodeSeedVisitor)
     }
 }
 
@@ -463,19 +521,20 @@ mod tests {
         assert_eq!(deserialized, resp);
     }
 
-    /// Unknown error codes in postcard binary format also fall back safely.
+    /// Unknown variant indices from postcard are safely mapped to
+    /// [`CatalogErrorCode::InternalError`] rather than producing an error.
     #[test]
     fn test_catalog_error_code_postcard_unknown_fallback() {
-        // Serialize an unknown error code via postcard using the raw string.
-        let bytes = postcard::to_stdvec(&"some_new_error").expect("postcard serialize raw");
-        // The bytes contain just the string "some_new_error" encoded in postcard format.
+        // Postcard encodes unit variants by their 0-based index.
+        // Our enum has 8 variants (indices 0-7). Index 8 is out of range.
+        // Postcard encoding: varint(8) = a single byte 0x08.
+        let bytes = vec![0x08u8];
         let result: Result<CatalogErrorCode, _> = postcard::from_bytes(&bytes);
-        assert!(result.is_ok(), "unknown postcard value should not panic");
-        assert_eq!(
-            result.unwrap(),
-            CatalogErrorCode::InternalError,
-            "unknown value should map to InternalError"
+        assert!(
+            result.is_ok(),
+            "out-of-range variant index should map to InternalError, got error: {result:?}"
         );
+        assert_eq!(result.unwrap(), CatalogErrorCode::InternalError);
     }
 
     /// `RevisionChanged` response round-trips.
