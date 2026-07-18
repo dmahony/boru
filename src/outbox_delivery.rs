@@ -98,6 +98,43 @@ impl ReconnectDeliveryTrigger {
     }
 }
 
+/// Retry schedule with exponential growth, bounded jitter, and a hard cap.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Initial delay before the first retry.
+    pub initial_delay_ms: u64,
+    /// Maximum retry delay.
+    pub max_delay_ms: u64,
+    /// Maximum positive jitter as a fraction of the base delay.
+    pub jitter_fraction: f64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self { initial_delay_ms: 5_000, max_delay_ms: 180_000, jitter_fraction: 0.5 }
+    }
+}
+
+impl RetryPolicy {
+    /// Compute a delay for a zero-based attempt and a deterministic jitter in [0, 1].
+    pub fn delay_ms(&self, attempt: u32, jitter: f64) -> u64 {
+        let base = self.initial_delay_ms.saturating_mul(1u64 << attempt.min(31));
+        let capped = base.min(self.max_delay_ms);
+        let factor = 1.0 + self.jitter_fraction * jitter.clamp(0.0, 1.0);
+        ((capped as f64 * factor) as u64).min(self.max_delay_ms)
+    }
+}
+
+/// Injectable clock for deterministic scheduling tests.
+pub trait Clock: Send + Sync {
+    /// Return current Unix time in milliseconds.
+    fn now_ms(&self) -> u64;
+}
+/// Production wall clock implementation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+impl Clock for SystemClock { fn now_ms(&self) -> u64 { unix_ms() } }
+
 /// Whether a delivery failure can be retried automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureClass {
@@ -273,6 +310,8 @@ pub struct OutboxDeliveryWorker<P, T> {
     lease_owner: String,
     lease_duration_ms: u64,
     claim_limit: u32,
+    retry_policy: RetryPolicy,
+    clock: Arc<dyn Clock>,
     trigger: mpsc::Receiver<()>,
 }
 
@@ -303,6 +342,8 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             lease_owner: lease_owner.into(),
             lease_duration_ms: 60_000,
             claim_limit: 32,
+            retry_policy: RetryPolicy::default(),
+            clock: Arc::new(SystemClock),
             trigger,
         }
     }
@@ -318,23 +359,30 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
         self
     }
 
+    /// Replace the production clock with an injectable clock.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Ask the durable store to retry a recipient immediately.
+    pub fn retry_now(&self, msg_id: &crate::store::MessageId, peer: PublicKey) -> Result<usize> {
+        self.storage.retry_outbox_now(msg_id, peer, self.clock.now_ms())
+    }
+
+    /// Accelerate all pending messages when a peer is newly discovered.
+    pub fn peer_discovered(&self, peer: PublicKey) -> Result<usize> {
+        self.storage.wake_outbox_for_peer(peer, self.clock.now_ms())
+    }
+
     /// Process all currently claimable rows. The returned count is the number
     /// of attempts made, not the number of bytes written.
     pub async fn run_once(&self) -> usize {
-        let now = unix_ms();
-        let _ = self.storage.recover_stale_outbox_leases(now);
+        let now = self.clock.now_ms();
         let _ = self.storage.expire_outbox(now);
+        let rows = self.storage.fetch_due_outbox(now).unwrap_or_default();
         let mut attempted = 0;
-        loop {
-            let row = match self.storage.claim_due_outbox(
-                now,
-                &self.lease_owner,
-                self.lease_duration_ms,
-                self.claim_limit,
-            ) {
-                Ok(Some(row)) => row,
-                Ok(None) | Err(_) => break,
-            };
+        for row in rows.into_iter().take(self.claim_limit as usize) {
             attempted += 1;
             self.process_claim(row).await;
         }
@@ -382,21 +430,19 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             self.transport.deliver(peer, envelope).await
         }
         .await;
-        let now = unix_ms();
+        let now = self.clock.now_ms();
         let (success, error) = match outcome {
             Ok(()) => (true, None),
             Err(err) => (false, Some(err.to_string())),
         };
-        // The lease owner check makes a late completion harmless if another
-        // worker has reclaimed an expired lease.
-        let _ = self.storage.finish_outbox_attempt(
-            &msg_id,
-            peer,
-            &self.lease_owner,
-            success,
-            now.saturating_add(backoff_ms(row.attempts)),
-            error.as_deref(),
-        );
+        if success {
+            let _ = self.storage.mark_acked(&msg_id, peer);
+        } else {
+            let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
+            let delay = self.retry_policy.delay_ms(row.attempts, jitter);
+            let _ = self.storage.record_attempt(
+                &msg_id, peer, now.saturating_add(delay), error.as_deref());
+        }
     }
 
     /// Run until the trigger channel closes, with a periodic recovery tick.
@@ -435,17 +481,6 @@ fn unix_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-fn backoff_ms(attempts: u32) -> u64 {
-    match attempts {
-        0 => 5_000,
-        1 => 30_000,
-        2 => 120_000,
-        3 => 600_000,
-        4 => 1_800_000,
-        5 => 7_200_000,
-        _ => 21_600_000,
-    }
-}
 
 /// Convenience policy for applications whose contact store is already
 /// authoritative and whose transport performs address resolution itself.
@@ -470,8 +505,19 @@ mod tests {
     use super::*;
     #[test]
     fn backoff_is_bounded() {
-        assert_eq!(backoff_ms(0), 5_000);
-        assert_eq!(backoff_ms(99), 21_600_000);
+        let policy = RetryPolicy::default();
+        assert_eq!(policy.delay_ms(0, 0.5), 6_250);
+        assert_eq!(policy.delay_ms(99, 0.5), 180_000);
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_and_jitter_is_bounded() {
+        let policy = RetryPolicy::default();
+        assert_eq!(policy.delay_ms(1, 0.0), 10_000);
+        assert_eq!(policy.delay_ms(1, 1.0), 15_000);
+        assert_eq!(policy.delay_ms(2, 0.0), 20_000);
+        assert_eq!(policy.delay_ms(2, 1.0), 30_000);
+        assert!(policy.delay_ms(20, 1.0) <= policy.max_delay_ms);
     }
 
     #[test]

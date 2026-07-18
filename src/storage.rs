@@ -1413,6 +1413,26 @@ impl Storage {
         Ok(results)
     }
 
+    /// Make one pending outbox row due immediately (manual retry).
+    pub fn retry_outbox_now(&self, msg_id: &MessageId, recipient_device_id: iroh::PublicKey, now_ms: u64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE outbox SET next_attempt_at_ms = ?1 WHERE msg_id = ?2 AND recipient_device_id = ?3 AND status != ?4 AND status != ?5",
+            params![now_ms as i64, msg_id.as_slice(), recipient_device_id.as_bytes(), DeliveryStatus::Acked as u8, DeliveryStatus::Expired as u8],
+        ).std_context("retry outbox now")?;
+        Ok(changed)
+    }
+
+    /// Make all non-terminal messages for a newly discovered peer due now.
+    pub fn wake_outbox_for_peer(&self, recipient_device_id: iroh::PublicKey, now_ms: u64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE outbox SET next_attempt_at_ms = ?1 WHERE recipient_device_id = ?2 AND status != ?3 AND status != ?4",
+            params![now_ms as i64, recipient_device_id.as_bytes(), DeliveryStatus::Acked as u8, DeliveryStatus::Expired as u8],
+        ).std_context("wake outbox peer")?;
+        Ok(changed)
+    }
+
     // ── Outbox (v1) ───────────────────────────────────────────────────
 
     /// Enqueue a message for delivery.
