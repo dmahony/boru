@@ -1,0 +1,10 @@
+{
+  "max_files_per_catalogue": 10000,
+  "max_collections": 1000,
+  "max_entries_per_collection": 10000,
+  "max_page_size": 500,
+  "max_total_page_bytes": 1048576,
+  "max_requests_per_window": 32,
+  "request_window_seconds": 10,
+  "max_invalid_responses_before_block": 3
+}

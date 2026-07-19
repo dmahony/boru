@@ -33,7 +33,7 @@ use n0_future::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
-use crate::download_limits::{DownloadLimiter, ProgressUpdateGate};
+use crate::download_limits::{BatchedProgressWriter, DownloadLimiter};
 use crate::file_access_protocol::SignedDownloadDescriptor;
 use crate::storage::Storage;
 
@@ -180,7 +180,7 @@ pub async fn transfer_blob_to_temp(
         .await
         .map_err(|e| anyhow::anyhow!("blob-transfer: start failed: {e:?}"))?;
 
-    let progress_gate = ProgressUpdateGate::new(config.progress_persist_interval);
+    let batched_writer = BatchedProgressWriter::new(config.progress_persist_interval);
 
     // ── 3. Stage A: Network download into blob store ──────────────────
     let result = stage_network_download(
@@ -190,7 +190,7 @@ pub async fn transfer_blob_to_temp(
         &providers,
         &cancel_flag,
         &config,
-        &progress_gate,
+        &batched_writer,
         storage,
         download_id,
         total_bytes,
@@ -206,6 +206,12 @@ pub async fn transfer_blob_to_temp(
         }
     };
 
+    // ── 3a. Acquire hash verification budget (CPU-bound hashing) ──────
+    // Hold the permit through step 4 (hash computation) and steps 5-6
+    // (size + hash verification) so the concurrent hash limit is respected
+    // for the entire verification lifecycle.
+    let _hash_permit = limiter.acquire_hash_verification().await;
+
     // ── 4. Stage B: Copy from blob store to temp file + hash ───────────
     let result = stage_copy_to_temp(
         blob_store,
@@ -214,7 +220,7 @@ pub async fn transfer_blob_to_temp(
         total_bytes,
         &cancel_flag,
         &config,
-        &progress_gate,
+        &batched_writer,
         storage,
         download_id,
         network_bytes,
@@ -252,7 +258,7 @@ pub async fn transfer_blob_to_temp(
     }
 
     // ── 6. Verify BLAKE3 hash ──────────────────────────────────────────
-    let expected_hex = hex::encode(descriptor.content_hash.clone());
+    let expected_hex = descriptor.content_hash.clone();
     if hash_hex != expected_hex {
         let _ = tokio::fs::remove_file(&temp_path).await;
         let msg = format!(
@@ -299,7 +305,7 @@ async fn stage_network_download(
     providers: &[PublicKey],
     cancel_flag: &AtomicBool,
     config: &BlobTransferConfig,
-    progress_gate: &ProgressUpdateGate,
+    batcher: &BatchedProgressWriter,
     storage: &Storage,
     download_id: i64,
     total_bytes: u64,
@@ -344,6 +350,15 @@ async fn stage_network_download(
 
         let Some(item) = item else {
             // Stream ended — network download completed successfully.
+            // Force a final flush of any queued progress.
+            if batcher.has_pending() {
+                if let Err(e) = batcher.flush(|batch| storage.flush_progress_batch(batch)) {
+                    warn!(
+                        download_id,
+                        "blob-transfer: final progress persist failed: {e:#}"
+                    );
+                }
+            }
             return Ok(network_bytes);
         };
 
@@ -351,11 +366,9 @@ async fn stage_network_download(
             iroh_blobs::api::downloader::DownloadProgressItem::Progress(n) => {
                 network_bytes = n;
 
-                // Persist progress periodically.
-                if progress_gate.should_persist(Instant::now()) {
-                    if let Err(e) =
-                        storage.update_download_progress(download_id, network_bytes, "downloading")
-                    {
+                // Queue the progress update; flush if the interval has elapsed.
+                if batcher.submit(download_id, network_bytes, "downloading") {
+                    if let Err(e) = batcher.flush(|batch| storage.flush_progress_batch(batch)) {
                         warn!(
                             download_id,
                             bytes = network_bytes,
@@ -401,7 +414,7 @@ async fn stage_copy_to_temp(
     total_bytes: u64,
     cancel_flag: &AtomicBool,
     config: &BlobTransferConfig,
-    progress_gate: &ProgressUpdateGate,
+    batcher: &BatchedProgressWriter,
     storage: &Storage,
     download_id: i64,
     initial_bytes: u64,
@@ -469,12 +482,10 @@ async fn stage_copy_to_temp(
 
         bytes_written += n as u64;
 
-        // ── Persist progress periodically ─────────────────────────
-        if progress_gate.should_persist(Instant::now()) {
-            let total_received = initial_bytes + bytes_written;
-            if let Err(e) =
-                storage.update_download_progress(download_id, total_received, "downloading")
-            {
+        // ── Persist progress periodically via batched writer ──────
+        let total_received = initial_bytes + bytes_written;
+        if batcher.submit(download_id, total_received, "downloading") {
+            if let Err(e) = batcher.flush(|batch| storage.flush_progress_batch(batch)) {
                 warn!(
                     download_id,
                     bytes = total_received,
@@ -499,14 +510,15 @@ async fn stage_copy_to_temp(
     drop(file);
 
     // Force a final progress persist.
-    let _ = progress_gate.should_persist(std::time::Instant::now());
     let total_received = initial_bytes + bytes_written;
-    if let Err(e) = storage.update_download_progress(download_id, total_received, "downloading") {
-        warn!(
-            download_id,
-            bytes = total_received,
-            "blob-transfer: final progress persist failed: {e:#}"
-        );
+    if batcher.submit(download_id, total_received, "downloading") || batcher.has_pending() {
+        if let Err(e) = batcher.flush(|batch| storage.flush_progress_batch(batch)) {
+            warn!(
+                download_id,
+                bytes = total_received,
+                "blob-transfer: final progress persist failed: {e:#}"
+            );
+        }
     }
 
     let hash_hex = hasher.finalize().to_hex().to_string();
@@ -642,7 +654,8 @@ mod tests {
         );
 
         let limiter = DownloadLimiter::new(crate::download_limits::DownloadLimitsConfig {
-            max_active_downloads: 4,
+            max_concurrent_downloads: 5,
+            max_startup_downloads: 3,
             max_downloads_per_peer: 2,
             max_active_hash_verifications: 2,
             max_queued_downloads: 16,

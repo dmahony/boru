@@ -38,8 +38,8 @@ use crate::catalogue_protocol::{
     CatalogErrorCode, CatalogRequest, CatalogResponse, CatalogWireRequest, CatalogWireResponse,
 };
 use crate::catalogue_rate_limits::{
-    write_busy_response, write_rate_limited_response, CatalogueConcurrencyLimiter,
-    PeerCatalogueRateLimiter,
+    write_busy_response, write_rate_limited_response, CatalogueAdmission,
+    CatalogueConcurrencyLimiter, CatalogueRateConfig, PeerCatalogueAbuseLimiter,
 };
 use crate::friends::{FriendId, FriendRelationship, FriendsStore};
 use crate::protocol_version::{
@@ -182,9 +182,8 @@ pub struct CatalogueHandler {
     view_hash_cache: ViewHashCache,
     /// Concurrency limiter — bounds simultaneous catalogue connections.
     concurrency_limiter: Arc<CatalogueConcurrencyLimiter>,
-    /// Per-peer rate limiter — limits requests from a single peer over a
-    /// sliding time window.
-    peer_rate_limiter: Arc<PeerCatalogueRateLimiter>,
+    /// Combined request, response-volume, and malformed-request limiter.
+    abuse_limiter: Arc<PeerCatalogueAbuseLimiter>,
 }
 
 impl CatalogueHandler {
@@ -201,6 +200,24 @@ impl CatalogueHandler {
         profile_user_id: String,
         friends: FriendsStore,
     ) -> Self {
+        Self::with_rate_config(
+            storage,
+            secret_key,
+            profile_user_id,
+            friends,
+            CatalogueRateConfig::default(),
+        )
+    }
+
+    /// Create a handler with explicit request-frequency, response-volume,
+    /// and malformed-request budgets.
+    pub fn with_rate_config(
+        storage: Arc<Storage>,
+        secret_key: SecretKey,
+        profile_user_id: String,
+        friends: FriendsStore,
+        rate_config: CatalogueRateConfig,
+    ) -> Self {
         Self {
             storage,
             secret_key,
@@ -210,10 +227,7 @@ impl CatalogueHandler {
             concurrency_limiter: Arc::new(CatalogueConcurrencyLimiter::new(
                 crate::catalogue_rate_limits::MAX_CONCURRENT_CATALOGUE_CONNECTIONS,
             )),
-            peer_rate_limiter: Arc::new(PeerCatalogueRateLimiter::new(
-                crate::catalogue_rate_limits::MAX_CATALOGUE_REQUESTS_PER_PEER,
-                crate::catalogue_rate_limits::CATALOGUE_RATE_LIMIT_WINDOW,
-            )),
+            abuse_limiter: Arc::new(PeerCatalogueAbuseLimiter::new(&rate_config)),
         }
     }
 
@@ -568,11 +582,13 @@ async fn serve_catalogue(
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let remote_id = connection.remote_id();
 
-    // ── Per-peer rate limiter check ──────────────────────────────────
-    if !handler
-        .peer_rate_limiter
-        .check_and_record(&remote_id.to_string())
-    {
+    // ── Per-peer abuse limiter check ─────────────────────────────────
+    let peer_key = remote_id.to_string();
+    if !matches!(
+        handler.abuse_limiter.admit(&peer_key),
+        CatalogueAdmission::Allowed
+    ) {
+        warn!(peer = %remote_id.fmt_short(), "catalogue: blocked peer request by abuse limit");
         let (mut send, mut recv) = connection.accept_bi().await?;
         // Drain the request data so the stream closes cleanly.
         let _ = tokio::io::copy(&mut recv, &mut tokio::io::sink()).await;
@@ -596,8 +612,16 @@ async fn serve_catalogue(
 
     // ── Reject oversized request payloads ────────────────────────────
     if payload.len() > MAX_CATALOGUE_REQUEST_BYTES {
+        // Oversized payloads are malformed protocol attempts: count them in
+        // the same budget as failed postcard decoding so an attacker cannot
+        // bypass malformed-attempt blocking by sending oversized frames.
+        let remains_unblocked = handler.abuse_limiter.record_invalid(&peer_key);
         let response = CatalogResponse::error(
-            CatalogErrorCode::InvalidRequest,
+            if remains_unblocked {
+                CatalogErrorCode::InvalidRequest
+            } else {
+                CatalogErrorCode::PermissionDenied
+            },
             format!(
                 "request payload too large ({} > {MAX_CATALOGUE_REQUEST_BYTES})",
                 payload.len()
@@ -612,7 +636,29 @@ async fn serve_catalogue(
     }
 
     // Deserialize the inner request.
-    let wire_req: CatalogWireRequest = postcard::from_bytes(&payload)?;
+    let wire_req: CatalogWireRequest = match postcard::from_bytes(&payload) {
+        Ok(request) => request,
+        Err(error) => {
+            let remains_unblocked = handler.abuse_limiter.record_invalid(&peer_key);
+            warn!(
+                peer = %remote_id.fmt_short(),
+                blocked = !remains_unblocked,
+                "catalogue: malformed request rejected: {error}"
+            );
+            let code = if remains_unblocked {
+                CatalogErrorCode::InvalidRequest
+            } else {
+                CatalogErrorCode::PermissionDenied
+            };
+            write_catalogue_response(
+                &mut send,
+                CatalogResponse::error(code, "malformed catalogue request"),
+            )
+            .await?;
+            send.finish()?;
+            return Ok(());
+        }
+    };
     let request = wire_req.inner;
 
     match request {
@@ -787,6 +833,10 @@ async fn serve_catalogue(
                 next_cursor,
             };
             let response = CatalogResponse::CataloguePage(page);
+            handler.abuse_limiter.record_response_bytes(
+                &peer_key,
+                postcard::to_stdvec(&CatalogWireResponse::new(response.clone()))?.len(),
+            );
             write_page_response(&mut send, response).await?;
             send.finish()?;
         }
@@ -892,6 +942,10 @@ async fn serve_catalogue(
             handler.cache_view_hash(&requester_id, current_revision, view_hash);
 
             let response = CatalogResponse::SignedCatalogue(catalogue);
+            handler.abuse_limiter.record_response_bytes(
+                &peer_key,
+                postcard::to_stdvec(&CatalogWireResponse::new(response.clone()))?.len(),
+            );
             write_catalogue_response(&mut send, response).await?;
             send.finish()?;
         }
@@ -913,6 +967,10 @@ async fn serve_catalogue(
                         return Ok(());
                     }
                     let response = CatalogResponse::FileDetails(file);
+                    handler.abuse_limiter.record_response_bytes(
+                        &peer_key,
+                        postcard::to_stdvec(&CatalogWireResponse::new(response.clone()))?.len(),
+                    );
                     write_file_details_response(&mut send, response).await?;
                     send.finish()?;
                 }
@@ -945,9 +1003,7 @@ mod tests {
 
     use crate::catalogue_model::SignedFileCatalogue;
     use crate::catalogue_protocol::CatalogErrorCode;
-    use crate::catalogue_rate_limits::{
-        MAX_CATALOGUE_REQUESTS_PER_PEER, MAX_CONCURRENT_CATALOGUE_CONNECTIONS,
-    };
+    use crate::catalogue_rate_limits::MAX_CONCURRENT_CATALOGUE_CONNECTIONS;
     use crate::friends::{FriendId, FriendRecord, FriendRelationship};
 
     // ── Helpers ─────────────────────────────────────────────────────────
@@ -1665,7 +1721,13 @@ mod tests {
     /// view exceeds file count limits.
     #[test]
     fn test_build_catalogue_rejects_oversized_view() {
-        let storage = Arc::new(Storage::memory().expect("storage"));
+        let storage = Arc::new(
+            Storage::memory_with_catalogue_limits(crate::catalogue_limits::CatalogueLimitsConfig {
+                max_files_per_catalogue: MAX_CATALOGUE_FILES + 1,
+                ..Default::default()
+            })
+            .expect("storage"),
+        );
         let owner_sk = iroh::SecretKey::generate();
         let profile_id = owner_sk.public().to_string();
         let requester_pk = iroh::SecretKey::generate().public();
@@ -2053,40 +2115,6 @@ mod tests {
         assert!(reacquired.is_some(), "should reacquire after release");
     }
 
-    /// The per-peer rate limiter is correctly wired in the handler and
-    /// independently tracks different peers.
-    #[test]
-    fn test_peer_rate_limiter_integration() {
-        let storage = Arc::new(Storage::memory().expect("storage"));
-        let owner_sk = iroh::SecretKey::generate();
-        let profile_id = owner_sk.public().to_string();
-        let friends = FriendsStore::empty_at(std::path::Path::new("/tmp/test-peer-rate"));
-
-        let handler = build_handler(storage, owner_sk, profile_id, friends);
-        let peer_a = "peer_a_long_enough_for_public_key";
-        let peer_b = "peer_b_long_enough_for_public_key";
-
-        // Exhaust peer_a's budget.
-        for i in 0..MAX_CATALOGUE_REQUESTS_PER_PEER as usize {
-            assert!(
-                handler.peer_rate_limiter.check_and_record(peer_a),
-                "peer_a request {} allowed",
-                i + 1
-            );
-        }
-        // Next request from peer_a should be rejected.
-        assert!(
-            !handler.peer_rate_limiter.check_and_record(peer_a),
-            "peer_a should be rate-limited"
-        );
-
-        // peer_b is unaffected.
-        assert!(
-            handler.peer_rate_limiter.check_and_record(peer_b),
-            "peer_b request allowed"
-        );
-    }
-
     /// The `CatalogueHandler` Clone creates independent `Arc` references
     /// to the same shared limiters, so a permit held on one clone is
     /// visible on another.
@@ -2111,26 +2139,5 @@ mod tests {
         // Both original and clone see exhaustion.
         assert!(handler.concurrency_limiter.try_acquire().is_none());
         assert!(cloned.concurrency_limiter.try_acquire().is_none());
-    }
-
-    /// The per-peer rate limiter is shared across handler clones.
-    #[test]
-    fn test_peer_rate_limiter_shared_across_clones() {
-        let peer = "shared_peer_id";
-        let storage = Arc::new(Storage::memory().expect("storage"));
-        let owner_sk = iroh::SecretKey::generate();
-        let profile_id = owner_sk.public().to_string();
-        let friends = FriendsStore::empty_at(std::path::Path::new("/tmp/test-clone-peer"));
-
-        let handler = build_handler(storage, owner_sk, profile_id, friends);
-        let cloned = handler.clone();
-
-        // Exhaust budget through the original.
-        for _ in 0..MAX_CATALOGUE_REQUESTS_PER_PEER {
-            assert!(handler.peer_rate_limiter.check_and_record(peer));
-        }
-
-        // The clone sees the same exhaustion.
-        assert!(!cloned.peer_rate_limiter.check_and_record(peer));
     }
 }

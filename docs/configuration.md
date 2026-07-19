@@ -76,6 +76,51 @@ Currently limited — see `examples/iced_chat/app.rs` for the authoritative list
 | `theme` | String | `"light"` | UI theme (`light`/`dark`) |
 | (future) | | | More settings will be added as the UI matures |
 
+## Catalogue Limits File (`catalogue_limits.json`)
+
+Catalogue request limits can be tuned without rebuilding the application by
+placing `catalogue_limits.json` in the data directory and loading it with
+`CatalogueLimitsConfig::load_from_path`. The loader applies defaults for omitted
+fields, rejects zero values and invalid relationships, and reports malformed
+JSON or unreadable files as an error. The example schema is in
+`docs/catalogue_limits.json`; all fields are positive integers.
+
+The default file location is `<data_dir>/catalogue_limits.json`. Deployments may
+also load another path explicitly at startup. An absent file is not an error;
+callers can use `CatalogueLimitsConfig::default()` when no override is needed.
+
+## Download Limits File (`download_limits.json`)
+
+Download admission can be tuned without rebuilding by loading
+`DownloadLimitsConfig::load_from_path` from `download_limits.json`. The global
+concurrency cap defaults to `5`; downloads restored during startup are capped at
+`3` concurrent transfers; the global queue cap defaults to `32` pending
+downloads.  All limit values must be positive integers.  The example schema is
+in `docs/download_limits.json`.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_concurrent_downloads` | `5` | Maximum active transfers at once |
+| `max_startup_downloads` | `3` | Burst cap for downloads restored on restart |
+| `max_downloads_per_peer` | `2` | Maximum queued+active downloads from one peer |
+| `max_active_hash_verifications` | `2` | CPU-bound hash verification slots |
+| `max_queued_downloads` | `32` | Maximum queued downloads before rejection |
+| `progress_update_interval` | `250ms` | Minimum interval between DB progress writes |
+
+Environment overrides are available through the following variables via
+`DownloadLimitsConfig::from_env()`:
+
+| Variable | Overrides |
+|----------|-----------|
+| `BORU_CHAT_MAX_CONCURRENT_DOWNLOADS` | `max_concurrent_downloads` |
+| `BORU_CHAT_MAX_STARTUP_DOWNLOADS` | `max_startup_downloads` |
+| `BORU_CHAT_MAX_DOWNLOADS_PER_PEER` | `max_downloads_per_peer` |
+| `BORU_CHAT_MAX_QUEUED_DOWNLOADS` | `max_queued_downloads` |
+| `BORU_CHAT_PROGRESS_DB_UPDATE_INTERVAL_MS` | `progress_update_interval` |
+| A startup caller can use `DownloadLimiter::try_enqueue_startup` so restored
+downloads observe the burst cap, while ordinary calls to `try_enqueue` use the
+global concurrency cap.
+
 ## Profile File (`profile.json`)
 
 Stored beside `secret_key.txt` in the data directory.

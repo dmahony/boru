@@ -1,5 +1,12 @@
 /target
 .worktrees/
+.gradle/
+build/
+mobile/.gradle/
+mobile/build/
+app/build/
+__pycache__/
+*.pyc
 *.mp4
 *.exe
 hermes-verify-script.sh

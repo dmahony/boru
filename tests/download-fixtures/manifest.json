@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "hash_algorithm": "sha256",
+  "content_hash_algorithm_used_by_app": "blake3",
+  "large_file_generation": "8 MiB; byte at offset n is n modulo 251; run generate.py to recreate",
+  "fixtures": [
+    {
+      "case": "duplicate-a",
+      "filename": "duplicate-a.txt",
+      "relative_path": "duplicate-a.txt",
+      "size_bytes": 41,
+      "sha256": "30db523bb62502d865aeb0b7bd2150fa2eb8308cadb42b00951c21b249b4deb9",
+      "mime_type": "text/plain",
+      "workflow": "direct",
+      "setup": "Direct download fixture; same bytes as duplicate-b.txt.",
+      "duplicate_group": "identical-content-v1"
+    },
+    {
+      "case": "duplicate-b",
+      "filename": "duplicate-b.txt",
+      "relative_path": "duplicate-b.txt",
+      "size_bytes": 41,
+      "sha256": "30db523bb62502d865aeb0b7bd2150fa2eb8308cadb42b00951c21b249b4deb9",
+      "mime_type": "text/plain",
+      "workflow": "direct",
+      "setup": "Direct download fixture; same bytes as duplicate-a.txt.",
+      "duplicate_group": "identical-content-v1"
+    },
+    {
+      "case": "imported-document",
+      "filename": "imported-document.json",
+      "relative_path": "imported-document.json",
+      "size_bytes": 97,
+      "sha256": "d42ff708ea0bcde7881ca20bde97109af01a20eb45a7ed2c4e64effd9f9bc54f",
+      "mime_type": "application/json",
+      "workflow": "import_file",
+      "setup": "Create this entry through File Library > Import; the source file is this fixture."
+    },
+    {
+      "case": "large-deterministic",
+      "filename": "large-deterministic.bin",
+      "relative_path": "large-deterministic.bin",
+      "size_bytes": 8388608,
+      "sha256": "5440547bf5d6afa98c19bc8e1820380596685cbe99d95b24bf70b201a92b51be",
+      "mime_type": "application/octet-stream",
+      "workflow": "direct",
+      "setup": "Direct download fixture; generated deterministically."
+    },
+    {
+      "case": "referenced-record",
+      "filename": "referenced-record.csv",
+      "relative_path": "referenced-record.csv",
+      "size_bytes": 60,
+      "sha256": "ea69a5d27f19658f738a3a796eab4ce74f4c2b78d186ceb7ca8a2646ab85ff54",
+      "mime_type": "text/csv",
+      "workflow": "offer_referenced_file",
+      "setup": "Create this entry through File Library > Reference/Offer; keep the source path pointing at this fixture."
+    },
+    {
+      "case": "small-message",
+      "filename": "small-message.txt",
+      "relative_path": "small-message.txt",
+      "size_bytes": 39,
+      "sha256": "ba197df209c57f354fc2c747fac804aa780d0d221cb80bba0aaa8d2b11b94cf7",
+      "mime_type": "text/plain",
+      "workflow": "direct",
+      "setup": "Direct download fixture."
+    },
+    {
+      "case": "zero-byte",
+      "filename": "zero-byte.txt",
+      "relative_path": "zero-byte.txt",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "mime_type": "text/plain",
+      "workflow": "direct",
+      "setup": "Zero-byte file; do not import because the application import validator rejects empty files."
+    }
+  ]
+}

@@ -86,7 +86,7 @@ Defaults enforced by the implementation include:
 | File-access preparations | 4 concurrent, 1 GiB/file, 60 s timeout |
 | Active upload requests | 8 global, 2 per peer, 32 queued |
 | Permission verifications | 4 concurrent |
-| Download transfers | 4 global, 1 per peer, 32 queued |
+| Download transfers | 4 global, 2 per peer, 32 queued |
 | Hash verifications | 2 concurrent |
 | Blob transfer timeout / no-progress timeout | 5 min / 30 s |
 

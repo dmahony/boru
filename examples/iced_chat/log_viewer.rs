@@ -73,6 +73,7 @@ pub fn log_file_path(data_dir: &Path) -> PathBuf {
     data_dir.join("logs").join("iced_chat.log")
 }
 
+#[expect(dead_code)]
 pub fn spawn(data_dir: &Path) -> std::result::Result<(), String> {
     build_spawn_command(data_dir)?
         .spawn()
@@ -80,6 +81,7 @@ pub fn spawn(data_dir: &Path) -> std::result::Result<(), String> {
     Ok(())
 }
 
+#[expect(dead_code)]
 fn build_spawn_command(data_dir: &Path) -> std::result::Result<Command, String> {
     let exe =
         std::env::current_exe().map_err(|e| format!("failed to locate current executable: {e}"))?;

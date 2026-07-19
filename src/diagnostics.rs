@@ -10,6 +10,26 @@
 //! the extended lifecycle stages (discovery, address lookup, connection,
 //! subscription, probes).
 //!
+//! # Catalogue lifecycle event contract
+//!
+//! The catalogue protocol emits seven structured events that trace a
+//! catalogue advertisement from receipt through fetch, verification,
+//! and local installation.
+//!
+//! | Event | Required fields | Optional fields | Description |
+//! |---|---|---|---|
+//! | [`DiagnosticEventKind::CatalogueNoticeReceived`] | — | `known_revision` | A remote peer advertised a catalogue (e.g. via gossip). Peer identity is carried by the `record_with_peer` context. |
+//! | [`DiagnosticEventKind::CatalogueFetchStarted`] | — | `known_revision` | A fetch connection to a remote peer was initiated. |
+//! | [`DiagnosticEventKind::CatalogueFetchCompleted`] | `revision`, `file_count`, `collection_count` | — | A fetch completed successfully with a validated response. |
+//! | [`DiagnosticEventKind::CatalogueSignatureRejected`] | `error` | — | The fetched catalogue failed signature or owner-id verification. |
+//! | [`DiagnosticEventKind::CatalogueFetchFailed`] | `error` | — | The fetch failed (timeout, connection error, protocol violation). |
+//! | [`DiagnosticEventKind::CatalogueRevisionInstalled`] | `revision`, `file_count`, `collection_count` | — | A validated catalogue revision was persisted to local storage. |
+//! | [`DiagnosticEventKind::CatalogueCachedDataUsed`] | `cached_revision` | — | Local cached data was served instead of a remote fetch (cache hit or known-revision match). |
+//!
+//! None of these events carry secrets, full catalogue contents, or raw
+//! error internals.  All peer identities are provided via the caller's
+//! `record_with_peer` parameter, not embedded in the event payload.
+//!
 //! # Peer state
 //!
 //! [`PeerDiagnosticState`] tracks the per-peer diagnostic lifecycle — what
@@ -276,6 +296,37 @@ pub enum DiagnosticEventKind {
     CatalogueSignatureRejected {
         /// Reason for the rejection.
         error: String,
+    },
+    /// A notification/advertisement of a new catalogue was received
+    /// from a remote peer (e.g. via gossip or direct discovery).
+    ///
+    /// The peer identity is carried via `record_with_peer`'s `peer_id`
+    /// parameter — this variant only holds the revision metadata from
+    /// the notice message.
+    CatalogueNoticeReceived {
+        /// The catalogue revision advertised by the remote peer, if known.
+        known_revision: Option<u64>,
+    },
+    /// A new catalogue revision was successfully installed in local storage.
+    ///
+    /// This is recorded after a fetched catalogue passes all validation
+    /// checks and is persisted to the database.
+    CatalogueRevisionInstalled {
+        /// The installed revision number.
+        revision: u64,
+        /// Number of files in the installed catalogue.
+        file_count: usize,
+        /// Number of collections in the installed catalogue.
+        collection_count: usize,
+    },
+    /// Locally cached catalogue data was used instead of a remote fetch.
+    ///
+    /// Recorded when the local store already has the current revision or
+    /// when a cache-hit policy chooses to serve the previous revision
+    /// without contacting the remote peer.
+    CatalogueCachedDataUsed {
+        /// The revision of the cached catalogue data that was used.
+        cached_revision: u64,
     },
 
     // ── Blob transfer events ──────────────────────────────────────

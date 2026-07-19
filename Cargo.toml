@@ -127,6 +127,7 @@ parking_lot = { version = "0.12" }
 rusqlite = { version = "0.39", features = ["bundled"] }
 anyhow = "1.0.103"
 socket2 = "0.5"
+unicode-normalization = "0.1"
 
 
 [dev-dependencies]
@@ -281,6 +282,11 @@ path = "tests/test_serde_format.rs"
 required-features = ["net"]
 
 [[test]]
+name = "test_fixture"
+path = "tests/test_fixture.rs"
+required-features = ["net", "test-utils"]
+
+[[test]]
 name = "test_storage_integration"
 path = "tests/test_storage_integration.rs"
 required-features = ["net"]
@@ -299,3 +305,59 @@ required-features = ["net"]
 name = "test_sync_after_downtime"
 path = "tests/test_sync_after_downtime.rs"
 required-features = ["net"]
+
+[[test]]
+name = "test_malformed_catalogue"
+path = "tests/test_malformed_catalogue.rs"
+required-features = ["net"]
+
+[[test]]
+name = "test_pause_scenarios"
+path = "tests/test_pause_scenarios.rs"
+required-features = ["net"]
+
+[[test]]
+name = "test_download_initiation_integration"
+path = "tests/test_download_initiation_integration.rs"
+required-features = ["net"]
+
+[[test]]
+name = "test_restart_storm_prevention"
+path = "tests/test_restart_storm_prevention.rs"
+required-features = ["net"]
+
+[[test]]
+name = "test_resource_exhaustion"
+path = "tests/test_resource_exhaustion.rs"
+required-features = ["net"]
+
+[[test]]
+name = "test_download_queue_order"
+path = "tests/test_download_queue_order.rs"
+required-features = ["net"]
+
+[[test]]
+name = "test_stable_identities"
+path = "tests/test_stable_identities.rs"
+required-features = ["net", "test-utils"]
+
+[[test]]
+name = "test_peer_lifecycle"
+path = "tests/test_peer_lifecycle.rs"
+required-features = ["net", "test-utils"]
+
+[[test]]
+name = "test_catalogue_harness"
+path = "tests/test_catalogue_harness.rs"
+required-features = ["net"]
+
+[[test]]
+name = "test_deterministic_harness"
+path = "tests/test_deterministic_harness.rs"
+required-features = ["net", "test-utils"]
+
+[[test]]
+name = "test_remote_catalogue_integration"
+path = "tests/test_remote_catalogue_integration.rs"
+required-features = ["net"]
+

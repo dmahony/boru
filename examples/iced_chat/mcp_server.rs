@@ -185,6 +185,7 @@ pub fn validate_target_state(s: &str) -> Result<(), String> {
 
 /// Validate that a string does not contain filesystem path separators
 /// or shell metacharacters.
+#[expect(dead_code)]
 pub fn validate_no_path_or_shell(s: &str, name: &str) -> Result<(), String> {
     if s.contains('/') || s.contains('\\') {
         return Err(format!(
@@ -278,6 +279,7 @@ pub struct McpAppState {
     /// Current application version.
     pub version: String,
     /// Channel to send gossip messages through the mesh.
+    #[expect(dead_code)]
     pub gossip_tx: tokio::sync::mpsc::UnboundedSender<ConversationNetEvent>,
     /// Secret key for signing outgoing messages (probes, etc.).
     pub secret_key: SecretKey,
@@ -434,13 +436,13 @@ async fn handle_connection(
 /// Handle a single JSON-RPC request and produce a response.
 async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcResponse {
     let result = match req.method.as_str() {
-        "boru_ping" => handle_ping(state).await,
-        "boru_get_node_status" => handle_get_node_status(state).await,
-        "boru_get_room_status" => handle_get_room_status(req, state).await,
-        "boru_get_discovery_events" => handle_get_discovery_events(req, state).await,
+        "boru_ping" => handle_ping(state),
+        "boru_get_node_status" => handle_get_node_status(state),
+        "boru_get_room_status" => handle_get_room_status(req, state),
+        "boru_get_discovery_events" => handle_get_discovery_events(req, state),
         "boru_send_probe" => handle_send_probe(req, state).await,
-        "boru_find_received_probe" => handle_find_received_probe(req, state).await,
-        "boru_get_peer_status" => handle_get_peer_status(req, state).await,
+        "boru_find_received_probe" => handle_find_received_probe(req, state),
+        "boru_get_peer_status" => handle_get_peer_status(req, state),
         "boru_wait_for_peer" => handle_wait_for_peer(req, state).await,
         "boru_run_discovery_test" => handle_run_discovery_test(req, state).await,
         "boru_join_lobby_room" => {
@@ -463,7 +465,7 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                     "GUI test actions are not enabled. Start with --enable-gui-test-actions.",
                 );
             }
-            handle_get_iced_state(state).await
+            handle_get_iced_state(state)
         }
 
         "boru_get_iced_message_journal" => {
@@ -475,10 +477,10 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                     "GUI test actions are not enabled. Start with --enable-gui-test-actions.",
                 );
             }
-            handle_get_iced_message_journal(req, state).await
+            handle_get_iced_message_journal(req, state)
         }
 
-        "boru_get_failure_analysis" => handle_get_failure_analysis(req, state).await,
+        "boru_get_failure_analysis" => handle_get_failure_analysis(req, state),
 
         // `boru_gui_wait_for_state` is read-only and does not require the action queue.
         "boru_gui_wait_for_state" => {
@@ -523,8 +525,8 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
             let tx = state.gui_action_tx.clone().unwrap();
             match req.method.as_str() {
                 // Read-only tools — excluded from restrictive rate limit
-                "boru_gui_get_action_status" => handle_get_gui_action_status(req, state).await,
-                "boru_get_gui_snapshot" => handle_get_gui_snapshot(state).await,
+                "boru_gui_get_action_status" => handle_get_gui_action_status(req, state),
+                "boru_get_gui_snapshot" => handle_get_gui_snapshot(state),
 
                 // Mutating tools — rate-limited
                 "boru_send_gui_action"
@@ -541,16 +543,16 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                         return jsonrpc_error(req.id.clone(), -32000, "Rate limit exceeded", &e);
                     }
                     match req.method.as_str() {
-                        "boru_send_gui_action" => handle_send_gui_action(req, tx).await,
-                        "boru_gui_navigate" => handle_gui_navigate(req, tx).await,
-                        "boru_gui_set_composer" => handle_set_composer(req, tx).await,
-                        "boru_gui_clear_composer" => handle_composer_control("clear", tx).await,
-                        "boru_gui_focus_composer" => handle_composer_control("focus", tx).await,
-                        "boru_gui_open_room" => handle_gui_open_room(req, tx).await,
-                        "boru_gui_open_conversation" => handle_gui_open_conversation(req, tx).await,
-                        "boru_gui_submit_composer" => handle_submit_composer(tx).await,
-                        "boru_gui_toggle_dark_mode" => handle_gui_toggle_dark_mode(req, tx).await,
-                        "boru_gui_close_dialog" => handle_gui_close_dialog(tx).await,
+                        "boru_send_gui_action" => handle_send_gui_action(req, tx),
+                        "boru_gui_navigate" => handle_gui_navigate(req, tx),
+                        "boru_gui_set_composer" => handle_set_composer(req, tx),
+                        "boru_gui_clear_composer" => handle_composer_control("clear", tx),
+                        "boru_gui_focus_composer" => handle_composer_control("focus", tx),
+                        "boru_gui_open_room" => handle_gui_open_room(req, tx),
+                        "boru_gui_open_conversation" => handle_gui_open_conversation(req, tx),
+                        "boru_gui_submit_composer" => handle_submit_composer(tx),
+                        "boru_gui_toggle_dark_mode" => handle_gui_toggle_dark_mode(req, tx),
+                        "boru_gui_close_dialog" => handle_gui_close_dialog(tx),
                         _ => unreachable!(),
                     }
                 }
@@ -656,7 +658,7 @@ fn validate_gui_tool_params(method: &str, params: &Value) -> Result<(), String> 
 }
 
 /// `boru_send_gui_action` — send a GUI test command through the channel.
-async fn handle_send_gui_action(
+fn handle_send_gui_action(
     req: &JsonRpcRequest,
     tx: boru_chat::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
@@ -759,7 +761,7 @@ async fn handle_send_gui_action(
 /// - Input is bounded to `MAX_PROBE_ID_LEN` (64 chars).
 /// - Control characters are rejected.
 /// - No secrets (keys, tickets, tokens) are exposed.
-async fn handle_get_gui_action_status(
+fn handle_get_gui_action_status(
     req: &JsonRpcRequest,
     state: &McpAppState,
 ) -> Result<Value, String> {
@@ -873,7 +875,7 @@ async fn handle_gui_wait_for_state(
 }
 
 /// `boru_get_gui_snapshot` — snapshot of current GUI application state.
-async fn handle_get_gui_snapshot(state: &McpAppState) -> Result<Value, String> {
+fn handle_get_gui_snapshot(state: &McpAppState) -> Result<Value, String> {
     let journal = &state.iced_diagnostics;
     Ok(serde_json::json!({
         "journal_entry_count": journal.entry_count(),
@@ -897,7 +899,7 @@ async fn handle_get_gui_snapshot(state: &McpAppState) -> Result<Value, String> {
 /// - Full text is NOT logged — only character count or truncated prefix is emitted.
 /// - Input exceeding [`MAX_COMPOSER_LEN`] is clamped rather than passed through.
 /// - Control characters are rejected.
-async fn handle_set_composer(
+fn handle_set_composer(
     req: &JsonRpcRequest,
     tx: boru_chat::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
@@ -1002,7 +1004,7 @@ async fn handle_set_composer(
 /// - The `action_id` is a server-generated unique key, not a caller-supplied
 ///   value, preventing caller-controlled data from appearing in the
 ///   response's structural fields.
-async fn handle_gui_open_room(
+fn handle_gui_open_room(
     req: &JsonRpcRequest,
     tx: boru_chat::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
@@ -1086,7 +1088,7 @@ async fn handle_gui_open_room(
 /// - Control characters are rejected.
 /// - No secrets (keys, tickets, tokens) are exposed.
 /// - Full conversation_id is NOT logged — only length is emitted.
-async fn handle_gui_open_conversation(
+fn handle_gui_open_conversation(
     req: &JsonRpcRequest,
     tx: boru_chat::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
@@ -1176,9 +1178,7 @@ async fn handle_gui_open_conversation(
 ///
 /// - No secrets are exposed — the composer text is never read or logged.
 /// - Rate-limited by the shared `GuiActionRateLimiter`.
-async fn handle_submit_composer(
-    tx: boru_chat::diagnostics::GuiTestHandle,
-) -> Result<Value, String> {
+fn handle_submit_composer(tx: boru_chat::diagnostics::GuiTestHandle) -> Result<Value, String> {
     info!("boru_gui_submit_composer: SubmitComposer action queued");
 
     let idempotency_key = crate::gui_test_actions::generate_action_key();
@@ -1214,7 +1214,7 @@ async fn handle_submit_composer(
 }
 
 /// Queue a parameterless semantic composer control action.
-async fn handle_composer_control(
+fn handle_composer_control(
     control: &str,
     tx: boru_chat::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
@@ -1276,9 +1276,7 @@ async fn handle_composer_control(
 ///
 /// - No caller-supplied input is involved — the command has no parameters.
 /// - Rate-limited by the shared `GuiActionRateLimiter`.
-async fn handle_gui_close_dialog(
-    tx: boru_chat::diagnostics::GuiTestHandle,
-) -> Result<Value, String> {
+fn handle_gui_close_dialog(tx: boru_chat::diagnostics::GuiTestHandle) -> Result<Value, String> {
     info!("boru_gui_close_dialog: CloseDialog action queued");
 
     let idempotency_key = crate::gui_test_actions::generate_action_key();
@@ -1548,6 +1546,7 @@ impl GuiNavigateDestination {
     }
 
     /// Iterate over all supported destination strings.
+    #[expect(dead_code)]
     pub fn all_destinations() -> &'static [&'static str] {
         &["chat_list", "friends", "settings"]
     }
@@ -1587,6 +1586,7 @@ impl std::fmt::Display for GuiNavigateDestination {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[expect(dead_code)]
 pub struct GuiNavigateParams {
     /// Destination screen: `"chat_list"`, `"friends"`, or `"settings"`.
     pub destination: GuiNavigateDestination,
@@ -1696,7 +1696,7 @@ pub struct GuiNavigateResponse {
 ///   queued_at_ms: number;  // ms since Unix epoch
 /// }
 /// ```
-async fn handle_gui_navigate(
+fn handle_gui_navigate(
     req: &JsonRpcRequest,
     tx: boru_chat::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
@@ -1781,7 +1781,7 @@ async fn handle_gui_navigate(
 /// - Rate-limited by the shared `GuiActionRateLimiter`.
 /// - The `action_id` is a server-generated unique key, not a
 ///   caller-supplied value.
-async fn handle_gui_toggle_dark_mode(
+fn handle_gui_toggle_dark_mode(
     req: &JsonRpcRequest,
     tx: boru_chat::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
@@ -1833,6 +1833,7 @@ async fn handle_gui_toggle_dark_mode(
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
     #[serde(default)]
+    #[expect(dead_code)]
     pub jsonrpc: String,
     pub method: String,
     #[serde(default)]
@@ -1872,6 +1873,7 @@ fn jsonrpc_error(id: Option<Value>, code: i32, message: &str, data: &str) -> Jso
     }
 }
 
+#[expect(dead_code)]
 fn jsonrpc_success(id: Option<Value>, result: Value) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".to_string(),
@@ -1891,12 +1893,12 @@ fn jsonrpc_success(id: Option<Value>, result: Value) -> JsonRpcResponse {
 /// possible MCP tool — it does not touch the endpoint, diagnostics store,
 /// or any shared state.  Clients should use this to verify MCP JSON-RPC
 /// responsiveness before calling heavier tools like `boru_get_node_status`.
-async fn handle_ping(_state: &McpAppState) -> Result<Value, String> {
+fn handle_ping(_state: &McpAppState) -> Result<Value, String> {
     Ok(serde_json::json!({ "pong": true }))
 }
 
 /// `boru_get_node_status` — local node identity and status.
-async fn handle_get_node_status(state: &McpAppState) -> Result<Value, String> {
+fn handle_get_node_status(state: &McpAppState) -> Result<Value, String> {
     let local_id = state.endpoint.id().fmt_short().to_string();
     let relay_url = state
         .endpoint
@@ -1977,10 +1979,7 @@ async fn handle_join_lobby_room(
 }
 
 /// `boru_get_room_status` — room membership and peer summary.
-async fn handle_get_room_status(
-    req: &JsonRpcRequest,
-    state: &McpAppState,
-) -> Result<Value, String> {
+fn handle_get_room_status(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
     let room_str = req
         .params
         .get("room_id")
@@ -2033,10 +2032,7 @@ async fn handle_get_room_status(
 }
 
 /// `boru_get_discovery_events` — recent diagnostic events.
-async fn handle_get_discovery_events(
-    req: &JsonRpcRequest,
-    state: &McpAppState,
-) -> Result<Value, String> {
+fn handle_get_discovery_events(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
     let since_sequence = req
         .params
         .get("since_sequence")
@@ -2183,10 +2179,7 @@ async fn handle_send_probe(req: &JsonRpcRequest, state: &McpAppState) -> Result<
 }
 
 /// `boru_find_received_probe` — look up a received probe by ID.
-async fn handle_find_received_probe(
-    req: &JsonRpcRequest,
-    state: &McpAppState,
-) -> Result<Value, String> {
+fn handle_find_received_probe(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
     let probe_id = req
         .params
         .get("probe_id")
@@ -2218,10 +2211,7 @@ async fn handle_find_received_probe(
 }
 
 /// `boru_get_peer_status` — per-peer diagnostic state.
-async fn handle_get_peer_status(
-    req: &JsonRpcRequest,
-    state: &McpAppState,
-) -> Result<Value, String> {
+fn handle_get_peer_status(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
     let peer_id = req
         .params
         .get("peer_id")
@@ -2540,7 +2530,7 @@ async fn handle_run_discovery_test(
 }
 
 /// `boru_get_iced_state` — snapshot of the current Iced application state.
-async fn handle_get_iced_state(state: &McpAppState) -> Result<Value, String> {
+fn handle_get_iced_state(state: &McpAppState) -> Result<Value, String> {
     let journal = &state.iced_diagnostics;
     Ok(serde_json::json!({
         "message": "Iced diagnostics available",
@@ -2553,7 +2543,7 @@ async fn handle_get_iced_state(state: &McpAppState) -> Result<Value, String> {
 }
 
 /// `boru_get_iced_message_journal` — recent Iced AppMessage processing history.
-async fn handle_get_iced_message_journal(
+fn handle_get_iced_message_journal(
     req: &JsonRpcRequest,
     state: &McpAppState,
 ) -> Result<Value, String> {
@@ -2580,10 +2570,7 @@ async fn handle_get_iced_message_journal(
 }
 
 /// `boru_get_failure_analysis` — combined failure analysis across all layers.
-async fn handle_get_failure_analysis(
-    req: &JsonRpcRequest,
-    state: &McpAppState,
-) -> Result<Value, String> {
+fn handle_get_failure_analysis(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
     let since_sequence = req
         .params
         .get("since_sequence")

@@ -1,16 +1,16 @@
 //! Rate-limit enforcement for catalogue protocol connections.
 //!
-//! Two independent limiters:
+//! Catalogue abuse controls:
 //!
 //! 1. **Concurrency limiter** (`CatalogueConcurrencyLimiter`) — caps the number
 //!    of catalogue connections being served simultaneously.  When the limit is
 //!    reached, new connections receive a [`CatalogResponse::Error`] with
 //!    [`CatalogErrorCode::Busy`].
 //!
-//! 2. **Per-peer rate limiter** (`PeerCatalogueRateLimiter`) — limits the number
-//!    of requests from a single peer over a sliding time window.  When a peer
-//!    exceeds the limit, new requests receive
-//!    [`CatalogErrorCode::RateLimited`].
+//! 2. **Combined per-peer abuse limiter** (`PeerCatalogueAbuseLimiter`) —
+//!    limits request frequency and response volume, and blocks peers that
+//!    exceed the malformed-request budget.  Oversized request payloads count
+//!    as malformed attempts, as do failed postcard decodes.
 //!
 //! Both limiters use `Mutex` (not `tokio::sync::Mutex`) because their
 //! critical sections are synchronous and never hold a lock across an `.await`
@@ -38,6 +38,12 @@ pub const MAX_CATALOGUE_REQUESTS_PER_PEER: u32 = 32;
 /// Duration of the sliding rate-limit window for per-peer accounting.
 pub const CATALOGUE_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(10);
 
+/// Default maximum number of response bytes served to one peer in a window.
+pub const MAX_CATALOGUE_RESPONSE_BYTES_PER_PEER: usize = 16 * 1024 * 1024;
+
+/// Default number of malformed requests tolerated by one peer in a window.
+pub const MAX_INVALID_CATALOGUE_ATTEMPTS_PER_PEER: u32 = 3;
+
 // ── Configuration ──────────────────────────────────────────────────────────
 
 /// Tuning parameters for catalogue rate limits.
@@ -59,6 +65,12 @@ pub struct CatalogueRateConfig {
     /// Duration of the sliding rate-limit window for per-peer accounting.
     /// Default: 10 seconds.
     pub rate_limit_window: Duration,
+
+    /// Maximum response bytes served to one peer in the same window.
+    pub max_response_bytes_per_peer: usize,
+
+    /// Maximum malformed requests tolerated by one peer in the same window.
+    pub max_invalid_attempts_per_peer: u32,
 }
 
 impl Default for CatalogueRateConfig {
@@ -67,7 +79,129 @@ impl Default for CatalogueRateConfig {
             max_concurrent_connections: 16,
             max_requests_per_peer: 10,
             rate_limit_window: Duration::from_secs(10),
+            max_response_bytes_per_peer: MAX_CATALOGUE_RESPONSE_BYTES_PER_PEER,
+            max_invalid_attempts_per_peer: MAX_INVALID_CATALOGUE_ATTEMPTS_PER_PEER,
         }
+    }
+}
+
+/// Result of admitting a catalogue request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogueAdmission {
+    /// The request may be processed.
+    Allowed,
+    /// The peer exceeded its request-frequency budget.
+    RateLimited,
+    /// The peer exceeded its response-byte budget.
+    ResponseBudgetExceeded,
+    /// The peer has sent too many malformed requests and is blocked.
+    Blocked,
+}
+
+#[derive(Debug, Default)]
+struct PeerAbuseWindow {
+    requests: VecDeque<Instant>,
+    responses: VecDeque<(Instant, usize)>,
+    invalid: VecDeque<Instant>,
+}
+
+/// Combined per-peer abuse limiter for request frequency, response volume,
+/// and malformed-request attempts.
+///
+/// State is keyed by the authenticated peer identity (not an untrusted string
+/// such as an IP header). All counters use the same sliding window and are
+/// purged on every operation, so idle peers do not retain stale accounting.
+#[derive(Debug)]
+pub struct PeerCatalogueAbuseLimiter {
+    windows: Mutex<HashMap<String, PeerAbuseWindow>>,
+    max_requests: u32,
+    max_response_bytes: usize,
+    max_invalid_attempts: u32,
+    window_duration: Duration,
+}
+
+impl PeerCatalogueAbuseLimiter {
+    /// Create a limiter using the request, byte, and invalid-attempt budgets
+    /// from `config`.
+    pub fn new(config: &CatalogueRateConfig) -> Self {
+        Self {
+            windows: Mutex::new(HashMap::new()),
+            max_requests: config.max_requests_per_peer.max(1),
+            max_response_bytes: config.max_response_bytes_per_peer.max(1),
+            max_invalid_attempts: config.max_invalid_attempts_per_peer.max(1),
+            window_duration: config.rate_limit_window,
+        }
+    }
+
+    fn purge(window: &mut PeerAbuseWindow, cutoff: Instant) {
+        while window.requests.front().is_some_and(|t| *t < cutoff) {
+            window.requests.pop_front();
+        }
+        while window.responses.front().is_some_and(|(t, _)| *t < cutoff) {
+            window.responses.pop_front();
+        }
+        while window.invalid.front().is_some_and(|t| *t < cutoff) {
+            window.invalid.pop_front();
+        }
+    }
+
+    /// Admit one request. The request counter is recorded only when allowed.
+    pub fn admit(&self, peer: &str) -> CatalogueAdmission {
+        let now = Instant::now();
+        let mut windows = self
+            .windows
+            .lock()
+            .expect("catalogue abuse limiter poisoned");
+        let window = windows.entry(peer.to_owned()).or_default();
+        Self::purge(window, now - self.window_duration);
+        if window.invalid.len() as u32 >= self.max_invalid_attempts {
+            return CatalogueAdmission::Blocked;
+        }
+        let response_bytes: usize = window.responses.iter().map(|(_, bytes)| *bytes).sum();
+        if response_bytes >= self.max_response_bytes {
+            return CatalogueAdmission::ResponseBudgetExceeded;
+        }
+        if window.requests.len() as u32 >= self.max_requests {
+            return CatalogueAdmission::RateLimited;
+        }
+        window.requests.push_back(now);
+        CatalogueAdmission::Allowed
+    }
+
+    /// Record bytes actually written to a peer after a successful response.
+    pub fn record_response_bytes(&self, peer: &str, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let now = Instant::now();
+        let mut windows = self
+            .windows
+            .lock()
+            .expect("catalogue abuse limiter poisoned");
+        let window = windows.entry(peer.to_owned()).or_default();
+        Self::purge(window, now - self.window_duration);
+        window.responses.push_back((now, bytes));
+    }
+
+    /// Record a malformed request. Returns whether the peer remains unblocked.
+    pub fn record_invalid(&self, peer: &str) -> bool {
+        let now = Instant::now();
+        let mut windows = self
+            .windows
+            .lock()
+            .expect("catalogue abuse limiter poisoned");
+        let window = windows.entry(peer.to_owned()).or_default();
+        Self::purge(window, now - self.window_duration);
+        window.invalid.push_back(now);
+        (window.invalid.len() as u32) <= self.max_invalid_attempts
+    }
+
+    /// Clear all accounting for one peer.
+    pub fn reset_peer(&self, peer: &str) {
+        self.windows
+            .lock()
+            .expect("catalogue abuse limiter poisoned")
+            .remove(peer);
     }
 }
 
@@ -333,6 +467,59 @@ mod tests {
         let limiter = PeerCatalogueRateLimiter::new(0, Duration::from_secs(60));
         // Even 0 is clamped to 1.
         assert!(limiter.check_and_record("p"), "min 1 request allowed");
+    }
+
+    #[test]
+    fn abuse_limiter_enforces_request_and_response_budgets() {
+        let config = CatalogueRateConfig {
+            max_requests_per_peer: 2,
+            max_response_bytes_per_peer: 10,
+            max_invalid_attempts_per_peer: 3,
+            rate_limit_window: Duration::from_millis(20),
+            ..CatalogueRateConfig::default()
+        };
+        let limiter = PeerCatalogueAbuseLimiter::new(&config);
+        assert_eq!(limiter.admit("peer"), CatalogueAdmission::Allowed);
+        limiter.record_response_bytes("peer", 10);
+        assert_eq!(
+            limiter.admit("peer"),
+            CatalogueAdmission::ResponseBudgetExceeded
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(limiter.admit("peer"), CatalogueAdmission::Allowed);
+    }
+
+    #[test]
+    fn abuse_limiter_blocks_invalid_attempts_until_window_expires() {
+        let config = CatalogueRateConfig {
+            max_invalid_attempts_per_peer: 1,
+            rate_limit_window: Duration::from_millis(20),
+            ..CatalogueRateConfig::default()
+        };
+        let limiter = PeerCatalogueAbuseLimiter::new(&config);
+        assert!(limiter.record_invalid("peer"));
+        assert!(!limiter.record_invalid("peer"));
+        assert_eq!(limiter.admit("peer"), CatalogueAdmission::Blocked);
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(limiter.admit("peer"), CatalogueAdmission::Allowed);
+    }
+
+    #[test]
+    fn oversized_payload_attempts_share_malformed_budget() {
+        let config = CatalogueRateConfig {
+            max_invalid_attempts_per_peer: 1,
+            ..CatalogueRateConfig::default()
+        };
+        let limiter = PeerCatalogueAbuseLimiter::new(&config);
+
+        // The handler records both oversized payloads and decode failures via
+        // record_invalid, so neither form can bypass the same block threshold.
+        assert!(limiter.record_invalid("peer"), "first oversized attempt");
+        assert!(
+            !limiter.record_invalid("peer"),
+            "second oversized attempt blocks"
+        );
+        assert_eq!(limiter.admit("peer"), CatalogueAdmission::Blocked);
     }
 
     // ── Response helpers ─────────────────────────────────────────────

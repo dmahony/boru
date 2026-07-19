@@ -12,6 +12,9 @@
 //!   8. large catalogue pagination
 //!   9. revision change during pagination
 //!   10. offline stale cache display
+//!   11. revoke explicit permission mid-session (operation-time check)
+//!   12. dynamic block between fetches (per-connection authorisation)
+//!   13. unauthorised requester denied for explicitly-granted file
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -803,4 +806,262 @@ async fn offline_stale_cache_display() {
     );
 
     drop(cli_ep);
+}
+
+// -- Permission helpers (beyond the basic helpers above) ------------------------
+
+/// Grant a read permission to a peer on a specific file.  The file enters
+/// *selected-peers* mode once at least one explicit permission exists.
+fn grant_read(storage: &Storage, profile_id: &str, grantee_pk: &PublicKey, content_hash: &str) {
+    storage
+        .grant_permission(
+            content_hash,
+            profile_id,
+            &grantee_pk.to_string(),
+            "read",
+            None,
+        )
+        .expect("grant read permission");
+}
+
+/// Revoke a previously granted read permission from a peer on a specific file.
+/// If no remaining permissions exist, the file falls back to contacts-only mode.
+fn revoke_read(storage: &Storage, profile_id: &str, grantee_pk: &PublicKey, content_hash: &str) {
+    let removed = storage
+        .revoke_permission(content_hash, profile_id, &grantee_pk.to_string(), "read")
+        .expect("revoke read permission");
+    assert!(removed, "revoke must find and remove the permission row");
+}
+
+// -- Test 11: Revoke explicit permission mid-session ----------------------------
+//
+// Fetch a catalogue, then revoke the requester's read grant on a file without
+// restarting the server, then re-fetch.  The file must be absent from the
+// second response — proving authorisation is evaluated against current storage
+// state at operation time, not against cached permissions baked into the first
+// signed catalogue.
+//
+// We keep the file in *selected-peers* mode by granting access to a third
+// party (Charlie) in addition to Alice.  When Alice's grant is revoked the
+// file remains selected-peers (Charlie's grant still exists), so Alice,
+// lacking an explicit grant, no longer sees it — even though she is a friend.
+
+#[tokio::test]
+async fn revoke_explicit_permission_after_fetch() {
+    let server_sk = SecretKey::generate();
+    let server_pk = server_sk.public();
+    let alice_sk = SecretKey::generate();
+    let alice_pk = alice_sk.public();
+    let charlie_pk = SecretKey::generate().public();
+
+    let profile_user_id = server_pk.to_string();
+    let (storage, _dir) = make_storage();
+    init_manifest(&storage, &profile_user_id);
+
+    // File A: contacts-only (no explicit grants) → visible to all friends.
+    add_file(&storage, &profile_user_id, "hash_a", "contacts.txt", true);
+    // File B: selected-peers with read grants to Alice AND Charlie.
+    add_file(&storage, &profile_user_id, "hash_b", "granted.txt", true);
+    grant_read(&storage, &profile_user_id, &alice_pk, "hash_b");
+    grant_read(&storage, &profile_user_id, &charlie_pk, "hash_b");
+    // File B now has two explicit grants → stays selected-peers even after
+    // one is revoked.
+
+    let friends_dir = TempDir::new().expect("friends temp dir");
+    let mut friends = FriendsStore::empty_at(friends_dir.path());
+    make_friend(&mut friends, &alice_pk);
+
+    let (router, ep) =
+        create_server(storage.clone(), server_sk, profile_user_id.clone(), friends).await;
+
+    let (cli_ep, lookup) = create_client_with_key(Some(alice_sk)).await;
+    lookup.set_endpoint_info(ep.addr());
+
+    // ── First fetch: Alice sees both files ─────────────────────────────
+    let first = fetch_remote_catalogue(&cli_ep, server_pk, None)
+        .await
+        .expect("first fetch should succeed");
+    assert_eq!(first.files.len(), 2, "Alice sees both files initially");
+    let hashes: Vec<&str> = first
+        .files
+        .iter()
+        .map(|f| f.content_hash.as_str())
+        .collect();
+    assert!(hashes.contains(&"hash_a"), "contacts-only file visible");
+    assert!(hashes.contains(&"hash_b"), "granted file visible");
+
+    // ── Revoke Alice's explicit read grant on hash_b ───────────────────
+    // No server restart — the handler shares the same Arc<Storage>.
+    // Charlie's grant remains, so the file stays in selected-peers mode.
+    revoke_read(&storage, &profile_user_id, &alice_pk, "hash_b");
+
+    // ── Second fetch: Alice should no longer see hash_b ────────────────
+    // If authorisation were trusted from the first signed catalogue (or from
+    // any cached state), hash_b would still appear.  Because the handler
+    // re-reads permissions from Storage on every request, the revocation
+    // takes effect immediately.
+    let second = fetch_remote_catalogue(&cli_ep, server_pk, None)
+        .await
+        .expect("second fetch should succeed");
+    assert_eq!(
+        second.files.len(),
+        1,
+        "only contacts-only file after revocation"
+    );
+    assert_eq!(
+        second.files[0].content_hash, "hash_a",
+        "contacts-only file remains; granted file is gone"
+    );
+
+    drop(cli_ep);
+    drop(router);
+    drop(ep);
+}
+
+// -- Test 12: Dynamic block between fetches ----------------------------------
+//
+// Fetch successfully as a friend, then stop the server, replace it with a new
+// instance that marks the peer as blocked, then re-fetch and verify
+// PermissionDenied.  This proves that the friend-relationship check is
+// evaluated per-connection (or per-server-start) and not cached from the
+// first successful handshake.
+
+#[tokio::test]
+async fn dynamic_block_between_fetches() {
+    let server_sk = SecretKey::generate();
+    let server_pk = server_sk.public();
+    let alice_sk = SecretKey::generate();
+    let alice_pk = alice_sk.public();
+
+    let profile_user_id = server_pk.to_string();
+    let (storage, _dir) = make_storage();
+    init_manifest(&storage, &profile_user_id);
+    add_file(&storage, &profile_user_id, "some_file", "data.txt", true);
+
+    // ── First server: Alice is a friend ─────────────────────────────────
+    let friends_dir_a = TempDir::new().expect("friends temp dir a");
+    let mut friends_a = FriendsStore::empty_at(friends_dir_a.path());
+    make_friend(&mut friends_a, &alice_pk);
+
+    let (router_a, ep_a) = create_server(
+        storage.clone(),
+        server_sk.clone(),
+        profile_user_id.clone(),
+        friends_a,
+    )
+    .await;
+
+    // Freshest client endpoint for each fetch avoids any lingering QUIC
+    // connection state from a previous (now-closed) server instance.
+    let (cli_ep_a, lookup_a) = create_client_with_key(Some(alice_sk.clone())).await;
+    lookup_a.set_endpoint_info(ep_a.addr());
+
+    // First fetch — should succeed (Alice is a friend).
+    let first = fetch_remote_catalogue(&cli_ep_a, server_pk, None)
+        .await
+        .expect("friend should fetch successfully");
+    assert_eq!(first.files.len(), 1, "friend sees the offered file");
+    drop(cli_ep_a);
+
+    // Tear down the first server before starting the second.
+    drop(router_a);
+    drop(ep_a);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // ── Second server: Alice is now blocked ────────────────────────────
+    // Same storage, same server identity — only the FriendsStore differs.
+    let friends_dir_b = TempDir::new().expect("friends temp dir b");
+    let mut friends_b = FriendsStore::empty_at(friends_dir_b.path());
+    make_blocked(&mut friends_b, &alice_pk);
+
+    let (router_b, ep_b) = create_server(
+        storage.clone(),
+        server_sk.clone(),
+        profile_user_id.clone(),
+        friends_b,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Fresh client endpoint for the second fetch.
+    let (cli_ep_b, lookup_b) = create_client_with_key(Some(alice_sk)).await;
+    lookup_b.set_endpoint_info(ep_b.addr());
+
+    // Second fetch — must fail with PermissionDenied.
+    let err = fetch_remote_catalogue(&cli_ep_b, server_pk, None)
+        .await
+        .expect_err("blocked peer must be denied");
+    assert!(
+        matches!(err, RemoteCatalogueFetchError::PermissionDenied),
+        "expected PermissionDenied after block, got {:?}",
+        err
+    );
+
+    drop(cli_ep_b);
+    drop(router_b);
+    drop(ep_b);
+}
+
+// -- Test 13: Unauthorized requester denied for explicitly-granted file -------
+//
+// A file with an explicit grant for Alice only (selected-peers mode) must NOT
+// be served to Bob, even though Bob is a friend.  This verifies that
+// authorisation is per-requester and that a requester different from the one
+// named in the descriptor (grant) is correctly denied.
+
+#[tokio::test]
+async fn unauthorized_requester_missing_grant() {
+    let server_sk = SecretKey::generate();
+    let server_pk = server_sk.public();
+    let alice_sk = SecretKey::generate();
+    let alice_pk = alice_sk.public();
+    let bob_sk = SecretKey::generate();
+    let bob_pk = bob_sk.public();
+
+    let profile_user_id = server_pk.to_string();
+    let (storage, _dir) = make_storage();
+    init_manifest(&storage, &profile_user_id);
+
+    // File A: contacts-only → visible to all friends (control).
+    add_file(&storage, &profile_user_id, "hash_a", "public.txt", true);
+    // File B: explicit read grant to Alice only → selected-peers mode.
+    add_file(&storage, &profile_user_id, "hash_b", "restricted.txt", true);
+    grant_read(&storage, &profile_user_id, &alice_pk, "hash_b");
+
+    // Both Alice and Bob are friends, but only Alice has the explicit grant.
+    let friends_dir = TempDir::new().expect("friends temp dir");
+    let mut friends = FriendsStore::empty_at(friends_dir.path());
+    make_friend(&mut friends, &alice_pk);
+    make_friend(&mut friends, &bob_pk);
+
+    let (router, ep) = create_server(storage, server_sk, profile_user_id, friends).await;
+
+    // ── Alice fetches → sees both files ────────────────────────────────
+    {
+        let (cli_ep, lookup) = create_client_with_key(Some(alice_sk)).await;
+        lookup.set_endpoint_info(ep.addr());
+        let cat = fetch_remote_catalogue(&cli_ep, server_pk, None)
+            .await
+            .expect("alice should fetch successfully");
+        assert_eq!(cat.files.len(), 2, "Alice sees both files");
+        drop(cli_ep);
+    }
+
+    // ── Bob fetches → sees only hash_a (contacts-only) ─────────────────
+    {
+        let (cli_ep, lookup) = create_client_with_key(Some(bob_sk)).await;
+        lookup.set_endpoint_info(ep.addr());
+        let cat = fetch_remote_catalogue(&cli_ep, server_pk, None)
+            .await
+            .expect("bob should fetch a catalogue (not blocked)");
+        assert_eq!(cat.files.len(), 1, "Bob sees only the contacts-only file");
+        assert_eq!(
+            cat.files[0].content_hash, "hash_a",
+            "Bob does NOT see the file granted to Alice"
+        );
+        drop(cli_ep);
+    }
+
+    drop(router);
+    drop(ep);
 }

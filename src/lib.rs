@@ -94,6 +94,10 @@ pub mod contact;
 #[cfg(feature = "net")]
 pub mod chat_callbacks;
 
+/// Bounded startup burst scheduler for queued download admissions.
+#[cfg(feature = "net")]
+pub mod bounded_startup_scheduler;
+
 /// Bounded admission and resource controls for file downloads.
 #[cfg(feature = "net")]
 pub mod download_limits;
@@ -294,6 +298,12 @@ pub mod file_access_handler;
 #[cfg(feature = "net")]
 pub mod download_manager;
 
+/// Download initiation — validates preconditions (catalogue verified,
+/// file metadata valid, no conflicting download) before queuing a new
+/// durable download.
+#[cfg(feature = "net")]
+pub mod download_initiation;
+
 /// File access transfer client — requests fresh download descriptors from
 /// a remote peer and verifies the signed response.
 #[cfg(feature = "net")]
@@ -302,6 +312,13 @@ pub mod file_access_client;
 /// Safe destination selection — sanitises remote display names to prevent
 /// path traversal and filename injection.
 pub mod safe_destination;
+
+/// Text sanitisation for safe display in the UI and logs.
+///
+/// Strips or replaces control characters, Unicode format characters
+/// (bidi overrides, zero-width spaces, etc.), and truncates to a
+/// reasonable length.  See the module docs for full details.
+pub mod abuse_controls;
 
 /// Blob transfer — iroh-blobs streaming download from a remote peer to a
 /// local temp file.

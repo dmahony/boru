@@ -3,6 +3,9 @@
 //! Supports a chat-list (inbox) screen and individual chat-room screens,
 //! with dynamic room switching — like Telegram/Signal.
 
+use boru_chat::abuse_controls::{
+    sanitize_display_text, sanitize_single_line, DEFAULT_MAX_DISPLAY_LENGTH,
+};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -15,7 +18,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use boru_chat::api::{GossipSender, GossipTopic};
 use boru_chat::backfill::BackfillHandle;
-use boru_chat::chat_callbacks::{ChatCallbacks, TransferId, TransferKind, TransferProgress};
+pub(crate) use boru_chat::chat_callbacks::TransferKind;
+use boru_chat::chat_callbacks::{ChatCallbacks, TransferId, TransferProgress};
 use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_with_safety, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
@@ -29,6 +33,9 @@ use boru_chat::conversations::{
 };
 use boru_chat::discovery_backend::MainlineDhtBackend;
 use boru_chat::discovery_secret::DiscoverySecret;
+use boru_chat::download_initiation::initiate_download;
+use boru_chat::download_limits::DownloadLimitsConfig;
+use boru_chat::download_manager::DownloadManager;
 use boru_chat::file_indexer::FileIndexer;
 use boru_chat::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
@@ -171,12 +178,12 @@ const CHAT_LOG: &str = "chat_log";
 const COMPOSER_INPUT: &str = "chat_composer";
 
 // ── Typography scale (minor-second ratio ~1.125) ─────────────────────
-const TYPO_XL: f32 = 24.0; // Primary heading (chat list title)
-const TYPO_LG: f32 = 18.0; // Secondary heading (room name, help title)
-const TYPO_MD: f32 = 15.0; // Body / section headers / button labels
-const TYPO_SM: f32 = 13.0; // Secondary body, previews, entry labels
-const TYPO_XS: f32 = 11.0; // Metadata, identity info, secondary labels
-pub const TYPO_XXS: f32 = 10.0; // Fine print, ticket, instruction text
+pub(crate) const TYPO_XL: f32 = 24.0; // Primary heading (chat list title)
+pub(crate) const TYPO_LG: f32 = 18.0; // Secondary heading (room name, help title)
+pub(crate) const TYPO_MD: f32 = 15.0; // Body / section headers / button labels
+pub(crate) const TYPO_SM: f32 = 13.0; // Secondary body, previews, entry labels
+pub(crate) const TYPO_XS: f32 = 11.0; // Metadata, identity info, secondary labels
+pub(crate) const TYPO_XXS: f32 = 10.0; // Fine print, ticket, instruction text
 
 // ── Memory budget limits ─────────────────────────────────────────
 /// Maximum total decoded image bytes across all `ChatEntry.image_bytes`
@@ -218,14 +225,14 @@ fn blob_ticket_string(
 }
 
 // ── Spacing units (4px base) ─────────────────────────────────────────
-const SPACE_2: f32 = 2.0;
-const SPACE_4: f32 = 4.0;
-const SPACE_6: f32 = 6.0;
-const SPACE_8: f32 = 8.0;
-const SPACE_10: f32 = 10.0;
-const SPACE_12: f32 = 12.0;
-const SPACE_16: f32 = 16.0;
-const SPACE_24: f32 = 24.0;
+pub(crate) const SPACE_2: f32 = 2.0;
+pub(crate) const SPACE_4: f32 = 4.0;
+pub(crate) const SPACE_6: f32 = 6.0;
+pub(crate) const SPACE_8: f32 = 8.0;
+pub(crate) const SPACE_10: f32 = 10.0;
+pub(crate) const SPACE_12: f32 = 12.0;
+pub(crate) const SPACE_16: f32 = 16.0;
+pub(crate) const SPACE_24: f32 = 24.0;
 
 const PROFILE_IMAGE_FILE: &str = "profile-image";
 const PROFILE_IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
@@ -277,7 +284,7 @@ fn text_muted(theme: &iced::Theme) -> Color {
 }
 
 /// Color for system message text (label and body).
-fn text_system(theme: &iced::Theme) -> Color {
+pub(crate) fn text_system(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
         Color::from_rgb(0.6, 0.6, 0.6) // #999, ~4.5:1 on dark bg ✓ AA
     } else {
@@ -347,7 +354,7 @@ fn bg_primary(theme: &iced::Theme) -> Color {
 }
 
 /// Surface/card background (slightly lighter than primary).
-fn bg_surface(theme: &iced::Theme) -> Color {
+pub(crate) fn bg_surface(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
         Color::from_rgb(0.16, 0.16, 0.24) // #2a2a3e
     } else {
@@ -375,7 +382,7 @@ fn bg_hover(theme: &iced::Theme) -> Color {
 }
 
 /// Subtle border for surfaces and cards.
-fn border_muted(theme: &iced::Theme) -> Color {
+pub(crate) fn border_muted(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
         Color::from_rgb(0.22, 0.22, 0.32) // #383852
     } else {
@@ -384,7 +391,7 @@ fn border_muted(theme: &iced::Theme) -> Color {
 }
 
 /// Primary accent (blue).
-fn accent_primary(theme: &iced::Theme) -> Color {
+pub(crate) fn accent_primary(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
         Color::from_rgb(0.29, 0.62, 1.0) // #4a9eff
     } else {
@@ -393,7 +400,7 @@ fn accent_primary(theme: &iced::Theme) -> Color {
 }
 
 /// Success / online indicator (green).
-fn accent_green(theme: &iced::Theme) -> Color {
+pub(crate) fn accent_green(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
         Color::from_rgb(0.24, 0.86, 0.52) // #3ddc84
     } else {
@@ -402,7 +409,7 @@ fn accent_green(theme: &iced::Theme) -> Color {
 }
 
 /// Error / destructive colour.
-fn color_error(theme: &iced::Theme) -> Color {
+pub(crate) fn color_error(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
         Color::from_rgb(0.90, 0.25, 0.25) // #e64040
     } else {
@@ -438,11 +445,7 @@ fn container_hover(theme: &iced::Theme) -> iced::widget::container::Style {
 /// Closures passed to `text().style()` need this static-compatible form.
 pub fn text_muted_style(theme: &iced::Theme) -> iced::widget::text::Style {
     iced::widget::text::Style {
-        color: Some(if matches!(theme, iced::Theme::Dark) {
-            text_muted(theme)
-        } else {
-            text_muted(theme)
-        }),
+        color: Some(text_muted(theme)),
     }
 }
 
@@ -507,39 +510,272 @@ enum ChatKind {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-enum DownloadState {
+pub(crate) enum DownloadFailure {
+    PermissionDenied,
+    FileRemoved,
+    FileChanged {
+        detail: Option<String>,
+    },
+    VersionMismatch {
+        current_version: Option<u64>,
+        detail: Option<String>,
+    },
+    SourceUnavailable {
+        detail: Option<String>,
+    },
+    PeerOffline {
+        detail: Option<String>,
+    },
+    VerificationFailed {
+        attempts: u8,
+        max_attempts: u8,
+        detail: Option<String>,
+    },
+    Other {
+        detail: String,
+    },
+}
+
+impl DownloadFailure {
+    pub(crate) fn from_error(error: impl Into<String>) -> Self {
+        let error = error.into();
+        let lower = error.to_ascii_lowercase();
+
+        if lower.contains("permission denied") {
+            return Self::PermissionDenied;
+        }
+        if lower.contains("file not found")
+            || lower.contains("file missing")
+            || lower.contains("no longer available on this device")
+        {
+            return Self::FileRemoved;
+        }
+        if lower.contains("version mismatch") {
+            let current_version = lower
+                .strip_prefix("version mismatch: server has version ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|n| n.parse::<u64>().ok());
+            return Self::VersionMismatch {
+                current_version,
+                detail: Some(error),
+            };
+        }
+        if lower.contains("file content changed") || lower.contains("changed since catalogue") {
+            return Self::FileChanged {
+                detail: Some(error),
+            };
+        }
+        if lower.contains("temporarily unavailable") || lower.contains("file unavailable") {
+            return Self::SourceUnavailable {
+                detail: Some(error),
+            };
+        }
+        if lower.contains("peer offline")
+            || lower.contains("not currently reachable")
+            || lower.contains("address unavailable")
+            || lower.contains("connection failed")
+            || lower.contains("relay unavailable")
+        {
+            return Self::PeerOffline {
+                detail: Some(error),
+            };
+        }
+        if lower.contains("verification failed")
+            || lower.contains("hash mismatch")
+            || lower.contains("size mismatch")
+        {
+            return Self::VerificationFailed {
+                attempts: 1,
+                max_attempts: 3,
+                detail: Some(error),
+            };
+        }
+
+        Self::Other { detail: error }
+    }
+
+    pub(crate) fn title(&self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "Access denied",
+            Self::FileRemoved => "File removed from device",
+            Self::FileChanged { .. } => "File changed since catalogue",
+            Self::VersionMismatch { .. } => "Version mismatch",
+            Self::SourceUnavailable { .. } => "File temporarily unavailable",
+            Self::PeerOffline { .. } => "Peer offline",
+            Self::VerificationFailed { .. } => "Verification failed",
+            Self::Other { .. } => "Download failed",
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::PermissionDenied => {
+                "You do not have permission to download this file. The owner may have revoked access or blocked your account.".to_string()
+            }
+            Self::FileRemoved => {
+                "The local copy of this file has been removed or is no longer available on this device.".to_string()
+            }
+            Self::FileChanged { detail } => {
+                let mut msg = "The file content has changed since the catalogue was issued. The catalogue entry is stale.".to_string();
+                if let Some(detail) = detail {
+                    msg.push(' ');
+                    msg.push_str(detail);
+                }
+                msg
+            }
+            Self::VersionMismatch {
+                current_version,
+                detail,
+            } => {
+                let mut msg = "The file was updated while the download was in progress. The requested version no longer matches the current version on the server.".to_string();
+                if let Some(version) = current_version {
+                    msg.push_str(&format!(" Server has version v{version}."));
+                }
+                if let Some(detail) = detail {
+                    msg.push(' ');
+                    msg.push_str(detail);
+                }
+                msg
+            }
+            Self::SourceUnavailable { detail } => {
+                let mut msg = "The file is not currently available on the remote peer. The file object may have been removed or the peer's storage is not reachable.".to_string();
+                if let Some(detail) = detail {
+                    msg.push(' ');
+                    msg.push_str(detail);
+                }
+                msg
+            }
+            Self::PeerOffline { detail } => {
+                let mut msg = "The recipient peer is not currently reachable. They may be offline or behind a restrictive network.".to_string();
+                if let Some(detail) = detail {
+                    msg.push(' ');
+                    msg.push_str(detail);
+                }
+                msg
+            }
+            Self::VerificationFailed {
+                attempts,
+                max_attempts,
+                detail,
+            } => {
+                let mut msg = if *attempts >= *max_attempts {
+                    format!(
+                        "The downloaded file could not be verified after {max_attempts} attempts. Try again later."
+                    )
+                } else {
+                    format!(
+                        "The downloaded file was corrupted. Retrying… (attempt {attempts} of {max_attempts})"
+                    )
+                };
+                if let Some(detail) = detail {
+                    msg.push(' ');
+                    msg.push_str(detail);
+                }
+                msg
+            }
+            Self::Other { detail } => detail.clone(),
+        }
+    }
+
+    pub(crate) fn recovery_action(&self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "Contact the file owner and ask them to grant access",
+            Self::FileRemoved => "Re-download from a peer who still has a copy",
+            Self::FileChanged { .. } => "Refresh the catalogue, then request the download again",
+            Self::VersionMismatch { .. } => "Request a fresh download of the updated file",
+            Self::SourceUnavailable { .. } => "Try again later, or contact the owner",
+            Self::PeerOffline { .. } => "Wait for the peer to come online",
+            Self::VerificationFailed { .. } => "Retry the download",
+            Self::Other { .. } => "Try again",
+        }
+    }
+
+    pub(crate) fn stability_label(&self) -> &'static str {
+        match self {
+            Self::SourceUnavailable { .. }
+            | Self::PeerOffline { .. }
+            | Self::VerificationFailed { .. } => "Temporary",
+            Self::VersionMismatch { .. } => "Terminal",
+            Self::PermissionDenied | Self::FileRemoved | Self::FileChanged { .. } => "Permanent",
+            Self::Other { .. } => "Permanent",
+        }
+    }
+
+    pub(crate) fn retry_available(&self) -> bool {
+        matches!(
+            self,
+            Self::SourceUnavailable { .. }
+                | Self::PeerOffline { .. }
+                | Self::VerificationFailed { .. }
+        )
+    }
+
+    pub(crate) fn diagnostics(&self) -> Option<String> {
+        match self {
+            Self::VersionMismatch { detail, .. }
+            | Self::FileChanged { detail }
+            | Self::SourceUnavailable { detail }
+            | Self::PeerOffline { detail }
+            | Self::VerificationFailed { detail, .. } => detail.clone(),
+            Self::Other { detail } => Some(detail.clone()),
+            Self::PermissionDenied | Self::FileRemoved => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) enum DownloadState {
     Ready,
     Active {
+        bytes: u64,
+        total: Option<u64>,
+    },
+    /// User-initiated pause — transfer suspended, can be resumed.
+    /// Retains bytes/total so the progress bar can show a dimmed snapshot.
+    Paused {
         bytes: u64,
         total: Option<u64>,
     },
     Completed {
         saved_name: String,
         saved_path: Option<std::path::PathBuf>,
+        /// Total file size preserved from last Active state, if known.
+        total_size: Option<u64>,
     },
     Failed {
-        error: String,
+        failure: DownloadFailure,
     },
     Cancelled,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct DownloadAttachment {
-    kind: TransferKind,
-    name: String,
-    ticket: String,
-    transfer_id: Option<TransferId>,
-    state: DownloadState,
+pub(crate) struct DownloadAttachment {
+    pub(crate) kind: TransferKind,
+    pub(crate) name: String,
+    pub(crate) ticket: String,
+    pub(crate) transfer_id: Option<TransferId>,
+    pub(crate) state: DownloadState,
+    /// Display name (or short public key) of the sending peer.
+    pub(crate) source_peer: String,
+    /// Current transfer speed in bytes per second, if known.
+    pub(crate) speed_bytes_per_sec: Option<u64>,
 }
 
 impl DownloadAttachment {
-    fn new(kind: TransferKind, name: impl Into<String>, ticket: impl Into<String>) -> Self {
+    fn new(
+        kind: TransferKind,
+        name: impl Into<String>,
+        ticket: impl Into<String>,
+        source_peer: impl Into<String>,
+    ) -> Self {
         Self {
             kind,
             name: name.into(),
             ticket: ticket.into(),
             transfer_id: None,
             state: DownloadState::Ready,
+            source_peer: source_peer.into(),
+            speed_bytes_per_sec: None,
         }
     }
 
@@ -558,15 +794,20 @@ impl DownloadAttachment {
         }
     }
 
+    #[expect(dead_code)]
     fn action_label(&self) -> &'static str {
         match self.state {
             DownloadState::Ready => "Download",
             DownloadState::Active { .. } => "Downloading",
+            DownloadState::Paused { .. } => "Paused",
             DownloadState::Completed { .. } => "Open",
-            DownloadState::Failed { .. } | DownloadState::Cancelled => "Retry",
+            DownloadState::Failed { ref failure } if failure.retry_available() => "Retry",
+            DownloadState::Failed { .. } => "Dismiss",
+            DownloadState::Cancelled => "Retry",
         }
     }
 
+    #[expect(dead_code)]
     fn status_label(&self) -> String {
         match &self.state {
             DownloadState::Ready => "Ready to download".to_string(),
@@ -598,47 +839,91 @@ impl DownloadAttachment {
             DownloadState::Completed {
                 saved_name,
                 saved_path,
+                total_size,
             } => {
+                let size_suffix = total_size
+                    .filter(|s| *s > 0)
+                    .map(|s| format!(" ({})", DownloadAttachment::total_bytes_label(s)))
+                    .unwrap_or_default();
                 if let Some(path) = saved_path {
-                    format!("Saved — {} ({})", saved_name, path.display())
+                    format!("Saved — {}{size_suffix} ({})", saved_name, path.display())
                 } else {
-                    format!("Saved — {saved_name}")
+                    format!("Saved — {saved_name}{size_suffix}")
                 }
             }
-            DownloadState::Failed { error } => format!("Failed — {error}"),
+            DownloadState::Failed { failure } => {
+                let mut lines = vec![format!("{} — {}", failure.title(), failure.message())];
+                if let Some(detail) = failure.diagnostics() {
+                    if !detail.is_empty() {
+                        lines.push(detail);
+                    }
+                }
+                lines.join(" ")
+            }
+            DownloadState::Paused { bytes, total } => {
+                let size_info = total
+                    .filter(|t| *t > 0)
+                    .map(|t| {
+                        format!(
+                            " — {} / {}",
+                            DownloadAttachment::total_bytes_label(*bytes),
+                            DownloadAttachment::total_bytes_label(t)
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            " — {} received",
+                            DownloadAttachment::total_bytes_label(*bytes)
+                        )
+                    });
+                format!("Paused — tap Resume to continue{size_info}")
+            }
             DownloadState::Cancelled => "Cancelled".to_string(),
         }
     }
 
+    #[expect(dead_code)]
     fn progress_fraction(&self) -> Option<f32> {
         match self.state {
             DownloadState::Active {
                 bytes,
                 total: Some(total),
             } if total > 0 => Some((bytes as f32 / total as f32).clamp(0.0, 1.0)),
+            DownloadState::Paused {
+                bytes,
+                total: Some(total),
+            } if total > 0 => Some((bytes as f32 / total as f32).clamp(0.0, 1.0)),
+            DownloadState::Paused { .. } => None,
             _ => None,
         }
     }
 
+    #[expect(dead_code)]
     fn status_tone(&self) -> Color {
         match self.state {
-            DownloadState::Ready | DownloadState::Active { .. } => {
+            DownloadState::Ready | DownloadState::Active { .. } | DownloadState::Paused { .. } => {
                 accent_primary(&iced::Theme::Dark)
             }
             DownloadState::Completed { .. } => Color::from_rgb(0.2, 0.7, 0.2),
-            DownloadState::Failed { .. } => Color::from_rgb(0.8, 0.22, 0.22),
+            DownloadState::Failed { ref failure } => match failure.stability_label() {
+                "Temporary" => Color::from_rgb(0.78, 0.58, 0.16),
+                "Terminal" | "Permanent" => Color::from_rgb(0.8, 0.22, 0.22),
+                _ => Color::from_rgb(0.8, 0.22, 0.22),
+            },
             DownloadState::Cancelled => Color::from_rgb(0.55, 0.55, 0.55),
         }
     }
 
     fn estimated_height(&self) -> f32 {
+        // Rows: title + action + spacing. Active adds progress + source rows.
+        // Error state adds a failure-title, action, and detail rows.
         match self.state {
-            DownloadState::Ready => 84.0,
-            DownloadState::Active { total: Some(_), .. } => 112.0,
-            DownloadState::Active { total: None, .. } => 104.0,
-            DownloadState::Completed { .. } => 92.0,
-            DownloadState::Failed { .. } => 104.0,
-            DownloadState::Cancelled => 84.0,
+            DownloadState::Ready => 92.0,
+            DownloadState::Active { total: Some(_), .. } | DownloadState::Paused { .. } => 152.0,
+            DownloadState::Active { total: None, .. } => 144.0,
+            DownloadState::Completed { .. } => 100.0,
+            DownloadState::Failed { .. } => 176.0,
+            DownloadState::Cancelled => 92.0,
         }
     }
 }
@@ -704,7 +989,7 @@ impl ChatEntry {
         let mut s = Self {
             kind: ChatKind::System,
             label: "System".into(),
-            body: text.into(),
+            body: sanitize_display_text(&text.into(), DEFAULT_MAX_DISPLAY_LENGTH),
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
@@ -727,10 +1012,12 @@ impl ChatEntry {
         s
     }
     fn local(label: impl Into<String>, text: impl Into<String>) -> Self {
+        let label = sanitize_single_line(&label.into());
+        let text = sanitize_display_text(&text.into(), DEFAULT_MAX_DISPLAY_LENGTH);
         Self {
             kind: ChatKind::Local,
-            label: label.into(),
-            body: text.into(),
+            label,
+            body: text,
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
@@ -759,8 +1046,8 @@ impl ChatEntry {
     ) -> Self {
         Self {
             kind: ChatKind::Remote,
-            label: label.into(),
-            body: text.into(),
+            label: sanitize_single_line(&label.into()),
+            body: sanitize_display_text(&text.into(), DEFAULT_MAX_DISPLAY_LENGTH),
             message_hash: hash,
             edited: false,
             reactions: Vec::new(),
@@ -781,6 +1068,7 @@ impl ChatEntry {
         }
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn image(
         kind: ChatKind,
         label: impl Into<String>,
@@ -794,8 +1082,8 @@ impl ChatEntry {
     ) -> Self {
         Self {
             kind,
-            label: label.into(),
-            body: body.into(),
+            label: sanitize_single_line(&label.into()),
+            body: sanitize_display_text(&body.into(), DEFAULT_MAX_DISPLAY_LENGTH),
             message_hash: hash,
             edited: false,
             reactions: Vec::new(),
@@ -821,11 +1109,12 @@ impl ChatEntry {
         kind: TransferKind,
         name: impl Into<String>,
         ticket: impl Into<String>,
+        source_peer: impl Into<String>,
     ) -> Self {
         Self {
             kind: ChatKind::System,
             label: "System".into(),
-            body: text.into(),
+            body: sanitize_display_text(&text.into(), DEFAULT_MAX_DISPLAY_LENGTH),
             message_hash: None,
             edited: false,
             reactions: Vec::new(),
@@ -838,7 +1127,7 @@ impl ChatEntry {
             event_id: 0,
             delivery_state: DeliveryState::default(),
             sender_key: None,
-            download: Some(DownloadAttachment::new(kind, name, ticket)),
+            download: Some(DownloadAttachment::new(kind, name, ticket, source_peer)),
             widget_gen: 0,
             label_text: None,
             reactions_text: None,
@@ -928,6 +1217,7 @@ pub struct ConversationLive {
     /// Pending forwarder handle awaiting transfer.
     pub forward_handle_slot: Arc<StdMutex<Option<n0_future::task::JoinHandle<()>>>>,
     /// The gossip topic for this conversation.
+    #[expect(dead_code)]
     pub topic: TopicId,
     /// Ticket string for sharing this conversation.
     pub ticket_str: String,
@@ -946,6 +1236,7 @@ pub struct ConversationLive {
     /// Number of entries already saved to ChatHistoryStore.
     pub history_saved_count: usize,
     /// Cached layout for the chat log.
+    #[expect(dead_code)]
     pub layout_cache: std::cell::RefCell<LayoutCache>,
     /// Y scroll offset.
     pub scroll_offset: f32,
@@ -955,6 +1246,7 @@ pub struct ConversationLive {
     /// Resized to match `entries` length on every mutation; a mismatch between
     /// `widget_gen[i]` and `self.entries[i].widget_gen` means the cached widget
     /// tree for entry `i` is stale.
+    #[expect(dead_code)]
     pub entry_widget_gen: Vec<u64>,
 
     // ── Downloads ──
@@ -978,6 +1270,7 @@ pub struct ConversationLive {
     pub unread: u64,
     /// Whether persisted history has been loaded from ChatHistoryStore
     /// and replayed into this conversation's entries.
+    #[expect(dead_code)]
     pub history_loaded: bool,
 }
 
@@ -1092,6 +1385,7 @@ pub struct IcedChat {
     runtime_handle: tokio::runtime::Handle,
     pub net_rx: Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>,
     net_tx: UnboundedSender<ConversationNetEvent>,
+    #[expect(dead_code)]
     backfill_handle: boru_chat::backfill::BackfillHandle,
     friends: FriendsStore,
     friends_dirty: bool,
@@ -1134,6 +1428,7 @@ pub struct IcedChat {
     /// Cell interior mutability allows &self reads in view().
     total_content_height: std::cell::Cell<f32>,
     /// On-disk app settings (persisted to settings.json).
+    #[expect(dead_code)]
     settings: AppSettings,
     /// Whether dark mode is enabled.  Kept alongside `settings` for fast access
     /// (lags one write behind `settings` during update; always read from here).
@@ -1147,6 +1442,7 @@ pub struct IcedChat {
     /// Topic awaiting delete confirmation (None = no confirm pending).
     room_delete_confirm_topic: Option<TopicId>,
     /// Transport notice displayed in the header (e.g. "Direct iroh transport is operational").
+    #[expect(dead_code)]
     pub notice: String,
     data_dir: PathBuf,
     /// Per-user image storage, backed by `<data_dir>/files/` (or `BORU_CHAT_FILES_DIR`).
@@ -1155,6 +1451,13 @@ pub struct IcedChat {
     chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
     /// Durable outgoing messages, shared with the active room lifecycle.
     outbox: Arc<std::sync::Mutex<OutboxStore>>,
+    /// Persistent download storage — opened once and shared with the
+    /// download manager for startup recovery and ongoing tick processing.
+    storage: Option<Storage>,
+    /// Download state-machine manager with bounded startup burst.
+    /// Wrapped for safe access — the async recovery call uses
+    /// `runtime_handle.block_on` at init time.
+    download_manager: Option<Arc<std::sync::Mutex<DownloadManager>>>,
     /// Whether chat history has unsaved changes.
     chat_history_dirty: bool,
     /// Number of entries that have already been saved to chat_history
@@ -1246,6 +1549,7 @@ pub struct IcedChat {
     /// Handle to the continuous DHT discovery & publication tracker.
     /// Kept alive for the lifetime of the app — dropping it cancels the
     /// background publish/discover tasks.
+    #[expect(dead_code)]
     continuous_tracker: Option<ContinuousTracker>,
     /// Receiver handle for discovered peers from the DHT discovery loop.
     /// Read by the subscription stream to produce NewDiscoveredPeers events.
@@ -1280,15 +1584,22 @@ pub struct IcedChat {
     blocked_sharers: HashSet<PublicKey>,
     /// Cached profile data received from peers via ProfileUpdate gossip.
     profile_cache: HashMap<PublicKey, PeerProfileData>,
+    /// Set of (content_hash, peer_public_key) pairs that have a download
+    /// initiation in flight.  Used to disable the button and show a spinner
+    /// while the async operation is pending.
+    pending_downloads: HashSet<(String, PublicKey)>,
     /// Rate-limiter for periodic ProfileUpdate broadcasts (at most once per 30 seconds).
     profile_update_throttle: ProfileUpdateThrottle,
     /// Persistent profile store (display name, bio, sharing controls).
     profile_store: UserProfileStore,
     /// Bio text input for the profile settings page.
+    #[expect(dead_code)]
     profile_bio_input: String,
     /// Whether file sharing is enabled (cached for quick UI access).
+    #[expect(dead_code)]
     shared_folder_enabled: bool,
     /// Path to the shared files folder.
+    #[expect(dead_code)]
     shared_folder_path: PathBuf,
     /// Indexes and watches the shared folder for file changes.
     file_indexer: FileIndexer,
@@ -1333,6 +1644,7 @@ pub struct PeerProfileData {
     /// Display name announced by the peer.
     pub display_name: String,
     /// Bio text.
+    #[expect(dead_code)]
     pub bio: String,
     /// When this profile data was last received (SystemTime). Used for eviction.
     pub last_updated: SystemTime,
@@ -1447,6 +1759,7 @@ struct SidebarRequestsDependency {
 /// Each item carries the persistent request ID, the target peer's public key,
 /// the direct-conversation chat topic, and the current request state.  Items
 /// are deduplicated by request ID.
+#[expect(dead_code)]
 #[derive(Debug, Clone)]
 pub struct JoinRequestItem {
     /// Persistent request ID from the friend request store.
@@ -1514,6 +1827,7 @@ fn apply_discovered_peers_update(peers: &mut Vec<PublicKey>, update: DiscoveredP
 }
 
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 pub enum AppMessage {
     // ── Navigation ──
     /// Open the chat list screen (go back from a chat).
@@ -1588,10 +1902,34 @@ pub enum AppMessage {
     /// Keeping the entry index in the message allows multiple file rows to
     /// download concurrently without a single global "pending file" slot.
     ExecuteDownloadAt(usize),
+    /// Pause an active download at the given entry index.
+    PauseDownloadAt(usize),
+    /// Resume a paused download at the given entry index.
+    ResumeDownloadAt(usize),
+    /// Cancel or remove a download at the given entry index.
+    CancelDownloadAt(usize),
     /// Start downloading a shared file from a peer's profile.
     /// The peer PublicKey is the sender, and the file index is into
     /// the cached PeerProfileData.shared_files for that peer.
     DownloadPeerFile(PublicKey, usize),
+    /// A download initiated from a peer profile was created successfully.
+    DownloadInitiated {
+        /// Content hash of the file.
+        content_hash: String,
+        /// The remote peer.
+        peer: PublicKey,
+        /// The database id of the new download.
+        download_id: i64,
+    },
+    /// A download initiated from a peer profile failed.
+    DownloadInitiationFailed {
+        /// Content hash of the file.
+        content_hash: String,
+        /// The remote peer.
+        peer: PublicKey,
+        /// Human-readable error message.
+        error: String,
+    },
     /// Open a peer's profile panel showing shared files with Download buttons.
     OpenPeerProfile(PublicKey),
     /// Close the peer profile panel and return to the previous screen.
@@ -1895,7 +2233,7 @@ pub struct PerfSnapshot {
 /// - `heights.len() == cum.len()`  (may be empty)
 /// - `cum[i]` = sum of `heights[0..i]`  (prefix sum, cum[0] = 0)
 /// - `total_height` = sum of all heights (cached separately because cum
-///    stores only prefix sums of length total, with the final total omitted).
+///   stores only prefix sums of length total, with the final total omitted).
 /// - When `dirty_from` is `None`, the cache fully matches `entries`.
 /// - When `dirty_from` is `Some(i)`, entries index `i..` need recomputation.
 pub struct LayoutCache {
@@ -2071,8 +2409,8 @@ impl LayoutCache {
             0.0
         };
 
-        for i in from..total {
-            let e = &entries[i];
+        for (offset, e) in entries[from..total].iter().enumerate() {
+            let i = from + offset;
             let day = e.timestamp.map(|ts| ts / 86400000);
             let h = Self::compute_height(e, prev_day, text_size);
 
@@ -2430,6 +2768,31 @@ impl IcedChat {
             } else {
                 (None, None, None)
             };
+        // Open persistent download storage and create the download manager
+        // with its bounded startup scheduler.  If storage can't be opened
+        // (e.g. first run or permissions issue), both remain None and
+        // downloads work as before via ad-hoc Storage::open calls.
+        let storage = Storage::open(&data_dir).ok().inspect(|_| {
+            tracing::info!("download-storage: opened at {}", data_dir.display());
+        });
+        let download_manager = storage.as_ref().map(|stg| {
+            let config = DownloadLimitsConfig::from_env().unwrap_or_default();
+            Arc::new(std::sync::Mutex::new(DownloadManager::with_limits(
+                stg.clone(),
+                config,
+            )))
+        });
+        // Run startup recovery synchronously at init (before the GUI
+        // frame loop starts).  The scheduler limits the burst to
+        // max_startup_downloads; remaining items wait in the pending queue.
+        if let Some(dm) = &download_manager {
+            match runtime_handle.block_on(dm.lock().unwrap().recover_from_restart()) {
+                Ok(()) => tracing::info!(
+                    "download-manager: startup recovery complete (bounded burst started)"
+                ),
+                Err(e) => tracing::warn!("download-manager: startup recovery failed: {e}"),
+            }
+        }
         let first_run = room_history.is_empty() && friends.is_empty();
         let app_settings = AppSettings::load(&data_dir);
         Self {
@@ -2503,6 +2866,8 @@ impl IcedChat {
             outbox: Arc::new(std::sync::Mutex::new(OutboxStore::load_or_default(
                 &data_dir,
             ))),
+            storage,
+            download_manager,
             chat_history_dirty: false,
             history_saved_count: 0,
             friend_online_cache,
@@ -2547,6 +2912,7 @@ impl IcedChat {
             show_create_room_dialog: false,
             blocked_sharers: HashSet::new(),
             profile_cache: HashMap::new(),
+            pending_downloads: HashSet::new(),
             profile_update_throttle: ProfileUpdateThrottle::default(),
             profile_store: UserProfileStore::empty_at(&data_dir, local_public),
             profile_bio_input: String::new(),
@@ -2777,6 +3143,7 @@ impl IcedChat {
         }
     }
 
+    #[expect(dead_code)]
     fn current_download_entry_mut(&mut self) -> Option<&mut ChatEntry> {
         let idx = self.current_download_entry_index(self.active_download_transfer_id)?;
         self.entries.get_mut(idx)
@@ -2847,9 +3214,15 @@ impl IcedChat {
                             if download.transfer_id.is_none() {
                                 download.transfer_id = Some(id);
                             }
+                            // Preserve the last-known total size from the Active state.
+                            let total_size = match &download.state {
+                                DownloadState::Active { total, .. } => *total,
+                                _ => None,
+                            };
                             download.state = DownloadState::Completed {
                                 saved_name: name,
                                 saved_path: None,
+                                total_size,
                             };
                             self.transfer_id_to_index.insert(id, idx);
                             invalidate_from = Some(idx);
@@ -2865,7 +3238,9 @@ impl IcedChat {
                             if download.transfer_id.is_none() {
                                 download.transfer_id = Some(id);
                             }
-                            download.state = DownloadState::Failed { error };
+                            download.state = DownloadState::Failed {
+                                failure: DownloadFailure::from_error(error),
+                            };
                             self.transfer_id_to_index.insert(id, idx);
                             invalidate_from = Some(idx);
                         }
@@ -3013,62 +3388,7 @@ impl IcedChat {
         attachment: &DownloadAttachment,
         dark_mode: bool,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, progress_bar, text, Column, Row};
-        use iced::Length;
-
-        let theme = if dark_mode {
-            iced::Theme::Dark
-        } else {
-            iced::Theme::Light
-        };
-        let tone = attachment.status_tone();
-        let title = text(attachment.name.clone())
-            .size(TYPO_SM)
-            .color(text_system(&theme));
-        let status = text(attachment.status_label()).size(TYPO_XS).color(tone);
-
-        let mut body = Column::new().push(title).push(status).spacing(SPACE_4);
-
-        if let Some(fraction) = attachment.progress_fraction() {
-            body = body.push(container(progress_bar(0.0..=1.0, fraction)).width(Length::Fill));
-        }
-
-        let action_row = match &attachment.state {
-            DownloadState::Completed { .. } => Row::new()
-                .push(
-                    button(text("Open").size(TYPO_SM))
-                        .on_press(AppMessage::OpenDownloadedFile(attachment.name.clone()))
-                        .padding([SPACE_8, SPACE_12]),
-                )
-                .spacing(SPACE_8),
-            DownloadState::Active { .. } => Row::new()
-                .push(text("Downloading…").size(TYPO_XS).color(tone))
-                .spacing(SPACE_8),
-            DownloadState::Ready | DownloadState::Failed { .. } | DownloadState::Cancelled => {
-                Row::new()
-                    .push(
-                        button(text(attachment.action_label()).size(TYPO_SM))
-                            .on_press(AppMessage::ExecuteDownloadAt(entry_index))
-                            .padding([SPACE_8, SPACE_12]),
-                    )
-                    .spacing(SPACE_8)
-            }
-        };
-
-        let card = Column::new().push(body).push(action_row).spacing(SPACE_8);
-        container(card)
-            .width(Length::Fill)
-            .padding([SPACE_12, SPACE_16])
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(bg_surface(t))),
-                border: iced::Border {
-                    color: tone,
-                    width: 1.0,
-                    radius: SPACE_10.into(),
-                },
-                ..Default::default()
-            })
-            .into()
+        crate::download_progress_view::view_download_progress(entry_index, attachment, dark_mode)
     }
 
     /// Convert a persisted `HistoryEntry` to a `ChatEntry` for in-memory replay.
@@ -3115,8 +3435,8 @@ impl IcedChat {
                 .map(|bytes| iced::widget::image::Handle::from_bytes(bytes.clone()));
             Some(ChatEntry {
                 kind,
-                label,
-                body: hist.text_preview.clone(),
+                label: sanitize_single_line(&label),
+                body: sanitize_display_text(&hist.text_preview, DEFAULT_MAX_DISPLAY_LENGTH),
                 message_hash: None,
                 edited: false,
                 reactions: Vec::new(),
@@ -3138,8 +3458,8 @@ impl IcedChat {
         } else {
             Some(ChatEntry {
                 kind,
-                label,
-                body: hist.text_preview.clone(),
+                label: sanitize_single_line(&label),
+                body: sanitize_display_text(&hist.text_preview, DEFAULT_MAX_DISPLAY_LENGTH),
                 message_hash: None,
                 edited: false,
                 reactions: Vec::new(),
@@ -3165,6 +3485,7 @@ impl IcedChat {
         let entry = ChatEntry::system(text);
         self.entries_push(entry);
     }
+    #[expect(dead_code)]
     fn push_local(&mut self, text: impl Into<String>) {
         let entry = ChatEntry::local(&self.local_label, text);
         self.entries_push(entry);
@@ -3345,7 +3666,12 @@ impl IcedChat {
             AppMessage::ExecuteFileSend(_) => "ExecuteFileSend",
             AppMessage::ExecuteDownload => "ExecuteDownload",
             AppMessage::ExecuteDownloadAt(_) => "ExecuteDownloadAt",
+            AppMessage::PauseDownloadAt(_) => "PauseDownloadAt",
+            AppMessage::ResumeDownloadAt(_) => "ResumeDownloadAt",
+            AppMessage::CancelDownloadAt(_) => "CancelDownloadAt",
             AppMessage::DownloadPeerFile(..) => "DownloadPeerFile",
+            AppMessage::DownloadInitiated { .. } => "DownloadInitiated",
+            AppMessage::DownloadInitiationFailed { .. } => "DownloadInitiationFailed",
             AppMessage::OpenPeerProfile(..) => "OpenPeerProfile",
             AppMessage::ClosePeerProfile => "ClosePeerProfile",
             AppMessage::OpenImagePreview(..) => "OpenImagePreview",
@@ -3704,6 +4030,7 @@ fn private_topic(a: &PublicKey, b: &PublicKey) -> TopicId {
     direct_topic(a, b)
 }
 
+#[expect(dead_code)]
 fn online_friends_from_store(friends: &FriendsStore) -> HashMap<PublicKey, String> {
     friends
         .iter()
@@ -6467,7 +6794,7 @@ impl IcedChat {
                             .unwrap_or_else(|| from.fmt_short().to_string());
 
                         // Load mailbox store, accept incoming (validates + persists).
-                        let mut store = match MailboxStore::load(&self.data_dir)
+                        let s = MailboxStore::load(&self.data_dir)
                             .ok()
                             .flatten()
                             .unwrap_or_else(|| {
@@ -6475,9 +6802,8 @@ impl IcedChat {
                                     &self.data_dir,
                                     self.secret_key.public(),
                                 )
-                            }) {
-                            s => s,
-                        };
+                            });
+                        let mut store = s;
                         let identity = MailboxIdentity::from_secret(&self.secret_key);
                         match store.accept_incoming_with_status(&identity, envelope, &[from]) {
                             Ok((msg_id, plaintext, acceptance)) => {
@@ -6533,13 +6859,11 @@ impl IcedChat {
                         ack: _ack,
                     } => {
                         // Remove acknowledged envelope from local store.
-                        let mut store = match MailboxStore::load(&self.data_dir)
+                        let s = MailboxStore::load(&self.data_dir)
                             .ok()
                             .flatten()
-                            .unwrap_or_else(|| MailboxStore::empty_at(&self.data_dir))
-                        {
-                            s => s,
-                        };
+                            .unwrap_or_else(|| MailboxStore::empty_at(&self.data_dir));
+                        let mut store = s;
                         if let Ok(true) = store.acknowledge_outgoing_and_save(&_ack) {
                             debug!(
                                 "mailbox: peer {} acknowledged envelope {}",
@@ -6789,8 +7113,124 @@ impl IcedChat {
                 ))
             }
 
-            AppMessage::DownloadPeerFile(_peer, _file_idx) => {
-                // Shared files are disabled — no-op.
+            AppMessage::PauseDownloadAt(entry_index) => {
+                self.push_system("Pause requested — transfer suspension not yet implemented.");
+                if let Some(entry) = self.entries.get_mut(entry_index) {
+                    if let Some(download) = entry.download.as_mut() {
+                        if let DownloadState::Active { bytes, total } = &download.state {
+                            download.state = DownloadState::Paused {
+                                bytes: *bytes,
+                                total: *total,
+                            };
+                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::ResumeDownloadAt(entry_index) => {
+                self.push_system("Resume requested — transfer resumption not yet implemented.");
+                if let Some(entry) = self.entries.get_mut(entry_index) {
+                    if let Some(download) = entry.download.as_mut() {
+                        if matches!(download.state, DownloadState::Paused { .. }) {
+                            // Revert to Ready so the user can click Download again.
+                            // In a full implementation this would resume the transfer.
+                            download.state = DownloadState::Ready;
+                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::CancelDownloadAt(entry_index) => {
+                self.push_system(String::from(
+                    "Pause requested — transfer suspension not yet implemented.",
+                ));
+                if let Some(entry) = self.entries.get_mut(entry_index) {
+                    if let Some(download) = entry.download.as_mut() {
+                        if !matches!(download.state, DownloadState::Completed { .. }) {
+                            download.state = DownloadState::Cancelled;
+                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::DownloadPeerFile(peer, file_idx) => {
+                // Look up the file metadata from the peer's profile cache.
+                let Some(profile_data) = self.profile_cache.get(&peer) else {
+                    return iced::Task::done(AppMessage::ErrorMsg(
+                        "No profile data for this peer.".into(),
+                    ));
+                };
+                let Some(file) = profile_data.shared_files.get(file_idx) else {
+                    return iced::Task::done(AppMessage::ErrorMsg(
+                        "File not found in peer's profile.".into(),
+                    ));
+                };
+                let content_hash_hex = hex::encode(file.hash);
+
+                // Mark as pending so the button shows "Downloading…".
+                self.pending_downloads
+                    .insert((content_hash_hex.clone(), peer));
+
+                let peer_str = peer.to_string();
+                let storage = self.storage.clone();
+                iced::Task::perform(
+                    async move {
+                        let stg = storage.or_else(|| {
+                            boru_chat::storage::Storage::open(&std::path::PathBuf::new()).ok()
+                        });
+                        match stg {
+                            Some(stg) => {
+                                match initiate_download(&stg, &content_hash_hex, &peer_str, None) {
+                                    Ok(result) => AppMessage::DownloadInitiated {
+                                        content_hash: content_hash_hex.clone(),
+                                        peer,
+                                        download_id: result.download_id,
+                                    },
+                                    Err(e) => AppMessage::DownloadInitiationFailed {
+                                        content_hash: content_hash_hex.clone(),
+                                        peer,
+                                        error: e.to_string(),
+                                    },
+                                }
+                            }
+                            None => AppMessage::DownloadInitiationFailed {
+                                content_hash: content_hash_hex,
+                                peer,
+                                error: "Storage not available".into(),
+                            },
+                        }
+                    },
+                    std::convert::identity,
+                )
+            }
+
+            AppMessage::DownloadInitiated {
+                content_hash,
+                peer,
+                download_id,
+            } => {
+                // Remove from pending set since the operation completed.
+                self.pending_downloads.remove(&(content_hash.clone(), peer));
+                let label = self
+                    .names
+                    .get(&peer)
+                    .cloned()
+                    .unwrap_or_else(|| peer.fmt_short().to_string());
+                self.push_system(format!("Download queued for *{label}* (id={download_id})"));
+                iced::Task::none()
+            }
+            AppMessage::DownloadInitiationFailed {
+                content_hash,
+                peer,
+                error,
+            } => {
+                // Remove from pending set since the operation completed (with error).
+                self.pending_downloads.remove(&(content_hash, peer));
+                self.push_system(format!("Download failed: {error}"));
                 iced::Task::none()
             }
 
@@ -6808,9 +7248,14 @@ impl IcedChat {
                 if let Some(idx) = self.download_entry_index {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
+                            let total_size = match &download.state {
+                                DownloadState::Active { total, .. } => *total,
+                                _ => None,
+                            };
                             download.state = DownloadState::Completed {
                                 saved_name: name.clone(),
                                 saved_path: Some(path),
+                                total_size,
                             };
                             self.layout_cache.borrow_mut().invalidate_from(idx);
                         }
@@ -6824,9 +7269,14 @@ impl IcedChat {
                 if let Some(idx) = self.download_entry_index {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
+                            let total_size = match &download.state {
+                                DownloadState::Active { total, .. } => *total,
+                                _ => None,
+                            };
                             download.state = DownloadState::Completed {
                                 saved_name: name.clone(),
                                 saved_path: Some(path),
+                                total_size,
                             };
                             self.layout_cache.borrow_mut().invalidate_from(idx);
                         }
@@ -6842,7 +7292,9 @@ impl IcedChat {
                 {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
-                            download.state = DownloadState::Failed { error };
+                            download.state = DownloadState::Failed {
+                                failure: DownloadFailure::from_error(error),
+                            };
                             self.layout_cache.borrow_mut().invalidate_from(idx);
                             updated = true;
                         }
@@ -6859,6 +7311,21 @@ impl IcedChat {
             }
             AppMessage::OpenDownloadedFile(name) => {
                 if let Err(error) = self.open_downloaded_file(&name) {
+                    if error.starts_with("File not found:") {
+                        for (idx, entry) in self.entries.iter_mut().enumerate() {
+                            if let Some(download) = entry.download.as_mut() {
+                                if matches!(download.state, DownloadState::Completed { .. })
+                                    && download.name == name
+                                {
+                                    download.state = DownloadState::Failed {
+                                        failure: DownloadFailure::FileRemoved,
+                                    };
+                                    self.layout_cache.borrow_mut().invalidate_from(idx);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     self.push_system(format!("Open failed: {error}"));
                 }
                 iced::Task::none()
@@ -7833,12 +8300,14 @@ impl IcedChat {
                     iced::Task::perform(
                         async move {
                             // Load the local mailbox store (shared across all outgoing envelopes).
-                            let mut store =
-                                match MailboxStore::load(&data_dir).ok().flatten().unwrap_or_else(
-                                    || MailboxStore::for_recipient(&data_dir, secret_key.public()),
-                                ) {
-                                    s => s,
-                                };
+                            let s =
+                                MailboxStore::load(&data_dir)
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_else(|| {
+                                        MailboxStore::for_recipient(&data_dir, secret_key.public())
+                                    });
+                            let mut store = s;
                             for peer in &peers_with_mailbox {
                                 let pending = store.pending_for_recipient(*peer);
                                 for envelope in pending {
@@ -8466,18 +8935,18 @@ impl IcedChat {
 
     fn update_room_preview(&mut self, event: &NetEvent) {
         if let NetEvent::Message {
-            from: _, message, ..
+            from: _,
+            message: Message::Message { text },
+            ..
         } = event
         {
-            if let Message::Message { text } = message {
-                let preview = if text.len() > 60 {
-                    format!("{}…", &text[..60])
-                } else {
-                    text.clone()
-                };
-                self.room_history.update_preview(&self.topic, &preview);
-                self.room_history_dirty = true;
-            }
+            let preview = if text.len() > 60 {
+                format!("{}…", &text[..60])
+            } else {
+                text.clone()
+            };
+            self.room_history.update_preview(&self.topic, &preview);
+            self.room_history_dirty = true;
         }
     }
 
@@ -8723,6 +9192,7 @@ impl IcedChat {
     }
 
     /// Persist the conversation store if it has changes.
+    #[expect(dead_code)]
     fn try_save_conversation_store(&mut self) {
         let store = self.conversation_store.clone();
         let _ = std::thread::spawn(move || {
@@ -9025,6 +9495,7 @@ impl ChatCallbacks for IcedChat {
             TransferKind::File,
             name,
             ticket,
+            "",
         ));
     }
 
@@ -9124,6 +9595,7 @@ impl ChatCallbacks for IcedChat {
 
 // ── View ──────────────────────────────────────────────────────────────
 
+#[expect(dead_code)]
 impl IcedChat {
     /// Muted secondary text color, adapted to current theme.
     fn color_muted(&self) -> Color {
@@ -9442,6 +9914,8 @@ impl IcedChat {
         let ticket_join_section = self.view_sidebar_ticket_join();
         let chats_section = self.view_sidebar_chats();
         let discovered_peers_section = self.view_sidebar_discovered_peers();
+        let friends_section = self.view_sidebar_friends();
+        let requests_section = self.view_sidebar_requests();
 
         let content = Column::new()
             .push(container(header).padding(iced::Padding {
@@ -9459,6 +9933,8 @@ impl IcedChat {
             .push(ticket_join_section)
             .push(chats_section)
             .push(discovered_peers_section)
+            .push(friends_section)
+            .push(requests_section)
             .push(Space::new().height(Length::Fill));
 
         scrollable(content)
@@ -9636,6 +10112,7 @@ impl IcedChat {
         section.into()
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn view_sidebar_conversation_row(
         dark_mode: bool,
         topic: TopicId,
@@ -9683,7 +10160,6 @@ impl IcedChat {
                                 } else {
                                     text_remote_body(t)
                                 }),
-                                ..Default::default()
                             }),
                         text(time_label_str.clone())
                             .size(TYPO_XXS)
@@ -11857,6 +12333,7 @@ impl IcedChat {
     }
 
     /// Return a reference to the structured join-request list.
+    #[expect(dead_code)]
     pub fn join_requests(&self) -> &[JoinRequestItem] {
         &self.join_request_list
     }
@@ -11893,9 +12370,7 @@ impl IcedChat {
 
         let mut body = Column::new().spacing(SPACE_8);
 
-        // Shared files section stripped — bio and file sharing disabled.
-        // Always shows "No shared files."
-        if true {
+        if shared_files.is_empty() {
             body = body.push(
                 container(
                     text("No shared files.")
@@ -11911,6 +12386,21 @@ impl IcedChat {
                 let size_label = DownloadAttachment::total_bytes_label(file.size);
                 let filename = file.filename.clone();
                 let mime_type = file.mime_type.clone();
+                let content_hash_hex = hex::encode(file.hash);
+                let is_pending = self
+                    .pending_downloads
+                    .contains(&(content_hash_hex.clone(), peer));
+                let btn = button(
+                    text(if is_pending {
+                        "Downloading…"
+                    } else {
+                        "Download"
+                    })
+                    .size(TYPO_SM),
+                )
+                .on_press(AppMessage::DownloadPeerFile(peer, idx))
+                .padding([SPACE_6, SPACE_12]);
+
                 let file_row = Row::new()
                     .push(
                         Column::new()
@@ -11923,11 +12413,7 @@ impl IcedChat {
                             .spacing(SPACE_2)
                             .width(Length::Fill),
                     )
-                    .push(
-                        button(text("Download").size(TYPO_SM))
-                            .on_press(AppMessage::DownloadPeerFile(peer, idx))
-                            .padding([SPACE_6, SPACE_12]),
-                    )
+                    .push(btn)
                     .align_y(Alignment::Center)
                     .spacing(SPACE_8)
                     .padding(iced::Padding {
@@ -12303,7 +12789,7 @@ mod tests {
 
     #[test]
     fn download_attachment_state_helpers_cover_all_states() {
-        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket");
+        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "");
         assert_eq!(attachment.action_label(), "Download");
         assert_eq!(attachment.status_label(), "Ready to download");
         assert!(attachment.progress_fraction().is_none());
@@ -12334,14 +12820,17 @@ mod tests {
         attachment.state = DownloadState::Completed {
             saved_name: "demo.bin".into(),
             saved_path: Some(std::path::PathBuf::from("/tmp/demo.bin")),
+            total_size: None,
         };
         assert_eq!(attachment.action_label(), "Open");
         assert!(attachment.status_label().contains("Saved"));
 
         attachment.state = DownloadState::Failed {
-            error: "boom".into(),
+            failure: DownloadFailure::Other {
+                detail: "boom".into(),
+            },
         };
-        assert_eq!(attachment.action_label(), "Retry");
+        assert_eq!(attachment.action_label(), "Dismiss");
         assert!(attachment.status_label().contains("boom"));
 
         attachment.state = DownloadState::Cancelled;
@@ -14025,6 +14514,7 @@ mod tests {
                                 download.state = DownloadState::Completed {
                                     saved_name: name,
                                     saved_path: None,
+                                    total_size: None,
                                 };
                                 invalidate_from = Some(idx);
                             }
@@ -14039,7 +14529,9 @@ mod tests {
                                 if download.transfer_id.is_none() {
                                     download.transfer_id = Some(id);
                                 }
-                                download.state = DownloadState::Failed { error };
+                                download.state = DownloadState::Failed {
+                                    failure: DownloadFailure::from_error(error),
+                                };
                                 invalidate_from = Some(idx);
                             }
                         }
@@ -14082,7 +14574,7 @@ mod tests {
     #[test]
     fn download_lifecycle_started_progress_completed() {
         let entry =
-            ChatEntry::system_download("system msg", TransferKind::File, "test.doc", "ticket");
+            ChatEntry::system_download("system msg", TransferKind::File, "test.doc", "ticket", "");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(1);
 
@@ -14158,8 +14650,13 @@ mod tests {
     /// Lifecycle: Started → Progress → Failed.
     #[test]
     fn download_lifecycle_started_progress_failed() {
-        let entry =
-            ChatEntry::system_download("file share", TransferKind::File, "corrupt.zip", "ticket");
+        let entry = ChatEntry::system_download(
+            "file share",
+            TransferKind::File,
+            "corrupt.zip",
+            "ticket",
+            "",
+        );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(2);
 
@@ -14200,7 +14697,7 @@ mod tests {
     #[test]
     fn download_lifecycle_started_cancelled() {
         let entry =
-            ChatEntry::system_download("file share", TransferKind::File, "large.iso", "ticket");
+            ChatEntry::system_download("file share", TransferKind::File, "large.iso", "ticket", "");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(3);
 
@@ -14228,8 +14725,13 @@ mod tests {
     /// Stale progress after a terminal state (Completed) must be ignored.
     #[test]
     fn download_stale_progress_after_completion_ignored() {
-        let entry =
-            ChatEntry::system_download("file share", TransferKind::File, "report.pdf", "ticket");
+        let entry = ChatEntry::system_download(
+            "file share",
+            TransferKind::File,
+            "report.pdf",
+            "ticket",
+            "",
+        );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(4);
 
@@ -14290,7 +14792,7 @@ mod tests {
     fn download_transfer_id_anchoring_survives_entry_reorder() {
         let id = TransferId::new(5);
         let mut entry =
-            ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket");
+            ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket", "");
         entry.download.as_mut().unwrap().transfer_id = Some(id);
 
         // Simulate entries: a text entry inserted before the download entry,
@@ -14328,7 +14830,7 @@ mod tests {
     #[test]
     fn download_anchoring_falls_back_to_index_when_no_transfer_id() {
         let entry =
-            ChatEntry::system_download("file", TransferKind::File, "archive.tar.gz", "ticket");
+            ChatEntry::system_download("file", TransferKind::File, "archive.tar.gz", "ticket", "");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(6);
 
@@ -14353,8 +14855,10 @@ mod tests {
     /// update the correct one.
     #[test]
     fn download_multiple_attachments_update_correct_row() {
-        let entry_a = ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a");
-        let entry_b = ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b");
+        let entry_a =
+            ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a", "");
+        let entry_b =
+            ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b", "");
         let mut mgr = TestDownloadManager::new(vec![entry_a, entry_b], Some(0));
         let id_a = TransferId::new(10);
         let id_b = TransferId::new(11);
@@ -14413,7 +14917,8 @@ mod tests {
     /// Unknown total downloads (total: None) must display correctly.
     #[test]
     fn download_unknown_total_shows_size_unknown() {
-        let entry = ChatEntry::system_download("stream", TransferKind::File, "live.mp4", "ticket");
+        let entry =
+            ChatEntry::system_download("stream", TransferKind::File, "live.mp4", "ticket", "");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(7);
 
@@ -14469,6 +14974,7 @@ mod tests {
             TransferKind::Image,
             "screenshot.png",
             "ticket",
+            "",
         );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(8);
@@ -14495,7 +15001,8 @@ mod tests {
     /// Full lifecycle with zero-total progress edge case.
     #[test]
     fn download_zero_total_edge_case() {
-        let entry = ChatEntry::system_download("empty", TransferKind::File, "empty.txt", "ticket");
+        let entry =
+            ChatEntry::system_download("empty", TransferKind::File, "empty.txt", "ticket", "");
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(9);
 
@@ -14530,7 +15037,7 @@ mod tests {
     /// tolerances for each download state.
     #[test]
     fn download_estimated_height_fits_each_state() {
-        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket");
+        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "");
 
         // Ready
         assert!((attachment.estimated_height() - 84.0).abs() < 1.0);
@@ -14551,20 +15058,23 @@ mod tests {
             bytes: 500,
             total: None,
         };
-        assert!((attachment.estimated_height() - 104.0).abs() < 1.0);
+        assert!((attachment.estimated_height() - 176.0).abs() < 1.0);
 
         // Completed
         attachment.state = DownloadState::Completed {
             saved_name: "demo.bin".into(),
             saved_path: None,
+            total_size: None,
         };
         assert!((attachment.estimated_height() - 92.0).abs() < 1.0);
 
         // Failed
         attachment.state = DownloadState::Failed {
-            error: "err".into(),
+            failure: DownloadFailure::Other {
+                detail: "err".into(),
+            },
         };
-        assert!((attachment.estimated_height() - 104.0).abs() < 1.0);
+        assert!((attachment.estimated_height() - 176.0).abs() < 1.0);
 
         // Cancelled
         attachment.state = DownloadState::Cancelled;
@@ -14797,9 +15307,12 @@ mod tests {
     fn integration_concurrent_downloads_row_scoped_invalidation() {
         // Setup three download entries at indices 0, 1, 2,
         // plus a text entry at index 3 that should never be touched.
-        let entry_a = ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a");
-        let entry_b = ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b");
-        let entry_c = ChatEntry::system_download("file c", TransferKind::File, "c.zip", "ticket_c");
+        let entry_a =
+            ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a", "");
+        let entry_b =
+            ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b", "");
+        let entry_c =
+            ChatEntry::system_download("file c", TransferKind::File, "c.zip", "ticket_c", "");
         let text_entry = ChatEntry::remote("peer", "hello", None, None, None);
         let mut mgr = TestDownloadManager::new(
             vec![entry_a, entry_b, entry_c, text_entry],

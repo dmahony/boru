@@ -68,12 +68,24 @@ use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 
+use crate::abuse_controls::sanitize_single_line;
 use crate::{
     api::{Event as GossipEvent, GossipReceiver, GossipSender},
     chat_core::filter_net_event_with_safety,
     proto::TopicId,
     public_room_safety::PublicRoomSafety,
 };
+
+// ── Constants ─────────────────────────────────────────────────────────
+
+/// Maximum length (in bytes) for a room name received over the wire.
+const MAX_ROOM_NAME_BYTES: usize = 512;
+
+/// Maximum length (in bytes) for a room description received over the wire.
+const MAX_ROOM_DESCRIPTION_BYTES: usize = 4096;
+
+/// Maximum length (in bytes) for room rules received over the wire.
+const MAX_ROOM_RULES_BYTES: usize = 4096;
 
 // ── Wire protocol ──────────────────────────────────────────────────────
 
@@ -114,6 +126,70 @@ impl RoomMetadata {
         }
     }
 
+    /// Validate all fields against length and content constraints.
+    ///
+    /// - `name`: must not exceed [`MAX_ROOM_NAME_BYTES`], and must not contain
+    ///   control characters or path-separator characters.
+    /// - `description`: must not exceed [`MAX_ROOM_DESCRIPTION_BYTES`], and
+    ///   must not contain control characters beyond tab/CR/LF.
+    /// - `rules`: must not exceed [`MAX_ROOM_RULES_BYTES`], and must not
+    ///   contain control characters beyond tab/CR/LF.
+    pub fn validate(&self) -> Result<()> {
+        let valid_display = |value: &str| -> bool {
+            !value.is_empty()
+                && !value.chars().any(|ch| ch.is_control())
+                && !value.contains('/')
+                && !value.contains('\\')
+                && value != "."
+                && value != ".."
+        };
+
+        let valid_multiline = |value: &str| -> bool {
+            value.chars().all(|ch| {
+                let allowed_control = matches!(ch, '\t' | '\n' | '\r');
+                !ch.is_control() || allowed_control
+            })
+        };
+
+        if let Some(ref name) = self.name {
+            if name.len() > MAX_ROOM_NAME_BYTES {
+                bail_any!(
+                    "room name exceeds maximum length of {MAX_ROOM_NAME_BYTES} (got {})",
+                    name.len()
+                );
+            }
+            if !name.is_empty() && !valid_display(name) {
+                bail_any!("room name contains disallowed characters");
+            }
+        }
+
+        if let Some(ref desc) = self.description {
+            if desc.len() > MAX_ROOM_DESCRIPTION_BYTES {
+                bail_any!(
+                    "room description exceeds maximum length of {MAX_ROOM_DESCRIPTION_BYTES} (got {})",
+                    desc.len()
+                );
+            }
+            if !desc.is_empty() && !valid_multiline(desc) {
+                bail_any!("room description contains disallowed control characters");
+            }
+        }
+
+        if let Some(ref rules) = self.rules {
+            if rules.len() > MAX_ROOM_RULES_BYTES {
+                bail_any!(
+                    "room rules exceed maximum length of {MAX_ROOM_RULES_BYTES} (got {})",
+                    rules.len()
+                );
+            }
+            if !rules.is_empty() && !valid_multiline(rules) {
+                bail_any!("room rules contain disallowed control characters");
+            }
+        }
+
+        Ok(())
+    }
+
     /// Merge another metadata snapshot into `self`, taking its
     /// `Some(...)` values as the new values.  `None` fields are left
     /// unchanged (they never **unset** a previously set value).
@@ -133,7 +209,7 @@ impl RoomMetadata {
     /// from the topic when the name field is `None`.
     pub fn display_name(&self, topic: &TopicId) -> String {
         match &self.name {
-            Some(n) if !n.is_empty() => n.clone(),
+            Some(n) if !n.is_empty() => sanitize_single_line(n),
             _ => {
                 let hex = format!("{:.16}", topic);
                 format!("room-{}", &hex[..8])
@@ -383,7 +459,13 @@ pub async fn process_gossip_event(
                 }
             };
 
-            // Merge the received update into our local state.
+            // Validate the received metadata before merging.
+            if let Err(e) = payload.validate() {
+                tracing::warn!("ignoring invalid remote metadata (dropped): {e}");
+                return Ok(true); // consumed (not forwarded as chat)
+            }
+
+            // Merge the validated update into our local state.
             {
                 let mut state = doc.state.write().await;
                 state.merge(&payload);
@@ -680,7 +762,7 @@ pub async fn process_roster_event(
                     members.insert(
                         entry.pub_key,
                         RosterMember {
-                            display_name: entry.display_name,
+                            display_name: sanitize_single_line(&entry.display_name),
                             joined_at: entry.joined_at,
                         },
                     );
@@ -857,7 +939,107 @@ pub async fn forward_room_events_for_chat(
 mod tests {
     use super::*;
 
-    // ── Wire format round-trips ────────────────────────────────────
+    // ── Metadata validation ─────────────────────────────────────────
+
+    #[test]
+    fn room_metadata_validate_accepts_valid() {
+        let md = RoomMetadata {
+            name: Some("Friends Chat".into()),
+            description: Some("A room for friends".into()),
+            rules: Some("Be nice".into()),
+        };
+        assert!(md.validate().is_ok());
+    }
+
+    #[test]
+    fn room_metadata_validate_accepts_none_fields() {
+        let md = RoomMetadata::empty();
+        assert!(md.validate().is_ok());
+    }
+
+    #[test]
+    fn room_metadata_validate_rejects_name_with_control_chars() {
+        let md = RoomMetadata {
+            name: Some("bad\u{0000}name".into()),
+            description: None,
+            rules: None,
+        };
+        assert!(md.validate().is_err());
+    }
+
+    #[test]
+    fn room_metadata_validate_rejects_name_with_path_separators() {
+        for sep in &["/", "\\"] {
+            let md = RoomMetadata {
+                name: Some(format!("bad{}name", sep)),
+                description: None,
+                rules: None,
+            };
+            assert!(md.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn room_metadata_validate_rejects_oversized_name() {
+        let md = RoomMetadata {
+            name: Some("x".repeat(MAX_ROOM_NAME_BYTES + 1)),
+            description: None,
+            rules: None,
+        };
+        assert!(md.validate().is_err());
+    }
+
+    #[test]
+    fn room_metadata_validate_rejects_oversized_description() {
+        let md = RoomMetadata {
+            name: None,
+            description: Some("x".repeat(MAX_ROOM_DESCRIPTION_BYTES + 1)),
+            rules: None,
+        };
+        assert!(md.validate().is_err());
+    }
+
+    #[test]
+    fn room_metadata_validate_accepts_multiline_description() {
+        let md = RoomMetadata {
+            name: None,
+            description: Some("line1\nline2\n\tindented".into()),
+            rules: None,
+        };
+        assert!(md.validate().is_ok());
+    }
+
+    #[test]
+    fn room_metadata_validate_rejects_description_with_null() {
+        let md = RoomMetadata {
+            name: None,
+            description: Some("bad\u{0000}desc".into()),
+            rules: None,
+        };
+        assert!(md.validate().is_err());
+    }
+
+    #[test]
+    fn room_metadata_validate_rejects_oversized_rules() {
+        let md = RoomMetadata {
+            name: None,
+            description: None,
+            rules: Some("x".repeat(MAX_ROOM_RULES_BYTES + 1)),
+        };
+        assert!(md.validate().is_err());
+    }
+
+    #[test]
+    fn room_metadata_validate_rejects_name_dot_and_dotdot() {
+        for name in &[".", ".."] {
+            let md = RoomMetadata {
+                name: Some(name.to_string()),
+                description: None,
+                rules: None,
+            };
+            assert!(md.validate().is_err());
+        }
+    }
 
     #[test]
     fn wire_roundtrip() {

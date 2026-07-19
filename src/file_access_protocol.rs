@@ -37,6 +37,9 @@ pub const FILE_ACCESS_WIRE_VERSION: u16 = 1;
 /// All wire versions that the current code understands.
 pub const SUPPORTED_FILE_ACCESS_VERSIONS: &[u16] = &[1];
 
+/// Maximum length (in bytes) for a filename received in a file-access request.
+const MAX_FILENAME_BYTES: usize = 512;
+
 // ── Error codes (wire-safe) ──────────────────────────────────────────────────
 
 /// Stable, wire-safe error codes for file-access operations.
@@ -325,6 +328,25 @@ impl FileAccessRequest {
         if self.content_hash.is_empty() && self.expected_content_hash == [0; 32] {
             return Err((FileAccessErrorCode::InvalidRequest, "content hash is empty"));
         }
+        // Validate filename: must not contain path separators or control chars.
+        if self.filename.contains('/') || self.filename.contains('\\') {
+            return Err((
+                FileAccessErrorCode::InvalidRequest,
+                "filename contains path separators",
+            ));
+        }
+        if self.filename.len() > MAX_FILENAME_BYTES {
+            return Err((
+                FileAccessErrorCode::InvalidRequest,
+                "filename exceeds maximum length",
+            ));
+        }
+        if !self.filename.is_empty() && self.filename.chars().any(|ch| ch.is_control()) {
+            return Err((
+                FileAccessErrorCode::InvalidRequest,
+                "filename contains control characters",
+            ));
+        }
         Ok(())
     }
 
@@ -466,6 +488,77 @@ impl FileAccessWireResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── FileAccessRequest validation ─────────────────────────────────────
+
+    #[test]
+    fn file_access_request_valid_succeeds() {
+        let req = FileAccessRequest {
+            content_hash: "abc123".into(),
+            filename: "photo.png".into(),
+            expected_size: 1024,
+            shared_file_id: "file-001".into(),
+            expected_content_hash: [1u8; 32],
+            expected_version: 1,
+        };
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn file_access_request_empty_shared_file_id_rejected() {
+        let req = FileAccessRequest {
+            shared_file_id: String::new(),
+            ..FileAccessRequest::new("x", [1u8; 32], 1)
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn file_access_request_filename_with_path_separators_rejected() {
+        for sep in &["/", "\\"] {
+            let req = FileAccessRequest {
+                filename: format!("sub{}dir{}name.txt", sep, sep),
+                ..FileAccessRequest::new("id", [1u8; 32], 1)
+            };
+            assert!(
+                req.validate().is_err(),
+                "filename with '{sep}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn file_access_request_filename_with_control_chars_rejected() {
+        let req = FileAccessRequest {
+            filename: "file\u{0000}.txt".into(),
+            ..FileAccessRequest::new("id", [1u8; 32], 1)
+        };
+        assert!(
+            req.validate().is_err(),
+            "filename with null byte must be rejected"
+        );
+
+        let req = FileAccessRequest {
+            filename: "file\u{001B}.txt".into(),
+            ..FileAccessRequest::new("id", [1u8; 32], 1)
+        };
+        assert!(
+            req.validate().is_err(),
+            "filename with ESC must be rejected"
+        );
+    }
+
+    #[test]
+    fn file_access_request_oversized_filename_rejected() {
+        let req = FileAccessRequest {
+            filename: "x".repeat(MAX_FILENAME_BYTES + 1),
+            ..FileAccessRequest::new("id", [1u8; 32], 1)
+        };
+        assert!(
+            req.validate().is_err(),
+            "oversized filename must be rejected"
+        );
+    }
 
     // ── Serialization round-trip ───────────────────────────────────────────
 

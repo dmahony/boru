@@ -132,7 +132,7 @@ fn make_manager_diag(storage: Storage) -> (DownloadManager, Arc<Diagnostics>, te
 
 /// Check whether a state string represents a terminal download state.
 fn is_terminal(state: &str) -> bool {
-    matches!(state, "completed" | "failed" | "cancelled")
+    matches!(state, "complete" | "completed" | "failed" | "cancelled")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -615,7 +615,7 @@ async fn download_from_peer_profile() {
         .expect("get download")
         .expect("exists");
     assert!(is_terminal(&dl.state), "download should be terminal");
-    assert_eq!(dl.state, "completed", "download should complete");
+    assert_eq!(dl.state, "complete", "download should complete");
     assert_eq!(dl.content_hash, "dl-hash");
     assert_eq!(dl.total_bytes, FILE_SIZE);
     assert_eq!(dl.remote_peer, pk.to_string());
@@ -747,7 +747,10 @@ async fn pause_and_resume_download() {
         .get_download(dl_id)
         .expect("get download")
         .expect("exists");
-    assert_eq!(dl.state, "queued", "should be queued after resume");
+    assert_eq!(
+        dl.state, "resolving_peer",
+        "should be resolving_peer after resume"
+    );
 
     // Complete via manager ticks.
     for _ in 0..10 {
@@ -758,7 +761,7 @@ async fn pause_and_resume_download() {
         .get_download(dl_id)
         .expect("get download")
         .expect("exists");
-    assert_eq!(dl.state, "completed", "should reach completed after resume");
+    assert_eq!(dl.state, "complete", "should reach completed after resume");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1005,7 +1008,7 @@ async fn completed_file_state() {
         .get_download(dl_id)
         .expect("get download")
         .expect("exists");
-    assert_eq!(dl.state, "completed", "state is completed");
+    assert_eq!(dl.state, "complete", "state is completed");
     assert_eq!(dl.content_hash, "done-hash", "content hash preserved");
     assert_eq!(dl.total_bytes, FILE_SIZE, "total bytes preserved");
     assert_eq!(dl.remote_peer, pk.to_string(), "remote peer preserved");

@@ -36,6 +36,7 @@ use n0_error::{Result, StdResultExt};
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
+use crate::catalogue_limits::CatalogueLimitsConfig;
 use crate::catalogue_model::{CatalogueView, RemoteSharedFile, SignedFileCatalogue};
 use crate::friends::{FriendRelationship, FriendsStore};
 use crate::mailbox::{seal_for, MailboxAck, MailboxEnvelope, MailboxPublicKey};
@@ -44,7 +45,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 7;
+const CURRENT_SCHEMA_VERSION: u32 = 8;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -319,6 +320,7 @@ pub struct SyncCursorRow {
 #[derive(Debug, Clone)]
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
+    catalogue_limits: CatalogueLimitsConfig,
 }
 
 /// Durable result of creating an outgoing direct message.
@@ -381,6 +383,16 @@ struct LogicalDm {
     signature: Vec<u8>,
 }
 
+/// A row from the `downloads` table recovered during restart.
+struct RecoveryRow {
+    id: i64,
+    state: String,
+    total_bytes: u64,
+    content_hash: String,
+    temp_path: Option<String>,
+    destination_path: Option<String>,
+}
+
 impl Storage {
     // ── Open / init ───────────────────────────────────────────────────
 
@@ -390,6 +402,18 @@ impl Storage {
     /// [`CURRENT_SCHEMA_VERSION`] after this call returns.
     /// Runs integrity check and crash-state recovery automatically.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_catalogue_limits(data_dir, CatalogueLimitsConfig::default())
+    }
+
+    /// Open (or create) the database with explicit catalogue admission limits.
+    ///
+    /// This is the same as [`open`](Self::open), but allows tests and
+    /// deployments to override the catalogue count caps without changing the
+    /// rest of the storage configuration.
+    pub fn open_with_catalogue_limits(
+        data_dir: impl AsRef<Path>,
+        catalogue_limits: CatalogueLimitsConfig,
+    ) -> Result<Self> {
         let data_dir = data_dir.as_ref();
 
         #[cfg(unix)]
@@ -419,6 +443,7 @@ impl Storage {
 
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
+            catalogue_limits,
         };
 
         // Check DB integrity before touching any data.
@@ -429,17 +454,25 @@ impl Storage {
 
         // Recover any state left dangling by a crash.
         storage.recover_crash_state()?;
+        // Recover interrupted file transfers after the schema is ready.
+        storage.recover_downloads_from_restart()?;
 
         Ok(storage)
     }
 
     /// Open an in-memory database (for tests).
     pub fn memory() -> Result<Self> {
+        Self::memory_with_catalogue_limits(CatalogueLimitsConfig::default())
+    }
+
+    /// Open an in-memory database (for tests) with explicit catalogue limits.
+    pub fn memory_with_catalogue_limits(catalogue_limits: CatalogueLimitsConfig) -> Result<Self> {
         let conn = Connection::open_in_memory().std_context("open in-memory sqlite db")?;
         conn.execute_batch("PRAGMA foreign_keys = ON;\n             PRAGMA synchronous = NORMAL;")
             .std_context("set pragmas")?;
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
+            catalogue_limits,
         };
         storage.run_migrations()?;
         Ok(storage)
@@ -561,6 +594,7 @@ impl Storage {
                 5 => self.migrate_v5(&conn)?,
                 6 => self.migrate_v6(&conn)?,
                 7 => self.migrate_v7(&conn)?,
+                8 => self.migrate_v8(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -733,6 +767,10 @@ impl Storage {
             );
             CREATE INDEX idx_downloads_state
                 ON downloads(state);
+            -- The row id is the insertion sequence and disambiguates
+            -- downloads created during the same millisecond.
+            CREATE INDEX idx_downloads_queue_order
+                ON downloads(state, created_at_ms, id);
             CREATE INDEX idx_downloads_hash
                 ON downloads(content_hash);
 
@@ -870,6 +908,17 @@ impl Storage {
         .std_context("migrate v7 file verification and replacements")?;
         Ok(())
     }
+    /// V8 adds the filesystem paths needed to recover an interrupted
+    /// download without guessing where its partial output belongs.
+    fn migrate_v8(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "ALTER TABLE downloads ADD COLUMN temp_path TEXT;
+             ALTER TABLE downloads ADD COLUMN destination_path TEXT;",
+        )
+        .std_context("migrate v8 download paths")?;
+        Ok(())
+    }
+
     /// during repeat sync requests.  Every message id served via SyncResponse
     /// is recorded in sync_dedup.  The query_pending_outbound_for_recipient
     /// method filters out already-served ids so that subsequent sync requests
@@ -1666,7 +1715,7 @@ impl Storage {
                 "SELECT msg_id, recipient_device_id FROM outbox
                  WHERE status != ?1 AND status != ?2 AND next_attempt_at_ms <= ?3
                    AND (locked_until_ms IS NULL OR locked_until_ms <= ?3)
-                 ORDER BY rowid LIMIT ?4",
+                 ORDER BY next_attempt_at_ms, rowid LIMIT ?4",
                 params![
                     DeliveryStatus::Acked as u8,
                     DeliveryStatus::Expired as u8,
@@ -2254,9 +2303,39 @@ impl Storage {
         description: Option<&str>,
         offered: bool,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .std_context("begin shared file upsert")?;
+        let existing_offered: Option<bool> = tx
+            .query_row(
+                "SELECT offered FROM shared_files
+                 WHERE content_hash = ?1 AND profile_user_id = ?2",
+                params![content_hash, profile_user_id],
+                |row| row.get::<_, i64>(0).map(|v| v != 0),
+            )
+            .optional()
+            .std_context("check existing shared file")?;
+        if offered && existing_offered != Some(true) {
+            let shared_count: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM shared_files
+                     WHERE profile_user_id = ?1 AND offered = 1",
+                    params![profile_user_id],
+                    |row| row.get(0),
+                )
+                .std_context("count shared files")?;
+            if shared_count as usize >= self.catalogue_limits.max_files_per_catalogue {
+                return Err(anyhow!(
+                    "catalogue has {} files, exceeds maximum of {}",
+                    shared_count,
+                    self.catalogue_limits.max_files_per_catalogue
+                )
+                .into());
+            }
+        }
         let now = now_ms() as i64;
-        conn.execute(
+        tx.execute(
             "INSERT INTO shared_files
                 (content_hash, profile_user_id, metadata_id, display_filename,
                  description, offered, created_at_ms, updated_at_ms)
@@ -2278,6 +2357,7 @@ impl Storage {
             ],
         )
         .std_context("upsert shared_file")?;
+        tx.commit().std_context("commit shared file upsert")?;
         Ok(())
     }
 
@@ -2383,7 +2463,9 @@ impl Storage {
                     granted |= permission.permission == "read";
                 }
             }
-            if denied || (!granted && !is_friend) {
+            let has_restricted_permissions =
+                self.has_active_permissions_for_file(&row.content_hash, profile_user_id)?;
+            if denied || (!granted && (has_restricted_permissions || !is_friend)) {
                 continue;
             }
             let object = self
@@ -2481,22 +2563,48 @@ impl Storage {
         name: &str,
         description: Option<&str>,
     ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
-        let now = now_ms() as i64;
-        conn.execute(
-            "INSERT OR IGNORE INTO file_collections
-                (profile_user_id, name, description, created_at_ms, updated_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![profile_user_id, name, description, now],
-        )
-        .std_context("ensure collection")?;
-        let id: i64 = conn
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .std_context("begin collection ensure")?;
+        if let Some(id) = tx
             .query_row(
                 "SELECT id FROM file_collections WHERE profile_user_id = ?1 AND name = ?2",
                 params![profile_user_id, name],
                 |row| row.get(0),
             )
-            .std_context("get collection id")?;
+            .optional()
+            .std_context("lookup existing collection")?
+        {
+            tx.commit()
+                .std_context("commit existing collection lookup")?;
+            return Ok(id);
+        }
+        let collection_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM file_collections WHERE profile_user_id = ?1",
+                params![profile_user_id],
+                |row| row.get(0),
+            )
+            .std_context("count collections")?;
+        if collection_count as usize >= self.catalogue_limits.max_collections {
+            return Err(anyhow!(
+                "catalogue has {} collections, exceeds maximum of {}",
+                collection_count,
+                self.catalogue_limits.max_collections
+            )
+            .into());
+        }
+        let now = now_ms() as i64;
+        tx.execute(
+            "INSERT INTO file_collections
+                (profile_user_id, name, description, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![profile_user_id, name, description, now],
+        )
+        .std_context("ensure collection")?;
+        let id = tx.last_insert_rowid();
+        tx.commit().std_context("commit collection ensure")?;
         Ok(id)
     }
 
@@ -2535,15 +2643,47 @@ impl Storage {
         content_hash: &str,
         position: u32,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .std_context("begin collection item add")?;
+        let existing_item: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM file_collection_items
+                 WHERE collection_id = ?1 AND content_hash = ?2",
+                params![collection_id, content_hash],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("lookup existing collection item")?;
+        if existing_item.is_none() {
+            let item_count: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM file_collection_items WHERE collection_id = ?1",
+                    params![collection_id],
+                    |row| row.get(0),
+                )
+                .std_context("count collection items")?;
+            if item_count as usize >= self.catalogue_limits.max_entries_per_collection {
+                return Err(anyhow!(
+                    "collection {collection_id} has more than {} entries",
+                    self.catalogue_limits.max_entries_per_collection
+                )
+                .into());
+            }
+        }
         let now = now_ms() as i64;
-        conn.execute(
-            "INSERT OR REPLACE INTO file_collection_items
+        tx.execute(
+            "INSERT INTO file_collection_items
                 (collection_id, content_hash, position, added_at_ms)
-             VALUES (?1, ?2, ?3, ?4)",
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(collection_id, content_hash) DO UPDATE SET
+                position = excluded.position,
+                added_at_ms = excluded.added_at_ms",
             params![collection_id, content_hash, position as i64, now],
         )
         .std_context("add to collection")?;
+        tx.commit().std_context("commit collection item add")?;
         Ok(())
     }
 
@@ -2696,6 +2836,29 @@ impl Storage {
         Ok(results)
     }
 
+    /// Return whether a file has any active explicit permissions.
+    pub fn has_active_permissions_for_file(
+        &self,
+        content_hash: &str,
+        grantor_user_id: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        let has: bool = conn
+            .query_row(
+                "SELECT 1 FROM shared_file_permissions
+                 WHERE content_hash = ?1 AND grantor_user_id = ?2
+                   AND (expires_at_ms IS NULL OR expires_at_ms > ?3)
+                 LIMIT 1",
+                params![content_hash, grantor_user_id, now],
+                |_| Ok(true),
+            )
+            .optional()
+            .std_context("check file permissions")?
+            .unwrap_or(false);
+        Ok(has)
+    }
+
     // ── Downloads (v2) ────────────────────────────────────────────────
 
     /// Create a download entry (queued state).
@@ -2716,6 +2879,128 @@ impl Storage {
         )
         .std_context("create download")?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Persist the temporary and final filesystem paths for restart recovery.
+    pub fn set_download_paths(
+        &self,
+        id: i64,
+        temp_path: impl AsRef<Path>,
+        destination_path: impl AsRef<Path>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET temp_path = ?1, destination_path = ?2,
+                    updated_at_ms = ?3 WHERE id = ?4",
+            params![
+                temp_path.as_ref().to_string_lossy().as_ref(),
+                destination_path.as_ref().to_string_lossy().as_ref(),
+                now_ms() as i64,
+                id,
+            ],
+        )
+        .std_context("set download paths")?;
+        Ok(())
+    }
+
+    /// Recover download rows left in an in-progress state by a restart.
+    ///
+    /// Resolution and permission negotiation are retried from the beginning
+    /// when no partial file exists, while a partial file is retained behind a
+    /// paused row. Active transfers are always paused. Verification is never
+    /// trusted from the database: an existing destination or temporary file
+    /// is hashed again before it can become complete.
+    pub fn recover_downloads_from_restart(&self) -> Result<()> {
+        let rows: Vec<RecoveryRow> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, state, total_bytes, content_hash, temp_path, destination_path
+                 FROM downloads
+                 WHERE state IN ('resolving_peer', 'requesting_permission',
+                                 'downloading', 'verifying')",
+                )
+                .std_context("prepare download restart recovery")?;
+            let mut query = stmt
+                .query([])
+                .std_context("query download restart recovery")?;
+            let mut rows = Vec::new();
+            while let Some(row) = query.next().std_context("read download restart row")? {
+                rows.push(RecoveryRow {
+                    id: row.get(0).std_context("get download id")?,
+                    state: row.get(1).std_context("get download state")?,
+                    total_bytes: row.get::<_, i64>(2).std_context("get download size")? as u64,
+                    content_hash: row.get(3).std_context("get download hash")?,
+                    temp_path: row.get(4).std_context("get temporary path")?,
+                    destination_path: row.get(5).std_context("get destination path")?,
+                });
+            }
+            rows
+        };
+
+        for row in rows {
+            let temp_exists = row
+                .temp_path
+                .as_deref()
+                .is_some_and(|path| Path::new(path).is_file());
+            match row.state.as_str() {
+                "resolving_peer" | "requesting_permission" => {
+                    let next = if temp_exists { "paused" } else { "queued" };
+                    self.set_download_state_for_recovery(row.id, next)?;
+                }
+                "downloading" => self.set_download_state_for_recovery(row.id, "paused")?,
+                "verifying" => {
+                    let destination_valid = row.destination_path.as_deref().is_some_and(|path| {
+                        Path::new(path).is_file()
+                            && crate::download::verify_download_file(
+                                path,
+                                row.total_bytes,
+                                &row.content_hash,
+                            )
+                            .is_ok()
+                    });
+                    let temp_valid = !destination_valid
+                        && row.temp_path.as_deref().is_some_and(|path| {
+                            Path::new(path).is_file()
+                                && crate::download::verify_download_file(
+                                    path,
+                                    row.total_bytes,
+                                    &row.content_hash,
+                                )
+                                .is_ok()
+                        });
+                    if destination_valid || temp_valid {
+                        if destination_valid {
+                            if let Some(temp) = row.temp_path.as_deref() {
+                                if Path::new(temp).is_file() {
+                                    let _ = std::fs::remove_file(temp);
+                                }
+                            }
+                        } else if let (Some(temp), Some(destination)) =
+                            (row.temp_path.as_deref(), row.destination_path.as_deref())
+                        {
+                            std::fs::rename(temp, destination)
+                                .std_context("install verified download during recovery")?;
+                        }
+                        self.complete_download(row.id, row.total_bytes)?;
+                    } else {
+                        self.set_download_state_for_recovery(row.id, "downloading")?;
+                    }
+                }
+                _ => unreachable!("filtered download state"),
+            }
+        }
+        Ok(())
+    }
+
+    fn set_download_state_for_recovery(&self, id: i64, state: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET state = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![state, now_ms() as i64, id],
+        )
+        .std_context("set recovered download state")?;
+        Ok(())
     }
 
     /// Update download progress.
@@ -2751,6 +3036,47 @@ impl Storage {
                 None => return Err(anyhow!("download not found").into()),
             }
         }
+        Ok(())
+    }
+
+    /// Write multiple progress updates in a single SQLite transaction.
+    ///
+    /// Each entry is `(download_id, bytes_downloaded, state)`.  Updates
+    /// are applied via the same logic as [`update_download_progress`],
+    /// but wrapped in a single `BEGIN` / `COMMIT` so that N concurrent
+    /// downloaders do not issue N separate transactions.
+    ///
+    /// Paused or missing downloads are silently skipped (the batch
+    /// should not fail because one download was paused mid-transfer).
+    pub fn flush_progress_batch(&self, batch: &[(i64, u64, &str)]) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().std_context("start progress batch")?;
+        let now = now_ms() as i64;
+        for &(id, bytes, state) in batch {
+            let changed = tx
+                .execute(
+                    "UPDATE downloads SET bytes_downloaded = ?1, state = ?2, updated_at_ms = ?3
+                     WHERE id = ?4 AND state != 'paused'",
+                    params![bytes as i64, state, now, id],
+                )
+                .std_context("batch progress update")?;
+            if changed == 0 {
+                // Paused / missing — skip silently rather than failing the
+                // whole batch.  A concurrent pause or cancellation is normal.
+                let _: Option<String> = tx
+                    .query_row(
+                        "SELECT state FROM downloads WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .std_context("check download state")?;
+            }
+        }
+        tx.commit().std_context("commit progress batch")?;
         Ok(())
     }
 
@@ -3012,7 +3338,7 @@ impl Storage {
                         total_bytes, created_at_ms, updated_at_ms, last_error,
                         retry_count, next_retry_at_ms
                  FROM downloads WHERE state = ?1
-                 ORDER BY created_at_ms ASC",
+                 ORDER BY created_at_ms ASC, id ASC",
             )
             .std_context("prepare list_downloads_by_state")?;
         let mut rows = stmt.query(params![state]).std_context("query downloads")?;
@@ -3023,13 +3349,83 @@ impl Storage {
         Ok(results)
     }
 
-    /// Cancel a non-terminal download — sets state to 'cancelled'.
-    pub fn cancel_download(&self, id: i64) -> Result<()> {
+    /// Find downloads targeting a specific content_hash, optionally filtered
+    /// by remote_peer.  Returns all matching rows (in any state).
+    ///
+    /// Used by the download initiation logic to detect conflicting completed
+    /// downloads before creating a new one.
+    pub fn find_downloads_for_file(
+        &self,
+        content_hash: &str,
+        remote_peer: Option<&str>,
+    ) -> Result<Vec<Download>> {
         let conn = self.conn.lock().unwrap();
+        let mut results = Vec::new();
+
+        let sql = "SELECT id, content_hash, remote_peer, state, bytes_downloaded, \
+                    total_bytes, created_at_ms, updated_at_ms, last_error, \
+                    retry_count, next_retry_at_ms \
+                   FROM downloads WHERE content_hash = ?1";
+
+        if let Some(peer) = remote_peer {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "{sql} AND remote_peer = ?2 ORDER BY created_at_ms ASC, id ASC"
+                ))
+                .std_context("prepare find_downloads_for_file")?;
+            let mut rows = stmt
+                .query(rusqlite::params![content_hash, peer])
+                .std_context("query find_downloads_for_file")?;
+            while let Some(row) = rows.next().std_context("next row")? {
+                results.push(row_to_download(row)?);
+            }
+        } else {
+            let mut stmt = conn
+                .prepare(&format!("{sql} ORDER BY created_at_ms ASC, id ASC"))
+                .std_context("prepare find_downloads_for_file")?;
+            let mut rows = stmt
+                .query(rusqlite::params![content_hash])
+                .std_context("query find_downloads_for_file")?;
+            while let Some(row) = rows.next().std_context("next row")? {
+                results.push(row_to_download(row)?);
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Cancel a non-terminal download — sets state to 'cancelled'.
+    ///
+    /// Terminal downloads (complete, failed, version_mismatch) are rejected
+    /// because their outcome is already durably recorded.  An already-cancelled
+    /// download is treated as idempotent (no-op), matching the pattern used
+    /// by [`Self::pause_download`].
+    pub fn cancel_download(&self, id: i64) -> Result<()> {
+        const TERMINAL_STATES: &[&str] = &["complete", "completed", "failed", "version_mismatch"];
+
+        let conn = self.conn.lock().unwrap();
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT state FROM downloads WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("look up download before cancel")?;
+        let Some(current) = current else {
+            return Err(anyhow!("download not found").into());
+        };
+        if current == "cancelled" {
+            return Ok(());
+        }
+        if TERMINAL_STATES.contains(&current.as_str()) {
+            return Err(anyhow!("cannot cancel terminal download in state {current}").into());
+        }
         let now = now_ms() as i64;
         conn.execute(
-            "UPDATE downloads SET state = 'cancelled', updated_at_ms = ?1 WHERE id = ?2",
-            params![now, id],
+            "UPDATE downloads SET state = 'cancelled', updated_at_ms = ?1
+             WHERE id = ?2 AND state = ?3",
+            params![now, id, current],
         )
         .std_context("cancel download")?;
         Ok(())
@@ -4099,6 +4495,77 @@ mod tests {
     }
 
     #[test]
+    fn v2_catalogue_limits_reject_new_entries_but_allow_updates() {
+        let limits = CatalogueLimitsConfig {
+            max_files_per_catalogue: 1,
+            max_collections: 1,
+            max_entries_per_collection: 1,
+            ..Default::default()
+        };
+        let storage = Storage::memory_with_catalogue_limits(limits).unwrap();
+        storage
+            .put_file_object("hash-a", 100, "text/plain", "a.txt", b"a")
+            .unwrap();
+        storage
+            .put_file_object("hash-b", 200, "text/plain", "b.txt", b"b")
+            .unwrap();
+
+        storage
+            .upsert_shared_file("hash-a", "alice_key", "meta-a", "a.txt", None, true)
+            .unwrap();
+        // Updating an existing offered file must succeed even when the catalogue is full.
+        storage
+            .upsert_shared_file(
+                "hash-a",
+                "alice_key",
+                "meta-a-2",
+                "a-renamed.txt",
+                None,
+                true,
+            )
+            .unwrap();
+        let files = storage.list_shared_files("alice_key", true).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].metadata_id, "meta-a-2");
+        assert_eq!(files[0].display_filename, "a-renamed.txt");
+
+        let err = storage
+            .upsert_shared_file("hash-b", "alice_key", "meta-b", "b.txt", None, true)
+            .unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("files"));
+        assert!(storage
+            .get_shared_file("alice_key", "hash-b")
+            .unwrap()
+            .is_none());
+
+        let coll_id = storage
+            .ensure_collection("alice_key", "docs", Some("docs"))
+            .unwrap();
+        // Re-using the existing collection is allowed at the limit.
+        let same_coll_id = storage
+            .ensure_collection("alice_key", "docs", Some("docs v2"))
+            .unwrap();
+        assert_eq!(same_coll_id, coll_id);
+        let err = storage
+            .ensure_collection("alice_key", "photos", Some("photos"))
+            .unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("collections"));
+        assert_eq!(storage.list_collections("alice_key").unwrap().len(), 1);
+
+        storage.add_to_collection(coll_id, "hash-a", 0).unwrap();
+        storage.add_to_collection(coll_id, "hash-a", 1).unwrap();
+        let items = storage.list_collection_items(coll_id).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].position, 1);
+        let err = storage.add_to_collection(coll_id, "hash-b", 2).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("entries"));
+        assert_eq!(storage.list_collection_items(coll_id).unwrap().len(), 1);
+    }
+
+    #[test]
     fn v2_permissions() {
         let storage = Storage::memory().unwrap();
         storage
@@ -5107,5 +5574,266 @@ mod tests {
             r3.msg_id, [40u8; 32],
             "latest next_attempt (300) should be third"
         );
+    }
+
+    // ── Progress batch tests ──────────────────────────────────────────
+
+    #[test]
+    fn flush_progress_batch_writes_multiple_downloads() {
+        let storage = Storage::memory().unwrap();
+        let hash = "hash-a";
+        storage
+            .put_file_object(hash, 4096, "app/bin", "a.bin", b"data")
+            .unwrap();
+        let id1 = storage.create_download(hash, "peer1", 4096).unwrap();
+        let id2 = storage.create_download(hash, "peer2", 4096).unwrap();
+        let id3 = storage.create_download(hash, "peer3", 4096).unwrap();
+
+        // Write all three in a single batch.
+        let batch = [
+            (id1, 1024u64, "downloading"),
+            (id2, 2048u64, "downloading"),
+            (id3, 3072u64, "downloading"),
+        ];
+        storage.flush_progress_batch(&batch).unwrap();
+
+        let d1 = storage.get_download(id1).unwrap().unwrap();
+        let d2 = storage.get_download(id2).unwrap().unwrap();
+        let d3 = storage.get_download(id3).unwrap().unwrap();
+        assert_eq!(d1.bytes_downloaded, 1024);
+        assert_eq!(d1.state, "downloading");
+        assert_eq!(d2.bytes_downloaded, 2048);
+        assert_eq!(d2.state, "downloading");
+        assert_eq!(d3.bytes_downloaded, 3072);
+        assert_eq!(d3.state, "downloading");
+    }
+
+    #[test]
+    fn flush_progress_batch_skips_paused_downloads() {
+        let storage = Storage::memory().unwrap();
+        let hash = "hash-b";
+        storage
+            .put_file_object(hash, 100, "app/bin", "b.bin", b"test")
+            .unwrap();
+        let id1 = storage.create_download(hash, "peer1", 100).unwrap();
+        let id2 = storage.create_download(hash, "peer2", 100).unwrap();
+
+        // Pause id2.
+        storage.pause_download(id2).unwrap();
+
+        // Batch that includes the paused download — should not fail.
+        let batch = [
+            (id1, 50u64, "downloading"),
+            (id2, 60u64, "downloading"), // paused — written to 0 rows
+        ];
+        storage.flush_progress_batch(&batch).unwrap();
+
+        let d1 = storage.get_download(id1).unwrap().unwrap();
+        let d2 = storage.get_download(id2).unwrap().unwrap();
+        assert_eq!(d1.bytes_downloaded, 50, "active download updated");
+        assert_eq!(d2.bytes_downloaded, 0, "paused download not modified");
+    }
+
+    #[test]
+    fn flush_progress_batch_empty_is_noop() {
+        let storage = Storage::memory().unwrap();
+        storage.flush_progress_batch(&[]).unwrap();
+        // No panic — that's the test.
+    }
+
+    // ── Remote catalogue cache lifecycle ───────────────────────────
+
+    /// Helper: build a test catalogue signed with `sk` containing the given
+    /// file hashes, each as a [`RemoteSharedFile`] with a sensible default
+    /// display name.
+    fn make_test_catalogue(
+        sk: &SecretKey,
+        revision: u64,
+        file_hashes: &[&str],
+    ) -> SignedFileCatalogue {
+        let files: Vec<RemoteSharedFile> = file_hashes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                RemoteSharedFile::new(
+                    *h,
+                    format!("file-{i}.data"),
+                    None,
+                    1024,
+                    "application/octet-stream",
+                    None,
+                    1,
+                )
+            })
+            .collect();
+        SignedFileCatalogue::sign(sk, revision, now_ms(), vec![], files)
+    }
+
+    /// Assert that the remote catalogue meta for `peer` matches the
+    /// expected revision.
+    fn assert_cached_revision(storage: &Storage, peer: &PublicKey, expected_rev: u64) {
+        let meta = storage
+            .get_remote_catalogue_meta(peer)
+            .expect("get_remote_catalogue_meta");
+        assert!(
+            meta.is_some(),
+            "expected cached meta for {peer} at rev {expected_rev}"
+        );
+        assert_eq!(
+            meta.unwrap().revision,
+            expected_rev,
+            "cached revision for {peer}"
+        );
+    }
+
+    /// Assert that the set of content hashes cached for `peer` matches
+    /// `expected` (order-insensitive).
+    fn assert_cached_files(storage: &Storage, peer: &PublicKey, expected: &[&str]) {
+        let rows = storage
+            .get_remote_shared_files(peer)
+            .expect("get_remote_shared_files");
+        let mut actual: Vec<&str> = rows.iter().map(|r| r.content_hash.as_str()).collect();
+        actual.sort();
+        let mut exp: Vec<&str> = expected.to_vec();
+        exp.sort();
+        assert_eq!(actual, exp, "cached file hashes for {peer}");
+    }
+
+    /// Assert that NO remote catalogue meta exists for `peer`.
+    #[allow(dead_code)]
+    fn assert_no_cached_meta(storage: &Storage, peer: &PublicKey) {
+        let meta = storage
+            .get_remote_catalogue_meta(peer)
+            .expect("get_remote_catalogue_meta");
+        assert!(meta.is_none(), "expected no cached meta for {peer}");
+    }
+
+    #[test]
+    fn first_fetch_stores_profile_and_revision() {
+        let storage = Storage::memory().unwrap();
+        let sk = SecretKey::generate();
+        let pk = sk.public();
+
+        let cat = make_test_catalogue(&sk, 1, &["hash_a", "hash_b"]);
+        storage
+            .replace_remote_catalogue(&cat)
+            .expect("replace_remote_catalogue");
+
+        // Meta — revision and peer are recorded.
+        assert_cached_revision(&storage, &pk, 1);
+
+        // Files — both hashes are present.
+        assert_cached_files(&storage, &pk, &["hash_a", "hash_b"]);
+
+        // The peer key in meta matches the catalogue owner.
+        let meta = storage.get_remote_catalogue_meta(&pk).unwrap().unwrap();
+        assert_eq!(
+            meta.peer,
+            pk.to_string(),
+            "meta peer matches catalogue owner"
+        );
+    }
+
+    #[test]
+    fn not_modified_reuses_cached_content_without_replacing() {
+        let storage = Storage::memory().unwrap();
+        let sk = SecretKey::generate();
+        let pk = sk.public();
+
+        // 1) First fetch stores file A.
+        let cat1 = make_test_catalogue(&sk, 1, &["hash_a"]);
+        storage
+            .replace_remote_catalogue(&cat1)
+            .expect("first replace");
+
+        assert_cached_revision(&storage, &pk, 1);
+        assert_cached_files(&storage, &pk, &["hash_a"]);
+
+        // 2) NotModified — we do NOT call replace_remote_catalogue because
+        //    the server responded with NotModified.  The cached data should
+        //    still be revision 1 and file A only.
+        //    (No second replace_remote_catalogue call here.)
+
+        assert_cached_revision(&storage, &pk, 1);
+        assert_cached_files(&storage, &pk, &["hash_a"]);
+
+        // 3) Even if we *were* to call replace_remote_catalogue with the
+        //    identical catalogue, the content should remain unchanged.
+        storage
+            .replace_remote_catalogue(&cat1)
+            .expect("re-replace identical");
+
+        assert_cached_revision(&storage, &pk, 1);
+        assert_cached_files(&storage, &pk, &["hash_a"]);
+    }
+
+    #[test]
+    fn newer_revision_replaces_cached_content() {
+        let storage = Storage::memory().unwrap();
+        let sk = SecretKey::generate();
+        let pk = sk.public();
+
+        // 1) First catalogue has file A, file B at rev 1.
+        let cat1 = make_test_catalogue(&sk, 1, &["hash_a", "hash_b"]);
+        storage
+            .replace_remote_catalogue(&cat1)
+            .expect("first replace");
+        assert_cached_revision(&storage, &pk, 1);
+        assert_cached_files(&storage, &pk, &["hash_a", "hash_b"]);
+
+        // 2) Newer catalogue replaces file B with file C at rev 2.
+        let cat2 = make_test_catalogue(&sk, 2, &["hash_a", "hash_c"]);
+        storage
+            .replace_remote_catalogue(&cat2)
+            .expect("second replace");
+
+        // Revision bumped.
+        assert_cached_revision(&storage, &pk, 2);
+
+        // hash_b is gone, hash_c is new, hash_a persists.
+        assert_cached_files(&storage, &pk, &["hash_a", "hash_c"]);
+        // Explicitly: hash_b must NOT be in the cached set.
+        let rows = storage
+            .get_remote_shared_files(&pk)
+            .expect("get_remote_shared_files");
+        for row in &rows {
+            assert_ne!(
+                row.content_hash, "hash_b",
+                "stale file hash_b should have been removed"
+            );
+        }
+    }
+
+    #[test]
+    fn file_removal_reflected_after_refresh() {
+        let storage = Storage::memory().unwrap();
+        let sk = SecretKey::generate();
+        let pk = sk.public();
+
+        // 1) Catalogue with three files.
+        let cat1 = make_test_catalogue(&sk, 5, &["keep_a", "keep_b", "remove_me"]);
+        storage
+            .replace_remote_catalogue(&cat1)
+            .expect("first replace");
+        assert_cached_files(&storage, &pk, &["keep_a", "keep_b", "remove_me"]);
+
+        // 2) Server removes "remove_me" and bumps revision.
+        let cat2 = make_test_catalogue(&sk, 6, &["keep_a", "keep_b"]);
+        storage
+            .replace_remote_catalogue(&cat2)
+            .expect("second replace");
+
+        assert_cached_revision(&storage, &pk, 6);
+        assert_cached_files(&storage, &pk, &["keep_a", "keep_b"]);
+        // Explicitly assert the removed file is gone.
+        let rows = storage
+            .get_remote_shared_files(&pk)
+            .expect("get_remote_shared_files");
+        for row in &rows {
+            assert_ne!(
+                row.content_hash, "remove_me",
+                "removed file should not appear in cached files"
+            );
+        }
     }
 }

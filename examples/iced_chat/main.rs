@@ -6,6 +6,7 @@
 //!   cargo run --features gui --example iced_chat join <ticket>  # join room
 
 mod app;
+mod download_progress_view;
 mod gui_test_actions;
 mod log_viewer;
 mod mcp_server;

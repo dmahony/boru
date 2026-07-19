@@ -1,0 +1,7 @@
+{
+  "max_concurrent_downloads": 5,
+  "max_startup_downloads": 3,
+  "max_downloads_per_peer": 2,
+  "max_active_hash_verifications": 2,
+  "max_queued_downloads": 32
+}

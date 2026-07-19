@@ -76,6 +76,7 @@ impl PerfTracker {
     }
 
     /// Time a closure and record its duration.
+    #[expect(dead_code)]
     pub fn time<F, T>(label: &'static str, context: impl Into<String>, f: F) -> T
     where
         F: FnOnce() -> T,
@@ -88,6 +89,7 @@ impl PerfTracker {
     }
 
     /// Time an async closure and record its duration.
+    #[expect(dead_code)]
     pub async fn time_async<F, T>(label: &'static str, context: impl Into<String>, f: F) -> T
     where
         F: std::future::Future<Output = T>,
@@ -172,6 +174,7 @@ impl PerfTracker {
     }
 
     /// Print a JSON snapshot of the aggregated data (machine-readable).
+    #[expect(dead_code)]
     pub fn json_report() -> serde_json::Value {
         let samples = PERF.samples.lock();
         let mut by_label: std::collections::BTreeMap<&'static str, Vec<u64>> =
@@ -217,6 +220,7 @@ impl PerfTracker {
     }
 
     /// Reset all accumulated samples.
+    #[expect(dead_code)]
     pub fn reset() {
         let mut samples = PERF.samples.lock();
         samples.clear();
@@ -232,6 +236,7 @@ pub struct PerfTimer {
 
 impl PerfTimer {
     /// Abort without recording.
+    #[expect(dead_code)]
     pub fn cancel(&mut self) {
         self.context = None;
     }

@@ -3,6 +3,28 @@
 These are enforced limits, not deployment recommendations. Both the handler
 and client fail closed when a boundary is exceeded.
 
+## Runtime configuration schema
+
+Deployments may override the tunable admission limits with a JSON file named
+`catalogue_limits.json` in the application data directory. The file is loaded
+with `CatalogueLimitsConfig::load_from_path`; omitted fields use the defaults
+below, while malformed JSON, zero values, and invalid relationships return a
+descriptive error. A complete example is `docs/catalogue_limits.json`.
+
+| JSON field | Default | Meaning |
+|---|---:|---|
+| `max_files_per_catalogue` | 10,000 | Maximum files in one catalogue |
+| `max_collections` | 1,000 | Maximum collections in one catalogue |
+| `max_entries_per_collection` | 10,000 | Maximum entries in one collection |
+| `max_page_size` | 500 | Maximum files in one page |
+| `max_total_page_bytes` | 1,048,576 | Maximum serialized page bytes |
+| `max_requests_per_window` | 32 | Requests per peer in the window |
+| `request_window_seconds` | 10 | Per-peer rate-limit window |
+| `max_invalid_responses_before_block` | 3 | Invalid responses before aborting |
+
+All schema values must be positive integers. `max_page_size` must not exceed
+`max_files_per_catalogue`.
+
 ## Hard Limits (enforced at protocol boundaries)
 
 All limits are defined in `src/catalogue_limits.rs` and enforced on both the
@@ -38,6 +60,17 @@ server (handler) and client side.
 | Max shared_file_id length | 256 bytes | `RemoteSharedFile::validate()` |
 | Max collection_id length | 256 bytes | `RemoteCollection::validate()` |
 | Max collection name length | 512 bytes | `RemoteCollection::validate()` |
+
+### Field-Level Format and Security Rules
+
+- `display_name` is non-empty, contains no control characters, path separators,
+  or `.`/`..` directory references.
+- `shared_file_id`, `content_hash`, `collection_id`, and collection references
+  use only ASCII `[A-Za-z0-9._-]`.
+- `mime_type` is lowercase ASCII `type/subtype` with RFC-style token characters.
+- Descriptions may contain newlines and tabs but no other control characters.
+- `size_bytes` is bounded by 10 TiB; `updated_at_ms` and `generated_at_ms`
+  must not be more than 24 hours in the future.
 
 ### Collection Membership Limits
 
@@ -94,7 +127,7 @@ File-access and download admission is bounded separately. Default file-access
 limits are four concurrent preparations (1 GiB/file, 60-second preparation
 timeout), eight active upload requests, two requests per peer, a 32-request
 queue, four concurrent permission verifications, and a 60-second request
-timeout. Default download limits are four active downloads, one per peer, two
+timeout. Default download limits are four active downloads, two per peer, two
 concurrent hash verifications, and a 32-item queue. These controls prevent
 catalogue or transfer requests from turning untrusted peer input into
 unbounded memory, CPU, disk, or network work.

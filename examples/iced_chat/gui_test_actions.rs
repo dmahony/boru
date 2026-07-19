@@ -197,6 +197,7 @@ impl GuiActionHistory {
     }
 
     /// Record a completed action.
+    #[expect(dead_code)]
     pub fn record(&self, record: ActionRecord) {
         let mut inner = self.inner.lock().unwrap();
         inner.sequence += 1;
@@ -218,6 +219,7 @@ impl GuiActionHistory {
     }
 
     /// Get all recent actions.
+    #[expect(dead_code)]
     pub fn all(&self) -> Vec<ActionRecord> {
         self.inner
             .lock()
@@ -230,6 +232,7 @@ impl GuiActionHistory {
     }
 
     /// Get the latest sequence number.
+    #[expect(dead_code)]
     pub fn latest_sequence(&self) -> u64 {
         self.inner.lock().unwrap().sequence
     }
@@ -366,12 +369,15 @@ impl Default for GuiActionRateLimiter {
 // =============================================================================
 
 /// Sender half — held by the MCP server to inject test actions.
+#[expect(dead_code)]
 pub type GuiActionSender = tokio::sync::mpsc::Sender<GuiActionRequest>;
 
 /// Receiver half — held by the Iced subscription to read test actions.
+#[expect(dead_code)]
 pub type GuiActionReceiver = tokio::sync::mpsc::Receiver<GuiActionRequest>;
 
 /// Create a new bounded channel for GUI test actions.
+#[expect(dead_code)]
 pub fn gui_action_channel() -> (GuiActionSender, GuiActionReceiver) {
     tokio::sync::mpsc::channel(MAX_PENDING)
 }
@@ -388,6 +394,7 @@ pub fn generate_action_key() -> String {
 }
 
 /// Snapshot of current GUI state, exposed via the MCP `boru_get_gui_snapshot` tool.
+#[expect(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuiSnapshot {
     /// Current screen name.

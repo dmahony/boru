@@ -26,7 +26,7 @@ pub const MAX_SHARED_FILE_ID_LENGTH: usize = 256;
 /// Maximum length of a `display_name`.
 pub const MAX_DISPLAY_NAME_LENGTH: usize = 512;
 
-/// Maximum length of a `description`.
+/// Maximum UTF-8 byte length of a `description`.
 pub const MAX_DESCRIPTION_LENGTH: usize = 1024;
 
 /// Maximum length of a `mime_type` string.
@@ -41,6 +41,12 @@ pub const MAX_COLLECTION_IDS: usize = 256;
 /// Maximum length of a single collection ID string.
 pub const MAX_COLLECTION_ID_LENGTH: usize = 256;
 
+/// Maximum collection display-name length, in bytes.
+pub const MAX_COLLECTION_NAME_LENGTH: usize = 512;
+
+/// Remote timestamps may be modestly ahead because peers' clocks differ.
+pub const MAX_TIMESTAMP_FUTURE_SKEW_MS: u64 = 24 * 60 * 60 * 1000;
+
 const SIGNATURE_LEN: usize = iroh::Signature::LENGTH;
 
 fn now_ms() -> u64 {
@@ -48,6 +54,79 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn valid_display_text(value: &str) -> bool {
+    !value.is_empty() && !value.chars().any(|ch| ch.is_control())
+}
+
+/// Return whether a description contains only display-safe text.
+///
+/// Descriptions intentionally permit ordinary multiline formatting: tab,
+/// carriage return, and line feed are allowed. All other Unicode control
+/// characters, Unicode line/paragraph separators, and Unicode format
+/// characters (including bidi overrides and zero-width characters) are
+/// rejected so signed metadata cannot hide content or alter its visual order.
+fn valid_description_text(value: &str) -> bool {
+    value.chars().all(|ch| {
+        let allowed_control = matches!(ch, '\t' | '\n' | '\r');
+        let unicode_format = matches!(
+            ch,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0001}'
+                | '\u{E0020}'..='\u{E007F}'
+        );
+        (!ch.is_control() || allowed_control)
+            && !matches!(ch, '\u{2028}' | '\u{2029}')
+            && !unicode_format
+    })
+}
+
+fn valid_mime_type(value: &str) -> bool {
+    let Some((major, minor)) = value.split_once('/') else {
+        return false;
+    };
+    let valid_token = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(
+                        byte,
+                        b'!' | b'#' | b'$' | b'&' | b'-' | b'^' | b'_' | b'.' | b'+'
+                    )
+            })
+    };
+    value.is_ascii() && valid_token(major) && valid_token(minor)
+}
+
+fn timestamp_is_reasonable(timestamp_ms: u64) -> bool {
+    timestamp_ms <= now_ms().saturating_add(MAX_TIMESTAMP_FUTURE_SKEW_MS)
 }
 
 // ── RemoteSharedFile ─────────────────────────────────────────────────────
@@ -64,7 +143,9 @@ pub struct RemoteSharedFile {
     pub shared_file_id: String,
     /// Display name shown to peers (never a local path).
     pub display_name: String,
-    /// Optional human-readable description.
+    /// Optional human-readable description. Tab, CR, and LF are allowed for
+    /// ordinary formatting; all other control, line/paragraph-separator, and
+    /// Unicode format characters are rejected by [`Self::validate`].
     #[serde(default)]
     pub description: Option<String>,
     /// MIME type of the file (e.g. `"application/pdf"`).
@@ -137,9 +218,9 @@ impl RemoteSharedFile {
                 self.shared_file_id.len()
             ));
         }
-        if self.shared_file_id.contains('/') || self.shared_file_id.contains('\\') {
+        if !valid_identifier(&self.shared_file_id) {
             return Err(n0_error::anyerr!(
-                "shared_file_id must not contain path separators"
+                "shared_file_id contains characters outside [A-Za-z0-9._-]"
             ));
         }
 
@@ -154,19 +235,20 @@ impl RemoteSharedFile {
                 self.display_name.len()
             ));
         }
-        if self.display_name.contains('/') || self.display_name.contains('\\') {
-            return Err(n0_error::anyerr!(
-                "display_name must not contain path separators"
-            ));
+        if self.display_name == "."
+            || self.display_name == ".."
+            || self.display_name.chars().any(|ch| ch.is_control())
+            || self.display_name.contains('/')
+            || self.display_name.contains('\\')
+        {
+            return Err(n0_error::anyerr!("display_name contains unsafe characters"));
         }
 
         // ── description (optional) ──────────────────────────────────────
         if let Some(ref desc) = self.description {
-            if desc.len() > MAX_DESCRIPTION_LENGTH {
+            if desc.len() > MAX_DESCRIPTION_LENGTH || !valid_description_text(desc) {
                 return Err(n0_error::anyerr!(
-                    "description exceeds maximum length of {} (got {})",
-                    MAX_DESCRIPTION_LENGTH,
-                    desc.len()
+                    "description is too long or contains disallowed control/format characters"
                 ));
             }
         }
@@ -182,8 +264,10 @@ impl RemoteSharedFile {
                 self.mime_type.len()
             ));
         }
-        if !self.mime_type.contains('/') {
-            return Err(n0_error::anyerr!("mime_type must contain a '/' separator"));
+        if !valid_mime_type(&self.mime_type) {
+            return Err(n0_error::anyerr!(
+                "mime_type is not a valid lowercase MIME type"
+            ));
         }
 
         // ── content_hash ────────────────────────────────────────────────
@@ -197,9 +281,19 @@ impl RemoteSharedFile {
                 self.content_hash.len()
             ));
         }
+        if !valid_identifier(&self.content_hash) {
+            return Err(n0_error::anyerr!("content_hash contains unsafe characters"));
+        }
+        if self.size_bytes > crate::catalogue_limits::MAX_FILE_SIZE_BYTES {
+            return Err(n0_error::anyerr!(
+                "size_bytes exceeds the maximum allowed file size"
+            ));
+        }
+        if !timestamp_is_reasonable(self.updated_at_ms) {
+            return Err(n0_error::anyerr!("updated_at_ms is too far in the future"));
+        }
 
-        // ── version_number ──────────────────────────────────────────────
-        // Any u32 is valid; no constraint beyond the type.
+        // ── version_number
 
         // ── collection_ids ──────────────────────────────────────────────
         if self.collection_ids.len() > MAX_COLLECTION_IDS {
@@ -210,8 +304,11 @@ impl RemoteSharedFile {
             ));
         }
         for (i, id) in self.collection_ids.iter().enumerate() {
-            if id.is_empty() {
-                return Err(n0_error::anyerr!("collection_ids[{}] must not be empty", i));
+            if !valid_identifier(id) {
+                return Err(n0_error::anyerr!(
+                    "collection_ids[{}] contains unsafe characters",
+                    i
+                ));
             }
             if id.len() > MAX_COLLECTION_ID_LENGTH {
                 return Err(n0_error::anyerr!(
@@ -311,7 +408,9 @@ pub struct FileCatalogueCollection {
     pub collection_id: String,
     /// Human-readable display name.
     pub name: String,
-    /// Optional description.
+    /// Optional description. Tab, CR, and LF are allowed for ordinary
+    /// formatting; all other control, line/paragraph-separator, and Unicode
+    /// format characters are rejected by [`Self::validate`].
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -322,15 +421,23 @@ impl FileCatalogueCollection {
         if self.collection_id.is_empty() {
             return Err(n0_error::anyerr!("collection_id must not be empty"));
         }
+        if !valid_identifier(&self.collection_id) {
+            return Err(n0_error::anyerr!(
+                "collection_id contains unsafe characters"
+            ));
+        }
         if self.name.is_empty() {
             return Err(n0_error::anyerr!("name must not be empty"));
         }
+        if self.name.len() > MAX_COLLECTION_NAME_LENGTH || !valid_display_text(&self.name) {
+            return Err(n0_error::anyerr!(
+                "name is too long or contains control characters"
+            ));
+        }
         if let Some(ref desc) = self.description {
-            if desc.len() > MAX_DESCRIPTION_LENGTH {
+            if desc.len() > MAX_DESCRIPTION_LENGTH || !valid_description_text(desc) {
                 return Err(n0_error::anyerr!(
-                    "description exceeds maximum length of {} (got {})",
-                    MAX_DESCRIPTION_LENGTH,
-                    desc.len()
+                    "description is too long or contains disallowed control/format characters"
                 ));
             }
         }
@@ -406,6 +513,11 @@ impl SignedFileCatalogue {
     /// [`FileCatalogueCollection::validate`] on every collection, then
     /// verifies the Ed25519 signature via [`verify`](Self::verify).
     pub fn validate(&self) -> Result<()> {
+        if !timestamp_is_reasonable(self.generated_at_ms) {
+            return Err(n0_error::anyerr!(
+                "generated_at_ms is too far in the future"
+            ));
+        }
         // Validate each collection.
         for c in &self.collections {
             c.validate().std_context("collection validation failed")?;
@@ -448,7 +560,9 @@ pub struct RemoteCollection {
     pub collection_id: String,
     /// Human-readable display name.
     pub name: String,
-    /// Optional description.
+    /// Optional description. Tab, CR, and LF are allowed for ordinary
+    /// formatting; all other control, line/paragraph-separator, and Unicode
+    /// format characters are rejected by [`Self::validate`].
     #[serde(default)]
     pub description: Option<String>,
     /// Display order among collections (lower = first).
@@ -461,15 +575,23 @@ impl RemoteCollection {
         if self.collection_id.is_empty() {
             return Err(n0_error::anyerr!("collection_id must not be empty"));
         }
+        if !valid_identifier(&self.collection_id) {
+            return Err(n0_error::anyerr!(
+                "collection_id contains unsafe characters"
+            ));
+        }
         if self.name.is_empty() {
             return Err(n0_error::anyerr!("name must not be empty"));
         }
+        if self.name.len() > MAX_COLLECTION_NAME_LENGTH || !valid_display_text(&self.name) {
+            return Err(n0_error::anyerr!(
+                "name is too long or contains control characters"
+            ));
+        }
         if let Some(ref desc) = self.description {
-            if desc.len() > MAX_DESCRIPTION_LENGTH {
+            if desc.len() > MAX_DESCRIPTION_LENGTH || !valid_description_text(desc) {
                 return Err(n0_error::anyerr!(
-                    "description exceeds maximum length of {} (got {})",
-                    MAX_DESCRIPTION_LENGTH,
-                    desc.len()
+                    "description is too long or contains disallowed control/format characters"
                 ));
             }
         }
@@ -568,6 +690,7 @@ fn cursor_signing_payload(cursor: &SignedCatalogueCursor) -> Vec<u8> {
         cursor.revision,
         &cursor.last_file_id,
         cursor.last_updated_at_ms,
+        cursor.requester,
     );
     postcard::to_stdvec(&digest).expect("postcard serialisation is infallible")
 }
@@ -701,6 +824,79 @@ mod tests {
     }
 
     #[test]
+    fn descriptions_allow_multiline_text_but_reject_controls_and_formats() {
+        let multiline = "first line\r\n\tsecond line\nthird line";
+        let file = RemoteSharedFile {
+            description: Some(multiline.into()),
+            ..RemoteSharedFile::new("hash", "name", None, 100, "text/plain", None, 1)
+        };
+        assert!(
+            file.validate().is_ok(),
+            "documented multiline text is valid"
+        );
+
+        for description in ["bad\0text", "bad\u{7f}text", "bad\u{200b}text"] {
+            let file = RemoteSharedFile {
+                description: Some(description.into()),
+                ..RemoteSharedFile::new("hash", "name", None, 100, "text/plain", None, 1)
+            };
+            assert!(
+                file.validate().is_err(),
+                "unsafe file description accepted: {description:?}"
+            );
+        }
+
+        let file_collection = FileCatalogueCollection {
+            collection_id: "docs".into(),
+            name: "Documents".into(),
+            description: Some(multiline.into()),
+        };
+        assert!(file_collection.validate().is_ok());
+        let file_collection = FileCatalogueCollection {
+            description: Some("bad\u{202e}text".into()),
+            ..file_collection
+        };
+        assert!(file_collection.validate().is_err());
+
+        let remote_collection = RemoteCollection {
+            collection_id: "docs".into(),
+            name: "Documents".into(),
+            description: Some(multiline.into()),
+            sort_order: 0,
+        };
+        assert!(remote_collection.validate().is_ok());
+        let remote_collection = RemoteCollection {
+            description: Some("bad\u{2066}text".into()),
+            ..remote_collection
+        };
+        assert!(remote_collection.validate().is_err());
+    }
+
+    #[test]
+    fn signed_catalogue_rejects_malformed_description_before_display() {
+        let sk = SecretKey::generate();
+        let catalogue = SignedFileCatalogue::sign(
+            &sk,
+            1,
+            now_ms(),
+            vec![],
+            vec![RemoteSharedFile {
+                description: Some("forged\u{200b}description".into()),
+                ..RemoteSharedFile::new("hash", "name", None, 100, "text/plain", None, 1)
+            }],
+        );
+
+        assert!(
+            catalogue.verify().is_ok(),
+            "the fixture is correctly signed"
+        );
+        assert!(
+            catalogue.validate().is_err(),
+            "signed but malformed metadata must be rejected before display"
+        );
+    }
+
+    #[test]
     fn oversized_collection_list_rejected() {
         let ids: Vec<String> = (0..MAX_COLLECTION_IDS + 1)
             .map(|i| format!("col-{}", i))
@@ -731,6 +927,73 @@ mod tests {
             ..RemoteSharedFile::new("hash", "name", None, 100, "text/plain", None, 1)
         };
         assert!(f.validate().is_ok());
+    }
+
+    #[test]
+    fn metadata_rejects_control_characters_and_unsafe_ids() {
+        let base = RemoteSharedFile::new("hash", "name", None, 100, "text/plain", None, 1);
+        for value in ["name\n.txt", "name\0.txt", "name\u{7f}.txt"] {
+            let f = RemoteSharedFile {
+                display_name: value.into(),
+                ..base.clone()
+            };
+            assert!(f.validate().is_err(), "unsafe filename accepted: {value:?}");
+        }
+        for value in ["id with spaces", "id/with-slash", "id\\with-slash", "id\n"] {
+            let f = RemoteSharedFile {
+                shared_file_id: value.into(),
+                ..base.clone()
+            };
+            assert!(f.validate().is_err(), "unsafe id accepted: {value:?}");
+        }
+    }
+
+    #[test]
+    fn metadata_rejects_invalid_mime_types() {
+        let base = RemoteSharedFile::new("hash", "name", None, 100, "text/plain", None, 1);
+        for mime in [
+            "text/",
+            "/plain",
+            "text/plain;\n",
+            "text plain",
+            "TEXT/PLAIN",
+        ] {
+            let f = RemoteSharedFile {
+                mime_type: mime.into(),
+                ..base.clone()
+            };
+            assert!(f.validate().is_err(), "invalid MIME accepted: {mime:?}");
+        }
+    }
+
+    #[test]
+    fn metadata_rejects_oversized_files_and_future_timestamps() {
+        let f = RemoteSharedFile {
+            size_bytes: crate::catalogue_limits::MAX_FILE_SIZE_BYTES + 1,
+            ..RemoteSharedFile::new("hash", "name", None, 100, "text/plain", None, 1)
+        };
+        assert!(f.validate().is_err());
+        let f = RemoteSharedFile {
+            updated_at_ms: now_ms().saturating_add(MAX_TIMESTAMP_FUTURE_SKEW_MS + 1),
+            ..RemoteSharedFile::new("hash", "name", None, 100, "text/plain", None, 1)
+        };
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn collection_validation_rejects_unsafe_metadata() {
+        let collection = FileCatalogueCollection {
+            collection_id: "collection id".into(),
+            name: "safe".into(),
+            description: None,
+        };
+        assert!(collection.validate().is_err());
+        let collection = FileCatalogueCollection {
+            collection_id: "collection".into(),
+            name: "name\n".into(),
+            description: None,
+        };
+        assert!(collection.validate().is_err());
     }
 
     // ── TryFrom<SharedFile> ─────────────────────────────────────────────
