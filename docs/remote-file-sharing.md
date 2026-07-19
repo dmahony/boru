@@ -1,358 +1,106 @@
-# Remote File Sharing: Milestone Architecture Note
+# Remote file sharing
 
-Status: **component boundaries, written before implementation starts**. The test
-files, ALPN constants, storage schema, and protocol-layer specification exist.
-The handler/client modules (`catalogue_handler`, `catalogue_client`,
-`catalogue_model`, `catalogue_protocol`, `download_manager`, `download`,
-`file_access_handler`, `protocol_version`) have tests that reference their public
-APIs but the module implementations themselves are not yet built. This note
-defines each component's boundary — what it owns, what it delegates, and how
-they connect — to guide implementation.
+Status: implemented. Remote file sharing has two authenticated QUIC protocols and a separate iroh-blobs transfer. A catalogue is an advertisement, not a capability: seeing metadata never grants download access.
 
-## Core principle: catalogue visibility and download permission are separate decisions
+## End-to-end workflow
 
-A peer who can **see** a file in a catalogue cannot necessarily **download** it.
-Visibility is a read-time decision based on relationship and offer state;
-download permission is a separate request-time decision that re-evaluates the
-same checks plus availability, integrity, and concurrency. The two protocols
-(`/boru-file-catalog/1` and `/boru-file-access/1`) are independent QUIC ALPNs
-with different handlers and different response types. A client must never assume
-that catalogue visibility implies download authorisation.
+1. The owner stores a content-addressed `file_object`, marks it as an offered `shared_file`, and maintains a profile manifest revision.
+2. A requester connects to `/boru-file-catalog/1`. The owner identifies the requester from the authenticated QUIC connection, applies relationship and per-file permission rules, and signs a requester-specific `SignedFileCatalogue`.
+3. The requester validates field limits, collection references, duplicate IDs/hashes, the Ed25519 signature, and that `owner_id` is the connected peer before using or caching the catalogue.
+4. A catalogue change is represented by the owner’s monotonically increasing `revision`. A requester can send `known_revision`; an unchanged requester-specific view returns `NotModified`. During pagination, a revision change returns `RevisionChanged` and the requester must restart.
+5. When the user downloads an entry, the requester sends a fresh `FileAccessRequest` to `/boru-file-access/1`. The owner re-authorises against live storage; cached catalogue state is not a grant.
+6. On success, the owner signs a short-lived, requester-bound `SignedDownloadDescriptor` (default lifetime: 60 seconds). The descriptor includes the owner, requester, shared-file ID, content/blob hash, size, timestamps, nonce, and signature.
+7. Iroh-blobs transfers the bytes. The downloader writes a bounded stream to a temporary file, then verifies the expected size and BLAKE3 content hash. Only verified output is atomically installed and the durable download is marked complete.
 
-## Subsystem overview
+In short: profiles advertise signed metadata; access is re-authorised at download time; Iroh transfers the bytes; the receiver verifies the content hash before completion.
 
-```
-Peer A (requester)                          Peer B (owner)
-      │                                           │
-      │  1. Revision notification (advisory)      │
-      │◄──────────────────────────────────────────│
-      │                                           │
-      │  2. Catalogue retrieval                   │
-      │──────────────────────────────────────────►│
-      │  (/boru-file-catalog/1)                   │
-      │◄──────────────────────────────────────────│
-      │  signed snapshot (paginated)              │
-      │                                           │
-      │  3. Cache in Storage                      │
-      │  (local SQLite)                           │
-      │                                           │
-      │  4. Download authorisation                │
-      │──────────────────────────────────────────►│
-      │  (/boru-file-access/1)                    │
-      │◄──────────────────────────────────────────│
-      │  signed short-lived descriptor            │
-      │                                           │
-      │  5. Blob transfer (iroh-blobs)            │
-      │──────────────────────────────────────────►│
-      │  content-addressed stream                 │
-      │◄──────────────────────────────────────────│
-      │                                           │
-      │  6. Verification                          │
-      │  (size + BLAKE3 hash)                     │
-```
+## Catalogue protocol
 
-## Component boundaries
+ALPN: `/boru-file-catalog/1`; wire version: 1. Requests are `GetCatalogue`, `GetCataloguePage`, or `GetFileDetails`.
 
-### 1. Catalogue notification
+Each full catalogue contains:
 
-| Property | Value |
-|----------|-------|
-| Owner | TBD — either embedded in `AboutMe` gossip broadcasts or a dedicated notification |
-| ALPN | None (piggybacks on existing gossip/presence) |
-| Direction | Owner → requester (advisory one-shot) |
-| Persistence | None (transient) |
+- `owner_id`, monotonic `revision`, and `generated_at_ms`;
+- requester-visible collections;
+- `RemoteSharedFile` entries containing stable ID, display name, optional description, MIME type, size, content hash, version number, update time, and collection IDs.
 
-**Responsibility:** Inform subscribed peers that an owner's file catalogue
-revision has changed. The notification is purely advisory — it contains no file
-metadata, no download grant, and no file bytes. Its only purpose is to let the
-recipient know they should fetch a fresh catalogue if they care.
+The signed payload covers every catalogue field except the signature. The wire representation does not contain local filesystem paths, database row IDs, permission rows, upload secrets, blob tickets, or unrestricted addresses.
 
-**Design options (not yet settled):**
-- Embed the current catalogue revision in periodic `AboutMe` gossip messages.
-  The recipient compares against their cached revision and skips the fetch if
-  unchanged. This avoids a dedicated notification protocol but increases gossip
-  payload size.
-- A dedicated `/boru-file-notify/1` ALPN that the owner calls once per peer
-  after a change. More targeted but adds another QUIC protocol.
+### Per-peer filtering
 
-**What it does NOT do:**
-- No file metadata or download grant is carried in the notification
-- No bytes, hashes, names, or permissions
-- The recipient must still authenticate to fetch the catalogue
+Filtering happens before signing and is performed for the authenticated requester:
 
-### 2. Catalogue retrieval
+- blocked peers receive `PermissionDenied`;
+- with no selected-peer grants, confirmed friends see enabled, available offers and other peers see an empty catalogue;
+- when any `read` grant exists for a file, only explicitly granted peers see it;
+- explicit `deny`, disabled offers, missing `file_objects`, and empty/unavailable entries are omitted.
 
-| Property | Value |
-|----------|-------|
-| Module | `catalogue_handler` (server), `catalogue_client` (client) |
-| ALPN | `/boru-file-catalog/1` (`FILE_CATALOG_ALPN` in `net.rs`) |
-| Direction | Requester-initiated QUIC bi-stream, owner responds |
-| Persistence | None on the server; client caches in `Storage` |
+Selected-peer grants carry optional `expires_at_ms` metadata in storage. Download authorization still evaluates the live permission rows rather than trusting a cached catalogue, and the issued descriptor has its own enforced 60-second expiry. Catalogue visibility and download permission are deliberately separate.
 
-**Responsibility:** Serve a signed, requester-filtered snapshot of the owner's
-offered files. The `CatalogueHandler` opens a bi-directional QUIC stream,
-authenticates the requester via `Connection::remote_id()`, looks up their
-relationship in `FriendsStore`, and builds a projection of files the requester
-is allowed to see.
+### Revisions, pagination, and refresh
 
-**Requester filtering rules (in order):**
-1. Blocked peers → `PermissionDenied` error
-2. Confirmed friends → enabled, available offers (default)
-3. Non-friend peers → only files with an explicit `read` permission in
-   `shared_file_permissions`
-4. Disabled offers, unavailable file objects (`file_objects` row missing),
-   empty collections → silently omitted (never included)
+The catalogue revision is read from `profile_manifest_state`. `known_revision` is a request optimization, not an authorization decision. `NotModified` means the server’s cached requester-view hash still matches; permission changes are included in that view check even when the global revision did not change. A paginated response is limited to 500 items and 1 MiB; all pages must have the same revision and a final page with no cursor.
 
-**Pagination:** The response is a `CatalogResponse::CataloguePage` containing a
-signed `SignedFileCatalogue` slice with `items`, `next_cursor`, `revision`, and
-`has_more`. The client iterates with `GetCataloguePage { known_revision,
-cursor, page_size }`. If the server's revision changes between pages, the
-server returns `RevisionChanged { new_revision }` and the client must restart.
+There is no continuous catalogue-polling loop and no separate implemented catalogue-notification ALPN. Applications may trigger a refresh after observing a profile/manifest revision change, on manual refresh, when a cache is stale, or when a requested item is missing. The test name “revision notice and refresh” refers to this revision/`NotModified` request behavior, not a guaranteed push notification.
 
-**NotModified:** The client can pass `known_revision` in the request. If the
-catalogue revision has not changed, the server returns
-`CatalogResponse::NotModified` rather than re-sending the full page.
+## Local catalogue cache
 
-**Key types (test-only, not yet implemented):**
-- `CatalogRequest::GetCataloguePage`
-- `CatalogResponse::CataloguePage`, `CatalogResponse::NotModified`,
-  `CatalogResponse::RevisionChanged`
-- `SignedFileCatalogue` (owner-signed, verifiable)
-- `RemoteSharedFile` (file metadata visible to the requester)
+Verified catalogues are stored by the local `Storage::replace_remote_catalogue` path. The current schema reuses `profile_manifest_state` for peer, revision, generated time, and fetch time, and stores remote file/collection projections in the existing `file_objects`, `shared_files`, and `file_collections` tables. The cache is a local display/reconciliation projection; it is not an access-control source and does not contain the owner’s local path.
 
-**Test coverage:** `tests/test_remote_catalogue_integration.rs` — 10 scenarios
-covering visibility, denial, revision changes, pagination, offline cache.
+A later fetch replaces/upserts rows for entries returned by that snapshot. Callers should use the fetched revision and refresh rather than treating cached rows as current authorization. Offline UI may display the last locally stored projection, but a download still needs a live access request.
 
-**What it does NOT do:**
-- No download permission is implied by catalogue visibility
-- No blob hashes available to iroh-blobs are exposed in the catalogue
-- No blob tickets live in the catalogue response
+## Download authorization
 
-### 3. Catalogue cache
+`/boru-file-access/1` accepts a versioned `FileAccessRequest` containing the shared-file ID, expected content hash/version, filename, and expected size. The handler checks the live relationship, grants/denials, offer state, file availability, expected content, and size/version before issuing a descriptor. It also applies request deadlines, upload concurrency, preparation limits, and rate limits.
 
-| Property | Value |
-|----------|-------|
-| Owner | `Storage` (SQLite: `remote_catalogues`, `remote_shared_files`,
-          `remote_collections` tables) |
-| Protocol | None (local-only) |
-| Direction | Local read/write |
-| Persistence | Durable across restarts |
+Descriptors are signed by the owner, bound to the requester’s public key, expire after 60 seconds, and use a random nonce. The nonce store rejects reuse while the descriptor is valid. A requester verifies lifetime, owner, requester, signature, content hash, and size before starting transfer. Errors intentionally avoid disclosing inaccessible-file details where the protocol supports a generic refusal.
 
-**Responsibility:** Store the most recent verified catalogue from each peer so
-the UI can display peer profiles without continuously re-fetching. The cache is
-revision-keyed: a fetch that returns `NotModified` preserves the existing cache
-instead of replacing it.
+## Transfer and verification
 
-**Key operations:**
-- `Storage::replace_remote_catalogue(SignedFileCatalogue)` — atomically replace
-  the cached catalogue for a peer, bumping `cached_at_ms`. Rejects catalogues
-  whose revision is ≤ the stored revision (prevents replay of old data).
-- `Storage::get_remote_catalogue_meta(peer)` — returns revision, fetched_at,
-  etc. for staleness checks.
-- `Storage::get_remote_shared_files(peer)` — returns the file list from cache.
-- `Storage::get_remote_collections(peer)` — returns collection metadata.
+The file-access protocol transfers no file bytes. Iroh-blobs performs the content-addressed transfer from the owner/provider. The transfer implementation uses bounded buffers, cancellation, per-chunk and overall timeouts, periodic progress persistence, and temporary output cleanup on failure.
 
-**Staleness:** The frontend considers a cache stale when `fetched_at_ms` is
-more than 5 minutes old (constant `STALE_THRESHOLD_MS` in app.rs). A stale
-cache triggers a refresh on next view. When the network is unavailable, the
-stale cache is displayed with a warning rather than showing nothing.
+The receiver verifies size and BLAKE3 hash after bytes have arrived. A mismatch fails the download and removes the temporary output. A successful verification is followed by an atomic rename and durable completion update. The hash is the integrity check; the descriptor signature authenticates authorization and metadata, not the file bytes themselves.
 
-**What it does NOT do:**
-- No write-back or sync — the cache is a local projection
-- No partial updates — always a full catalogue replacement
-- No merging with other peers' catalogues
+## Pause, resume, and retry limitations
 
-### 4. Download authorisation
+Pause/resume is implemented for durable file-download rows, not as byte-range continuation of the destination file:
 
-| Property | Value |
-|----------|-------|
-| Module | `file_access_handler` (not yet implemented) |
-| ALPN | `/boru-file-access/1` (`FILE_ACCESS_ALPN` in `net.rs`) |
-| Direction | Requester-initiated QUIC bi-stream, owner responds |
-| Persistence | None (descriptor is short-lived, ~5 minutes) |
+- pause preserves download metadata and prevents stale workers from writing progress/completion;
+- resume returns to peer resolution and requests a fresh descriptor, because descriptors expire and permissions can change;
+- retained iroh-blobs chunks may be reused by a later content-addressed request, but the application does not append to a prior destination offset;
+- temporary output is removed on cancellation/failure; if partial blob chunks were garbage-collected, transfer starts over;
+- a changed content hash becomes `version_mismatch`; terminal states cannot be resumed;
+- catalogue retrieval has no continuous pauseable polling worker.
 
-**Responsibility:** At download-request time, re-verify the requester's
-relationship, permission, offer status, file availability, content hash, and
-file revision — then issue a signed, short-lived download descriptor. This is
-the security gate: every download must pass through this check before iroh-blobs
-transfer begins.
+## Resource limits
 
-**Request flow:**
-1. Requester opens QUIC bi-stream to the owner's `/boru-file-access/1` endpoint
-2. Requester sends `FileAccessRequest { content_hash, expected_revision }`
-3. Owner re-evaluates all checks at request time:
-   - Is requester blocked? → `PermissionDenied`
-   - Is the file still offered? → `FileNotOffered`
-   - Does `file_objects` contain this hash? → `FileNotAvailable`
-   - Does the current revision match `expected_revision`? → `RevisionMismatch`
-   - Is the owner's download slot budget saturated? → `RateLimited`
-4. On success, owner issues `SignedDownloadDescriptor`:
-   - Bound to: owner identity, requester identity, content hash, expected size,
-     blob format indicator
-   - Temporal: issue timestamp, expiry timestamp (default 5 minutes)
-   - Nonce: random 32 bytes to prevent descriptor replay
-   - Signed by the owner's `SecretKey`
-5. Owner may optionally prepare the file into iroh-blobs at this point
-   (deferred preparation).
+Defaults enforced by the implementation include:
 
-**What it does NOT do:**
-- No blob bytes are transferred over this protocol
-- No catalogue entries or file metadata are exposed
-- Error responses intentionally hide whether a non-existent file exists
-  (generic `FileNotAvailable` for missing content_hash, un-offered files,
-  and unknown content_hashes)
+| Area | Default |
+|---|---:|
+| Catalogue request payload | 256 KiB |
+| Catalogue response payload | 4 MiB |
+| Paginated response | 1 MiB / 500 files |
+| Files / collections per catalogue | 10,000 / 1,000 |
+| Individual catalogue file size | 10 TiB |
+| File-access preparations | 4 concurrent, 1 GiB/file, 60 s timeout |
+| Active upload requests | 8 global, 2 per peer, 32 queued |
+| Permission verifications | 4 concurrent |
+| Download transfers | 4 global, 1 per peer, 32 queued |
+| Hash verifications | 2 concurrent |
+| Blob transfer timeout / no-progress timeout | 5 min / 30 s |
 
-### 5. File-byte transfer
+The exact catalogue limits are maintained in [`catalogue-limits.md`](catalogue-limits.md). Limits are admission and safety controls, not a promise that a peer will accept every request.
 
-| Property | Value |
-|----------|-------|
-| Owner | `iroh-blobs` (content-addressed blob protocol) |
-| ALPN | `iroh-blobs` built-in ALPN |
-| Direction | Client-initiated pull |
-| Persistence | iroh-blobs store + `Storage::downloads` state machine |
+## Manual verification checklist
 
-**Responsibility:** Transfer raw file bytes from owner to requester via
-iroh-blobs' content-addressed protocol. The requester holds a
-`SignedDownloadDescriptor` (from step 4) and a `blob_hash` that resolves to the
-file content.
+1. Publish an enabled file and verify that a friend receives a signed catalogue containing metadata but no local path or blob ticket.
+2. Fetch as a non-friend, explicitly granted peer, and blocked peer; compare the requester-specific projections and refusal behavior.
+3. Fetch twice with `known_revision`; confirm `NotModified`, then change the offer/revision and confirm a fresh snapshot. During pagination, change the revision and restart when `RevisionChanged` is returned.
+4. Remove/disable an offer and verify it is absent from a subsequent catalogue; do not use an old cache entry as download authorization.
+5. Request access with current and stale hash/version data; confirm only a live, matching request produces a signed descriptor, and verify expiry, requester binding, signature, and nonce replay rejection.
+6. Transfer bytes through iroh-blobs, corrupt or truncate the temporary output, and confirm size/hash verification fails and unverified output is not installed.
+7. Pause and resume a download; confirm peer resolution and authorization run again, and that resume does not claim byte-range destination-file support.
+8. Exercise queue, per-peer, size, timeout, and hash-verification limits with structured errors/state transitions.
 
-**Flow:**
-1. Requester calls `iroh_blobs::get::get_blob()` with the blob hash and the
-   owner as a provider candidate
-2. Owner's blob store serves verified content chunks
-3. Requester's `DownloadManager` ticks the download through states:
-   `Queued → RequestPermission → Validating → Transferring → Verifying → Complete`
-4. Bytes are written to a temporary file during transfer
-
-**`DownloadManager` state machine:**
-```
-Queued → RequestPermission → Validating → Transferring → Verifying → Complete
-    │                          │               │             │
-    ↓                          ↓               ↓             ↓
-Cancelled               VersionMismatch     Failed        Failed
-```
-- `Queued`: initial state after `Storage::create_download()`
-- `RequestPermission`: (stub in tests — the real `/boru-file-access/1` call lives here)
-- `Validating`: check content hash against cached catalogue, abort on mismatch
-- `Transferring`: active iroh-blobs download with progress tracking
-- `Verifying`: post-download BLAKE3 hash and size check
-- `Complete`: verified output atomically renamed to destination
-
-**Progress:** `DownloadManager` emits `TransferProgress` events via
-`ChatCallbacks::on_transfer_progress()` for UI consumption.
-
-**Safety envelope:**
-- `PublicRoomSafety::max_blob_size_bytes` is checked before download starts
-  (function `download_blob_with_safety()` in `chat_core.rs`)
-- Per-peer concurrency: at most one active blob transfer per peer
-- Global concurrency: bounded by `PublicRoomConfig::max_concurrent_blob_downloads`
-
-**Resume semantics (iroh-blobs 0.103.0):**
-- The transfer is content-addressed by the blob hash. The downloader asks the
-  local blob store which BAO chunks are already present and requests only the
-  missing chunks; this includes chunks retained after an interrupted transfer.
-- This is chunk-level reuse, not byte-range resume of the destination file. The
-  application destination is still written only after the blob is complete and
-  verified, so an interrupted destination write is not continued from its
-  previous file offset.
-- If the partial blob is garbage-collected, the next request has no local
-  chunks to reuse and the transfer starts from the beginning. A repeated
-  request for an already complete hash is satisfied locally without network
-  transfer.
-
-**What it does NOT do:**
-- No authorisation — relies entirely on step 4 having issued a valid descriptor
-- No catalogue visibility — operates purely on content hashes
-- No byte-range resume of the temporary/destination output file
-
-### 6. Verification
-
-| Property | Value |
-|----------|-------|
-| Owner | `DownloadManager` (verification step of state machine) |
-| Direction | Local (post-download) |
-| Persistence | `DownloadState::Complete` or `DownloadState::Failed` |
-
-**Responsibility:** After iroh-blobs delivers the full byte stream, verify
-that the output matches the expected BLAKE3 content hash and size before
-installing it at the destination path. Verification happens on a temporary
-file; only verified output is atomically renamed to the final path.
-
-**Verification steps (in order):**
-1. Compare downloaded byte count against `expected_size` from the catalogue →
-   mismatch marks `Failed` with `content_mismatch` error
-2. Compute BLAKE3 hash of the full downloaded content → compare against
-   `content_hash` from the catalogue → mismatch marks `Failed`
-3. On both checks passing, atomically rename temp file to destination path
-4. Record `DownloadState::Complete` in `Storage::downloads`
-5. Emit `TransferProgress::Completed` via `ChatCallbacks`
-
-**What it does NOT do:**
-- No re-verification after `Complete` — the state is terminal
-- No partial hash verification (content is fully hashed post-download)
-- No signature verification of the bytes (blob integrity is content-addressed)
-
-## Component interaction flow (complete download lifecycle)
-
-```
-1. Owner modifies shared files → bumps manifest revision
-2. Owner's `AboutMe` gossip broadcast includes new revision number
-   [catalogue notification]
-3. Peer A (requester) sees revision changed → fetches `/boru-file-catalog/1`
-   [catalogue retrieval]
-4. Peer A stores signed catalogue in `Storage`
-   [catalogue cache]
-5. User views Peer A's profile → frontend reads cached catalogue
-   (or triggers refresh if stale)
-6. User clicks "Download" on a file → `Storage::create_download()` → Queued
-7. `DownloadManager` ticks → opens `/boru-file-access/1` QUIC connection
-   [download authorisation]
-8. Owner checks relationship, offer, availability → issues signed descriptor
-9. Requester validates descriptor → starts iroh-blobs transfer
-   [file-byte transfer]
-10. `DownloadManager` ticks → bytes stream to temp file
-11. Post-download: verify BLAKE3 hash + size
-    [verification]
-12. If OK: atomic rename → `DownloadState::Complete`
-    If FAIL: `DownloadState::Failed`, temp file removed
-```
-
-## Existing artifacts (pre-implementation)
-
-These files already exist and define the contracts that the component
-implementations must satisfy:
-
-| Artifact | Content |
-|----------|---------|
-| `docs/protocol-layers.md` | ALPN definitions, protocol responsibilities, security properties |
-| `tests/test_remote_catalogue_integration.rs` | 10 tests for catalogue visibility, denial, pagination, revision changes, offline |
-| `tests/test_download_integration.rs` | 16 tests for download state machine (hash mismatch, auth denial, retry, pause/resume) |
-| `tests/test_ui_file_sharing_integration.rs` | 11 tests for profile data flow, staleness, collection browsing |
-| `tests/test_blob_size_enforcement.rs` | 3 tests for public-room blob size cap |
-| `src/net.rs` (unstaged diff) | `FILE_CATALOG_ALPN`, `FILE_ACCESS_ALPN` constants with dedup tests |
-| `src/storage.rs` | `file_objects`, `shared_files`, `shared_file_permissions`, `profile_manifest_state`, `downloads` tables |
-| `src/chat_core.rs` | `download_blob_with_progress()`, `download_blob_with_safety()` |
-| `src/chat_callbacks.rs` | `TransferId`, `TransferKind`, `TransferProgress` |
-| `src/user_profile.rs` | `UserProfile`, `SharedFile`, `SharedFileMeta` |
-| `src/file_indexer.rs` | Local shared-folder scanner and filesystem watcher |
-| `docs/testing.md` | "Remote file-sharing tests" section (lines 175–205) |
-
-## Implementation order (phases)
-
-1. **Catalogue protocol types + handler + client** — `catalogue_model`,
-   `catalogue_protocol`, `catalogue_handler`, `catalogue_client`, `protocol_version`
-2. **Catalogue storage + cache** — `Storage` SQLite operations for
-   `replace_remote_catalogue`, `get_remote_catalogue_meta`,
-   `get_remote_shared_files`, `get_remote_collections`
-3. **Catalogue integration tests** — `test_remote_catalogue_integration.rs`
-4. **File access handler** — `file_access_handler` implementing
-   `/boru-file-access/1` with permission re-check and signed descriptor issuance
-5. **Download manager** — `download` and `download_manager` modules for the
-   state machine, blob transfer orchestration, and verification
-6. **Transfer integration tests** — `test_download_integration.rs`,
-   `test_ui_file_sharing_integration.rs`
-7. **Diagnostics + observability** — diagnostic events for each state transition
-8. **Remove obsolete code** — prune old file-sharing paths superseded by
-   the new architecture
-9. **Documentation + release gate** — this note, protocol doc updates,
-   testing doc updates
+Relevant automated coverage is in `tests/test_remote_catalogue_integration.rs`, `tests/test_download_integration.rs`, `tests/test_corrupted_content.rs`, `tests/test_interruption_restart.rs`, and the unit tests for catalogue/access/limit modules.

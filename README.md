@@ -15,7 +15,7 @@ boru-chat is a Rust library (`boru_chat`) and example GUI application
   peers
 - **Friend management** — signed contact and friend-request negotiation
 - **File sharing** — content-addressed file attachments, profile-offered files
-  with per-peer permissions
+  with signed, requester-filtered catalogues and per-peer permissions
 - **Relational storage** — SQLite-based persistence with managed migrations
 
 ## Storage
@@ -89,6 +89,33 @@ All persistent data lives under a single data directory, resolved in this order:
 
 See [`docs/message-storage-design.md`](docs/message-storage-design.md) for
 the full storage architecture.
+
+## Remote file sharing
+
+Profiles advertise shared-file metadata through signed, requester-specific
+catalogue snapshots. A catalogue contains safe display metadata and a
+monotonic revision; it never contains local filesystem paths, permission rows,
+or a download capability. The client verifies the owner's signature and the
+owner identity before caching the projection. `known_revision` can produce a
+`NotModified` response, while a revision change during pagination requires a
+restart. There is no continuous catalogue-polling worker.
+
+Clicking download performs a fresh authorization request over
+`/boru-file-access/1`. The owner re-checks the live relationship, grants,
+offer, availability, expected hash, size, and version, then issues a
+requester-bound signed descriptor that expires after 60 seconds. Cached
+catalogue visibility does not authorize access.
+
+Iroh-blobs transfers the bytes. The receiver writes temporary output and
+verifies the exact size and BLAKE3 content hash before atomically installing
+the file and recording completion. Pause/resume re-resolves the peer and
+re-authorizes; it is not byte-range resume of the destination file. Queue,
+concurrency, size, timeout, and hash-verification limits bound resource use.
+
+See [`docs/remote-file-sharing.md`](docs/remote-file-sharing.md),
+[`docs/security-model.md`](docs/security-model.md), and
+[`docs/privacy-model.md`](docs/privacy-model.md) for the protocol workflow,
+security properties, privacy guarantees, storage behavior, and manual tests.
 
 ## Running
 

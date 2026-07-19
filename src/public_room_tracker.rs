@@ -403,7 +403,7 @@ mod tests {
         let tracker = block_on(PublicRoomTracker::start(
             Box::new(InMemoryDiscoveryBackend::new()),
             PublicNetwork::Test,
-            ep.clone(),
+            ep,
             sk,
         ))
         .unwrap();
@@ -445,7 +445,7 @@ mod tests {
         let tracker_a = block_on(PublicRoomTracker::start(
             Box::new(shared.clone()),
             PublicNetwork::Test,
-            ep_a.clone(),
+            ep_a,
             sk_a,
         ))
         .unwrap();
@@ -482,7 +482,7 @@ mod tests {
         let tracker = block_on(PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
-            ep.clone(),
+            ep,
             sk,
         ))
         .unwrap();
@@ -510,7 +510,7 @@ mod tests {
             let t = block_on(PublicRoomTracker::start(
                 Box::new(backend.clone()),
                 PublicNetwork::Test,
-                ep.clone(),
+                ep,
                 sk.clone(),
             ))
             .unwrap();
@@ -521,7 +521,7 @@ mod tests {
             let t = block_on(PublicRoomTracker::start(
                 Box::new(backend.clone()),
                 PublicNetwork::Test,
-                ep.clone(),
+                ep,
                 sk,
             ))
             .unwrap();
@@ -553,13 +553,13 @@ mod tests {
         let identities: Vec<(SecretKey, EndpointId)> = (0..3).map(|_| test_identity()).collect();
 
         // Publish each peer.
-        for (_i, (sk, ep)) in identities.iter().enumerate() {
+        for (sk, ep) in identities.iter() {
             // Use a unique key for each — same sk/ep but new tracker each time
             // to avoid mutable borrow issues.
             let t = block_on(PublicRoomTracker::start(
                 Box::new(backend.clone()),
                 PublicNetwork::Test,
-                ep.clone(),
+                *ep,
                 sk.clone(),
             ))
             .unwrap();

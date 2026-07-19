@@ -44,14 +44,9 @@ fn make_identity() -> (SecretKey, EndpointId) {
 /// Spawn a test peer on the given shared backend.
 async fn spawn_peer(backend: &InMemoryDiscoveryBackend) -> TestPeer {
     let (sk, ep) = make_identity();
-    let tracker = PublicRoomTracker::start(
-        Box::new(backend.clone()),
-        PublicNetwork::Test,
-        ep.clone(),
-        sk,
-    )
-    .await
-    .unwrap();
+    let tracker = PublicRoomTracker::start(Box::new(backend.clone()), PublicNetwork::Test, ep, sk)
+        .await
+        .unwrap();
     TestPeer { ep, tracker }
 }
 
@@ -173,7 +168,7 @@ async fn test_first_peer_starts_alone() -> Result<()> {
     let other = PublicRoomTracker::start(
         Box::new(backend.clone()),
         PublicNetwork::Test,
-        other_ep.clone(),
+        other_ep,
         other_sk,
     )
     .await?;
@@ -276,8 +271,7 @@ async fn test_dht_lookup_temporarily_fails() -> Result<()> {
     let fail_backend = FailOnCountBackend::new(inner.clone(), 3);
     let (sk, ep) = make_identity();
     let tracker =
-        PublicRoomTracker::start(Box::new(fail_backend), PublicNetwork::Test, ep.clone(), sk)
-            .await?;
+        PublicRoomTracker::start(Box::new(fail_backend), PublicNetwork::Test, ep, sk).await?;
 
     // First attempt: should fail (or return empty — the error propagates
     // from the backend through discover_once).

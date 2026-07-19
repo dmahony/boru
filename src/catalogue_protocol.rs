@@ -182,6 +182,31 @@ pub enum CatalogRequest {
         /// Maximum number of items to return in this page.
         page_size: u32,
     },
+    /// Fetch the full requester-specific catalogue, with optional
+    /// revision-based short-circuit.
+    ///
+    /// When `known_revision` is `Some(r)` and the requester-specific
+    /// catalogue view has not changed since revision `r`, the server
+    /// returns [`CatalogResponse::NotModified`] instead of the full
+    /// [`CatalogResponse::SignedCatalogue`].  The check is content-aware:
+    /// permission changes that don't bump the global revision are still
+    /// detected and prevent a false `NotModified`.
+    GetCatalogue {
+        /// The revision the client already has.  `None` means the client
+        /// wants the full catalogue unconditionally.
+        known_revision: Option<u64>,
+    },
+    /// Fetch details for a single shared file by its stable
+    /// [`shared_file_id`](crate::catalogue_model::RemoteSharedFile::shared_file_id).
+    ///
+    /// The server applies the same visibility rules as the full catalogue:
+    /// a requester who cannot see this file in the catalogue listing
+    /// receives [`CatalogResponse::Error`] with [`CatalogErrorCode::NotFound`].
+    /// A blocked requester receives [`CatalogErrorCode::PermissionDenied`].
+    GetFileDetails {
+        /// The shared_file_id of the file to look up.
+        shared_file_id: String,
+    },
 }
 
 /// A page of catalogue data returned in [`CatalogResponse::CataloguePage`].
@@ -229,6 +254,23 @@ pub enum CatalogResponse {
         /// Human-readable explanation (may be disclosed to remote peer).
         message: String,
     },
+    /// The requester-specific catalogue view has not changed since the
+    /// revision indicated in the request.  `revision` echoes the current
+    /// revision the server holds — the client can use it in future
+    /// `GetCatalogue` requests.
+    NotModified {
+        /// The current catalogue revision (unchanged from the client's
+        /// known_revision).
+        revision: u64,
+    },
+    /// A complete signed catalogue, returned by the handler when the client
+    /// requests the full catalogue (not a paginated sub-page).
+    #[cfg(feature = "net")]
+    SignedCatalogue(crate::catalogue_model::SignedFileCatalogue),
+    /// A single file's metadata, returned in response to
+    /// [`CatalogRequest::GetFileDetails`].  The requester sees only the
+    /// metadata they are permitted to view.
+    FileDetails(crate::catalogue_model::RemoteSharedFile),
 }
 
 // ── Error helpers ─────────────────────────────────────────────────────────

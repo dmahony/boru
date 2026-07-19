@@ -90,7 +90,7 @@ enum Cmd {
     /// Stop a session, cancelling any in-flight reconnect.
     StopSession { peer: PublicKey },
     /// Notify the manager that the whisper layer reported a remote event.
-    WhisperEvent(WhisperEvent),
+    WhisperEvent(Box<WhisperEvent>),
 }
 
 // ── Internal per-peer state ─────────────────────────────────────────────────────
@@ -163,7 +163,12 @@ impl SessionManager {
 
     /// Forward a [`WhisperEvent`] so the session manager can update state.
     pub async fn notice_whisper_event(&self, event: WhisperEvent) {
-        if self.cmd_tx.send(Cmd::WhisperEvent(event)).await.is_err() {
+        if self
+            .cmd_tx
+            .send(Cmd::WhisperEvent(Box::new(event)))
+            .await
+            .is_err()
+        {
             warn!("session manager actor dropped");
         }
     }
@@ -284,7 +289,7 @@ impl SessionManagerActor {
                 });
             }
             Cmd::WhisperEvent(event) => {
-                match event {
+                match *event {
                     WhisperEvent::Control { .. } => {
                         // Control messages are consumed by the frontend and do not
                         // affect the transport session state.
@@ -410,7 +415,7 @@ impl SessionManagerActor {
                             trace!(%peer, "ignoring disconnect for unknown session");
                         }
                     }
-                    WhisperEvent::Message { .. } | WhisperEvent::FileTransfer { .. } => {
+                    WhisperEvent::Message { .. } => {
                         // These are handled by the GUI directly.
                     }
                 }

@@ -98,7 +98,7 @@ fn image_cache_round_trip_rehydrates_after_restart_and_blocks_other_users() {
     );
     assert_eq!(cache_hit.as_deref(), Some(image_bytes.as_slice()));
 
-    let repeated = vec![reloaded_entry.clone(), reloaded_entry.clone()];
+    let repeated = [reloaded_entry.clone(), reloaded_entry.clone()];
     for (idx, item) in repeated.iter().enumerate() {
         let hydrated =
             load_stored_chat_image(&store, user_a, item.image_identifier.as_deref().unwrap())

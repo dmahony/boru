@@ -95,7 +95,7 @@ fn height_estimation_pass(entries: &[ChatEntry]) -> (Vec<f32>, Vec<f32>, f32) {
         let mut h = 0.0;
         let day = entry.timestamp.map(|ts| ts / 86400000);
         if let Some(d) = day {
-            if prev_day_ht.map_or(true, |prev| prev != d) {
+            if prev_day_ht != Some(d) {
                 h += DATE_SEP_H;
             }
             prev_day_ht = Some(d);

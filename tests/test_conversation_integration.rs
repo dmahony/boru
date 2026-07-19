@@ -302,7 +302,7 @@ fn bidirectional_friendship_on_acceptance() {
         .filter(|r| r.recipient == bob)
         .map(|r| r.id.clone())
         .collect();
-    for req_id in &alice_req_ids {
+    for _req_id in &alice_req_ids {
         // Simulate the remote side telling us the request was accepted
         // In real app this comes via a FriendRequestAccepted whisper
         // Since Alice can't 'accept' her own outgoing request directly
@@ -384,7 +384,7 @@ fn reject_friend_request_adds_no_friend_no_conversation() {
 #[test]
 fn open_conversation_creates_exactly_one() {
     let dir = temp_dir("test3-exactly-one");
-    let (alice_sk, alice_pk) = random_peer();
+    let (alice_sk, _alice_pk) = random_peer();
     let (_bob_sk, bob_pk) = random_peer();
 
     let mut alice_stores = PeerStores::new(&dir.join("alice"));
@@ -410,7 +410,7 @@ fn open_conversation_creates_exactly_one() {
 #[test]
 fn open_same_friend_no_duplicates() {
     let dir = temp_dir("test4-no-duplicates");
-    let (alice_sk, alice_pk) = random_peer();
+    let (_alice_sk, alice_pk) = random_peer();
     let (_bob_sk, bob_pk) = random_peer();
 
     let mut alice_stores = PeerStores::new(&dir.join("alice"));
@@ -458,7 +458,7 @@ fn open_same_friend_no_duplicates() {
 #[test]
 fn switching_conversations_preserves_both_histories() {
     let dir = temp_dir("test5-switch-preserve");
-    let (alice_sk, alice_pk) = random_peer();
+    let (_alice_sk, alice_pk) = random_peer();
     let (_bob_sk, bob_pk) = random_peer();
     let (_carol_sk, carol_pk) = random_peer();
 
@@ -467,21 +467,13 @@ fn switching_conversations_preserves_both_histories() {
     let bob_topic = open_conversation(&mut stores, &alice_pk, &bob_pk);
     let carol_topic = open_conversation(&mut stores, &alice_pk, &carol_pk);
 
-    // Simulate frontend state: which conversation is "selected"
-    let mut active_topic: Option<TopicId> = None;
-
     // "Switch" to Bob's conversation — add messages
-    active_topic = Some(bob_topic);
     let msg1 = make_history_entry(bob_topic, &alice_pk, "Hello Bob");
     stores.history.push_with_id(msg1);
 
     // "Switch" to Carol's conversation — add messages
-    active_topic = Some(carol_topic);
     let msg2 = make_history_entry(carol_topic, &alice_pk, "Hey Carol");
     stores.history.push_with_id(msg2);
-
-    // "Switch" back to Bob
-    active_topic = Some(bob_topic);
 
     // Verify: Bob's messages still exist
     let bob_entries: Vec<_> = stores
@@ -504,7 +496,8 @@ fn switching_conversations_preserves_both_histories() {
         "Both conversations' messages preserved"
     );
 
-    // Verify: active_topic is Bob
+    // The frontend returns to Bob after preserving both histories.
+    let active_topic = Some(bob_topic);
     assert_eq!(active_topic, Some(bob_topic));
 }
 
@@ -513,7 +506,7 @@ fn switching_conversations_preserves_both_histories() {
 #[test]
 fn incoming_message_inactive_conversation_increments_unread() {
     let dir = temp_dir("test6-unread-inactive");
-    let (alice_sk, alice_pk) = random_peer();
+    let (_alice_sk, alice_pk) = random_peer();
     let (_bob_sk, bob_pk) = random_peer();
     let (_carol_sk, carol_pk) = random_peer();
 
@@ -523,9 +516,6 @@ fn incoming_message_inactive_conversation_increments_unread() {
 
     // Simulate frontend unread tracking (the app's ConversationLive tracks this)
     let mut unreads: std::collections::HashMap<TopicId, u64> = std::collections::HashMap::new();
-
-    // Bob's conversation is "selected" (active)
-    let mut active_topic = bob_topic;
 
     // Incoming message for Carol (inactive) → unread++
     unreads
@@ -545,7 +535,6 @@ fn incoming_message_inactive_conversation_increments_unread() {
 
     // Now switch to Carol's conversation (as in the iced_chat frontend)
     // The frontend clears Carol's unread when selecting it
-    active_topic = carol_topic;
     // ── Test 8: selecting clears unread ──
     unreads.insert(carol_topic, 0);
     assert_eq!(
@@ -573,7 +562,7 @@ fn incoming_message_inactive_conversation_increments_unread() {
 #[test]
 fn messages_routed_to_correct_conversation() {
     let dir = temp_dir("test9-routing");
-    let (alice_sk, alice_pk) = random_peer();
+    let (_alice_sk, alice_pk) = random_peer();
     let (_bob_sk, bob_pk) = random_peer();
     let (_carol_sk, carol_pk) = random_peer();
 
@@ -617,7 +606,7 @@ fn messages_routed_to_correct_conversation() {
 #[test]
 fn conversation_ordering_by_latest_activity() {
     let dir = temp_dir("test10-ordering");
-    let (alice_sk, alice_pk) = random_peer();
+    let (_alice_sk, alice_pk) = random_peer();
     let (_bob_sk, bob_pk) = random_peer();
     let (_carol_sk, carol_pk) = random_peer();
 
@@ -860,7 +849,7 @@ fn group_chats_continue_to_work() {
 #[test]
 fn offline_direct_messages_populate_correct_conversation() {
     let dir = temp_dir("test14-offline-dm");
-    let (alice_sk, alice_pk) = random_peer();
+    let (_alice_sk, alice_pk) = random_peer();
     let (_bob_sk, bob_pk) = random_peer();
     let (_carol_sk, carol_pk) = random_peer();
 
@@ -909,7 +898,7 @@ fn offline_direct_messages_populate_correct_conversation() {
 #[test]
 fn friend_acceptance_does_not_unsubscribe_from_active_topics() {
     let dir = temp_dir("test15-no-unsub");
-    let (alice_sk, alice_pk) = random_peer();
+    let (_alice_sk, alice_pk) = random_peer();
     let (_bob_sk, bob_pk) = random_peer();
     let (_carol_sk, carol_pk) = random_peer();
 
@@ -947,7 +936,7 @@ fn friend_acceptance_does_not_unsubscribe_from_active_topics() {
     );
 
     // Verify: Both conversations still exist (if Alice opened one with Bob)
-    let bob_topic = open_conversation(&mut stores, &alice_pk, &bob_pk);
+    let _bob_topic = open_conversation(&mut stores, &alice_pk, &bob_pk);
     assert_eq!(
         stores.conversations.len(),
         2,

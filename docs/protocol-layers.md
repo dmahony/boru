@@ -231,21 +231,25 @@ topic and the secret can find each other on the DHT.
 
 ## Remote File Catalogue
 
-The file-sharing protocols are separate from gossip. A revision notification is
-advisory and contains no file bytes or access grant. The requester fetches a
-fresh signed snapshot over `/boru-file-catalog/1`; the client verifies the
-frame version, transport identity, owner identity, signature, bounds, and field
-limits before caching it. `known_revision` enables `NotModified`; cache refresh
-is event-driven (new revision, manual refresh, stale cache, or missing item),
-not continuous polling.
+The file-sharing protocols are separate from gossip. A catalogue is an
+advertisement, not a download capability. The requester fetches a fresh,
+requester-filtered signed snapshot over `/boru-file-catalog/1`; the client
+verifies the frame version, transport identity, owner identity, signature,
+bounds, duplicate/reference rules, and field limits before caching it.
+`known_revision` enables `NotModified`; a revision change during pagination
+returns `RevisionChanged` and the client restarts. There is no separate
+implemented push-notification ALPN or continuous catalogue-polling worker;
+applications may trigger refresh after observing a profile revision change,
+manually, when stale, or when an item is missing.
 
 The owner builds each snapshot for `Connection::remote_id`. Blocked peers are
-denied. Confirmed friends see enabled, available offers by default; other
-peers see only files with an explicit `read` permission. Disabled offers,
-unavailable file objects, and empty collections are omitted. The signed
-projection contains hash, display metadata, size, MIME type, collection name,
-and file revision, but no source path, username, database ID, permission row,
-blob ticket, or unrestricted address.
+denied. With no selected-peer grants, confirmed friends see enabled, available
+offers by default and other peers see an empty catalogue. When a file has
+explicit `read` grants, only granted peers see it; explicit denials, disabled
+offers, unavailable file objects, and empty collections are omitted. The
+signed projection contains hash, safe display metadata, size, MIME type,
+collection IDs, and file revision, but no source path, username, database ID,
+permission row, blob ticket, or unrestricted address.
 
 ### Transfer authorisation
 
@@ -254,30 +258,26 @@ expected file revision over `/boru-file-access/1`. The owner repeats the
 block, relationship, permission, offer, availability, expected-hash, and
 expected-version checks at request time. A grant returns a signed download
 descriptor bound to owner, requester, file, content hash, size, blob format,
-issue/expiry times, and a random nonce. The default expiry is five minutes;
+issue/expiry times, and a random nonce. The default expiry is 60 seconds;
 there are no permanent capabilities. Errors intentionally do not reveal whether
 an inaccessible file exists.
 
 The descriptor authorises an iroh-blobs content-addressed transfer. The client
 streams into a temporary file, verifies expected size and BLAKE3 content hash,
-and atomically renames only verified output. iroh-blobs 0.103.0 stores verified
-BAO chunks by content hash and, on a later request for the same blob, computes
-the missing chunk ranges and fetches only those ranges. Thus an interrupted
-transfer can reuse retained partial chunks, and a complete blob can be served
-locally. This is not byte-range resume of the temporary/destination file: the
-application does not append to a prior output offset, and the output is only
-installed after complete verification. If the partial blob is garbage-collected,
-the next transfer starts over.
+and atomically renames only verified output. Retained iroh-blobs chunks may be
+reused by a later content-addressed request, but this is not byte-range resume
+of the temporary/destination file: the application does not append to a prior
+output offset. If partial chunks are garbage-collected, transfer starts over.
 
 ### Limits and errors
 
-Requests are capped at 64 KiB, responses at 1 MiB, catalogues at 1,000 entries
-and 2 MiB encoded, and pages at 1–200 entries. Handlers apply global/per-peer
-concurrency caps, deadlines, a 30 requests/minute sliding-window limit, and
-stale-state pruning. File preparation also limits concurrent hashing/blob
-registration and may apply per-peer cooldowns. Invalid signatures, malformed
-metadata, oversized payloads, permission failures, unavailable/changed files,
-and rate limits have structured error categories.
+Requests are capped at 256 KiB, full responses at 4 MiB, file-details responses
+at 256 KiB, pages at 1 MiB/500 files, catalogues at 10,000 files and 1,000
+collections, and individual advertised files at 10 TiB. Handlers apply
+global/per-peer concurrency caps, deadlines, rate limits, and preparation
+limits. Invalid signatures, malformed metadata, oversized payloads, permission
+failures, unavailable/changed files, and rate limits have structured error
+categories. See [`catalogue-limits.md`](catalogue-limits.md).
 
 ## Transport Security
 

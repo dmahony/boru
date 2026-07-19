@@ -45,6 +45,10 @@ pub static DIAGNOSTICS: LazyLock<Diagnostics> = LazyLock::new(Diagnostics::new);
 /// Maximum clock-skew tolerance for future-dated messages (5 minutes).
 const MAX_FUTURE_SKEW_SECS: u64 = 300;
 
+/// Shared progress callback used by blob download functions with progress tracking.
+pub(crate) type TransferProgressCallback =
+    Arc<Mutex<Option<Box<dyn FnMut(TransferProgress) + Send>>>>;
+
 // ── Bootstrap peer resolution ─────────────────────────────────────────────────
 
 /// Collect unique bootstrap peer IDs from multiple address sources, preserving
@@ -1626,20 +1630,11 @@ pub fn handle_net_event_for_topic(
                     }
                 }
                 Message::FileShare { name, ticket } => {
-                    if from != cb.local_public() {
-                        let fid = FriendId::from_public_key(from);
-                        if cb.is_friend(&from) {
-                            cb.friend_mark_online(fid);
-                        }
-                        if !is_muted {
-                            let sender_name = cb.resolve_name(&from);
-                            cb.push_system(format!(
-                                "{} shared a file: {} (type /download to fetch it)",
-                                sender_name, name
-                            ));
-                            cb.set_pending_file(name, ticket);
-                        }
-                    }
+                    // Legacy ticket-bearing file announcements are retained
+                    // only for wire compatibility.  They must never enter the
+                    // download UI: access is granted exclusively by the
+                    // request-time catalogue/file-access services.
+                    let _ = (name, ticket, from, is_muted);
                 }
                 Message::ImageShare { name, hash } => {
                     if from != cb.local_public() {
@@ -2037,7 +2032,7 @@ pub async fn check_peer_connection_type(
 // A RAII guard that emits TransferProgress::Cancelled via the shared callback
 // wrapper when dropped without being disarmed first.
 struct CancelGuard {
-    callback: Arc<Mutex<Option<Box<dyn FnMut(TransferProgress) + Send>>>>,
+    callback: TransferProgressCallback,
     id: TransferId,
     kind: TransferKind,
     name: String,
@@ -2049,7 +2044,7 @@ impl CancelGuard {
         id: TransferId,
         kind: TransferKind,
         name: String,
-        callback: Arc<Mutex<Option<Box<dyn FnMut(TransferProgress) + Send>>>>,
+        callback: TransferProgressCallback,
     ) -> Self {
         Self {
             callback,
@@ -2103,6 +2098,7 @@ impl Drop for CancelGuard {
 /// cumulative progress exceeds the limit — the stream is abandoned and the
 /// partially-stored blob is never loaded into memory.  When `None` (the
 /// private-room path) no size enforcement is applied.
+#[expect(clippy::too_many_arguments)]
 pub async fn download_blob_with_progress(
     blob_store: &iroh_blobs::api::Store,
     endpoint: &Endpoint,
@@ -2118,8 +2114,7 @@ pub async fn download_blob_with_progress(
     let id = TransferId::next();
 
     // Wrap the callback in a shared Mutex so the CancelGuard can reach it.
-    let shared_cb: Arc<Mutex<Option<Box<dyn FnMut(TransferProgress) + Send>>>> =
-        Arc::new(Mutex::new(Some(Box::new(on_progress))));
+    let shared_cb: TransferProgressCallback = Arc::new(Mutex::new(Some(Box::new(on_progress))));
 
     // Helper: lock and call the callback.
     let emit = |ev: TransferProgress| {
@@ -2231,6 +2226,7 @@ pub async fn download_blob_with_progress(
 /// [`download_blob_with_progress`] (no size enforcement).
 ///
 /// [`max_blob_size_bytes`]: PublicRoomConfig::max_blob_size_bytes
+#[expect(clippy::too_many_arguments)]
 pub async fn download_blob_with_safety(
     blob_store: &iroh_blobs::api::Store,
     endpoint: &Endpoint,
@@ -3183,7 +3179,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_net_event_file_share_sets_pending() {
+    fn handle_net_event_file_share_is_ignored_without_authorisation() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
 
@@ -3196,8 +3192,8 @@ mod tests {
             sent_at: now_secs(),
         };
         handle_net_event(event, &mut app).unwrap();
-        assert_eq!(app.pending_file, Some(("doc.pdf".into(), "abc123".into())));
-        assert!(app.entries.iter().any(|e| e.body.contains("doc.pdf")));
+        assert!(app.pending_file.is_none());
+        assert!(!app.entries.iter().any(|e| e.body.contains("doc.pdf")));
     }
 
     #[test]
@@ -4059,10 +4055,9 @@ mod tests {
         let events_clone = events.clone();
 
         let id = TransferId::next();
-        let cb: Arc<Mutex<Option<Box<dyn FnMut(TransferProgress) + Send>>>> =
-            Arc::new(Mutex::new(Some(Box::new(move |ev| {
-                events_clone.lock().unwrap().push(ev);
-            }))));
+        let cb: TransferProgressCallback = Arc::new(Mutex::new(Some(Box::new(move |ev| {
+            events_clone.lock().unwrap().push(ev);
+        }))));
 
         // Create the guard and let it drop without disarming.
         {
@@ -4092,10 +4087,9 @@ mod tests {
         let events_clone = events.clone();
 
         let id = TransferId::next();
-        let cb: Arc<Mutex<Option<Box<dyn FnMut(TransferProgress) + Send>>>> =
-            Arc::new(Mutex::new(Some(Box::new(move |ev| {
-                events_clone.lock().unwrap().push(ev);
-            }))));
+        let cb: TransferProgressCallback = Arc::new(Mutex::new(Some(Box::new(move |ev| {
+            events_clone.lock().unwrap().push(ev);
+        }))));
 
         // Create the guard, disarm it, then let it drop.
         {

@@ -134,7 +134,7 @@ fn assert_no_exif(bytes: &[u8]) {
 fn integration_compress_jpeg_input() {
     let raw = encode_jpeg(&make_test_rgb(640, 480), 80);
     let compressed = compress_image(&raw, 1280, 70).unwrap();
-    assert!(compressed.len() > 0);
+    assert!(!compressed.is_empty());
     assert_valid_jpeg(&compressed);
     assert_no_exif(&compressed);
 }
@@ -508,7 +508,7 @@ fn integration_compress_all_formats_accepted() {
         assert_valid_jpeg(&compressed);
         assert_no_exif(&compressed);
         assert!(
-            compressed.len() > 0,
+            !compressed.is_empty(),
             "{label}: compressed output should not be empty"
         );
     }

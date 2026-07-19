@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::chat_core::DIAGNOSTICS;
 use crate::diagnostics::DiagnosticEventKind;
-use crate::proto::TopicId;
 
 /// Helper: produce a stable 8-char hex prefix from a 32-byte hash.
 fn short_id(id: &[u8; 32]) -> String {
@@ -1402,7 +1401,6 @@ impl MessageStore {
             "DELETE FROM outbox WHERE recipient_device_id = ?1",
             [recipient.as_bytes()],
         )
-        .map(|n| n as usize)
         .unwrap_or(0)
     }
 }

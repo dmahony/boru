@@ -141,11 +141,11 @@ impl RoomStore {
             }
             Ok(Some(store))
         } else if store.schema_version > SCHEMA_VERSION {
-            return Err(n0_error::anyerr!(
+            Err(n0_error::anyerr!(
                 "unsupported room schema version {} in {} (expected version 3 or lower)",
                 store.schema_version,
                 path.display()
-            ));
+            ))
         } else {
             store.data_dir = data_dir.to_path_buf();
             Ok(Some(store))
@@ -318,7 +318,7 @@ mod tests {
         let mut store = RoomStore::empty_at(&dir);
         let secret = DiscoverySecret::from_bytes([0xAAu8; 32]);
         store
-            .set_discovery_secret(Some(secret.clone()))
+            .set_discovery_secret(Some(secret))
             .expect("set discovery secret");
 
         let reloaded = RoomStore::load(&dir)

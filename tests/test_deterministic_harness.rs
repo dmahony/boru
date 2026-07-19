@@ -10,6 +10,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -32,7 +33,7 @@ use iroh::{
     Endpoint, PublicKey, RelayMap, RelayMode, RelayUrl, SecretKey,
 };
 use n0_error::{bail_any, Result};
-use n0_future::{task, time::sleep, StreamExt};
+use n0_future::{task, time::sleep};
 use rand::{RngExt, SeedableRng};
 use std::sync::Mutex as StdMutex;
 use tempfile::TempDir;
@@ -104,6 +105,7 @@ pub enum HarnessEvent {
 // TestPeer — ChatCallbacks implementation
 // ═══════════════════════════════════════════════════════════════════════
 
+#[derive(Debug)]
 pub struct TestPeer {
     pub id: PeerId,
     pub local_public: PublicKey,
@@ -155,6 +157,8 @@ impl ChatCallbacks for TestPeer {
     fn friend_mark_offline(&mut self, _fid: FriendId) {}
     fn friend_set_name(&mut self, _fid: FriendId, _name: String) {}
     fn mark_friends_dirty(&mut self) {}
+
+    fn set_pending_file(&mut self, _name: String, _ticket: String) {}
 
     fn push_system(&mut self, text: String) {
         self.system_messages.lock().unwrap().push(text.clone());
@@ -244,6 +248,16 @@ pub struct PeerNode {
     pub net_event_tx: Option<tokio::sync::mpsc::UnboundedSender<NetEvent>>,
 }
 
+impl fmt::Debug for PeerNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PeerNode")
+            .field("id", &self.id)
+            .field("public_key", &self.public_key)
+            .field("is_running", &self.is_running())
+            .finish()
+    }
+}
+
 impl PeerNode {
     fn new(id: PeerId, seed: &[u8], fault: FaultConfig) -> Self {
         let data_dir = tempfile::tempdir().expect("create temp dir");
@@ -300,13 +314,17 @@ pub struct TestHarness {
     blocked_directions: HashSet<(PeerId, PeerId)>,
 }
 
-// Helper to get a mutable reference to both Alice and Bob without borrow conflicts.
-macro_rules! peers_mut {
-    ($self:expr) => {
-        (&mut $self.alice, &mut $self.bob)
-    };
+impl fmt::Debug for TestHarness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TestHarness")
+            .field("alice", &self.alice)
+            .field("bob", &self.bob)
+            .field("topic", &self.topic)
+            .field("relay_url", &self.relay_url)
+            .field("blocked_directions", &self.blocked_directions)
+            .finish()
+    }
 }
-
 impl TestHarness {
     pub fn new() -> Self {
         let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
@@ -401,8 +419,8 @@ impl TestHarness {
         self.start_peer(PeerId::Bob, &relay_map, topic).await?;
 
         // Seed lookups
-        self.seed_lookup(PeerId::Alice).await;
-        self.seed_lookup(PeerId::Bob).await;
+        self.seed_lookup(PeerId::Alice);
+        self.seed_lookup(PeerId::Bob);
 
         Ok(())
     }
@@ -476,14 +494,13 @@ impl TestHarness {
         node.net_event_tx = Some(net_tx);
 
         let short = node.fmt_short();
-        drop(node);
         self.record(HarnessEvent::PeerStarted(who));
         info!("{:?} started pk={}", who, short);
 
         Ok(())
     }
 
-    async fn seed_lookup(&mut self, who: PeerId) {
+    fn seed_lookup(&mut self, who: PeerId) {
         let other_addr = match who {
             PeerId::Alice => self.bob.endpoint.as_ref().map(|ep| ep.addr()),
             PeerId::Bob => self.alice.endpoint.as_ref().map(|ep| ep.addr()),
@@ -526,12 +543,12 @@ impl TestHarness {
             .ok_or_else(|| n0_error::anyerr!("relay map not available"))?;
         let topic = self.topic;
         self.start_peer(who, &relay_map, topic).await?;
-        self.seed_lookup(who).await;
+        self.seed_lookup(who);
         let other = match who {
             PeerId::Alice => PeerId::Bob,
             PeerId::Bob => PeerId::Alice,
         };
-        self.seed_lookup(other).await;
+        self.seed_lookup(other);
         Ok(())
     }
 
@@ -760,7 +777,7 @@ impl TestHarness {
 
     // ── Fault injection ────────────────────────────────────────────
 
-    pub async fn change_address(&mut self, who: PeerId) {
+    pub fn change_address(&mut self, who: PeerId) {
         let node = self.node_mut(who);
         let new_lookup = MemoryLookup::new();
         node.memory_lookup = new_lookup.clone();
@@ -800,6 +817,12 @@ impl TestHarness {
             PeerId::Alice => &mut self.alice,
             PeerId::Bob => &mut self.bob,
         }
+    }
+}
+
+impl Default for TestHarness {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1040,7 +1063,7 @@ async fn test_address_change() -> Result<()> {
         .await?;
 
     // Change Alice's address lookup
-    harness.change_address(PeerId::Alice).await;
+    harness.change_address(PeerId::Alice);
 
     // Re-register Bob in Alice's lookup
     if let Some(ep_b) = &harness.bob.endpoint {
@@ -1048,7 +1071,7 @@ async fn test_address_change() -> Result<()> {
     }
 
     // Also change Bob's
-    harness.change_address(PeerId::Bob).await;
+    harness.change_address(PeerId::Bob);
     if let Some(ep_a) = &harness.alice.endpoint {
         harness.bob.memory_lookup.set_endpoint_info(ep_a.addr());
     }

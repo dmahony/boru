@@ -211,7 +211,7 @@ async fn test_stale_bootstrap_does_not_block_rejoin() -> Result<()> {
     }
 
     // Forward C's events to a sink so the gossip actor's event channel doesn't fill up
-    let _c_drain = task::spawn(async move { while let Some(_) = recv_c.next().await {} });
+    let _c_drain = task::spawn(async move { while recv_c.next().await.is_some() {} });
 
     let (net_tx_b, net_rx_b) = mpsc::unbounded_channel();
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));

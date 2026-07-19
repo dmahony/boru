@@ -681,13 +681,8 @@ mod tests {
         let shared = InMemoryDiscoveryBackend::new();
 
         // Tracker A publishes into shared backend.
-        let tracker_a = PrivateRoomTracker::new(
-            Box::new(shared.clone()),
-            topic,
-            secret.clone(),
-            ep_a.clone(),
-            sk_a,
-        );
+        let tracker_a =
+            PrivateRoomTracker::new(Box::new(shared.clone()), topic, secret, ep_a, sk_a);
         block_on(tracker_a.publish_once()).unwrap();
         block_on(tracker_a.shutdown());
 
@@ -722,8 +717,7 @@ mod tests {
         let backend = InMemoryDiscoveryBackend::new();
 
         // Publish our own presence.
-        let tracker =
-            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep.clone(), sk);
+        let tracker = PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep, sk);
         block_on(tracker.publish_once()).unwrap();
 
         // Discover — our own EndpointId should be filtered out.
@@ -750,13 +744,8 @@ mod tests {
         let shared = InMemoryDiscoveryBackend::new();
 
         // Tracker A publishes with secret A.
-        let tracker_a = PrivateRoomTracker::new(
-            Box::new(shared.clone()),
-            topic,
-            secret_a,
-            ep_a.clone(),
-            sk_a,
-        );
+        let tracker_a =
+            PrivateRoomTracker::new(Box::new(shared.clone()), topic, secret_a, ep_a, sk_a);
         block_on(tracker_a.publish_once()).unwrap();
         block_on(tracker_a.shutdown());
 
@@ -782,9 +771,8 @@ mod tests {
         let topic = TopicId::from_bytes([0xCDu8; 32]);
         let secret = DiscoverySecret::from_bytes([0x52u8; 32]);
         let backend = InMemoryDiscoveryBackend::new();
-        let tracker =
-            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret.clone(), ep, sk);
-        let namespace = tracker.namespace().clone();
+        let tracker = PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep, sk);
+        let namespace = *tracker.namespace();
         block_on(backend.publish(&namespace, EncryptedDiscoveryRecord::new(vec![0xAA; 32])))
             .unwrap();
 

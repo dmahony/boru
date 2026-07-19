@@ -4,7 +4,7 @@
 //! file must match both the advertised size and the advertised BLAKE3 content
 //! hash before it is installed at its destination.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -171,6 +171,7 @@ pub fn verify_install_and_complete(
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn fixture(bytes: &[u8]) -> (TempDir, PathBuf, String) {
@@ -203,8 +204,8 @@ mod tests {
     #[test]
     fn corrupted_bytes_are_rejected() {
         let (_dir, path, _hash) = fixture(b"verified bytes");
-        let error = verify_download_file(&path, 14, &blake3::hash(b"other").to_hex().to_string())
-            .unwrap_err();
+        let error =
+            verify_download_file(&path, 14, blake3::hash(b"other").to_hex().as_ref()).unwrap_err();
         assert!(error.to_string().contains("content hash mismatch"));
         assert!(path.exists());
     }

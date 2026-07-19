@@ -137,7 +137,7 @@ fn t01_bob_offline_alice_sends_one() {
 
     // Alice's store: enqueue message for Bob
     {
-        let alice_store = MessageStore::open(&dir.join("alice")).unwrap();
+        let alice_store = MessageStore::open(dir.join("alice")).unwrap();
 
         // Insert into inbox as well (Alice stores her own outgoing message locally)
         let env = envelope_with_author(msg_id, conv_id, alice_pk, now_ms_raw() + 86_400_000);
@@ -161,7 +161,7 @@ fn t01_bob_offline_alice_sends_one() {
 
     // Bob's store: simulate Bob coming online and receiving the message
     {
-        let bob_store = MessageStore::open(&dir.join("bob")).unwrap();
+        let bob_store = MessageStore::open(dir.join("bob")).unwrap();
         let env = sample_envelope(msg_id, conv_id);
 
         // Bob receives and stores the message
@@ -187,7 +187,7 @@ fn t01_bob_offline_alice_sends_one() {
 
     // Alice's store: Bob's ack comes back, mark as acked
     {
-        let alice_store = MessageStore::open(&dir.join("alice")).unwrap();
+        let alice_store = MessageStore::open(dir.join("alice")).unwrap();
         alice_store.mark_acked(&msg_id, bob_pk).unwrap();
 
         // Verify acked message no longer appears in due queue
@@ -217,7 +217,7 @@ fn t02_bob_offline_alice_sends_multiple() {
 
     // Alice enqueues three messages
     {
-        let alice_store = Storage::open(&dir.join("alice")).unwrap();
+        let alice_store = Storage::open(dir.join("alice")).unwrap();
 
         for (i, &msg_id) in [msg_a, msg_b, msg_c].iter().enumerate() {
             // Insert into Alice's inbox (outgoing messages stored locally)
@@ -244,7 +244,7 @@ fn t02_bob_offline_alice_sends_multiple() {
 
     // Bob comes online and receives all three
     {
-        let bob_store = Storage::open(&dir.join("bob")).unwrap();
+        let bob_store = Storage::open(dir.join("bob")).unwrap();
 
         for &msg_id in &[msg_a, msg_b, msg_c] {
             let env = sample_envelope(msg_id, conv_id);
@@ -258,7 +258,7 @@ fn t02_bob_offline_alice_sends_multiple() {
 
     // Alice marks all three as acked
     {
-        let alice_store = Storage::open(&dir.join("alice")).unwrap();
+        let alice_store = Storage::open(dir.join("alice")).unwrap();
         for &msg_id in &[msg_a, msg_b, msg_c] {
             alice_store.mark_acked(&msg_id, bob_pk).unwrap();
         }
@@ -305,7 +305,7 @@ fn t03_alice_restarts_before_bob_returns() {
 
     // Bob eventually receives the message
     {
-        let bob_store = Storage::open(&dir.join("bob")).unwrap();
+        let bob_store = Storage::open(dir.join("bob")).unwrap();
         let env = sample_envelope(msg_id, make_conv_id(0x03));
         bob_store.insert_inbox(&env).unwrap();
     }
@@ -519,7 +519,7 @@ fn t07_ack_dropped() {
 
     // Bob receives and acks, but ack is dropped (never reaches Alice)
     {
-        let bob_store = Storage::open(&dir.join("bob")).unwrap();
+        let bob_store = Storage::open(dir.join("bob")).unwrap();
         let env = sample_envelope(msg_id, conv_id);
         bob_store.insert_inbox(&env).unwrap();
     }
@@ -674,7 +674,7 @@ fn t10_messages_arrive_out_of_order() {
 
     // Bob receives them out of order — Y first, then X
     {
-        let bob_store = Storage::open(&dir.join("bob")).unwrap();
+        let bob_store = Storage::open(dir.join("bob")).unwrap();
 
         // Y arrives first
         let env_y_late = sample_envelope(msg_y, conv_id);
@@ -1224,7 +1224,7 @@ fn t_aggregate_exactly_once_and_terminal_states() {
 
     // Bob receives messages 0,1,2 and acks them (using MessageStore for unread tracking)
     {
-        let bob_store = MessageStore::open(&dir.join("bob")).unwrap();
+        let bob_store = MessageStore::open(dir.join("bob")).unwrap();
         let local_bob = random_pk();
 
         for &msg_id in &ids[0..3] {

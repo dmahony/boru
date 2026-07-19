@@ -164,7 +164,7 @@ impl PublicRoomSafety {
         if !times.contains_key(peer) && times.len() >= MAX_TRACKED_PEERS {
             return false;
         }
-        let peer_times = times.entry(*peer).or_insert_with(Vec::new);
+        let peer_times = times.entry(*peer).or_default();
 
         // Prune entries outside the window.
         peer_times.retain(|t| now.duration_since(*t) < window_duration);
@@ -498,8 +498,10 @@ mod tests {
 
     #[test]
     fn zero_rate_disables_limit() {
-        let mut cfg = PublicRoomConfig::default();
-        cfg.per_peer_message_rate = 0.0;
+        let cfg = PublicRoomConfig {
+            per_peer_message_rate: 0.0,
+            ..Default::default()
+        };
         let safety = PublicRoomSafety::new(cfg);
         let peer = test_peer(99);
         // Flood should not trigger rate limiting when rate is 0.0.
@@ -642,8 +644,10 @@ mod tests {
 
     #[test]
     fn rate_limit_hits_incremented_on_rejection() {
-        let mut cfg = PublicRoomConfig::default();
-        cfg.per_peer_message_rate = 5.0;
+        let cfg = PublicRoomConfig {
+            per_peer_message_rate: 5.0,
+            ..Default::default()
+        };
         let safety = PublicRoomSafety::new(cfg);
         let peer = test_peer(50);
 
@@ -717,7 +721,7 @@ mod tests {
         };
         let safety = PublicRoomSafety::new(cfg);
         assert!(safety.check_message_size(b"hello"));
-        assert!(!safety.check_message_size(&vec![0u8; 101]));
+        assert!(!safety.check_message_size(&[0u8; 101]));
     }
 
     #[test]
@@ -816,8 +820,10 @@ mod tests {
 
     #[test]
     fn filter_enforces_message_rate_per_peer() {
-        let mut cfg = PublicRoomConfig::default();
-        cfg.per_peer_message_rate = 10.0;
+        let cfg = PublicRoomConfig {
+            per_peer_message_rate: 10.0,
+            ..Default::default()
+        };
         let safety = PublicRoomSafety::new(cfg);
         let peer = test_peer(42);
 
@@ -853,8 +859,10 @@ mod tests {
 
     #[test]
     fn filter_rate_limit_isolated_per_peer() {
-        let mut cfg = PublicRoomConfig::default();
-        cfg.per_peer_message_rate = 2.0;
+        let cfg = PublicRoomConfig {
+            per_peer_message_rate: 2.0,
+            ..Default::default()
+        };
         let safety = PublicRoomSafety::new(cfg);
         let peer_a = test_peer(43);
         let peer_b = test_peer(44);
@@ -1125,7 +1133,7 @@ mod tests {
 
     #[test]
     fn handle_net_event_without_safety_passes_private_events() {
-        let safety = default_safety();
+        let _safety = default_safety();
         let peer = test_peer(3);
         let mut app = test_app();
 

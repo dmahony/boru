@@ -314,7 +314,7 @@ fn test_iced_message_journal_eviction() {
     let journal = IcedMessageJournal::with_capacity(3);
 
     for i in 0..5 {
-        journal.record(&format!("Msg{i}"), FailureLayer::IcedUpdate, true, "", None);
+        journal.record(format!("Msg{i}"), FailureLayer::IcedUpdate, true, "", None);
     }
 
     assert_eq!(journal.entry_count(), 3);
@@ -583,7 +583,7 @@ fn test_iced_state_snapshot_serde() {
     assert_eq!(deserialized.active_screen, "ChatList");
     assert!(deserialized.active_room.is_none());
     assert_eq!(deserialized.conversation_count, 3);
-    assert_eq!(deserialized.dark_mode, true);
+    assert!(deserialized.dark_mode);
 
     // Verify no secret keys in output
     assert!(!json.contains("secret_key"));

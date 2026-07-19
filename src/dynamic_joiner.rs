@@ -41,7 +41,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
-use crate::api::{Command, GossipSender};
+use crate::api::GossipSender;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -310,6 +310,7 @@ fn handle_neighbor_event(event: NeighborEvent, state: &Arc<Mutex<JoinerState>>) 
 }
 
 /// Process a discovery batch, returning `false` if the channel is closed.
+#[expect(clippy::too_many_arguments)]
 fn handle_discovery_batch(
     peers: Vec<EndpointId>,
     state: &Arc<Mutex<JoinerState>>,
@@ -487,6 +488,7 @@ fn apply_jitter(base: Duration, factor: f64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Command;
     use tokio::sync::mpsc as tokio_mpsc;
 
     // ── Helpers ──────────────────────────────────────────────────────

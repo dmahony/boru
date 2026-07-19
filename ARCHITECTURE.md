@@ -253,12 +253,13 @@ valid transitions crash-robustly. Full details in
 
 ## Remote File Catalogue
 
-Remote file sharing is split into discovery, authorisation, and content
-transfer. A gossip/application event carries only a small catalogue-revision
-notification; it never grants access or carries file bytes. The receiver keeps
-a verified cache per peer and fetches a new catalogue only for a newer revision,
-an explicit refresh, a stale cache, or a missing item. `NotModified` preserves
-the current cache. There is no continuous polling.
+Remote file sharing is split into catalogue retrieval, authorization, and
+content transfer. A signed catalogue snapshot advertises safe metadata but
+never grants access or carries file bytes. `known_revision` can produce
+`NotModified`, and a revision change during pagination requires a restart. The
+current implementation has no separate push-notification ALPN or continuous
+catalogue-polling worker; callers trigger refresh explicitly or after observing
+a profile revision change.
 
 ### Catalogue semantics
 
@@ -270,21 +271,22 @@ unrestricted addresses. A valid signature proves authorship and integrity, but
 metadata remains untrusted input and is sanitized before UI or filesystem use.
 
 Catalogues are built for the authenticated QUIC requester, never from a shared
-cache. Blocked peers receive access denied; enabled offers are visible to
-confirmed friends; non-friends require an explicit per-file `read` grant;
-disabled offers and unavailable file objects are omitted. Collections with no
-visible available files are omitted. Two requesters may therefore receive
-different catalogues for the same owner and revision.
+cache. Blocked peers receive access denied. With no selected-peer grants,
+enabled offers are visible to confirmed friends and other peers receive an
+empty catalogue; when a file has explicit `read` grants, only granted peers
+see it. Disabled offers and unavailable file objects are omitted. Two
+requesters may therefore receive different catalogues for the same owner and
+revision.
 
 ### Authorisation and transfer
 
-The requester sends a file hash plus expected catalogue file revision to
-`/iroh-chat-transfer-auth/1`. The handler obtains identity from
+The requester sends a shared-file ID plus expected content hash, size, and
+version to `/boru-file-access/1`. The handler obtains identity from
 `Connection::remote_id`, re-evaluates block/contact/permission state, checks
 that the offer is enabled and the source has not changed, then prepares the
 iroh-blobs object. A grant is a signed descriptor bound to owner and requester,
 content hash, size, blob format, issue time, expiry, and a random nonce. The
-default descriptor lifetime is five minutes; expired or replayed descriptors
+default descriptor lifetime is 60 seconds; expired or replayed descriptors
 must not be treated as access.
 
 The transfer uses iroh-blobs' content-addressed store. Data is streamed in
@@ -296,12 +298,13 @@ There is no byte-range resume of the temporary file.
 
 ### Abuse limits and visibility
 
-Catalogue requests are bounded to 64 KiB requests, 1 MiB responses, 1,000
-entries, and a 2 MiB encoded catalogue. Pagination is 1–200 entries per page.
-Catalogue and access handlers have global and per-peer concurrency limits,
-bounded read/build/write deadlines, a 30-request-per-minute sliding window, and
-stale peer-state pruning. File preparation additionally limits global
-preparation and verification concurrency and can apply per-peer cooldowns.
+Catalogue requests are bounded to 256 KiB requests, 4 MiB responses, 10,000
+files/1,000 collections, and a 10 TiB advertised file size. Pagination is
+limited to 500 entries and 1 MiB per page. Catalogue and access handlers have
+global and per-peer concurrency limits, bounded read/build/write deadlines,
+rate limits, and preparation limits. File preparation additionally limits
+global preparation and verification concurrency. See
+[`docs/catalogue-limits.md`](docs/catalogue-limits.md).
 Remote filenames are filesystem-sanitized before use; display text is sanitized
 after signature verification.
 

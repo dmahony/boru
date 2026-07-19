@@ -41,6 +41,7 @@ pub struct PerfSample {
 }
 
 /// Thread-safe performance sample accumulator.
+#[derive(Debug)]
 pub struct PerfTracker {
     samples: Mutex<Vec<PerfSample>>,
     enabled: std::sync::atomic::AtomicBool,
@@ -176,7 +177,7 @@ impl PerfTracker {
 
         // Top-N slowest individual operations
         let mut all_samples: Vec<_> = samples.clone();
-        all_samples.sort_by(|a, b| b.duration_ns.cmp(&a.duration_ns));
+        all_samples.sort_by_key(|b| std::cmp::Reverse(b.duration_ns));
         eprintln!("  ── Top 10 Slowest Operations ──");
         for s in all_samples.iter().take(10) {
             let ms = s.duration_ns as f64 / 1_000_000.0;

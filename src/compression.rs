@@ -448,7 +448,7 @@ mod tests {
     fn test_compress_jpeg_input() {
         let raw = encode_jpeg(&make_test_rgb(640, 480), 80);
         let compressed = compress_image(&raw, 1280, 70).unwrap();
-        assert!(compressed.len() > 0);
+        assert!(!compressed.is_empty());
         assert_eq!(compressed[0], 0xFF);
         assert_eq!(compressed[1], 0xD8);
     }
@@ -457,7 +457,7 @@ mod tests {
     fn test_compress_png_input() {
         let raw = encode_png_rgb(640, 480);
         let compressed = compress_image(&raw, 1280, 70).unwrap();
-        assert!(compressed.len() > 0);
+        assert!(!compressed.is_empty());
         assert_eq!(compressed[0], 0xFF);
         assert_eq!(compressed[1], 0xD8);
     }

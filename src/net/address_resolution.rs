@@ -27,16 +27,16 @@ pub(crate) enum ResolutionFailureCategory {
     IdentityMismatch,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl ResolutionFailureCategory {
-    pub(crate) const fn code(self) -> &'static str {
+    pub(crate) fn code(self) -> &'static str {
         match self {
-            Self::NoCandidates => "address_resolution.no_candidates",
-            Self::IdentityMismatch => "address_resolution.identity_mismatch",
+            ResolutionFailureCategory::NoCandidates => "address_resolution.no_candidates",
+            ResolutionFailureCategory::IdentityMismatch => "address_resolution.identity_mismatch",
         }
     }
 }
 
-/// A candidate together with its provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AddressCandidate {
     pub(crate) addr: EndpointAddr,

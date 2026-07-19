@@ -25,7 +25,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use iroh_base::PublicKey;
@@ -252,6 +251,79 @@ pub enum DiagnosticEventKind {
         peer_id: Option<String>,
         delivery_state: String,
     },
+
+    // ── Catalogue events ─────────────────────────────────────────
+    /// A catalogue fetch from a remote peer has started.
+    CatalogueFetchStarted {
+        /// Optional known revision sent with the request.
+        known_revision: Option<u64>,
+    },
+    /// A catalogue fetch from a remote peer completed successfully.
+    CatalogueFetchCompleted {
+        /// Catalogue revision at fetch time.
+        revision: u64,
+        /// Number of files in the received catalogue.
+        file_count: usize,
+        /// Number of collections in the received catalogue.
+        collection_count: usize,
+    },
+    /// A catalogue fetch from a remote peer failed.
+    CatalogueFetchFailed {
+        /// Human-readable error description.
+        error: String,
+    },
+    /// A catalogue signature verification was rejected.
+    CatalogueSignatureRejected {
+        /// Reason for the rejection.
+        error: String,
+    },
+
+    // ── Blob transfer events ──────────────────────────────────────
+    /// A blob transfer has started.
+    TransferStarted {
+        /// Short transfer identifier.
+        transfer_id: String,
+        /// Total expected bytes.
+        total_bytes: u64,
+    },
+    /// A blob transfer verification step completed (or failed).
+    TransferVerification {
+        /// Short transfer identifier.
+        transfer_id: String,
+        /// Bytes received so far.
+        bytes: u64,
+        /// Total expected bytes.
+        total_bytes: u64,
+        /// Whether the verification passed.
+        success: bool,
+    },
+    /// A blob transfer completed successfully.
+    BlobTransferCompleted {
+        /// Short transfer identifier.
+        transfer_id: String,
+        /// Total bytes transferred.
+        total_bytes: u64,
+        /// Content hash of the transferred data (hex).
+        content_hash: String,
+    },
+    /// A blob transfer failed.
+    BlobTransferFailed {
+        /// Short transfer identifier.
+        transfer_id: String,
+        /// Human-readable error description.
+        error: String,
+    },
+}
+
+/// Produce a short human-friendly identifier from a full id/order.
+/// Useful for diagnostic logs where a full id would be too verbose.
+pub fn short_transfer_id(id: impl std::fmt::Display) -> String {
+    let s = id.to_string();
+    if s.len() <= 8 {
+        s
+    } else {
+        format!("{}…", &s[..8])
+    }
 }
 
 // =============================================================================
@@ -1003,7 +1075,7 @@ impl Diagnostics {
         &self,
         id: String,
         peer: PublicKey,
-        discovery_source: DiscoverySource,
+        _discovery_source: DiscoverySource,
         room_id: Option<TopicId>,
     ) {
         let now_ms = std::time::SystemTime::now()
@@ -1972,21 +2044,24 @@ impl GuiActionStatus {
     pub fn transition_to(&mut self, target: GuiActionState) -> Result<(), GuiActionError> {
         use GuiActionState::*;
 
-        let allowed = match (&self.state, &target) {
-            (Queued, Validating) | (Queued, QueueFull) => true,
-            (Validating, Rejected) | (Validating, AppMessageQueued) => true,
-            (AppMessageQueued, AppMessageHandled) => true,
-            (AppMessageHandled, Completed)
-            | (AppMessageHandled, Failed)
-            | (AppMessageHandled, WaitingForExpectedState) => true,
-            (WaitingForExpectedState, Completed)
-            | (WaitingForExpectedState, TimedOut)
-            | (WaitingForExpectedState, Failed) => true,
-            _ => false,
-        };
+        let allowed = matches!(
+            (&self.state, &target),
+            (Queued, Validating)
+                | (Queued, QueueFull)
+                | (Validating, Rejected)
+                | (Validating, AppMessageQueued)
+                | (AppMessageQueued, AppMessageHandled)
+                | (AppMessageHandled, Completed)
+                | (AppMessageHandled, Failed)
+                | (AppMessageHandled, WaitingForExpectedState)
+                | (WaitingForExpectedState, Completed)
+                | (WaitingForExpectedState, TimedOut)
+                | (WaitingForExpectedState, Failed)
+        );
 
         if allowed {
-            Ok(self.set_state(target))
+            self.set_state(target);
+            Ok(())
         } else {
             Err(GuiActionError::new(
                 GuiActionErrorCode::InvalidArgument,
@@ -2891,7 +2966,7 @@ impl GuiActionEventHistory {
 
     /// Create a new action event journal with the given maximum number of entries.
     pub fn with_capacity(max_entries: usize) -> Self {
-        let capped = max_entries.max(64).min(5000);
+        let capped = max_entries.clamp(64, 5000);
         Self {
             inner: Arc::new(GuiActionEventHistoryInner {
                 entries: Mutex::new(VecDeque::with_capacity(capped + 32)),
@@ -3707,7 +3782,7 @@ mod tests {
 
     #[test]
     fn test_local_room_unavailable_classified() {
-        let evidence = DiscoveryTestEvidence {
+        let _evidence = DiscoveryTestEvidence {
             local_room_joined: false,
             peer_discovered: false,
             ..Default::default()
@@ -6610,7 +6685,7 @@ mod tests {
         let journal = IcedMessageJournal::with_capacity(10);
         for i in 0..7 {
             journal.record(
-                &format!("Msg{}", i),
+                format!("Msg{}", i),
                 FailureLayer::IcedUpdate,
                 true,
                 "",
@@ -6864,7 +6939,7 @@ mod tests {
 
         for i in 0..50 {
             journal.record(
-                &format!("action-{}", i),
+                format!("action-{}", i),
                 GuiActionEventKind::ActionRequested,
                 i,
                 None,
@@ -6892,7 +6967,7 @@ mod tests {
         // Fill beyond capacity (record 70 entries, should evict to 64)
         for i in 0..70 {
             journal.record(
-                &format!("action-{}", i),
+                format!("action-{}", i),
                 GuiActionEventKind::ActionRequested,
                 i as u64,
                 None,
@@ -6967,7 +7042,7 @@ mod tests {
         let tiny = GuiActionEventHistory::with_capacity(10);
         for i in 0..70 {
             tiny.record(
-                &format!("a{}", i),
+                format!("a{}", i),
                 GuiActionEventKind::ActionRequested,
                 i as u64,
                 None,
@@ -6980,7 +7055,7 @@ mod tests {
         let huge = GuiActionEventHistory::with_capacity(10_000);
         for i in 0..6000 {
             huge.record(
-                &format!("a{}", i),
+                format!("a{}", i),
                 GuiActionEventKind::ActionRequested,
                 i as u64,
                 None,
@@ -7179,7 +7254,7 @@ mod tests {
             let deser: GuiActionEventKind = serde_json::from_str(&json).unwrap();
             // Use debug format for comparison since PartialEq isn't derived
             let original_debug = format!("{:?}", kind);
-            let deser_debug = format!("{:?}", &deser);
+            let deser_debug = format!("{:?}", deser);
             assert_eq!(
                 original_debug, deser_debug,
                 "roundtrip mismatch for variant index {i}: {json}"
@@ -7235,7 +7310,7 @@ mod tests {
         // Fill to capacity
         for i in 0..64 {
             journal.record(
-                &format!("pre-{i}"),
+                format!("pre-{i}"),
                 GuiActionEventKind::ActionRequested,
                 i as u64,
                 None,
@@ -7248,7 +7323,7 @@ mod tests {
         // Over-fill — this triggers eviction of oldest
         for i in 0..20 {
             journal.record(
-                &format!("post-{i}"),
+                format!("post-{i}"),
                 GuiActionEventKind::ActionCompleted,
                 (64 + i) as u64,
                 None,
@@ -7968,7 +8043,7 @@ mod tests {
             "default should be 10s"
         );
         assert_eq!(MAX_ACTION_STATE_TIMEOUT_MS, 30_000, "max should be 30s");
-        assert!(
+        const _: () = assert!(
             DEFAULT_ACTION_STATE_TIMEOUT_MS <= MAX_ACTION_STATE_TIMEOUT_MS,
             "default must not exceed max"
         );
@@ -8464,8 +8539,8 @@ mod tests {
                 for _ in 0..100 {
                     let all = h.all_actions();
                     let count = h.action_count();
-                    let active = h.active_count();
-                    let queued = h.actions_with_state(GuiActionState::Queued);
+                    let _active = h.active_count();
+                    let _queued = h.actions_with_state(GuiActionState::Queued);
                     let _next_timeout = h.next_timeout_remaining_ms();
 
                     // all should contain the right number
@@ -8825,9 +8900,9 @@ mod tests {
         let mut handles = Vec::with_capacity(6);
 
         // Threads 0-4: alternate between record() and remove()
-        for idx in 0..5 {
+        for (idx, aid) in ids.iter().enumerate().take(5) {
             let h = history.clone();
-            let aid = ids[idx].clone();
+            let aid = aid.clone();
             let bar = barrier.clone();
             handles.push(std::thread::spawn(move || {
                 bar.wait();
@@ -10206,11 +10281,8 @@ mod tests {
         }
 
         // After producers finish, drain any remaining
-        loop {
-            match rx.try_recv() {
-                Ok(_) => received += 1,
-                _ => break,
-            }
+        while rx.try_recv().is_ok() {
+            received += 1;
         }
 
         assert_eq!(

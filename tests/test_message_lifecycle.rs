@@ -12,13 +12,11 @@
 //! 5. **Message expiry** — TTL-based expiry in OutboxStore and handle_net_event stale-message drop
 //! 6. **Edge cases** — empty stores, missing entries, backward transitions, concurrent saves
 
-use boru_chat::chat_history::{
-    blake3_hex, ChatHistoryStore, DeliveryState, HistoryEntry, InvalidTransition,
-};
-use boru_chat::outbox::{OutboxEntry, OutboxStore, DEFAULT_OUTBOX_TTL};
+use boru_chat::chat_history::{blake3_hex, ChatHistoryStore, DeliveryState, HistoryEntry};
+use boru_chat::outbox::{OutboxEntry, OutboxStore};
 use boru_chat::proto::TopicId;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
@@ -57,8 +55,10 @@ fn make_outbox_entry(event_id: u64, topic: TopicId) -> OutboxEntry {
 
 #[test]
 fn full_lifecycle_queued_to_seen() {
-    /// Verify the complete Queued → Sent → Delivered → Seen transition for
-    /// a single message in both the OutboxStore and ChatHistoryStore.
+    // Verify the complete Queued → Sent → Delivered → Seen transition for
+
+    // a single message in both the OutboxStore and ChatHistoryStore.
+
     let dir = temp_dir("full_lifecycle");
     let topic = make_topic(0x01);
 
@@ -123,8 +123,10 @@ fn full_lifecycle_queued_to_seen() {
 
 #[test]
 fn full_lifecycle_multiple_messages_independent_states() {
-    /// Multiple messages should advance independently through the state machine
-    /// without cross-contamination.
+    // Multiple messages should advance independently through the state machine
+
+    // without cross-contamination.
+
     let dir = temp_dir("multiple_independent");
     let topic = make_topic(0x02);
 
@@ -190,7 +192,8 @@ fn full_lifecycle_multiple_messages_independent_states() {
 
 #[test]
 fn full_lifecycle_queued_to_failed() {
-    /// A message can transition Queued → Failed if sending fails immediately.
+    // A message can transition Queued → Failed if sending fails immediately.
+
     let dir = temp_dir("queued_failed");
     let topic = make_topic(0x03);
 
@@ -218,7 +221,8 @@ fn full_lifecycle_queued_to_failed() {
 
 #[test]
 fn full_lifecycle_sent_to_failed() {
-    /// A message can transition Sent → Failed if the peer disconnects.
+    // A message can transition Sent → Failed if the peer disconnects.
+
     let dir = temp_dir("sent_failed");
     let topic = make_topic(0x04);
 
@@ -250,8 +254,10 @@ fn full_lifecycle_sent_to_failed() {
 
 #[test]
 fn full_lifecycle_delivered_to_failed() {
-    /// A message can transition Delivered → Failed (delivery explicitly failed
-    /// after confirmation, e.g. timeout before final acknowledgement).
+    // A message can transition Delivered → Failed (delivery explicitly failed
+
+    // after confirmation, e.g. timeout before final acknowledgement).
+
     let dir = temp_dir("delivered_failed");
     let topic = make_topic(0x05);
 
@@ -290,8 +296,10 @@ fn full_lifecycle_delivered_to_failed() {
 
 #[test]
 fn restart_recovery_preserves_all_states() {
-    /// Simulate an app restart: write entries with various delivery states,
-    /// save, drop, reload, verify everything is preserved.
+    // Simulate an app restart: write entries with various delivery states,
+
+    // save, drop, reload, verify everything is preserved.
+
     let dir = temp_dir("restart_recovery");
     let topic = make_topic(0x10);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -362,7 +370,8 @@ fn restart_recovery_preserves_all_states() {
 
 #[test]
 fn restart_recovery_preserves_retry_count() {
-    /// Retry count should survive a restart cycle.
+    // Retry count should survive a restart cycle.
+
     let dir = temp_dir("restart_retry");
     let topic = make_topic(0x11);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -382,7 +391,8 @@ fn restart_recovery_preserves_retry_count() {
 
 #[test]
 fn restart_recovery_empty_store() {
-    /// Loading a non-existent outbox returns None (graceful first-start path).
+    // Loading a non-existent outbox returns None (graceful first-start path).
+
     let dir = temp_dir("restart_empty");
     let loaded = OutboxStore::load(&dir).expect("load missing should not error");
     assert!(loaded.is_none(), "fresh directory should have no outbox");
@@ -390,7 +400,8 @@ fn restart_recovery_empty_store() {
 
 #[test]
 fn restart_recovery_load_or_default_creates_empty() {
-    /// load_or_default returns an empty store for a fresh directory.
+    // load_or_default returns an empty store for a fresh directory.
+
     let dir = temp_dir("restart_default");
     let store = OutboxStore::load_or_default(&dir);
     assert!(store.is_empty());
@@ -398,7 +409,8 @@ fn restart_recovery_load_or_default_creates_empty() {
 
 #[test]
 fn restart_recovery_save_then_load_idempotent() {
-    /// Multiple save/load cycles should be idempotent.
+    // Multiple save/load cycles should be idempotent.
+
     let dir = temp_dir("restart_idempotent");
     let topic = make_topic(0x12);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -410,7 +422,7 @@ fn restart_recovery_save_then_load_idempotent() {
 
     // Reload and save again (no new entries)
     {
-        let mut loaded = OutboxStore::load(&dir)
+        let loaded = OutboxStore::load(&dir)
             .expect("load")
             .expect("should exist");
         assert_eq!(loaded.len(), 10);
@@ -429,7 +441,8 @@ fn restart_recovery_save_then_load_idempotent() {
 
 #[test]
 fn restart_recovery_corrupt_file_graceful() {
-    /// A corrupt outbox file should not prevent the application from starting.
+    // A corrupt outbox file should not prevent the application from starting.
+
     let dir = temp_dir("restart_corrupt");
     fs::create_dir_all(&dir).expect("create test dir");
     fs::write(dir.join("outbox.json"), "{not valid json").expect("write corrupt file");
@@ -448,8 +461,10 @@ fn restart_recovery_corrupt_file_graceful() {
 
 #[test]
 fn restart_recovery_reload_is_atomic() {
-    /// Verify that a save writes a complete, valid file by loading a fresh
-    /// store that was created solely from disk data.
+    // Verify that a save writes a complete, valid file by loading a fresh
+
+    // store that was created solely from disk data.
+
     let dir = temp_dir("restart_atomic");
     let topic = make_topic(0x13);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -470,8 +485,10 @@ fn restart_recovery_reload_is_atomic() {
 
 #[test]
 fn reconnect_replay_finds_pending_messages() {
-    /// get_outgoing_queue should return only our own Queued/Sent messages
-    /// for a specific topic — these are the messages to replay on reconnection.
+    // get_outgoing_queue should return only our own Queued/Sent messages
+
+    // for a specific topic — these are the messages to replay on reconnection.
+
     let dir = temp_dir("replay_pending");
     let topic_a = make_topic(0x20);
     let topic_b = make_topic(0x21);
@@ -492,13 +509,13 @@ fn reconnect_replay_finds_pending_messages() {
         store.push_with_id(e)
     };
     // Other peer's messages on topic A (should NOT be included in replay)
-    let id3 = {
+    let _id3 = {
         let mut e = make_chat_entry(topic_a, 1);
         e.sender = "other_peer".to_string();
         store.push_with_id(e)
     };
     // Already delivered message (should NOT be in replay)
-    let id4 = {
+    let _id4 = {
         let mut e = make_chat_entry(topic_a, 2);
         e.sender = local_hex.to_string();
         let id = store.push_with_id(e);
@@ -530,8 +547,10 @@ fn reconnect_replay_finds_pending_messages() {
 
 #[test]
 fn reconnect_replay_includes_sent_messages() {
-    /// Messages that were sent but not yet confirmed (Sent state) should
-    /// also be replayed on reconnection.
+    // Messages that were sent but not yet confirmed (Sent state) should
+
+    // also be replayed on reconnection.
+
     let dir = temp_dir("replay_sent");
     let topic = make_topic(0x22);
     let mut store = ChatHistoryStore::empty_at(&dir);
@@ -582,7 +601,8 @@ fn reconnect_replay_includes_sent_messages() {
 
 #[test]
 fn reconnect_replay_empty_for_other_peer() {
-    /// get_outgoing_queue for a peer with no pending messages returns empty.
+    // get_outgoing_queue for a peer with no pending messages returns empty.
+
     let dir = temp_dir("replay_empty");
     let topic = make_topic(0x23);
     let mut store = ChatHistoryStore::empty_at(&dir);
@@ -602,8 +622,10 @@ fn reconnect_replay_empty_for_other_peer() {
 
 #[test]
 fn reconnect_replay_outbox_pending_on_reload() {
-    /// After restart, outbox pending() should return messages that were
-    /// still Queued before shutdown — these need to be replayed.
+    // After restart, outbox pending() should return messages that were
+
+    // still Queued before shutdown — these need to be replayed.
+
     let dir = temp_dir("replay_outbox_reload");
     let topic = make_topic(0x24);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -629,7 +651,8 @@ fn reconnect_replay_outbox_pending_on_reload() {
 
 #[test]
 fn duplicate_suppression_outbox_rejects_same_event_id() {
-    /// OutboxStore::push must reject entries with the same event_id.
+    // OutboxStore::push must reject entries with the same event_id.
+
     let dir = temp_dir("dedup_outbox");
     let topic = make_topic(0x30);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -642,8 +665,10 @@ fn duplicate_suppression_outbox_rejects_same_event_id() {
 
 #[test]
 fn duplicate_suppression_outbox_accepts_same_content_diff_id() {
-    /// Same content but different event_id should be accepted (different
-    /// messages, same bytes is valid — e.g. multiple identical messages).
+    // Same content but different event_id should be accepted (different
+
+    // messages, same bytes is valid — e.g. multiple identical messages).
+
     let dir = temp_dir("dedup_content");
     let topic = make_topic(0x31);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -658,11 +683,13 @@ fn duplicate_suppression_outbox_accepts_same_content_diff_id() {
 
 #[test]
 fn duplicate_suppression_outbox_rejects_same_id_diff_topic() {
-    /// Different topics but same event_id should still be rejected (event_id
-    /// is the unique dedup key, not topic+event_id).
+    // Different topics but same event_id should still be rejected (event_id
+
+    // is the unique dedup key, not topic+event_id).
+
     let topic_a = make_topic(0x32);
     let topic_b = make_topic(0x33);
-    let mut outbox = OutboxStore::empty_at(&temp_dir("dedup_topic"));
+    let mut outbox = OutboxStore::empty_at(temp_dir("dedup_topic"));
 
     outbox.push(make_outbox_entry(1, topic_a)).unwrap();
     let err = outbox.push(make_outbox_entry(1, topic_b)).unwrap_err();
@@ -675,7 +702,8 @@ fn duplicate_suppression_outbox_rejects_same_id_diff_topic() {
 
 #[test]
 fn duplicate_suppression_outbox_remove_and_re_add() {
-    /// After removing an entry, its event_id should be reusable.
+    // After removing an entry, its event_id should be reusable.
+
     let dir = temp_dir("dedup_readd");
     let topic = make_topic(0x34);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -691,7 +719,8 @@ fn duplicate_suppression_outbox_remove_and_re_add() {
 
 #[test]
 fn duplicate_suppression_push_queued_rejects_non_queued() {
-    /// push_queued should reject entries that are not in Queued state.
+    // push_queued should reject entries that are not in Queued state.
+
     let dir = temp_dir("dedup_push_queued");
     let topic = make_topic(0x35);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -708,9 +737,12 @@ fn duplicate_suppression_push_queued_rejects_non_queued() {
 
 #[test]
 fn duplicate_suppression_history_store_no_built_in_dedup() {
-    /// ChatHistoryStore does NOT deduplicate — entries with the same
-    /// event_id can coexist (event_id is assigned by push_with_id).
-    /// This test documents this behavior.
+    // ChatHistoryStore does NOT deduplicate — entries with the same
+
+    // event_id can coexist (event_id is assigned by push_with_id).
+
+    // This test documents this behavior.
+
     let dir = temp_dir("dedup_history");
     let topic = make_topic(0x36);
     let mut store = ChatHistoryStore::empty_at(&dir);
@@ -727,8 +759,10 @@ fn duplicate_suppression_history_store_no_built_in_dedup() {
 
 #[test]
 fn message_expiry_outbox_zero_ttl_removes_all() {
-    /// Entries older than the TTL should be removed by expire().
-    /// Zero TTL means everything expires immediately.
+    // Entries older than the TTL should be removed by expire().
+
+    // Zero TTL means everything expires immediately.
+
     let dir = temp_dir("expiry_zero");
     let topic = make_topic(0x40);
     let mut outbox = OutboxStore::with_ttl(&dir, Duration::from_secs(0));
@@ -744,7 +778,8 @@ fn message_expiry_outbox_zero_ttl_removes_all() {
 
 #[test]
 fn message_expiry_outbox_long_ttl_keeps_all() {
-    /// Entries within the TTL should survive expire().
+    // Entries within the TTL should survive expire().
+
     let dir = temp_dir("expiry_long");
     let topic = make_topic(0x41);
     let mut outbox = OutboxStore::with_ttl(&dir, Duration::from_secs(365 * 86400));
@@ -759,7 +794,8 @@ fn message_expiry_outbox_long_ttl_keeps_all() {
 
 #[test]
 fn message_expiry_outbox_save_auto_expires() {
-    /// save() should automatically expire old entries before writing.
+    // save() should automatically expire old entries before writing.
+
     let dir = temp_dir("expiry_save");
     let topic = make_topic(0x42);
     let mut outbox = OutboxStore::with_ttl(&dir, Duration::from_secs(0));
@@ -779,7 +815,8 @@ fn message_expiry_outbox_save_auto_expires() {
 
 #[test]
 fn message_expiry_outbox_ttl_change_takes_effect() {
-    /// Changing the TTL should affect subsequent expire() calls.
+    // Changing the TTL should affect subsequent expire() calls.
+
     let dir = temp_dir("expiry_ttl_change");
     let topic = make_topic(0x43);
     let mut outbox = OutboxStore::with_ttl(&dir, Duration::from_secs(365 * 86400));
@@ -796,8 +833,10 @@ fn message_expiry_outbox_ttl_change_takes_effect() {
 
 #[test]
 fn message_expiry_outbox_seen_and_failed_also_expire() {
-    /// Terminal-state entries (Seen, Failed) should also be subject to
-    /// TTL-based expiry — they don't get special treatment.
+    // Terminal-state entries (Seen, Failed) should also be subject to
+
+    // TTL-based expiry — they don't get special treatment.
+
     let dir = temp_dir("expiry_terminal");
     let topic = make_topic(0x44);
     let mut outbox = OutboxStore::with_ttl(&dir, Duration::from_secs(0));
@@ -836,7 +875,8 @@ fn message_expiry_outbox_seen_and_failed_also_expire() {
 
 #[test]
 fn edge_case_empty_outbox_save_load() {
-    /// Saving and loading an empty outbox should work.
+    // Saving and loading an empty outbox should work.
+
     let dir = temp_dir("empty_outbox");
     let outbox = OutboxStore::empty_at(&dir);
 
@@ -850,8 +890,10 @@ fn edge_case_empty_outbox_save_load() {
 
 #[test]
 fn edge_case_identity_update_is_noop() {
-    /// Re-applying the same delivery state (identity) should be accepted
-    /// and not change anything, including retry_count.
+    // Re-applying the same delivery state (identity) should be accepted
+
+    // and not change anything, including retry_count.
+
     let dir = temp_dir("identity_noop");
     let topic = make_topic(0x50);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -871,7 +913,8 @@ fn edge_case_identity_update_is_noop() {
 
 #[test]
 fn edge_case_save_without_data_dir_errors() {
-    /// save() on a store without a data_dir should fail gracefully.
+    // save() on a store without a data_dir should fail gracefully.
+
     let mut outbox = OutboxStore::empty_at("");
     let topic = make_topic(0x51);
     outbox.push(make_outbox_entry(1, topic)).unwrap();
@@ -886,7 +929,8 @@ fn edge_case_save_without_data_dir_errors() {
 
 #[test]
 fn edge_case_outbox_remove_topic_leaves_other_topics() {
-    /// remove_topic should only remove entries for the specified topic.
+    // remove_topic should only remove entries for the specified topic.
+
     let dir = temp_dir("remove_topic");
     let ta = make_topic(0x52);
     let tb = make_topic(0x53);
@@ -904,7 +948,8 @@ fn edge_case_outbox_remove_topic_leaves_other_topics() {
 
 #[test]
 fn edge_case_outbox_contains_after_removal() {
-    /// contains should return false after remove().
+    // contains should return false after remove().
+
     let dir = temp_dir("contains_after_rm");
     let topic = make_topic(0x54);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -917,7 +962,8 @@ fn edge_case_outbox_contains_after_removal() {
 
 #[test]
 fn edge_case_outbox_get_by_hash_after_save_load() {
-    /// Content hash lookup should work after save/load cycle.
+    // Content hash lookup should work after save/load cycle.
+
     let dir = temp_dir("hash_roundtrip");
     let topic = make_topic(0x55);
     let mut outbox = OutboxStore::empty_at(&dir);
@@ -937,13 +983,14 @@ fn edge_case_outbox_get_by_hash_after_save_load() {
 
 #[test]
 fn edge_case_chat_history_get_outgoing_queue_not_include_delivered() {
-    /// get_outgoing_queue should exclude Delivered and Seen messages from replay.
+    // get_outgoing_queue should exclude Delivered and Seen messages from replay.
+
     let dir = temp_dir("outgoing_excludes_terminal");
     let topic = make_topic(0x56);
     let mut store = ChatHistoryStore::empty_at(&dir);
     let local = "me";
 
-    let delivered_id = {
+    let _delivered_id = {
         let mut e = make_chat_entry(topic, 1);
         e.sender = local.to_string();
         let id = store.push_with_id(e);
@@ -956,7 +1003,7 @@ fn edge_case_chat_history_get_outgoing_queue_not_include_delivered() {
         id
     };
 
-    let seen_id = {
+    let _seen_id = {
         let mut e = make_chat_entry(topic, 2);
         e.sender = local.to_string();
         let id = store.push_with_id(e);
@@ -990,9 +1037,12 @@ fn edge_case_chat_history_get_outgoing_queue_not_include_delivered() {
 
 #[test]
 fn mailbox_replay_persists_before_acknowledgement() {
-    /// A message accepted by the mailbox must be persisted in the history
-    /// store before the acknowledgement is sent.  This simulates the
-    /// pattern: accept_incoming → save → push_to_history → send_ack.
+    // A message accepted by the mailbox must be persisted in the history
+
+    // store before the acknowledgement is sent.  This simulates the
+
+    // pattern: accept_incoming → save → push_to_history → send_ack.
+
     let dir = temp_dir("mailbox_persist_before_ack");
     let topic = make_topic(0x60);
 
@@ -1029,10 +1079,14 @@ fn mailbox_replay_persists_before_acknowledgement() {
 
 #[test]
 fn mailbox_replay_of_same_payload_is_idempotent_in_history() {
-    /// Replaying the same decrypted payload twice must not create a
-    /// duplicate history entry.  The mailbox layer is responsible for
-    /// dedup; this test verifies that the history store's behaviour
-    /// does not accidentally create duplicates from replayed messages.
+    // Replaying the same decrypted payload twice must not create a
+
+    // duplicate history entry.  The mailbox layer is responsible for
+
+    // dedup; this test verifies that the history store's behaviour
+
+    // does not accidentally create duplicates from replayed messages.
+
     let dir = temp_dir("mailbox_replay_idempotent");
     let topic = make_topic(0x61);
     let mut history = ChatHistoryStore::empty_at(&dir);
@@ -1058,9 +1112,12 @@ fn mailbox_replay_of_same_payload_is_idempotent_in_history() {
 
 #[test]
 fn mailbox_replay_does_not_alter_delivery_transitions() {
-    /// Once a replayed message is in the history store, its delivery
-    /// state must follow the normal Queued → Sent → Delivered → Seen
-    /// progression without mailbox replay interfering.
+    // Once a replayed message is in the history store, its delivery
+
+    // state must follow the normal Queued → Sent → Delivered → Seen
+
+    // progression without mailbox replay interfering.
+
     let dir = temp_dir("mailbox_no_interference");
     let topic = make_topic(0x62);
     let mut history = ChatHistoryStore::empty_at(&dir);
@@ -1121,9 +1178,12 @@ fn mailbox_replay_does_not_alter_delivery_transitions() {
 
 #[test]
 fn mailbox_replay_pending_vs_seen_separation() {
-    /// A mailbox replay that delivers a message must not confuse
-    /// "pending" (not yet delivered) with "seen" (user has read it).
-    /// These are separate concepts; replay only affects pending.
+    // A mailbox replay that delivers a message must not confuse
+
+    // "pending" (not yet delivered) with "seen" (user has read it).
+
+    // These are separate concepts; replay only affects pending.
+
     let dir = temp_dir("mailbox_pending_seen");
     let topic = make_topic(0x63);
     let mut history = ChatHistoryStore::empty_at(&dir);
@@ -1179,9 +1239,12 @@ fn mailbox_replay_pending_vs_seen_separation() {
 
 #[test]
 fn mailbox_replay_outgoing_queue_unchanged() {
-    /// get_outgoing_queue (used for service/whisper reconnect replay)
-    /// must not include mailbox-replayed messages from other peers
-    /// (those are received messages, not outgoing).
+    // get_outgoing_queue (used for service/whisper reconnect replay)
+
+    // must not include mailbox-replayed messages from other peers
+
+    // (those are received messages, not outgoing).
+
     let dir = temp_dir("mailbox_outgoing_unchanged");
     let topic = make_topic(0x64);
     let mut history = ChatHistoryStore::empty_at(&dir);

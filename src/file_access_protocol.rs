@@ -21,7 +21,13 @@
 //!
 //! Always available (no feature gate).  Only uses `serde` and `postcard`.
 
+use iroh_base::PublicKey;
+
 use serde::{Deserialize, Serialize};
+use serde_byte_array::ByteArray;
+
+/// Ed25519 signature length in bytes.
+const SIGNATURE_LEN: usize = 64;
 
 // ── Wire version ─────────────────────────────────────────────────────────────
 
@@ -122,6 +128,153 @@ impl std::fmt::Display for FileAccessErrorCode {
     }
 }
 
+// ── Additional types used by file_access_handler ─────────────────────────
+
+/// Whether a blob is expected to already exist locally or needs to be
+/// downloaded from the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlobFormat {
+    /// The blob must already be present in the local store.
+    Raw,
+    /// The blob is a hash-seq (iroh concept for large files).
+    HashSeq,
+}
+
+/// Safe wire-friendly metadata for a prepared file ready to serve.
+#[derive(Debug, Clone)]
+pub struct PreparedFile {
+    /// The content hash of the prepared blob.
+    pub content_hash: String,
+    /// Expected file size in bytes.
+    pub size_bytes: u64,
+    /// How the blob is stored (Raw / HashSeq).
+    pub blob_format: BlobFormat,
+    /// MIME type of the file.
+    pub mime_type: String,
+    /// Safe display filename for wire transfer.
+    pub filename: String,
+}
+
+/// Outcome of verifying a SignedDownloadDescriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescriptorVerification {
+    /// The descriptor is valid and has not been used before.
+    Valid,
+    /// The descriptor's nonce was already consumed.
+    NonceReused,
+    /// The descriptor's signature is invalid.
+    InvalidSignature,
+    /// The descriptor has expired.
+    Expired,
+    /// The descriptor is not yet valid (issue time is in the future).
+    NotYetValid,
+    /// The descriptor's content hash does not match the expected file.
+    ContentMismatch,
+    /// The descriptor's owner does not match the expected peer.
+    OwnerMismatch,
+    /// The descriptor's requester does not match our identity.
+    RequesterMismatch,
+}
+
+/// Sign a [`SignedDownloadDescriptor`] with the owner's secret key.
+///
+/// Generates a random nonce and an empty blob ticket internally.
+/// The caller supplies the blob hash, size, and lifetime bounds.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_download_descriptor(
+    owner: &iroh::SecretKey,
+    requester: iroh::PublicKey,
+    shared_file_id: String,
+    blob_hash: [u8; 32],
+    size_bytes: u64,
+    _blob_format: BlobFormat,
+    now_ms: u64,
+    expires_at_ms: u64,
+) -> SignedDownloadDescriptor {
+    let content_hash = hex::encode(blob_hash);
+    let nonce = rand::random::<[u8; 32]>();
+    let blob_ticket = Vec::new(); // populated by the blob-transfer layer
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(owner.public().as_bytes());
+    payload.extend_from_slice(requester.as_bytes());
+    payload.extend_from_slice(shared_file_id.as_bytes());
+    payload.extend_from_slice(&blob_hash);
+    payload.extend_from_slice(content_hash.as_bytes());
+    payload.extend_from_slice(&size_bytes.to_le_bytes());
+    payload.extend_from_slice(&blob_ticket);
+    payload.extend_from_slice(&nonce);
+    payload.extend_from_slice(&now_ms.to_le_bytes());
+    payload.extend_from_slice(&expires_at_ms.to_le_bytes());
+    let signature = owner.sign(&payload);
+    SignedDownloadDescriptor {
+        owner_id: owner.public(),
+        requester,
+        shared_file_id,
+        blob_hash,
+        content_hash,
+        size_bytes,
+        blob_ticket,
+        nonce,
+        issued_at_ms: now_ms,
+        expires_at_ms,
+        signature: ByteArray::from(signature.to_bytes()),
+    }
+}
+
+/// Verify a [`SignedDownloadDescriptor`]'s owner, requester, signature, and
+/// expiry.
+///
+/// Returns [`DescriptorVerification::Valid`] on success, or a reason.
+pub fn verify_download_descriptor(
+    descriptor: &SignedDownloadDescriptor,
+    expected_owner: &iroh::PublicKey,
+    expected_requester: &iroh::PublicKey,
+    now_ms: u64,
+) -> DescriptorVerification {
+    // ── 1. Check expiry (fast path) ──────────────────────────────────────
+    if now_ms > descriptor.expires_at_ms {
+        return DescriptorVerification::Expired;
+    }
+
+    // ── 2. Check not-yet-valid ───────────────────────────────────────────
+    if now_ms < descriptor.issued_at_ms {
+        return DescriptorVerification::NotYetValid;
+    }
+
+    // ── 3. Check that the owner matches what we expect ───────────────────
+    if &descriptor.owner_id != expected_owner {
+        return DescriptorVerification::OwnerMismatch;
+    }
+
+    // ── 4. Check that the requester matches what we expect ───────────────
+    if &descriptor.requester != expected_requester {
+        return DescriptorVerification::RequesterMismatch;
+    }
+
+    // ── 5. Reconstruct the signing payload ──────────────────────────────
+    let mut payload = Vec::new();
+    payload.extend_from_slice(descriptor.owner_id.as_bytes());
+    payload.extend_from_slice(descriptor.requester.as_bytes());
+    payload.extend_from_slice(descriptor.shared_file_id.as_bytes());
+    payload.extend_from_slice(&descriptor.blob_hash);
+    payload.extend_from_slice(descriptor.content_hash.as_bytes());
+    payload.extend_from_slice(&descriptor.size_bytes.to_le_bytes());
+    payload.extend_from_slice(&descriptor.blob_ticket);
+    payload.extend_from_slice(&descriptor.nonce);
+    payload.extend_from_slice(&descriptor.issued_at_ms.to_le_bytes());
+    payload.extend_from_slice(&descriptor.expires_at_ms.to_le_bytes());
+
+    // ── 6. Verify the signature ──────────────────────────────────────────
+    let sig_bytes = *descriptor.signature.as_ref();
+    let sig = iroh::Signature::from_bytes(&sig_bytes);
+    if descriptor.owner_id.verify(&payload, &sig).is_ok() {
+        DescriptorVerification::Valid
+    } else {
+        DescriptorVerification::InvalidSignature
+    }
+}
+
 // ── Inner protocol types ─────────────────────────────────────────────────────
 
 /// A request to access (download) a file from a remote peer.
@@ -133,6 +286,55 @@ pub struct FileAccessRequest {
     pub filename: String,
     /// Expected file size in bytes (from the catalogue).
     pub expected_size: u64,
+    /// Stable shared-file identifier from the catalogue.
+    #[serde(default)]
+    pub shared_file_id: String,
+    /// Expected content hash (raw 32 bytes).
+    #[serde(default)]
+    pub expected_content_hash: [u8; 32],
+    /// Expected version number (ms timestamp from catalogue).
+    #[serde(default)]
+    pub expected_version: u64,
+}
+
+impl FileAccessRequest {
+    /// Create a new request with the given parameters and sensible defaults.
+    pub fn new(
+        shared_file_id: &str,
+        expected_content_hash: [u8; 32],
+        expected_version: u64,
+    ) -> Self {
+        Self {
+            content_hash: hex::encode(expected_content_hash),
+            filename: "unknown".to_string(),
+            expected_size: 0,
+            shared_file_id: shared_file_id.to_string(),
+            expected_content_hash,
+            expected_version,
+        }
+    }
+
+    /// Validate the request fields.
+    pub fn validate(&self) -> std::result::Result<(), (FileAccessErrorCode, &'static str)> {
+        if self.shared_file_id.is_empty() {
+            return Err((
+                FileAccessErrorCode::InvalidRequest,
+                "shared_file_id is empty",
+            ));
+        }
+        if self.content_hash.is_empty() && self.expected_content_hash == [0; 32] {
+            return Err((FileAccessErrorCode::InvalidRequest, "content hash is empty"));
+        }
+        Ok(())
+    }
+
+    /// Validate the wire version (delegates to the wire wrapper; this is a
+    /// convenience method for backward compatibility).
+    pub fn validate_request_version(&self) -> std::result::Result<(), FileAccessErrorCode> {
+        // Version validation is done by the wire wrapper; this is kept
+        // for backward compatibility with code that calls it on the inner request.
+        Ok(())
+    }
 }
 
 /// A signed descriptor that authorises the requester to download a file.
@@ -141,23 +343,55 @@ pub struct FileAccessRequest {
 /// starting the actual blob transfer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SignedDownloadDescriptor {
-    /// Content hash of the authorised file.
+    /// Public key of the file owner (signer).
+    pub owner_id: PublicKey,
+    /// Public key of the authorised requester.
+    pub requester: PublicKey,
+    /// Stable shared-file identifier from the catalogue.
+    pub shared_file_id: String,
+    /// Blake3 content hash of the file (raw 32 bytes).
+    pub blob_hash: [u8; 32],
+    /// Hex-encoded blake3 content hash (for display/lookup).
     pub content_hash: String,
+    /// Expected file size in bytes.
+    pub size_bytes: u64,
     /// Opaque blob ticket (iroh blob ticket bytes).
     pub blob_ticket: Vec<u8>,
+    /// Unique nonce for replay protection.
+    pub nonce: [u8; 32],
+    /// Timestamp when the descriptor was issued (ms since UNIX epoch).
+    pub issued_at_ms: u64,
     /// Expiration timestamp (milliseconds since UNIX epoch).
     pub expires_at_ms: u64,
+    /// Ed25519 signature over the payload by `owner_id`.
+    pub signature: ByteArray<SIGNATURE_LEN>,
 }
 
 /// Response to a [`FileAccessRequest`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum FileAccessResponse {
     /// Access granted — contains the download descriptor.
-    AccessGranted(SignedDownloadDescriptor),
+    Granted(Box<SignedDownloadDescriptor>),
     /// The requested wire version is not supported.
-    UnsupportedVersion {
-        /// The version the caller requested.
-        requested: u16,
+    UnsupportedVersion,
+    /// The requesting peer is not permitted to download this file.
+    PermissionDenied,
+    /// The file was not found on this peer.
+    NotFound,
+    /// File sharing has been disabled by the owner.
+    Disabled,
+    /// The file content has changed since the catalogue was issued.
+    Changed,
+    /// The remote peer is temporarily unavailable.
+    Unavailable,
+    /// The remote peer is busy — try again later.
+    Busy,
+    /// Rate-limited — the requester has exceeded the per-peer limit.
+    RateLimited,
+    /// The requested version of the file is not available (mismatch).
+    VersionMismatch {
+        /// The current version on the server.
+        current_version: u64,
     },
 }
 
@@ -241,6 +475,9 @@ mod tests {
             content_hash: "deadbeef".into(),
             filename: "photo.png".into(),
             expected_size: 65536,
+            shared_file_id: String::new(),
+            expected_content_hash: [0u8; 32],
+            expected_version: 0,
         };
         let original = FileAccessWireRequest::new(inner);
 
@@ -254,11 +491,19 @@ mod tests {
     #[test]
     fn file_access_wire_response_round_trip_success() {
         let desc = SignedDownloadDescriptor {
+            owner_id: PublicKey::from_bytes(&[0u8; 32]).expect("valid key"),
+            requester: PublicKey::from_bytes(&[1u8; 32]).expect("valid key"),
+            shared_file_id: "test-file".into(),
+            blob_hash: [0u8; 32],
             content_hash: "deadbeef".into(),
+            size_bytes: 1024,
             blob_ticket: vec![1, 2, 3, 4],
+            nonce: [0u8; 32],
+            issued_at_ms: 1000,
             expires_at_ms: 1234567890000,
+            signature: ByteArray::from([0u8; 64]),
         };
-        let original = FileAccessWireResponse::success(FileAccessResponse::AccessGranted(desc));
+        let original = FileAccessWireResponse::success(FileAccessResponse::Granted(Box::new(desc)));
 
         let bytes = postcard::to_stdvec(&original).expect("serialize");
         let decoded: FileAccessWireResponse = postcard::from_bytes(&bytes).expect("deserialize");
@@ -286,6 +531,9 @@ mod tests {
             content_hash: "abc".into(),
             filename: "f".into(),
             expected_size: 0,
+            shared_file_id: String::new(),
+            expected_content_hash: [0u8; 32],
+            expected_version: 0,
         };
         let msg = FileAccessWireRequest {
             version: 999,
@@ -315,6 +563,9 @@ mod tests {
             content_hash: "abc".into(),
             filename: "f".into(),
             expected_size: 0,
+            shared_file_id: String::new(),
+            expected_content_hash: [0u8; 32],
+            expected_version: 0,
         };
         let msg = FileAccessWireRequest::new(inner);
         assert!(msg.validate_version().is_ok());
@@ -328,6 +579,9 @@ mod tests {
             content_hash: "abc".into(),
             filename: "f".into(),
             expected_size: 100,
+            shared_file_id: String::new(),
+            expected_content_hash: [0u8; 32],
+            expected_version: 0,
         };
         let original = FileAccessWireRequest::new(inner);
         let bytes = postcard::to_stdvec(&original).expect("serialize");
@@ -365,6 +619,9 @@ mod tests {
             content_hash: "abc".into(),
             filename: "f".into(),
             expected_size: 100,
+            shared_file_id: String::new(),
+            expected_content_hash: [0u8; 32],
+            expected_version: 0,
         };
         let original = FileAccessWireRequest::new(inner);
         let mut bytes = postcard::to_stdvec(&original).expect("serialize");
@@ -443,6 +700,9 @@ mod tests {
             content_hash: "abc".into(),
             filename: "f".into(),
             expected_size: 0,
+            shared_file_id: String::new(),
+            expected_content_hash: [0u8; 32],
+            expected_version: 0,
         };
         let msg = FileAccessWireRequest::new(inner);
         assert_eq!(msg.version, FILE_ACCESS_WIRE_VERSION);
@@ -451,11 +711,19 @@ mod tests {
     #[test]
     fn file_access_wire_response_success_sets_current_version() {
         let desc = SignedDownloadDescriptor {
+            owner_id: PublicKey::from_bytes(&[0u8; 32]).expect("valid key"),
+            requester: PublicKey::from_bytes(&[1u8; 32]).expect("valid key"),
+            shared_file_id: "test".into(),
+            blob_hash: [0u8; 32],
             content_hash: "abc".into(),
+            size_bytes: 512,
             blob_ticket: vec![],
+            nonce: [0u8; 32],
+            issued_at_ms: 500,
             expires_at_ms: 0,
+            signature: ByteArray::from([0u8; 64]),
         };
-        let msg = FileAccessWireResponse::success(FileAccessResponse::AccessGranted(desc));
+        let msg = FileAccessWireResponse::success(FileAccessResponse::Granted(Box::new(desc)));
         assert_eq!(msg.version, FILE_ACCESS_WIRE_VERSION);
         assert!(msg.inner.is_ok());
     }

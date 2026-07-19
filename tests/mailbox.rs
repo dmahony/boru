@@ -69,10 +69,10 @@ fn mailbox_rejects_tampering_and_wrong_ack_signer() {
 
 #[test]
 fn mailbox_recipient_restart_preserves_pending_for_reconnect() {
-    /// After accept_incoming + save, reloading the store and calling
-    /// pending_for_recipient must return the accepted envelope. This
-    /// simulates a recipient restart that needs to serve pending
-    /// envelopes via the inbox SyncResponse handler.
+    // After accept_incoming + save, reloading the store and calling
+    // pending_for_recipient must return the accepted envelope. This
+    // simulates a recipient restart that needs to serve pending
+    // envelopes via the inbox SyncResponse handler.
     let dir = tempfile::tempdir().unwrap();
     let recipient = SecretKey::generate();
     let sender = SecretKey::generate();
@@ -106,9 +106,9 @@ fn mailbox_recipient_restart_preserves_pending_for_reconnect() {
 
 #[test]
 fn mailbox_expired_messages_rejected_by_validate_for() {
-    /// Envelopes with created_at older than the TTL must be rejected by
-    /// validate_for. We create an envelope with a well-past timestamp to
-    /// simulate an expired message.
+    // Envelopes with created_at older than the TTL must be rejected by
+    // validate_for. We create an envelope with a well-past timestamp to
+    // simulate an expired message.
     let recipient = SecretKey::generate();
     let sender = SecretKey::generate();
     let identity = MailboxIdentity::from_secret(&recipient);
@@ -132,8 +132,8 @@ fn mailbox_expired_messages_rejected_by_validate_for() {
 
 #[test]
 fn mailbox_accept_incoming_handles_expired_envelope() {
-    /// accept_incoming should reject an envelope whose created_at exceeds
-    /// the TTL, just like validate_for does.
+    // accept_incoming should reject an envelope whose created_at exceeds
+    // the TTL, just like validate_for does.
     let dir = tempfile::tempdir().unwrap();
     let recipient = SecretKey::generate();
     let sender = SecretKey::generate();
@@ -154,8 +154,8 @@ fn mailbox_accept_incoming_handles_expired_envelope() {
 
 #[test]
 fn mailbox_lost_ack_stays_pending_across_restart() {
-    /// If an acknowledgement is never received, the envelope must remain
-    /// in the mailbox across restarts so it can be replayed again.
+    // If an acknowledgement is never received, the envelope must remain
+    // in the mailbox across restarts so it can be replayed again.
     let dir = tempfile::tempdir().unwrap();
     let recipient = SecretKey::generate();
     let sender = SecretKey::generate();
@@ -185,8 +185,8 @@ fn mailbox_lost_ack_stays_pending_across_restart() {
 
 #[test]
 fn mailbox_pending_for_recipient_filters_by_identity() {
-    /// pending_for_recipient must return only envelopes addressed to the
-    /// specified recipient, and must return empty for a different key.
+    // pending_for_recipient must return only envelopes addressed to the
+    // specified recipient, and must return empty for a different key.
     let dir = tempfile::tempdir().unwrap();
     let recipient = SecretKey::generate();
     let sender_a = SecretKey::generate();
@@ -212,8 +212,8 @@ fn mailbox_pending_for_recipient_filters_by_identity() {
 
 #[test]
 fn mailbox_invalid_identity_rejected_by_validate_for() {
-    /// An envelope encrypted for one recipient must be rejected by
-    /// validate_for when provided with a different identity.
+    // An envelope encrypted for one recipient must be rejected by
+    // validate_for when provided with a different identity.
     let client = SecretKey::generate();
     let server_a = SecretKey::generate();
     let server_b = SecretKey::generate();
@@ -237,8 +237,8 @@ fn mailbox_invalid_identity_rejected_by_validate_for() {
 
 #[test]
 fn mailbox_envelope_rejects_future_timestamp() {
-    /// Envelopes with created_at more than 60 seconds in the future must
-    /// be rejected as invalid.
+    // Envelopes with created_at more than 60 seconds in the future must
+    // be rejected as invalid.
     let recipient = SecretKey::generate();
     let sender = SecretKey::generate();
     let identity = MailboxIdentity::from_secret(&recipient);

@@ -33,7 +33,7 @@ fn create_file(dir: &std::path::Path, name: &str, content: &[u8]) -> PathBuf {
 #[test]
 fn integration_imported_file_full_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
-    let source = create_file(dir.path(), "photo.png", b"fake png data");
+    let _source = create_file(dir.path(), "photo.png", b"fake png data");
 
     let storage = test_storage();
     let hash = "import_lifecycle_hash_001";

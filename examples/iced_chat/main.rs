@@ -123,8 +123,6 @@ enum Command {
 
 // ── Message protocol ──────────────────────────────────────────────────
 pub use boru_chat::chat_core::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
-use boru_chat::diagnostics::GuiActionId;
-use boru_chat::diagnostics::GuiActionRequest;
 use boru_chat::diagnostics::GuiTestHandle;
 use boru_chat::diagnostics::IcedMessageJournal;
 
@@ -673,7 +671,7 @@ fn main() -> Result<()> {
 
         // Load or create the persistent friends list
         let friends = FriendsStore::load_or_default(&data_dir);
-        if friends.len() > 0 {
+        if !friends.is_empty() {
             info!("> loaded {} friend(s) from disk", friends.len());
         }
 

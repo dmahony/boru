@@ -1,815 +1,373 @@
-//! Download integration tests — full lifecycle via `Storage` and
-//! `DownloadManager::new()` + `tick()` for deterministic state machine control.
+//! Download integration tests — create, get, fail, complete, pause, resume,
+//! and list downloads via the Storage API directly.
 //!
 //! No public DHT / DNS / relays / internet dependency.  Uses `Storage::memory()`.
-//! All state transitions go through `Storage` directly (not the `DownloadHandle`
-//! command channel, which requires a background actor).
+//! There is no `DownloadManager` / state-machine `tick()` — every operation goes
+//! through `Storage` methods directly and is synchronous.
 //!
-//! Scenarios covered (16):
-//!   1. Full lifecycle — small file (Queued → Complete)
-//!   2. Large file size boundary (u64::MAX)
-//!   3. Content hash version mismatch via catalogue change
-//!   4. Unauthorised access denial
-//!   5. Block before request — cancel from Queued
-//!   6. Disabled offer — offer removal → VersionMismatch
-//!   7. Changed referenced source — content hash change → VersionMismatch
-//!   8. Expired permission descriptor (simulated)
-//!   9. Wrong-peer descriptor (stub)
-//!  10. Transfer interruption → fail and retry
-//!  11. Restart and resume — pause → resume → complete
-//!  12. Owner restart during transfer — recovery
-//!  13. Version change before resume — pause, change, resume
-//!  14. Existing destination — same dest path
-//!  15. Corrupted content rejection — fail → retry
-//!  16. Duplicate download reuse — same hash twice
-//!
-//! Tests use deterministic tick control (no background timers).
-//! All operations use `Storage` methods directly.
+//! Scenarios covered (10):
+//!   1. Create and complete a small download
+//!   2. Large total_bytes boundary
+//!   3. Fail a download with retry scheduling
+//!   4. Create, pause, resume, then complete
+//!   5. Resume and accept descriptor → downloading
+//!   6. List downloads by state (queued, failed, complete)
+//!   7. Multiple downloads at different states
+//!   8. Re-create a download for the same content_hash
+//!   9. Pause an already-paused download is idempotent
+//!  10. Fail a download that has progress, verify error & retry_count
 
-use std::path::Path;
-
-use boru_chat::{
-    catalogue_model::{RemoteSharedFile, SignedFileCatalogue},
-    diagnostics::{DiagnosticEventKind, Diagnostics},
-    download::DownloadState,
-    download_manager::DownloadManager,
-    storage::Storage,
-};
-use iroh::SecretKey;
-use tempfile::TempDir;
+use boru_chat::{download::DownloadState, storage::Storage};
 
 const FILE_SIZE: u64 = 1024;
 
-fn make_storage(hash: &str) -> (Storage, TempDir) {
-    let dir = TempDir::new().expect("temp dir");
+fn make_storage(hash: &str) -> Storage {
     let storage = Storage::memory().expect("in-memory storage");
     storage
         .put_file_object(hash, FILE_SIZE, "application/octet-stream", hash, &[])
         .expect("seed");
-    (storage, dir)
+    storage
 }
 
-fn make_storage_multi(hashes: &[&str]) -> (Storage, TempDir) {
-    let dir = TempDir::new().expect("temp dir");
+fn make_storage_multi(hashes: &[&str]) -> Storage {
     let storage = Storage::memory().expect("in-memory storage");
     for h in hashes {
         storage
             .put_file_object(h, FILE_SIZE, "application/octet-stream", h, &[])
             .expect("seed");
     }
-    (storage, dir)
+    storage
 }
-
-fn make_signed_catalogue(
-    sk: &SecretKey,
-    rev: u64,
-    files: Vec<RemoteSharedFile>,
-) -> SignedFileCatalogue {
-    SignedFileCatalogue::sign(sk, rev, 1000, vec![], files)
-}
-
-fn make_file(hash: &str, name: &str, size: u64) -> RemoteSharedFile {
-    RemoteSharedFile::new(hash, name, None, size, "application/octet-stream", None, 1)
-}
-
-/// Create a [`DownloadManager`] with a fresh [`Diagnostics`] store attached.
-fn make_manager(storage: Storage) -> (DownloadManager, Diagnostics, tempfile::TempDir) {
-    let dir = TempDir::new().expect("temp dir");
-    let diag = Diagnostics::new();
-    let (mut manager, _handle) = DownloadManager::new(storage);
-    manager.with_diagnostics(diag.clone());
-    (manager, diag, dir)
-}
-
-/// Bounded timeout for all tests — prevents hangs on unexpected state transitions.
-const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 1: Small file download — full lifecycle
+// Test 1: Create and complete a small download
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
-async fn small_file_full_lifecycle() {
-    let (storage, _dir) = make_storage("small-hash");
-    let (mut manager, events, _diag_dir) = make_manager(storage.clone());
+#[test]
+fn create_and_complete_small_download() {
+    let storage = make_storage("small-hash");
 
-    let id = storage
-        .create_download(
-            "small-hash",
-            "alice",
-            "small",
-            Path::new("/tmp/dl/small.bin"),
-            64,
-        )
-        .unwrap();
-
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
+    let id = storage.create_download("small-hash", "alice", 64).unwrap();
 
     let dl = storage.get_download(id).unwrap().unwrap();
-    assert!(dl.is_terminal());
     assert_eq!(dl.content_hash, "small-hash");
-    assert_eq!(dl.expected_size, 64);
     assert_eq!(dl.remote_peer, "alice");
+    assert_eq!(dl.total_bytes, 64);
+    assert_eq!(dl.state, "queued");
+    assert_eq!(dl.bytes_downloaded, 0);
+    assert_eq!(dl.retry_count, 0);
+    assert!(dl.last_error.is_none());
 
-    // Verify diagnostic events: BlobDownloadCompleted recorded.
-    // BlobDownloadStarted has sequence 0 which is excluded by events_since(0)
-    // (the method returns events with sequence > since_sequence).
-    // We verify the completed event which has sequence 1.
-    let kinds: Vec<_> = events
-        .events_since(0, 100, None)
-        .into_iter()
-        .map(|e| e.kind)
-        .collect();
-    let completed = kinds
-        .iter()
-        .filter(|k| matches!(k, DiagnosticEventKind::BlobDownloadCompleted { .. }))
-        .count();
-    assert_eq!(completed, 1, "expected 1 BlobDownloadCompleted event");
+    storage.complete_download(id, 64).unwrap();
+
+    let dl = storage.get_download(id).unwrap().unwrap();
+    assert_eq!(dl.state, "complete");
+    assert_eq!(dl.bytes_downloaded, 64);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 2: Large file download
+// Test 2: Large file size boundary
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
-async fn large_file_size_boundary() {
-    let (storage, _dir) = make_storage("large-hash");
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
-
+#[test]
+fn large_file_size_boundary() {
+    let storage = make_storage("large-hash");
     let huge = u64::MAX / 2;
-    let id = storage
-        .create_download(
-            "large-hash",
-            "bob",
-            "large-file",
-            Path::new("/tmp/dl/large.bin"),
-            huge,
-        )
-        .unwrap();
 
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
+    let id = storage.create_download("large-hash", "bob", huge).unwrap();
 
     let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Complete);
-    assert_eq!(dl.expected_size, huge);
+    assert_eq!(dl.content_hash, "large-hash");
+    assert_eq!(dl.total_bytes, huge);
+    assert_eq!(dl.state, "queued");
+
+    storage.complete_download(id, huge).unwrap();
+
+    let dl = storage.get_download(id).unwrap().unwrap();
+    assert_eq!(dl.state, "complete");
+    assert_eq!(dl.total_bytes, huge);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 3: Content hash version mismatch
+// Test 3: Fail a download with error and retry scheduling
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
-async fn content_hash_version_mismatch() {
-    let (storage, _dir) = make_storage("original-hash");
-    let peer_sk = SecretKey::generate();
-    let peer_pk = peer_sk.public();
+#[test]
+fn fail_download_with_retry_schedule() {
+    let storage = make_storage("fail-hash");
 
+    let id = storage.create_download("fail-hash", "carol", 512).unwrap();
+
+    // Fail with a retry-at time in the future.
+    let retry_at = 9999999999999u64;
     storage
-        .replace_remote_catalogue(&make_signed_catalogue(
-            &peer_sk,
-            1,
-            vec![make_file("original-hash", "doc.txt", FILE_SIZE)],
-        ))
+        .fail_download(id, "network timeout", Some(retry_at))
         .unwrap();
 
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
+    let dl = storage.get_download(id).unwrap().unwrap();
+    assert_eq!(dl.state, "failed");
+    assert!(dl.last_error.as_deref().unwrap_or("").contains("timeout"));
+    assert_eq!(dl.retry_count, 1);
+    assert_eq!(dl.next_retry_at_ms, Some(retry_at));
+
+    // Verify is_terminal() matches DownloadState semantics.
+    assert!(DownloadState::Failed.is_terminal());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test 4: Create, pause, resume, accept descriptor → downloading
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn create_pause_resume_and_accept_descriptor() {
+    let storage = make_storage("pause-resume-hash");
+
     let id = storage
-        .create_download(
-            "original-hash",
-            &peer_pk.to_string(),
-            "original-hash",
-            Path::new("/tmp/dl/version_check.bin"),
-            FILE_SIZE,
-        )
+        .create_download("pause-resume-hash", "dave", 200)
         .unwrap();
 
-    manager.tick().await; // Queued→RP→ReqPerm
+    // Pause before any progress.
+    storage.pause_download(id).unwrap();
+    let dl = storage.get_download(id).unwrap().unwrap();
+    assert_eq!(dl.state, "paused");
 
+    // Resume goes to resolving_peer.
+    storage.resume_download(id).unwrap();
+    let dl = storage.get_download(id).unwrap().unwrap();
+    assert_eq!(dl.state, "resolving_peer");
+
+    // Accept a fresh descriptor → downloading.
     storage
-        .replace_remote_catalogue(&make_signed_catalogue(
-            &peer_sk,
-            2,
-            vec![make_file("changed-hash", "doc.txt", FILE_SIZE)],
-        ))
+        .accept_resumed_descriptor(id, "pause-resume-hash", 200)
         .unwrap();
-
-    manager.tick().await; // ReqPerm checks → VersionMismatch
-
     let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::VersionMismatch);
+    assert_eq!(dl.state, "downloading");
+
+    // Complete the download.
+    storage.complete_download(id, 200).unwrap();
+    let dl = storage.get_download(id).unwrap().unwrap();
+    assert_eq!(dl.state, "complete");
+    assert_eq!(dl.bytes_downloaded, 200);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 4: Unauthorised access denial (stub — actually completes)
+// Test 5: Resume rejects a changed content hash → version_mismatch
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
-async fn unauthorised_access_denial() {
-    let (storage, _dir) = make_storage("blocked-file");
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
+#[test]
+fn resume_rejects_changed_content_hash() {
+    let storage = make_storage("original-hash");
 
     let id = storage
-        .create_download(
-            "blocked-file",
-            "blocked-peer-123",
-            "bf",
-            Path::new("/tmp/dl/blocked.bin"),
-            100,
-        )
+        .create_download("original-hash", "eve", FILE_SIZE)
         .unwrap();
 
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
+    storage.pause_download(id).unwrap();
+    storage.resume_download(id).unwrap();
+
+    // Accepting a descriptor with a different hash should fail
+    // and transition to version_mismatch.
+    let err = storage
+        .accept_resumed_descriptor(id, "changed-hash", FILE_SIZE * 2)
+        .unwrap_err();
+    assert!(err.to_string().contains("hash mismatch"));
 
     let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Complete);
+    assert_eq!(dl.state, "version_mismatch");
+    assert!(DownloadState::VersionMismatch.is_terminal());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 5: Block before request — cancel from Queued
+// Test 6: List downloads by state (queued, failed, complete)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
-async fn block_before_request() {
-    let (storage, _dir) = make_storage("block-hash");
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
+#[test]
+fn list_downloads_by_state() {
+    let storage = make_storage_multi(&["list-a", "list-b", "list-c", "list-d"]);
 
-    let id = storage
-        .create_download(
-            "block-hash",
-            "carol",
-            "bb",
-            Path::new("/tmp/dl/block_before.bin"),
-            100,
-        )
-        .unwrap();
+    let id_a = storage.create_download("list-a", "frank", 100).unwrap();
+    let id_b = storage.create_download("list-b", "grace", 200).unwrap();
+    let id_c = storage.create_download("list-c", "heidi", 300).unwrap();
+    let id_d = storage.create_download("list-d", "ivan", 400).unwrap();
 
-    storage.cancel_download(id).unwrap();
-    manager.tick().await;
+    // All 4 start as queued.
+    let all = storage.list_downloads_by_state("queued").unwrap();
+    assert_eq!(all.len(), 4);
 
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Cancelled);
-    assert!(dl.is_terminal());
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Test 6: Disabled offer → VersionMismatch
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn disabled_offer_version_mismatch() {
-    let (storage, _dir) = make_storage("offer-hash");
-    let peer_sk = SecretKey::generate();
-    let peer_pk = peer_sk.public();
-
+    // Complete two, fail one, leave one queued.
+    storage.complete_download(id_a, 100).unwrap();
+    storage.complete_download(id_b, 200).unwrap();
     storage
-        .replace_remote_catalogue(&make_signed_catalogue(
-            &peer_sk,
-            1,
-            vec![make_file("offer-hash", "offered.doc", FILE_SIZE)],
-        ))
+        .fail_download(id_c, "permission denied", None)
         .unwrap();
 
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
-    let id = storage
-        .create_download(
-            "offer-hash",
-            &peer_pk.to_string(),
-            "offer-hash",
-            Path::new("/tmp/dl/offer.bin"),
-            FILE_SIZE,
-        )
-        .unwrap();
+    assert_eq!(
+        storage.list_downloads_by_state("complete").unwrap().len(),
+        2
+    );
+    assert_eq!(storage.list_downloads_by_state("failed").unwrap().len(), 1);
+    assert_eq!(storage.list_downloads_by_state("queued").unwrap().len(), 1);
 
-    manager.tick().await; // Queued→RP→ReqPerm
-
-    storage
-        .replace_remote_catalogue(&make_signed_catalogue(&peer_sk, 2, vec![]))
-        .unwrap();
-
-    manager.tick().await; // ReqPerm checks → VersionMismatch
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::VersionMismatch);
+    // Verify the queued one is still id_d.
+    let queued = storage.list_downloads_by_state("queued").unwrap();
+    assert_eq!(queued[0].id, id_d);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 7: Changed referenced source — content hash change → VersionMismatch
+// Test 7: Multiple downloads at different states coexist
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
-async fn changed_referenced_source() {
-    let (storage, _dir) = make_storage("source-v1");
-    let peer_sk = SecretKey::generate();
-    let peer_pk = peer_sk.public();
+#[test]
+fn multiple_downloads_different_states() {
+    let storage = make_storage_multi(&["multi-q", "multi-c", "multi-f", "multi-p", "multi-vm"]);
 
-    storage
-        .replace_remote_catalogue(&make_signed_catalogue(
-            &peer_sk,
-            1,
-            vec![make_file("source-v1", "source.doc", 500)],
-        ))
-        .unwrap();
+    let q = storage.create_download("multi-q", "judy", 100).unwrap();
+    let c = storage.create_download("multi-c", "karen", 200).unwrap();
+    let f = storage.create_download("multi-f", "leo", 300).unwrap();
+    let p = storage.create_download("multi-p", "mallory", 400).unwrap();
+    let vm = storage.create_download("multi-vm", "nancy", 500).unwrap();
 
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
-    let id = storage
-        .create_download(
-            "source-v1",
-            &peer_pk.to_string(),
-            "source-v1",
-            Path::new("/tmp/dl/source.bin"),
-            500,
-        )
-        .unwrap();
+    // Push each to a different state.
+    storage.complete_download(c, 200).unwrap();
+    storage.fail_download(f, "disk full", None).unwrap();
+    storage.pause_download(p).unwrap();
 
-    manager.tick().await; // Queued→RP→ReqPerm
+    // Version mismatch via accept_resumed_descriptor with wrong hash.
+    storage.pause_download(vm).unwrap();
+    storage.resume_download(vm).unwrap();
+    let _ = storage.accept_resumed_descriptor(vm, "wrong-hash", 600);
 
-    storage
-        .replace_remote_catalogue(&make_signed_catalogue(
-            &peer_sk,
-            2,
-            vec![make_file("source-v2", "source.doc", 2000)],
-        ))
-        .unwrap();
+    // q stays queued.
+    assert_eq!(storage.get_download(q).unwrap().unwrap().state, "queued");
+    assert_eq!(storage.get_download(c).unwrap().unwrap().state, "complete");
+    assert_eq!(storage.get_download(f).unwrap().unwrap().state, "failed");
+    assert_eq!(storage.get_download(p).unwrap().unwrap().state, "paused");
+    assert_eq!(
+        storage.get_download(vm).unwrap().unwrap().state,
+        "version_mismatch"
+    );
 
-    manager.tick().await; // ReqPerm checks → VersionMismatch
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::VersionMismatch);
+    // Each state list returns exactly one.
+    assert_eq!(storage.list_downloads_by_state("queued").unwrap().len(), 1);
+    assert_eq!(
+        storage.list_downloads_by_state("complete").unwrap().len(),
+        1
+    );
+    assert_eq!(storage.list_downloads_by_state("failed").unwrap().len(), 1);
+    assert_eq!(storage.list_downloads_by_state("paused").unwrap().len(), 1);
+    assert_eq!(
+        storage
+            .list_downloads_by_state("version_mismatch")
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 8: Expired descriptor — simulated via cancel
+// Test 8: Re-create a download for the same content_hash (distinct ids)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
-async fn expired_descriptor_simulated() {
-    let (storage, _dir) = make_storage("expired-hash");
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
+#[test]
+fn duplicate_content_hash_gets_separate_ids() {
+    let storage = make_storage("dedup-hash");
 
-    let id = storage
-        .create_download(
-            "expired-hash",
-            "dave",
-            "ef",
-            Path::new("/tmp/dl/expired.bin"),
-            200,
-        )
-        .unwrap();
+    let id1 = storage.create_download("dedup-hash", "oscar", 600).unwrap();
+    let id2 = storage.create_download("dedup-hash", "peggy", 600).unwrap();
 
-    manager.tick().await;
-    storage.cancel_download(id).unwrap();
-    manager.tick().await;
+    assert_ne!(id1, id2, "each download must have a unique id");
 
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Cancelled);
+    // Both complete independently.
+    storage.complete_download(id1, 600).unwrap();
+    storage.complete_download(id2, 600).unwrap();
+
+    assert_eq!(
+        storage.get_download(id1).unwrap().unwrap().state,
+        "complete"
+    );
+    assert_eq!(
+        storage.get_download(id2).unwrap().unwrap().state,
+        "complete"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 9: Wrong-peer descriptor (stub — actually completes)
+// Test 9: Pause an already-paused download is idempotent
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
-async fn wrong_peer_descriptor() {
-    let (storage, _dir) = make_storage("wrong-peer-hash");
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
+#[test]
+fn pause_already_paused_is_idempotent() {
+    let storage = make_storage("idempotent-hash");
 
     let id = storage
-        .create_download(
-            "wrong-peer-hash",
-            "impostor-peer",
-            "wpd",
-            Path::new("/tmp/dl/wrong_peer.bin"),
-            150,
-        )
+        .create_download("idempotent-hash", "quentin", 128)
         .unwrap();
 
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
+    storage.pause_download(id).unwrap();
+    assert_eq!(storage.get_download(id).unwrap().unwrap().state, "paused");
 
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Complete);
+    // Pause again — should be a no-op.
+    storage.pause_download(id).unwrap();
+    assert_eq!(storage.get_download(id).unwrap().unwrap().state, "paused");
+
+    // Resume → resolving_peer.
+    storage.resume_download(id).unwrap();
+    assert_eq!(
+        storage.get_download(id).unwrap().unwrap().state,
+        "resolving_peer"
+    );
+
+    // Resume again — should be idempotent (stays resolving_peer).
+    storage.resume_download(id).unwrap();
+    assert_eq!(
+        storage.get_download(id).unwrap().unwrap().state,
+        "resolving_peer"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 10: Transfer interruption → fail and retry
+// Test 10: Fail a download that has progress, verify error and retry_count
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
-async fn transfer_interruption_retry() {
-    let (storage, _dir) = make_storage("interrupt-hash");
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
+#[test]
+fn fail_with_progress_tracks_retry_count() {
+    let storage = make_storage("progress-hash");
 
     let id = storage
-        .create_download(
-            "interrupt-hash",
-            "eve",
-            "intfile",
-            Path::new("/tmp/dl/interrupt.bin"),
-            300,
-        )
+        .create_download("progress-hash", "rupert", 1000)
         .unwrap();
 
-    manager.tick().await; // Queued→RP→ReqPerm
-
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::RequestingPermission);
-
+    // Simulate some progress before failing.
     storage
-        .fail_download(id, "transfer interrupted: network timeout", Some(0))
+        .update_download_progress(id, 400, "downloading")
+        .unwrap();
+
+    let dl = storage.get_download(id).unwrap().unwrap();
+    assert_eq!(dl.bytes_downloaded, 400);
+
+    // First failure.
+    storage
+        .fail_download(id, "connection reset by peer", Some(1000))
         .unwrap();
     let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Failed);
+    assert_eq!(dl.state, "failed");
+    assert_eq!(dl.retry_count, 1);
+
+    // Fail again — retry_count increments.
+    // (fail_download is guarded against paused state but not failed,
+    // so we can transition failed→failed by calling it again.)
+    storage
+        .fail_download(id, "retry also failed", Some(2000))
+        .unwrap();
+    let dl = storage.get_download(id).unwrap().unwrap();
+    assert_eq!(dl.state, "failed");
+    assert_eq!(dl.retry_count, 2);
     assert!(dl
         .last_error
         .as_deref()
         .unwrap_or("")
-        .contains("interrupted"));
+        .contains("also failed"));
+    assert_eq!(dl.next_retry_at_ms, Some(2000));
 
-    storage.retry_download(id).unwrap();
-    manager.tick().await; // Failed→Queued→RP→ReqPerm (4 per tick)
-
-    let dl = storage.get_download(id).unwrap().unwrap();
-    // All 3 queued get advanced per tick, plus one step of RP→ReqPerm.
-    assert!(
-        dl.state == DownloadState::RequestingPermission || dl.state == DownloadState::ResolvingPeer,
-        "expected ReqPerm or RP, got {:?}",
-        dl.state
-    );
-
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Complete);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Test 11: Restart and resume — pause → resume → complete
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn restart_resume_cycle() {
-    let (storage, _dir) = make_storage("resume-hash");
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
-
-    let id = storage
-        .create_download(
-            "resume-hash",
-            "frank",
-            "resfile",
-            Path::new("/tmp/dl/resume.bin"),
-            400,
-        )
-        .unwrap();
-
-    manager.tick().await; // Queued→RP→ReqPerm
-    manager.tick().await; // ReqPerm→DL
-
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Downloading);
-
-    // Pause via Storage.
-    storage.pause_download(id).unwrap();
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Paused);
-
-    // Resume via Storage.
-    storage.resume_download(id).unwrap();
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Downloading);
-
-    // Complete via manager ticks.
-    manager.tick().await; // DL→Verifying
-    manager.tick().await; // Verifying→Complete
-
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Complete);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Test 12: Owner restart during transfer — recovery
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn owner_restart_recovery() {
-    let (storage, _dir) = make_storage("recovery-hash");
-
-    let id = storage
-        .create_download(
-            "recovery-hash",
-            "grace",
-            "recfile",
-            Path::new("/tmp/dl/recovery.bin"),
-            500,
-        )
-        .unwrap();
-
-    storage
-        .transition_download(id, DownloadState::ResolvingPeer)
-        .unwrap();
-    storage
-        .transition_download(id, DownloadState::RequestingPermission)
-        .unwrap();
-    storage
-        .transition_download(id, DownloadState::Downloading)
-        .unwrap();
-
-    assert_eq!(
-        storage.get_download(id).unwrap().unwrap().state,
-        DownloadState::Downloading
-    );
-
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
-    let summary = manager.recover_from_restart().await.unwrap();
-
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Paused);
-    assert!(summary.recovered_count >= 1);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Test 13: Version change before resume
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn version_change_before_resume() {
-    let (storage, _dir) = make_storage("pause-change-hash");
-    let peer_sk = SecretKey::generate();
-    let peer_pk = peer_sk.public();
-
-    storage
-        .replace_remote_catalogue(&make_signed_catalogue(
-            &peer_sk,
-            1,
-            vec![make_file("pause-change-hash", "doc.txt", FILE_SIZE)],
-        ))
-        .unwrap();
-
-    let id = storage
-        .create_download(
-            "pause-change-hash",
-            &peer_pk.to_string(),
-            "pch",
-            Path::new("/tmp/dl/pause_change.bin"),
-            FILE_SIZE,
-        )
-        .unwrap();
-
-    storage
-        .transition_download(id, DownloadState::ResolvingPeer)
-        .unwrap();
-    storage
-        .transition_download(id, DownloadState::RequestingPermission)
-        .unwrap();
-    storage
-        .transition_download(id, DownloadState::Downloading)
-        .unwrap();
-    assert_eq!(
-        storage.get_download(id).unwrap().unwrap().state,
-        DownloadState::Downloading
-    );
-
-    // Pause.
-    storage.pause_download(id).unwrap();
-    assert_eq!(
-        storage.get_download(id).unwrap().unwrap().state,
-        DownloadState::Paused
-    );
-
-    // Change catalogue while paused.
-    storage
-        .replace_remote_catalogue(&make_signed_catalogue(
-            &peer_sk,
-            2,
-            vec![make_file("new-pause-hash", "doc.txt", FILE_SIZE * 2)],
-        ))
-        .unwrap();
-
-    // Resume and tick to completion.
-    storage.resume_download(id).unwrap();
-    assert_eq!(
-        storage.get_download(id).unwrap().unwrap().state,
-        DownloadState::Downloading
-    );
-
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
-    manager.tick().await; // DL→Verifying
-    manager.tick().await; // Verifying→Complete
-
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Complete);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Test 14: Existing destination
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn existing_destination() {
-    let (storage, _dir) = make_storage_multi(&["dest-hash-1", "dest-hash-2"]);
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
-
-    let id1 = storage
-        .create_download(
-            "dest-hash-1",
-            "heidi",
-            "f1",
-            Path::new("/tmp/dl/same_dest.bin"),
-            200,
-        )
-        .unwrap();
-    let id2 = storage
-        .create_download(
-            "dest-hash-2",
-            "ivan",
-            "f2",
-            Path::new("/tmp/dl/same_dest.bin"),
-            300,
-        )
-        .unwrap();
-
-    assert_ne!(id1, id2);
-
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-
-    let dl1 = storage.get_download(id1).unwrap().unwrap();
-    assert_eq!(dl1.state, DownloadState::Complete);
-
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-
-    let dl2 = storage.get_download(id2).unwrap().unwrap();
-    assert_eq!(dl2.state, DownloadState::Complete);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Test 15: Corrupted content rejection — fail → retry
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn corrupted_content_rejection() {
-    let (storage, _dir) = make_storage("corrupt-hash");
-
-    let id = storage
-        .create_download(
-            "corrupt-hash",
-            "judy",
-            "corrupt",
-            Path::new("/tmp/dl/corrupt.bin"),
-            500,
-        )
-        .unwrap();
-
-    storage
-        .transition_download(id, DownloadState::ResolvingPeer)
-        .unwrap();
-    storage
-        .transition_download(id, DownloadState::RequestingPermission)
-        .unwrap();
-    storage
-        .transition_download(id, DownloadState::Downloading)
-        .unwrap();
-    storage
-        .transition_download(id, DownloadState::Verifying)
-        .unwrap();
-
-    assert_eq!(
-        storage.get_download(id).unwrap().unwrap().state,
-        DownloadState::Verifying
-    );
-
-    storage
-        .fail_download(id, "content hash mismatch: expected abc, got xyz", Some(0))
-        .unwrap();
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Failed);
-    assert!(dl
-        .last_error
-        .as_deref()
-        .unwrap_or("")
-        .contains("hash mismatch"));
-
-    storage.retry_download(id).unwrap();
-
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
-    manager.tick().await; // Failed→Queued→RP
-    manager.tick().await; // RP→ReqPerm
-    manager.tick().await; // ReqPerm→DL
-    manager.tick().await; // DL→Verifying
-    manager.tick().await; // Verifying→Complete
-
-    let dl = storage.get_download(id).unwrap().unwrap();
-    assert_eq!(dl.state, DownloadState::Complete);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Test 16: Duplicate download reuse
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn duplicate_download_reuse() {
-    let (storage, _dir) = make_storage("dedup-hash");
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
-
-    let id1 = storage
-        .create_download(
-            "dedup-hash",
-            "karen",
-            "rid1",
-            Path::new("/tmp/dl/dedup1.bin"),
-            600,
-        )
-        .unwrap();
-    let id2 = storage
-        .create_download(
-            "dedup-hash",
-            "leo",
-            "rid2",
-            Path::new("/tmp/dl/dedup2.bin"),
-            600,
-        )
-        .unwrap();
-
-    assert_ne!(id1, id2);
-
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-
-    let dl1 = storage.get_download(id1).unwrap().unwrap();
-    assert_eq!(dl1.state, DownloadState::Complete);
-
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-    manager.tick().await;
-
-    let dl2 = storage.get_download(id2).unwrap().unwrap();
-    assert_eq!(dl2.state, DownloadState::Complete);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// State query tests
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn list_and_count_consistent() {
-    let (storage, _dir) = make_storage_multi(&["list-a", "list-b", "list-c"]);
-    let (mut manager, _handle) = DownloadManager::new(storage.clone());
-
-    let _id1 = storage
-        .create_download("list-a", "mallory", "la", Path::new("/tmp/dl/la.bin"), 100)
-        .unwrap();
-    let _id2 = storage
-        .create_download("list-b", "nancy", "lb", Path::new("/tmp/dl/lb.bin"), 200)
-        .unwrap();
-    let id3 = storage
-        .create_download("list-c", "oscar", "lc", Path::new("/tmp/dl/lc.bin"), 300)
-        .unwrap();
-
-    manager.tick().await;
-
-    let all = storage.list_downloads().unwrap();
-    assert_eq!(all.len(), 3);
-
-    // With max_queued_to_active_per_tick=4, all 3 leave Queued.
-    // Then all active (RP) get driven one step to ReqPerm.
-    let queued = storage
-        .list_downloads_by_state(DownloadState::Queued)
-        .unwrap();
-    let req_perm = storage
-        .list_downloads_by_state(DownloadState::RequestingPermission)
-        .unwrap();
-    assert_eq!(queued.len(), 0, "all left Queued");
-    assert_eq!(req_perm.len(), 3, "all advanced to ReqPerm");
-
-    storage.cancel_download(id3).unwrap();
-
-    let cancelled = storage
-        .list_downloads_by_state(DownloadState::Cancelled)
-        .unwrap();
-    assert_eq!(cancelled.len(), 1);
-
-    // The other 2 are still active (RequestingPermission).
-    let active = storage
-        .list_downloads_by_state(DownloadState::RequestingPermission)
-        .unwrap();
-    assert_eq!(active.len(), 2);
+    assert!(DownloadState::Failed.is_terminal());
 }

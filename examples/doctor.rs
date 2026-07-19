@@ -465,7 +465,7 @@ fn check_chat_history(data_dir: &Path) -> Check {
 
 fn check_features() -> Check {
     let name = "compiled-features".to_string();
-    let mut features: Vec<&str> = Vec::new();
+    let mut features: Vec<&str> = Vec::with_capacity(6);
 
     #[cfg(feature = "net")]
     features.push("net");

@@ -177,7 +177,6 @@ fn friend_request_cancel_flow() {
 
     // Find the outgoing request id in Alice's store
     let alice_pk_str = alice_sk.public().to_string();
-    let bob_pk_str = bob_pk.to_string();
     let alice_req_id = alice_store
         .list_outgoing(&alice_pk_str)
         .first()
@@ -445,8 +444,6 @@ fn signed_conversation_invite_round_trip() {
 #[test]
 fn signed_contact_verify_with_expected_identity() {
     let alice_sk = SecretKey::generate();
-    let bob_sk = SecretKey::generate();
-
     let action = ContactAction::FriendRequest {
         name: Some("Alice".into()),
     };

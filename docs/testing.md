@@ -182,27 +182,34 @@ The remote catalogue and transfer tests should verify the stages independently:
    `read` grants expose only granted files to non-friends, blocked peers receive
    access denied, and disabled/unavailable files are omitted. Build catalogues
    for two requesters and assert their projections are isolated.
-3. **Notification/cache behaviour** — a revision notice triggers one fetch,
-   duplicate notices are coalesced, `NotModified` preserves a verified cache,
-   and stale/manual/missing-file triggers refresh without a polling loop.
+3. **Revision/cache behaviour** — `known_revision` returns `NotModified` for an
+   unchanged requester-specific view, a changed revision returns fresh data,
+   and stale/manual/missing-file refresh is initiated by the caller. There is
+   no separate push-notification or continuous polling worker.
 4. **Authorisation** — access is re-evaluated after catalogue creation;
    changed hashes/versions, disabled offers, missing data, blocked peers, and
    expired descriptors are denied. A descriptor must be bound to the transport
    requester and fail signature/expiry verification when tampered with.
 5. **Blob transfer** — exercise successful iroh-blobs download, wrong hash,
    wrong size, provider failure, cancellation, pause/resume, atomic destination
-   installation, and cleanup of temporary output. Verify that resumed output is
-   re-streamed and that only verified BLAKE3 content is installed.
+   installation, and cleanup of temporary output. Verify that only verified
+   BLAKE3 content is installed. Resume must re-resolve the peer and obtain a
+   fresh descriptor; retained iroh-blobs chunks may be reused, but the
+   destination file is not resumed by byte offset.
 6. **Abuse limits** — test request/response/catalogue size caps, pagination
    bounds, per-peer/global concurrency, rate limits, timeouts, and upload
    preparation limits. Assertions should use structured protocol errors rather
    than log text.
 
-A complete end-to-end scenario is: publish an enabled local file, notify a peer,
-fetch and verify its requester-filtered catalogue, request authorisation, fetch
-through iroh-blobs, and assert size/hash plus durable download state. Run the
-same scenario from both peers where applicable; a successful catalogue fetch is
-not evidence that transfer authorisation or blob delivery succeeded.
+A complete end-to-end scenario is: publish an enabled local file, expose its
+signed requester-filtered catalogue, fetch and verify that catalogue, request
+fresh authorization, fetch through iroh-blobs, and assert size/hash plus
+durable download state. A revision change can be exercised by sending
+`known_revision` and checking `NotModified`, then changing the manifest or
+permissions and fetching again. Run the same scenario from both peers where
+applicable; a successful catalogue fetch is not evidence that transfer
+authorization or blob delivery succeeded. There is no continuous catalogue
+notification/polling worker to test; refresh is triggered by the caller.
 
 ## Scripts
 

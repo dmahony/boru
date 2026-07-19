@@ -36,7 +36,12 @@ use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 use tokio::sync::{mpsc, Mutex};
 
-use crate::mailbox::{MailboxAck, MailboxEnvelope, DEFAULT_MAILBOX_TTL, MAX_SYNC_LOOKBACK};
+use crate::mailbox::{MailboxAck, MailboxEnvelope, MAX_SYNC_LOOKBACK};
+
+/// Callback that provides pending envelopes for a SyncRequest.
+type PendingFn = Option<Arc<dyn Fn(PublicKey, u64) -> (Vec<MailboxEnvelope>, bool) + Send + Sync>>;
+/// Callback invoked after a SyncResponse is sent, recording which message IDs were served.
+type RecordSyncFn = Option<Arc<dyn Fn(PublicKey, &[[u8; 32]]) + Send + Sync>>;
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -265,14 +270,13 @@ pub struct InboxInner {
     /// The function receives (requester_public_key, since_ms) and returns
     /// (envelopes, has_more). The protocol handler derives last_created_at_ms
     /// from the last envelope in the page.
-    pub pending_fn:
-        Option<Arc<dyn Fn(PublicKey, u64) -> (Vec<MailboxEnvelope>, bool) + Send + Sync>>,
+    pub pending_fn: PendingFn,
     /// Optional callback invoked after a SyncResponse is sent, recording
     /// which message IDs were served for replay protection.  The callback
     /// receives (recipient_public_key, &[[u8; 32]]).
     /// This prevents the same envelopes from being served again on repeat
     /// sync requests.
-    pub record_sync_served_fn: Option<Arc<dyn Fn(PublicKey, &[[u8; 32]]) + Send + Sync>>,
+    pub record_sync_served_fn: RecordSyncFn,
 }
 
 impl std::fmt::Debug for InboxInner {
@@ -395,10 +399,7 @@ impl InboxHandle {
     /// The function receives `(requester_public_key, since_ms)` and returns
     /// `(envelopes, has_more)`. Called from the protocol handler when a
     /// SyncRequest arrives.
-    pub async fn set_pending_fn(
-        &self,
-        f: Option<Arc<dyn Fn(PublicKey, u64) -> (Vec<MailboxEnvelope>, bool) + Send + Sync>>,
-    ) {
+    pub async fn set_pending_fn(&self, f: PendingFn) {
         self.inner.lock().await.pending_fn = f;
     }
 
@@ -409,10 +410,7 @@ impl InboxHandle {
     /// the message IDs are the raw 32-byte identifiers from the storage layer.
     /// This integrates with `Storage::record_sync_served()` for durable
     /// dedup tracking.
-    pub async fn set_record_sync_served_fn(
-        &self,
-        f: Option<Arc<dyn Fn(PublicKey, &[[u8; 32]]) + Send + Sync>>,
-    ) {
+    pub async fn set_record_sync_served_fn(&self, f: RecordSyncFn) {
         self.inner.lock().await.record_sync_served_fn = f;
     }
 }

@@ -111,14 +111,20 @@ pub struct RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        Self { initial_delay_ms: 5_000, max_delay_ms: 180_000, jitter_fraction: 0.5 }
+        Self {
+            initial_delay_ms: 5_000,
+            max_delay_ms: 180_000,
+            jitter_fraction: 0.5,
+        }
     }
 }
 
 impl RetryPolicy {
     /// Compute a delay for a zero-based attempt and a deterministic jitter in [0, 1].
     pub fn delay_ms(&self, attempt: u32, jitter: f64) -> u64 {
-        let base = self.initial_delay_ms.saturating_mul(1u64 << attempt.min(31));
+        let base = self
+            .initial_delay_ms
+            .saturating_mul(1u64 << attempt.min(31));
         let capped = base.min(self.max_delay_ms);
         let factor = 1.0 + self.jitter_fraction * jitter.clamp(0.0, 1.0);
         ((capped as f64 * factor) as u64).min(self.max_delay_ms)
@@ -133,7 +139,11 @@ pub trait Clock: Send + Sync {
 /// Production wall clock implementation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
-impl Clock for SystemClock { fn now_ms(&self) -> u64 { unix_ms() } }
+impl Clock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        unix_ms()
+    }
+}
 
 /// Whether a delivery failure can be retried automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,18 +297,14 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 /// Returning an error prevents delivery and schedules a retry.
 pub trait RecipientPolicy: Send + Sync {
     /// Check contact authorization and resolve current recipient state.
-    fn authorize<'a>(&'a self, recipient: PublicKey) -> BoxFuture<Result<bool>>;
+    fn authorize(&self, recipient: PublicKey) -> BoxFuture<Result<bool>>;
 }
 
 /// Sends one stored envelope and returns only after the remote protocol has
 /// acknowledged and authenticated the envelope.
 pub trait DeliveryTransport: Send + Sync {
     /// Deliver an envelope and await a verified protocol acknowledgement.
-    fn deliver<'a>(
-        &'a self,
-        recipient: PublicKey,
-        envelope: StoredEnvelope,
-    ) -> BoxFuture<Result<()>>;
+    fn deliver(&self, recipient: PublicKey, envelope: StoredEnvelope) -> BoxFuture<Result<()>>;
 }
 
 /// Durable, single-owner outbox worker.  Do not create another retry loop for
@@ -367,7 +373,8 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
 
     /// Ask the durable store to retry a recipient immediately.
     pub fn retry_now(&self, msg_id: &crate::store::MessageId, peer: PublicKey) -> Result<usize> {
-        self.storage.retry_outbox_now(msg_id, peer, self.clock.now_ms())
+        self.storage
+            .retry_outbox_now(msg_id, peer, self.clock.now_ms())
     }
 
     /// Accelerate all pending messages when a peer is newly discovered.
@@ -441,7 +448,11 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
             let delay = self.retry_policy.delay_ms(row.attempts, jitter);
             let _ = self.storage.record_attempt(
-                &msg_id, peer, now.saturating_add(delay), error.as_deref());
+                &msg_id,
+                peer,
+                now.saturating_add(delay),
+                error.as_deref(),
+            );
         }
     }
 
@@ -495,7 +506,7 @@ where
     F: Fn(PublicKey) -> Fut + Send + Sync,
     Fut: Future<Output = Result<bool>> + Send + 'static,
 {
-    fn authorize<'a>(&'a self, recipient: PublicKey) -> BoxFuture<Result<bool>> {
+    fn authorize(&self, recipient: PublicKey) -> BoxFuture<Result<bool>> {
         Box::pin((self.0)(recipient))
     }
 }

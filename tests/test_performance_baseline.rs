@@ -28,8 +28,6 @@ use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, PublicKey,
     RelayMode, SecretKey,
 };
-use n0_future::task;
-use n0_future::StreamExt;
 use rand::RngExt;
 use rand::SeedableRng;
 
@@ -519,7 +517,7 @@ fn baseline_data_scaling() {
             let mut h = 0.0;
             let day = entry.timestamp.map(|ts| ts / 86400000);
             if let Some(d) = day {
-                if prev_day_ht.map_or(true, |prev| prev != d) {
+                if prev_day_ht.is_none_or(|prev| prev != d) {
                     h += DATE_SEP_H;
                 }
                 prev_day_ht = Some(d);
@@ -628,7 +626,7 @@ async fn baseline_simultaneous_downloads() {
 async fn baseline_net_event_throughput() {
     let _ = tracing_subscriber::fmt::try_init();
     boru_chat::perf::init();
-    let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
+    let _rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
     let sk = SecretKey::from_bytes(&[0u8; 32]);
 
     for (suffix, count) in [("100", 100usize), ("1000", 1000)] {

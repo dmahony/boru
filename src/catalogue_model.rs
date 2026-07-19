@@ -65,7 +65,7 @@ pub struct RemoteSharedFile {
     /// Display name shown to peers (never a local path).
     pub display_name: String,
     /// Optional human-readable description.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub description: Option<String>,
     /// MIME type of the file (e.g. `"application/pdf"`).
     pub mime_type: String,
@@ -275,7 +275,7 @@ impl TryFrom<&SharedFile> for RemoteSharedFile {
             });
         }
 
-        let content_hash = file.hash.map(|h| hex::encode(h)).unwrap_or_default();
+        let content_hash = file.hash.map(hex::encode).unwrap_or_default();
 
         Ok(Self {
             shared_file_id: file.id.clone(),
@@ -312,8 +312,30 @@ pub struct FileCatalogueCollection {
     /// Human-readable display name.
     pub name: String,
     /// Optional description.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub description: Option<String>,
+}
+
+impl FileCatalogueCollection {
+    /// Validate the collection fields against length and content constraints.
+    pub fn validate(&self) -> Result<()> {
+        if self.collection_id.is_empty() {
+            return Err(n0_error::anyerr!("collection_id must not be empty"));
+        }
+        if self.name.is_empty() {
+            return Err(n0_error::anyerr!("name must not be empty"));
+        }
+        if let Some(ref desc) = self.description {
+            if desc.len() > MAX_DESCRIPTION_LENGTH {
+                return Err(n0_error::anyerr!(
+                    "description exceeds maximum length of {} (got {})",
+                    MAX_DESCRIPTION_LENGTH,
+                    desc.len()
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 // ── SignedFileCatalogue ──────────────────────────────────────────────────
@@ -323,7 +345,7 @@ pub struct FileCatalogueCollection {
 /// The catalogue content is serialised to a canonical byte representation
 /// before signing, so tampering with any field (except the signature itself)
 /// invalidates the signature.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedFileCatalogue {
     /// The peer who owns (and signed) this catalogue.
     pub owner_id: PublicKey,
@@ -377,6 +399,25 @@ impl SignedFileCatalogue {
             .verify(&payload, &sig)
             .std_context("catalogue signature verification failed")
     }
+
+    /// Validate all entries in the catalogue — files, collections, and signature.
+    ///
+    /// Calls [`RemoteSharedFile::validate`] on every file and
+    /// [`FileCatalogueCollection::validate`] on every collection, then
+    /// verifies the Ed25519 signature via [`verify`](Self::verify).
+    pub fn validate(&self) -> Result<()> {
+        // Validate each collection.
+        for c in &self.collections {
+            c.validate().std_context("collection validation failed")?;
+        }
+        // Validate each file.
+        for f in &self.files {
+            f.validate().std_context("file validation failed")?;
+        }
+        // Verify the signature.
+        self.verify().std_context("signature validation failed")?;
+        Ok(())
+    }
 }
 
 /// Produce the canonical payload that is signed / verified.
@@ -391,6 +432,142 @@ fn signing_payload(catalogue: &SignedFileCatalogue) -> Vec<u8> {
         catalogue.generated_at_ms,
         &catalogue.collections,
         &catalogue.files,
+    );
+    postcard::to_stdvec(&digest).expect("postcard serialisation is infallible")
+}
+
+// ── RemoteCollection ─────────────────────────────────────────────────────
+
+/// A collection visible to a remote peer in a catalogue.
+///
+/// This is the wire-safe version of a collection, distinct from
+/// [`FileCatalogueCollection`] which lacks the `sort_order` field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteCollection {
+    /// Unique identifier for this collection.
+    pub collection_id: String,
+    /// Human-readable display name.
+    pub name: String,
+    /// Optional description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Display order among collections (lower = first).
+    pub sort_order: u32,
+}
+
+impl RemoteCollection {
+    /// Validate the remote collection fields.
+    pub fn validate(&self) -> Result<()> {
+        if self.collection_id.is_empty() {
+            return Err(n0_error::anyerr!("collection_id must not be empty"));
+        }
+        if self.name.is_empty() {
+            return Err(n0_error::anyerr!("name must not be empty"));
+        }
+        if let Some(ref desc) = self.description {
+            if desc.len() > MAX_DESCRIPTION_LENGTH {
+                return Err(n0_error::anyerr!(
+                    "description exceeds maximum length of {} (got {})",
+                    MAX_DESCRIPTION_LENGTH,
+                    desc.len()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── CatalogueView ────────────────────────────────────────────────────────
+
+/// A filtered view of a catalogue for a specific requester, used for
+/// validation and content-hash computation before signing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CatalogueView {
+    /// Collections visible to the requester.
+    pub collections: Vec<RemoteCollection>,
+    /// Files visible to the requester.
+    pub files: Vec<RemoteSharedFile>,
+}
+
+// ── SignedCatalogueCursor ────────────────────────────────────────────────
+
+/// A signed pagination cursor that ties a specific page position to a
+/// catalogue revision, owner, and requester.
+///
+/// The cursor is signed by the catalogue owner so clients cannot forge
+/// cursor positions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedCatalogueCursor {
+    /// Catalogue revision at cursor creation.
+    pub revision: u64,
+    /// Timestamp of the last file in the current page.
+    pub last_updated_at_ms: u64,
+    /// shared_file_id of the last file in the current page.
+    pub last_file_id: String,
+    /// The peer who signed this cursor (catalogue owner).
+    pub owner_id: PublicKey,
+    /// The peer this cursor was issued for.
+    pub requester: PublicKey,
+    /// Ed25519 signature over the cursor content.
+    signature: ByteArray<{ iroh::Signature::LENGTH }>,
+}
+
+impl SignedCatalogueCursor {
+    /// Create and sign a new cursor.
+    pub fn sign(
+        secret_key: &SecretKey,
+        revision: u64,
+        last_updated_at_ms: u64,
+        last_file_id: &str,
+        requester: PublicKey,
+    ) -> Self {
+        let owner_id = secret_key.public();
+        let unsigned = Self {
+            revision,
+            last_updated_at_ms,
+            last_file_id: last_file_id.to_string(),
+            owner_id,
+            requester,
+            signature: ByteArray::new([0u8; iroh::Signature::LENGTH]),
+        };
+        let payload = cursor_signing_payload(&unsigned);
+        let signature = secret_key.sign(&payload);
+        Self {
+            signature: ByteArray::new(signature.to_bytes()),
+            ..unsigned
+        }
+    }
+
+    /// Verify the cursor's signature against the claimed owner_id.
+    pub fn verify(&self) -> Result<()> {
+        let payload = cursor_signing_payload(self);
+        let sig = iroh::Signature::from_bytes(&self.signature);
+        self.owner_id
+            .verify(&payload, &sig)
+            .std_context("cursor signature verification failed")
+    }
+
+    /// Encode the cursor into an opaque string for wire transfer.
+    pub fn encode(&self) -> String {
+        let bytes = postcard::to_stdvec(self).expect("postcard serialisation is infallible");
+        data_encoding::BASE64URL_NOPAD.encode(&bytes)
+    }
+
+    /// Decode a cursor from its wire string representation.
+    pub fn decode(encoded: &str) -> Option<Self> {
+        let bytes = data_encoding::BASE64URL_NOPAD
+            .decode(encoded.as_bytes())
+            .ok()?;
+        postcard::from_bytes(&bytes).ok()
+    }
+}
+
+/// Canonical signing payload for a [`SignedCatalogueCursor`].
+fn cursor_signing_payload(cursor: &SignedCatalogueCursor) -> Vec<u8> {
+    let digest = (
+        cursor.revision,
+        &cursor.last_file_id,
+        cursor.last_updated_at_ms,
     );
     postcard::to_stdvec(&digest).expect("postcard serialisation is infallible")
 }

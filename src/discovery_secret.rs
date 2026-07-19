@@ -80,7 +80,7 @@ impl DiscoverySecret {
 // know to handle cloned copies with appropriate care.
 impl Clone for DiscoverySecret {
     fn clone(&self) -> Self {
-        Self { bytes: self.bytes }
+        *self
     }
 }
 
@@ -205,7 +205,7 @@ mod tests {
         let a = DiscoverySecret::from_bytes([0xABu8; 32]);
         let b = DiscoverySecret::from_bytes([0xABu8; 32]);
         let mut set = HashSet::new();
-        set.insert(a.clone());
+        set.insert(a);
         set.insert(b);
         assert_eq!(set.len(), 1, "equal secrets should hash identically");
     }
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn clone_equality() {
         let a = DiscoverySecret::from_bytes([0xABu8; 32]);
-        let b = a.clone();
+        let b = a;
         assert_eq!(a, b);
     }
 }

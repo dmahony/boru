@@ -9,22 +9,17 @@
 //! Run:
 //!   BORU_PERF=1 cargo test --test stress_test_comprehensive --features net,test-utils -- --nocapture
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
-use boru_chat::chat_callbacks::ChatCallbacks;
-use boru_chat::chat_core::{
-    handle_net_event as chat_net_event, ChatEntry, ChatKind, Message, MessageHash, NetEvent,
-    SignedMessage,
-};
-use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
-use boru_chat::conversations::{ConversationEntry, ConversationStore};
+use boru_chat::chat_core::{ChatEntry, ChatKind};
+use boru_chat::chat_history::ChatHistoryStore;
+use boru_chat::conversations::ConversationStore;
 use boru_chat::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore};
 use boru_chat::perf::PerfTracker;
 use boru_chat::proto::TopicId;
 use iroh::{PublicKey, SecretKey};
-use n0_future::task;
-use n0_future::StreamExt;
+
 use rand::RngExt;
 use rand::SeedableRng;
 
@@ -36,20 +31,6 @@ const DATASET_MESSAGES: usize = 5_000;
 const DATASET_SHARED_FILES: usize = 100;
 const DATASET_DOWNLOADS: usize = 50;
 const DATASET_AVATARS: usize = 200;
-
-/// Benchmark helper: run `f` repeatedly and return the minimum duration.
-fn bench_min<F: FnMut()>(mut f: F, iterations: usize) -> Duration {
-    let mut best = Duration::MAX;
-    for _ in 0..iterations {
-        let start = Instant::now();
-        f();
-        let elapsed = start.elapsed();
-        if elapsed < best {
-            best = elapsed;
-        }
-    }
-    best
-}
 
 /// Generate synthetic ChatEntry entries matching the IcedChat app's ChatEntry
 /// shape for the stress test.
@@ -208,7 +189,7 @@ fn stress_entry_scrolling() {
     );
 
     // B) Height estimation (like app's LayoutCache)
-    const DATE_SEP_H: f32 = 32.0;
+
     const SYSTEM_H: f32 = 24.0;
     const MSG_BASE_H: f32 = 76.0;
     const REACTION_EXTRA: f32 = 22.0;
@@ -313,8 +294,7 @@ fn stress_profile_opening() {
     boru_chat::perf::init();
 
     let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
-    let secret_key = SecretKey::from_bytes(&[0u8; 32]);
-    let local_public = secret_key.public();
+    let _secret_key = SecretKey::from_bytes(&[0u8; 32]);
 
     // Build profile image handles map (like app's friend_image_handles)
     let _timer = PerfTracker::timer("stress_build_profile_image_map", "200_avatars");
@@ -387,7 +367,7 @@ fn stress_downloads() {
     // Simulate progress updates (like app's DownloadProgress handler)
     let _timer = PerfTracker::timer("stress_download_progress_updates", "50_downloads_x_10");
     for tid in &transfer_ids {
-        for chunk in 0..10 {
+        for _chunk in 0..10 {
             if let Some((received, total)) = download_progress.get_mut(tid) {
                 *received += *total / 10;
                 let pct = (*received as f64 / *total as f64) * 100.0;
@@ -573,7 +553,7 @@ fn stress_all_operations() {
     // Build online cache (like IcedChat::new())
     let _timer2 = PerfTracker::timer(
         "stress_build_online_cache",
-        &format!("{}_friends", friends_store.len()),
+        format!("{}_friends", friends_store.len()),
     );
     let starting_online_count = friends_store
         .iter()
@@ -583,7 +563,7 @@ fn stress_all_operations() {
     // Build profile image maps (like IcedChat::new())
     let _timer3 = PerfTracker::timer(
         "stress_build_image_maps",
-        &format!("{}_avatars", DATASET_AVATARS),
+        format!("{}_avatars", DATASET_AVATARS),
     );
     let mut image_handles: HashMap<PublicKey, Option<Vec<u8>>> = HashMap::new();
     for i in 0..DATASET_AVATARS {

@@ -46,21 +46,17 @@
 //! server to bind to a loopback address only, preventing remote access to
 //! GUI-test tools.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::gui_test_actions::{
-    ActionRecord, ActionStatus, GuiActionHistory, GuiActionRateLimiter, RateLimitError,
-};
-use boru_chat::chat_core::{broadcast_diagnostic_probe, message_hash, Message, SignedMessage};
+use crate::gui_test_actions::{GuiActionHistory, GuiActionRateLimiter};
+use boru_chat::chat_core::{broadcast_diagnostic_probe, message_hash, Message};
 use boru_chat::conversations::ConversationNetEvent;
 use boru_chat::diagnostics::{
     self, classify_discovery_test, classify_failures, generate_probe_id, ConnectionDiagnosticState,
-    DiagnosticEvent, DiagnosticEventKind, DiagnosticStageState, Diagnostics, DiscoveryFailureStage,
-    DiscoveryTestEvidence, DiscoveryTestResult, FailureAnalysis, FailureLayer, GuiWaitCondition,
-    IcedMessageJournal, IcedStateSnapshot, PeerDiagnosticState, ProbeTestResult, ReceivedProbe,
+    DiagnosticEvent, DiagnosticEventKind, DiagnosticStageState, Diagnostics, DiscoveryTestResult,
+    GuiWaitCondition, IcedMessageJournal, IcedStateSnapshot, PeerDiagnosticState, ProbeTestResult,
 };
 use boru_chat::net::Gossip;
 use boru_chat::proto::TopicId;
@@ -320,6 +316,7 @@ fn check_gui_action_rate_limit(
 }
 
 /// Spawn the MCP server in a background task.
+#[expect(clippy::unused_async)]
 pub async fn spawn_mcp_server(config: McpConfig, state: McpAppState) -> Result<(), String> {
     // Use socket2 to set SO_REUSEADDR before binding, so the port can be
     // reused immediately after the process exits (avoids TIME_WAIT orphan
@@ -708,7 +705,7 @@ async fn handle_send_gui_action(
     };
 
     // Send through the channel (non-blocking via enqueue)
-    let _sent = tx.enqueue(request).map_err(|e| match e.code {
+    tx.enqueue(request).map_err(|e| match e.code {
         boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
@@ -837,12 +834,12 @@ async fn handle_gui_wait_for_state(
         )
     };
 
-    let reached = evaluate(&*rx.borrow());
+    let reached = evaluate(&rx.borrow());
     if !reached {
         let changed = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
             loop {
                 match rx.changed().await {
-                    Ok(()) if evaluate(&*rx.borrow()) => break true,
+                    Ok(()) if evaluate(&rx.borrow()) => break true,
                     Ok(()) => continue,
                     Err(_) => break false,
                 }
@@ -959,7 +956,7 @@ async fn handle_set_composer(
     };
 
     // Send through the channel (non-blocking via enqueue)
-    let _ = tx.enqueue(request).map_err(|e| match e.code {
+    tx.enqueue(request).map_err(|e| match e.code {
         boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
@@ -1061,7 +1058,7 @@ async fn handle_gui_open_room(
     };
 
     // Send through the channel (non-blocking via enqueue)
-    let _ = tx.enqueue(request).map_err(|e| match e.code {
+    tx.enqueue(request).map_err(|e| match e.code {
         boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
@@ -1148,7 +1145,7 @@ async fn handle_gui_open_conversation(
 
     // Send through the channel (non-blocking — try_send to avoid blocking the
     // MCP connection handler).
-    let _ = tx.enqueue(request).map_err(|e| match e.code {
+    tx.enqueue(request).map_err(|e| match e.code {
         boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
@@ -1202,7 +1199,7 @@ async fn handle_submit_composer(
     };
 
     // Send through the channel (non-blocking via enqueue)
-    let _sent = tx.enqueue(request).map_err(|e| match e.code {
+    tx.enqueue(request).map_err(|e| match e.code {
         boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
@@ -1300,7 +1297,7 @@ async fn handle_gui_close_dialog(
 
     // Send through the channel (non-blocking — try_send to avoid blocking the
     // MCP connection handler).
-    let _sent = tx.enqueue(request).map_err(|e| match e.code {
+    tx.enqueue(request).map_err(|e| match e.code {
         boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
@@ -1464,7 +1461,7 @@ async fn handle_run_local_gui_message_test(
             })),
             _ => None,
         });
-    let local_broadcast_detected = broadcast_event.is_some();
+    let _local_broadcast_detected = broadcast_event.is_some();
     let gui_entries = state.iced_diagnostics.entries_since(initial_journal, 200);
     let gui_state_observed = !gui_entries.is_empty() || current.is_some();
     let first_failed_stage = if !composer_cleared {
@@ -1749,7 +1746,7 @@ async fn handle_gui_navigate(
 
     // Send through the channel (non-blocking — try_send to avoid blocking the
     // MCP connection handler).
-    let _ = tx.enqueue(request).map_err(|e| match e.code {
+    tx.enqueue(request).map_err(|e| match e.code {
         boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
@@ -1815,7 +1812,7 @@ async fn handle_gui_toggle_dark_mode(
     };
 
     // Send through the channel (non-blocking via enqueue)
-    let _sent = tx.enqueue(request).map_err(|e| match e.code {
+    tx.enqueue(request).map_err(|e| match e.code {
         boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
@@ -2418,7 +2415,7 @@ async fn handle_run_discovery_test(
     let seq_start = state.diagnostics.latest_sequence();
 
     // 3. Inspect existing peer state
-    let initial_peer = state.diagnostics.peer_state(expected_peer);
+    let _initial_peer = state.diagnostics.peer_state(expected_peer);
 
     // 4-7. Wait for peer to progress through stages (with timeout)
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
@@ -2438,7 +2435,7 @@ async fn handle_run_discovery_test(
     ];
 
     for &stage in stages {
-        let stage_owned = stage.to_string();
+        let _stage_owned = stage.to_string();
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
@@ -2539,7 +2536,7 @@ async fn handle_run_discovery_test(
         probe: probe_result,
     };
 
-    Ok(serde_json::to_value(&result).map_err(|e| format!("serialize: {e}"))?)
+    serde_json::to_value(&result).map_err(|e| format!("serialize: {e}"))
 }
 
 /// `boru_get_iced_state` — snapshot of the current Iced application state.
@@ -2595,7 +2592,7 @@ async fn handle_get_failure_analysis(
 
     let analysis = classify_failures(&state.diagnostics, &state.iced_diagnostics, since_sequence);
 
-    Ok(serde_json::to_value(&analysis).map_err(|e| format!("serialize: {e}"))?)
+    serde_json::to_value(&analysis).map_err(|e| format!("serialize: {e}"))
 }
 
 // =============================================================================

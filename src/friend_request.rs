@@ -455,7 +455,7 @@ impl FriendRequestStore {
             .values()
             .filter(|r| r.requester == peer)
             .collect();
-        result.sort_by(|a, b| b.created_at_unix_ms.cmp(&a.created_at_unix_ms));
+        result.sort_by_key(|b| std::cmp::Reverse(b.created_at_unix_ms));
         result
     }
 
@@ -469,7 +469,7 @@ impl FriendRequestStore {
             .values()
             .filter(|r| r.recipient == peer)
             .collect();
-        result.sort_by(|a, b| b.created_at_unix_ms.cmp(&a.created_at_unix_ms));
+        result.sort_by_key(|b| std::cmp::Reverse(b.created_at_unix_ms));
         result
     }
 
@@ -484,7 +484,7 @@ impl FriendRequestStore {
             .values()
             .filter(|r| r.recipient == peer && r.status == status)
             .collect();
-        result.sort_by(|a, b| b.created_at_unix_ms.cmp(&a.created_at_unix_ms));
+        result.sort_by_key(|b| std::cmp::Reverse(b.created_at_unix_ms));
         result
     }
 
@@ -499,7 +499,7 @@ impl FriendRequestStore {
             .values()
             .filter(|r| r.requester == peer && r.status == status)
             .collect();
-        result.sort_by(|a, b| b.created_at_unix_ms.cmp(&a.created_at_unix_ms));
+        result.sort_by_key(|b| std::cmp::Reverse(b.created_at_unix_ms));
         result
     }
 
@@ -513,7 +513,7 @@ impl FriendRequestStore {
                     && (r.requester == peer || r.recipient == peer)
             })
             .collect();
-        result.sort_by(|a, b| b.created_at_unix_ms.cmp(&a.created_at_unix_ms));
+        result.sort_by_key(|b| std::cmp::Reverse(b.created_at_unix_ms));
         result
     }
 

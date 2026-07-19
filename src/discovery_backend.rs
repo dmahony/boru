@@ -193,7 +193,7 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
         let entries = map.entry(*namespace).or_default();
         entries.retain(|r| {
             r.expires_at
-                .map_or(true, |deadline| deadline > self.now_secs())
+                .is_none_or(|deadline| deadline > self.now_secs())
         });
         entries.push(record);
         if entries.len() > MAX_DISCOVERY_RECORDS {
@@ -209,7 +209,7 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
         let mut records = records;
         records.retain(|r| {
             r.expires_at
-                .map_or(true, |deadline| deadline > self.now_secs())
+                .is_none_or(|deadline| deadline > self.now_secs())
         });
         records.reverse();
         records.truncate(MAX_DISCOVERY_RECORDS);
@@ -224,6 +224,7 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
 /// DHT-backed implementation of [`TopicDiscoveryBackend`] using the
 /// `distributed-topic-tracker` crate.  Only available with the `net` feature.
 #[cfg(feature = "net")]
+#[derive(Debug)]
 pub struct MainlineDhtBackend {
     dht: distributed_topic_tracker::Dht,
     #[allow(dead_code)]

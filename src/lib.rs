@@ -131,8 +131,6 @@ pub mod room_cleanup;
 /// epoch-versioned upgrades with deterministic conflict resolution.
 #[cfg(feature = "net")]
 // pub mod room_secret_migration;
-
-/// Active-session chat message state. No chat messages are persisted.
 #[cfg(feature = "net")]
 pub mod chat_history;
 
@@ -268,3 +266,44 @@ pub mod catalogue_protocol;
 /// [`FileAccessWireResponse`], inner [`FileAccessRequest`]/[`FileAccessResponse`]
 /// types, and wire-safe [`FileAccessErrorCode`].
 pub mod file_access_protocol;
+
+// ── New modules (catalogue + file access) ────────────────────────────────────
+
+/// Versioned wire-frame protocol helpers — `read_frame` / `write_frame`.
+pub mod protocol_version;
+
+/// Central size and count limits for catalogue protocol traffic.
+pub mod catalogue_limits;
+
+/// Per-peer and global rate limiting for catalogue protocol connections.
+pub mod catalogue_rate_limits;
+
+/// Catalogue retrieval protocol handler — server side.
+pub mod catalogue_handler;
+
+/// Catalogue retrieval client — fetches and verifies a signed catalogue
+/// from a remote peer.
+pub mod catalogue_client;
+
+/// File access (download-authorisation) protocol handler — server side.
+#[cfg(feature = "net")]
+pub mod file_access_handler;
+
+/// Download state-machine manager — tick-driven worker that processes
+/// queued downloads through the full lifecycle.
+#[cfg(feature = "net")]
+pub mod download_manager;
+
+/// File access transfer client — requests fresh download descriptors from
+/// a remote peer and verifies the signed response.
+#[cfg(feature = "net")]
+pub mod file_access_client;
+
+/// Safe destination selection — sanitises remote display names to prevent
+/// path traversal and filename injection.
+pub mod safe_destination;
+
+/// Blob transfer — iroh-blobs streaming download from a remote peer to a
+/// local temp file.
+#[cfg(feature = "net")]
+pub mod blob_transfer;

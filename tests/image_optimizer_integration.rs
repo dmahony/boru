@@ -23,7 +23,7 @@ fn load_fixture(name: &str) -> Vec<u8> {
 
 /// Helper: report size information for a result.
 fn report(name: &str, original: &[u8], optimized: &[u8]) {
-    let reduction_pct = if original.len() > 0 {
+    let reduction_pct = if !original.is_empty() {
         (1.0 - optimized.len() as f64 / original.len() as f64) * 100.0
     } else {
         0.0

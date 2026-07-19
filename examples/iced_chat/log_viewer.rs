@@ -12,7 +12,7 @@ use iced::{
 use n0_error::{Result as NResult, StdResultExt};
 
 use crate::app;
-use crate::app::{text_muted_style, version_tag, TYPO_XXS};
+use crate::app::{text_muted_style, TYPO_XXS};
 
 #[derive(Debug, Clone)]
 pub enum Message {

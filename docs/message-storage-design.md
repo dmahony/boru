@@ -113,6 +113,30 @@ Extends V1 with file-object storage and sharing infrastructure.
 | `downloads` | Durable download state machine | Auto-increment `id`, `state` (queued/active/paused/completed/failed), `bytes_downloaded`, retry tracking |
 | `profile_manifest_state` | Manifest revision tracking | `user_id` PK, monotonically increasing `revision`, `manifest_hash` |
 
+### Remote catalogue projections
+
+Remote catalogue storage currently reuses the V2 relational tables rather than
+creating a separate cache database:
+
+| Data | Storage | Semantics |
+|---|---|---|
+| Peer/revision/generated/fetched metadata | `profile_manifest_state` keyed by the remote public-key string | `revision` is the advertised monotonic revision; `manifest_hash` stores the generated timestamp string in the current implementation; `created_at_ms` is the local fetch time |
+| Remote file projection | `file_objects` plus `shared_files` keyed by remote profile and `metadata_id` | Stores safe display metadata, content hash, size, MIME type, and description; no source path or permission row is imported |
+| Remote collections | `file_collections` keyed by remote profile | Stores collection display metadata for local browsing |
+
+`Storage::replace_remote_catalogue` is called only after the client validates
+the catalogue signature, owner identity, fields, limits, duplicate IDs/hashes,
+and collection references. It upserts the entries returned by the latest
+snapshot. The cache is a local display/reconciliation projection: it is not an
+authorization source, and the current replacement path does not itself remove
+older rows that are absent from a newer snapshot. Callers must use a live
+`/boru-file-access/1` request before transferring bytes.
+
+The `shared_file_permissions.expires_at_ms` column stores optional grant
+expiry metadata. Permission evaluation and download authorization are separate
+from cached catalogue reads; descriptor issuance re-checks the live permission
+rows and the descriptor itself has an enforced expiry.
+
 ### Migration System
 
 - Schema version tracked in `schema_version` table (`version` INTEGER PK, `applied_at_ms`).

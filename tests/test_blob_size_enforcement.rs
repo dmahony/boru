@@ -79,8 +79,10 @@ async fn safety_rejects_oversized_blob() -> Result<()> {
     let candidates = vec![pk_a];
 
     // ── Peer B: safety with tiny blob cap ──────────────────────
-    let mut config = PublicRoomConfig::default();
-    config.max_blob_size_bytes = 50_000; // 50 KiB cap — blob is 100 KiB
+    let config = PublicRoomConfig {
+        max_blob_size_bytes: 50_000, // 50 KiB cap — blob is 100 KiB
+        ..Default::default()
+    };
     let safety = Some(Arc::new(PublicRoomSafety::new(config)));
 
     let result = download_blob_with_safety(
@@ -126,8 +128,10 @@ async fn safety_allows_small_blob() -> Result<()> {
     let blob_hash = tag.hash;
     let candidates = vec![pk_a];
 
-    let mut config = PublicRoomConfig::default();
-    config.max_blob_size_bytes = 50_000; // 1 KiB blob < 50 KiB cap
+    let config = PublicRoomConfig {
+        max_blob_size_bytes: 50_000, // 1 KiB blob < 50 KiB cap
+        ..Default::default()
+    };
     let safety = Some(Arc::new(PublicRoomSafety::new(config)));
 
     let bytes = download_blob_with_safety(

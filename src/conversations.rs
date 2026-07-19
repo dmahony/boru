@@ -207,7 +207,7 @@ impl ConversationStore {
     /// Sort the conversation list most-recent-first by `last_seen_at_unix_ms`.
     fn sort_by_recency(&mut self) {
         self.conversations
-            .sort_by(|a, b| b.last_seen_at_unix_ms.cmp(&a.last_seen_at_unix_ms));
+            .sort_by_key(|b| std::cmp::Reverse(b.last_seen_at_unix_ms));
         self.rebuild_index();
     }
 
@@ -480,7 +480,6 @@ pub fn spawn_conversation_forwarder(
                 safety,
             ));
         // Bridge: tag each NetEvent with the topic and forward to the shared channel
-        use n0_future::StreamExt;
         while let Some(event) = inner_rx.recv().await {
             if net_tx
                 .send(ConversationNetEvent::new(topic, event))

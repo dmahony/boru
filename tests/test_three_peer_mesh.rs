@@ -5,7 +5,7 @@
 //!   - Messages broadcast from each peer reach all others
 //!   - Metadata and roster sync across peers
 //!   - Connection type detection (relayed vs direct)
-//!   --no-relay mode (direct connections only)
+//!   - No-relay mode (direct connections only)
 //!
 //! Each peer is isolated (separate secret key, separate endpoint) and
 //! participates in the same gossip topic, exactly as real chat peers do.

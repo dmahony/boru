@@ -779,7 +779,7 @@ mod tests {
         let bob_tracker = PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
-            bob_ep.clone(),
+            bob_ep,
             bob_sk,
         )
         .await
@@ -829,7 +829,7 @@ mod tests {
         let bob_tracker = PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
-            bob_ep.clone(),
+            bob_ep,
             bob_sk,
         )
         .await
@@ -881,7 +881,7 @@ mod tests {
         let bob_tracker = PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
-            bob_ep.clone(),
+            bob_ep,
             bob_sk,
         )
         .await
@@ -921,16 +921,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         // Drain any messages that may have arrived.
-        loop {
-            match tokio::time::timeout(Duration::from_millis(10), rx.recv()).await {
-                Ok(Some(batch)) => {
-                    assert!(
-                        batch.is_empty(),
-                        "expected empty batch (peer already known), got {batch:?}"
-                    );
-                }
-                _ => break,
-            }
+        while let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(10), rx.recv()).await
+        {
+            assert!(
+                batch.is_empty(),
+                "expected empty batch (peer already known), got {batch:?}"
+            );
         }
 
         continuous.shutdown().await;
@@ -1032,7 +1028,7 @@ mod tests {
         let bob_tracker = PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
-            bob_ep.clone(),
+            bob_ep,
             bob_sk,
         )
         .await
@@ -1145,7 +1141,7 @@ mod tests {
         let bob_tracker = PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
-            bob_ep.clone(),
+            bob_ep,
             bob_sk,
         )
         .await
@@ -1181,7 +1177,7 @@ mod tests {
         let bob_tracker = PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
-            bob_ep.clone(),
+            bob_ep,
             bob_sk,
         )
         .await
@@ -1235,7 +1231,7 @@ mod tests {
         let bob_tracker = PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
-            bob_ep.clone(),
+            bob_ep,
             bob_sk,
         )
         .await
@@ -1321,7 +1317,7 @@ mod tests {
         let bob_tracker = PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
-            bob_ep.clone(),
+            bob_ep,
             bob_sk,
         )
         .await
@@ -1360,16 +1356,12 @@ mod tests {
 
         // Wait several more ticks — should not send any more non-empty batches.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        loop {
-            match tokio::time::timeout(Duration::from_millis(5), rx.recv()).await {
-                Ok(Some(batch)) => {
-                    assert!(
-                        batch.is_empty(),
-                        "expected empty batch after session cap reached, got {batch:?}"
-                    );
-                }
-                _ => break,
-            }
+        while let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(5), rx.recv()).await
+        {
+            assert!(
+                batch.is_empty(),
+                "expected empty batch after session cap reached, got {batch:?}"
+            );
         }
 
         continuous.shutdown().await;
@@ -1390,7 +1382,7 @@ mod tests {
         let bob_tracker = PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
-            bob_ep.clone(),
+            bob_ep,
             bob_sk,
         )
         .await
@@ -1432,14 +1424,10 @@ mod tests {
         // Bob should be re-discovered since the TTL expired.
         // We may get multiple batches — at least one should contain Bob.
         let mut found_bob_again = false;
-        loop {
-            match tokio::time::timeout(Duration::from_millis(10), rx.recv()).await {
-                Ok(Some(batch)) => {
-                    if batch.contains(&bob_ep) {
-                        found_bob_again = true;
-                    }
-                }
-                _ => break,
+        while let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(10), rx.recv()).await
+        {
+            if batch.contains(&bob_ep) {
+                found_bob_again = true;
             }
         }
 
@@ -1467,7 +1455,7 @@ mod tests {
         let bob_tracker = PublicRoomTracker::start(
             Box::new(backend.clone()),
             PublicNetwork::Test,
-            bob_ep.clone(),
+            bob_ep,
             bob_sk,
         )
         .await

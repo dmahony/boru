@@ -189,7 +189,7 @@ async fn main() -> Result<()> {
     println!();
 
     // ── Create tracker ──────────────────────────────────────────────
-    let tracker = PublicRoomTracker::start(Box::new(backend), network, ep.clone(), sk)
+    let tracker = PublicRoomTracker::start(Box::new(backend), network, ep, sk)
         .await
         .std_context("Failed to start PublicRoomTracker")?;
     println!("  └─ Tracker started: {short_id}");

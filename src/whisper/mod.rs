@@ -59,13 +59,7 @@ enum WhisperWireMessage {
         /// The message content.
         text: String,
     },
-    /// A file available for download.
-    FileTransfer {
-        /// File name (basename only).
-        name: String,
-        /// BlobTicket serialized to string.
-        ticket: String,
-    },
+
     /// Signed contact/control-plane message.
     Control { payload: Vec<u8> },
     /// Encrypted offline-mailbox envelope. The transport never decrypts it.
@@ -86,15 +80,7 @@ pub enum WhisperEvent {
         /// The raw message content (text or file transfer).
         content: Bytes,
     },
-    /// A file transfer notification received from a peer.
-    FileTransfer {
-        /// Public key of the sender.
-        from: PublicKey,
-        /// File name.
-        name: String,
-        /// BlobTicket string.
-        ticket: String,
-    },
+
     /// A signed contact/control-plane message. The receiver must verify it.
     Control {
         /// Public key of the sender.
@@ -136,12 +122,7 @@ pub(crate) enum Cmd {
         text: String,
         reply: oneshot::Sender<Result<()>>,
     },
-    SendFile {
-        peer: PublicKey,
-        name: String,
-        ticket: String,
-        reply: oneshot::Sender<Result<()>>,
-    },
+
     SendControl {
         peer: PublicKey,
         payload: Bytes,
@@ -218,25 +199,6 @@ impl WhisperHandle {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(Cmd::SendDm { peer, text, reply })
-            .await
-            .map_err(|_| n0_error::anyerr!("whisper actor dropped"))?;
-        rx.await
-            .map_err(|_| n0_error::anyerr!("whisper reply dropped"))?
-    }
-
-    /// Send a file transfer notification to a peer.
-    ///
-    /// The `ticket` is a serialized [`iroh_blobs::ticket::BlobTicket`] that
-    /// the receiver can use to download the file via iroh-blobs.
-    pub async fn send_file(&self, peer: PublicKey, name: String, ticket: String) -> Result<()> {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Cmd::SendFile {
-                peer,
-                name,
-                ticket,
-                reply,
-            })
             .await
             .map_err(|_| n0_error::anyerr!("whisper actor dropped"))?;
         rx.await
@@ -454,18 +416,7 @@ async fn run_actor(
                         ).await;
                         let _ = reply.send(result);
                     }
-                    Some(Cmd::SendFile { peer, name, ticket, reply }) => {
-                        let result = send_file_message(
-                            &endpoint,
-                            &secret_key,
-                            &peer,
-                            name,
-                            ticket,
-                            &connected,
-                            &msg_tx,
-                        ).await;
-                        let _ = reply.send(result);
-                    }
+
                     Some(Cmd::SendControl { peer, payload, reply }) => {
                         let result = send_control_message(
                             &endpoint, &peer, payload, &connected, &msg_tx,
@@ -528,13 +479,7 @@ async fn run_actor(
                                     content: Bytes::from(text),
                                 });
                             }
-                            Ok(WhisperWireMessage::FileTransfer { name, ticket }) => {
-                                let _ = event_tx.send(WhisperEvent::FileTransfer {
-                                    from,
-                                    name,
-                                    ticket,
-                                });
-                            }
+
                             Ok(WhisperWireMessage::Control { payload }) => {
                                 let _ = event_tx.send(WhisperEvent::Control {
                                     from,
@@ -708,25 +653,6 @@ async fn send_text_message(
         from: secret_key.public().to_string(),
         text,
     };
-
-    write_framed_message(&conn, &wire).await
-}
-
-/// Send a file transfer notification to a peer.
-async fn send_file_message(
-    endpoint: &Endpoint,
-    _secret_key: &SecretKey,
-    peer: &PublicKey,
-    name: String,
-    ticket: String,
-    connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
-    msg_tx: &mpsc::UnboundedSender<ConnectionEvent>,
-) -> Result<()> {
-    let (dummy_tx, _) = mpsc::unbounded_channel();
-
-    let conn = get_or_connect(endpoint, peer, connected, &dummy_tx, msg_tx).await?;
-
-    let wire = WhisperWireMessage::FileTransfer { name, ticket };
 
     write_framed_message(&conn, &wire).await
 }
@@ -964,47 +890,6 @@ mod tests {
             !revoked_message_received,
             "revoked peer must not deliver messages"
         );
-
-        router_a.shutdown().await.unwrap();
-        router_b.shutdown().await.unwrap();
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[n0_tracing_test::traced_test]
-    async fn test_whisper_file_transfer() -> Result<()> {
-        let (router_a, ep_a, _sk_a, handle_a, _events_a) = create_node().await?;
-        let (router_b, ep_b, _sk_b, handle_b, mut events_b) = create_node().await?;
-        handle_a.set_peer_authorized(ep_b.secret_key().public(), true);
-        handle_b.set_peer_authorized(ep_a.secret_key().public(), true);
-        handle_a
-            .connect_to(ep_b.secret_key().public(), ep_b.addr())
-            .await?;
-        sleep(Duration::from_millis(500)).await;
-
-        // A sends a file transfer notification to B.
-        let ticket = "blobticket123".to_string();
-        handle_a
-            .send_file(
-                ep_b.secret_key().public(),
-                "photo.png".to_string(),
-                ticket.clone(),
-            )
-            .await?;
-        sleep(Duration::from_millis(500)).await;
-
-        // B should receive the file transfer event.
-        let b_got_file = loop {
-            match events_b.recv().await {
-                Some(WhisperEvent::FileTransfer {
-                    name, ticket: t, ..
-                }) => break name == "photo.png" && t == "blobticket123",
-                Some(WhisperEvent::Connected { .. }) => continue,
-                Some(_) => continue,
-                None => break false,
-            }
-        };
-        assert!(b_got_file, "B should receive a file transfer notification");
 
         router_a.shutdown().await.unwrap();
         router_b.shutdown().await.unwrap();

@@ -28,18 +28,14 @@
 
 #![cfg(feature = "net")]
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use boru_chat::chat_core::{
     handle_net_event, handle_net_event_for_topic, message_hash, now_secs, ChatCallbacks, ChatEntry,
-    ChatKind, Message, MessageHash, NetEvent, SignedMessage,
+    Message, MessageHash, NetEvent, SignedMessage,
 };
 use boru_chat::chat_history::DeliveryState;
 use boru_chat::friends::{FriendId, FriendsStore};
 use boru_chat::proto::TopicId;
-use boru_chat::user_profile::UserProfile;
 use iroh::{PublicKey, SecretKey};
-use n0_error::Result;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -235,8 +231,8 @@ fn spoof_signed_envelope(attacker_sk: &SecretKey, victim_pk: PublicKey, msg: &Me
         encoded
     } else {
         // Fallback: flip the first 32 bytes (should contain the PK).
-        for i in 0..32 {
-            encoded[i] ^= 0xFF;
+        for byte in encoded.iter_mut().take(32) {
+            *byte ^= 0xFF;
         }
         encoded
     }
@@ -759,7 +755,7 @@ fn blocked_sender_about_me_silently_dropped() {
         "blocked sender AboutMe must be silently dropped"
     );
     assert!(
-        chat.names.get(&blocked_key.public()).is_none(),
+        !chat.names.contains_key(&blocked_key.public()),
         "blocked sender name must not be cached"
     );
 }

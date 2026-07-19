@@ -90,10 +90,11 @@ pub struct FriendStatus {
 ///
 /// This tracks the full lifecycle from not being friends through
 /// request-pending states to established friendship (or blocked).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FriendRelationship {
     /// No friendship relationship exists.
     #[serde(rename = "not_friend")]
+    #[default]
     NotFriend,
     /// We sent a friend request that hasn't been answered yet.
     ///
@@ -125,12 +126,6 @@ pub enum FriendRelationship {
     /// Peer is blocked.
     #[serde(rename = "blocked")]
     Blocked,
-}
-
-impl Default for FriendRelationship {
-    fn default() -> Self {
-        Self::NotFriend
-    }
 }
 
 impl FriendRelationship {

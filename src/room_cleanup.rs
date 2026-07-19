@@ -226,29 +226,26 @@ mod tests {
             outbox.entries().iter().filter(|e| e.topic == other).count(),
             1
         );
-        assert!(friends
+        assert!(!friends
             .get(&FriendId::new("friend-1"))
             .unwrap()
             .rooms
-            .get(&target)
-            .is_none());
+            .contains_key(&target));
         assert!(friends
             .get(&FriendId::new("friend-1"))
             .unwrap()
             .direct_conversation()
             .is_none());
+        assert!(!friends
+            .get(&FriendId::new("friend-2"))
+            .unwrap()
+            .rooms
+            .contains_key(&target));
         assert!(friends
             .get(&FriendId::new("friend-2"))
             .unwrap()
             .rooms
-            .get(&target)
-            .is_none());
-        assert!(friends
-            .get(&FriendId::new("friend-2"))
-            .unwrap()
-            .rooms
-            .get(&other)
-            .is_some());
+            .contains_key(&other));
         assert!(friends
             .get(&FriendId::new("friend-2"))
             .unwrap()
@@ -287,8 +284,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(first.room_history_removed, false);
-        assert_eq!(second.room_history_removed, false);
+        assert!(!first.room_history_removed);
+        assert!(!second.room_history_removed);
         assert_eq!(second.chat_entries_removed, 0);
         assert_eq!(second.outbox_entries_removed, 0);
         assert_eq!(second.friend_records_updated, 0);

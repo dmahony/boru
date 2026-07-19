@@ -674,7 +674,7 @@ mod tests {
         while i + 1 < optimized.len() {
             if optimized[i] == 0xFF {
                 let marker = optimized[i + 1];
-                if marker >= 0xE0 && marker <= 0xEF {
+                if (0xE0..=0xEF).contains(&marker) {
                     app_markers += 1;
                 }
             }

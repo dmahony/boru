@@ -36,13 +36,15 @@ use n0_error::{Result, StdResultExt};
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
+use crate::catalogue_model::{CatalogueView, RemoteSharedFile, SignedFileCatalogue};
+use crate::friends::{FriendRelationship, FriendsStore};
 use crate::mailbox::{seal_for, MailboxAck, MailboxEnvelope, MailboxPublicKey};
 use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 6;
+const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -58,6 +60,9 @@ pub const DB_FILE_NAME: &str = "boru.db";
 
 /// Content hash type — blake3 32-byte output encoded as hex.
 pub type ContentHash = [u8; 32];
+
+/// A matched acknowledgement row: (logical_id, sender_id, recipient_id, envelope_bytes).
+type AckMatchRow = (MessageId, Vec<u8>, Vec<u8>, Vec<u8>);
 
 /// A content-addressed file object stored locally.
 #[derive(Debug, Clone)]
@@ -75,6 +80,8 @@ pub struct FileObject {
     /// The file data itself. For large files this may be a blob-id
     /// that references an iroh-blobs store.
     pub data: Option<Vec<u8>>,
+    /// Optional source path on disk for referenced (non-imported) files.
+    pub source_path: Option<String>,
 }
 
 /// A file object that has been imported from a remote peer and is
@@ -199,6 +206,65 @@ pub struct Download {
     pub retry_count: u32,
     /// Next retry timestamp (ms since UNIX epoch).
     pub next_retry_at_ms: Option<u64>,
+}
+
+// ── Remote catalogue types ─────────────────────────────────────────
+
+/// Metadata about a remote peer's stored catalogue fetched via the
+/// catalogue protocol.
+#[derive(Debug, Clone)]
+pub struct RemoteCatalogueMeta {
+    /// The remote peer's public key (hex-encoded).
+    pub peer: String,
+    /// Catalogue revision at the time of last fetch.
+    pub revision: u64,
+    /// When the catalogue was generated on the remote peer.
+    pub generated_at_ms: u64,
+    /// When we last fetched this catalogue.
+    pub fetched_at_ms: u64,
+}
+
+/// A file entry from a remote peer's catalogue, stored locally for
+/// catalogue reconciliation.
+#[derive(Debug, Clone)]
+pub struct RemoteSharedFileRow {
+    /// Content hash of the file.
+    pub content_hash: String,
+    /// Display filename from the remote catalogue.
+    pub display_filename: String,
+    /// MIME type hint.
+    pub mime_type: String,
+    /// File size in bytes.
+    pub size_bytes: u64,
+}
+
+/// A collection entry from a remote peer's catalogue.
+#[derive(Debug, Clone)]
+pub struct RemoteCollectionRow {
+    /// Collection row id.
+    pub id: i64,
+    /// Collection name.
+    pub name: String,
+}
+
+/// Availability state of a file object — whether the content is
+/// present locally and has been verified against expected metadata.
+#[derive(Debug, Clone)]
+pub struct FileAvailability {
+    /// Content hash of the file.
+    pub content_hash: String,
+    /// The owning profile (hex-encoded public key).
+    pub profile_user_id: String,
+    /// Availability status: "Available", "Changed", "Missing", etc.
+    pub availability: String,
+    /// When the file was last verified (ms since UNIX epoch).
+    pub verified_at_ms: Option<u64>,
+    /// The expected content hash at the time of verification.
+    pub expected_content_hash: String,
+    /// The expected file size in bytes.
+    pub expected_size: u64,
+    /// When the availability record was last updated.
+    pub updated_at_ms: u64,
 }
 
 /// Profile manifest revision tracking for a local user.
@@ -494,6 +560,7 @@ impl Storage {
                 4 => self.migrate_v4(&conn)?,
                 5 => self.migrate_v5(&conn)?,
                 6 => self.migrate_v6(&conn)?,
+                7 => self.migrate_v7(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -779,7 +846,30 @@ impl Storage {
         Ok(())
     }
 
-    /// V6 adds sync dedup tracking to prevent duplicate envelope delivery
+    /// V7 adds file verification tracking and file replacement history.
+    fn migrate_v7(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS file_verification (
+                content_hash TEXT NOT NULL REFERENCES file_objects(content_hash),
+                profile_user_id TEXT NOT NULL,
+                availability TEXT NOT NULL DEFAULT 'Unknown',
+                verified_at_ms INTEGER,
+                expected_content_hash TEXT NOT NULL DEFAULT '',
+                expected_size INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (content_hash, profile_user_id)
+            );
+            CREATE TABLE IF NOT EXISTS file_replacements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                old_content_hash TEXT NOT NULL,
+                new_content_hash TEXT NOT NULL,
+                profile_user_id TEXT NOT NULL,
+                replaced_at_ms INTEGER NOT NULL
+            );",
+        )
+        .std_context("migrate v7 file verification and replacements")?;
+        Ok(())
+    }
     /// during repeat sync requests.  Every message id served via SyncResponse
     /// is recorded in sync_dedup.  The query_pending_outbound_for_recipient
     /// method filters out already-served ids so that subsequent sync requests
@@ -821,6 +911,7 @@ impl Storage {
     }
 
     /// Queue an outgoing DM while injecting a deterministic failure.
+    #[expect(clippy::too_many_arguments)]
     pub fn queue_outgoing_dm_with_fault(
         &self,
         conversation_id: [u8; 32],
@@ -842,6 +933,7 @@ impl Storage {
         )
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn queue_outgoing_dm_inner(
         &self,
         conversation_id: [u8; 32],
@@ -1135,7 +1227,7 @@ impl Storage {
         let mut rows = stmt
             .query([])
             .std_context("query acknowledgement message lookup")?;
-        let mut matched: Option<(MessageId, Vec<u8>, Vec<u8>, Vec<u8>)> = None;
+        let mut matched: Option<AckMatchRow> = None;
         while let Some(row) = rows.next().std_context("next acknowledgement row")? {
             let logical_id: Vec<u8> = row
                 .get(0)
@@ -1274,7 +1366,7 @@ impl Storage {
         let mut has_extra = false;
 
         while let Some(row) = rows.next().std_context("next outbound row")? {
-            let message_id_blob: Vec<u8> = row.get(0).std_context("get message_id")?;
+            let _message_id_blob: Vec<u8> = row.get(0).std_context("get message_id")?;
             let envelope_bytes: Vec<u8> = row.get(1).std_context("get envelope bytes")?;
             let _created_at_ms: i64 = row.get(2).std_context("get created_at_ms")?;
 
@@ -1414,7 +1506,12 @@ impl Storage {
     }
 
     /// Make one pending outbox row due immediately (manual retry).
-    pub fn retry_outbox_now(&self, msg_id: &MessageId, recipient_device_id: iroh::PublicKey, now_ms: u64) -> Result<usize> {
+    pub fn retry_outbox_now(
+        &self,
+        msg_id: &MessageId,
+        recipient_device_id: iroh::PublicKey,
+        now_ms: u64,
+    ) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         let changed = conn.execute(
             "UPDATE outbox SET next_attempt_at_ms = ?1 WHERE msg_id = ?2 AND recipient_device_id = ?3 AND status != ?4 AND status != ?5",
@@ -1424,7 +1521,11 @@ impl Storage {
     }
 
     /// Make all non-terminal messages for a newly discovered peer due now.
-    pub fn wake_outbox_for_peer(&self, recipient_device_id: iroh::PublicKey, now_ms: u64) -> Result<usize> {
+    pub fn wake_outbox_for_peer(
+        &self,
+        recipient_device_id: iroh::PublicKey,
+        now_ms: u64,
+    ) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         let changed = conn.execute(
             "UPDATE outbox SET next_attempt_at_ms = ?1 WHERE recipient_device_id = ?2 AND status != ?3 AND status != ?4",
@@ -1523,7 +1624,7 @@ impl Storage {
                  FROM outbox
                  WHERE status != ?1 AND status != ?2 AND next_attempt_at_ms <= ?3
                    AND (locked_until_ms IS NULL OR locked_until_ms <= ?3)
-                 ORDER BY next_attempt_at_ms, rowid
+                 ORDER BY rowid
                  LIMIT ?4",
             )
             .std_context("prepare fetch_due_outbox")?;
@@ -1565,7 +1666,7 @@ impl Storage {
                 "SELECT msg_id, recipient_device_id FROM outbox
                  WHERE status != ?1 AND status != ?2 AND next_attempt_at_ms <= ?3
                    AND (locked_until_ms IS NULL OR locked_until_ms <= ?3)
-                 ORDER BY next_attempt_at_ms, rowid LIMIT ?4",
+                 ORDER BY rowid LIMIT ?4",
                 params![
                     DeliveryStatus::Acked as u8,
                     DeliveryStatus::Expired as u8,
@@ -1640,7 +1741,7 @@ impl Storage {
              WHERE recipient_device_id = ?1 AND status != ?2 AND status != ?3
                AND next_attempt_at_ms <= ?4
                AND (locked_until_ms IS NULL OR locked_until_ms <= ?4)
-             ORDER BY next_attempt_at_ms, rowid LIMIT 1",
+             ORDER BY rowid LIMIT 1",
                 params![
                     recipient,
                     DeliveryStatus::Acked as u8,
@@ -2027,7 +2128,8 @@ impl Storage {
                 mime_type: row.get(2).std_context("get mime")?,
                 filename: row.get(3).std_context("get filename")?,
                 created_at_ms: row.get::<_, i64>(4).std_context("get created_at")? as u64,
-                data: row.get::<_, Option<Vec<u8>>>(5).std_context("get data")?,
+                data: row.get(5).std_context("get data")?,
+                source_path: None,
             }))
         } else {
             Ok(None)
@@ -2251,6 +2353,123 @@ impl Storage {
         } else {
             Ok(None)
         }
+    }
+
+    /// Return the requester-filtered view used by the remote catalogue.
+    pub fn catalogue_entries_for_peer(
+        &self,
+        profile_user_id: &str,
+        requester: &PublicKey,
+        friends: &FriendsStore,
+    ) -> Result<CatalogueView> {
+        let requester_id = crate::friends::FriendId::from_public_key(*requester);
+        let is_friend = friends
+            .get(&requester_id)
+            .is_some_and(|r| r.relationship == FriendRelationship::Friends);
+        let permissions = self.list_permissions_for_grantee(requester_id.as_str())?;
+        let mut used_ids = std::collections::HashSet::new();
+        let mut files = Vec::new();
+        for row in self.list_shared_files(profile_user_id, true)? {
+            if !self.file_object_exists(&row.content_hash)? {
+                continue;
+            }
+            let mut denied = false;
+            let mut granted = false;
+            for permission in &permissions {
+                if permission.grantor_user_id == profile_user_id
+                    && permission.content_hash == row.content_hash
+                {
+                    denied |= permission.permission == "deny";
+                    granted |= permission.permission == "read";
+                }
+            }
+            if denied || (!granted && !is_friend) {
+                continue;
+            }
+            let object = self
+                .get_file_object(&row.content_hash)?
+                .unwrap_or(FileObject {
+                    content_hash: row.content_hash.clone(),
+                    size: 0,
+                    mime_type: String::new(),
+                    filename: row.display_filename.clone(),
+                    created_at_ms: row.created_at_ms,
+                    data: None,
+                    source_path: None,
+                });
+            let shared_file_id = if used_ids.insert(row.metadata_id.clone()) {
+                row.metadata_id
+            } else {
+                row.content_hash.clone()
+            };
+            files.push(RemoteSharedFile {
+                shared_file_id,
+                display_name: row.display_filename,
+                description: row.description,
+                mime_type: object.mime_type,
+                size_bytes: object.size,
+                content_hash: row.content_hash,
+                version_number: 1,
+                updated_at_ms: row.updated_at_ms,
+                collection_ids: Vec::new(),
+            });
+        }
+        Ok(CatalogueView {
+            collections: Vec::new(),
+            files,
+        })
+    }
+
+    /// Look up a shared file by its stable metadata identifier.
+    pub fn get_shared_file_by_metadata_id(
+        &self,
+        profile_user_id: &str,
+        metadata_id: &str,
+    ) -> Result<Option<SharedFileRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT content_hash, profile_user_id, metadata_id, display_filename,
+                    description, offered, created_at_ms, updated_at_ms
+             FROM shared_files WHERE profile_user_id = ?1 AND metadata_id = ?2",
+            )
+            .std_context("prepare get_shared_file_by_metadata_id")?;
+        let mut rows = stmt
+            .query(params![profile_user_id, metadata_id])
+            .std_context("query shared_file_by_metadata_id")?;
+        if let Some(row) = rows.next().std_context("next row")? {
+            Ok(Some(SharedFileRow {
+                content_hash: row.get(0).std_context("get hash")?,
+                profile_user_id: row.get(1).std_context("get profile")?,
+                metadata_id: row.get(2).std_context("get metadata_id")?,
+                display_filename: row.get(3).std_context("get filename")?,
+                description: row.get(4).std_context("get desc")?,
+                offered: row.get::<_, i64>(5).std_context("get offered")? != 0,
+                created_at_ms: row.get::<_, i64>(6).std_context("get created")? as u64,
+                updated_at_ms: row.get::<_, i64>(7).std_context("get updated")? as u64,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Count active read grants for a file owner.
+    pub fn count_read_grants_for_file(
+        &self,
+        content_hash: &str,
+        grantor_user_id: &str,
+    ) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM shared_file_permissions
+             WHERE content_hash = ?1 AND grantor_user_id = ?2 AND permission = 'read'
+               AND (expires_at_ms IS NULL OR expires_at_ms > ?3)",
+                params![content_hash, grantor_user_id, now_ms() as i64],
+                |row| row.get(0),
+            )
+            .std_context("count read grants")?;
+        Ok(count as u64)
     }
 
     // ── File collections (v2) ─────────────────────────────────────────
@@ -2526,7 +2745,7 @@ impl Storage {
                 .std_context("check download state after progress update")?;
             match state.as_deref() {
                 Some("paused") => {
-                    return Err(anyhow!("download is paused; active work must be cancelled").into())
+                    return Err(anyhow!("download is paused; active work must be cancelled").into());
                 }
                 Some(_) => return Err(anyhow!("download progress update affected no rows").into()),
                 None => return Err(anyhow!("download not found").into()),
@@ -2804,6 +3023,18 @@ impl Storage {
         Ok(results)
     }
 
+    /// Cancel a non-terminal download — sets state to 'cancelled'.
+    pub fn cancel_download(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        conn.execute(
+            "UPDATE downloads SET state = 'cancelled', updated_at_ms = ?1 WHERE id = ?2",
+            params![now, id],
+        )
+        .std_context("cancel download")?;
+        Ok(())
+    }
+
     // ── Profile manifest state (v2) ───────────────────────────────────
 
     /// Update the manifest revision for a profile.
@@ -2997,6 +3228,393 @@ impl Storage {
         }
 
         Ok(())
+    }
+
+    // ── Remote catalogue storage ────────────────────────────────────
+
+    /// Store a remote peer's catalogue locally.
+    ///
+    /// Inserts metadata (revision, generation time), file entries, and
+    /// collection entries so they can be queried later via the
+    /// `get_remote_*` methods.
+    pub fn replace_remote_catalogue(&self, catalogue: &SignedFileCatalogue) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let peer = catalogue.owner_id.to_string();
+        let now = now_ms() as i64;
+
+        // Store catalogue meta in profile_manifest_state (reused as
+        // remote-catalogue meta store for the stub implementation).
+        conn.execute(
+            "INSERT OR REPLACE INTO profile_manifest_state
+                (user_id, revision, manifest_hash, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                peer,
+                catalogue.revision as i64,
+                catalogue.generated_at_ms.to_string(),
+                now,
+            ],
+        )
+        .std_context("store remote catalogue meta")?;
+
+        // A catalogue is a complete snapshot. Remove entries from the
+        // previous revision before inserting the current one so deleted
+        // offers do not remain visible in the remote cache.
+        conn.execute(
+            "DELETE FROM shared_files WHERE profile_user_id = ?1",
+            params![peer],
+        )
+        .std_context("clear remote catalogue files")?;
+        conn.execute(
+            "DELETE FROM file_collections WHERE profile_user_id = ?1",
+            params![peer],
+        )
+        .std_context("clear remote catalogue collections")?;
+
+        // Store each file from the catalogue.
+        for file in &catalogue.files {
+            // Satisfy FK: ensure a file_objects row exists.
+            conn.execute(
+                "INSERT OR IGNORE INTO file_objects
+                    (content_hash, size, mime_type, filename, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    &file.content_hash,
+                    file.size_bytes as i64,
+                    &file.mime_type,
+                    &file.display_name,
+                    now,
+                ],
+            )
+            .std_context("store remote catalogue file object")?;
+
+            // Upsert into shared_files keyed by remote peer.
+            conn.execute(
+                "INSERT OR REPLACE INTO shared_files
+                    (content_hash, profile_user_id, metadata_id, display_filename,
+                     description, offered, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
+                params![
+                    &file.content_hash,
+                    peer,
+                    &file.shared_file_id,
+                    &file.display_name,
+                    &file.description,
+                    now,
+                ],
+            )
+            .std_context("store remote catalogue shared file")?;
+        }
+
+        // Store each collection from the catalogue.
+        for collection in &catalogue.collections {
+            conn.execute(
+                "INSERT OR REPLACE INTO file_collections
+                    (profile_user_id, name, description, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![peer, &collection.name, &collection.description, now],
+            )
+            .std_context("store remote catalogue collection")?;
+        }
+
+        Ok(())
+    }
+
+    /// Read back catalogue metadata for a remote peer.
+    pub fn get_remote_catalogue_meta(
+        &self,
+        peer: &iroh::PublicKey,
+    ) -> Result<Option<RemoteCatalogueMeta>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT user_id, revision, manifest_hash, created_at_ms
+             FROM profile_manifest_state WHERE user_id = ?1",
+            params![peer.to_string()],
+            |row| {
+                Ok(RemoteCatalogueMeta {
+                    peer: row.get(0)?,
+                    revision: row.get::<_, i64>(1)? as u64,
+                    generated_at_ms: row.get::<_, String>(2)?.parse().unwrap_or(0),
+                    fetched_at_ms: row.get::<_, i64>(3)? as u64,
+                })
+            },
+        )
+        .optional()
+        .std_context("get remote catalogue meta")
+    }
+
+    /// Read back shared files stored from a remote peer's catalogue.
+    pub fn get_remote_shared_files(
+        &self,
+        peer: &iroh::PublicKey,
+    ) -> Result<Vec<RemoteSharedFileRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT sf.content_hash, sf.display_filename, fo.mime_type, fo.size
+                 FROM shared_files sf
+                 JOIN file_objects fo ON fo.content_hash = sf.content_hash
+                 WHERE sf.profile_user_id = ?1
+                 ORDER BY sf.updated_at_ms DESC",
+            )
+            .std_context("prepare get_remote_shared_files")?;
+        let mut rows = stmt
+            .query(params![peer.to_string()])
+            .std_context("query remote shared files")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next row")? {
+            results.push(RemoteSharedFileRow {
+                content_hash: row.get(0).std_context("get content_hash")?,
+                display_filename: row.get(1).std_context("get display_filename")?,
+                mime_type: row.get(2).std_context("get mime_type")?,
+                size_bytes: row.get::<_, i64>(3).std_context("get size_bytes")? as u64,
+            });
+        }
+        Ok(results)
+    }
+
+    /// Read back collections stored from a remote peer's catalogue.
+    pub fn get_remote_collections(
+        &self,
+        peer: &iroh::PublicKey,
+    ) -> Result<Vec<RemoteCollectionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name
+                 FROM file_collections
+                 WHERE profile_user_id = ?1
+                 ORDER BY name",
+            )
+            .std_context("prepare get_remote_collections")?;
+        let mut rows = stmt
+            .query(params![peer.to_string()])
+            .std_context("query remote collections")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next row")? {
+            results.push(RemoteCollectionRow {
+                id: row.get(0).std_context("get id")?,
+                name: row.get(1).std_context("get name")?,
+            });
+        }
+        Ok(results)
+    }
+
+    // ── Shared-file mutations (v2) ───────────────────────────────────
+
+    /// Update metadata fields of a shared file entry.
+    ///
+    /// Args: content_hash, profile_user_id, display_filename, description (optional), metadata_id.
+    pub fn update_shared_file_metadata(
+        &self,
+        content_hash: &str,
+        profile_user_id: &str,
+        display_filename: &str,
+        description: Option<&str>,
+        metadata_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        conn.execute(
+            "UPDATE shared_files SET
+                display_filename = ?1,
+                description = ?2,
+                metadata_id = ?3,
+                updated_at_ms = ?4
+             WHERE content_hash = ?5 AND profile_user_id = ?6",
+            params![
+                display_filename,
+                description,
+                metadata_id,
+                now,
+                content_hash,
+                profile_user_id
+            ],
+        )
+        .std_context("update shared file metadata")?;
+        Ok(())
+    }
+
+    /// Set the offered flag on a shared file entry.
+    pub fn set_shared_file_offered(
+        &self,
+        content_hash: &str,
+        profile_user_id: &str,
+        offered: bool,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        conn.execute(
+            "UPDATE shared_files SET offered = ?1, updated_at_ms = ?2
+             WHERE content_hash = ?3 AND profile_user_id = ?4",
+            params![offered as i64, now, content_hash, profile_user_id],
+        )
+        .std_context("set shared file offered")?;
+        Ok(())
+    }
+
+    /// Delete a shared file entry.
+    pub fn delete_shared_file(&self, content_hash: &str, profile_user_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn
+            .execute(
+                "DELETE FROM shared_files
+                 WHERE content_hash = ?1 AND profile_user_id = ?2",
+                params![content_hash, profile_user_id],
+            )
+            .std_context("delete shared file")?;
+        Ok(n > 0)
+    }
+
+    // ── File availability (v7) ────────────────────────────────────
+
+    /// Record file verification/availability state for a specific profile.
+    ///
+    /// Args: content_hash, profile_user_id, availability_status, verified_at_ms,
+    ///       expected_content_hash, expected_size.
+    pub fn set_file_availability(
+        &self,
+        content_hash: &str,
+        profile_user_id: &str,
+        availability: &str,
+        verified_at_ms: Option<u64>,
+        expected_content_hash: &str,
+        expected_size: u64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        conn.execute(
+            "INSERT OR REPLACE INTO file_verification
+                (content_hash, profile_user_id, availability, verified_at_ms,
+                 expected_content_hash, expected_size, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                content_hash,
+                profile_user_id,
+                availability,
+                verified_at_ms.map(|v| v as i64),
+                expected_content_hash,
+                expected_size as i64,
+                now,
+            ],
+        )
+        .std_context("set file availability")?;
+        Ok(())
+    }
+
+    /// Get the current file verification/availability state for a profile.
+    pub fn get_file_availability(
+        &self,
+        content_hash: &str,
+        profile_user_id: &str,
+    ) -> Result<Option<FileAvailability>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT content_hash, profile_user_id, availability, verified_at_ms,
+                    expected_content_hash, expected_size, updated_at_ms
+             FROM file_verification
+             WHERE content_hash = ?1 AND profile_user_id = ?2",
+            params![content_hash, profile_user_id],
+            |row| {
+                Ok(FileAvailability {
+                    content_hash: row.get(0)?,
+                    profile_user_id: row.get(1)?,
+                    availability: row.get(2)?,
+                    verified_at_ms: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                    expected_content_hash: row.get(4)?,
+                    expected_size: row.get::<_, i64>(5)? as u64,
+                    updated_at_ms: row.get::<_, i64>(6)? as u64,
+                })
+            },
+        )
+        .optional()
+        .std_context("get file availability")
+    }
+
+    /// Record that a file was replaced with a new hash.
+    pub fn record_file_replacement(
+        &self,
+        old_content_hash: &str,
+        new_content_hash: &str,
+        profile_user_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        conn.execute(
+            "INSERT INTO file_replacements
+                (old_content_hash, new_content_hash, profile_user_id, replaced_at_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![old_content_hash, new_content_hash, profile_user_id, now],
+        )
+        .std_context("record file replacement")?;
+        Ok(())
+    }
+
+    /// Increment the revision counter for a shared file.
+    pub fn increment_shared_file_revision(
+        &self,
+        _content_hash: &str,
+        _profile_user_id: &str,
+    ) -> Result<()> {
+        // Currently a no-op — revision tracking for individual shared files
+        // is not yet implemented in the schema. The per-file version_number
+        // is primarily a wire-format concept in RemoteSharedFile.
+        // This stub satisfies the API contract for file_library_ops.
+        Ok(())
+    }
+
+    /// Rename a file collection.
+    pub fn rename_collection(&self, collection_id: i64, new_name: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        let n = conn
+            .execute(
+                "UPDATE file_collections SET name = ?1, updated_at_ms = ?2 WHERE id = ?3",
+                params![new_name, now, collection_id],
+            )
+            .std_context("rename collection")?;
+        Ok(n > 0)
+    }
+
+    /// Delete a file collection (cascade removes items via ON DELETE CASCADE).
+    pub fn delete_collection(&self, collection_id: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn
+            .execute(
+                "DELETE FROM file_collections WHERE id = ?1",
+                params![collection_id],
+            )
+            .std_context("delete collection")?;
+        Ok(n > 0)
+    }
+
+    /// Check whether any foreign-key references exist for a file object.
+    ///
+    /// Returns `true` if at least one other table (message_attachments,
+    /// shared_files, file_collection_items, shared_file_permissions, or
+    /// downloads) references the given `content_hash`.
+    pub fn file_object_has_references(&self, content_hash: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let has: bool = conn
+            .query_row(
+                "SELECT 1 FROM (
+                    SELECT 1 FROM message_attachments WHERE content_hash = ?1
+                    UNION ALL
+                    SELECT 1 FROM shared_files WHERE content_hash = ?1
+                    UNION ALL
+                    SELECT 1 FROM file_collection_items WHERE content_hash = ?1
+                    UNION ALL
+                    SELECT 1 FROM shared_file_permissions WHERE content_hash = ?1
+                    UNION ALL
+                    SELECT 1 FROM downloads WHERE content_hash = ?1
+                ) LIMIT 1",
+                params![content_hash],
+                |_| Ok(true),
+            )
+            .optional()
+            .std_context("check file object references")?
+            .unwrap_or(false);
+        Ok(has)
     }
 
     /// Return the raw [`rusqlite::Connection`] (locked) for advanced use.
@@ -3906,21 +4524,30 @@ mod tests {
             let _s = Storage::open(dir.path()).unwrap();
         }
 
-        // Insert a fake partial state: remove some v2 tables, keep v1.
+        // Insert a fake partial state: remove v2–v7 tables, keep v1.
         {
             let db_path = dir.path().join("boru.db");
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
                 "PRAGMA foreign_keys = OFF;
-                 DROP TABLE IF EXISTS file_objects;
+                 DROP TABLE IF EXISTS file_verification;
+                 DROP TABLE IF EXISTS file_replacements;
+                 DROP TABLE IF EXISTS shared_file_permissions;
+                 DROP TABLE IF EXISTS file_collection_items;
+                 DROP TABLE IF EXISTS file_collections;
                  DROP TABLE IF EXISTS message_attachments;
                  DROP TABLE IF EXISTS shared_files;
-                 DROP TABLE IF EXISTS file_collections;
-                 DROP TABLE IF EXISTS file_collection_items;
-                 DROP TABLE IF EXISTS shared_file_permissions;
                  DROP TABLE IF EXISTS downloads;
                  DROP TABLE IF EXISTS profile_manifest_state;
-                 DELETE FROM schema_version WHERE version = 2;",
+                 DROP TABLE IF EXISTS file_objects;
+                 DROP TABLE IF EXISTS dm_outbox;
+                 DROP TABLE IF EXISTS dm_messages;
+                 DROP TABLE IF EXISTS dm_sender_sequences;
+                 DROP TABLE IF EXISTS dm_conversations;
+                 DROP TABLE IF EXISTS dm_acknowledgements;
+                 DROP TABLE IF EXISTS sync_dedup;
+                 DROP TABLE IF EXISTS outbox;
+                 DELETE FROM schema_version;",
             )
             .unwrap();
         }
@@ -4174,7 +4801,7 @@ mod tests {
 
         // "dead-worker" claims all 3 with a short lease (10ms)
         for i in 0..3 {
-            let id = [30 + i as u8; 32];
+            let _id = [30 + i as u8; 32];
             storage
                 .claim_due_outbox(100, "dead-worker", 10, 10)
                 .unwrap();

@@ -744,7 +744,7 @@ fn outbox_message_count_after_mixed_operations() {
     let dir = temp_dir("mixed-outbox");
     let recipient = random_pk();
 
-    let msg_ids: Vec<MessageId> = (0..10).map(|i| make_msg_id(i)).collect();
+    let msg_ids: Vec<MessageId> = (0..10).map(make_msg_id).collect();
 
     {
         let storage = Storage::open(&dir).expect("open");
@@ -756,16 +756,16 @@ fn outbox_message_count_after_mixed_operations() {
                 .expect("enqueue");
         }
 
-        // Ack messages 0, 1, 2.
-        for i in 0..3 {
-            storage.mark_acked(&msg_ids[i], recipient).expect("ack");
+        // Mark acked for messages 0, 1, 2.
+        for msg_id in msg_ids[..3].iter() {
+            storage.mark_acked(msg_id, recipient).expect("ack");
         }
 
         // Record attempt for messages 3, 4 (set to Sent status, far future retry).
         let far_future = now_ms_raw() + 86_400_000;
-        for i in 3..5 {
+        for msg_id in msg_ids[3..5].iter() {
             storage
-                .record_attempt(&msg_ids[i], recipient, far_future, Some("sent"))
+                .record_attempt(msg_id, recipient, far_future, Some("sent"))
                 .expect("attempt");
         }
     }

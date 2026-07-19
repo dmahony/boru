@@ -27,7 +27,9 @@ use boru_chat::{
     catalogue_client::{fetch_remote_catalogue, RemoteCatalogueFetchError},
     catalogue_handler::CatalogueHandler,
     catalogue_model::RemoteSharedFile,
-    catalogue_protocol::{CatalogRequest, CatalogResponse},
+    catalogue_protocol::{
+        CatalogRequest, CatalogResponse, CatalogWireRequest, CatalogWireResponse,
+    },
     friends::{FriendId, FriendRecord, FriendRelationship, FriendsStore},
     protocol_version::{
         read_frame, write_frame, CATALOGUE_ALPN, CATALOGUE_RETRIEVAL_V1,
@@ -97,16 +99,20 @@ fn remove_offer(storage: &Storage, profile_id: &str, hash: &str) {
 /// Mark a peer as a friend in the store.
 fn make_friend(friends: &mut FriendsStore, peer_pk: &PublicKey) {
     let fid = FriendId::from_public_key(*peer_pk);
-    let mut record = FriendRecord::default();
-    record.relationship = FriendRelationship::Friends;
+    let record = FriendRecord {
+        relationship: FriendRelationship::Friends,
+        ..Default::default()
+    };
     friends.upsert(fid, record);
 }
 
 /// Mark a peer as blocked in the store.
 fn make_blocked(friends: &mut FriendsStore, peer_pk: &PublicKey) {
     let fid = FriendId::from_public_key(*peer_pk);
-    let mut record = FriendRecord::default();
-    record.relationship = FriendRelationship::Blocked;
+    let record = FriendRecord {
+        relationship: FriendRelationship::Blocked,
+        ..Default::default()
+    };
     friends.upsert(fid, record);
 }
 
@@ -188,8 +194,9 @@ async fn fetch_catalogue_page(
         cursor,
         page_size,
     };
+    let wire_request = CatalogWireRequest::new(request);
     let payload =
-        postcard::to_stdvec(&request).map_err(|e| n0_error::anyerr!("encode request: {e}"))?;
+        postcard::to_stdvec(&wire_request).map_err(|e| n0_error::anyerr!("encode request: {e}"))?;
 
     write_frame(&mut send, CATALOGUE_RETRIEVAL_V1, &payload)
         .await
@@ -197,14 +204,20 @@ async fn fetch_catalogue_page(
     send.finish()
         .map_err(|e| n0_error::anyerr!("finish send: {e}"))?;
 
-    let (_version, resp_bytes) = read_frame(&mut recv, SUPPORTED_CATALOGUE_RETRIEVAL, "catalogue")
-        .await
-        .map_err(|e| n0_error::anyerr!("read frame: {e}"))?;
+    let Some((_version, resp_bytes)) =
+        read_frame(&mut recv, SUPPORTED_CATALOGUE_RETRIEVAL, "catalogue")
+            .await
+            .map_err(|e| n0_error::anyerr!("read frame: {e}"))?
+    else {
+        return Err(n0_error::anyerr!("server closed without a response"));
+    };
 
-    let response: CatalogResponse =
+    let wire_response: CatalogWireResponse =
         postcard::from_bytes(&resp_bytes).map_err(|e| n0_error::anyerr!("decode response: {e}"))?;
-
-    Ok(response)
+    wire_response
+        .validate_version()
+        .map_err(|e| n0_error::anyerr!("unsupported response version: {e}"))?;
+    Ok(wire_response.inner)
 }
 
 // -- Test 1: Contacts-only file visibility --------------------------------
@@ -781,8 +794,7 @@ async fn offline_stale_cache_display() {
     // It may be ConnectionFailed or Timeout depending on timing.
     let is_conn_err = matches!(
         &err,
-        RemoteCatalogueFetchError::ConnectionFailed { .. }
-            | RemoteCatalogueFetchError::Timeout { .. }
+        RemoteCatalogueFetchError::ConnectionFailed { .. } | RemoteCatalogueFetchError::Timeout
     );
     assert!(
         is_conn_err,
