@@ -26,3 +26,8 @@ iced-chat = "run --features gui --example iced_chat --"
 #
 # If you really need standalone clippy on a single file, pass --edition:
 #   clippy-driver --edition 2021 src/foo.rs
+
+# ── Cross-compilation ──────────────────────────────────────────────────
+# aarch64-unknown-linux-gnu (dragon — Radxa Dragon Q6A, Ubuntu arm64)
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
