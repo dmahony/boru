@@ -24,6 +24,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use boru_chat::backfill::{BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN};
+use boru_chat::catalogue_handler::CatalogueHandler;
 use boru_chat::chat_core::friend_ping::{
     FriendPingManager, PingHandler, DEFAULT_CONNECT_TIMEOUT, DEFAULT_PING_INTERVAL,
     FRIEND_PING_ALPN,
@@ -34,8 +35,10 @@ use boru_chat::inbox::{inbox_message_id, InboxHandle, InboxMessageId, InboxProto
 use boru_chat::mailbox::{MailboxStore, MAX_SYNC_ENVELOPES};
 use boru_chat::net::{Gossip, GOSSIP_ALPN};
 use boru_chat::proto::TopicId;
+use boru_chat::protocol_version::CATALOGUE_ALPN;
 use boru_chat::room::RoomStore;
 use boru_chat::room_history::RoomHistoryStore;
+use boru_chat::storage::Storage;
 use clap::Parser;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, RelayMode,
@@ -49,8 +52,8 @@ use iroh_mainline_address_lookup::DhtAddressLookup;
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_error::{bail_any, Result, StdResultExt};
 
-/// Default relay server — user's VPS, secured with Cloudflare Full SSL.
-const VPS_RELAY_URL: &str = "https://boru.chat";
+/// Default relay server — user's VPS, relay TLS on 8443 (nginx TLS on 443).
+const VPS_RELAY_URL: &str = "https://boru.chat:8443";
 use tokio::sync::{watch, Mutex};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -425,6 +428,10 @@ fn main() -> Result<()> {
     };
     info!("> relay: {}", fmt_relay_mode(&relay_mode));
 
+    // ── Persistent download storage (shared with CatalogueHandler) ─────
+    let storage = Arc::new(Storage::open(&data_dir).expect("storage"));
+    info!("download-storage: opened at {}", data_dir.display());
+
     // ── Build the endpoint, gossip, and router (no topic subscription yet) ──
 
     let (
@@ -576,6 +583,20 @@ fn main() -> Result<()> {
         let inbox_protocol = InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
         let inbox_events_rx = Arc::new(Mutex::new(inbox_events_rx_tmp));
 
+        // ── Friends list (needed before router for CatalogueHandler) ───
+        let friends = FriendsStore::load_or_default(&data_dir);
+        if !friends.is_empty() {
+            info!("> loaded {} friend(s) from disk", friends.len());
+        }
+
+        // ── Catalogue handler (serves file catalogues to peers) ────────
+        let catalogue_handler = CatalogueHandler::new(
+            storage.clone(),
+            secret_key.clone(),
+            local_public.to_string(),
+            friends.clone(),
+        );
+
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol.clone())
@@ -583,6 +604,7 @@ fn main() -> Result<()> {
             .accept(BACKFILL_ALPN, backfill_handler)
             .accept(WHISPER_ALPN, whisper_handler)
             .accept(INBOX_ALPN, inbox_protocol)
+            .accept(CATALOGUE_ALPN, catalogue_handler)
             .spawn();
 
         // Subscribe to the lobby topic so the gossip mesh is ready for
@@ -669,12 +691,6 @@ fn main() -> Result<()> {
         let backfill_handle = BackfillHandle::spawn(endpoint.clone());
 
         let whisper_events_rx = Arc::new(Mutex::new(whisper_events_rx_tmp));
-
-        // Load or create the persistent friends list
-        let friends = FriendsStore::load_or_default(&data_dir);
-        if !friends.is_empty() {
-            info!("> loaded {} friend(s) from disk", friends.len());
-        }
 
         // Create the network event channel (shared across rooms, tagged by topic)
         let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -891,6 +907,7 @@ fn main() -> Result<()> {
             Some(Arc::new(tokio::sync::Mutex::new(gui_action_rx))),
             gui_state_tx,
             gui_action_history,
+            Some((*storage).clone()),
         ),
         initial_topic,
     )));
