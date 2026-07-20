@@ -26,9 +26,12 @@
 //! | `boru_get_gui_snapshot` | Snapshot of current GUI application state |
 //! | `boru_gui_wait_for_state` | Wait for a GUI state condition using notifications |
 //! | `boru_gui_set_composer` | Set composer (message input) text without submitting |
+//! | `boru_gui_clear_composer` | Clear the composer (message input) text |
+//! | `boru_gui_focus_composer` | Focus the composer (message input) |
 //! | `boru_gui_submit_composer` | Submit the current composer text through the normal GUI send path |
 //! | `boru_gui_open_conversation` | Open a direct conversation with a peer (requires `--enable-gui-test-actions`) |
 //! | `boru_gui_toggle_dark_mode` | Toggle dark mode on/off (requires `--enable-gui-test-actions`) |
+//! | `boru_gui_close_dialog` | Close the currently open dialog or overlay (requires `--enable-gui-test-actions`) |
 //! | `boru_run_gui_message_test` | Verify the local GUI message pipeline without claiming remote delivery (requires `--enable-gui-test-actions`) |
 //!
 //! # Security
