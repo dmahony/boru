@@ -138,12 +138,21 @@ fn test_room_store_peers_roundtrip() -> Result<()> {
         "topic": topic_bytes
     });
     std::fs::write(&v1_path, v1_json.to_string()).map_err(|e| n0_error::anyerr!("{e}"))?;
-    let migrated = RoomStore::load(dir.path())?
-        .expect("v1 format should be migrated to current schema");
-    assert_eq!(migrated.schema_version, 3, "v1 file should be migrated to v3");
+    let migrated =
+        RoomStore::load(dir.path())?.expect("v1 format should be migrated to current schema");
+    assert_eq!(
+        migrated.schema_version, 3,
+        "v1 file should be migrated to v3"
+    );
     assert_eq!(migrated.topic, topic, "topic should survive v1 migration");
-    assert!(migrated.peers.is_empty(), "v1 file has no peers, should default to empty");
-    assert!(migrated.discovery_secret.is_none(), "v1 file has no discovery_secret");
+    assert!(
+        migrated.peers.is_empty(),
+        "v1 file has no peers, should default to empty"
+    );
+    assert!(
+        migrated.discovery_secret.is_none(),
+        "v1 file has no discovery_secret"
+    );
 
     Ok(())
 }

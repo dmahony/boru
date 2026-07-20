@@ -107,22 +107,17 @@ All tests confirmed present:
 
 ## 4. Cleanup / Migration Findings
 
-### 4.1 Diagnostics events defined but never emitted
-Three `DiagnosticEventKind` variants are defined but **never recorded** anywhere:
+### 4.1 Diagnostics events — wired up (t_0aeb59d0)
+Three `DiagnosticEventKind` variants are now **recorded** from the live code paths:
 
-| Variant | Defined at | Emitted? |
-|---------|-----------|----------|
-| `CatalogueNoticeReceived` | `diagnostics.rs:306` | **NO** |
-| `CatalogueRevisionInstalled` | `diagnostics.rs:314` | **NO** |
-| `CatalogueCachedDataUsed` | `diagnostics.rs:327` | **NO** |
+| Variant | Defined at | Emitted? | Emitter |
+|---------|-----------|----------|---------|
+| `CatalogueNoticeReceived` | `diagnostics.rs:306` | **YES** | `catalogue_client.rs:503` — when `handle_catalogue_notice()` is called with a peer's advert |
+| `CatalogueRevisionInstalled` | `diagnostics.rs:314` | **YES** | `catalogue_client.rs:471` — after `process_and_store_remote_catalogue()` persists the catalogue |
+| `CatalogueCachedDataUsed` | `diagnostics.rs:327` | **YES** | `catalogue_handler.rs:914` — when serving a cached/NotModified catalogue |
 
-These are migration/compatibility code that should be kept — they are part of the event contract and will be wired up when the catalogue lifecycle is integrated into the main app flow (chat_core / iced_chat). **Do not remove them.**
-
-### 4.2 Duplicate ALPN constant
-`src/net.rs:56` defines `FILE_CATALOG_ALPN` which is a duplicate of `src/protocol_version.rs:22`'s `CATALOGUE_ALPN`. Both have the same value (`b"/boru-file-catalog/1"`). The `protocol_version.rs` version is used by the actual handler and client code. The `net.rs` version is only referenced in the ALPN-conflict test.
-
-- **Safe to remove:** `net.rs`'s `FILE_CATALOG_ALPN` constant — the test at `net.rs:1396` can reference `crate::protocol_version::CATALOGUE_ALPN` instead.
-- **OR** keep it as a convenience re-export for the router-registration point (where it will be needed when the handler is wired in).
+### 4.2 Duplicate ALPN constant — REMOVED (t_514968de)
+`net.rs`'s `FILE_CATALOG_ALPN` constant has been removed. All references now point to `protocol_version::CATALOGUE_ALPN`. The ALPN-conflict test at `net.rs` references `crate::protocol_version::CATALOGUE_ALPN`.
 
 ### 4.3 CatalogueHandler not yet wired into main app router
 The handler exists and works (proven by tests), but the main application in `net.rs` does not register it. This is migration-forward code, not dead code. **Do not remove.**

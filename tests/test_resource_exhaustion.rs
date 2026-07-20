@@ -446,9 +446,11 @@ fn malformed_requests_block_peer_after_threshold() {
 
 #[test]
 fn blocked_peer_can_recover_after_window_expiry() {
+    // Use a 200ms window so that three consecutive record_invalid calls
+    // don't race with window expiry under test load.
     let limiter = PeerCatalogueAbuseLimiter::new(&CatalogueRateConfig {
         max_invalid_attempts_per_peer: 2,
-        rate_limit_window: Duration::from_millis(30),
+        rate_limit_window: Duration::from_millis(200),
         ..Default::default()
     });
 
@@ -457,7 +459,8 @@ fn blocked_peer_can_recover_after_window_expiry() {
     assert!(limiter.record_invalid(peer));
     assert!(!limiter.record_invalid(peer), "blocked");
 
-    std::thread::sleep(Duration::from_millis(50));
+    // Sleep well past the window so the old entries are purged.
+    std::thread::sleep(Duration::from_millis(300));
     assert!(limiter.record_invalid(peer), "unblocked after window");
 }
 

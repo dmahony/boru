@@ -26,10 +26,10 @@ All persistent data lives under a single data directory, resolved in this order:
 2. `BORU_CHAT_DATA_DIR` environment variable
 3. `$XDG_DATA_HOME/boru-chat` (typically `~/.local/share/boru-chat/`)
 4. `$PWD/.boru-chat`
+###
+File Layout
 
-### File Layout
-
-```
+```text
 <data_dir>/
 ├── boru.db                # SQLite: inbox, outbox, file objects, attachments
 ├── chat_history.json       # Per-room chat message history

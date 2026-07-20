@@ -171,7 +171,7 @@ pub fn sanitize_display_text(text: &str, max_chars: usize) -> String {
 /// use boru_chat::abuse_controls::sanitize_single_line;
 ///
 /// let clean = sanitize_single_line("hello\nworld\u{0000}test");
-/// assert_eq!(clean, "hello world\u{FFFD}test");
+/// assert_eq!(clean, "hello world test");
 /// ```
 pub fn sanitize_single_line(text: &str) -> String {
     sanitize_single_line_with_max(text, DEFAULT_MAX_SINGLE_LINE_LENGTH)

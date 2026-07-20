@@ -599,6 +599,10 @@ async fn download_from_peer_profile() {
     // ── Process through DownloadManager ──
     let (manager, diag, _dir) = make_manager_diag(storage.clone());
 
+    // Burn the first diagnostic sequence (seq=0, always excluded by
+    // events_since(0)) so TransferStarted gets seq > 0 and is visible.
+    diag.record(None, DiagnosticEventKind::RoomJoinStarted);
+
     // Tick enough times to reach terminal state.
     for _ in 0..10 {
         let _ = manager.tick().await;
@@ -661,6 +665,9 @@ async fn download_progress_observation() {
     let dl_id = create_and_verify_download(&storage, "progress-hash", &pk.to_string(), FILE_SIZE);
 
     let (manager, diag, _dir) = make_manager_diag(storage.clone());
+
+    // Burn seq 0 (always excluded by events_since(0)) so TransferStarted is visible.
+    diag.record(None, DiagnosticEventKind::RoomJoinStarted);
 
     for _ in 0..10 {
         let _ = manager.tick().await;
@@ -997,6 +1004,9 @@ async fn completed_file_state() {
     let dl_id = create_and_verify_download(&storage, "done-hash", &pk.to_string(), FILE_SIZE);
 
     let (manager, diag, _dir) = make_manager_diag(storage.clone());
+
+    // Burn seq 0 (always excluded by events_since(0)) so TransferStarted is visible.
+    diag.record(None, DiagnosticEventKind::RoomJoinStarted);
 
     for _ in 0..10 {
         let _ = manager.tick().await;

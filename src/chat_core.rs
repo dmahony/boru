@@ -3319,7 +3319,6 @@ mod tests {
 
     #[test]
     fn handle_net_event_dedup_exact_duplicate_is_suppressed() {
-        clear_seen_messages();
         let key = SecretKey::generate();
         let mut app = test_app();
 
@@ -3346,7 +3345,6 @@ mod tests {
 
     #[test]
     fn handle_net_event_dedup_different_text_passes() {
-        clear_seen_messages();
         let key = SecretKey::generate();
         let mut app = test_app();
 
@@ -3378,7 +3376,6 @@ mod tests {
 
     #[test]
     fn handle_net_event_dedup_different_sender_passes() {
-        clear_seen_messages();
         let key_a = SecretKey::generate();
         let key_b = SecretKey::generate();
         let mut app = test_app();
@@ -3412,7 +3409,6 @@ mod tests {
 
     #[test]
     fn handle_net_event_dedup_different_sent_at_passes() {
-        clear_seen_messages();
         let key = SecretKey::generate();
         let mut app = test_app();
 
@@ -3447,7 +3443,6 @@ mod tests {
         // Self-messages are normally skipped for push_remote but should
         // still be tracked in the dedup set so duplicate gossip deliveries
         // of our own messages are suppressed.
-        clear_seen_messages();
         let local_key = SecretKey::generate();
         let mut app = AppState::new(
             test_status(),
@@ -3475,7 +3470,6 @@ mod tests {
 
     #[test]
     fn handle_net_event_dedup_about_me_is_deduped() {
-        clear_seen_messages();
         let key = SecretKey::generate();
         let mut app = test_app();
 
