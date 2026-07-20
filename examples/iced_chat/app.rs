@@ -31,7 +31,7 @@ use boru_chat::chat_core::{
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_chat::conversations::{
-    spawn_conversation_forwarder, ConversationNetEvent, ConversationStore,
+    spawn_conversation_forwarder, ConversationEntry, ConversationNetEvent, ConversationStore,
 };
 use boru_chat::discovery_backend::MainlineDhtBackend;
 use boru_chat::discovery_secret::DiscoverySecret;
@@ -5342,6 +5342,9 @@ impl IcedChat {
                             self.entries_push(chat_entry);
                         }
                     }
+                    // These entries already came from the persistent store;
+                    // don't append them again when the room is switched away.
+                    self.history_saved_count = self.entries.len();
                 }
 
                 // Replay queued or previously-sent messages after a reconnect.
@@ -5949,8 +5952,14 @@ impl IcedChat {
                     .get(&fid)
                     .map(|record| record.known_addrs.clone())
                     .unwrap_or_default();
-                let record = self.friends.ensure_friend(fid);
+                let record = self.friends.ensure_friend(fid.clone());
                 record.set_direct_conversation(topic, DirectConversationState::Active);
+                self.conversation_store.upsert(ConversationEntry::new(
+                    topic,
+                    peer.to_string(),
+                    record.display_label(&fid),
+                ));
+                let _ = self.conversation_store.save();
                 let room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                 let _ = room.save();
                 self.try_save_friends();
@@ -9777,7 +9786,7 @@ impl IcedChat {
         }
     }
 
-    fn update_room_preview(&mut self, event: &NetEvent) {
+    fn update_room_preview(&mut self, topic: &TopicId, event: &NetEvent) {
         if let NetEvent::Message {
             from: _,
             message: Message::Message { text },
@@ -9789,7 +9798,7 @@ impl IcedChat {
             } else {
                 text.clone()
             };
-            self.room_history.update_preview(&self.topic, &preview);
+            self.room_history.update_preview(topic, &preview);
             self.room_history_dirty = true;
         }
     }
@@ -9810,8 +9819,22 @@ impl IcedChat {
         topic: &TopicId,
         event: &NetEvent,
     ) -> Option<iced::Task<AppMessage>> {
+        if let NetEvent::Message { from, .. } = event {
+            if *from != self.local_public && direct_topic(&self.local_public, from) == *topic {
+                let fid = FriendId::from_public_key(*from);
+                let label = self
+                    .friends
+                    .get(&fid)
+                    .map(|record| record.display_label(&fid))
+                    .unwrap_or_else(|| from.fmt_short().to_string());
+                self.friends.ensure_friend(fid);
+                self.conversation_store
+                    .upsert(ConversationEntry::new(*topic, from.to_string(), label));
+            }
+        }
         self.conversation_store.touch_and_bump(topic);
-        self.update_room_preview(event);
+        self.update_room_preview(topic, event);
+        let _ = self.conversation_store.save();
         let safety = self.public_room_safety.clone();
         if let Err(err) = handle_net_event_with_safety_for_topic(
             event.clone(),

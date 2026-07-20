@@ -510,9 +510,11 @@ fn main() -> Result<()> {
         let blob_store = MemStore::new();
         let blobs_protocol = BlobsProtocol::new(&blob_store, None);
 
-        // ── History stores (all disabled — no persistence) ────────────
+        // ── Persistent history stores ────────────────────────────────
         let room_history = RoomHistoryStore::empty_at(&data_dir);
-        let chat_history = Arc::new(std::sync::Mutex::new(ChatHistoryStore::empty_at(&data_dir)));
+        let chat_history = Arc::new(std::sync::Mutex::new(
+            ChatHistoryStore::load_or_default(&data_dir),
+        ));
 
         // ── Backfill handler ──────────────────────────────────────────
         let backfill_handler = BackfillProtocolHandler::new(chat_history.clone());
