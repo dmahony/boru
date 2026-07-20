@@ -447,7 +447,7 @@ fn metadata_nfc_normalisation_applied() {
 #[test]
 fn metadata_tag_characters_stripped() {
     // Tag characters stripped during sanitisation.
-    let with_tags = format!("abc\u{E0001}def\u{E0020}ghi\u{E007F}jkl");
+    let with_tags = "abc\u{E0001}def\u{E0020}ghi\u{E007F}jkl".to_string();
     let sanitised = sanitize_display_text(&with_tags, DEFAULT_MAX_DISPLAY_LENGTH);
     assert!(
         !sanitised.contains('\u{E0001}'),

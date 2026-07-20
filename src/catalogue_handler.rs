@@ -41,6 +41,8 @@ use crate::catalogue_rate_limits::{
     write_busy_response, write_rate_limited_response, CatalogueAdmission,
     CatalogueConcurrencyLimiter, CatalogueRateConfig, PeerCatalogueAbuseLimiter,
 };
+use crate::chat_core::DIAGNOSTICS;
+use crate::diagnostics::DiagnosticEventKind;
 use crate::friends::{FriendId, FriendRelationship, FriendsStore};
 use crate::protocol_version::{
     read_frame, write_frame, CATALOGUE_RETRIEVAL_V1, SUPPORTED_CATALOGUE_RETRIEVAL,
@@ -906,6 +908,13 @@ async fn serve_catalogue(
                 if known == current_revision
                     && handler.is_view_unchanged(&requester_id, known, view_hash)
                 {
+                    DIAGNOSTICS.record_with_peer(
+                        None,
+                        Some(remote_id.to_string()),
+                        DiagnosticEventKind::CatalogueCachedDataUsed {
+                            cached_revision: current_revision,
+                        },
+                    );
                     let response = CatalogResponse::NotModified {
                         revision: current_revision,
                     };

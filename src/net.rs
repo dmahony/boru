@@ -46,15 +46,6 @@ mod util;
 /// ALPN protocol name
 pub const GOSSIP_ALPN: &[u8] = b"/iroh-gossip/1";
 
-/// ALPN for the remote file catalogue protocol.
-///
-/// Provides signed, requester-filtered catalogue snapshots that list
-/// files available for download from a peer.  See `docs/protocol-layers.md`
-/// for the full protocol specification.
-/// This constant is not yet registered on any router — registration is
-/// deferred until the catalogue handler module is built.
-pub const FILE_CATALOG_ALPN: &[u8] = b"/boru-file-catalog/1";
-
 /// ALPN for the file access (transfer authorisation) protocol.
 ///
 /// Performs a request-time permission, availability, and integrity check
@@ -1384,7 +1375,7 @@ pub(crate) mod tests {
     /// accidental duplicates.
     const ALL_ALPNS: &[&[&[u8]]] = &[
         &[super::GOSSIP_ALPN],
-        &[super::FILE_CATALOG_ALPN],
+        &[crate::protocol_version::CATALOGUE_ALPN],
         &[super::FILE_ACCESS_ALPN],
         &[crate::inbox::INBOX_ALPN],
         &[crate::backfill::BACKFILL_ALPN],
@@ -1395,9 +1386,9 @@ pub(crate) mod tests {
     #[test]
     fn file_catalog_alpn_has_expected_value() {
         assert_eq!(
-            super::FILE_CATALOG_ALPN,
+            crate::protocol_version::CATALOGUE_ALPN,
             b"/boru-file-catalog/1",
-            "FILE_CATALOG_ALPN must not change without updating all peers"
+            "CATALOGUE_ALPN must not change without updating all peers"
         );
     }
 

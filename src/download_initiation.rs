@@ -16,6 +16,7 @@
 use n0_error::StdResultExt;
 use tracing::info;
 
+use crate::chat_core::TRANSFER_TELEMETRY;
 use crate::storage::Storage;
 
 // ── Error type ──────────────────────────────────────────────────────────────
@@ -250,6 +251,8 @@ pub fn initiate_download(
         download_id,
         content_hash, remote_peer, size, "download-initiation: new download created"
     );
+
+    TRANSFER_TELEMETRY.download_queued(download_id, size, None);
 
     Ok(InitiateDownloadResult {
         download_id,

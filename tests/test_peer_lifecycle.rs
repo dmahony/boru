@@ -506,7 +506,7 @@ async fn repeated_updates_are_deterministic() {
     .await;
 
     // Add files in batches, fetching after each batch.
-    let rounds = vec![
+    let rounds = [
         vec!["det-hash-1", "det-hash-2"],
         vec!["det-hash-3"],
         vec!["det-hash-4", "det-hash-5", "det-hash-6"],

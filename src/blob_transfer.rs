@@ -33,6 +33,8 @@ use n0_future::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
+use crate::chat_core::TRANSFER_TELEMETRY;
+use crate::diagnostics::ErrorCategory;
 use crate::download_limits::{BatchedProgressWriter, DownloadLimiter};
 use crate::file_access_protocol::SignedDownloadDescriptor;
 use crate::storage::Storage;
@@ -162,13 +164,7 @@ pub async fn transfer_blob_to_temp(
     debug!(download_id, path = %temp_str, "blob-transfer: recorded temp path");
 
     on_progress(BlobTransferProgress::Started { total_bytes });
-    crate::chat_core::DIAGNOSTICS.record(
-        None,
-        crate::diagnostics::DiagnosticEventKind::TransferStarted {
-            transfer_id: crate::diagnostics::short_transfer_id(download_id),
-            total_bytes,
-        },
-    );
+    TRANSFER_TELEMETRY.transfer_started(download_id, total_bytes, None);
 
     // ── 2. Acquire download slot from the limiter ──────────────────────
     let peer_str = descriptor.owner_id.to_string();
@@ -237,21 +233,26 @@ pub async fn transfer_blob_to_temp(
     };
 
     // ── 5. Verify size ─────────────────────────────────────────────────
-    crate::chat_core::DIAGNOSTICS.record(
-        None,
-        crate::diagnostics::DiagnosticEventKind::TransferVerification {
-            transfer_id: crate::diagnostics::short_transfer_id(download_id),
-            bytes: bytes_written,
-            total_bytes,
-            success: false,
-        },
-    );
     if bytes_written != total_bytes {
         let _ = tokio::fs::remove_file(&temp_path).await;
         let msg = format!(
             "blob-transfer: size mismatch after copy: wrote {bytes_written}, expected {total_bytes}"
         );
         error!(download_id, "{msg}");
+        TRANSFER_TELEMETRY.verification(
+            download_id,
+            "failed",
+            Some(bytes_written),
+            Some(total_bytes),
+        );
+        TRANSFER_TELEMETRY.failure(
+            download_id,
+            ErrorCategory::SizeMismatch,
+            false,
+            Some(bytes_written),
+            None,
+            None,
+        );
         storage.fail_download(download_id, &msg, None)?;
         on_progress(BlobTransferProgress::Failed { error: msg.clone() });
         return Err(anyhow::anyhow!("{msg}"));
@@ -265,19 +266,30 @@ pub async fn transfer_blob_to_temp(
             "blob-transfer: content hash mismatch: computed {hash_hex}, expected {expected_hex}"
         );
         error!(download_id, "{msg}");
+        TRANSFER_TELEMETRY.verification(
+            download_id,
+            "failed",
+            Some(bytes_written),
+            Some(total_bytes),
+        );
+        TRANSFER_TELEMETRY.failure(
+            download_id,
+            ErrorCategory::IntegrityMismatch,
+            false,
+            Some(bytes_written),
+            None,
+            None,
+        );
         storage.fail_download(download_id, &msg, None)?;
         on_progress(BlobTransferProgress::Failed { error: msg.clone() });
         return Err(anyhow::anyhow!("{msg}"));
     }
 
-    crate::chat_core::DIAGNOSTICS.record(
-        None,
-        crate::diagnostics::DiagnosticEventKind::TransferVerification {
-            transfer_id: crate::diagnostics::short_transfer_id(download_id),
-            bytes: bytes_written,
-            total_bytes,
-            success: true,
-        },
+    TRANSFER_TELEMETRY.verification(
+        download_id,
+        "passed",
+        Some(bytes_written),
+        Some(total_bytes),
     );
     info!(
         download_id,
@@ -321,6 +333,8 @@ async fn stage_network_download(
         .context("blob-transfer: open download stream")?;
 
     let mut network_bytes: u64 = 0;
+    let mut last_checkpoint = Instant::now();
+    let checkpoint_interval = config.progress_persist_interval;
 
     loop {
         // ── Cancellation check ──────────────────────────────────────
@@ -381,6 +395,19 @@ async fn stage_network_download(
                     bytes_received: network_bytes,
                     total_bytes,
                 });
+
+                // Emit telemetry checkpoint (rate-limited by progress interval).
+                if last_checkpoint.elapsed() >= checkpoint_interval {
+                    TRANSFER_TELEMETRY.progress_checkpoint(
+                        download_id,
+                        network_bytes,
+                        total_bytes,
+                        None,
+                        Some(checkpoint_interval.as_millis() as u64),
+                        None,
+                    );
+                    last_checkpoint = Instant::now();
+                }
             }
             iroh_blobs::api::downloader::DownloadProgressItem::Error(e) => {
                 let msg = format!("blob-transfer: download error: {e}");
@@ -437,6 +464,8 @@ async fn stage_copy_to_temp(
     let mut buf = vec![0u8; COPY_BUF_SIZE];
     let mut hasher = blake3::Hasher::new();
     let mut bytes_written: u64 = 0;
+    let mut last_checkpoint = Instant::now();
+    let checkpoint_interval = config.progress_persist_interval;
 
     loop {
         // ── Cancellation check ──────────────────────────────────────
@@ -498,6 +527,20 @@ async fn stage_copy_to_temp(
             bytes_received: initial_bytes + bytes_written,
             total_bytes,
         });
+
+        // Emit telemetry checkpoint (rate-limited by progress interval).
+        if last_checkpoint.elapsed() >= checkpoint_interval {
+            let total_received = initial_bytes + bytes_written;
+            TRANSFER_TELEMETRY.progress_checkpoint(
+                download_id,
+                total_received,
+                total_bytes,
+                None,
+                Some(checkpoint_interval.as_millis() as u64),
+                None,
+            );
+            last_checkpoint = Instant::now();
+        }
     }
 
     // ── Finalise the file ────────────────────────────────────────────
@@ -557,10 +600,36 @@ pub async fn request_and_transfer_blob(
     on_progress: impl FnMut(BlobTransferProgress),
 ) -> Result<PathBuf> {
     // ── 1. Request permission ───────────────────────────────────────
+    TRANSFER_TELEMETRY.access_requested(download_id, "initial");
     let response =
         crate::file_access_client::request_download_permission(client_ep, server_pk, request)
             .await
-            .map_err(|e| anyhow::anyhow!("permission request failed: {e}"))?;
+            .map_err(|e| {
+                // Map request-level errors to failure telemetry before propagating.
+                let (category, retryable) = match &e {
+                    crate::file_access_client::FileAccessRequestError::ConnectionFailed {
+                        ..
+                    } => (crate::diagnostics::ErrorCategory::PeerUnavailable, true),
+                    crate::file_access_client::FileAccessRequestError::Timeout => {
+                        (crate::diagnostics::ErrorCategory::Timeout, true)
+                    }
+                    crate::file_access_client::FileAccessRequestError::ProtocolError { .. } => {
+                        (crate::diagnostics::ErrorCategory::ProtocolError, false)
+                    }
+                    crate::file_access_client::FileAccessRequestError::ServerError(_) => {
+                        (crate::diagnostics::ErrorCategory::Unknown, false)
+                    }
+                };
+                TRANSFER_TELEMETRY.failure(
+                    download_id,
+                    category,
+                    retryable,
+                    None,
+                    Some(retryable),
+                    None,
+                );
+                anyhow::anyhow!("permission request failed: {e}")
+            })?;
 
     // ── 2. Verify and accept the response ───────────────────────────
     let expected_content_hash_hex = hex::encode(request.expected_content_hash);
@@ -573,6 +642,19 @@ pub async fn request_and_transfer_blob(
         expected_size,
     )?
     .ok_or_else(|| anyhow::anyhow!("permission denied or retryable error"))?;
+
+    // Grant TTL: not_after - current time, or None if unknown.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let expires_at_ms = descriptor.expires_at_ms;
+    let grant_ttl_ms = if expires_at_ms > now_ms {
+        Some(expires_at_ms - now_ms)
+    } else {
+        None
+    };
+    TRANSFER_TELEMETRY.access_granted(download_id, grant_ttl_ms);
 
     // ── 3. Transfer the blob ────────────────────────────────────────
     transfer_blob_to_temp(

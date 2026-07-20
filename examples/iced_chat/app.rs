@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use boru_chat::api::{GossipSender, GossipTopic};
 use boru_chat::backfill::BackfillHandle;
@@ -24,7 +24,7 @@ use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_with_safety, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     handle_net_event_with_safety_for_topic, message_hash, seed_memory_lookup, MeshHealth,
-    MessageHash, ProfileUpdateThrottle, RoomInviteV2, SharedFileMeta,
+    MessageHash, RoomInviteV2,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
@@ -33,7 +33,6 @@ use boru_chat::conversations::{
 };
 use boru_chat::discovery_backend::MainlineDhtBackend;
 use boru_chat::discovery_secret::DiscoverySecret;
-use boru_chat::download_initiation::initiate_download;
 use boru_chat::download_limits::DownloadLimitsConfig;
 use boru_chat::download_manager::DownloadManager;
 use boru_chat::file_indexer::FileIndexer;
@@ -1453,10 +1452,12 @@ pub struct IcedChat {
     outbox: Arc<std::sync::Mutex<OutboxStore>>,
     /// Persistent download storage — opened once and shared with the
     /// download manager for startup recovery and ongoing tick processing.
+    #[allow(dead_code)]
     storage: Option<Storage>,
     /// Download state-machine manager with bounded startup burst.
     /// Wrapped for safe access — the async recovery call uses
     /// `runtime_handle.block_on` at init time.
+    #[allow(dead_code)]
     download_manager: Option<Arc<std::sync::Mutex<DownloadManager>>>,
     /// Whether chat history has unsaved changes.
     chat_history_dirty: bool,
@@ -1588,8 +1589,6 @@ pub struct IcedChat {
     /// initiation in flight.  Used to disable the button and show a spinner
     /// while the async operation is pending.
     pending_downloads: HashSet<(String, PublicKey)>,
-    /// Rate-limiter for periodic ProfileUpdate broadcasts (at most once per 30 seconds).
-    profile_update_throttle: ProfileUpdateThrottle,
     /// Persistent profile store (display name, bio, sharing controls).
     profile_store: UserProfileStore,
     /// Bio text input for the profile settings page.
@@ -1602,6 +1601,7 @@ pub struct IcedChat {
     #[expect(dead_code)]
     shared_folder_path: PathBuf,
     /// Indexes and watches the shared folder for file changes.
+    #[allow(dead_code)]
     file_indexer: FileIndexer,
     /// Local folder where downloaded peer files are saved ("Boru Downloads").
     boru_downloads_dir: PathBuf,
@@ -1648,8 +1648,6 @@ pub struct PeerProfileData {
     pub bio: String,
     /// When this profile data was last received (SystemTime). Used for eviction.
     pub last_updated: SystemTime,
-    /// Shared file metadata announced by the peer.
-    pub shared_files: Vec<SharedFileMeta>,
 }
 
 /// Tracks the UI-level lifecycle of an outgoing friend request.
@@ -1908,10 +1906,6 @@ pub enum AppMessage {
     ResumeDownloadAt(usize),
     /// Cancel or remove a download at the given entry index.
     CancelDownloadAt(usize),
-    /// Start downloading a shared file from a peer's profile.
-    /// The peer PublicKey is the sender, and the file index is into
-    /// the cached PeerProfileData.shared_files for that peer.
-    DownloadPeerFile(PublicKey, usize),
     /// A download initiated from a peer profile was created successfully.
     DownloadInitiated {
         /// Content hash of the file.
@@ -2913,7 +2907,6 @@ impl IcedChat {
             blocked_sharers: HashSet::new(),
             profile_cache: HashMap::new(),
             pending_downloads: HashSet::new(),
-            profile_update_throttle: ProfileUpdateThrottle::default(),
             profile_store: UserProfileStore::empty_at(&data_dir, local_public),
             profile_bio_input: String::new(),
             shared_folder_enabled: false,
@@ -3669,7 +3662,6 @@ impl IcedChat {
             AppMessage::PauseDownloadAt(_) => "PauseDownloadAt",
             AppMessage::ResumeDownloadAt(_) => "ResumeDownloadAt",
             AppMessage::CancelDownloadAt(_) => "CancelDownloadAt",
-            AppMessage::DownloadPeerFile(..) => "DownloadPeerFile",
             AppMessage::DownloadInitiated { .. } => "DownloadInitiated",
             AppMessage::DownloadInitiationFailed { .. } => "DownloadInitiationFailed",
             AppMessage::OpenPeerProfile(..) => "OpenPeerProfile",
@@ -7157,57 +7149,6 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::DownloadPeerFile(peer, file_idx) => {
-                // Look up the file metadata from the peer's profile cache.
-                let Some(profile_data) = self.profile_cache.get(&peer) else {
-                    return iced::Task::done(AppMessage::ErrorMsg(
-                        "No profile data for this peer.".into(),
-                    ));
-                };
-                let Some(file) = profile_data.shared_files.get(file_idx) else {
-                    return iced::Task::done(AppMessage::ErrorMsg(
-                        "File not found in peer's profile.".into(),
-                    ));
-                };
-                let content_hash_hex = hex::encode(file.hash);
-
-                // Mark as pending so the button shows "Downloading…".
-                self.pending_downloads
-                    .insert((content_hash_hex.clone(), peer));
-
-                let peer_str = peer.to_string();
-                let storage = self.storage.clone();
-                iced::Task::perform(
-                    async move {
-                        let stg = storage.or_else(|| {
-                            boru_chat::storage::Storage::open(&std::path::PathBuf::new()).ok()
-                        });
-                        match stg {
-                            Some(stg) => {
-                                match initiate_download(&stg, &content_hash_hex, &peer_str, None) {
-                                    Ok(result) => AppMessage::DownloadInitiated {
-                                        content_hash: content_hash_hex.clone(),
-                                        peer,
-                                        download_id: result.download_id,
-                                    },
-                                    Err(e) => AppMessage::DownloadInitiationFailed {
-                                        content_hash: content_hash_hex.clone(),
-                                        peer,
-                                        error: e.to_string(),
-                                    },
-                                }
-                            }
-                            None => AppMessage::DownloadInitiationFailed {
-                                content_hash: content_hash_hex,
-                                peer,
-                                error: "Storage not available".into(),
-                            },
-                        }
-                    },
-                    std::convert::identity,
-                )
-            }
-
             AppMessage::DownloadInitiated {
                 content_hash,
                 peer,
@@ -7434,7 +7375,6 @@ impl IcedChat {
                                 display_name: record.display_label(&fid),
                                 bio: String::new(),
                                 last_updated: SystemTime::UNIX_EPOCH,
-                                shared_files: Vec::new(),
                             },
                         );
                     }
@@ -9269,12 +9209,8 @@ impl IcedChat {
 // ── Profile cache methods ──────────────────────────────────────────────
 
 impl IcedChat {
-    /// Broadcast our own profile metadata (name, bio, shared files) via gossip,
-    /// rate-limited to at most once per 30 seconds by [`ProfileUpdateThrottle`].
+    /// Broadcast our own profile metadata (name, bio) via gossip.
     fn broadcast_profile_update(&mut self) -> iced::Task<AppMessage> {
-        if !self.profile_update_throttle.try_acquire(Instant::now()) {
-            return iced::Task::none();
-        }
         let sender = match self.sender.clone() {
             Some(s) => s,
             None => return iced::Task::none(),
@@ -9286,20 +9222,6 @@ impl IcedChat {
         let user_id = self.local_public;
         let shared_path = profile.shared_folder_path.clone();
         let shared_enabled = profile.file_sharing_enabled;
-
-        // Scan shared folder for files to announce.
-        let shared_file_meta: Vec<SharedFileMeta> = if shared_enabled {
-            // Ensure folder exists and scan.
-            let _ = self.file_indexer.scan();
-            self.file_indexer
-                .list_shared_files()
-                .iter()
-                .filter(|f| f.is_announceable())
-                .map(|f| f.to_shared_file_meta())
-                .collect()
-        } else {
-            Vec::new()
-        };
 
         iced::Task::perform(
             async move {
@@ -9313,7 +9235,7 @@ impl IcedChat {
                     allow_downloads: false,
                     max_file_size: 100 * 1024 * 1024,
                     allowed_extensions: Vec::new(),
-                    shared_files: shared_file_meta,
+                    shared_files: Vec::new(),
                 };
                 if let Ok(encoded) =
                     SignedMessage::sign_and_encode(&sk, &crate::Message::ProfileUpdate(profile))
@@ -9444,7 +9366,6 @@ impl ChatCallbacks for IcedChat {
                 display_name: profile.display_name,
                 bio: profile.bio,
                 last_updated: SystemTime::now(),
-                shared_files: profile.shared_files,
             },
         );
     }
@@ -12349,11 +12270,6 @@ impl IcedChat {
             .as_ref()
             .map(|p| p.display_name.clone())
             .unwrap_or_else(|| peer.fmt_short().to_string());
-        let shared_files = profile_data
-            .as_ref()
-            .map(|p| p.shared_files.clone())
-            .unwrap_or_default();
-
         let header = Row::new()
             .push(text(display_name.clone()).size(TYPO_LG).width(Length::Fill))
             .push(
@@ -12370,66 +12286,16 @@ impl IcedChat {
 
         let mut body = Column::new().spacing(SPACE_8);
 
-        if shared_files.is_empty() {
-            body = body.push(
-                container(
-                    text("No shared files.")
-                        .size(TYPO_SM)
-                        .style(text_muted_style),
-                )
-                .width(Length::Fill)
-                .padding(SPACE_12)
-                .style(container_surface),
-            );
-        } else {
-            for (idx, file) in shared_files.iter().enumerate() {
-                let size_label = DownloadAttachment::total_bytes_label(file.size);
-                let filename = file.filename.clone();
-                let mime_type = file.mime_type.clone();
-                let content_hash_hex = hex::encode(file.hash);
-                let is_pending = self
-                    .pending_downloads
-                    .contains(&(content_hash_hex.clone(), peer));
-                let btn = button(
-                    text(if is_pending {
-                        "Downloading…"
-                    } else {
-                        "Download"
-                    })
-                    .size(TYPO_SM),
-                )
-                .on_press(AppMessage::DownloadPeerFile(peer, idx))
-                .padding([SPACE_6, SPACE_12]);
-
-                let file_row = Row::new()
-                    .push(
-                        Column::new()
-                            .push(text(filename).size(TYPO_SM))
-                            .push(
-                                text(format!("{}  •  {}", size_label, mime_type))
-                                    .size(TYPO_XS)
-                                    .style(text_muted_style),
-                            )
-                            .spacing(SPACE_2)
-                            .width(Length::Fill),
-                    )
-                    .push(btn)
-                    .align_y(Alignment::Center)
-                    .spacing(SPACE_8)
-                    .padding(iced::Padding {
-                        top: SPACE_8,
-                        right: SPACE_12,
-                        bottom: SPACE_8,
-                        left: SPACE_12,
-                    });
-
-                body = body.push(
-                    container(file_row)
-                        .width(Length::Fill)
-                        .style(container_surface),
-                );
-            }
-        }
+        body = body.push(
+            container(
+                text("No shared files.")
+                    .size(TYPO_SM)
+                    .style(text_muted_style),
+            )
+            .width(Length::Fill)
+            .padding(SPACE_12)
+            .style(container_surface),
+        );
 
         let content = Column::new()
             .push(

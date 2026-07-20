@@ -115,14 +115,22 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
-    let (router_a, _ep_a, sk_a, gossip_a, pk_a) = spawn_peer(&mut rng).await?;
-    let (router_b, _ep_b, sk_b, gossip_b, pk_b) = spawn_peer(&mut rng).await?;
+    let (router_a, ep_a, sk_a, gossip_a, pk_a) = spawn_peer(&mut rng).await?;
+    let (router_b, ep_b, sk_b, gossip_b, pk_b) = spawn_peer(&mut rng).await?;
 
     println!("A: {}", pk_a.fmt_short());
     println!("B: {}", pk_b.fmt_short());
 
     let topic = TopicId::from_bytes(rng.random());
     println!("Topic: {topic}");
+
+    // ── Share A's address info with B (like iced_chat JoinFromTicket does) ──
+    let mem_b = MemoryLookup::new();
+    if let Ok(addr_lookup) = ep_b.address_lookup() {
+        addr_lookup.add(mem_b.clone());
+    }
+    let addr_a = ep_a.addr();
+    mem_b.set_endpoint_info(addr_a);
 
     // ── Peer A: subscribe (like iced_chat CreateNewRoom/OpenRoom) ──
     println!("\n--- A: subscribing (empty bootstrap, no join wait) ---");

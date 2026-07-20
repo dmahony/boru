@@ -60,8 +60,27 @@ async fn test_signed_message_gossip_flow() -> Result<()> {
     memory_lookup.set_endpoint_info(ep_a.addr());
     let mut sub_b = gossip_b.subscribe(topic, vec![ep_a.id()]).await?;
 
-    // Wait a moment for subscriptions to connect
-    sleep(Duration::from_millis(200)).await;
+    // Wait for peer A to see peer B as a neighbor (gossip connection established)
+    // before broadcasting, so the message isn't sent on a not-yet-ready connection.
+    let deadline_a = tokio::time::Instant::now() + Duration::from_secs(10);
+    let b_id = ep_b.id();
+    let mut a_saw_b = false;
+    while tokio::time::Instant::now() < deadline_a {
+        match timeout(Duration::from_millis(200), sub_a.try_next()).await {
+            Ok(Ok(Some(GossipEvent::NeighborUp(id)))) if id == b_id => {
+                a_saw_b = true;
+                break;
+            }
+            Ok(Ok(Some(_))) => {} // drain other events
+            Ok(Ok(None)) => break,
+            Ok(Err(_)) => break,
+            Err(_elapsed) => {} // timeout is expected — keep waiting
+        }
+    }
+    assert!(
+        a_saw_b,
+        "Peer A should see Peer B as a neighbor before broadcasting"
+    );
 
     // Peer A sends a signed AboutMe (identical to what chat-gui does)
     let msg = Message::AboutMe {

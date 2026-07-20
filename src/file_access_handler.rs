@@ -2450,7 +2450,7 @@ mod tests {
     async fn prepare_referenced_unchanged_source() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let data = b"hello referenced file";
-        let (_file_path, hex_hash) = write_temp_file(tmp.path(), "source.txt", data);
+        let (file_path, hex_hash) = write_temp_file(tmp.path(), "source.txt", data);
 
         let storage = Arc::new(Storage::memory().expect("in-memory storage"));
         storage
@@ -2462,6 +2462,9 @@ mod tests {
                 data,
             )
             .expect("put file object");
+        storage
+            .set_file_object_source_path(&hex_hash, Some(file_path.to_str().expect("utf-8 path")))
+            .expect("set source_path");
 
         let blob_store: Arc<iroh_blobs::api::Store> =
             Arc::new(iroh_blobs::store::mem::MemStore::new().into());
@@ -2505,6 +2508,9 @@ mod tests {
                 data,
             )
             .expect("put file object");
+        storage
+            .set_file_object_source_path(&hex_hash, Some(file_path.to_str().expect("utf-8 path")))
+            .expect("set source_path");
 
         // Delete the source file.
         std::fs::remove_file(&file_path).expect("remove file");
@@ -2538,6 +2544,9 @@ mod tests {
                 original,
             )
             .expect("put file object");
+        storage
+            .set_file_object_source_path(&hex_hash, Some(file_path.to_str().expect("utf-8 path")))
+            .expect("set source_path");
 
         // Replace the file with different content (same length to avoid
         // catching a size mismatch — we want the hash check to fail).
@@ -2581,6 +2590,9 @@ mod tests {
                 data,
             )
             .expect("put file object");
+        storage
+            .set_file_object_source_path(&hex_hash, Some(file_path.to_str().expect("utf-8 path")))
+            .expect("set source_path");
 
         // Remove the file and create a directory in its place.
         std::fs::remove_file(&file_path).expect("remove file");
@@ -2615,6 +2627,9 @@ mod tests {
                 data,
             )
             .expect("put file object");
+        storage
+            .set_file_object_source_path(&hex_hash, Some(file_path.to_str().expect("utf-8 path")))
+            .expect("set source_path");
 
         // Remove the file and create a symlink pointing elsewhere.
         std::fs::remove_file(&file_path).expect("remove file");

@@ -23,14 +23,13 @@ fn make_sk(rng: &mut impl rand::Rng) -> SecretKey {
 async fn spawn_peer_relay(
     rng: &mut impl rand::Rng,
 ) -> Result<(Router, Endpoint, SecretKey, Gossip)> {
-    let ep = Endpoint::builder(presets::N0)
+    let ep = Endpoint::builder(presets::N0DisableRelay)
         .secret_key(make_sk(rng))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Disabled)
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
-    ep.online().await;
     let gossip = Gossip::builder().spawn(ep.clone());
     let router = Router::builder(ep.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
@@ -74,6 +73,11 @@ async fn test_two_peers_exchange_messages() -> Result<()> {
     let mut sub_a = gossip_a.subscribe(topic, vec![ep_a.id()]).await?;
     println!("A subscribed");
     sleep(Duration::from_millis(100)).await;
+    let memory_lookup = MemoryLookup::new();
+    if let Ok(addr_lookup) = ep_b.address_lookup() {
+        addr_lookup.add(memory_lookup.clone());
+    }
+    memory_lookup.set_endpoint_info(ep_a.addr());
     let mut sub_b = gossip_b.subscribe(topic, vec![ep_a.id()]).await?;
     println!("B subscribed");
 

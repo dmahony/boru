@@ -933,6 +933,10 @@ async fn test_stop_start_restart_cycle() -> Result<()> {
 
     harness.restart_peer(PeerId::Alice).await?;
     harness.restart_peer(PeerId::Bob).await?;
+    // Re-seed lookups now that both endpoints exist, since restart_peer can only seed
+    // one side at a time (the other endpoint may not be recreated yet).
+    harness.seed_lookup(PeerId::Alice);
+    harness.seed_lookup(PeerId::Bob);
     harness.wait_for_connected().await?;
 
     harness.shutdown().await;

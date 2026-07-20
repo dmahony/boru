@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use boru_chat::discovery_backend::{
-    EncryptedDiscoveryRecord, InMemoryDiscoveryBackend, NamespaceId, TopicDiscoveryBackend,
+    canonical_lobby_key, EncryptedDiscoveryRecord, InMemoryDiscoveryBackend, NamespaceId,
+    TopicDiscoveryBackend,
 };
 use boru_chat::discovery_record::create_discovery_record;
 use boru_chat::public_room::{public_room_identity, PublicNetwork};
@@ -69,7 +70,7 @@ async fn test_multi_peer_public_lobby_scenario() -> Result<()> {
     // ── Setup: shared "DHT" ──────────────────────────────────────────
     let backend = InMemoryDiscoveryBackend::new();
     let identity = public_room_identity(PublicNetwork::Test);
-    let namespace = NamespaceId::new(identity.discovery_key);
+    let namespace = NamespaceId::new(canonical_lobby_key(identity.discovery_key));
 
     // ── 1. Peer A opens the public lobby ─────────────────────────────
     let peer_a = spawn_peer(&backend).await;
@@ -323,7 +324,7 @@ async fn test_dht_lookup_temporarily_fails() -> Result<()> {
 async fn test_malformed_records_mixed_with_valid() -> Result<()> {
     let backend = InMemoryDiscoveryBackend::new();
     let identity = public_room_identity(PublicNetwork::Test);
-    let namespace = NamespaceId::new(identity.discovery_key);
+    let namespace = NamespaceId::new(canonical_lobby_key(identity.discovery_key));
 
     // Publish a valid record from a real peer.
     let publisher = spawn_peer(&backend).await;
@@ -380,7 +381,7 @@ async fn test_malformed_records_mixed_with_valid() -> Result<()> {
 async fn test_stale_peer_plus_valid_peer() -> Result<()> {
     let backend = InMemoryDiscoveryBackend::new();
     let identity = public_room_identity(PublicNetwork::Test);
-    let namespace = NamespaceId::new(identity.discovery_key);
+    let namespace = NamespaceId::new(canonical_lobby_key(identity.discovery_key));
 
     // Inject a stale record: create a valid record with unix_minute=0
     // (far in the past, well beyond the 10-minute staleness window).
@@ -436,7 +437,7 @@ async fn test_stale_peer_plus_valid_peer() -> Result<()> {
 async fn test_leave_stops_publication() -> Result<()> {
     let backend = InMemoryDiscoveryBackend::new();
     let identity = public_room_identity(PublicNetwork::Test);
-    let namespace = NamespaceId::new(identity.discovery_key);
+    let namespace = NamespaceId::new(canonical_lobby_key(identity.discovery_key));
 
     // Two peers publish.
     let peer_a = spawn_peer(&backend).await;

@@ -34,6 +34,7 @@ use crate::discovery_secret::DiscoverySecret;
 use crate::friends::{FriendId, FriendsStore};
 use crate::proto::TopicId;
 use crate::public_room_safety::PublicRoomSafety;
+use crate::transfer_telemetry::TransferTelemetry;
 use crate::user_profile::UserProfile;
 
 /// Global diagnostics store for recording network events and probes.
@@ -41,6 +42,13 @@ use crate::user_profile::UserProfile;
 /// Lazily initialised on first access with default capacities
 /// (5 000 events, 1 000 received probes).
 pub static DIAGNOSTICS: LazyLock<Diagnostics> = LazyLock::new(Diagnostics::new);
+
+/// Global transfer lifecycle telemetry store.
+///
+/// Lazily initialised on first access.  Wraps the shared [`DIAGNOSTICS`]
+/// store and adds per-transfer sequence tracking.
+pub static TRANSFER_TELEMETRY: LazyLock<TransferTelemetry> =
+    LazyLock::new(|| TransferTelemetry::new(DIAGNOSTICS.clone()));
 
 /// Maximum clock-skew tolerance for future-dated messages (5 minutes).
 const MAX_FUTURE_SKEW_SECS: u64 = 300;
@@ -933,35 +941,6 @@ pub struct SharedFileMeta {
     pub modified_time: u64,
     /// Content hash used to identify the file.
     pub hash: MessageHash,
-}
-
-/// Minimum interval between profile announcements on a gossip topic.
-pub const PROFILE_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Monotonic debounce guard for profile announcements.
-#[derive(Debug, Clone, Default)]
-pub struct ProfileUpdateThrottle {
-    last_sent: Option<Instant>,
-}
-
-impl ProfileUpdateThrottle {
-    /// Return `true` and consume the current slot when an update is allowed.
-    pub fn try_acquire(&mut self, now: Instant) -> bool {
-        if self
-            .last_sent
-            .is_some_and(|last| now.duration_since(last) < PROFILE_UPDATE_INTERVAL)
-        {
-            return false;
-        }
-        self.last_sent = Some(now);
-        true
-    }
-
-    /// Clear the guard, allowing an immediate announcement after a profile
-    /// has been loaded or a gossip topic has been joined.
-    pub fn reset(&mut self) {
-        self.last_sent = None;
-    }
 }
 
 /// Content hash used by richer interaction messages to refer to a chat message.
@@ -2760,26 +2739,6 @@ mod tests {
             }
             _ => panic!("expected ProfileUpdate"),
         }
-    }
-
-    #[test]
-    fn profile_update_throttle_enforces_thirty_second_interval() {
-        let start = Instant::now();
-        let mut throttle = ProfileUpdateThrottle::default();
-
-        assert!(throttle.try_acquire(start));
-        assert!(!throttle.try_acquire(start + Duration::from_secs(29)));
-        assert!(throttle.try_acquire(start + PROFILE_UPDATE_INTERVAL));
-    }
-
-    #[test]
-    fn profile_update_throttle_reset_allows_immediate_update() {
-        let start = Instant::now();
-        let mut throttle = ProfileUpdateThrottle::default();
-
-        assert!(throttle.try_acquire(start));
-        throttle.reset();
-        assert!(throttle.try_acquire(start + Duration::from_secs(1)));
     }
 
     #[test]

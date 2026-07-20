@@ -435,8 +435,9 @@ impl TwoPeerFixture {
             (rm, self.topic)
         };
         self.stop_peer(id).await;
-        // Brief settling time so the OS frees the port.
-        sleep(Duration::from_millis(100)).await;
+        // Brief settling time so the OS frees the port and the
+        // router/endpoint are fully ready to accept new connections.
+        sleep(Duration::from_millis(500)).await;
         self.start_peer(id, &relay_map, topic).await?;
         self.seed_lookups();
         Ok(())

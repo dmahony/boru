@@ -18,8 +18,7 @@ use iroh::{Endpoint, EndpointAddr, PublicKey};
 
 use crate::catalogue_limits::{
     check_page_payload_size, check_response_payload_size, MAX_CATALOGUE_FILES,
-    MAX_CATALOGUE_PAGE_SIZE, MAX_COLLECTIONS, MAX_ENTRIES_PER_COLLECTION,
-    MAX_INVALID_RESPONSE_ATTEMPTS,
+    MAX_CATALOGUE_PAGE_SIZE, MAX_INVALID_RESPONSE_ATTEMPTS,
 };
 use crate::catalogue_model::SignedFileCatalogue;
 use crate::catalogue_protocol::{
@@ -30,6 +29,7 @@ use crate::diagnostics::DiagnosticEventKind;
 use crate::protocol_version::{
     read_frame, write_frame, CATALOGUE_RETRIEVAL_V1, SUPPORTED_CATALOGUE_RETRIEVAL,
 };
+use crate::storage::Storage;
 
 /// Default timeout for a catalogue fetch operation.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -177,132 +177,41 @@ fn validate_pages(
     Ok((all_items, revision))
 }
 
-/// Validate a fully assembled [`SignedFileCatalogue`] against all limits,
-/// duplicate checks, field validation, and signature verification.
+/// Validate a fully assembled [`SignedFileCatalogue`] against limits,
+/// duplicate checks, field validation, owner matching, and signature verification.
 ///
-/// This is the same validation that `fetch_remote_catalogue` applies to a
-/// single-shot catalogue, extracted so paginated fetches can reuse it.
-fn validate_complete_catalogue(
+/// Emits [`DiagnosticEventKind::CatalogueSignatureRejected`](crate::diagnostics::DiagnosticEventKind::CatalogueSignatureRejected)
+/// on signature or owner mismatch.  Returns
+/// [`RemoteCatalogueFetchError::SignatureInvalid`] for signature/owner
+/// errors and [`RemoteCatalogueFetchError::ProtocolError`] for structural
+/// issues.
+pub fn validate_complete_catalogue(
     catalogue: &SignedFileCatalogue,
     server_pk: PublicKey,
 ) -> std::result::Result<(), RemoteCatalogueFetchError> {
-    // Structural metadata validation must happen before any persistence or UI use.
+    // Signature verification must come first — a tampered signature is
+    // a distinct error variant from structural issues.
+    catalogue.verify().map_err(|e| {
+        let details = format!("catalogue signature verification failed: {e}");
+        DIAGNOSTICS.record_with_peer(
+            None,
+            Some(server_pk.to_string()),
+            DiagnosticEventKind::CatalogueSignatureRejected {
+                error: details.clone(),
+            },
+        );
+        RemoteCatalogueFetchError::SignatureInvalid { details }
+    })?;
+
+    // Structural metadata validation (including timestamp, files, collections,
+    // and duplicate checks).  The redundant verify() inside validate() is
+    // harmless since we already verified the signature above.
     catalogue
         .validate()
         .map_err(|e| RemoteCatalogueFetchError::ProtocolError {
             details: format!("invalid catalogue metadata: {e}"),
         })?;
 
-    // ── Enforce catalogue item count limits ──────────────────────
-    if catalogue.files.len() > MAX_CATALOGUE_FILES {
-        return Err(RemoteCatalogueFetchError::ProtocolError {
-            details: format!(
-                "catalogue has {} files, exceeds maximum of {MAX_CATALOGUE_FILES}",
-                catalogue.files.len()
-            ),
-        });
-    }
-    if catalogue.collections.len() > MAX_COLLECTIONS {
-        return Err(RemoteCatalogueFetchError::ProtocolError {
-            details: format!(
-                "catalogue has {} collections, exceeds maximum of {MAX_COLLECTIONS}",
-                catalogue.collections.len()
-            ),
-        });
-    }
-    // ── Validate each file entry ─────────────────────────────────
-    for file in &catalogue.files {
-        if let Err(e) = file.validate() {
-            return Err(RemoteCatalogueFetchError::ProtocolError {
-                details: format!("invalid file in catalogue: {e}"),
-            });
-        }
-    }
-    // ── Validate each collection entry ────────────────────────────
-    for col in &catalogue.collections {
-        if let Err(e) = col.validate() {
-            return Err(RemoteCatalogueFetchError::ProtocolError {
-                details: format!("invalid collection in catalogue: {e}"),
-            });
-        }
-    }
-    // ── Check collection membership limits ────────────────────────
-    let mut entries_per_collection = std::collections::HashMap::<&str, usize>::new();
-    for file in &catalogue.files {
-        for collection_id in &file.collection_ids {
-            let count = entries_per_collection
-                .entry(collection_id.as_str())
-                .and_modify(|count| *count += 1)
-                .or_insert(1);
-            if *count > MAX_ENTRIES_PER_COLLECTION {
-                return Err(RemoteCatalogueFetchError::ProtocolError {
-                    details: format!(
-                        "collection {collection_id} has more than {MAX_ENTRIES_PER_COLLECTION} entries"
-                    ),
-                });
-            }
-        }
-    }
-    // ── Check for duplicate shared_file_ids ──────────────────────
-    {
-        let mut seen: std::collections::HashSet<&str> =
-            std::collections::HashSet::with_capacity(catalogue.files.len());
-        for file in &catalogue.files {
-            if !seen.insert(file.shared_file_id.as_str()) {
-                return Err(RemoteCatalogueFetchError::ProtocolError {
-                    details: format!("duplicate shared_file_id: {}", file.shared_file_id),
-                });
-            }
-        }
-    }
-    // ── Check for duplicate content_hashes ───────────────────────
-    {
-        let mut seen: std::collections::HashSet<&str> =
-            std::collections::HashSet::with_capacity(catalogue.files.len());
-        for file in &catalogue.files {
-            if !seen.insert(file.content_hash.as_str()) {
-                return Err(RemoteCatalogueFetchError::ProtocolError {
-                    details: format!("duplicate content_hash: {}", file.content_hash),
-                });
-            }
-        }
-    }
-    // ── Check for duplicate collection_ids ───────────────────────
-    let mut col_ids: std::collections::HashSet<&str> =
-        std::collections::HashSet::with_capacity(catalogue.collections.len());
-    for col in &catalogue.collections {
-        if !col_ids.insert(col.collection_id.as_str()) {
-            return Err(RemoteCatalogueFetchError::ProtocolError {
-                details: format!("duplicate collection_id: {}", col.collection_id),
-            });
-        }
-    }
-    // ── Check that all collection references resolve ─────────────
-    for file in &catalogue.files {
-        for cref in &file.collection_ids {
-            if !col_ids.contains(cref.as_str()) {
-                return Err(RemoteCatalogueFetchError::ProtocolError {
-                    details: format!(
-                        "dangling collection reference '{}' in file '{}'",
-                        cref, file.shared_file_id
-                    ),
-                });
-            }
-        }
-    }
-    // Verify the signature before returning.
-    if let Err(e) = catalogue.verify() {
-        DIAGNOSTICS.record_with_peer(
-            None,
-            Some(server_pk.to_string()),
-            DiagnosticEventKind::CatalogueSignatureRejected {
-                error: format!("{e:#}"),
-            },
-        );
-        return Err(RemoteCatalogueFetchError::SignatureInvalid {
-            details: format!("{e:#}"),
-        });
-    }
     // Verify the owner matches who we connected to.
     if catalogue.owner_id != server_pk {
         DIAGNOSTICS.record_with_peer(
@@ -513,15 +422,93 @@ fn record_fetch_result(
                 collection_count: catalogue.collections.len(),
             },
         ),
-        Err(error) => DIAGNOSTICS.record_with_peer(
-            None,
-            Some(server_pk.to_string()),
-            DiagnosticEventKind::CatalogueFetchFailed {
-                error: error.to_string(),
-            },
-        ),
+        Err(error) => {
+            // Only emit CatalogueFetchFailed for transport/protocol errors.
+            // Signature rejection and permission denial have their own events
+            // emitted by the validation layer (CatalogueSignatureRejected).
+            let is_transport_error = matches!(
+                error,
+                RemoteCatalogueFetchError::ConnectionFailed { .. }
+                    | RemoteCatalogueFetchError::Timeout
+                    | RemoteCatalogueFetchError::ProtocolError { .. }
+            );
+            if is_transport_error {
+                DIAGNOSTICS.record_with_peer(
+                    None,
+                    Some(server_pk.to_string()),
+                    DiagnosticEventKind::CatalogueFetchFailed {
+                        error: error.to_string(),
+                    },
+                );
+            }
+        }
     }
     result
+}
+
+/// Store a fetched and validated [`SignedFileCatalogue`] to local storage,
+/// emitting a [`CatalogueRevisionInstalled`] event on success.
+///
+/// This is the idiomatic way to persist a remote catalogue after a
+/// successful fetch.  The function calls [`Storage::replace_remote_catalogue`]
+/// and records the installation event with the catalogue's revision, file
+/// count, and collection count.
+///
+/// # Errors
+///
+/// Propagates any storage error from `replace_remote_catalogue`.
+pub fn process_and_store_remote_catalogue(
+    storage: &Storage,
+    catalogue: &SignedFileCatalogue,
+) -> std::result::Result<(), String> {
+    storage
+        .replace_remote_catalogue(catalogue)
+        .map_err(|e| format!("store remote catalogue: {e:#}"))?;
+
+    DIAGNOSTICS.record_with_peer(
+        None,
+        Some(catalogue.owner_id.to_string()),
+        DiagnosticEventKind::CatalogueRevisionInstalled {
+            revision: catalogue.revision,
+            file_count: catalogue.files.len(),
+            collection_count: catalogue.collections.len(),
+        },
+    );
+
+    Ok(())
+}
+
+/// Handle a catalogue notice/advertisement from a remote peer.
+///
+/// Orchestrates the full lifecycle:
+/// 1. Emits [`CatalogueNoticeReceived`] with the advertised revision.
+/// 2. Fetches the remote catalogue via [`fetch_remote_catalogue`].
+/// 3. On success, persists the catalogue via [`process_and_store_remote_catalogue`],
+///    which emits [`CatalogueRevisionInstalled`].
+///
+/// The peer identity for all events is sourced from `server_pk`.
+///
+/// # Errors
+///
+/// Returns [`RemoteCatalogueFetchError`] if the fetch or store fails.
+pub async fn handle_catalogue_notice(
+    client_ep: &Endpoint,
+    server_pk: PublicKey,
+    known_revision: Option<u64>,
+    storage: &Storage,
+) -> std::result::Result<SignedFileCatalogue, RemoteCatalogueFetchError> {
+    DIAGNOSTICS.record_with_peer(
+        None,
+        Some(server_pk.to_string()),
+        DiagnosticEventKind::CatalogueNoticeReceived { known_revision },
+    );
+
+    let catalogue = fetch_remote_catalogue(client_ep, server_pk, known_revision).await?;
+
+    process_and_store_remote_catalogue(storage, &catalogue)
+        .map_err(|e| RemoteCatalogueFetchError::ProtocolError { details: e })?;
+
+    Ok(catalogue)
 }
 
 /// Parse a `CatalogResponse` from a `GetCatalogue` request and apply

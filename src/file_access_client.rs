@@ -18,6 +18,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use iroh::{Endpoint, EndpointAddr, PublicKey};
 use tracing::{debug, info, warn};
 
+use crate::chat_core::TRANSFER_TELEMETRY;
+use crate::diagnostics::ErrorCategory;
 use crate::file_access_protocol::{
     verify_download_descriptor, DescriptorVerification, FileAccessErrorCode, FileAccessRequest,
     FileAccessResponse, FileAccessWireRequest, FileAccessWireResponse, SignedDownloadDescriptor,
@@ -238,6 +240,14 @@ pub fn handle_permission_response(
         FileAccessResponse::PermissionDenied => {
             info!(download_id, "file-access: permission denied");
             storage.reject_resumed_permission(download_id, "permission denied by remote peer")?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::PermissionDenied,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             Ok(None)
         }
         FileAccessResponse::VersionMismatch { current_version } => {
@@ -249,22 +259,54 @@ pub fn handle_permission_response(
                 download_id,
                 &format!("version mismatch: server has version {current_version}"),
             )?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::VersionMismatch,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             Ok(None)
         }
         FileAccessResponse::NotFound => {
             info!(download_id, "file-access: file not found on remote peer");
             storage.reject_resumed_permission(download_id, "file not found on remote peer")?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::NotFound,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             Ok(None)
         }
         FileAccessResponse::Disabled => {
             info!(download_id, "file-access: file sharing disabled on remote");
             storage
                 .reject_resumed_permission(download_id, "file sharing disabled on remote peer")?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::PermissionDenied,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             Ok(None)
         }
         FileAccessResponse::Unavailable => {
             info!(download_id, "file-access: file unavailable on remote peer");
             storage.reject_resumed_permission(download_id, "file unavailable on remote peer")?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::PeerUnavailable,
+                true,
+                None,
+                Some(true),
+                None,
+            );
             Ok(None)
         }
         FileAccessResponse::Changed => {
@@ -276,16 +318,40 @@ pub fn handle_permission_response(
                 "file content changed since catalogue was fetched",
                 None,
             )?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::VersionMismatch,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             Ok(None)
         }
         FileAccessResponse::Busy => {
             warn!(download_id, "file-access: remote peer is busy");
             storage.reject_resumed_permission(download_id, "remote peer is busy")?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::ResourceExhausted,
+                true,
+                None,
+                Some(true),
+                None,
+            );
             Ok(None)
         }
         FileAccessResponse::RateLimited => {
             warn!(download_id, "file-access: rate limited by remote peer");
             storage.reject_resumed_permission(download_id, "rate limited by remote peer")?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::RateLimited,
+                true,
+                None,
+                Some(true),
+                None,
+            );
             Ok(None)
         }
         FileAccessResponse::UnsupportedVersion => {
@@ -295,6 +361,14 @@ pub fn handle_permission_response(
                 "remote peer does not support our protocol version",
                 None,
             )?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::ProtocolError,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             Ok(None)
         }
     }
@@ -330,12 +404,28 @@ fn handle_granted(
         DescriptorVerification::Expired => {
             warn!(download_id, "file-access: descriptor expired");
             storage.reject_resumed_permission(download_id, "descriptor expired before use")?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::PermissionDenied,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             return Ok(None);
         }
         DescriptorVerification::NotYetValid => {
             warn!(download_id, "file-access: descriptor not yet valid");
             storage
                 .reject_resumed_permission(download_id, "descriptor issue time is in the future")?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::ProtocolError,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             return Ok(None);
         }
         DescriptorVerification::OwnerMismatch => {
@@ -345,6 +435,14 @@ fn handle_granted(
                 "descriptor owner does not match expected peer",
                 None,
             )?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::PermissionDenied,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             return Ok(None);
         }
         DescriptorVerification::RequesterMismatch => {
@@ -354,6 +452,14 @@ fn handle_granted(
                 "descriptor requester does not match our identity",
                 None,
             )?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::PermissionDenied,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             return Ok(None);
         }
         DescriptorVerification::InvalidSignature => {
@@ -363,11 +469,27 @@ fn handle_granted(
                 "descriptor signature verification failed",
                 None,
             )?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::ProtocolError,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             return Ok(None);
         }
         DescriptorVerification::NonceReused => {
             warn!(download_id, "file-access: descriptor nonce reused");
             storage.reject_resumed_permission(download_id, "descriptor nonce already consumed")?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::PermissionDenied,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             return Ok(None);
         }
         DescriptorVerification::ContentMismatch => {
@@ -377,6 +499,14 @@ fn handle_granted(
                 "descriptor content hash does not match expected file",
                 None,
             )?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::IntegrityMismatch,
+                false,
+                None,
+                Some(false),
+                None,
+            );
             return Ok(None);
         }
     }
@@ -384,6 +514,14 @@ fn handle_granted(
     // ── 2. Verify content hash matches what we expect ───────────────────
     let desc_hash_hex = &descriptor.content_hash;
     if !desc_hash_hex.eq_ignore_ascii_case(expected_content_hash_hex) {
+        TRANSFER_TELEMETRY.failure(
+            download_id,
+            ErrorCategory::IntegrityMismatch,
+            false,
+            None,
+            Some(false),
+            None,
+        );
         storage.fail_download(
             download_id,
             &format!(
@@ -398,6 +536,14 @@ fn handle_granted(
 
     // ── 3. Verify size matches ─────────────────────────────────────────
     if descriptor.size_bytes != expected_size {
+        TRANSFER_TELEMETRY.failure(
+            download_id,
+            ErrorCategory::SizeMismatch,
+            false,
+            None,
+            Some(false),
+            None,
+        );
         storage.fail_download(
             download_id,
             &format!(

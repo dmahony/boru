@@ -45,7 +45,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 8;
+const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -595,6 +595,7 @@ impl Storage {
                 6 => self.migrate_v6(&conn)?,
                 7 => self.migrate_v7(&conn)?,
                 8 => self.migrate_v8(&conn)?,
+                9 => self.migrate_v9(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -916,6 +917,14 @@ impl Storage {
              ALTER TABLE downloads ADD COLUMN destination_path TEXT;",
         )
         .std_context("migrate v8 download paths")?;
+        Ok(())
+    }
+
+    /// V9 adds `source_path` to `file_objects` for locally-referenced files
+    /// (files on disk that are served without importing into iroh-blobs).
+    fn migrate_v9(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch("ALTER TABLE file_objects ADD COLUMN source_path TEXT;")
+            .std_context("migrate v9 source_path")?;
         Ok(())
     }
 
@@ -2106,6 +2115,7 @@ impl Storage {
 
     /// Store a file object. If the content hash already exists, returns the
     /// existing row without modifying it (idempotent).
+    /// Optionally records the `source_path` on disk for referenced files.
     pub fn put_file_object(
         &self,
         content_hash: &str,
@@ -2123,6 +2133,23 @@ impl Storage {
             params![content_hash, size as i64, mime_type, filename, now, data],
         )
         .std_context("put file_object")?;
+        Ok(())
+    }
+
+    /// Set (or clear) the `source_path` of an existing file object.
+    /// Used when a local file is referenced on disk rather than imported
+    /// into iroh-blobs.
+    pub fn set_file_object_source_path(
+        &self,
+        content_hash: &str,
+        source_path: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE file_objects SET source_path = ?1 WHERE content_hash = ?2",
+            params![source_path, content_hash],
+        )
+        .std_context("set file_object source_path")?;
         Ok(())
     }
 
@@ -2163,7 +2190,7 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT content_hash, size, mime_type, filename, created_at_ms, data
+                "SELECT content_hash, size, mime_type, filename, created_at_ms, data, source_path
                  FROM file_objects WHERE content_hash = ?1",
             )
             .std_context("prepare get_file_object")?;
@@ -2178,7 +2205,7 @@ impl Storage {
                 filename: row.get(3).std_context("get filename")?,
                 created_at_ms: row.get::<_, i64>(4).std_context("get created_at")? as u64,
                 data: row.get(5).std_context("get data")?,
-                source_path: None,
+                source_path: row.get(6).std_context("get source_path")?,
             }))
         } else {
             Ok(None)

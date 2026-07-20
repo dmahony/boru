@@ -32,6 +32,7 @@ use rusqlite::{params, OptionalExtension};
 use tracing::{debug, info};
 
 use crate::bounded_startup_scheduler::BoundedStartupScheduler;
+use crate::chat_core::TRANSFER_TELEMETRY;
 use crate::diagnostics::{DiagnosticEventKind, Diagnostics};
 use crate::download_limits::{
     ActiveDownload, DownloadLimiter, DownloadLimitsConfig, QueuedDownload,
@@ -139,6 +140,20 @@ impl DownloadManager {
             let Some(restored) = self.storage.get_download(download.id)? else {
                 continue;
             };
+
+            // Emit a resume event for every item recovered by restart.
+            // Items that went to 'queued' will be auto-scheduled below;
+            // items that went to 'paused' await user action but are still
+            // part of the restart recovery cycle.
+            if restored.state == "queued" || restored.state == "paused" {
+                let bytes = if restored.bytes_downloaded > 0 {
+                    Some(restored.bytes_downloaded)
+                } else {
+                    None
+                };
+                TRANSFER_TELEMETRY.resume(download.id, "restart_recovery", bytes);
+            }
+
             if restored.state != "queued" {
                 continue;
             }
@@ -151,15 +166,54 @@ impl DownloadManager {
             return Ok(());
         }
 
-        let mut scheduler = self
-            .startup_scheduler
-            .lock()
-            .expect("startup scheduler poisoned");
-        scheduler.push(items);
-        let started = scheduler.kickstart().await;
+        // ── Phase 1: push items and pop the burst budget (sync) ───
+        let burst = {
+            let mut scheduler = self
+                .startup_scheduler
+                .lock()
+                .expect("startup scheduler poisoned");
+            scheduler.push(items);
+            scheduler.pop_burst()
+        }; // MutexGuard dropped here
+
+        // ── Phase 2: start items without holding the lock (async) ──
+        let started = Self::start_burst_items(burst).await;
+
+        // ── Phase 3: record started count (sync) ──────────────────
+        {
+            let mut scheduler = self
+                .startup_scheduler
+                .lock()
+                .expect("startup scheduler poisoned");
+            scheduler.record_started(started.len());
+        }
         let mut active = self.startup_active.lock().expect("startup active poisoned");
         active.extend(started);
         Ok(())
+    }
+
+    /// Start a batch of popped queued downloads, stopping on the first
+    /// failure.  Mirrors the original [`kickstart`] loop logic.
+    ///
+    /// [`kickstart`]: BoundedStartupScheduler::kickstart
+    async fn start_burst_items(items: Vec<(i64, QueuedDownload)>) -> Vec<ActiveDownload> {
+        let mut started = Vec::with_capacity(items.len());
+        for (_id, queued) in items {
+            match queued.start().await {
+                Ok(active) => {
+                    info!("bounded-startup-scheduler: started download (burst)");
+                    started.push(active);
+                }
+                Err(e) => {
+                    info!(
+                        "bounded-startup-scheduler: burst start failed: {e:?}, \
+                         ending burst early"
+                    );
+                    break;
+                }
+            }
+        }
+        started
     }
 
     /// Clean up scheduler tracking for a download that completed locally
@@ -167,6 +221,7 @@ impl DownloadManager {
     ///
     /// Removes the download from the scheduler's pending queue and ID tracker
     /// if it was a scheduler-managed startup item.
+    #[cfg(test)]
     fn cleanup_local_completion(&self, download_id: i64) {
         let mut scheduler = self
             .startup_scheduler
@@ -188,11 +243,43 @@ impl DownloadManager {
     ///
     /// Returns the new [`ActiveDownload`] handle if one was started.
     pub async fn notify_startup_completed(&self) -> Option<ActiveDownload> {
-        let mut scheduler = self
-            .startup_scheduler
-            .lock()
-            .expect("startup scheduler poisoned");
-        scheduler.notify_completed().await
+        // ── Phase 1: sync decrement ─────────────────────────────────
+        {
+            let mut scheduler = self
+                .startup_scheduler
+                .lock()
+                .expect("startup scheduler poisoned");
+            scheduler.notify_completed_sync();
+        }
+
+        // ── Phase 2: retry loop — pop items under lock, start without ─
+        loop {
+            let maybe_item = {
+                let mut scheduler = self
+                    .startup_scheduler
+                    .lock()
+                    .expect("startup scheduler poisoned");
+                scheduler.pop_next_to_start()
+            };
+            let (_id, queued) = maybe_item?;
+            match queued.start().await {
+                Ok(active) => {
+                    let mut scheduler = self
+                        .startup_scheduler
+                        .lock()
+                        .expect("startup scheduler poisoned");
+                    scheduler.record_started(1);
+                    return Some(active);
+                }
+                Err(e) => {
+                    info!(
+                        "bounded-startup-scheduler: start failed: {e:?}, \
+                         skipping item"
+                    );
+                    continue;
+                }
+            }
+        }
     }
 
     /// Advance the download state machine by one tick.
@@ -307,6 +394,67 @@ impl DownloadManager {
             .lock()
             .expect("cancel_flags poisoned")
             .remove(&download_id);
+    }
+
+    /// Pause an active download.
+    ///
+    /// Sets the cancel flag (signalling any in-flight worker), cleans up the
+    /// temporary file if one exists, and transitions the download state to
+    /// `paused` in storage.
+    ///
+    /// Idempotent on already-paused downloads.  Rejects terminal states.
+    pub fn pause_download(&self, download_id: i64) -> Result<()> {
+        // 1. Signal any in-flight worker to stop.
+        self.cancel_flag(download_id)
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // 2. Clean up temporary file if present.
+        let temp_path = self
+            .storage
+            .get_download_temp_path(download_id)
+            .ok()
+            .flatten();
+        if let Some(ref path) = temp_path {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = self.storage.clear_download_temp_path(download_id);
+
+        // 3. Transition state in storage.
+        self.storage.pause_download(download_id)?;
+
+        TRANSFER_TELEMETRY.pause(download_id, "user", None);
+        Ok(())
+    }
+
+    /// Resume a paused download — transitions to `resolving_peer` and emits a
+    /// `resume` telemetry event with reason `user`.
+    ///
+    /// Idempotent on already-active downloads (those in `resolving_peer`,
+    /// `requesting_permission`, `downloading`, or `verifying`).  Rejects
+    /// terminal and unknown states.
+    pub fn resume_download(&self, download_id: i64) -> Result<()> {
+        // Read the current bytes_received before resume (used for telemetry).
+        let bytes = self
+            .storage
+            .get_download(download_id)
+            .ok()
+            .flatten()
+            .map(|dl| dl.bytes_downloaded);
+        self.storage.resume_download(download_id)?;
+        TRANSFER_TELEMETRY.resume(download_id, "user", bytes);
+        Ok(())
+    }
+
+    /// Cancel a download permanently.
+    ///
+    /// Transitions the download state to `cancelled` in storage and removes
+    /// the cancellation flag so a fresh, unset flag is created on the next
+    /// lookup.
+    pub fn cancel_download(&self, download_id: i64) -> Result<()> {
+        self.storage.cancel_download(download_id)?;
+        self.remove_cancel_flag(download_id);
+        TRANSFER_TELEMETRY.cancellation(download_id, "user", None);
+        Ok(())
     }
 }
 
@@ -592,5 +740,65 @@ mod tests {
             !manager.startup_scheduler.lock().unwrap().contains(id),
             "should be removed from scheduler"
         );
+    }
+
+    #[tokio::test]
+    async fn resume_download_transitions_state_and_emits_event() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object("hash-resume", 4, "app/bin", "resume.bin", b"data")
+            .unwrap();
+        let id = storage.create_download("hash-resume", "peer6", 4).unwrap();
+
+        // Set download to paused state.
+        storage.pause_download(id).unwrap();
+
+        let manager = DownloadManager::with_limits(storage.clone(), test_config());
+        manager.resume_download(id).unwrap();
+
+        // Verify state transition.
+        let dl = storage.get_download(id).unwrap().unwrap();
+        assert_eq!(
+            dl.state, "resolving_peer",
+            "resumed download should be in resolving_peer state"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_download_is_idempotent_on_active_downloads() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object("hash-resume-idem", 4, "app/bin", "resume-idem.bin", b"data")
+            .unwrap();
+        let id = storage
+            .create_download("hash-resume-idem", "peer7", 4)
+            .unwrap();
+
+        // Set to resolving_peer to test idempotency.
+        storage
+            .update_download_progress(id, 0, "resolving_peer")
+            .unwrap();
+
+        let manager = DownloadManager::with_limits(storage.clone(), test_config());
+        // Should not error — idempotent on already-active downloads.
+        manager.resume_download(id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_download_rejects_terminal_states() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object("hash-resume-term", 4, "app/bin", "resume-term.bin", b"data")
+            .unwrap();
+        let id = storage
+            .create_download("hash-resume-term", "peer8", 4)
+            .unwrap();
+
+        // Complete the download.
+        storage.complete_download(id, 4).unwrap();
+
+        let manager = DownloadManager::with_limits(storage.clone(), test_config());
+        let result = manager.resume_download(id);
+        assert!(result.is_err(), "resume should reject completed downloads");
     }
 }

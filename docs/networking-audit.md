@@ -20,7 +20,7 @@ Codebase: iroh-gossip-chat (`boru-chat`), commit 9ed4f23
 
 | Protocol | ALPN | Defined At | Status |
 |----------|------|------------|--------|
-| File Catalogue | `/boru-file-catalog/1` | `src/net.rs:56` (`FILE_CATALOG_ALPN`) | Constant exists, comment says "not yet registered" |
+| File Catalogue | `/boru-file-catalog/1` | `src/protocol_version.rs:22` (`CATALOGUE_ALPN`) | Authoritative canonical constant |
 | File Access | `/boru-file-access/1` | `src/net.rs:65` (`FILE_ACCESS_ALPN`) | Constant exists, comment says "not yet registered" |
 
 Pre-written integration tests import from modules that do not yet exist:

@@ -324,3 +324,7 @@ pub mod abuse_controls;
 /// local temp file.
 #[cfg(feature = "net")]
 pub mod blob_transfer;
+
+/// Transfer lifecycle telemetry — structured events for download workflows.
+#[cfg(feature = "net")]
+pub mod transfer_telemetry;

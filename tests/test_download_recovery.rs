@@ -16,8 +16,8 @@ fn create_download(storage: &Storage, hash: &str, state: DownloadState) -> i64 {
     id
 }
 
-#[test]
-fn resolving_and_permission_recover_to_queue_without_temp_file() {
+#[tokio::test]
+async fn resolving_and_permission_recover_to_queue_without_temp_file() {
     let storage = Storage::memory().unwrap();
     let resolving = create_download(&storage, "recovery-resolving", DownloadState::ResolvingPeer);
     let permission = create_download(
@@ -28,6 +28,7 @@ fn resolving_and_permission_recover_to_queue_without_temp_file() {
 
     DownloadManager::new(storage.clone())
         .recover_from_restart()
+        .await
         .unwrap();
 
     assert_eq!(
@@ -40,8 +41,8 @@ fn resolving_and_permission_recover_to_queue_without_temp_file() {
     );
 }
 
-#[test]
-fn resolving_with_partial_temp_recovers_to_paused() {
+#[tokio::test]
+async fn resolving_with_partial_temp_recovers_to_paused() {
     let dir = tempdir().unwrap();
     let temp = dir.path().join("download.part");
     fs::write(&temp, b"par").unwrap();
@@ -53,6 +54,7 @@ fn resolving_with_partial_temp_recovers_to_paused() {
 
     DownloadManager::new(storage.clone())
         .recover_from_restart()
+        .await
         .unwrap();
 
     assert_eq!(storage.get_download(id).unwrap().unwrap().state, "paused");
@@ -99,8 +101,8 @@ fn reopening_database_recovers_each_interrupted_state() {
     );
 }
 
-#[test]
-fn downloading_recovers_to_paused_and_complete_stays_terminal() {
+#[tokio::test]
+async fn downloading_recovers_to_paused_and_complete_stays_terminal() {
     let dir = tempdir().unwrap();
     let temp = dir.path().join("download.part");
     fs::write(&temp, b"data").unwrap();
@@ -113,6 +115,7 @@ fn downloading_recovers_to_paused_and_complete_stays_terminal() {
 
     DownloadManager::new(storage.clone())
         .recover_from_restart()
+        .await
         .unwrap();
 
     assert_eq!(
@@ -125,8 +128,8 @@ fn downloading_recovers_to_paused_and_complete_stays_terminal() {
     );
 }
 
-#[test]
-fn verifying_valid_temp_is_installed_and_completed() {
+#[tokio::test]
+async fn verifying_valid_temp_is_installed_and_completed() {
     let dir = tempdir().unwrap();
     let temp = dir.path().join("download.part");
     let destination = dir.path().join("file.bin");
@@ -144,6 +147,7 @@ fn verifying_valid_temp_is_installed_and_completed() {
 
     DownloadManager::new(storage.clone())
         .recover_from_restart()
+        .await
         .unwrap();
 
     assert_eq!(storage.get_download(id).unwrap().unwrap().state, "complete");
@@ -151,8 +155,8 @@ fn verifying_valid_temp_is_installed_and_completed() {
     assert!(!temp.exists());
 }
 
-#[test]
-fn restored_downloads_are_admitted_in_deterministic_bounded_burst() {
+#[tokio::test]
+async fn restored_downloads_are_admitted_in_deterministic_bounded_burst() {
     let storage = Storage::memory().unwrap();
     let mut ids = Vec::new();
     for index in 0..5 {
@@ -174,7 +178,7 @@ fn restored_downloads_are_admitted_in_deterministic_bounded_burst() {
             ..DownloadLimitsConfig::default()
         },
     );
-    manager.recover_from_restart().unwrap();
+    manager.recover_from_restart().await.unwrap();
 
     let states: Vec<_> = ids
         .iter()
@@ -184,7 +188,13 @@ fn restored_downloads_are_admitted_in_deterministic_bounded_burst() {
         states,
         vec!["queued", "queued", "queued", "queued", "queued",]
     );
-    assert!(manager.take_startup_admission(ids[0]).is_some());
-    assert!(manager.take_startup_admission(ids[1]).is_some());
-    assert!(manager.take_startup_admission(ids[2]).is_none());
+
+    // With max_startup_downloads=2, burst started 2 and 3 remain pending.
+    let scheduler = manager.startup_scheduler().lock().unwrap();
+    assert_eq!(scheduler.active_count(), 2, "burst should start 2");
+    assert_eq!(scheduler.pending_count(), 3, "3 should remain pending");
+    // All 5 IDs are managed by the scheduler (started + pending).
+    for id in &ids {
+        assert!(scheduler.contains(*id), "id {id} should be in scheduler");
+    }
 }

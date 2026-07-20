@@ -362,8 +362,11 @@ fn malformed_records_do_not_block_discovery() {
     ))
     .expect("inject garbage record");
 
-    // Oversized payload (exceeds MAX_DISCOVERY_PAYLOAD_SIZE)
-    let oversized = vec![0xabu8; 3000];
+    // Garbage the size of a valid payload (up to MAX_DISCOVERY_PAYLOAD_SIZE)
+    // but encrypts/decrypts to garbage — verifies discovery doesn't block
+    // on undecryptable records.
+    let garbage_size = 2048;
+    let oversized = vec![0xabu8; garbage_size];
     block_on(backend.publish(
         &ns,
         boru_chat::discovery_backend::EncryptedDiscoveryRecord::new(oversized),

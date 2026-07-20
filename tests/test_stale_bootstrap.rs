@@ -129,8 +129,8 @@ fn test_room_store_peers_roundtrip() -> Result<()> {
     let cleared = RoomStore::load(dir.path())?.expect("should load cleared store");
     assert!(cleared.peers.is_empty(), "cleared store has empty peers");
 
-    // Load a v1-format file (no peers field) — currently the store
-    // rejects non-v2 schemas, so this is expected to fail.
+    // Load a v1-format file (no peers field) — the store migrates
+    // it to the current schema version with empty peers.
     let v1_path = dir.path().join("room.json");
     let topic_bytes: Vec<u8> = topic.as_bytes().to_vec();
     let v1_json = serde_json::json!({
@@ -138,11 +138,12 @@ fn test_room_store_peers_roundtrip() -> Result<()> {
         "topic": topic_bytes
     });
     std::fs::write(&v1_path, v1_json.to_string()).map_err(|e| n0_error::anyerr!("{e}"))?;
-    let v1_result = RoomStore::load(dir.path());
-    assert!(
-        v1_result.is_err(),
-        "v1 format should be rejected (no migration path yet)"
-    );
+    let migrated = RoomStore::load(dir.path())?
+        .expect("v1 format should be migrated to current schema");
+    assert_eq!(migrated.schema_version, 3, "v1 file should be migrated to v3");
+    assert_eq!(migrated.topic, topic, "topic should survive v1 migration");
+    assert!(migrated.peers.is_empty(), "v1 file has no peers, should default to empty");
+    assert!(migrated.discovery_secret.is_none(), "v1 file has no discovery_secret");
 
     Ok(())
 }

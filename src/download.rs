@@ -8,6 +8,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 
+use crate::chat_core::TRANSFER_TELEMETRY;
 use crate::storage::Storage;
 
 /// Durable states used by the download worker.
@@ -161,8 +162,19 @@ pub fn verify_install_and_complete(
                 format!("database completion failed and rollback also failed: {rollback_error}")
             }
         };
+        TRANSFER_TELEMETRY.failure(
+            download_id,
+            crate::diagnostics::ErrorCategory::StorageError,
+            false,
+            Some(verified.bytes),
+            None,
+            None,
+        );
         return Err(error.context(message).into());
     }
+
+    // Transfer durablly complete — emit the terminal completion event.
+    TRANSFER_TELEMETRY.completion(download_id, verified.bytes, None);
 
     Ok(verified)
 }

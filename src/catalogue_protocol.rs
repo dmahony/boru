@@ -782,4 +782,66 @@ mod tests {
             "SUPPORTED_CATALOGUE_VERSIONS must be sorted and unique"
         );
     }
+
+    /// Current version passes validation, unsupported versions are rejected.
+    #[test]
+    fn test_catalogue_wire_request_validate_version() {
+        let req = CatalogWireRequest {
+            version: CATALOGUE_WIRE_VERSION,
+            inner: CatalogRequest::GetCataloguePage {
+                known_revision: None,
+                cursor: None,
+                page_size: 10,
+            },
+        };
+        assert!(
+            req.validate_version().is_ok(),
+            "current wire version must pass validation"
+        );
+
+        let bad_versions = [0u16, 2, 99, u16::MAX];
+        for &bad in &bad_versions {
+            let bad_req = CatalogWireRequest {
+                version: bad,
+                inner: CatalogRequest::GetCataloguePage {
+                    known_revision: None,
+                    cursor: None,
+                    page_size: 10,
+                },
+            };
+            let result = bad_req.validate_version();
+            assert!(
+                result.is_err(),
+                "unsupported version {bad} must be rejected"
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                CatalogErrorCode::UnsupportedVersion,
+                "wrong error code for unsupported version {bad}"
+            );
+        }
+    }
+
+    /// Response validate_version mirrors request behavior.
+    #[test]
+    fn test_catalogue_wire_response_validate_version() {
+        let resp = CatalogWireResponse {
+            version: CATALOGUE_WIRE_VERSION,
+            inner: CatalogResponse::internal_error(),
+        };
+        assert!(
+            resp.validate_version().is_ok(),
+            "current wire version must pass validation"
+        );
+
+        let bad_version = 0u16;
+        let bad_resp = CatalogWireResponse {
+            version: bad_version,
+            inner: CatalogResponse::internal_error(),
+        };
+        assert!(
+            bad_resp.validate_version().is_err(),
+            "version {bad_version} must be rejected"
+        );
+    }
 }

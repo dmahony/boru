@@ -364,6 +364,134 @@ pub enum DiagnosticEventKind {
         /// Human-readable error description.
         error: String,
     },
+    /// A structured transfer lifecycle event conforming to the v1 contract
+    /// (see docs/design/transfer-lifecycle-events.md).
+    TransferLifecycle(TransferLifecycleEvent),
+}
+
+// =============================================================================
+// TransferLifecycleEvent — structured envelope (section 1 + 3 of the contract)
+// =============================================================================
+
+/// A single transfer lifecycle event conforming to the v1 event contract
+/// (see `docs/design/transfer-lifecycle-events.md`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferLifecycleEvent {
+    /// Contract version.  `1` for this document.
+    pub schema_version: u32,
+    /// Locally generated opaque event identifier, unique for the retention
+    /// period.  Not a transfer identifier.
+    pub event_id: String,
+    /// Stable lowercase snake_case event name (section 3).
+    pub event_name: String,
+    /// Short stable identifier for the logical transfer (section 2).
+    pub transfer_id: String,
+    /// Monotonic sequence within this transfer, starting at `0`.
+    pub sequence: u64,
+    /// Local Unix epoch milliseconds when the event was observed.
+    pub occurred_at_ms: u64,
+    /// Attempt number, starting at `1`.  A retry increments this value;
+    /// pause/resume does not.
+    pub attempt: u32,
+    /// Event-specific payload.  Absent when the event has no optional fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+}
+
+// =============================================================================
+// ErrorCategory — stable bounded taxonomy (section 5 of the contract)
+// =============================================================================
+
+/// Stable error categories for transfer failure events.
+///
+/// The taxonomy is closed for v1.  New implementation errors must map to
+/// [`Self::Unknown`] until a future contract revision adds a category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCategory {
+    /// Access was refused or the grant expired without authorisation.
+    PermissionDenied,
+    /// The requested shared object is not available on the remote peer.
+    NotFound,
+    /// The remote peer is offline, unreachable, or disconnected.
+    PeerUnavailable,
+    /// A configured transfer or operation deadline elapsed.
+    Timeout,
+    /// Admission or remote policy rejected the operation temporarily.
+    RateLimited,
+    /// Cancellation interrupted the attempt.
+    Cancelled,
+    /// The operation stopped because it was paused.
+    Paused,
+    /// Received size differs from the expected size.
+    SizeMismatch,
+    /// Verification failed for the received bytes.
+    IntegrityMismatch,
+    /// The remote version changed while the transfer was pending.
+    VersionMismatch,
+    /// Local temporary-file, database, or installation operation failed.
+    StorageError,
+    /// The peer response or transfer protocol was invalid.
+    ProtocolError,
+    /// Local queue, concurrency, memory, or disk limits prevented progress.
+    ResourceExhausted,
+    /// An error cannot safely be classified into the published categories.
+    Unknown,
+}
+
+impl ErrorCategory {
+    /// Return the stable lowercase identifier.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PermissionDenied => "permission_denied",
+            Self::NotFound => "not_found",
+            Self::PeerUnavailable => "peer_unavailable",
+            Self::Timeout => "timeout",
+            Self::RateLimited => "rate_limited",
+            Self::Cancelled => "cancelled",
+            Self::Paused => "paused",
+            Self::SizeMismatch => "size_mismatch",
+            Self::IntegrityMismatch => "integrity_mismatch",
+            Self::VersionMismatch => "version_mismatch",
+            Self::StorageError => "storage_error",
+            Self::ProtocolError => "protocol_error",
+            Self::ResourceExhausted => "resource_exhausted",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Stable event name strings for transfer lifecycle events.
+pub mod event_names {
+    /// Durable download work was accepted before networking was scheduled.
+    pub const DOWNLOAD_QUEUED: &str = "download_queued";
+    /// A fresh access/permission request was sent.
+    pub const ACCESS_REQUESTED: &str = "access_requested";
+    /// The access response authorised the transfer.
+    pub const ACCESS_GRANTED: &str = "access_granted";
+    /// Byte transfer began for the current attempt.
+    pub const TRANSFER_STARTED: &str = "transfer_started";
+    /// A sampled cumulative progress point.
+    pub const PROGRESS_CHECKPOINT: &str = "progress_checkpoint";
+    /// Work was deliberately suspended.
+    pub const PAUSE: &str = "pause";
+    /// A paused logical transfer was resumed.
+    pub const RESUME: &str = "resume";
+    /// Local size/integrity verification finished.
+    pub const VERIFICATION: &str = "verification";
+    /// Verified content was installed and the download reached its successful
+    /// terminal state.
+    pub const COMPLETION: &str = "completion";
+    /// The current attempt failed.
+    pub const FAILURE: &str = "failure";
+    /// The transfer was cancelled and reached its terminal cancelled state.
+    pub const CANCELLATION: &str = "cancellation";
 }
 
 /// Produce a short human-friendly identifier from a full id/order.
@@ -1179,6 +1307,22 @@ impl Diagnostics {
     pub fn event_count(&self) -> usize {
         let events = self.inner.events.lock().expect("events lock");
         events.len()
+    }
+
+    /// Return the next event sequence number (the raw atomic counter).
+    /// Useful for precise event capture: pass this value to
+    /// `events_since` / `events_since_filtered` with `>` semantics
+    /// to capture events that have not yet been recorded.
+    pub fn next_event_sequence(&self) -> u64 {
+        self.inner.next_sequence.load(Ordering::Relaxed)
+    }
+
+    /// Remove all stored events and reset the event sequence counter.
+    /// Intended for test use (parallel test isolation).
+    pub fn reset_events(&self) {
+        let mut events = self.inner.events.lock().expect("events lock");
+        events.clear();
+        self.inner.next_sequence.store(0, Ordering::Release);
     }
 
     /// Return the total number of received probes currently stored.
@@ -10284,7 +10428,9 @@ mod tests {
         // Verify that concurrent enqueue and receive on a GuiTestHandle
         // channel is deadlock-free. Use multiple producer threads and
         // an active consumer draining the receiver.
-        let (handle, mut rx) = GuiTestHandle::channel(256);
+        // Capacity must exceed total messages (300 = 6 × 50) so concurrent
+        // producers never race past the consumer even under high system load.
+        let (handle, mut rx) = GuiTestHandle::channel(512);
         const N_PRODUCERS: usize = 6;
         const MSGS_PER_PRODUCER: usize = 50;
 

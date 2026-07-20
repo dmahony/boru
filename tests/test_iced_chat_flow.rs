@@ -147,6 +147,14 @@ async fn test_iced_chat_exact_flow() -> Result<()> {
 
     let topic = TopicId::from_bytes(rng.random());
 
+    // ── Share A's address info with B (like iced_chat JoinFromTicket does) ──
+    let mem_b = MemoryLookup::new();
+    if let Ok(addr_lookup) = ep_b.address_lookup() {
+        addr_lookup.add(mem_b.clone());
+    }
+    let addr_a = ep_a.addr();
+    mem_b.set_endpoint_info(addr_a);
+
     // Peer A: subscribe like CreateNewRoom/OpenRoom
     println!("\nA: subscribing (no bootstrap, like OpenRoom)...");
     let sub_a = gossip_a.subscribe(topic, vec![]).await?;

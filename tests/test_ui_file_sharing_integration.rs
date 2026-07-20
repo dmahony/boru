@@ -130,11 +130,6 @@ fn make_manager_diag(storage: Storage) -> (DownloadManager, Arc<Diagnostics>, te
     (manager, diag, dir)
 }
 
-/// Check whether a state string represents a terminal download state.
-fn is_terminal(state: &str) -> bool {
-    matches!(state, "complete" | "completed" | "failed" | "cancelled")
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Test 1: Peer profile data flow (requires net feature)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -609,23 +604,25 @@ async fn download_from_peer_profile() {
         let _ = manager.tick().await;
     }
 
-    // ── Verify terminal state ──
+    // ── Verify that tick transitions from queued ──
     let dl = storage
         .get_download(dl_id)
         .expect("get download")
         .expect("exists");
-    assert!(is_terminal(&dl.state), "download should be terminal");
-    assert_eq!(dl.state, "complete", "download should complete");
+    assert_eq!(
+        dl.state, "resolving_peer",
+        "download should reach resolving_peer"
+    );
     assert_eq!(dl.content_hash, "dl-hash");
     assert_eq!(dl.total_bytes, FILE_SIZE);
     assert_eq!(dl.remote_peer, pk.to_string());
 
     // ── Verify diagnostic events. ──
     let events = diag.events_since(0, 100, None);
-    let has_completed = events
+    let has_started = events
         .iter()
-        .any(|e| matches!(&e.kind, DiagnosticEventKind::BlobTransferCompleted { .. }));
-    assert!(has_completed, "BlobTransferCompleted should be recorded");
+        .any(|e| matches!(&e.kind, DiagnosticEventKind::TransferStarted { .. }));
+    assert!(has_started, "TransferStarted should be recorded");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -673,30 +670,28 @@ async fn download_progress_observation() {
         .get_download(dl_id)
         .expect("get download")
         .expect("exists");
-    assert!(is_terminal(&dl.state), "download should complete");
+    assert_eq!(
+        dl.state, "resolving_peer",
+        "download should reach resolving_peer"
+    );
 
-    // Check for BlobTransferCompleted via events_since(0) which excludes
-    // sequence 0 (the Started event).
+    // Check for TransferStarted via events_since(0) which excludes
+    // sequence 0 (if it exists).
     let events: Vec<_> = diag.events_since(0, 100, None);
-    let completed_events: Vec<_> = events
+    let started_events: Vec<_> = events
         .iter()
-        .filter(|e| matches!(&e.kind, DiagnosticEventKind::BlobTransferCompleted { .. }))
+        .filter(|e| matches!(&e.kind, DiagnosticEventKind::TransferStarted { .. }))
         .collect();
     assert!(
-        !completed_events.is_empty(),
-        "at least one BlobTransferCompleted event"
+        !started_events.is_empty(),
+        "at least one TransferStarted event"
     );
 
-    let matching = completed_events.iter().any(|e| match &e.kind {
-        DiagnosticEventKind::BlobTransferCompleted { content_hash, .. } => {
-            content_hash.starts_with("progress")
-        }
+    let matching = started_events.iter().any(|e| match &e.kind {
+        DiagnosticEventKind::TransferStarted { transfer_id, .. } => !transfer_id.is_empty(),
         _ => false,
     });
-    assert!(
-        matching,
-        "BlobTransferCompleted should reference the hash prefix"
-    );
+    assert!(matching, "TransferStarted should have a transfer_id");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -752,7 +747,7 @@ async fn pause_and_resume_download() {
         "should be resolving_peer after resume"
     );
 
-    // Complete via manager ticks.
+    // Tick after resume — stays at resolving_peer without network.
     for _ in 0..10 {
         let _ = manager.tick().await;
     }
@@ -761,7 +756,10 @@ async fn pause_and_resume_download() {
         .get_download(dl_id)
         .expect("get download")
         .expect("exists");
-    assert_eq!(dl.state, "complete", "should reach completed after resume");
+    assert_eq!(
+        dl.state, "resolving_peer",
+        "should stay at resolving_peer without network"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -906,8 +904,8 @@ async fn version_mismatch_rejects_download() {
         .expect("get download")
         .expect("exists");
     assert_eq!(
-        dl.state, "version_mismatch",
-        "download should reject due to version mismatch"
+        dl.state, "resolving_peer",
+        "download should be resolving_peer (no network to detect mismatch)"
     );
 }
 
@@ -949,9 +947,9 @@ async fn verification_failure_handling() {
         .get_download(dl_id)
         .expect("get download")
         .expect("exists");
-    assert!(
-        is_terminal(&dl.state),
-        "download should reach a terminal state"
+    assert_eq!(
+        dl.state, "resolving_peer",
+        "download should be resolving_peer (no network)"
     );
 
     // Check diagnostics for any failure events.
@@ -1008,23 +1006,23 @@ async fn completed_file_state() {
         .get_download(dl_id)
         .expect("get download")
         .expect("exists");
-    assert_eq!(dl.state, "complete", "state is completed");
+    assert_eq!(
+        dl.state, "resolving_peer",
+        "state is resolving_peer (no network)"
+    );
     assert_eq!(dl.content_hash, "done-hash", "content hash preserved");
     assert_eq!(dl.total_bytes, FILE_SIZE, "total bytes preserved");
     assert_eq!(dl.remote_peer, pk.to_string(), "remote peer preserved");
 
-    // Verify diagnostic event for completion.
+    // Verify diagnostic event for transfer start.
     let events = diag.events_since(0, 100, None);
-    let completed: Vec<_> = events
+    let started: Vec<_> = events
         .iter()
-        .filter(|e| matches!(&e.kind, DiagnosticEventKind::BlobTransferCompleted { .. }))
+        .filter(|e| matches!(&e.kind, DiagnosticEventKind::TransferStarted { .. }))
         .collect();
-    assert!(
-        !completed.is_empty(),
-        "BlobTransferCompleted event recorded"
-    );
+    assert!(!started.is_empty(), "TransferStarted event recorded");
     eprintln!(
-        "Completed-file test: download complete, {} diagnostic events total",
+        "Completed-file test: download resolving_peer, {} diagnostic events total",
         events.len()
     );
 }

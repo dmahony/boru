@@ -18,7 +18,7 @@ use tracing::warn;
 
 /// ALPN for the catalogue retrieval protocol.
 ///
-/// Matches `net::FILE_CATALOG_ALPN` (`/boru-file-catalog/1`).
+/// Previously also defined as `FILE_CATALOG_ALPN` in `net.rs`.
 pub const CATALOGUE_ALPN: &[u8] = b"/boru-file-catalog/1";
 
 // ── Version constants ─────────────────────────────────────────────────────

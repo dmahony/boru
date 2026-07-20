@@ -166,6 +166,50 @@ impl BoundedStartupScheduler {
         started
     }
 
+    /// Pop items from the pending queue up to the burst budget.
+    ///
+    /// The caller is expected to start the returned items outside of any
+    /// lock, then call [`record_started`](Self::record_started) to update
+    /// the active count.
+    pub fn pop_burst(&mut self) -> Vec<(i64, QueuedDownload)> {
+        let budget = self
+            .config
+            .max_startup_downloads
+            .min(self.config.max_concurrent_downloads);
+        let mut items = Vec::with_capacity(budget);
+        for _ in 0..budget {
+            let Some(item) = self.pending.pop_front() else {
+                break;
+            };
+            items.push(item);
+        }
+        items
+    }
+
+    /// Decrement the active count (called when a download completes).
+    pub fn notify_completed_sync(&mut self) {
+        self.active = self.active.saturating_sub(1);
+    }
+
+    /// Pop one pending item if the concurrent cap allows.
+    ///
+    /// Returns `None` when at cap or the queue is empty.  The caller starts
+    /// the item outside any lock, then calls [`record_started`](Self::record_started).
+    pub fn pop_next_to_start(&mut self) -> Option<(i64, QueuedDownload)> {
+        if self.active >= self.config.max_concurrent_downloads {
+            return None;
+        }
+        self.pending.pop_front()
+    }
+
+    /// Record that items were started (increment the active count).
+    ///
+    /// Must be balanced with [`notify_completed_sync`](Self::notify_completed_sync)
+    /// when those downloads complete.
+    pub fn record_started(&mut self, count: usize) {
+        self.active += count;
+    }
+
     /// Notify the scheduler that a download completed.
     ///
     /// Decrements the active count and, if the queue is non-empty and the
@@ -175,7 +219,7 @@ impl BoundedStartupScheduler {
     /// Returns `Some(ActiveDownload)` if a new download was started, or
     /// `None` if no more items are pending or at cap.
     pub async fn notify_completed(&mut self) -> Option<ActiveDownload> {
-        self.active = self.active.saturating_sub(1);
+        self.notify_completed_sync();
         self.try_start_next().await
     }
 

@@ -58,9 +58,8 @@ The task body's reference to "profile-file messages, cache definitions, full-cat
 | File | Symbol | Value |
 |------|--------|-------|
 | `src/protocol_version.rs` | `CATALOGUE_ALPN` | `b"/boru-file-catalog/1"` |
-| `src/net.rs` | `FILE_CATALOG_ALPN` | `b"/boru-file-catalog/1"` |
 
-Both are the same value. `protocol_version.rs` is the authoritative source (tests import it). `net.rs`'s is a duplicate.
+`CATALOGUE_ALPN` in `protocol_version.rs` is the sole authoritative constant. The duplicate `FILE_CATALOG_ALPN` in `net.rs` has been removed; its references now point to `crate::protocol_version::CATALOGUE_ALPN`.
 
 ---
 
@@ -143,8 +142,8 @@ The iced_chat app at several points returns error messages saying "Legacy ticket
 
 | Item | Remove? | Reason |
 |------|---------|--------|
-| `net.rs` `FILE_CATALOG_ALPN` constant | **OPTIONAL** | Duplicate of `protocol_version.rs::CATALOGUE_ALPN`. Safe to remove and redirect the test. |
-| `net.rs:54-55` comment about deferred registration | **OPTIONAL** | Becomes stale once wired in; keep until then. |
+| `net.rs` `FILE_CATALOG_ALPN` constant | **REMOVED** | Duplicate of `protocol_version.rs::CATALOGUE_ALPN`. Removed in t_514968de; test now references `CATALOGUE_ALPN`. |
+| `net.rs` deferred-registration comment for FILE_CATALOG_ALPN | **REMOVED** | Removed together with the constant. |
 | Diagnostics `CatalogueNoticeReceived`, `CatalogueRevisionInstalled`, `CatalogueCachedDataUsed` | **NO** | Part of contract; will be wired when catalogue lifecycle is integrated. |
 | `chat_core.rs:1637` `let _ = (...)` | **NO** | Migration compatibility for legacy wire format. |
 | iced_chat "use the authorised file catalogue" messages | **NO** | Active migration guidance. |
@@ -167,8 +166,7 @@ The iced_chat app at several points returns error messages saying "Legacy ticket
 - Import `CatalogueHandler` from `crate::catalogue_handler`.
 - Construct the handler in the router build sequence (has access to `Storage`, `SecretKey`, profile_user_id, `FriendsStore`).
 - Call `.accept(crate::protocol_version::CATALOGUE_ALPN, handler_instance)` on the Router builder.
-- Remove `net.rs:54-55` deferred-registration comment (or update it).
-- Optionally remove `net.rs`'s `FILE_CATALOG_ALPN` and redirect tests to `protocol_version::CATALOGUE_ALPN`.
+- Remove `net.rs`'s `FILE_CATALOG_ALPN` and redirect tests to `protocol_version::CATALOGUE_ALPN` (DONE).
 
 ### Worker 3: Integration with chat_core lifecycle (t_f4c75f52)
 **Task:** Connect catalogue fetch+install into the main chat event loop.

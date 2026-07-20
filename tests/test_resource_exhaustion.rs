@@ -212,7 +212,7 @@ async fn send_raw_catalogue_request(
         })?;
 
     let conn = client_ep
-        .connect(server_addr, &CATALOGUE_ALPN)
+        .connect(server_addr, CATALOGUE_ALPN)
         .await
         .map_err(|e| RemoteCatalogueFetchError::ConnectionFailed {
             details: format!("connect: {e}"),
@@ -1161,8 +1161,12 @@ fn limit_constants_are_consistent() {
     assert_eq!(MAX_ENTRIES_PER_COLLECTION, 10_000);
     assert_eq!(MAX_CATALOGUE_PAGE_SIZE, 500);
     assert_eq!(MAX_FILE_DETAILS_PAYLOAD_BYTES, 256 * 1024);
-    assert!(MAX_CATALOGUE_REQUEST_BYTES < MAX_CATALOGUE_RESPONSE_BYTES);
-    assert!(MAX_FILE_DETAILS_PAYLOAD_BYTES < MAX_CATALOGUE_RESPONSE_BYTES);
+    const {
+        assert!(MAX_CATALOGUE_REQUEST_BYTES < MAX_CATALOGUE_RESPONSE_BYTES);
+    }
+    const {
+        assert!(MAX_FILE_DETAILS_PAYLOAD_BYTES < MAX_CATALOGUE_RESPONSE_BYTES);
+    }
     assert_eq!(MAX_FILE_SIZE_BYTES, 10 * 1024 * 1024 * 1024 * 1024);
 }
 
@@ -1194,7 +1198,7 @@ async fn connection_storm_rapid_cycles() {
         },
     );
 
-    let mut server = ExhaustionServer::start(storage, friends, deterministic_sk(0xAA)).await;
+    let server = ExhaustionServer::start(storage, friends, deterministic_sk(0xAA)).await;
     server.add_file("storm-1", "shared.txt");
 
     const CYCLES: usize = 30;
