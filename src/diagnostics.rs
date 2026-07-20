@@ -2888,6 +2888,18 @@ pub enum GuiTestCommand {
     },
     /// Toggle the help overlay.
     ToggleHelp,
+    /// Browse a remote peer's shared file catalogue.
+    BrowseCatalogue {
+        /// Peer public key as a hex string.
+        peer_id: String,
+    },
+    /// Download a file from a remote peer's catalogue.
+    DownloadFile {
+        /// Peer public key as a hex string.
+        peer_id: String,
+        /// Content hash (blake3) of the file to download.
+        content_hash: String,
+    },
     /// Wait for a GUI condition to be satisfied.
     Wait {
         /// The condition to evaluate.
@@ -2957,6 +2969,16 @@ impl GuiTestCommand {
             GuiTestCommand::FocusComposer => Ok(()),
             GuiTestCommand::OpenSettings => Ok(()),
             GuiTestCommand::CloseDialog => Ok(()),
+            GuiTestCommand::BrowseCatalogue { peer_id } => {
+                validate_gui_identifier(peer_id, "peer_id")
+            }
+            GuiTestCommand::DownloadFile {
+                peer_id,
+                content_hash,
+            } => {
+                validate_gui_identifier(peer_id, "peer_id")?;
+                validate_gui_identifier(content_hash, "content_hash")
+            }
             GuiTestCommand::Wait {
                 condition,
                 timeout_ms,
@@ -3050,6 +3072,15 @@ impl GuiTestCommand {
             GuiTestCommand::SelectPeer { .. } => None,
             // Wait: the condition itself IS the post-condition, tracked separately.
             GuiTestCommand::Wait { .. } => None,
+            // BrowseCatalogue: transitions to the peer's catalogue screen.
+            GuiTestCommand::BrowseCatalogue { peer_id } => {
+                Some(ExpectedState::ScreenIs(format!("PeerCatalogue({peer_id})")))
+            }
+            // DownloadFile: initiates a download — post-condition is tracked through
+            // the DownloadInitiated event in the action lifecycle.
+            GuiTestCommand::DownloadFile { .. } => {
+                Some(ExpectedState::Generic("download_initiated".into()))
+            }
         }
     }
 }

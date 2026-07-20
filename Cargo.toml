@@ -210,6 +210,10 @@ required-features = ["gui"]
 name = "doctor"
 required-features = ["net"]
 
+[[example]]
+name = "catalogue_browser"
+required-features = ["net"]
+
 [[test]]
 name = "three_peer_mesh"
 path = "tests/test_three_peer_mesh.rs"
