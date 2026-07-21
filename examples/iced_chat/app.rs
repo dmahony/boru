@@ -4804,6 +4804,7 @@ impl IcedChat {
                 let personal_topic = self.personal_room_topic();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
                 let endpoint = self.endpoint.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let dht = self.dht.clone();
@@ -5068,6 +5069,7 @@ impl IcedChat {
                 let runtime_handle = self.runtime_handle.clone();
                 let memory_lookup = self.memory_lookup.clone();
                 let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
@@ -5546,6 +5548,7 @@ impl IcedChat {
                 let memory_lookup = self.memory_lookup.clone();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
@@ -6477,6 +6480,7 @@ impl IcedChat {
                     };
                     let secret_key = self.secret_key.clone();
                     let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
                     let endpoint = self.endpoint.clone();
                     return iced::Task::perform(
                         async move {
@@ -7679,6 +7683,7 @@ impl IcedChat {
                 let name = dl.name.clone();
                 let kind = dl.kind;
                 let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
                         let ticket: iroh_blobs::ticket::BlobTicket =
@@ -7698,7 +7703,14 @@ impl IcedChat {
                             name.clone(),
                             kind,
                             &save_path,
-                            |_| {},
+                            {
+                                let queue = progress_queue.clone();
+                                move |ev| {
+                                    if let Ok(mut q) = queue.lock() {
+                                        q.push_back(ev);
+                                    }
+                                }
+                            },
                             None,
                         )
                         .await
@@ -9120,6 +9132,7 @@ impl IcedChat {
                 let endpoint = self.endpoint.clone();
                 let secret_key = self.secret_key.clone();
                 let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
                 let peers_with_mailbox: Vec<PublicKey> = self
                     .friends
                     .iter()
@@ -9195,6 +9208,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9217,6 +9231,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9441,6 +9456,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9484,6 +9500,7 @@ impl IcedChat {
                         let image_store = self.image_store.clone();
                         let user = self.local_public.to_string();
                         let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
                         self.push_system("Saving profile image…");
                         iced::Task::perform(
                             async move {
@@ -9595,6 +9612,7 @@ impl IcedChat {
                     let image_store = self.image_store.clone();
                     let identifier = self.profile_image_identifier.clone();
                     let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
