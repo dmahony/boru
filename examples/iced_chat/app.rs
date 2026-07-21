@@ -8849,6 +8849,53 @@ impl IcedChat {
                     }
                 }
 
+                // Retry mailbox delivery for offline peers that just came online.
+                // Only attempt delivery when the recipient is currently in our
+                // gossip mesh (neighbors) — skip disconnected peers to avoid
+                // hanging on QUIC connect.
+                if !self.neighbors.is_empty() {
+                    let data_dir = self.data_dir.clone();
+                    let secret_key = self.secret_key.clone();
+                    let endpoint = self.endpoint.clone();
+                    let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
+                    tasks.push(iced::Task::perform(
+                        async move {
+                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir) {
+                                Ok(Some(s)) => s,
+                                _ => return Vec::new(),
+                            };
+                            let pending = match store.pending() {
+                                Ok(p) => p,
+                                Err(_) => return Vec::new(),
+                            };
+                            let mut results = Vec::new();
+                            for envelope in pending {
+                                let peer_key = envelope.recipient.identity;
+                                if !online_peers.contains(&peer_key) {
+                                    continue;
+                                }
+                                match send_deliver(
+                                    &endpoint,
+                                    &secret_key,
+                                    peer_key,
+                                    envelope.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        results.push((envelope.message_id(), true));
+                                    }
+                                    Err(_) => {
+                                        results.push((envelope.message_id(), false));
+                                    }
+                                }
+                            }
+                            results
+                        },
+                        |_results| AppMessage::Noop,
+                    ));
+                }
+
                 // Periodic presence heartbeat — broadcasts Message::Presence every ~5s.
 
                 // Periodic connection type refresh (~60s) or on-demand
