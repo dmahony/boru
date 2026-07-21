@@ -1924,11 +1924,17 @@ fn handle_get_node_status(state: &McpAppState) -> Result<Value, String> {
         .next()
         .map(|u| u.to_string());
 
+    let rooms = state.rooms.lock().map_err(|e| format!("rooms lock: {e}"))?;
+    let active_rooms: Vec<String> = rooms.iter().map(|t| hex::encode(t.as_bytes())).collect();
+    let active_room_count = rooms.len();
+    drop(rooms); // release lock
+
     Ok(serde_json::json!({
         "node_id": state.node_id.clone(),
         "node_id_short": local_id,
         "version": state.version.clone(),
-        "active_room_count": state.rooms.lock().unwrap().len(),
+        "active_room_count": active_room_count,
+        "active_rooms": active_rooms,
         "latest_event_sequence": state.diagnostics.latest_sequence(),
         "relay_url": relay_url,
     }))
@@ -2058,9 +2064,10 @@ fn handle_get_discovery_events(req: &JsonRpcRequest, state: &McpAppState) -> Res
 
     let limit = req
         .params
-        .get("limit")
+        .get("count")          // prefer 'count' for agent-friendliness
+        .or_else(|| req.params.get("limit"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(200) as usize;
+        .unwrap_or(20) as usize; // reduced from 200 to 20 for LLM context economy
 
     let room_id = req
         .params
@@ -2068,9 +2075,18 @@ fn handle_get_discovery_events(req: &JsonRpcRequest, state: &McpAppState) -> Res
         .and_then(|v| v.as_str())
         .and_then(|s| parse_topic_id(s).ok());
 
-    let events = state
-        .diagnostics
-        .events_since(since_sequence, limit, room_id);
+    let peer_id = req.params.get("peer_id").and_then(|v| v.as_str());
+
+    let events = if let Some(pid) = peer_id {
+        // Use events_since_filtered to filter by both room and peer
+        state
+            .diagnostics
+            .events_since_filtered(since_sequence, limit, room_id, Some(pid))
+    } else {
+        state
+            .diagnostics
+            .events_since(since_sequence, limit, room_id)
+    };
     let latest = state.diagnostics.latest_sequence();
 
     Ok(serde_json::json!({
@@ -2781,10 +2797,17 @@ fn handle_download_file(
 
 /// Parse a hex-encoded topic ID string into a `TopicId`.
 fn parse_topic_id(s: &str) -> Result<TopicId, String> {
-    let bytes = hex::decode(s).map_err(|e| format!("Invalid hex room_id: {e}"))?;
+    let bytes = hex::decode(s).map_err(|e| {
+        format!(
+            "Invalid hex room_id: {e}. \
+             Room IDs are hex-encoded 32-byte topic IDs. \
+             Use `boru_get_node_status` to discover active room IDs."
+        )
+    })?;
     if bytes.len() != 32 {
         return Err(format!(
-            "Room ID must be 32 bytes (64 hex chars), got {}",
+            "Room ID must be 32 bytes (64 hex chars), got {}. \
+             Use `boru_get_node_status` to discover active room IDs.",
             bytes.len()
         ));
     }
