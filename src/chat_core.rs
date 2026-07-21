@@ -2253,6 +2253,84 @@ pub async fn download_blob_with_progress(
     Ok(buf)
 }
 
+/// Download a blob with progress reporting, streaming directly to a file.
+///
+/// The blob is downloaded to the local store, then streamed from the store
+/// to `save_path` in fixed-size chunks.  No whole-file buffer is allocated.
+/// Progress events (`TransferProgress`) are emitted via `on_progress`.
+pub async fn download_blob_to_file(
+    blob_store: &iroh_blobs::api::Store,
+    endpoint: &Endpoint,
+    hash: iroh_blobs::Hash,
+    candidates: Vec<PublicKey>,
+    name: String,
+    kind: TransferKind,
+    save_path: &std::path::Path,
+    mut on_progress: impl FnMut(TransferProgress) + Send + 'static,
+    max_bytes: Option<u64>,
+) -> Result<()> {
+    let id = TransferId::next();
+    let shared_cb: TransferProgressCallback =
+        Arc::new(Mutex::new(Some(Box::new(on_progress))));
+    let emit = |ev: TransferProgress| {
+        if let Ok(mut guard) = shared_cb.lock() {
+            if let Some(cb) = guard.as_mut() { cb(ev); }
+        }
+    };
+    emit(TransferProgress::Started { id, kind, name: name.clone(), total: None });
+    let cancel_guard = CancelGuard::new(id, kind, name.clone(), shared_cb.clone());
+
+    // Phase 1: download to the local blob store
+    let downloader = blob_store.downloader(endpoint);
+    let progress = downloader.download(hash, candidates);
+    let mut stream = progress.stream().await?;
+    use iroh_blobs::api::downloader::DownloadProgressItem;
+    loop {
+        match stream.next().await {
+            Some(DownloadProgressItem::Progress(n)) => {
+                if let Some(max) = max_bytes {
+                    if n > max {
+                        emit(TransferProgress::Failed {
+                            id, name: name.clone(),
+                            error: format!("blob too large ({} bytes, limit {} bytes)", n, max),
+                        });
+                        return Err(n0_error::anyerr!("blob too large"));
+                    }
+                }
+                emit(TransferProgress::Progress { id, kind, name: name.clone(), bytes: n, total: None });
+            }
+            Some(DownloadProgressItem::Error(e)) => {
+                cancel_guard.disarm();
+                emit(TransferProgress::Failed { id, name, error: format!("{e}") });
+                return Err(e);
+            }
+            Some(DownloadProgressItem::DownloadError) => {
+                cancel_guard.disarm();
+                emit(TransferProgress::Failed { id, name, error: "Download error".into() });
+                return Err(n0_error::anyerr!("Download error"));
+            }
+            None => break,
+            _ => {}
+        }
+    }
+    cancel_guard.disarm();
+
+    // Phase 2: stream from the local store to the output file
+    use tokio::io::AsyncReadExt;
+    let mut reader = blob_store.blobs().reader(hash);
+    let mut file = tokio::fs::File::create(save_path).await?;
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 { break; }
+        tokio::io::AsyncWriteExt::write_all(&mut file, &buf[..n]).await?;
+    }
+    tokio::io::AsyncWriteExt::flush(&mut file).await?;
+
+    emit(TransferProgress::Completed { id, kind, name });
+    Ok(())
+}
+
 /// Download a blob with public-room safety admission control and
 /// blob-size enforcement.
 ///
