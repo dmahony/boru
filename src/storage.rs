@@ -2136,6 +2136,33 @@ impl Storage {
         Ok(())
     }
 
+    /// Store a chat upload and make it an offered file in the owner's profile.
+    ///
+    /// Chat uploads are content-addressed just like files added through the
+    /// catalogue UI. Keeping object insertion, the profile offer, and the
+    /// manifest revision together prevents a successful chat send from being
+    /// invisible to the owner's profile catalogue.
+    pub fn register_chat_upload(
+        &self,
+        profile_user_id: &str,
+        filename: &str,
+        mime_type: &str,
+        data: &[u8],
+    ) -> Result<String> {
+        let content_hash = blake3::hash(data).to_hex().to_string();
+        self.put_file_object(&content_hash, data.len() as u64, mime_type, filename, data)?;
+        self.upsert_shared_file(
+            &content_hash,
+            profile_user_id,
+            &content_hash,
+            filename,
+            None,
+            true,
+        )?;
+        self.bump_manifest_revision(profile_user_id, &format!("chat-upload:{content_hash}"))?;
+        Ok(content_hash)
+    }
+
     /// Set (or clear) the `source_path` of an existing file object.
     /// Used when a local file is referenced on disk rather than imported
     /// into iroh-blobs.
@@ -4466,6 +4493,31 @@ mod tests {
         assert_eq!(obj.size, 500);
         assert_eq!(obj.filename, "readme.txt");
         assert_eq!(obj.data.as_deref(), Some(&b"hello world"[..]));
+    }
+
+    #[test]
+    fn chat_upload_is_owned_by_profile_and_available_in_catalogue() {
+        let storage = Storage::memory().unwrap();
+        let data = b"chat-upload-data";
+        let hash = storage
+            .register_chat_upload("alice", "photo.webp", "image/webp", data)
+            .unwrap();
+
+        let alice_files = storage.list_shared_files("alice", true).unwrap();
+        assert_eq!(alice_files.len(), 1);
+        assert_eq!(alice_files[0].content_hash, hash);
+        assert_eq!(alice_files[0].display_filename, "photo.webp");
+        assert!(storage.list_shared_files("bob", true).unwrap().is_empty());
+        assert_eq!(
+            storage
+                .get_file_object(&hash)
+                .unwrap()
+                .unwrap()
+                .data
+                .as_deref(),
+            Some(&data[..])
+        );
+        assert!(storage.get_manifest_state("alice").unwrap().is_some());
     }
 
     #[test]
