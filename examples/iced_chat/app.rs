@@ -4176,6 +4176,7 @@ impl IcedChat {
             .conversations
             .remove(&topic)
             .unwrap_or_else(|| ConversationLive::new(topic));
+        tracing::info!(topic=%topic, has_sender=self.sender.is_some(), "leave_current_room");
         conversation.sender = self.sender.take();
         conversation.forward_handle = self.forward_handle.take();
         conversation.forward_handle_slot = self.forward_handle_slot.clone();
@@ -4218,67 +4219,67 @@ impl IcedChat {
     /// Returns `true` if the switch succeeded, `false` if the conversation was
     /// not found (caller should fall through to a fresh subscription).
     fn switch_to_conversation(&mut self, topic: TopicId) -> bool {
+        tracing::info!(topic=%topic, "switch_to_conversation called");
         if let Some(mut conversation) = self.conversations.remove(&topic) {
-            if let Some(sender) = conversation.sender.take() {
-                // Save current room entries before overwriting them
-                self.save_room_to_history();
+            // Save current room entries before overwriting them
+            self.save_room_to_history();
 
-                // Update room-list preview for the previous room
-                let preview = self
-                    .entries
-                    .last()
-                    .map(|e| {
-                        let t = e.body.clone();
-                        if t.len() > 60 {
-                            format!("{}…", &t[..60])
-                        } else {
-                            t
-                        }
-                    })
-                    .unwrap_or_default();
-                if !preview.is_empty() {
-                    self.room_history.update_preview(&self.topic, &preview);
-                }
-                self.room_history_dirty = true;
-
-                // Restore the target conversation state
-                self.topic = topic;
-                self.screen = Screen::Chat { topic };
-                self.sender = Some(sender);
-                self.forward_handle = conversation.forward_handle.take();
-                self.forward_handle_slot = conversation.forward_handle_slot;
-                self.ticket_str = std::mem::take(&mut conversation.ticket_str);
-                self.entries = std::mem::take(&mut conversation.entries);
-                self.composer_text = std::mem::take(&mut conversation.composer_text);
-                self.names = std::mem::take(&mut conversation.names);
-                self.self_sent_events = std::mem::take(&mut conversation.self_sent_events);
-                self.neighbors = conversation.neighbors;
-                self.history_saved_count = conversation.history_saved_count;
-                self.pending_file = conversation.pending_file.take();
-                self.pending_image = std::mem::take(&mut conversation.pending_image);
-                self.download_entry_index = conversation.download_entry_index.take();
-                self.active_download_transfer_id = conversation.active_download_transfer_id.take();
-                self.transfer_id_to_index = std::mem::take(&mut conversation.transfer_id_to_index);
-                self.follow_latest = conversation.follow_latest;
-                self.scroll_offset = conversation.scroll_offset;
-                self.viewport_height = conversation.viewport_height;
-
-                // Leave the layout cache dirty — `view_chat_log` calls
-                // `ensure()` which will detect the new entry count and rebuild
-                // from scratch, reusing existing allocations.
-                self.layout_cache.borrow_mut().invalidate_all();
-
-                // Drain any pending events that accumulated while hidden.
-                conversation.unread = 0;
-                for event in conversation.pending_events.drain(..) {
-                    self.process_net_event_sync(&topic, &event);
-                }
-
-                return true;
+            // Update room-list preview for the previous room
+            let preview = self
+                .entries
+                .last()
+                .map(|e| {
+                    let t = e.body.clone();
+                    if t.len() > 60 {
+                        format!("{}…", &t[..60])
+                    } else {
+                        t
+                    }
+                })
+                .unwrap_or_default();
+            if !preview.is_empty() {
+                self.room_history.update_preview(&self.topic, &preview);
             }
-            // Sender was None — unlikely; re-insert and fall through.
-            self.conversations.insert(topic, conversation);
+            self.room_history_dirty = true;
+
+            // Restore the target conversation state.
+            // sender may be None if the room subscription has not yet
+            // completed — the conversation is still viewable (read-only)
+            // until RoomOpened delivers the sender.
+            self.topic = topic;
+            self.screen = Screen::Chat { topic };
+            self.sender = conversation.sender.take();
+            self.forward_handle = conversation.forward_handle.take();
+            self.forward_handle_slot = conversation.forward_handle_slot;
+            self.ticket_str = std::mem::take(&mut conversation.ticket_str);
+            self.entries = std::mem::take(&mut conversation.entries);
+            self.composer_text = std::mem::take(&mut conversation.composer_text);
+            self.names = std::mem::take(&mut conversation.names);
+            self.self_sent_events = std::mem::take(&mut conversation.self_sent_events);
+            self.neighbors = conversation.neighbors;
+            self.history_saved_count = conversation.history_saved_count;
+            self.pending_file = conversation.pending_file.take();
+            self.pending_image = std::mem::take(&mut conversation.pending_image);
+            self.download_entry_index = conversation.download_entry_index.take();
+            self.active_download_transfer_id = conversation.active_download_transfer_id.take();
+            self.transfer_id_to_index = std::mem::take(&mut conversation.transfer_id_to_index);
+            self.follow_latest = conversation.follow_latest;
+            self.scroll_offset = conversation.scroll_offset;
+            self.viewport_height = conversation.viewport_height;
+
+            self.layout_cache.borrow_mut().invalidate_all();
+
+            // Drain any pending events that accumulated while hidden.
+            let count = conversation.pending_events.len();
+            conversation.unread = 0;
+            tracing::info!(topic=%topic, pending_count=count, "replaying pending events");
+            for event in conversation.pending_events.drain(..) {
+                self.process_net_event_sync(&topic, &event);
+            }
+
+            return true;
         }
+        tracing::info!(topic=%topic, "switch_to_conversation: no conversation found, returning false");
         false
     }
 
@@ -4993,6 +4994,22 @@ impl IcedChat {
                     .is_some_and(|(_, expected_topic)| *expected_topic == topic);
                 if topic == self.topic && (self.sender.is_some() || pending_selected_room_action) {
                     self.screen = Screen::Chat { topic };
+                    // Drain any messages that arrived while viewing the chat list.
+                    let pending: Vec<_> = self
+                        .conversations
+                        .get_mut(&topic)
+                        .map(|c| {
+                            c.unread = 0;
+                            c.pending_events.drain(..).collect()
+                        })
+                        .unwrap_or_default();
+                    if !pending.is_empty() {
+                        tracing::info!(topic=%topic, pending_count=pending.len(), "fast-path replaying pending events");
+                        for event in pending {
+                            self.process_net_event_sync(&topic, &event);
+                        }
+                        self.layout_cache.borrow_mut().invalidate_all();
+                    }
                     complete_open_room_action(self);
                     return iced::Task::none();
                 }
@@ -5097,6 +5114,7 @@ impl IcedChat {
 
                 iced::Task::perform(
                     async move {
+                        info!("OpenRoom task: ENTERED async block");
                         info!("OpenRoom task: starting subscribe topic={topic}");
                         // Seed the endpoint address lookup with bootstrap peer
                         // addresses so the endpoint can resolve them by their
@@ -5112,6 +5130,7 @@ impl IcedChat {
                         // Run gossip subscription on the dedicated Tokio runtime.
                         // Calling it directly from an Iced task can leave the room
                         // marked subscribed while the gossip handshake never starts.
+                        info!("OpenRoom task: about to spawn subscription");
                         let sub: GossipTopic = runtime_handle
                             .spawn(async move {
                                 if direct_conversation || bootstrap_peers.is_empty() {
@@ -5232,6 +5251,7 @@ impl IcedChat {
                             SignedMessage::sign_and_encode(&sk, &crate::Message::Presence)
                                 .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(presence).await;
+                        info!("OpenRoom task: broadcasts complete");
 
                         let saved_peers = if initial_addrs_for_save.is_empty() {
                             vec![local_peer_addr]
@@ -5267,6 +5287,7 @@ impl IcedChat {
                 sender,
                 room_tracker,
             } => {
+                info!("RoomOpened FIRED topic={topic}");
                 self.pending_topic = None;
                 self.sender = Some(sender.clone());
 
@@ -6895,13 +6916,21 @@ impl IcedChat {
                 // Bump conversation's last-seen timestamp so it moves to the
                 // top of the sorted chat list on any network activity.
                 self.conversation_store.touch_and_bump(&topic);
+                // Update the sidebar preview BEFORE taking the mutable borrow
+                // on self.conversations (avoids borrow conflict).
+                let is_inactive = topic != self.topic
+                    || !matches!(self.screen, Screen::Chat { .. });
+                if is_inactive {
+                    self.update_room_preview(&topic, &event);
+                }
                 let conversation = self
                     .conversations
                     .entry(topic)
                     .or_insert_with(|| ConversationLive::new(topic));
-                if topic != self.topic || !matches!(self.screen, Screen::Chat { .. }) {
+                if is_inactive {
                     conversation.pending_events.push_back(event);
                     conversation.unread = conversation.unread.saturating_add(1);
+                    tracing::info!(topic=%topic, unread=conversation.unread, "queued event for inactive room");
                     return iced::Task::none();
                 }
                 conversation.unread = 0;

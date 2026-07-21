@@ -379,7 +379,11 @@ pub async fn create_metadata_doc(
 
     // Broadcast the initial metadata so all peers converge.
     let wire = encode_wire(&initial)?;
-    gossip_sender.broadcast(wire).await?;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        gossip_sender.broadcast(wire),
+    )
+    .await;
 
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
 
@@ -655,7 +659,11 @@ pub async fn create_roster_doc(
     // Broadcast the full roster state
     let entries = make_roster_entries(&*members.read().await);
     let wire = encode_roster_wire(&entries)?;
-    gossip_sender.broadcast(wire).await?;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        gossip_sender.broadcast(wire),
+    )
+    .await;
 
     Ok(RosterDoc { topic, members })
 }

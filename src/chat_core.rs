@@ -922,6 +922,11 @@ pub enum Message {
     /// A diagnostic probe sent through the normal gossip path — not displayed
     /// as an ordinary chat message by default.
     DiagnosticProbe(crate::diagnostics::DiagnosticProbe),
+    /// Opaque contact-layer control message (friend requests, chat invites).
+    ContactControl {
+        /// Serialised SignedContactMessage payload.
+        payload: Vec<u8>,
+    },
     /// Publish the sender's profile and metadata over gossip.
     ProfileUpdate(UserProfile),
 }
@@ -1766,6 +1771,9 @@ pub fn handle_net_event_for_topic(
                     if from != cb.local_public() {
                         cb.add_reaction(&message_hash, emoji);
                     }
+                }
+                Message::ContactControl { .. } => {
+                    // Handled at the frontend layer.
                 }
             }
         }
