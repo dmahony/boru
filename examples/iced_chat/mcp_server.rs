@@ -33,6 +33,8 @@
 //! | `boru_gui_toggle_dark_mode` | Toggle dark mode on/off (requires `--enable-gui-test-actions`) |
 //! | `boru_gui_close_dialog` | Close the currently open dialog or overlay (requires `--enable-gui-test-actions`) |
 //! | `boru_run_gui_message_test` | Verify the local GUI message pipeline without claiming remote delivery (requires `--enable-gui-test-actions`) |
+//! | `boru_browse_peer_catalogue` | Fetch and return a remote peer's signed file catalogue |
+//! | `boru_download_file` | Initiate a durable file download from a remote peer |
 //!
 //! # Security
 //!
@@ -54,6 +56,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::gui_test_actions::{ActionRecord, ActionStatus, GuiActionHistory, GuiActionRateLimiter};
+use boru_chat::catalogue_client::fetch_remote_catalogue;
 use boru_chat::chat_core::{broadcast_diagnostic_probe, message_hash, Message};
 use boru_chat::conversations::ConversationNetEvent;
 use boru_chat::diagnostics::{
@@ -61,6 +64,7 @@ use boru_chat::diagnostics::{
     DiagnosticEvent, DiagnosticEventKind, DiagnosticStageState, Diagnostics, DiscoveryTestResult,
     GuiWaitCondition, IcedMessageJournal, IcedStateSnapshot, PeerDiagnosticState, ProbeTestResult,
 };
+use boru_chat::download_initiation::initiate_download;
 use boru_chat::net::Gossip;
 use boru_chat::proto::TopicId;
 use bytes::Bytes;
@@ -90,6 +94,10 @@ pub const MAX_PEER_ID_LEN: usize = 128;
 
 /// Maximum length for probe_id strings.
 pub const MAX_PROBE_ID_LEN: usize = 64;
+
+/// Maximum length for content_hash strings (covers SHA-256 hex = 64 chars
+/// and other hash algorithms with metadata prefixes).
+pub const MAX_CONTENT_HASH_LEN: usize = 128;
 
 /// Maximum length for probe payload message text (64 KiB).  Message text
 /// is the one string that MUST preserve Unicode — no control-char rejection.
@@ -300,6 +308,9 @@ pub struct McpAppState {
     pub gui_action_rate_limiter: Arc<Mutex<GuiActionRateLimiter>>,
     /// Latest GUI state, published by the Iced application through a watch channel.
     pub gui_state_rx: Option<watch::Receiver<IcedStateSnapshot>>,
+    /// Persistent storage for file catalogues and download state.
+    /// `None` when storage is unavailable (e.g. ephemeral mode).
+    pub storage: Option<boru_chat::storage::Storage>,
 }
 
 // =============================================================================
@@ -484,6 +495,9 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
         }
 
         "boru_get_failure_analysis" => handle_get_failure_analysis(req, state),
+
+        "boru_browse_peer_catalogue" => handle_browse_peer_catalogue(req, state).await,
+        "boru_download_file" => handle_download_file(req, state),
 
         // `boru_gui_wait_for_state` is read-only and does not require the action queue.
         "boru_gui_wait_for_state" => {
@@ -2585,6 +2599,182 @@ fn handle_get_failure_analysis(req: &JsonRpcRequest, state: &McpAppState) -> Res
     serde_json::to_value(&analysis).map_err(|e| format!("serialize: {e}"))
 }
 
+/// `boru_browse_peer_catalogue` — fetch and return a remote peer's file
+/// catalogue.
+///
+/// Connects to the specified peer via the iroh endpoint, fetches their signed
+/// file catalogue, and returns the catalogue metadata along with the list of
+/// shared files.
+///
+/// # Parameters
+///
+/// * `peer_id` (string, required) — the peer's public key (hex).
+///
+/// # Returns
+///
+/// ```json
+/// {
+///   "peer_id": "...",
+///   "revision": 1,
+///   "generated_at_ms": 1710000000000,
+///   "file_count": 3,
+///   "files": [
+///     {
+///       "shared_file_id": "...",
+///       "display_name": "...",
+///       "mime_type": "application/pdf",
+///       "size_bytes": 1024,
+///       "content_hash": "...",
+///       "version_number": 1,
+///     }
+///   ],
+///   "collections": [...]
+/// }
+/// ```
+///
+/// # Errors
+///
+/// Returns JSON-RPC error code -32000 with a descriptive message for:
+/// - Missing or invalid `peer_id`
+/// - Connection failures
+/// - Catalogue signature verification failures
+/// - Timeouts or protocol errors
+async fn handle_browse_peer_catalogue(
+    req: &JsonRpcRequest,
+    state: &McpAppState,
+) -> Result<Value, String> {
+    let peer_id = req
+        .params
+        .get("peer_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required argument: peer_id".to_string())?;
+
+    validate_bounded(peer_id, MAX_PEER_ID_LEN, "peer_id")?;
+    validate_no_control_chars(peer_id, "peer_id")?;
+
+    let peer_pk: iroh::PublicKey = peer_id.parse().map_err(|e| {
+        format!("Invalid peer_id '{peer_id}': {e}")
+    })?;
+
+    let catalogue = fetch_remote_catalogue(&state.endpoint, peer_pk, None)
+        .await
+        .map_err(|e| format!("Failed to fetch catalogue from peer '{peer_id}': {e}"))?;
+
+    let files: Vec<Value> = catalogue
+        .files
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "shared_file_id": f.shared_file_id,
+                "display_name": f.display_name,
+                "description": f.description,
+                "mime_type": f.mime_type,
+                "size_bytes": f.size_bytes,
+                "content_hash": f.content_hash,
+                "version_number": f.version_number,
+                "updated_at_ms": f.updated_at_ms,
+                "collection_ids": f.collection_ids,
+            })
+        })
+        .collect();
+
+    let collections: Vec<Value> = catalogue
+        .collections
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "collection_id": c.collection_id,
+                "name": c.name,
+                "description": c.description,
+                "file_count": catalogue.files.iter().filter(|f| f.collection_ids.contains(&c.collection_id)).count(),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "peer_id": catalogue.owner_id.to_string(),
+        "revision": catalogue.revision,
+        "generated_at_ms": catalogue.generated_at_ms,
+        "file_count": files.len(),
+        "files": files,
+        "collections": collections,
+    }))
+}
+
+/// `boru_download_file` — initiate a durable file download from a remote peer.
+///
+/// Validates preconditions (catalogue fetched, file exists in catalogue,
+/// no conflicting active download) and creates a new download row in
+/// `queued` state.
+///
+/// # Parameters
+///
+/// * `content_hash` (string, required) — the content hash of the file to
+///   download.
+/// * `peer_id` (string, required) — the peer's public key (hex).
+/// * `known_size` (number, optional) — expected file size in bytes.
+///
+/// # Returns
+///
+/// ```json
+/// {
+///   "download_id": 42,
+///   "content_hash": "...",
+///   "peer_id": "...",
+///   "total_bytes": 1024
+/// }
+/// ```
+///
+/// # Errors
+///
+/// Returns JSON-RPC error code -32000 with a descriptive message for:
+/// - Missing or invalid parameters
+/// - Storage not available
+/// - Catalogue not fetched for peer
+/// - File not found in catalogue
+/// - Conflicting download already active
+fn handle_download_file(
+    req: &JsonRpcRequest,
+    state: &McpAppState,
+) -> Result<Value, String> {
+    let content_hash = req
+        .params
+        .get("content_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required argument: content_hash".to_string())?;
+
+    let peer_id = req
+        .params
+        .get("peer_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required argument: peer_id".to_string())?;
+
+    let known_size = req
+        .params
+        .get("known_size")
+        .and_then(|v| v.as_u64());
+
+    validate_bounded(content_hash, MAX_CONTENT_HASH_LEN, "content_hash")?;
+    validate_bounded(peer_id, MAX_PEER_ID_LEN, "peer_id")?;
+    validate_no_control_chars(content_hash, "content_hash")?;
+    validate_no_control_chars(peer_id, "peer_id")?;
+
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or_else(|| "Storage not available. Download management requires persistent storage.".to_string())?;
+
+    let result = initiate_download(storage, content_hash, peer_id, known_size)
+        .map_err(|e| format!("Failed to initiate download: {e}"))?;
+
+    Ok(serde_json::json!({
+        "download_id": result.download_id,
+        "content_hash": result.content_hash,
+        "peer_id": result.remote_peer,
+        "total_bytes": result.total_bytes,
+    }))
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -4660,6 +4850,7 @@ mod tests {
             gui_action_lifecycle: boru_chat::diagnostics::GuiActionHistory::default(),
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
+            storage: Some(boru_chat::storage::Storage::memory().expect("test storage")),
         };
         (state, gossip_rx)
     }
@@ -5309,6 +5500,7 @@ mod tests {
             gui_action_lifecycle: boru_chat::diagnostics::GuiActionHistory::default(),
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
+            storage: None,
         };
 
         let result = spawn_mcp_server(config, state).await;
@@ -5367,6 +5559,7 @@ mod tests {
             gui_action_lifecycle: boru_chat::diagnostics::GuiActionHistory::default(),
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
+            storage: None,
         };
 
         let result = spawn_mcp_server(config, state).await;
@@ -5601,5 +5794,111 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("10 actions/sec"));
+    }
+
+    // ── boru_browse_peer_catalogue tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_browse_peer_catalogue_missing_peer_id() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let request = make_generic_request("boru_browse_peer_catalogue");
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Missing peer_id should produce error");
+        assert_eq!(response.error.as_ref().unwrap().code, -32000);
+        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+        assert!(data.contains("Missing required argument"), "Error should mention missing peer_id, got: {data}");
+    }
+
+    #[tokio::test]
+    async fn test_browse_peer_catalogue_empty_peer_id() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_browse_peer_catalogue");
+        request.params = json!({"peer_id": ""});
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Empty peer_id should produce error");
+        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+        assert!(data.contains("peer_id"), "Error should mention peer_id, got: {data}");
+    }
+
+    #[tokio::test]
+    async fn test_browse_peer_catalogue_control_chars_in_peer_id() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_browse_peer_catalogue");
+        request.params = json!({"peer_id": "bad\npeer"});
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Control chars in peer_id should produce error");
+    }
+
+    #[tokio::test]
+    async fn test_browse_peer_catalogue_invalid_peer_id() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_browse_peer_catalogue");
+        request.params = json!({"peer_id": "not-a-valid-peer-key"});
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Invalid peer_id should produce error");
+        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+        assert!(data.contains("Invalid peer_id"), "Error should mention invalid peer_id, got: {data}");
+    }
+
+    // ── boru_download_file tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_download_file_missing_content_hash() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_download_file");
+        request.params = json!({"peer_id": "abc123"});
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Missing content_hash should produce error");
+        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+        assert!(data.contains("Missing required argument"), "Error should mention missing argument, got: {data}");
+    }
+
+    #[tokio::test]
+    async fn test_download_file_missing_peer_id() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_download_file");
+        request.params = json!({"content_hash": "abc"});
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Missing peer_id should produce error");
+        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+        assert!(data.contains("Missing required argument"), "Error should mention missing argument, got: {data}");
+    }
+
+    #[tokio::test]
+    async fn test_download_file_content_hash_too_long() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_download_file");
+        request.params = json!({
+            "content_hash": "a".repeat(MAX_CONTENT_HASH_LEN + 1),
+            "peer_id": "abc123",
+        });
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Oversized content_hash should produce error");
+        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+        assert!(data.contains("too long"), "Error should mention too long, got: {data}");
+    }
+
+    #[tokio::test]
+    async fn test_download_file_control_chars_in_content_hash() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_download_file");
+        request.params = json!({
+            "content_hash": "abc\ndef",
+            "peer_id": "abc123",
+        });
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Control chars in content_hash should produce error");
+    }
+
+    #[tokio::test]
+    async fn test_download_file_control_chars_in_peer_id() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_download_file");
+        request.params = json!({
+            "content_hash": "abc",
+            "peer_id": "bad\npeer",
+        });
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Control chars in peer_id should produce error");
     }
 }
