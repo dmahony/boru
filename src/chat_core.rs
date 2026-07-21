@@ -1661,11 +1661,20 @@ pub fn handle_net_event_for_topic(
                     }
                 }
                 Message::FileShare { name, ticket } => {
-                    // Legacy ticket-bearing file announcements are retained
-                    // only for wire compatibility.  They must never enter the
-                    // download UI: access is granted exclusively by the
-                    // request-time catalogue/file-access services.
-                    let _ = (name, ticket, from, is_muted);
+                    if from != cb.local_public() {
+                        let fid = FriendId::from_public_key(from);
+                        if cb.is_friend(&from) {
+                            cb.friend_mark_online(fid);
+                        }
+                        if !is_muted {
+                            let sender_name = cb.resolve_name(&from);
+                            cb.push_system(format!(
+                                "{} shared a file: {}",
+                                sender_name, name
+                            ));
+                            cb.set_pending_file(name, ticket);
+                        }
+                    }
                 }
                 Message::ImageShare { name, hash } => {
                     if from != cb.local_public() {

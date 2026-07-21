@@ -2469,6 +2469,10 @@ pub enum AppMessage {
     CloseImagePreview,
     /// Image processing failed after the user selected it.
     ImageUploadFailed(String),
+    FileDownloaded {
+        name: String,
+        ticket: String,
+    },
 
     // ── GUI test actions (MCP-driven) ──
     /// An action received from the MCP GUI test actions channel.
@@ -4069,6 +4073,7 @@ impl IcedChat {
             AppMessage::OpenImagePreview(..) => "OpenImagePreview",
             AppMessage::CloseImagePreview => "CloseImagePreview",
             AppMessage::ImageUploadFailed(_) => "ImageUploadFailed",
+            AppMessage::FileDownloaded { .. } => "FileDownloaded",
             AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
             AppMessage::ImageDownloaded { .. } => "ImageDownloaded",
             AppMessage::FriendAdded { .. } => "FriendAdded",
@@ -7487,11 +7492,59 @@ impl IcedChat {
             }
 
             AppMessage::ExecuteFileSend(encoded) => {
-                let _ = encoded;
-                iced::Task::done(AppMessage::ErrorMsg(
-                    "Legacy ticket-based file sharing is disabled; use the authorised file catalogue."
-                        .to_string(),
-                ))
+                let parts: Vec<&str> = encoded.splitn(3, '|').collect();
+                if parts.len() < 3 {
+                    return iced::Task::none();
+                }
+                let filename = parts[0].to_string();
+                let abs_path = parts[1].to_string();
+                let blob_store = self.blob_store.clone();
+                let sender = self.sender.clone();
+                let secret_key = self.secret_key.clone();
+                let endpoint_addr = self.endpoint.addr();
+                let local_label = self.local_label.clone();
+                let local_pk = self.local_public;
+                iced::Task::perform(
+                    async move {
+                        let path_buf = std::path::PathBuf::from(&abs_path);
+                        let metadata = tokio::fs::metadata(&path_buf)
+                            .await
+                            .map_err(|e| format!("Failed to inspect file: {e}"))?;
+                        let file_size = metadata.len();
+                        if file_size > 50 * 1024 * 1024 {
+                            return Err("File must be 50 MiB or smaller.".to_string());
+                        }
+                        let bytes = tokio::fs::read(&path_buf)
+                            .await
+                            .map_err(|e| format!("Failed to read file: {e}"))?;
+                        let tag = blob_store
+                            .blobs()
+                            .add_bytes(bytes)
+                            .await
+                            .map_err(|e| format!("Failed to store file: {e}"))?;
+                        let ticket_str = blob_ticket_string(
+                            endpoint_addr,
+                            tag.hash,
+                            tag.format,
+                        );
+                        let msg = crate::Message::FileShare {
+                            name: filename.clone(),
+                            ticket: ticket_str.clone(),
+                        };
+                        let encoded_msg = SignedMessage::sign_and_encode(&secret_key, &msg)
+                            .map_err(|e| format!("Failed to sign: {e}"))?;
+                        if let Some(ref sender) = sender {
+                            sender.broadcast(encoded_msg).await.ok();
+                        }
+                        Ok((filename, ticket_str))
+                    },
+                    |r: Result<(String, String), String>| match r {
+                        Ok((name, ticket)) => {
+                            AppMessage::FileDownloaded { name, ticket }
+                        }
+                        Err(e) => AppMessage::ErrorMsg(e),
+                    },
+                )
             }
 
             AppMessage::ExecuteImageSend(encoded) => {
@@ -7859,6 +7912,10 @@ impl IcedChat {
             AppMessage::ImageUploadFailed(error) => {
                 self.pending_image_upload = None;
                 self.push_system(format!("Image upload failed: {error}"));
+                iced::Task::none()
+            }
+            AppMessage::FileDownloaded { name, ticket } => {
+                self.set_pending_file(name, ticket);
                 iced::Task::none()
             }
             AppMessage::ErrorMsg(msg) => {

@@ -8,22 +8,18 @@
 use std::time::Duration;
 
 use boru_chat::catalogue_client::fetch_paginated_remote_catalogue;
-use iroh::{
-    Endpoint, PublicKey, SecretKey,
-    RelayMode, RelayMap, RelayUrl,
-    endpoint::presets,
-};
+use iroh::{endpoint::presets, Endpoint, PublicKey, RelayMap, RelayMode, RelayUrl, SecretKey};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let peer_hex = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| {
-            eprintln!("Usage: catalogue_browser <peer_public_key_hex> [relay_url]");
-            std::process::exit(1);
-        });
+    let peer_hex = std::env::args().nth(1).unwrap_or_else(|| {
+        eprintln!("Usage: catalogue_browser <peer_public_key_hex> [relay_url]");
+        std::process::exit(1);
+    });
 
-    let relay_url_str = std::env::args().nth(2).unwrap_or_else(|| "https://boru.chat:8443/".to_string());
+    let relay_url_str = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "https://boru.chat:8443/".to_string());
     let relay_url: RelayUrl = relay_url_str.parse()?;
     let relay_map = RelayMap::try_from_iter([relay_url_str.as_str()])?;
 
@@ -47,7 +43,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("CATALOGUE_OK");
             println!("files: {}", catalogue.files.len());
             for f in &catalogue.files {
-                println!("  file|{}|{}|{}|{}", f.content_hash, f.size_bytes, f.mime_type, f.display_name);
+                println!(
+                    "  file|{}|{}|{}|{}",
+                    f.content_hash, f.size_bytes, f.mime_type, f.display_name
+                );
             }
         }
         Err(e) => {
