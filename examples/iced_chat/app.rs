@@ -7686,25 +7686,32 @@ impl IcedChat {
                         let (addr, hash, _format) = ticket.into_parts();
                         let node_id = addr.id;
                         let candidates = download_candidates(node_id, &neighbors);
-                        let bytes = download_blob_with_safety(
-                            &blob_store,
-                            &endpoint,
-                            hash,
-                            candidates,
-                            name.clone(),
-                            kind,
-                            |_| {},
-                            safety.as_deref(),
-                            node_id,
-                        )
-                        .await
-                        .map_err(|e| format!("Download failed: {e}"))?;
+                        // reader() auto-downloads from peers via blobs protocol
+                        // and streams directly — no whole-file memory allocation.
                         let dl_dir = data_dir.join("downloads");
                         let _ = tokio::fs::create_dir_all(&dl_dir).await;
                         let save_path = dl_dir.join(&name);
-                        tokio::fs::write(&save_path, &bytes)
-                            .await
-                            .map_err(|e| format!("Download failed: {e}"))?;
+                        {
+                            use tokio::io::AsyncReadExt;
+                            let mut reader = blob_store.blobs().reader(hash);
+                            let mut file = tokio::fs::File::create(&save_path)
+                                .await
+                                .map_err(|e| format!("Failed to create file: {e}"))?;
+                            let mut buf = vec![0u8; 256 * 1024];
+                            loop {
+                                let n = reader.read(&mut buf).await
+                                    .map_err(|e| format!("Read error: {e}"))?;
+                                if n == 0 {
+                                    break;
+                                }
+                                tokio::io::AsyncWriteExt::write_all(
+                                    &mut file, &buf[..n],
+                                ).await.map_err(|e| format!("Write error: {e}"))?;
+                            }
+                            tokio::io::AsyncWriteExt::flush(&mut file)
+                                .await
+                                .map_err(|e| format!("Flush error: {e}"))?;
+                        }
                         Ok::<_, String>((name.clone(), save_path))
                     },
                     move |r| match r {
