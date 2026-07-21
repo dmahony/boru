@@ -46,7 +46,7 @@ use iroh::{
     endpoint::presets,
     Endpoint, EndpointAddr, RelayMode, RelayUrl, SecretKey,
 };
-use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
+use iroh_blobs::{store::fs::FsStore, BlobsProtocol};
 
 use boru_chat::whisper::{WhisperBuilder, WHISPER_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
@@ -564,7 +564,7 @@ fn main() -> Result<()> {
         let notice = "Direct iroh transport is operational.".to_string();
 
         let gossip = Gossip::builder().spawn(endpoint.clone());
-        let blob_store = MemStore::new();
+        let blob_store = FsStore::load(data_dir.join("blobs")).await?;
         let blobs_protocol = BlobsProtocol::new(&blob_store, None);
 
         // ── Persistent history stores ────────────────────────────────

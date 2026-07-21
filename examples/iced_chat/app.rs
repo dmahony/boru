@@ -65,7 +65,7 @@ use boru_chat::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
     address_lookup::memory::MemoryLookup, EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher,
 };
-use iroh_blobs::{store::mem::MemStore, ticket::BlobTicket};
+use iroh_blobs::{store::fs::FsStore, ticket::BlobTicket};
 use n0_future::task;
 use n0_future::Stream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -1609,7 +1609,7 @@ pub struct IcedChat {
     /// Keeps the protocol router alive for the lifetime of the GUI. Dropping
     /// the router stops accepting incoming gossip connections.
     _router: iroh::protocol::Router,
-    blob_store: MemStore,
+    blob_store: FsStore,
     endpoint: iroh::Endpoint,
     memory_lookup: MemoryLookup,
     local_label: String,
@@ -3024,7 +3024,7 @@ impl IcedChat {
         secret_key: SecretKey,
         gossip: Gossip,
         router: iroh::protocol::Router,
-        blob_store: MemStore,
+        blob_store: FsStore,
         endpoint: iroh::Endpoint,
         memory_lookup: MemoryLookup,
         local_label: String,
@@ -10111,7 +10111,7 @@ impl IcedChat {
     /// Returns an `AppMessage::ProfileImageDownloaded` or
     /// `AppMessage::ProfileImageDownloadFailed` when done.
     fn download_profile_image_task(
-        blob_store: &MemStore,
+        blob_store: &FsStore,
         endpoint: &iroh::Endpoint,
         memory_lookup: &MemoryLookup,
         neighbors: &HashSet<PublicKey>,

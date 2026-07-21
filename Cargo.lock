@@ -3639,7 +3639,9 @@ dependencies = [
  "postcard",
  "rand 0.10.2",
  "range-collections",
+ "redb",
  "ref-cast",
+ "reflink-copy",
  "self_cell",
  "serde",
  "smallvec",
@@ -6096,6 +6098,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
+name = "redb"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e925444704b5f17d32bf42f5b6e2df050bceebc3dcd6e71cc73dafe8092e839"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6140,6 +6151,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.0",
+]
+
+[[package]]
+name = "reflink-copy"
+version = "0.1.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9dd7ab4af0363d5ccfd2838d782a28196cf32a5cc2e4fe3c5dc83f2be588b8b"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "rustix 1.1.4",
+ "windows 0.62.2",
 ]
 
 [[package]]
