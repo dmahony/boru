@@ -2184,6 +2184,7 @@ pub enum AppMessage {
     DownloadDonePeerFile(String, PathBuf),
     DownloadFailed(String),
     OpenDownloadedFile(String),
+    OpenDownloadsFolder,
     ErrorMsg(String),
     ExecuteFileSend(String),
     ExecuteDownload,
@@ -4045,6 +4046,7 @@ impl IcedChat {
             AppMessage::DownloadDonePeerFile(..) => "DownloadDonePeerFile",
             AppMessage::DownloadFailed(_) => "DownloadFailed",
             AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
+            AppMessage::OpenDownloadsFolder => "OpenDownloadsFolder",
             AppMessage::ErrorMsg(_) => "ErrorMsg",
             AppMessage::ExecuteFileSend(_) => "ExecuteFileSend",
             AppMessage::ExecuteDownload => "ExecuteDownload",
@@ -7653,11 +7655,62 @@ impl IcedChat {
                 }
             },
             AppMessage::ExecuteDownloadAt(entry_index) => {
-                let _ = entry_index;
-                iced::Task::done(AppMessage::ErrorMsg(
-                    "Legacy ticket-based downloads are disabled; request access through the file catalogue."
-                        .to_string(),
-                ))
+                let Some(entry) = self.entries.get(entry_index) else {
+                    return iced::Task::done(AppMessage::ErrorMsg("Entry not found.".into()));
+                };
+                let Some(dl) = entry.download.clone() else {
+                    return iced::Task::done(AppMessage::ErrorMsg("No download attached.".into()));
+                };
+                if !matches!(dl.state, DownloadState::Ready) {
+                    return iced::Task::none();
+                }
+                if let Some(e) = self.entries.get_mut(entry_index) {
+                    if let Some(ref mut d) = e.download {
+                        d.state = DownloadState::Active { bytes: 0, total: None };
+                    }
+                }
+                self.download_entry_index = Some(entry_index);
+                let blob_store = self.blob_store.clone();
+                let endpoint = self.endpoint.clone();
+                let neighbors = self.neighbors.clone();
+                let safety = self.public_room_safety.clone();
+                let ticket_str = dl.ticket.clone();
+                let name = dl.name.clone();
+                let kind = dl.kind;
+                let data_dir = self.data_dir.clone();
+                iced::Task::perform(
+                    async move {
+                        let ticket: iroh_blobs::ticket::BlobTicket =
+                            ticket_str.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
+                        let (addr, hash, _format) = ticket.into_parts();
+                        let node_id = addr.id;
+                        let candidates = download_candidates(node_id, &neighbors);
+                        let bytes = download_blob_with_safety(
+                            &blob_store,
+                            &endpoint,
+                            hash,
+                            candidates,
+                            name.clone(),
+                            kind,
+                            |_| {},
+                            safety.as_deref(),
+                            node_id,
+                        )
+                        .await
+                        .map_err(|e| format!("Download failed: {e}"))?;
+                        let dl_dir = data_dir.join("downloads");
+                        let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                        let save_path = dl_dir.join(&name);
+                        tokio::fs::write(&save_path, &bytes)
+                            .await
+                            .map_err(|e| format!("Download failed: {e}"))?;
+                        Ok::<_, String>((name.clone(), save_path))
+                    },
+                    move |r| match r {
+                        Ok((name, path)) => AppMessage::DownloadDone(name, path),
+                        Err(e) => AppMessage::DownloadFailed(e),
+                    },
+                )
             }
 
             AppMessage::PauseDownloadAt(entry_index) => {
@@ -9173,6 +9226,14 @@ impl IcedChat {
                 )
             }
 
+            AppMessage::OpenDownloadsFolder => {
+                let dl_dir = self.data_dir.join("downloads");
+                let _ = std::fs::create_dir_all(&dl_dir);
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(dl_dir.to_string_lossy().as_ref())
+                    .spawn();
+                iced::Task::none()
+            }
             AppMessage::Noop => iced::Task::none(),
 
             // ── Shared file catalogue management ──

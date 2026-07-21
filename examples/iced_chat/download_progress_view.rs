@@ -306,6 +306,12 @@ pub fn view_download_progress(
         body = body.push(prog);
     }
     body = body.push(action_row);
+    // "Open folder" link — always visible below the action buttons
+    body = body.push(
+        button(text("Open downloads folder").size(TYPO_XS))
+            .on_press(AppMessage::OpenDownloadsFolder)
+            .padding([SPACE_2, SPACE_4]),
+    );
     if let Some(err) = error_row {
         // Extra visual separation for the error row
         body = body.push(
