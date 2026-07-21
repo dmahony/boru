@@ -60,7 +60,7 @@ use boru_chat::room_docs::{self, RoomMetadata};
 use boru_chat::room_history::RoomHistoryStore;
 use boru_chat::storage::{SharedFileRow, Storage};
 use boru_chat::store::MessageStore;
-use boru_chat::user_profile::{UserProfile, UserProfileStore};
+use boru_chat::user_profile::{SharedFile, UserProfile, UserProfileStore};
 use boru_chat::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
     address_lookup::memory::MemoryLookup, EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher,
@@ -7471,6 +7471,7 @@ impl IcedChat {
                 let abs_path = parts[1].to_string();
 
                 let blob_store = self.blob_store.clone();
+                let storage = self.storage.clone();
                 let sender = self.sender.clone();
                 let secret_key = self.secret_key.clone();
                 let _fname = filename.clone();
@@ -7528,6 +7529,16 @@ impl IcedChat {
                         #[expect(unused_imports)]
                         use iroh_blobs::api::proto::TagInfo;
                         let hash: MessageHash = *tag.hash.as_bytes();
+                        if let Some(storage) = storage.as_ref() {
+                            storage
+                                .register_chat_upload(
+                                    &local_pk.to_string(),
+                                    &webp_name,
+                                    "image/webp",
+                                    &opt_bytes,
+                                )
+                                .map_err(|e| format!("Failed to add image to profile: {e}"))?;
+                        }
                         let msg = crate::Message::ImageShare {
                             name: webp_name.clone(),
                             hash,
@@ -7741,12 +7752,27 @@ impl IcedChat {
             }
             AppMessage::ImageDownloaded {
                 sender,
-                name: _,
+                name,
                 display_name,
                 image_bytes,
                 message_hash,
                 image_identifier,
             } => {
+                if sender == self.local_public && image_identifier.is_none() {
+                    let mut profile_file = SharedFile::new(
+                        &name,
+                        image_bytes.len() as u64,
+                        "image/webp",
+                        SystemTime::now(),
+                    );
+                    profile_file.id = hex::encode(message_hash);
+                    profile_file.hash = Some(message_hash);
+                    self.profile_store
+                        .shared_files_mut()
+                        .retain(|file| file.id != profile_file.id);
+                    self.profile_store.add_shared_file(profile_file);
+                    let _ = self.profile_store.save();
+                }
                 if self.has_message(&message_hash) {
                     return self.start_next_pending_image_download();
                 }
@@ -10153,6 +10179,13 @@ impl IcedChat {
         let user_id = self.local_public;
         let shared_path = profile.shared_folder_path.clone();
         let shared_enabled = profile.file_sharing_enabled;
+        let shared_files: Vec<_> = self
+            .profile_store
+            .shared_files()
+            .iter()
+            .filter(|file| file.is_announceable())
+            .map(SharedFile::to_shared_file_meta)
+            .collect();
 
         iced::Task::perform(
             async move {
@@ -10166,7 +10199,7 @@ impl IcedChat {
                     allow_downloads: false,
                     max_file_size: 100 * 1024 * 1024,
                     allowed_extensions: Vec::new(),
-                    shared_files: Vec::new(),
+                    shared_files,
                 };
                 if let Ok(encoded) =
                     SignedMessage::sign_and_encode(&sk, &crate::Message::ProfileUpdate(profile))
