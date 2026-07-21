@@ -174,10 +174,7 @@ async fn main() -> Result<()> {
 
     // ── Create backend ──────────────────────────────────────────────
     println!("  [2/4] Creating MainlineDhtBackend...");
-    // The TopicId argument is stored but never read by MainlineDhtBackend — it
-    // derives the DHT topic from the NamespaceId on each call.
-    let placeholder_topic = distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
-    let backend = MainlineDhtBackend::new(dht, placeholder_topic);
+    let backend = MainlineDhtBackend::new(dht);
     println!("  └─ Backend ready");
     println!();
 

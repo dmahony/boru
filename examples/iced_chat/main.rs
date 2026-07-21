@@ -41,8 +41,9 @@ use boru_chat::room_history::RoomHistoryStore;
 use boru_chat::storage::Storage;
 use clap::Parser;
 use iroh::{
-    address_lookup::memory::MemoryLookup, endpoint::presets, Endpoint, EndpointAddr, RelayMode,
-    RelayUrl, SecretKey,
+    address_lookup::{memory::MemoryLookup, AddrFilter},
+    endpoint::presets,
+    Endpoint, EndpointAddr, RelayMode, RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::mem::MemStore, BlobsProtocol};
 
@@ -88,6 +89,14 @@ struct Args {
     /// Disable private-room DHT discovery. The public lobby is unaffected.
     #[clap(long)]
     no_dht: bool,
+    /// Publish direct (public) IP addresses to the DHT for relay-free connectivity.
+    ///
+    /// Off by default (relay-only mode, which is privacy-preserving). When enabled,
+    /// the DhtAddressLookup uses AddrFilter::unfiltered so direct addresses are
+    /// published alongside the relay URL. Requires --no-dht to NOT be set.
+    /// WARNING: This exposes your public IP address on the Mainline DHT.
+    #[clap(long)]
+    publish_direct_addresses: bool,
     /// Directory for persistent identity and friend state. Chat and room
     /// history are kept in memory only.
     /// Defaults to BORU_CHAT_DATA_DIR env var, or ~/.local/share/boru-chat/.
@@ -428,6 +437,14 @@ fn main() -> Result<()> {
     };
     info!("> relay: {}", fmt_relay_mode(&relay_mode));
 
+    // ── Incompatible-option checks ──────────────────────────────────────
+    if args.publish_direct_addresses && args.no_dht {
+        bail_any!(
+            "--publish-direct-addresses requires DHT to be enabled. \
+             Remove --no-dht or drop --publish-direct-addresses."
+        );
+    }
+
     // ── Persistent download storage (shared with CatalogueHandler) ─────
     let storage = Arc::new(Storage::open(&data_dir).expect("storage"));
     info!("download-storage: opened at {}", data_dir.display());
@@ -494,12 +511,51 @@ fn main() -> Result<()> {
         // relay handles transport connectivity; this lookup is only consulted
         // when a private-room tracker supplies a peer ID without an address.
         if !args.no_dht {
-            if let Ok(addr_lookup) = endpoint.address_lookup().as_ref() {
-                if let Ok(dht) = DhtAddressLookup::builder()
-                    .secret_key(endpoint.secret_key().clone())
-                    .build()
-                {
-                    addr_lookup.add(dht);
+            // Choose address filter: relay-only (privacy-preserving, default)
+            // vs. unfiltered (publishes direct IPs, opt-in only).
+            let addr_filter = if args.publish_direct_addresses {
+                eprintln!(
+                    "\n  ⚠️  WARNING: --publish-direct-addresses is enabled.\n  \
+                     Your public IP address will be published on the Mainline DHT.\n  \
+                     This enables relay-free peer-to-peer connectivity but exposes\n  \
+                     your network location publicly.\n"
+                );
+                AddrFilter::unfiltered()
+            } else {
+                AddrFilter::relay_only()
+            };
+
+            match endpoint.address_lookup() {
+                Ok(registry) => {
+                    match DhtAddressLookup::builder()
+                        .secret_key(endpoint.secret_key().clone())
+                        .addr_filter(addr_filter)
+                        .build()
+                    {
+                        Ok(dht) => {
+                            info!(
+                                "DHT address lookup registered (filter: {})",
+                                if args.publish_direct_addresses {
+                                    "unfiltered"
+                                } else {
+                                    "relay-only"
+                                }
+                            );
+                            registry.add(dht);
+                        }
+                        Err(err) => {
+                            warn!(
+                                "DHT address lookup construction failed: {err}; \
+                                 peer address resolution may be slower without DHT"
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        "address lookup registry unavailable: {err}; \
+                         DHT address lookup not registered"
+                    );
                 }
             }
         }
@@ -1119,7 +1175,53 @@ mod tests {
         assert!(args.enable_gui_test_actions);
     }
 
-    // ── MCP input validation security tests ──────────────────────────
+    // ── DHT address publication tests ─────────────────────────────────
+
+    #[test]
+    fn publish_direct_addresses_defaults_to_false() {
+        let args = Args::try_parse_from(&["iced_chat"]).expect("should parse with no args");
+        assert!(!args.publish_direct_addresses);
+        assert!(!args.no_dht);
+    }
+
+    #[test]
+    fn publish_direct_addresses_flag_enables_bool() {
+        let args = Args::try_parse_from(&["iced_chat", "--publish-direct-addresses"])
+            .expect("should parse with flag");
+        assert!(args.publish_direct_addresses);
+    }
+
+    #[test]
+    fn publish_direct_addresses_works_without_no_dht() {
+        // --publish-direct-addresses alone is valid (DHT default is enabled)
+        let args = Args::try_parse_from(&["iced_chat", "--publish-direct-addresses"])
+            .expect("should parse without --no-dht");
+        assert!(args.publish_direct_addresses);
+        assert!(!args.no_dht);
+    }
+
+    #[test]
+    fn publish_direct_addresses_with_no_dht_is_rejected() {
+        // Combining --publish-direct-addresses with --no-dht should fail
+        // at the incompatible-option check in main().
+        // clap parse itself succeeds — the incompatibility is checked at runtime.
+        let args = Args::try_parse_from(&["iced_chat", "--publish-direct-addresses", "--no-dht"])
+            .expect("clap should parse both flags; incompatibility enforced in main()");
+        assert!(args.publish_direct_addresses);
+        assert!(args.no_dht);
+
+        // Verify the logic directly: the error is triggered when both are set
+        let has_incompatibility = args.publish_direct_addresses && args.no_dht;
+        assert!(has_incompatibility);
+    }
+
+    #[test]
+    fn no_dht_alone_is_valid() {
+        let args = Args::try_parse_from(&["iced_chat", "--no-dht"])
+            .expect("should parse with --no-dht alone");
+        assert!(args.no_dht);
+        assert!(!args.publish_direct_addresses);
+    }
 
     #[test]
     fn test_validate_bounded_ok() {

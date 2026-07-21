@@ -6,12 +6,12 @@ boru-chat uses multiple distinct QUIC-based protocols, each with its own ALPN
 ## Protocol Overview
 
 | Protocol | ALPN | Type | Purpose | Persistence |
-|----------|------|------|---------|-------------|
+|---------|------|------|---------|-------------|
 | Gossip | `/iroh-gossip/1` | Broadcast | Room-based message broadcasting via PlumTree; one independent mesh per room topic | None (transient) |
 | Inbox | `/iroh-chat-inbox/1` | Direct request/response | Offline message delivery, ACKs, sync responses, and deletion tombstones; not a gossip topic | InboxEvent emission |
-| Backfill | `/iroh-chat-backfill/1` | Direct | Historical message sync for late-joining peers | Reads ChatHistoryStore |
-| Whisper | `/iroh-chat-whisper/1` | Direct session | Online private 1:1 QUIC messages, control frames, and file transfer | None (transient) |
-| Friend Ping | `/iroh-chat-ping/1` | Direct | Connectivity checks between friends | None (transient) |
+| Backfill | `/iroh-gossip-chat/backfill/1` | Direct | Historical message sync for late-joining peers | Reads ChatHistoryStore |
+| Whisper | `/iroh-gossip-chat/whisper/1` | Direct session | Online private 1:1 QUIC messages, control frames, and file transfer | None (transient) |
+| Friend Ping | `/iroh-gossip-chat/friend-ping/1` | Direct | Connectivity checks between friends | None (transient) |
 | Catalogue retrieval | `/boru-file-catalog/1` | Direct | Signed, requester-filtered file catalogue retrieval | Per-peer verified cache |
 | Transfer authorisation | `/boru-file-access/1` | Direct | Request-time permission check and signed blob descriptor | None (short-lived descriptor) |
 | Blob transfer | iroh-blobs | Direct | Content-addressed file transfer | iroh-blobs store + download state |
@@ -135,7 +135,7 @@ signed by the original message author. The outer `SignedInboxMessage`
 authenticates the forwarder. See [`offline-direct-messaging.md`](offline-direct-messaging.md)
 for the full delivery state machine and retry/ack semantics.
 
-## Backfill Protocol (`/iroh-chat-backfill/1`)
+## Backfill Protocol (`/iroh-gossip-chat/backfill/1`)
 
 ### Purpose
 
@@ -155,7 +155,7 @@ request missed message history from connected peers.
 
 At most one backfill request per remote `PublicKey` is served concurrently.
 
-## Whisper Protocol (`/iroh-chat-whisper/1`)
+## Whisper Protocol (`/iroh-gossip-chat/whisper/1`)
 
 ### Responsibility
 
@@ -185,7 +185,7 @@ initiates a DM and are maintained for the duration of the conversation.
 `OutboxDeliveryWorker` is the sole owner of durable mailbox retry/lease state;
 whisper sessions must not add a second mailbox retry loop.
 
-## Friend Ping Protocol (`/iroh-chat-ping/1`)
+## Friend Ping Protocol (`/iroh-gossip-chat/friend-ping/1`)
 
 ### Purpose
 
@@ -196,38 +196,101 @@ status. Implemented in `chat_core::friend_ping`.
 |-----------|---------|
 | Ping interval | 30 seconds |
 | Connect timeout | 10 seconds |
-| ALPN | `/iroh-chat-ping/1` |
+| ALPN | `/iroh-gossip-chat/friend-ping/1` |
 
 ## Discovery System
 
-boru-chat uses several discovery mechanisms, not all of which are QUIC protocols:
+boru-chat uses two independent DHT systems for different purposes:
+
+| Layer | Purpose | Crate | DHT Instance |
+|---|---|---|---|
+| **Address resolution** | Resolve `EndpointId` to transport addresses | `iroh-mainline-address-lookup` | `n0_mainline::Dht` (separate UDP socket) |
+| **Topic discovery** | Discover peer `EndpointId` values per room | `distributed-topic-tracker` | `mainline::async_dht::AsyncDht` (separate UDP socket) |
+
+### Discovery Mechanisms
 
 | Mechanism | Scope | Technology |
 |-----------|-------|------------|
-| mDNS | LAN | iroh-mdns-address-lookup |
-| DHT (public rooms) | WAN | iroh-mainline-address-lookup (Mainline DHT) |
-| DHT (private rooms) | WAN | Same DHT, but namespace-isolated via `DiscoverySecret` |
+| mDNS | LAN | `iroh-mdns-address-lookup` |
+| DhtAddressLookup | WAN | Mainline DHT / Pkarr — resolves EndpointId to addresses |
+| Public-room discovery | WAN | `distributed-topic-tracker` under a deterministic namespace |
+| Private-room discovery | WAN | Same, but namespace-isolated via `DiscoverySecret` + HPKE encryption |
 | Memory lookup | Local | In-process address book for bootstrap peers |
-
-Discovery resolves endpoint IDs to usable addresses and feeds room joiners or
-direct transports. It does not imply a connection, topic membership, or
-message delivery. `DynamicPeerJoiner` owns bounded retry for discovered gossip
-joins; `SessionManager` owns whisper session reconnect; the durable outbox
-worker owns offline-message retry. These retry domains are intentionally
-separate.
+| GossipAddressLookup | Mesh | Addresses learned from gossip Join/ForwardJoin messages |
 
 ### Public Rooms
 
 Public rooms use deterministic identities derived from
 (network, room name, protocol version) with domain-separated topic and
-discovery key derivation. Continuous publication loops re-publish local
-presence on the DHT at configurable intervals.
+discovery key derivation. Background loops publish local presence on the DHT
+every 5 minutes and discover new peers every 30 seconds with jitter.
+A `PublicationPolicy` coordinates with the DHT minute to avoid redundant
+publishes and applies exponential backoff on failure.
 
 ### Private Rooms
 
-Private rooms derive their DHT namespace from BLAKE3(topic || secret)
-where the secret is a 32-byte random key. Only peers who know both the
-topic and the secret can find each other on the DHT.
+Private rooms derive their DHT namespace from `BLAKE3(domain_sep \|\| topic \|\| secret)`
+where the secret is a 32-byte CSPRNG key. Discovery records are HPKE-encrypted
+using per-minute keys so only peers who know the secret can find each other.
+The `--no-dht` CLI flag gates private-room discovery.
+
+### Validation Pipeline
+
+Every discovery record goes through 5 checks in order (cheapest first):
+
+1. **Size** — reject oversized records (>256 bytes)
+2. **Timestamp** — reject stale (>10 min) or future-skewed (>2 min) records
+3. **Decode** — reject records with unparseable content
+4. **Identity** — reject records where pub_key ≠ payload endpoint_id
+5. **Signature** — verify Ed25519 signature against the room's topic
+
+Batch processing bounds records examined (max 20), deduplicates, filters self,
+and caps discovered peers (max 20).
+
+### DHT Outage
+
+Existing connections and known addresses continue working. Exponential backoff
+delays retries (1s → 60s cap). mDNS and ticket-based joins are unaffected.
+Normal operation resumes automatically on DHT recovery.
+
+### Privacy
+
+- Default: relay-only mode — direct IPs never published (DhtAddressLookup uses
+  `AddrFilter::relay_only()`)
+- `--publish-direct-addresses`: exposes public IP on Mainline DHT
+- Private rooms: DHT namespace undetectable without `DiscoverySecret`; records
+  HPKE-encrypted; secret is never logged (Debug redacted to 4 hex chars)
+- Public rooms: deterministic key means anyone who knows the room name can
+  discover all members
+
+### Wire Format
+
+| Field | Size |
+|-------|------|
+| Topic hash | 32 B |
+| Unix minute | 8 B |
+| Publisher pub_key | 32 B |
+| Content (version + EndpointId) | ~35 B |
+| Ed25519 signature | 64 B |
+| **Total envelope** | **~171 B** |
+
+Private room records add HPKE encryption (~270 B ciphertext). The payload
+format is versioned (currently version 1); unknown versions are rejected
+at decode time.
+
+### Known Limitations
+
+- **Public lobby DHT not wired in GUI**: `ContinuousTracker` exists and is
+  unit-tested but is never spawned in `main.rs`. Public-lobby users rely on
+  mDNS (LAN) and tickets (out-of-band) for discovery.
+- **DHT-discovered peers not in UI**: Private-room DHT peers join the gossip
+  mesh directly via `spawn_join_fanout()` but do not appear in the
+  "discovered peers" panel (which is mDNS-only).
+- **Mainline mutable-record limits**: No atomic multi-value operations, no
+  ordering, no deletion, probabilistic propagation delay.
+
+See [`docs/discovery-architecture.md`](docs/discovery-architecture.md) for
+the full architecture, operator guidance, and detailed module reference.
 
 ## Remote File Catalogue
 

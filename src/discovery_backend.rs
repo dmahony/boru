@@ -223,25 +223,40 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
 
 /// DHT-backed implementation of [`TopicDiscoveryBackend`] using the
 /// `distributed-topic-tracker` crate.  Only available with the `net` feature.
+///
+/// # DHT instance separation
+///
+/// This backend wraps a distinct `distributed_topic_tracker::Dht` instance
+/// that is **independent** from the [`DhtAddressLookup`] used by iroh's
+/// address-resolution layer (`iroh-mainline-address-lookup`).  The two
+/// systems serve different purposes:
+///
+/// | Layer | Purpose | Type |
+/// |---|---|---|
+/// | Address resolution | Resolve `EndpointId` → transport addrs (relay+IP) | `iroh-mainline-address-lookup::DhtAddressLookup` |
+/// | Topic discovery | Discover peer `EndpointId` values per room | `distributed_topic_tracker::Dht` → `MainlineDhtBackend` |
+///
+/// Both use the same underlying `mainline` DHT crate but create separate
+/// actor threads with distinct UDP sockets.  By default each binds to a
+/// random OS-assigned port (`mainline::Dht::client()`), so there is no
+/// socket conflict.  Using separate instances is intentional — the topic
+/// discovery layer needs a different rate/timing profile and should not
+/// compete with address resolution.
+///
+/// **Do not** attempt to share a single `mainline::Dht` instance across
+/// both systems unless the upstream crates explicitly support it (they do
+/// not — each wraps its own `mainline::Dht` internally).
 #[cfg(feature = "net")]
 #[derive(Debug)]
 pub struct MainlineDhtBackend {
     dht: distributed_topic_tracker::Dht,
-    #[allow(dead_code)]
-    default_namespace: distributed_topic_tracker::TopicId,
 }
 
 #[cfg(feature = "net")]
 impl MainlineDhtBackend {
     /// Create a new DHT-backed discovery backend.
-    pub fn new(
-        dht: distributed_topic_tracker::Dht,
-        default_namespace: distributed_topic_tracker::TopicId,
-    ) -> Self {
-        Self {
-            dht,
-            default_namespace,
-        }
+    pub fn new(dht: distributed_topic_tracker::Dht) -> Self {
+        Self { dht }
     }
 
     fn topic_id_for(&self, namespace: &NamespaceId) -> distributed_topic_tracker::TopicId {

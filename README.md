@@ -117,6 +117,71 @@ See [`docs/remote-file-sharing.md`](docs/remote-file-sharing.md),
 [`docs/privacy-model.md`](docs/privacy-model.md) for the protocol workflow,
 security properties, privacy guarantees, storage behavior, and manual tests.
 
+## Discovery
+
+Peers find each other through multiple layered discovery mechanisms.
+The system separates **address resolution** (finding transport addresses for
+a known peer) from **member discovery** (finding which peers are in a room).
+
+### Address Resolution (How to dial a known peer)
+
+| Source | Technology | Scope |
+|--------|-----------|-------|
+| Current | In-memory active connection | Node-local |
+| Persisted | `FriendsStore.known_addrs` | Node-local |
+| mDNS | LAN multicast | Local network |
+| Configured | Bootstrap addresses | Node-local |
+| Relay | iroh relay server | WAN |
+| **DHT** | Mainline DHT / Pkarr | Global |
+| TrustedPeer | Config file | Node-local |
+
+Resolution priority: `Current → Persisted → Mdns → Configured → Relay → Dht → TrustedPeer`
+
+- **mDNS** discovers peers on the local network automatically (always active).
+- **DhtAddressLookup** resolves `EndpointId` to transport addresses on the
+  global Mainline DHT using Pkarr-signed records. Gated by `--no-dht`.
+- By default, only relay URLs are published (`--publish-direct-addresses`
+  exposes direct IPs — use with caution for privacy).
+
+### Member Discovery (Finding room peers)
+
+- **Public rooms**: Deterministic identity derived from (network, room name,
+  protocol version). Peers use `distributed-topic-tracker` to publish and
+  discover each other on the DHT. Continuous background loops re-publish
+  presence every 5 minutes and discover new peers every 30 seconds.
+- **Private rooms**: Same DHT mechanism but with namespace isolation via a
+  32-byte `DiscoverySecret`. Records are HPKE-encrypted so only members with
+  the secret can read them. Discovery is gated by `--no-dht`.
+- **Tickets**: Both room types support out-of-band invitation tickets that
+  encode the room identity (topic + optional secret + bootstrap relay),
+  bypassing DHT entirely.
+
+### Wire Format
+
+Discovery records are ~171-byte Ed25519-signed envelopes carrying a 33-byte
+payload: version byte + 32-byte `EndpointId`. Private-room records are
+HPKE-encrypted per-minute. The validation pipeline checks size, timestamp,
+decoding, identity match, and signature — in that order, cheapest first.
+
+### Privacy
+
+| Setting | Implication |
+|---------|-------------|
+| Default (relay-only) | IP addresses never published to DHT |
+| `--publish-direct-addresses` | Public IP published on Mainline DHT (faster P2P) |
+| Private rooms (with secret) | DHT namespace is undetectable without the secret; records encrypted |
+
+### DHT Outage Behaviour
+
+- Existing connections and known addresses continue working.
+- Exponential backoff on publish/discover failures (1s → 2s → 4s → 60s cap).
+- mDNS and ticket-based joins unaffected.
+- Once DHT recovers, normal operation resumes automatically.
+
+See [`docs/discovery-architecture.md`](docs/discovery-architecture.md) for
+the full architecture, namespace derivation, validation pipeline, DHT outage
+fallback, and operator guidance.
+
 ## Running
 
 ```sh

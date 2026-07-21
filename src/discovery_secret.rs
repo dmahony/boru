@@ -20,12 +20,66 @@
 //!   explicitly borrowed via [`as_bytes`](DiscoverySecret::as_bytes).
 //!   (We provide a manual [`Clone`] impl for practical testing use; see
 //!   the type-level docs for guidance.)
+//!
+//! # Domain-separated subkey assessment (V1 vs V2)
+//!
+//! In V1, the raw secret bytes serve **triple duty**:
+//!
+//! | Purpose | Derivation | V1 usage |
+//! |---------|-----------|----------|
+//! | DHT namespace | `BLAKE3("private-room v1" \|\| topic \|\| secret)` | [`private_room_namespace()`](crate::private_room_tracker::private_room_namespace) |
+//! | Encryption key | `encryption_keypair(secret_as_topic, BLAKE3(secret), minute)` | [`PrivateRoomTracker::encryption_key()`] |
+//! | Signing/verification topic | Direct use as `topic` parameter | `create_discovery_record()` / `ValidationConfig::new()` |
+//!
+//! **Risk**: If any one primitive is compromised (BLAKE3 preimage, Ed25519 key
+//! recovery, HPKE weakness), the same secret bytes enable all three attacks.
+//! In practice the secret is compartmentalised because each use applies a
+//! different domain separator before consuming the bytes, so a preimage on
+//! one output does not directly reveal the raw secret nor help with another
+//! usage.  However, a full key-extraction attack on any single use would
+//! compromise the room entirely.
+//!
+//! **V2 recommendation** (wire format unchanged here — V1 compatibility
+//! preserved): Derive three independent subkeys from the raw secret via
+//! domain-separated BLAKE3 hashes:
+//!
+//! ```text
+//! subkey_namespace  = BLAKE3("boru-chat private-room v2 namespace"  || secret || topic)
+//! subkey_encryption = BLAKE3("boru-chat private-room v2 encryption" || secret)
+//! subkey_signing    = BLAKE3("boru-chat private-room v2 signing"    || secret)
+//! ```
+//!
+//! The functions below ([`subkey_namespace`](Self::subkey_namespace),
+//! [`subkey_encryption`](Self::subkey_encryption),
+//! [`subkey_signing`](Self::subkey_signing)) implement these derivations.
+//! They are **not** used by the V1 wire format — they exist for assessment,
+//! unit testing, and future V2 migration.
 
 use getrandom;
 use serde::{Deserialize, Serialize};
 
 /// Size of a discovery secret in bytes.
 pub const DISCOVERY_SECRET_SIZE: usize = 32;
+
+// ---------------------------------------------------------------------------
+// Domain-separated subkey constants (V2 assessment — unused by V1 wire format)
+// ---------------------------------------------------------------------------
+
+/// Domain separator for deriving the V2 **namespace** subkey.
+///
+/// Used in [`DiscoverySecret::subkey_namespace`].
+/// Distinct from all V1 domain separators.
+pub const SUBKEY_NAMESPACE_DOMAIN: &[u8] = b"boru-chat private-room v2 namespace";
+
+/// Domain separator for deriving the V2 **encryption** subkey.
+///
+/// Used in [`DiscoverySecret::subkey_encryption`].
+pub const SUBKEY_ENCRYPTION_DOMAIN: &[u8] = b"boru-chat private-room v2 encryption";
+
+/// Domain separator for deriving the V2 **signing** subkey.
+///
+/// Used in [`DiscoverySecret::subkey_signing`].
+pub const SUBKEY_SIGNING_DOMAIN: &[u8] = b"boru-chat private-room v2 signing";
 
 /// A 32-byte cryptographically random secret for private-room DHT discovery.
 ///
@@ -73,6 +127,61 @@ impl DiscoverySecret {
     /// View the secret bytes as a namespace identifier.
     pub fn as_namespace_id(&self) -> crate::discovery_backend::NamespaceId {
         crate::discovery_backend::NamespaceId::new(self.bytes)
+    }
+
+    // ── V2 subkey derivation (assessment only — unused by V1) ──────────
+
+    /// Derive a domain-separated **namespace** subkey.
+    ///
+    /// `BLAKE3(SUBKEY_NAMESPACE_DOMAIN || self.bytes || topic)`
+    ///
+    /// Intended for V2 wire format where each privilege (namespace, encryption,
+    /// signing) uses an independent subkey.  The `topic` parameter binds the
+    /// namespace to the gossip topic so the same secret in different rooms
+    /// produces different namespaces.
+    pub fn subkey_namespace(&self, topic: &[u8; 32]) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(SUBKEY_NAMESPACE_DOMAIN);
+        hasher.update(&self.bytes);
+        hasher.update(topic);
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Derive a domain-separated **encryption** subkey.
+    ///
+    /// `BLAKE3(SUBKEY_ENCRYPTION_DOMAIN || self.bytes)`
+    ///
+    /// Intended for V2 wire format where encryption keys are derived from
+    /// this subkey instead of from the raw secret.
+    pub fn subkey_encryption(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(SUBKEY_ENCRYPTION_DOMAIN);
+        hasher.update(&self.bytes);
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Derive a domain-separated **signing/verification** subkey.
+    ///
+    /// `BLAKE3(SUBKEY_SIGNING_DOMAIN || self.bytes)`
+    ///
+    /// Intended for V2 wire format where discovery records are signed using
+    /// this subkey as the topic (Ed25519 domain) instead of the raw secret.
+    pub fn subkey_signing(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(SUBKEY_SIGNING_DOMAIN);
+        hasher.update(&self.bytes);
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Return all three V2 subkeys as a tuple `(namespace, encryption, signing)`.
+    ///
+    /// Provided for test assertions and migration tooling.
+    pub fn v2_subkeys(&self, topic: &[u8; 32]) -> ([u8; 32], [u8; 32], [u8; 32]) {
+        (
+            self.subkey_namespace(topic),
+            self.subkey_encryption(),
+            self.subkey_signing(),
+        )
     }
 }
 
@@ -215,5 +324,102 @@ mod tests {
         let a = DiscoverySecret::from_bytes([0xABu8; 32]);
         let b = a;
         assert_eq!(a, b);
+    }
+
+    // ── V2 subkey derivation tests ────────────────────────────────────
+
+    /// Subkeys are deterministic: same inputs → same subkeys.
+    #[test]
+    fn subkeys_are_deterministic() {
+        let secret = DiscoverySecret::from_bytes([0xABu8; 32]);
+        let topic = [0x42u8; 32];
+        let (ns_a, enc_a, sig_a) = secret.v2_subkeys(&topic);
+        let (ns_b, enc_b, sig_b) = secret.v2_subkeys(&topic);
+        assert_eq!(ns_a, ns_b, "namespace subkey");
+        assert_eq!(enc_a, enc_b, "encryption subkey");
+        assert_eq!(sig_a, sig_b, "signing subkey");
+    }
+
+    /// Different secrets produce different subkeys for the same topic.
+    #[test]
+    fn different_secrets_produce_different_subkeys() {
+        let topic = [0x42u8; 32];
+        let a = DiscoverySecret::from_bytes([0x01u8; 32]);
+        let b = DiscoverySecret::from_bytes([0x02u8; 32]);
+        let (ns_a, enc_a, sig_a) = a.v2_subkeys(&topic);
+        let (ns_b, enc_b, sig_b) = b.v2_subkeys(&topic);
+        assert_ne!(ns_a, ns_b, "namespace subkey must differ");
+        assert_ne!(enc_a, enc_b, "encryption subkey must differ");
+        assert_ne!(sig_a, sig_b, "signing subkey must differ");
+    }
+
+    /// Different topics produce different namespace subkeys (topic binding).
+    #[test]
+    fn different_topics_produce_different_namespace_subkeys() {
+        let secret = DiscoverySecret::from_bytes([0xABu8; 32]);
+        let topic_a = [0x01u8; 32];
+        let topic_b = [0x02u8; 32];
+        let ns_a = secret.subkey_namespace(&topic_a);
+        let ns_b = secret.subkey_namespace(&topic_b);
+        assert_ne!(ns_a, ns_b, "namespace subkey should be topic-bound");
+    }
+
+    /// Encryption and signing subkeys are identical regardless of topic
+    /// (they depend only on the secret).
+    #[test]
+    fn enc_sig_subkeys_are_topic_independent() {
+        let secret = DiscoverySecret::from_bytes([0xABu8; 32]);
+        let _topic_a = [0x01u8; 32];
+        let _topic_b = [0x02u8; 32];
+        assert_eq!(secret.subkey_encryption(), secret.subkey_encryption(),);
+        assert_eq!(secret.subkey_signing(), secret.subkey_signing(),);
+    }
+
+    /// All three subkeys are distinct from each other (domain separation).
+    #[test]
+    fn subkeys_are_mutually_distinct() {
+        let secret = DiscoverySecret::from_bytes([0xABu8; 32]);
+        let topic = [0x42u8; 32];
+        let (ns, enc, sig) = secret.v2_subkeys(&topic);
+        assert_ne!(ns, enc, "namespace ≠ encryption");
+        assert_ne!(ns, sig, "namespace ≠ signing");
+        assert_ne!(enc, sig, "encryption ≠ signing");
+    }
+
+    /// V2 subkeys differ from the V1 private-room namespace (domain
+    /// separation across versions).
+    #[test]
+    fn v2_subkeys_differ_from_v1_namespace() {
+        use crate::proto::TopicId;
+        let topic = TopicId::from_bytes([0x42u8; 32]);
+        let secret = DiscoverySecret::from_bytes([0xABu8; 32]);
+        let v1_ns = crate::private_room_tracker::private_room_namespace(&topic, &secret);
+        let (v2_ns, v2_enc, v2_sig) = secret.v2_subkeys(topic.as_bytes());
+        assert_ne!(
+            v1_ns.as_bytes(),
+            &v2_ns,
+            "V2 namespace subkey ≠ V1 namespace"
+        );
+        assert_ne!(
+            v1_ns.as_bytes(),
+            &v2_enc,
+            "V2 encryption subkey ≠ V1 namespace"
+        );
+        assert_ne!(
+            v1_ns.as_bytes(),
+            &v2_sig,
+            "V2 signing subkey ≠ V1 namespace"
+        );
+    }
+
+    /// Non-zero output for every subkey derived from a zeroed secret (avalanche).
+    #[test]
+    fn subkeys_are_nonzero_from_zero_secret() {
+        let secret = DiscoverySecret::from_bytes([0u8; 32]);
+        let topic = [0u8; 32];
+        let (ns, enc, sig) = secret.v2_subkeys(&topic);
+        assert!(ns.iter().any(|&b| b != 0), "namespace subkey");
+        assert!(enc.iter().any(|&b| b != 0), "encryption subkey");
+        assert!(sig.iter().any(|&b| b != 0), "signing subkey");
     }
 }

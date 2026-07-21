@@ -495,125 +495,141 @@ const BUTTON_GHOST: fn(&iced::Theme, iced::widget::button::Status) -> iced::widg
 
 /// Ghost button with hover background tint — like `BUTTON_GHOST` but with
 /// a subtle `bg_hover` background on hover for better visual feedback.
-pub(crate) const BUTTON_GHOST_BG: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
-    |theme, status| {
-        iced::widget::button::Style {
-            background: match status {
-                iced::widget::button::Status::Hovered => {
-                    Some(iced::Background::Color(bg_hover(theme)))
-                }
-                _ => None,
-            },
-            text_color: match status {
-                iced::widget::button::Status::Hovered => accent_primary(theme),
-                iced::widget::button::Status::Pressed => {
-                    let mut c = accent_primary(theme);
-                    c.r *= 0.85;
-                    c.g *= 0.85;
-                    c.b *= 0.85;
-                    c
-                }
-                _ => Color::from_rgb(0.5, 0.5, 0.5),
-            },
-            border: iced::Border {
-                radius: SPACE_4.into(),
-                ..Default::default()
-            },
-            ..Default::default()
+pub(crate) const BUTTON_GHOST_BG: fn(
+    &iced::Theme,
+    iced::widget::button::Status,
+) -> iced::widget::button::Style = |theme, status| iced::widget::button::Style {
+    background: match status {
+        iced::widget::button::Status::Hovered => Some(iced::Background::Color(bg_hover(theme))),
+        _ => None,
+    },
+    text_color: match status {
+        iced::widget::button::Status::Hovered => accent_primary(theme),
+        iced::widget::button::Status::Pressed => {
+            let mut c = accent_primary(theme);
+            c.r *= 0.85;
+            c.g *= 0.85;
+            c.b *= 0.85;
+            c
         }
-    };
+        _ => Color::from_rgb(0.5, 0.5, 0.5),
+    },
+    border: iced::Border {
+        radius: SPACE_4.into(),
+        ..Default::default()
+    },
+    ..Default::default()
+};
 
 /// Primary filled button — accent background, white text, rounded.
-pub(crate) const BUTTON_PRIMARY: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
-    |theme, status| {
-        let (bg_r, bg_g, bg_b) = {
-            let c = accent_primary(theme);
-            (c.r, c.g, c.b)
-        };
-        let bg = match status {
-            iced::widget::button::Status::Hovered => {
-                Color::from_rgb(
-                    (bg_r * 1.15).min(1.0),
-                    (bg_g * 1.15).min(1.0),
-                    (bg_b * 1.15).min(1.0),
-                )
-            }
-            iced::widget::button::Status::Pressed => {
-                Color::from_rgb(bg_r * 0.85, bg_g * 0.85, bg_b * 0.85)
-            }
-            _ => Color::from_rgb(bg_r, bg_g, bg_b),
-        };
-        iced::widget::button::Style {
-            background: Some(iced::Background::Color(bg)),
-            text_color: Color::WHITE,
-            border: iced::Border {
-                radius: SPACE_6.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+pub(crate) const BUTTON_PRIMARY: fn(
+    &iced::Theme,
+    iced::widget::button::Status,
+) -> iced::widget::button::Style = |theme, status| {
+    let (bg_r, bg_g, bg_b) = {
+        let c = accent_primary(theme);
+        (c.r, c.g, c.b)
     };
+    let bg = match status {
+        iced::widget::button::Status::Hovered => Color::from_rgb(
+            (bg_r * 1.15).min(1.0),
+            (bg_g * 1.15).min(1.0),
+            (bg_b * 1.15).min(1.0),
+        ),
+        iced::widget::button::Status::Pressed => {
+            Color::from_rgb(bg_r * 0.85, bg_g * 0.85, bg_b * 0.85)
+        }
+        _ => Color::from_rgb(bg_r, bg_g, bg_b),
+    };
+    iced::widget::button::Style {
+        background: Some(iced::Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: iced::Border {
+            radius: SPACE_6.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+};
 
 /// Green primary button — for positive actions (Send, Accept).
-pub(crate) const BUTTON_PRIMARY_GREEN: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
-    |theme, status| {
-        let base = accent_green(theme);
-        let bg = match status {
-            iced::widget::button::Status::Hovered => {
-                Color::from_rgb(
-                    (base.r * 1.15).min(1.0),
-                    (base.g * 1.15).min(1.0),
-                    (base.b * 1.15).min(1.0),
-                )
-            }
-            iced::widget::button::Status::Pressed => {
-                Color::from_rgb(base.r * 0.85, base.g * 0.85, base.b * 0.85)
-            }
-            _ => base,
-        };
-        iced::widget::button::Style {
-            background: Some(iced::Background::Color(bg)),
-            text_color: Color::WHITE,
-            border: iced::Border {
-                radius: SPACE_6.into(),
-                ..Default::default()
-            },
-            ..Default::default()
+pub(crate) const BUTTON_PRIMARY_GREEN: fn(
+    &iced::Theme,
+    iced::widget::button::Status,
+) -> iced::widget::button::Style = |theme, status| {
+    let base = accent_green(theme);
+    let bg = match status {
+        iced::widget::button::Status::Hovered => Color::from_rgb(
+            (base.r * 1.15).min(1.0),
+            (base.g * 1.15).min(1.0),
+            (base.b * 1.15).min(1.0),
+        ),
+        iced::widget::button::Status::Pressed => {
+            Color::from_rgb(base.r * 0.85, base.g * 0.85, base.b * 0.85)
         }
+        _ => base,
     };
+    iced::widget::button::Style {
+        background: Some(iced::Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: iced::Border {
+            radius: SPACE_6.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+};
 
 /// Danger/destructive button — error background, white text, rounded.
-pub(crate) const BUTTON_DANGER: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
-    |theme, status| {
-        let base = color_error(theme);
-        let bg = match status {
-            iced::widget::button::Status::Hovered => {
-                Color::from_rgb(
-                    (base.r * 1.2).min(1.0),
-                    base.g * 1.2,
-                    base.b * 1.2,
-                )
-            }
-            iced::widget::button::Status::Pressed => {
-                Color::from_rgb(base.r * 0.85, base.g * 0.85, base.b * 0.85)
-            }
-            _ => base,
-        };
-        iced::widget::button::Style {
-            background: Some(iced::Background::Color(bg)),
-            text_color: Color::WHITE,
-            border: iced::Border {
-                radius: SPACE_6.into(),
-                ..Default::default()
-            },
-            ..Default::default()
+pub(crate) const BUTTON_DANGER: fn(
+    &iced::Theme,
+    iced::widget::button::Status,
+) -> iced::widget::button::Style = |theme, status| {
+    let base = color_error(theme);
+    let bg = match status {
+        iced::widget::button::Status::Hovered => {
+            Color::from_rgb((base.r * 1.2).min(1.0), base.g * 1.2, base.b * 1.2)
         }
+        iced::widget::button::Status::Pressed => {
+            Color::from_rgb(base.r * 0.85, base.g * 0.85, base.b * 0.85)
+        }
+        _ => base,
     };
+    iced::widget::button::Style {
+        background: Some(iced::Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: iced::Border {
+            radius: SPACE_6.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+};
 
 /// Outline button — border_muted border, accent text on hover, transparent bg.
-pub(crate) const BUTTON_OUTLINE: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
-    |theme, status| {
-        let border_color = match status {
+pub(crate) const BUTTON_OUTLINE: fn(
+    &iced::Theme,
+    iced::widget::button::Status,
+) -> iced::widget::button::Style = |theme, status| {
+    let border_color = match status {
+        iced::widget::button::Status::Hovered => accent_primary(theme),
+        iced::widget::button::Status::Pressed => {
+            let mut c = accent_primary(theme);
+            c.r *= 0.85;
+            c.g *= 0.85;
+            c.b *= 0.85;
+            c
+        }
+        _ => border_muted(theme),
+    };
+    iced::widget::button::Style {
+        background: match status {
+            iced::widget::button::Status::Hovered => Some(iced::Background::Color(
+                Color::from_rgba(0.3, 0.3, 0.3, 0.08),
+            )),
+            _ => None,
+        },
+        text_color: match status {
             iced::widget::button::Status::Hovered => accent_primary(theme),
             iced::widget::button::Status::Pressed => {
                 let mut c = accent_primary(theme);
@@ -622,98 +638,82 @@ pub(crate) const BUTTON_OUTLINE: fn(&iced::Theme, iced::widget::button::Status) 
                 c.b *= 0.85;
                 c
             }
-            _ => border_muted(theme),
-        };
-        iced::widget::button::Style {
-            background: match status {
-                iced::widget::button::Status::Hovered => {
-                    Some(iced::Background::Color(Color::from_rgba(0.3, 0.3, 0.3, 0.08)))
-                }
-                _ => None,
-            },
-            text_color: match status {
-                iced::widget::button::Status::Hovered => accent_primary(theme),
-                iced::widget::button::Status::Pressed => {
-                    let mut c = accent_primary(theme);
-                    c.r *= 0.85;
-                    c.g *= 0.85;
-                    c.b *= 0.85;
-                    c
-                }
-                _ => Color::from_rgb(0.5, 0.5, 0.5),
-            },
-            border: iced::Border {
-                color: border_color,
-                width: 1.0,
-                radius: SPACE_6.into(),
-            },
-            ..Default::default()
-        }
-    };
+            _ => Color::from_rgb(0.5, 0.5, 0.5),
+        },
+        border: iced::Border {
+            color: border_color,
+            width: 1.0,
+            radius: SPACE_6.into(),
+        },
+        ..Default::default()
+    }
+};
 
 /// Muted text button — no background, muted colour, error on hover (for destructive actions).
-pub(crate) const BUTTON_MUTED: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
-    |theme, status| {
-        iced::widget::button::Style {
-            text_color: match status {
-                iced::widget::button::Status::Hovered => color_error(theme),
-                _ => Color::from_rgb(0.45, 0.45, 0.45),
-            },
-            border: iced::Border {
-                radius: SPACE_4.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    };
+pub(crate) const BUTTON_MUTED: fn(
+    &iced::Theme,
+    iced::widget::button::Status,
+) -> iced::widget::button::Style = |theme, status| iced::widget::button::Style {
+    text_color: match status {
+        iced::widget::button::Status::Hovered => color_error(theme),
+        _ => Color::from_rgb(0.45, 0.45, 0.45),
+    },
+    border: iced::Border {
+        radius: SPACE_4.into(),
+        ..Default::default()
+    },
+    ..Default::default()
+};
 
 /// Icon-only button for sidebar — minimal padding, text-colour accent on hover.
-pub(crate) const BUTTON_ICON: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
-    |theme, status| {
-        iced::widget::button::Style {
-            background: match status {
-                iced::widget::button::Status::Hovered => {
-                    Some(iced::Background::Color(bg_hover(theme)))
-                }
-                _ => None,
-            },
-            text_color: match status {
-                iced::widget::button::Status::Hovered => accent_primary(theme),
-                iced::widget::button::Status::Pressed => {
-                    let mut c = accent_primary(theme);
-                    c.r *= 0.85;
-                    c.g *= 0.85;
-                    c.b *= 0.85;
-                    c
-                }
-                _ => Color::from_rgb(0.5, 0.5, 0.5),
-            },
-            border: iced::Border {
-                radius: SPACE_4.into(),
-                ..Default::default()
-            },
-            ..Default::default()
+pub(crate) const BUTTON_ICON: fn(
+    &iced::Theme,
+    iced::widget::button::Status,
+) -> iced::widget::button::Style = |theme, status| iced::widget::button::Style {
+    background: match status {
+        iced::widget::button::Status::Hovered => Some(iced::Background::Color(bg_hover(theme))),
+        _ => None,
+    },
+    text_color: match status {
+        iced::widget::button::Status::Hovered => accent_primary(theme),
+        iced::widget::button::Status::Pressed => {
+            let mut c = accent_primary(theme);
+            c.r *= 0.85;
+            c.g *= 0.85;
+            c.b *= 0.85;
+            c
         }
-    };
+        _ => Color::from_rgb(0.5, 0.5, 0.5),
+    },
+    border: iced::Border {
+        radius: SPACE_4.into(),
+        ..Default::default()
+    },
+    ..Default::default()
+};
 
 /// Transparent full-size backdrop button — invisible but clickable.
-pub(crate) const BUTTON_BACKDROP: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
-    |_theme, _status| iced::widget::button::Style {
-        background: None,
-        border: iced::Border::default(),
-        text_color: iced::Color::TRANSPARENT,
-        ..Default::default()
-    };
+pub(crate) const BUTTON_BACKDROP: fn(
+    &iced::Theme,
+    iced::widget::button::Status,
+) -> iced::widget::button::Style = |_theme, _status| iced::widget::button::Style {
+    background: None,
+    border: iced::Border::default(),
+    text_color: iced::Color::TRANSPARENT,
+    ..Default::default()
+};
 
 /// Transparent-wide button — no background, no border, inherits parent text color.
 /// Used for clickable rows that should look like plain containers.
-pub(crate) const BUTTON_TRANSPARENT: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
-    |_theme, _status| iced::widget::button::Style {
-        background: None,
-        border: iced::Border::default(),
-        text_color: iced::Color::TRANSPARENT,
-        ..Default::default()
-    };
+pub(crate) const BUTTON_TRANSPARENT: fn(
+    &iced::Theme,
+    iced::widget::button::Status,
+) -> iced::widget::button::Style = |_theme, _status| iced::widget::button::Style {
+    background: None,
+    border: iced::Border::default(),
+    text_color: iced::Color::TRANSPARENT,
+    ..Default::default()
+};
 
 // ── Chat entry types ──────────────────────────────────────────────────
 
@@ -2641,7 +2641,10 @@ impl LayoutCache {
             }
             _ => {
                 h += Self::MSG_BASE_H;
-                if entry.image_handle.is_some() || entry.image_identifier.is_some() || entry.image_error.is_some() {
+                if entry.image_handle.is_some()
+                    || entry.image_identifier.is_some()
+                    || entry.image_error.is_some()
+                {
                     h += Self::IMAGE_EXTRA;
                 }
                 if !entry.reactions.is_empty() {
@@ -3855,7 +3858,8 @@ impl IcedChat {
         if self.recent_activity.len() >= 50 {
             self.recent_activity.pop_back();
         }
-        self.recent_activity.push_front(RecentActivityEvent::new(description));
+        self.recent_activity
+            .push_front(RecentActivityEvent::new(description));
     }
 
     /// Push an entry and update the incremental layout cache atomically.
@@ -4756,8 +4760,7 @@ impl IcedChat {
                         }
                     }
                     Err(e) => {
-                        self.chat_list_error =
-                            format!("Failed to read file: {e}");
+                        self.chat_list_error = format!("Failed to read file: {e}");
                     }
                 }
                 iced::Task::none()
@@ -4806,9 +4809,7 @@ impl IcedChat {
                                 return Err("DHT unavailable".to_string());
                             };
                             let secret = DiscoverySecret::generate();
-                            let dummy_ns =
-                                distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
-                            let backend = MainlineDhtBackend::new(dht_for_publish, dummy_ns);
+                            let backend = MainlineDhtBackend::new(dht_for_publish);
                             let tracker = PrivateRoomTracker::new(
                                 Box::new(backend),
                                 topic,
@@ -4837,9 +4838,7 @@ impl IcedChat {
                         let room_tracker = if let (Some(secret), Some(dht)) =
                             (discovery_secret, dht)
                         {
-                            let dummy_ns =
-                                distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
-                            let backend = MainlineDhtBackend::new(dht, dummy_ns);
+                            let backend = MainlineDhtBackend::new(dht);
                             let tracker = PrivateRoomTracker::new(
                                 Box::new(backend),
                                 topic,
@@ -5134,9 +5133,7 @@ impl IcedChat {
                         let room_tracker = if !private_dht_disabled {
                             if let (Some(secret), Some(dht)) = (saved_discovery_secret, dht.clone())
                             {
-                                let dummy_ns =
-                                    distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
-                                let backend = MainlineDhtBackend::new(dht, dummy_ns);
+                                let backend = MainlineDhtBackend::new(dht);
                                 let tracker = PrivateRoomTracker::new(
                                     Box::new(backend),
                                     topic,
@@ -5560,9 +5557,7 @@ impl IcedChat {
                                         &distributed_topic_tracker::DhtConfig::default(),
                                     )
                                 });
-                                let dummy_ns =
-                                    distributed_topic_tracker::TopicId::from_hash(&[0u8; 32]);
-                                let backend = MainlineDhtBackend::new(dht.clone(), dummy_ns);
+                                let backend = MainlineDhtBackend::new(dht.clone());
                                 let tracker = PrivateRoomTracker::new(
                                     Box::new(backend),
                                     topic,
@@ -6726,8 +6721,7 @@ impl IcedChat {
 
             AppMessage::ToggleSidebarSectionCollapsed(index) => {
                 if index < self.sidebar_section_collapsed.len() {
-                    self.sidebar_section_collapsed[index] =
-                        !self.sidebar_section_collapsed[index];
+                    self.sidebar_section_collapsed[index] = !self.sidebar_section_collapsed[index];
                 }
                 iced::Task::none()
             }
@@ -7935,7 +7929,8 @@ impl IcedChat {
                     if let Screen::FriendProfile(peer) = &self.screen {
                         let fid = boru_chat::friends::FriendId::from_public_key(*peer);
                         self.friends.set_label(fid, &new_name);
-                        self.friends_sidebar_revision = self.friends_sidebar_revision.wrapping_add(1);
+                        self.friends_sidebar_revision =
+                            self.friends_sidebar_revision.wrapping_add(1);
                     }
                 }
                 self.friend_profile_renaming = false;
@@ -8005,7 +8000,8 @@ impl IcedChat {
                     let fid = boru_chat::friends::FriendId::from_public_key(*peer);
                     if let Some(record) = self.friends.get_mut(&fid) {
                         record.relationship = boru_chat::friends::FriendRelationship::Blocked;
-                        self.friends_sidebar_revision = self.friends_sidebar_revision.wrapping_add(1);
+                        self.friends_sidebar_revision =
+                            self.friends_sidebar_revision.wrapping_add(1);
                     }
                     self.toast_message = Some(format!("Blocked {}", self.resolve_name(peer)));
                     self.toast_counter = 120;
@@ -8031,9 +8027,7 @@ impl IcedChat {
                             })
                         }
                         Err(e) => {
-                            self.push_system(format!(
-                                "Download failed for {display_name}: {e}"
-                            ));
+                            self.push_system(format!("Download failed for {display_name}: {e}"));
                             iced::Task::done(AppMessage::DownloadInitiationFailed {
                                 content_hash,
                                 peer,
@@ -8391,9 +8385,7 @@ impl IcedChat {
                                     &action_id,
                                     GuiActionError::new(
                                         GuiActionErrorCode::InvalidArgument,
-                                        format!(
-                                            "Invalid peer_id for DownloadFile: {error}"
-                                        ),
+                                        format!("Invalid peer_id for DownloadFile: {error}"),
                                     ),
                                 );
                                 let _ = self
@@ -8431,10 +8423,7 @@ impl IcedChat {
                         let _ = self
                             .gui_action_history
                             .set_state(&action_id, GuiActionState::AppMessageQueued);
-                        return iced::Task::done(AppMessage::RequestFileDownload {
-                            peer,
-                            file,
-                        });
+                        return iced::Task::done(AppMessage::RequestFileDownload { peer, file });
                     }
                     // Other GUI commands retain their existing diagnostic-only
                     // behavior until their dedicated action handlers land.
@@ -9089,9 +9078,7 @@ impl IcedChat {
                         .pick_file(),
                     |file| {
                         if let Some(file) = file {
-                            AppMessage::SharedFilePicked(
-                                file.path().to_string_lossy().to_string(),
-                            )
+                            AppMessage::SharedFilePicked(file.path().to_string_lossy().to_string())
                         } else {
                             AppMessage::Noop
                         }
@@ -9138,9 +9125,8 @@ impl IcedChat {
                         let hash_hex = hash.to_hex().to_string();
 
                         // Compute metadata_id (same as SharedFile::new does)
-                        let modified_time = metadata
-                            .modified()
-                            .unwrap_or(std::time::SystemTime::now());
+                        let modified_time =
+                            metadata.modified().unwrap_or(std::time::SystemTime::now());
                         let ts = modified_time
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -9171,10 +9157,8 @@ impl IcedChat {
                         };
 
                         // Store file object + source path + shared file entry
-                        stg.put_file_object(
-                            &hash_hex, size, mime_type, &filename, &file_data,
-                        )
-                        .map_err(|e| format!("Failed to store file: {e}"))?;
+                        stg.put_file_object(&hash_hex, size, mime_type, &filename, &file_data)
+                            .map_err(|e| format!("Failed to store file: {e}"))?;
                         stg.set_file_object_source_path(&hash_hex, Some(&path))
                             .map_err(|e| format!("Failed to set source path: {e}"))?;
                         stg.upsert_shared_file(
@@ -9187,10 +9171,7 @@ impl IcedChat {
                         )
                         .map_err(|e| format!("Failed to register shared file: {e}"))?;
 
-                        Ok(format!(
-                            "Shared file added: {filename} ({} bytes)",
-                            size
-                        ))
+                        Ok(format!("Shared file added: {filename} ({} bytes)", size))
                     },
                     |result: Result<String, String>| match result {
                         Ok(msg) => AppMessage::SharedFileAdded(msg),
@@ -9828,8 +9809,11 @@ impl IcedChat {
                     .map(|record| record.display_label(&fid))
                     .unwrap_or_else(|| from.fmt_short().to_string());
                 self.friends.ensure_friend(fid);
-                self.conversation_store
-                    .upsert(ConversationEntry::new(*topic, from.to_string(), label));
+                self.conversation_store.upsert(ConversationEntry::new(
+                    *topic,
+                    from.to_string(),
+                    label,
+                ));
             }
         }
         self.conversation_store.touch_and_bump(topic);
@@ -10672,30 +10656,55 @@ impl IcedChat {
         }
 
         let items = vec![
-            MenuItem { icon: "👤", label: "Add Friend", action: Some(AppMessage::OpenFriendRequests), disabled: false },
-            MenuItem { icon: "🔗", label: "Join Ticket", action: Some(AppMessage::JoinFromTicket), disabled: false },
-            MenuItem { icon: "📷", label: "Scan QR Code", action: None, disabled: true },
-            MenuItem { icon: "📥", label: "Import Friend", action: Some(AppMessage::ImportFriendFromFile), disabled: false },
+            MenuItem {
+                icon: "👤",
+                label: "Add Friend",
+                action: Some(AppMessage::OpenFriendRequests),
+                disabled: false,
+            },
+            MenuItem {
+                icon: "🔗",
+                label: "Join Ticket",
+                action: Some(AppMessage::JoinFromTicket),
+                disabled: false,
+            },
+            MenuItem {
+                icon: "📷",
+                label: "Scan QR Code",
+                action: None,
+                disabled: true,
+            },
+            MenuItem {
+                icon: "📥",
+                label: "Import Friend",
+                action: Some(AppMessage::ImportFriendFromFile),
+                disabled: false,
+            },
         ];
 
         let future_items = vec![
-            MenuItem { icon: "👥", label: "Create Group Chat", action: None, disabled: true },
-            MenuItem { icon: "📱", label: "Pair Device", action: None, disabled: true },
+            MenuItem {
+                icon: "👥",
+                label: "Create Group Chat",
+                action: None,
+                disabled: true,
+            },
+            MenuItem {
+                icon: "📱",
+                label: "Pair Device",
+                action: None,
+                disabled: true,
+            },
         ];
 
-        let mut menu_col = Column::new()
-            .spacing(0)
-            .width(Length::Fixed(220.0));
+        let mut menu_col = Column::new().spacing(0).width(Length::Fixed(220.0));
 
         // Header
         menu_col = menu_col.push(
             container(
-                row![
-                    text("＋").size(TYPO_SM),
-                    text(" Add").size(TYPO_SM),
-                ]
-                .spacing(SPACE_4)
-                .align_y(Alignment::Center),
+                row![text("＋").size(TYPO_SM), text(" Add").size(TYPO_SM),]
+                    .spacing(SPACE_4)
+                    .align_y(Alignment::Center),
             )
             .padding([SPACE_8, SPACE_12])
             .width(Length::Fill),
@@ -10986,7 +10995,11 @@ impl IcedChat {
 
         // Count for each section
         let chat_count = self.conversation_store.len();
-        let friend_count = self.friends.iter().filter(|(_, r)| r.relationship.can_message()).count();
+        let friend_count = self
+            .friends
+            .iter()
+            .filter(|(_, r)| r.relationship.can_message())
+            .count();
         let discover_count = self.discovered_peers.len();
         let request_count = self
             .friend_request_store
@@ -10996,7 +11009,7 @@ impl IcedChat {
             )
             .len();
 
-            let mut content = Column::new()
+        let mut content = Column::new()
             .push(container(header).padding(iced::Padding {
                 top: SPACE_12,
                 right: SPACE_12,
@@ -11080,12 +11093,11 @@ impl IcedChat {
                 let online = peer_pk
                     .map(|pk| self.friend_online_cache.contains(&pk))
                     .unwrap_or(false);
-                let avatar = peer_pk
-                    .and_then(|pk| {
-                        self.friend_image_handles
-                            .get(&pk)
-                            .and_then(|avatar| avatar.as_ref())
-                    });
+                let avatar = peer_pk.and_then(|pk| {
+                    self.friend_image_handles
+                        .get(&pk)
+                        .and_then(|avatar| avatar.as_ref())
+                });
                 let profile_version = peer_pk
                     .and_then(|pk| self.friend_profile_versions.get(&pk).copied())
                     .unwrap_or(0);
@@ -11265,78 +11277,76 @@ impl IcedChat {
         use iced::{Alignment, Background, Border, Length};
 
         // ── Avatar (32px circle) ────────────────────────────────────
-        let avatar_element: iced::Element<'static, AppMessage> =
-            if let Some(handle) = avatar.handle {
-                image(handle)
-                    .width(Length::Fixed(32.0))
-                    .height(Length::Fixed(32.0))
-                    .into()
-            } else {
-                // Derive a stable color from the name bytes
-                let bytes = name.as_bytes();
-                let r = bytes.first().copied().unwrap_or(0) as f32 / 255.0 * 0.6 + 0.2;
-                let g = bytes.get(1).copied().unwrap_or(0) as f32 / 255.0 * 0.6 + 0.2;
-                let b = bytes.get(2).copied().unwrap_or(0) as f32 / 255.0 * 0.6 + 0.2;
-                let avatar_color = Color::from_rgb(r, g, b);
-                let initial = name
-                    .chars()
-                    .next()
-                    .map(|c| c.to_uppercase().next().unwrap_or(c))
-                    .unwrap_or('?');
-
-                container(
-                    text(initial.to_string())
-                        .size(TYPO_MD)
-                        .color(Color::WHITE)
-                        .width(Length::Fill),
-                )
-                .center_y(Length::Fill)
+        let avatar_element: iced::Element<'static, AppMessage> = if let Some(handle) = avatar.handle
+        {
+            image(handle)
                 .width(Length::Fixed(32.0))
                 .height(Length::Fixed(32.0))
-                .style(move |_t| container::Style {
-                    background: Some(Background::Color(avatar_color)),
-                    border: Border {
-                        radius: 16.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
                 .into()
-            };
+        } else {
+            // Derive a stable color from the name bytes
+            let bytes = name.as_bytes();
+            let r = bytes.first().copied().unwrap_or(0) as f32 / 255.0 * 0.6 + 0.2;
+            let g = bytes.get(1).copied().unwrap_or(0) as f32 / 255.0 * 0.6 + 0.2;
+            let b = bytes.get(2).copied().unwrap_or(0) as f32 / 255.0 * 0.6 + 0.2;
+            let avatar_color = Color::from_rgb(r, g, b);
+            let initial = name
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().next().unwrap_or(c))
+                .unwrap_or('?');
+
+            container(
+                text(initial.to_string())
+                    .size(TYPO_MD)
+                    .color(Color::WHITE)
+                    .width(Length::Fill),
+            )
+            .center_y(Length::Fill)
+            .width(Length::Fixed(32.0))
+            .height(Length::Fixed(32.0))
+            .style(move |_t| container::Style {
+                background: Some(Background::Color(avatar_color)),
+                border: Border {
+                    radius: 16.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        };
 
         // ── Online indicator dot (overlaid on avatar) ─────────────
-        let avatar_with_dot: iced::Element<'static, AppMessage> = if online {
-            use iced::widget::Stack;
-            Stack::new()
-                .push(avatar_element)
-                .push(
-                    container(
-                        container(Space::new())
-                            .width(10.0)
-                            .height(10.0)
-                            .style(move |t| container::Style {
+        let avatar_with_dot: iced::Element<'static, AppMessage> =
+            if online {
+                use iced::widget::Stack;
+                Stack::new()
+                    .push(avatar_element)
+                    .push(
+                        container(container(Space::new()).width(10.0).height(10.0).style(
+                            move |t| container::Style {
                                 background: Some(Background::Color(accent_green(t))),
                                 border: Border {
                                     radius: 5.0.into(),
                                     ..Default::default()
                                 },
                                 ..Default::default()
-                            }),
+                            },
+                        ))
+                        .width(Length::Fixed(32.0))
+                        .height(Length::Fixed(32.0))
+                        .padding(iced::Padding {
+                            top: 22.0,
+                            left: 22.0,
+                            ..Default::default()
+                        }),
                     )
                     .width(Length::Fixed(32.0))
                     .height(Length::Fixed(32.0))
-                    .padding(iced::Padding {
-                        top: 22.0,
-                        left: 22.0,
-                        ..Default::default()
-                    }),
-                )
-                .width(Length::Fixed(32.0))
-                .height(Length::Fixed(32.0))
-                .into()
-        } else {
-            avatar_element
-        };
+                    .into()
+            } else {
+                avatar_element
+            };
 
         // ── Timestamp (relative) ──────────────────────────────────
         let time_label_str = if last_seen_at_unix_ms > 0 {
@@ -11410,14 +11420,11 @@ impl IcedChat {
                 Column::new()
                     .push(
                         Row::new()
-                            .push(
-                                text(name.clone())
-                                    .size(TYPO_SM)
-                                    .width(Length::Fill)
-                                    .style(move |t| iced::widget::text::Style {
-                                        color: Some(name_color(t)),
-                                    }),
-                            )
+                            .push(text(name.clone()).size(TYPO_SM).width(Length::Fill).style(
+                                move |t| iced::widget::text::Style {
+                                    color: Some(name_color(t)),
+                                },
+                            ))
                             .push(
                                 text(time_label_str.clone())
                                     .size(TYPO_XXS)
@@ -11845,17 +11852,15 @@ impl IcedChat {
                 button(text("Manage Requests").size(TYPO_XXS))
                     .on_press(AppMessage::OpenFriendRequests)
                     .padding([SPACE_2, SPACE_6])
-                    .style(move |t, _status| {
-                        iced::widget::button::Style {
-                            background: Some(iced::Background::Color(bg_surface(t))),
-                            text_color: Self::muted_color(dark_mode),
-                            border: iced::Border {
-                                color: border_muted(t),
-                                width: 1.0,
-                                radius: SPACE_4.into(),
-                            },
-                            ..Default::default()
-                        }
+                    .style(move |t, _status| iced::widget::button::Style {
+                        background: Some(iced::Background::Color(bg_surface(t))),
+                        text_color: Self::muted_color(dark_mode),
+                        border: iced::Border {
+                            color: border_muted(t),
+                            width: 1.0,
+                            radius: SPACE_4.into(),
+                        },
+                        ..Default::default()
                     }),
             )
             .padding(iced::Padding {
@@ -12008,17 +12013,19 @@ impl IcedChat {
             .push(
                 row![
                     text(online_dot).size(TYPO_MD).color(accent_primary(&theme)),
-                    text(mesh_label.clone()).size(TYPO_SM).color(text_system(&theme)),
+                    text(mesh_label.clone())
+                        .size(TYPO_SM)
+                        .color(text_system(&theme)),
                 ]
                 .spacing(SPACE_6)
                 .align_y(Alignment::Center),
             )
             .push(
                 row![
-                    text(online_dot)
-                        .size(TYPO_MD)
-                        .color(accent_primary(&theme)),
-                    text(relay_label.clone()).size(TYPO_SM).color(text_system(&theme)),
+                    text(online_dot).size(TYPO_MD).color(accent_primary(&theme)),
+                    text(relay_label.clone())
+                        .size(TYPO_SM)
+                        .color(text_system(&theme)),
                 ]
                 .spacing(SPACE_6)
                 .align_y(Alignment::Center),
@@ -12032,7 +12039,9 @@ impl IcedChat {
                         } else {
                             text_muted(&theme)
                         }),
-                    text(friend_status_text).size(TYPO_SM).color(text_system(&theme)),
+                    text(friend_status_text)
+                        .size(TYPO_SM)
+                        .color(text_system(&theme)),
                 ]
                 .spacing(SPACE_6)
                 .align_y(Alignment::Center),
@@ -12268,24 +12277,22 @@ impl IcedChat {
             .map(|r| r.display_name())
             .unwrap_or_else(|| format!("Room {}", short_topic));
 
-        let header = column![
-            row![
-                button(text("← Back").size(TYPO_SM))
-                    .on_press(AppMessage::GoToChatList)
-                    .style(BUTTON_GHOST_BG)
-                    .padding([SPACE_6, SPACE_12]),
-                text(room_name)
-                    .size(TYPO_LG)
-                    .width(Length::Fill)
-                    .wrapping(Wrapping::Word),
-                button(text("Settings").size(TYPO_SM))
-                    .on_press(AppMessage::OpenSettings)
-                    .style(BUTTON_GHOST_BG)
-                    .padding([SPACE_6, SPACE_12]),
-            ]
-            .spacing(SPACE_8)
-            .align_y(Alignment::Center),
+        let header = column![row![
+            button(text("← Back").size(TYPO_SM))
+                .on_press(AppMessage::GoToChatList)
+                .style(BUTTON_GHOST_BG)
+                .padding([SPACE_6, SPACE_12]),
+            text(room_name)
+                .size(TYPO_LG)
+                .width(Length::Fill)
+                .wrapping(Wrapping::Word),
+            button(text("Settings").size(TYPO_SM))
+                .on_press(AppMessage::OpenSettings)
+                .style(BUTTON_GHOST_BG)
+                .padding([SPACE_6, SPACE_12]),
         ]
+        .spacing(SPACE_8)
+        .align_y(Alignment::Center),]
         .spacing(SPACE_4);
 
         container(header)
@@ -12906,26 +12913,22 @@ impl IcedChat {
                     )
                     .push(
                         button(text("Remove").size(TYPO_XS))
-                            .on_press(AppMessage::RemoveSharedFile(
-                                file.content_hash.clone(),
-                            ))
+                            .on_press(AppMessage::RemoveSharedFile(file.content_hash.clone()))
                             .padding([SPACE_2, SPACE_6])
-                            .style(|t, _status| {
-                                iced::widget::button::Style {
-                                    background: Some(iced::Background::Color(
-                                        if matches!(t, iced::Theme::Dark) {
-                                            Color::from_rgb(0.6, 0.15, 0.15)
-                                        } else {
-                                            Color::from_rgb(0.9, 0.3, 0.3)
-                                        },
-                                    )),
-                                    text_color: Color::WHITE,
-                                    border: iced::Border {
-                                        radius: SPACE_4.into(),
-                                        ..Default::default()
+                            .style(|t, _status| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(
+                                    if matches!(t, iced::Theme::Dark) {
+                                        Color::from_rgb(0.6, 0.15, 0.15)
+                                    } else {
+                                        Color::from_rgb(0.9, 0.3, 0.3)
                                     },
+                                )),
+                                text_color: Color::WHITE,
+                                border: iced::Border {
+                                    radius: SPACE_4.into(),
                                     ..Default::default()
-                                }
+                                },
+                                ..Default::default()
                             }),
                     )
                     .spacing(SPACE_8)
@@ -13368,9 +13371,10 @@ impl IcedChat {
         } else {
             let mut list = Column::new().spacing(SPACE_4);
             for req in &incoming {
-                let label = self.resolve_name(&PublicKey::from_str(&req.requester).unwrap_or_else(|_| {
-                    iroh::SecretKey::generate().public()
-                }));
+                let label = self.resolve_name(
+                    &PublicKey::from_str(&req.requester)
+                        .unwrap_or_else(|_| iroh::SecretKey::generate().public()),
+                );
                 let msg_display = req.message.as_deref().unwrap_or("");
                 let row_el = row![
                     Column::new()
@@ -13904,7 +13908,11 @@ impl IcedChat {
             .unwrap_or_else(|| "Unknown Peer".to_string());
 
         let header = Row::new()
-            .push(text(format!("{} — Shared Files", display_name)).size(TYPO_LG).width(Length::Fill))
+            .push(
+                text(format!("{} — Shared Files", display_name))
+                    .size(TYPO_LG)
+                    .width(Length::Fill),
+            )
             .push(
                 button(text("✕").size(TYPO_MD))
                     .on_press(AppMessage::ClosePeerProfile)
@@ -13922,7 +13930,9 @@ impl IcedChat {
         if self.catalogue_loading {
             body = body.push(
                 container(
-                    text("Loading catalogue…").size(TYPO_SM).style(text_muted_style),
+                    text("Loading catalogue…")
+                        .size(TYPO_SM)
+                        .style(text_muted_style),
                 )
                 .width(Length::Fill)
                 .padding(SPACE_12)
@@ -13932,7 +13942,9 @@ impl IcedChat {
             if files.is_empty() {
                 body = body.push(
                     container(
-                        text("No shared files.").size(TYPO_SM).style(text_muted_style),
+                        text("No shared files.")
+                            .size(TYPO_SM)
+                            .style(text_muted_style),
                     )
                     .width(Length::Fill)
                     .padding(SPACE_12)
@@ -13942,23 +13954,32 @@ impl IcedChat {
                 // Table header
                 let header_row = Row::new()
                     .push(
-                        text("Filename").size(TYPO_XS).style(text_muted_style).width(Length::Fill),
+                        text("Filename")
+                            .size(TYPO_XS)
+                            .style(text_muted_style)
+                            .width(Length::Fill),
                     )
                     .push(
-                        text("Size").size(TYPO_XS).style(text_muted_style).width(Length::Fixed(80.0)),
+                        text("Size")
+                            .size(TYPO_XS)
+                            .style(text_muted_style)
+                            .width(Length::Fixed(80.0)),
                     )
                     .push(
-                        text("Type").size(TYPO_XS).style(text_muted_style).width(Length::Fixed(100.0)),
+                        text("Type")
+                            .size(TYPO_XS)
+                            .style(text_muted_style)
+                            .width(Length::Fixed(100.0)),
                     )
-                    .push(
-                        Space::new().width(Length::Fixed(80.0)),
-                    )
+                    .push(Space::new().width(Length::Fixed(80.0)))
                     .spacing(SPACE_8)
                     .padding([SPACE_4, SPACE_8]);
                 body = body.push(header_row);
 
                 for file in files {
-                    let is_pending = self.pending_downloads.contains(&(file.content_hash.clone(), peer));
+                    let is_pending = self
+                        .pending_downloads
+                        .contains(&(file.content_hash.clone(), peer));
                     let size_str = format_file_size(file.size_bytes);
 
                     // Truncate mime type for display
@@ -13969,33 +13990,38 @@ impl IcedChat {
                     };
 
                     let file_row = Row::new()
+                        .push(text(&file.display_name).size(TYPO_SM).width(Length::Fill))
                         .push(
-                            text(&file.display_name).size(TYPO_SM).width(Length::Fill),
+                            text(size_str)
+                                .size(TYPO_XS)
+                                .style(text_muted_style)
+                                .width(Length::Fixed(80.0)),
                         )
                         .push(
-                            text(size_str).size(TYPO_XS).style(text_muted_style).width(Length::Fixed(80.0)),
+                            text(mime_display)
+                                .size(TYPO_XS)
+                                .style(text_muted_style)
+                                .width(Length::Fixed(100.0)),
                         )
-                        .push(
-                            text(mime_display).size(TYPO_XS).style(text_muted_style).width(Length::Fixed(100.0)),
-                        )
-                        .push(
-                            if is_pending {
-                                button(text("…").size(TYPO_XS))
-                                    .padding([SPACE_2, SPACE_6])
-                            } else {
-                                button(text("Download").size(TYPO_XS))
-                                    .on_press(AppMessage::RequestFileDownload {
-                                        peer,
-                                        file: file.clone(),
-                                    })
-                                    .padding([SPACE_2, SPACE_6])
-                            },
-                        )
+                        .push(if is_pending {
+                            button(text("…").size(TYPO_XS)).padding([SPACE_2, SPACE_6])
+                        } else {
+                            button(text("Download").size(TYPO_XS))
+                                .on_press(AppMessage::RequestFileDownload {
+                                    peer,
+                                    file: file.clone(),
+                                })
+                                .padding([SPACE_2, SPACE_6])
+                        })
                         .spacing(SPACE_8)
                         .align_y(Alignment::Center)
                         .padding([SPACE_4, SPACE_8]);
 
-                    body = body.push(container(file_row).width(Length::Fill).style(container_surface));
+                    body = body.push(
+                        container(file_row)
+                            .width(Length::Fill)
+                            .style(container_surface),
+                    );
                 }
             }
         }
@@ -14173,11 +14199,7 @@ impl IcedChat {
             Self::muted_color(dark_mode)
         };
         let status_row = row![]
-            .push(
-                text(status_dot)
-                    .size(TYPO_SM)
-                    .color(status_color),
-            )
+            .push(text(status_dot).size(TYPO_SM).color(status_color))
             .push(
                 text(last_seen_str.clone())
                     .size(TYPO_SM)
@@ -14197,34 +14219,40 @@ impl IcedChat {
 
         // ── Shared Files section ──
         let shared_files_label = row![]
-            .push(
-                text("Shared Files")
-                    .size(TYPO_SM)
-                    .width(Length::Fill),
-            )
+            .push(text("Shared Files").size(TYPO_SM).width(Length::Fill))
             .push(
                 button(text("Browse").size(TYPO_XS))
                     .on_press(AppMessage::BrowsePeerCatalogue(peer))
                     .padding([SPACE_2, SPACE_6])
-                    .style(move |t, _status| {
-                        iced::widget::button::Style {
-                            background: Some(iced::Background::Color(accent_primary(t))),
-                            text_color: Color::WHITE,
-                            border: iced::Border {
-                                radius: SPACE_4.into(),
-                                ..Default::default()
-                            },
+                    .style(move |t, _status| iced::widget::button::Style {
+                        background: Some(iced::Background::Color(accent_primary(t))),
+                        text_color: Color::WHITE,
+                        border: iced::Border {
+                            radius: SPACE_4.into(),
                             ..Default::default()
-                        }
+                        },
+                        ..Default::default()
                     }),
             )
             .spacing(SPACE_8)
             .align_y(Alignment::Center);
 
         let shared_files_body = if has_catalogue {
-            row![].push(text("Files available").size(TYPO_XS).style(text_muted_style)).spacing(0)
+            row![]
+                .push(
+                    text("Files available")
+                        .size(TYPO_XS)
+                        .style(text_muted_style),
+                )
+                .spacing(0)
         } else {
-            row![].push(text("No shared files.").size(TYPO_XS).style(text_muted_style)).spacing(0)
+            row![]
+                .push(
+                    text("No shared files.")
+                        .size(TYPO_XS)
+                        .style(text_muted_style),
+                )
+                .spacing(0)
         };
         let shared_files_section = container(
             Column::new()
@@ -14238,9 +14266,7 @@ impl IcedChat {
         .style(container_surface);
 
         // ── Recent Messages section ──
-        let recent_header = text("Recent Messages")
-            .size(TYPO_SM)
-            .width(Length::Fill);
+        let recent_header = text("Recent Messages").size(TYPO_SM).width(Length::Fill);
 
         let recent_body: iced::Element<'_, AppMessage> = if recent_messages.is_empty() {
             text("No recent messages.")
@@ -14250,21 +14276,15 @@ impl IcedChat {
         } else {
             let mut col = Column::new().spacing(SPACE_4);
             for msg in &recent_messages {
-                col = col.push(
-                    text(msg.clone())
-                        .size(TYPO_XS)
-                        .style(text_muted_style),
-                );
+                col = col.push(text(msg.clone()).size(TYPO_XS).style(text_muted_style));
             }
             // Make entire section clickable to open chat
-            let section_content = container(col)
-                .width(Length::Fill)
-                .padding(iced::Padding {
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: 0.0,
-                    left: 0.0,
-                });
+            let section_content = container(col).width(Length::Fill).padding(iced::Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+            });
             button(section_content)
                 .on_press(AppMessage::OpenFriendChat(peer))
                 .width(Length::Fill)
@@ -14296,16 +14316,14 @@ impl IcedChat {
                     .on_press(AppMessage::OpenFriendChat(peer))
                     .padding([SPACE_8, SPACE_16])
                     .width(Length::Fill)
-                    .style(move |t, _status| {
-                        iced::widget::button::Style {
-                            background: Some(iced::Background::Color(accent_primary(t))),
-                            text_color: Color::WHITE,
-                            border: iced::Border {
-                                radius: SPACE_6.into(),
-                                ..Default::default()
-                            },
+                    .style(move |t, _status| iced::widget::button::Style {
+                        background: Some(iced::Background::Color(accent_primary(t))),
+                        text_color: Color::WHITE,
+                        border: iced::Border {
+                            radius: SPACE_6.into(),
                             ..Default::default()
-                        }
+                        },
+                        ..Default::default()
                     }),
             )
             .push(
@@ -14313,34 +14331,30 @@ impl IcedChat {
                     .on_press(AppMessage::BrowsePeerCatalogue(peer))
                     .padding([SPACE_8, SPACE_16])
                     .width(Length::Fill)
-                    .style(move |t, _status| {
-                        iced::widget::button::Style {
-                            background: Some(iced::Background::Color(bg_surface(t))),
-                            text_color: text_remote_body(&Self::theme_from_dark(dark_mode)),
-                            border: iced::Border {
-                                color: border_muted(t),
-                                width: 1.0,
-                                radius: SPACE_6.into(),
-                            },
-                            ..Default::default()
-                        }
+                    .style(move |t, _status| iced::widget::button::Style {
+                        background: Some(iced::Background::Color(bg_surface(t))),
+                        text_color: text_remote_body(&Self::theme_from_dark(dark_mode)),
+                        border: iced::Border {
+                            color: border_muted(t),
+                            width: 1.0,
+                            radius: SPACE_6.into(),
+                        },
+                        ..Default::default()
                     }),
             )
             .push(
                 button(text("Voice").size(TYPO_SM))
                     .padding([SPACE_8, SPACE_16])
                     .width(Length::Fill)
-                    .style(move |t, _status| {
-                        iced::widget::button::Style {
-                            background: Some(iced::Background::Color(bg_surface(t))),
-                            text_color: Self::muted_color(dark_mode),
-                            border: iced::Border {
-                                color: border_muted(t),
-                                width: 1.0,
-                                radius: SPACE_6.into(),
-                            },
-                            ..Default::default()
-                        }
+                    .style(move |t, _status| iced::widget::button::Style {
+                        background: Some(iced::Background::Color(bg_surface(t))),
+                        text_color: Self::muted_color(dark_mode),
+                        border: iced::Border {
+                            color: border_muted(t),
+                            width: 1.0,
+                            radius: SPACE_6.into(),
+                        },
+                        ..Default::default()
                     }),
             )
             .spacing(SPACE_8);
@@ -14384,10 +14398,7 @@ impl IcedChat {
         body = body.push(Space::new().height(Length::Fill));
 
         // ── Wrap in scrollable ──
-        let content = Column::new()
-            .push(header)
-            .push(body)
-            .push(actions_section);
+        let content = Column::new().push(header).push(body).push(actions_section);
 
         let base = container(scrollable(content))
             .width(Length::Fill)
@@ -14412,15 +14423,11 @@ impl IcedChat {
 
             for (label, msg) in &menu_items {
                 let is_destructive = *label == "Remove Friend" || *label == "Block Friend";
-                let item = button(
-                    text(*label)
-                        .size(TYPO_SM)
-                        .color(if is_destructive {
-                            Color::from_rgb(0.8, 0.2, 0.2)
-                        } else {
-                            text_remote_body(&Self::theme_from_dark(dark_mode))
-                        }),
-                )
+                let item = button(text(*label).size(TYPO_SM).color(if is_destructive {
+                    Color::from_rgb(0.8, 0.2, 0.2)
+                } else {
+                    text_remote_body(&Self::theme_from_dark(dark_mode))
+                }))
                 .on_press(msg.clone())
                 .width(Length::Fill)
                 .padding([SPACE_6, SPACE_8])
@@ -14491,27 +14498,23 @@ impl IcedChat {
 
         // ── Toast overlay ──
         if let Some(msg) = &self.toast_message {
-            let toast = container(
-                text(msg)
-                    .size(TYPO_SM)
-                    .color(Color::WHITE),
-            )
-            .padding(iced::Padding {
-                top: SPACE_8,
-                right: SPACE_16,
-                bottom: SPACE_8,
-                left: SPACE_16,
-            })
-            .style(move |_t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(
-                    iced::Color::from_rgba(0.1, 0.1, 0.1, 0.85),
-                )),
-                border: iced::Border {
-                    radius: SPACE_8.into(),
+            let toast = container(text(msg).size(TYPO_SM).color(Color::WHITE))
+                .padding(iced::Padding {
+                    top: SPACE_8,
+                    right: SPACE_16,
+                    bottom: SPACE_8,
+                    left: SPACE_16,
+                })
+                .style(move |_t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.1, 0.1, 0.1, 0.85,
+                    ))),
+                    border: iced::Border {
+                        radius: SPACE_8.into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            });
+                });
 
             return iced::widget::stack![
                 base,
@@ -14543,9 +14546,11 @@ impl IcedChat {
 
         let dialog = column![]
             .push(
-                text(format!("Are you sure you want to remove {name} as a friend?"))
-                    .size(TYPO_SM)
-                    .width(Length::Shrink),
+                text(format!(
+                    "Are you sure you want to remove {name} as a friend?"
+                ))
+                .size(TYPO_SM)
+                .width(Length::Shrink),
             )
             .push(Space::new().height(SPACE_16))
             .push(
@@ -14555,17 +14560,15 @@ impl IcedChat {
                             .on_press(AppMessage::CancelRemoveFriend)
                             .padding([SPACE_6, SPACE_12])
                             .width(Length::Fill)
-                            .style(move |t, _status| {
-                                iced::widget::button::Style {
-                                    background: Some(iced::Background::Color(bg_surface(t))),
-                                    text_color: text_muted(t),
-                                    border: iced::Border {
-                                        color: border_muted(t),
-                                        width: 1.0,
-                                        radius: SPACE_6.into(),
-                                    },
-                                    ..Default::default()
-                                }
+                            .style(move |t, _status| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(bg_surface(t))),
+                                text_color: text_muted(t),
+                                border: iced::Border {
+                                    color: border_muted(t),
+                                    width: 1.0,
+                                    radius: SPACE_6.into(),
+                                },
+                                ..Default::default()
                             }),
                     )
                     .push(
@@ -14573,16 +14576,14 @@ impl IcedChat {
                             .on_press(AppMessage::ConfirmRemoveFriend)
                             .padding([SPACE_6, SPACE_12])
                             .width(Length::Fill)
-                            .style(move |t, _status| {
-                                iced::widget::button::Style {
-                                    background: Some(iced::Background::Color(color_error(t))),
-                                    text_color: Color::WHITE,
-                                    border: iced::Border {
-                                        radius: SPACE_6.into(),
-                                        ..Default::default()
-                                    },
+                            .style(move |t, _status| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(color_error(t))),
+                                text_color: Color::WHITE,
+                                border: iced::Border {
+                                    radius: SPACE_6.into(),
                                     ..Default::default()
-                                }
+                                },
+                                ..Default::default()
                             }),
                     )
                     .spacing(SPACE_8)

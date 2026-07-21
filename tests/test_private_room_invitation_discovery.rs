@@ -527,3 +527,175 @@ fn five_peers_all_see_each_other() {
     }
     block_on(backend.shutdown()).expect("backend shutdown");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V1 legacy migration tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// V1 wire format is the current format.  This test verifies that a record
+/// created and signed with the V1 discovery_key (raw secret as topic) is
+/// accepted by the current V1 validation pipeline.  Future V2 adopters can
+/// repurpose this test to verify that V1 records remain accepted.
+#[test]
+fn v1_wire_format_is_accepted() {
+    let backend = InMemoryDiscoveryBackend::new();
+    let topic = test_topic();
+    let secret = test_secret();
+    let invite = boru_chat::chat_core::RoomInviteV2::new(topic, secret);
+    let invite_str = invite.encode();
+
+    // Publish using V1 format (Tracker A).
+    let (tracker_a, ep_a) = tracker_from_invitation(&backend, &invite_str);
+    block_on(tracker_a.publish_once()).expect("A publish (V1 format)");
+
+    // Discover using V1 format (Tracker B).
+    let (tracker_b, _ep_b) = tracker_from_invitation(&backend, &invite_str);
+    let peers = block_on(tracker_b.discover_once()).expect("B discover (V1 format)");
+
+    assert!(
+        peers.contains(&ep_a),
+        "V1 discovery record must be accepted by V1 validation, got {peers:?}"
+    );
+
+    block_on(tracker_a.shutdown());
+    block_on(tracker_b.shutdown());
+    block_on(backend.shutdown()).expect("backend shutdown");
+}
+
+/// Verify that a V1 invitation (boru1:) roundtrips: the encoded invitation
+/// decodes back to the same topic and secret, and produces the same
+/// PrivateRoomTracker namespace.
+#[test]
+fn v1_invitation_roundtrip() {
+    let topic = test_topic();
+    let secret = test_secret();
+    let invite = boru_chat::chat_core::RoomInviteV2::new(topic, secret);
+    let encoded = invite.encode();
+
+    // Parse.
+    let parsed =
+        boru_chat::chat_core::RoomInvitation::parse(&encoded).expect("parse V1 invitation");
+    assert!(
+        parsed.discovery_secret().is_some(),
+        "V1 invitation must carry a discovery secret"
+    );
+    let parsed_secret = parsed.discovery_secret().unwrap();
+    assert_eq!(*parsed_secret, secret, "parsed secret must match original");
+    assert_eq!(parsed.topic(), topic, "parsed topic must match original");
+
+    // The namespace derived from the parsed invitation must match.
+    let ns_from_parsed =
+        boru_chat::private_room_tracker::private_room_namespace(&parsed.topic(), parsed_secret);
+    let ns_original = boru_chat::private_room_tracker::private_room_namespace(&topic, &secret);
+    assert_eq!(
+        ns_from_parsed, ns_original,
+        "namespace from parsed invitation must match"
+    );
+}
+
+/// Verify that V1 invitation format is stable: the same inputs always produce
+/// the same encoded string (deterministic).
+#[test]
+fn v1_invitation_is_deterministic() {
+    let topic = test_topic();
+    let secret = test_secret();
+    let a = boru_chat::chat_core::RoomInviteV2::new(topic, secret).encode();
+    let b = boru_chat::chat_core::RoomInviteV2::new(topic, secret).encode();
+    assert_eq!(a, b, "V1 invitation must be deterministic");
+}
+
+/// Verify that V1 VERSION constant is 1 and V1 PREFIX is "boru1:".
+/// If these change, the migration tests must be updated.
+#[test]
+fn v1_constants_are_stable() {
+    let invite = boru_chat::chat_core::RoomInviteV2::new(test_topic(), test_secret());
+    let encoded = invite.encode();
+    // The prefix must remain stable for backward compatibility.
+    assert!(
+        encoded.starts_with("boru1:"),
+        "V1 invitation must start with 'boru1:', got {encoded:?}"
+    );
+    // The encoded length should be around 110 chars: "boru1:" (6) + ~104 base32 chars.
+    assert!(
+        encoded.len() >= 108 && encoded.len() <= 112,
+        "V1 invitation length {} out of expected range [108, 112]",
+        encoded.len()
+    );
+}
+
+/// Verify that V2 domain-separated subkeys do NOT accidentally match V1
+/// namespace.  This protects against future migration errors where a V2
+/// subkey is mistakenly used as a V1 namespace.
+#[test]
+fn v2_subkeys_are_distinct_from_v1_namespace() {
+    let topic = test_topic();
+    let secret = test_secret();
+
+    // V1 namespace.
+    let v1_ns = boru_chat::private_room_tracker::private_room_namespace(&topic, &secret);
+
+    // V2 subkeys.
+    let (v2_ns, v2_enc, v2_sig) = secret.v2_subkeys(topic.as_bytes());
+
+    // None of the V2 subkeys should match the V1 namespace.
+    assert_ne!(
+        v1_ns.as_bytes(),
+        &v2_ns,
+        "V2 namespace subkey must differ from V1 namespace"
+    );
+    assert_ne!(
+        v1_ns.as_bytes(),
+        &v2_enc,
+        "V2 encryption subkey must differ from V1 namespace"
+    );
+    assert_ne!(
+        v1_ns.as_bytes(),
+        &v2_sig,
+        "V2 signing subkey must differ from V1 namespace"
+    );
+
+    // All three V2 subkeys must differ from each other.
+    assert_ne!(v2_ns, v2_enc, "V2 namespace ≠ encryption subkey");
+    assert_ne!(v2_ns, v2_sig, "V2 namespace ≠ signing subkey");
+    assert_ne!(v2_enc, v2_sig, "V2 encryption ≠ signing subkey");
+}
+
+/// Verify that a V1 record created with the raw secret as topic is accepted
+/// by the V1 validator, and that a V2 subkey (used as topic) would produce
+/// a DIFFERENT signature that the V1 validator would reject.
+#[test]
+fn v1_record_accepted_v2_subkey_rejected_by_v1_validator() {
+    use boru_chat::discovery_record::create_discovery_record;
+    use boru_chat::discovery_validation::{DiscoveryRecordValidator, ValidationConfig};
+    use distributed_topic_tracker::unix_minute;
+
+    let secret = test_secret();
+    let now = unix_minute(0);
+
+    // Create a record with the V1 format (raw secret as topic).
+    let (sk, ep) = {
+        let seed = [0xBBu8; 32];
+        let sk = iroh::SecretKey::from_bytes(&seed);
+        let ep = sk.public();
+        (sk, ep)
+    };
+    let v1_record =
+        create_discovery_record(*secret.as_bytes(), now, &ep, &sk).expect("create V1 record");
+
+    // V1 validator with the raw secret as topic should accept it.
+    let v1_config = ValidationConfig::new(*secret.as_bytes());
+    let v1_validator = DiscoveryRecordValidator::new(v1_config, now);
+    assert!(
+        v1_validator.validate_single(&v1_record).is_ok(),
+        "V1 validator must accept V1 record signed with raw secret as topic"
+    );
+
+    // V2 signing subkey as topic — V1 validator should reject.
+    let v2_sig_subkey = secret.subkey_signing();
+    let wrong_config = ValidationConfig::new(v2_sig_subkey);
+    let wrong_validator = DiscoveryRecordValidator::new(wrong_config, now);
+    assert!(
+        wrong_validator.validate_single(&v1_record).is_err(),
+        "V1 validator with V2 signing subkey must reject V1 record (domain-separated)"
+    );
+}

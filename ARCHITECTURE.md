@@ -106,15 +106,52 @@ Deterministic public-room identities derived from (network, room name, protocol 
 | `public_room_safety` | Per-peer rate limiting for untrusted public-room message flows |
 | `public_room_tracker` | Publish-once / discover-once operations wrapping a discovery backend |
 
-### Discovery System
+### Discovery System — Architecture
+
+boru-chat uses **two independent DHT systems** for different purposes:
+
+| Layer | Purpose | Crate | Type |
+|---|---|---|---|
+| **Address Resolution** | Resolve `EndpointId` → transport addrs (relay, IPs) | `iroh-mainline-address-lookup` | `DhtAddressLookup` |
+| **Topic/Member Discovery** | Discover peer `EndpointId` values per room | `distributed-topic-tracker` | `MainlineDhtBackend` |
+
+Each layer uses a **separate `mainline::Dht` instance** (distinct UDP sockets).
+They serve different rate/timing profiles and should not be shared. The
+address-resolution layer uses Pkarr-signed DNS packets on Mainline; the
+topic-discovery layer uses the `distributed-topic-tracker` mutable-record
+API with per-minute key rotation.
+
+**Resolution priority** (for dialing a known peer):
+```
+Current → Persisted → Mdns → Configured → Relay → Dht → TrustedPeer
+```
+
+Member discovery splits into **public** and **private** subsystems:
+
+| Subsystem | Tracker | Background Loop | Records Encrypted | CLI Gate |
+|---|---|---|---|---|
+| Public rooms | `PublicRoomTracker` | `ContinuousTracker` | No (deterministic key) | Always on |
+| Private rooms | `PrivateRoomTracker` | `PrivateContinuousTracker` | Yes (HPKE, per-minute key) | `--no-dht` |
+
+#### Discovery System Modules
 
 | Module | Purpose |
 |--------|---------|
-| `discovery_backend` | `TopicDiscoveryBackend` trait + Mainline DHT + in-memory mock |
-| `discovery_record` | Wire-format signed discovery records |
-| `discovery_secret` | 32-byte random keys for private-room DHT isolation |
-| `discovery_validation` | Record validity checks (signatures, timestamps, formats) |
-| `private_room_tracker` | Private-room DHT publish/discover with namespace isolation |
+| `discovery_backend` | `TopicDiscoveryBackend` trait + `MainlineDhtBackend` + `InMemoryDiscoveryBackend` (mock) |
+| `discovery_record` | Wire-format signed discovery records; 33 B payload in ~171 B envelope |
+| `discovery_secret` | 32-byte CSPRNG keys for private-room DHT isolation (V1); V2 subkey assessment |
+| `discovery_validation` | 5-stage validation pipeline (size → timestamp → decode → identity → signature) with hard bounds |
+| `public_room` | Deterministic public-room identity derivation (topic + discovery key) from (network, room name, version) |
+| `public_room_config` | Limits and defaults for DHT timing, message size, rate limits |
+| `public_room_tracker` | Publish-once / discover-once for public rooms |
+| `public_room_continuous` | Background publish/discover loops with `PublicationPolicy`, exponential backoff, jitter |
+| `public_room_safety` | Per-peer rate limiting for untrusted public-room message flows |
+| `private_room_tracker` | Private-room DHT publish/discover with `DiscoverySecret`-based namespace isolation and HPKE encryption |
+
+See [`docs/discovery-architecture.md`](docs/discovery-architecture.md) for the
+full architecture: namespace derivation, wire format, validation pipeline,
+privacy implications, record lifecycle, DHT outage fallback, limitations,
+and operator guidance.
 
 ### Networking Protocols
 

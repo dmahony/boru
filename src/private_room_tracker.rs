@@ -42,14 +42,14 @@
 //! ).await.unwrap();
 //! ```
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use tokio::sync::mpsc;
+use tokio::{
+    sync::mpsc,
+    time::{interval, MissedTickBehavior},
+};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, warn, Instrument};
+use tracing::{debug, info, info_span, trace, warn, Instrument};
 
 use crate::discovery_backend::{
     EncryptedDiscoveryRecord, NamespaceId, TopicDiscoveryBackend, MAX_DISCOVERY_PAYLOAD_SIZE,
@@ -400,6 +400,12 @@ impl PrivateRoomTracker {
 }
 
 /// Runs private-room publication and discovery in the background.
+///
+/// Two independent tokio tasks: one for publication, one for discovery.
+/// Each tick applies uniform jitter to the configured interval. Failures
+/// use exponential backoff capped at `max_retry_delay`. The shared
+/// [`CancellationToken`] is fired on shutdown; both tasks observe it and
+/// exit promptly.
 pub struct PrivateContinuousTracker {
     cancel: CancellationToken,
     task_handle: tokio::task::JoinHandle<()>,
@@ -414,65 +420,67 @@ impl std::fmt::Debug for PrivateContinuousTracker {
 }
 
 impl PrivateContinuousTracker {
-    /// Start periodic private-room publish/discover loops.
+    /// Start periodic private-room publish/discover loops with configurable timing.
+    ///
+    /// Spawns two background tokio tasks:
+    ///
+    /// 1. **Publish loop** — periodically re-publishes local presence on the
+    ///    DHT via the private-room namespace. On failure, retries with
+    ///    exponential backoff.
+    /// 2. **Discovery loop** — periodically looks up peers on the DHT and
+    ///    sends newly discovered [`EndpointId`] values through `new_peers_tx`.
+    ///    Deduplicates peers already sent in previous ticks.
+    ///
+    /// The caller should read from the corresponding
+    /// [`mpsc::Receiver<Vec<EndpointId>>`] and forward batches to
+    /// [`crate::api::GossipSender::join_peers`] (or use
+    /// [`crate::public_room_continuous::spawn_join_fanout`]).
     pub fn start(
         tracker: PrivateRoomTracker,
-        _config: crate::public_room_continuous::ContinuousTrackerConfig,
+        config: crate::public_room_continuous::ContinuousTrackerConfig,
         new_peers_tx: mpsc::Sender<Vec<EndpointId>>,
     ) -> Self {
         let tracker = Arc::new(tracker);
         let cancel = CancellationToken::new();
+
+        // Create the publication policy with default settings.
+        let policy = crate::public_room_continuous::PublicationPolicy::new(
+            crate::public_room_continuous::PublicationPolicyConfig::default(),
+        );
+
+        let topic_short = tracker.topic_short();
+        let local = tracker.local_endpoint_id().fmt_short();
+        info!(
+            topic = %topic_short,
+            local = %local,
+            publish_ms = config.publish_interval.as_millis() as u64,
+            discover_ms = config.discover_interval.as_millis() as u64,
+            max_candidates = config.max_candidates_per_cycle,
+            "private continuous tracker starting background loops",
+        );
+
         let task_cancel = cancel.clone();
         let task_tracker = Arc::clone(&tracker);
+
         let task_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            loop {
-                tokio::select! {
-                    _ = task_cancel.cancelled() => {
-                        info!(topic = %task_tracker.topic_short(), "private DHT tracker cancelled");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        if let Err(error) = task_tracker.publish_once().await {
-                            // Publication failure is non-fatal: discovery can still
-                            // use records published by other room members. Keep the
-                            // fallback explicit so stale advertisements are visible.
-                            warn!(
-                                topic = %task_tracker.topic_short(),
-                                operation = "publish",
-                                fallback = "continue_without_local_refresh",
-                                error = %error,
-                                "DHT degraded; private-room publish unavailable",
-                            );
-                        }
-                        match task_tracker.discover_once().await {
-                            Ok(peers) => {
-                                if new_peers_tx.send(peers).await.is_err() {
-                                    warn!(
-                                        topic = %task_tracker.topic_short(),
-                                        operation = "discover",
-                                        fallback = "stop_peer_forwarding",
-                                        "private DHT peer channel closed",
-                                    );
-                                    break;
-                                }
-                            }
-                            Err(error) => {
-                                // A transient DHT outage must not shut down the
-                                // room; continue with peers already in the mesh.
-                                warn!(
-                                    topic = %task_tracker.topic_short(),
-                                    operation = "discover",
-                                    fallback = "continue_with_existing_peers",
-                                    error = %error,
-                                    "DHT degraded; private-room discovery unavailable",
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            let cfg_p = config.clone();
+            let tracker_p = Arc::clone(&task_tracker);
+            let cancel_p = task_cancel.clone();
+            let policy_p = policy;
+            let publish_task = tokio::task::spawn(async move {
+                private_publish_loop(tracker_p, cfg_p, policy_p, cancel_p).await;
+            });
+
+            let cfg_d = config;
+            let tracker_d = Arc::clone(&task_tracker);
+            let cancel_d = task_cancel;
+            let discover_task = tokio::task::spawn(async move {
+                private_discover_loop(tracker_d, cfg_d, new_peers_tx, cancel_d).await;
+            });
+
+            let _ = tokio::join!(publish_task, discover_task);
         });
+
         Self {
             cancel,
             task_handle,
@@ -486,6 +494,263 @@ impl PrivateContinuousTracker {
         let _ = self.task_handle.await;
         if let Ok(tracker) = Arc::try_unwrap(self.tracker) {
             tracker.shutdown().await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Background loops
+// ---------------------------------------------------------------------------
+
+/// Periodic publication loop for a private room with policy-governed timing.
+///
+/// Uses a [`PublicationPolicy`] to decide whether each tick should produce
+/// a real DHT write.  On success, the policy is updated so subsequent ticks
+/// within the same DHT minute are skipped (unless refresh age triggers a
+/// heartbeat).  On failure, the policy applies exponential backoff.
+async fn private_publish_loop(
+    tracker: Arc<PrivateRoomTracker>,
+    config: crate::public_room_continuous::ContinuousTrackerConfig,
+    mut policy: crate::public_room_continuous::PublicationPolicy,
+    cancel: CancellationToken,
+) {
+    let mut ticker = interval(config.publish_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                info!(topic = %tracker.topic_short(), "private continuous publish cancelled");
+                break;
+            }
+            _ = ticker.tick() => {
+                let _ = crate::public_room_continuous::apply_jitter(
+                    config.publish_interval,
+                    config.jitter_factor,
+                );
+
+                // ── Policy check ──────────────────────────────────────────
+                let now = Instant::now();
+                let current_minute = unix_minute(0);
+                match policy.decide(current_minute, now) {
+                    crate::public_room_continuous::PublicationDecision::Skip { reason, next_check_after } => {
+                        debug!(
+                            topic = %tracker.topic_short(),
+                            minute = current_minute,
+                            reason,
+                            next_check_ms = next_check_after.as_millis() as u64,
+                            consecutive_failures = policy.consecutive_failures(),
+                            "private publish skipped by policy",
+                        );
+                        continue;
+                    }
+                    crate::public_room_continuous::PublicationDecision::Publish => {
+                        debug!(
+                            topic = %tracker.topic_short(),
+                            minute = current_minute,
+                            consecutive_failures = policy.consecutive_failures(),
+                            "private publish proceeding after policy decision",
+                        );
+                    }
+                }
+
+                let start = Instant::now();
+                let result = crate::public_room_continuous::retry_with_backoff(
+                    || tracker.publish_once(),
+                    config.initial_retry_delay,
+                    config.max_retry_delay,
+                    config.jitter_factor,
+                    &cancel,
+                )
+                .await;
+                let duration_us = start.elapsed().as_micros() as u64;
+
+                match result {
+                    Ok(()) => {
+                        policy.record_success(current_minute);
+                        debug!(
+                            topic = %tracker.topic_short(),
+                            minute = current_minute,
+                            duration_us = duration_us,
+                            "private continuous publish succeeded",
+                        );
+                    }
+                    Err(e) => {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        policy.record_failure();
+                        let failures = policy.consecutive_failures();
+                        if failures >= 3 {
+                            warn!(
+                                topic = %tracker.topic_short(),
+                                error = %e,
+                                consecutive_failures = failures,
+                                duration_us = duration_us,
+                                fallback = "continue_with_stale_advertisement",
+                                "private continuous publish degraded DHT state",
+                            );
+                        } else {
+                            warn!(
+                                topic = %tracker.topic_short(),
+                                error = %e,
+                                consecutive_failures = failures,
+                                duration_us = duration_us,
+                                "private continuous publish failed after retries",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Periodic discovery loop for a private room.
+///
+/// Looks up peers on the DHT at the configured interval (with jitter).
+/// Discovered peers are sent through `new_peers_tx` as batches.
+/// Tracks consecutive failures to detect degraded DHT state.
+/// Deduplicates by tracking already-forwarded peers.
+/// Applies stale-ttl eviction to the known-peers set on each tick.
+async fn private_discover_loop(
+    tracker: Arc<PrivateRoomTracker>,
+    config: crate::public_room_continuous::ContinuousTrackerConfig,
+    new_peers_tx: mpsc::Sender<Vec<EndpointId>>,
+    cancel: CancellationToken,
+) {
+    let mut ticker = interval(config.discover_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut consecutive_failures: u32 = 0;
+
+    // Track peers we've already forwarded so we don't re-send them.
+    let mut known_peers: HashMap<EndpointId, Instant> = HashMap::new();
+    let max_candidates = config.max_candidates_per_cycle;
+    let staleness_ttl = config.stale_peer_ttl;
+
+    // Cumulative peer-set size reported per tick (not reset on eviction).
+    let mut cumulative_peers_seen: usize = 0;
+
+    info!(
+        topic = %tracker.topic_short(),
+        discover_ms = config.discover_interval.as_millis() as u64,
+        max_candidates = max_candidates,
+        "private continuous discovery loop started",
+    );
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                info!(topic = %tracker.topic_short(), "private continuous discover cancelled");
+                break;
+            }
+            _ = ticker.tick() => {
+                let _ = crate::public_room_continuous::apply_jitter(
+                    config.discover_interval,
+                    config.jitter_factor,
+                );
+
+                // Evict stale known peers before processing this tick.
+                if let Some(ttl) = staleness_ttl {
+                    let cutoff = Instant::now() - ttl;
+                    let before = known_peers.len();
+                    known_peers.retain(|_, last_seen| *last_seen >= cutoff);
+                    let evicted = before - known_peers.len();
+                    if evicted > 0 {
+                        trace!(
+                            topic = %tracker.topic_short(),
+                            evicted,
+                            remaining = known_peers.len(),
+                            "evicted stale known-peers entries",
+                        );
+                    }
+                }
+
+                let start = Instant::now();
+                let result = crate::public_room_continuous::retry_with_backoff(
+                    || tracker.discover_once(),
+                    config.initial_retry_delay,
+                    config.max_retry_delay,
+                    config.jitter_factor,
+                    &cancel,
+                )
+                .await;
+                let duration_us = start.elapsed().as_micros() as u64;
+
+                match result {
+                    Ok(peers) => {
+                        consecutive_failures = 0;
+                        let now = Instant::now();
+
+                        // Deduplicate: skip already-known peers, cap at max_candidates.
+                        let mut new_peers = Vec::with_capacity(max_candidates.min(peers.len()));
+                        for peer in peers {
+                            if new_peers.len() >= max_candidates {
+                                break;
+                            }
+                            if known_peers.contains_key(&peer) {
+                                continue;
+                            }
+                            trace!(
+                                topic = %tracker.topic_short(),
+                                candidate = %peer.fmt_short(),
+                                "private room candidate peer admitted",
+                            );
+                            known_peers.insert(peer, now);
+                            new_peers.push(peer);
+                        }
+
+                        if new_peers.is_empty() {
+                            continue;
+                        }
+
+                        let new_count = new_peers.len();
+                        cumulative_peers_seen += new_count;
+                        info!(
+                            topic = %tracker.topic_short(),
+                            new = new_count,
+                            cumulative = cumulative_peers_seen,
+                            known = known_peers.len(),
+                            duration_us = duration_us,
+                            "private continuous discovery found new peers",
+                        );
+
+                        if new_peers_tx.send(new_peers).await.is_err() {
+                            info!(
+                                topic = %tracker.topic_short(),
+                                "private continuous discover channel closed, stopping",
+                            );
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        consecutive_failures += 1;
+                        if consecutive_failures >= 3 {
+                            warn!(
+                                topic = %tracker.topic_short(),
+                                error = %e,
+                                consecutive_failures = consecutive_failures,
+                                duration_us = duration_us,
+                                fallback = "continue_with_existing_peers",
+                                "private continuous discover degraded DHT state",
+                            );
+                        } else {
+                            warn!(
+                                topic = %tracker.topic_short(),
+                                error = %e,
+                                consecutive_failures = consecutive_failures,
+                                duration_us = duration_us,
+                                "private continuous discover failed after retries",
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -851,5 +1116,403 @@ mod tests {
     fn namespace_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<NamespaceId>();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // PrivateContinuousTracker tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    use std::time::Duration;
+
+    use crate::public_room_continuous::{apply_jitter, ContinuousTrackerConfig};
+
+    /// Helper: create a test tracker suitable for continuous tests.
+    fn continuous_test_setup() -> (InMemoryDiscoveryBackend, PrivateRoomTracker) {
+        let backend = InMemoryDiscoveryBackend::new();
+        let (sk, ep) = test_identity();
+        let topic = TopicId::from_bytes([0xC0u8; 32]);
+        let secret = DiscoverySecret::from_bytes([0xC0u8; 32]);
+        let tracker = PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep, sk);
+        (backend, tracker)
+    }
+
+    // ── Tracing smoke tests ──────────────────────────────────────────
+
+    /// Tracing is emitted during continuous tracker lifecycle without panics.
+    #[tokio::test]
+    #[traced_test]
+    async fn traced_continuous_tracker_lifecycle() {
+        let (_alice_sk, alice_ep) = test_identity();
+        let (bob_sk, bob_ep) = test_identity();
+        let backend = InMemoryDiscoveryBackend::new();
+        let topic = TopicId::from_bytes([0xC1u8; 32]);
+        let secret = DiscoverySecret::from_bytes([0xC1u8; 32]);
+
+        // Bob publishes first.
+        let bob_tracker =
+            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, bob_ep, bob_sk);
+        bob_tracker.publish_once().await.unwrap();
+
+        let alice_tracker = PrivateRoomTracker::new(
+            Box::new(backend.clone()),
+            topic,
+            secret,
+            alice_ep,
+            SecretKey::generate(),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let config = ContinuousTrackerConfig {
+            discover_interval: Duration::from_millis(50),
+            publish_interval: Duration::from_secs(3600),
+            max_candidates_per_cycle: 20,
+            ..Default::default()
+        };
+
+        let continuous = PrivateContinuousTracker::start(alice_tracker, config.sanitize(), tx);
+
+        // Wait for discovery to find Bob.
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        continuous.shutdown().await;
+
+        let peers = result
+            .expect("timeout waiting for discovery")
+            .expect("channel closed unexpectedly");
+        assert!(peers.contains(&bob_ep), "expected Bob to be discovered");
+    }
+
+    // ── Discovery ───────────────────────────────────────────────────
+
+    /// Continuous tracker discovers a peer that published before start.
+    #[tokio::test]
+    async fn continuous_tracker_discovers_new_peer() {
+        let (_alice_sk, alice_ep) = test_identity();
+        let (bob_sk, bob_ep) = test_identity();
+        let backend = InMemoryDiscoveryBackend::new();
+        let topic = TopicId::from_bytes([0xC2u8; 32]);
+        let secret = DiscoverySecret::from_bytes([0xC2u8; 32]);
+
+        // Bob publishes first.
+        let bob_tracker =
+            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, bob_ep, bob_sk);
+        bob_tracker.publish_once().await.unwrap();
+
+        let alice_tracker = PrivateRoomTracker::new(
+            Box::new(backend.clone()),
+            topic,
+            secret,
+            alice_ep,
+            SecretKey::generate(),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let config = ContinuousTrackerConfig {
+            discover_interval: Duration::from_millis(50),
+            publish_interval: Duration::from_secs(3600),
+            max_candidates_per_cycle: 20,
+            ..Default::default()
+        };
+
+        let continuous = PrivateContinuousTracker::start(alice_tracker, config.sanitize(), tx);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+
+        continuous.shutdown().await;
+
+        let peers = result
+            .expect("timeout waiting for discovery")
+            .expect("channel closed unexpectedly");
+
+        assert!(
+            peers.contains(&bob_ep),
+            "expected Bob's EndpointId to be discovered, got {peers:?}"
+        );
+    }
+
+    // ── Deduplication ───────────────────────────────────────────────
+
+    /// Once a peer is known, subsequent ticks should NOT re-send it.
+    #[tokio::test]
+    async fn continuous_tracker_does_not_repeat_known_peers() {
+        let (alice_sk, alice_ep) = test_identity();
+        let (bob_sk, bob_ep) = test_identity();
+        let backend = InMemoryDiscoveryBackend::new();
+        let topic = TopicId::from_bytes([0xC3u8; 32]);
+        let secret = DiscoverySecret::from_bytes([0xC3u8; 32]);
+
+        let bob_tracker =
+            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, bob_ep, bob_sk);
+        bob_tracker.publish_once().await.unwrap();
+
+        let alice_tracker =
+            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, alice_ep, alice_sk);
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let config = ContinuousTrackerConfig {
+            discover_interval: Duration::from_millis(50),
+            publish_interval: Duration::from_secs(3600),
+            max_candidates_per_cycle: 20,
+            ..Default::default()
+        };
+
+        let continuous = PrivateContinuousTracker::start(alice_tracker, config.sanitize(), tx);
+
+        // First discovery should find Bob.
+        let first = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timeout waiting for first discovery")
+            .expect("channel closed unexpectedly");
+        assert!(!first.is_empty(), "expected at least one peer");
+        assert!(first.contains(&bob_ep), "expected Bob");
+
+        // Wait a bit — subsequent ticks should NOT send Bob again.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Drain any messages that may have arrived.
+        while let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(10), rx.recv()).await
+        {
+            assert!(
+                batch.is_empty(),
+                "expected empty batch (peer already known), got {batch:?}"
+            );
+        }
+
+        continuous.shutdown().await;
+    }
+
+    // ── Shutdown / Cancellation ─────────────────────────────────────
+
+    /// Shutdown stops background tasks promptly.
+    #[tokio::test]
+    async fn shutdown_stops_background_tasks() {
+        let (_backend, tracker) = continuous_test_setup();
+        let (tx, _rx) = mpsc::channel(16);
+
+        let config = ContinuousTrackerConfig {
+            discover_interval: Duration::from_millis(10),
+            publish_interval: Duration::from_millis(10),
+            ..Default::default()
+        };
+
+        let continuous = PrivateContinuousTracker::start(tracker, config.sanitize(), tx);
+
+        // Drop the receiver so the discovery loop stops on send failure.
+        drop(_rx);
+
+        // Shutdown should complete quickly — no blocking.
+        tokio::time::timeout(Duration::from_secs(5), continuous.shutdown())
+            .await
+            .expect("shutdown timed out (tasks did not stop)");
+    }
+
+    /// Explicit cancellation via shutdown() stops discovery and no further
+    /// batches are received.
+    #[tokio::test]
+    async fn cancellation_stops_discovery_promptly() {
+        let (_backend, tracker) = continuous_test_setup();
+        let (tx, _rx) = mpsc::channel::<Vec<EndpointId>>(16);
+
+        let config = ContinuousTrackerConfig {
+            discover_interval: Duration::from_millis(20),
+            publish_interval: Duration::from_secs(3600),
+            ..Default::default()
+        };
+
+        let continuous = PrivateContinuousTracker::start(tracker, config.sanitize(), tx);
+
+        // Let it run briefly.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Shutdown should complete within a generous timeout.
+        tokio::time::timeout(Duration::from_secs(3), continuous.shutdown())
+            .await
+            .expect("shutdown did not complete promptly after cancellation");
+    }
+
+    // ── Graceful degradation ────────────────────────────────────────
+
+    /// Empty backend should not produce panics or non-empty batches.
+    #[tokio::test]
+    async fn graceful_degradation_on_empty_backend() {
+        let (_backend, tracker) = continuous_test_setup();
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let config = ContinuousTrackerConfig {
+            discover_interval: Duration::from_millis(20),
+            publish_interval: Duration::from_secs(3600),
+            ..Default::default()
+        };
+
+        let continuous = PrivateContinuousTracker::start(tracker, config.sanitize(), tx);
+
+        // Let the discovery loop tick a few times with no peers.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Any received batches must be empty.
+        while let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(5), rx.recv()).await
+        {
+            assert!(batch.is_empty(), "expected empty batch, got {batch:?}");
+        }
+
+        continuous.shutdown().await;
+    }
+
+    // ── Determistic / unit tests ────────────────────────────────────
+
+    /// apply_jitter for factor 0.0 returns the base unchanged.
+    #[test]
+    fn apply_jitter_zero_factor_returns_base() {
+        let base = Duration::from_secs(30);
+        let result = apply_jitter(base, 0.0);
+        assert_eq!(result, base);
+    }
+
+    /// apply_jitter with positive factor stays within [0, base * (1 + factor)].
+    #[test]
+    fn apply_jitter_within_bounds() {
+        let base = Duration::from_secs(10);
+        let factor = 0.2;
+        for _ in 0..100 {
+            let result = apply_jitter(base, factor);
+            let result_ns = result.as_nanos();
+            let base_ns = base.as_nanos();
+            let max_ns = (base_ns as f64 * (1.0 + factor)) as u128;
+            // Lower bound is 0 (clamped), upper bound is base * (1 + factor).
+            assert!(
+                result_ns <= max_ns,
+                "jitter {result_ns}ns exceeded max {max_ns}ns for base {base_ns}ns * (1 + {factor})"
+            );
+        }
+    }
+
+    /// apply_jitter with negative factor is clamped to 0 -> returns base.
+    #[test]
+    fn apply_jitter_negative_factor_returns_base() {
+        let base = Duration::from_secs(30);
+        let result = apply_jitter(base, -0.1);
+        assert_eq!(result, base);
+    }
+
+    /// Config sanitize clamps jitter_factor to [0.0, 0.5].
+    #[test]
+    fn config_sanitize_clamps_jitter() {
+        let cfg = ContinuousTrackerConfig {
+            jitter_factor: 2.0,
+            ..Default::default()
+        };
+        let sanitized = cfg.sanitize();
+        assert!(
+            sanitized.jitter_factor <= 0.5,
+            "jitter_factor should be clamped to 0.5, got {}",
+            sanitized.jitter_factor
+        );
+
+        let cfg2 = ContinuousTrackerConfig {
+            jitter_factor: -1.0,
+            ..Default::default()
+        };
+        let sanitized2 = cfg2.sanitize();
+        assert!(
+            sanitized2.jitter_factor >= 0.0,
+            "negative jitter_factor should be clamped to 0.0, got {}",
+            sanitized2.jitter_factor
+        );
+    }
+
+    /// Config fields are used by the private continuous tracker.
+    #[tokio::test]
+    async fn config_fields_affect_discovery_timing() {
+        let (bob_sk, bob_ep) = test_identity();
+        let backend = InMemoryDiscoveryBackend::new();
+        let topic = TopicId::from_bytes([0xC4u8; 32]);
+        let secret = DiscoverySecret::from_bytes([0xC4u8; 32]);
+
+        // Bob publishes first.
+        let bob_tracker =
+            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, bob_ep, bob_sk);
+        bob_tracker.publish_once().await.unwrap();
+
+        let alice_tracker = PrivateRoomTracker::new(
+            Box::new(backend.clone()),
+            topic,
+            secret,
+            SecretKey::generate().public(),
+            SecretKey::generate(),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        // Use a very short interval so discovery happens fast.
+        let config = ContinuousTrackerConfig {
+            discover_interval: Duration::from_millis(20),
+            publish_interval: Duration::from_secs(3600), // slow publish
+            max_candidates_per_cycle: 10,
+            ..Default::default()
+        };
+
+        let continuous = PrivateContinuousTracker::start(alice_tracker, config.sanitize(), tx);
+
+        // Should discover Bob within a reasonable time.
+        let result = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        continuous.shutdown().await;
+
+        let peers = result
+            .expect("timeout waiting for discovery with fast interval")
+            .expect("channel closed unexpectedly");
+        assert!(
+            peers.contains(&bob_ep),
+            "expected Bob to be discovered with configured interval, got {peers:?}"
+        );
+    }
+
+    // ── Secret-safe logging ─────────────────────────────────────────
+
+    /// The continuous tracker logs must not leak secrets.
+    #[tokio::test]
+    #[traced_test]
+    async fn continuous_secret_safe_logging() {
+        let (_alice_sk, alice_ep) = test_identity();
+        let (bob_sk, bob_ep) = test_identity();
+        let backend = InMemoryDiscoveryBackend::new();
+        let topic = TopicId::from_bytes([0xC5u8; 32]);
+        let secret = DiscoverySecret::from_bytes([0xC5u8; 32]);
+        let raw_secret = hex::encode(secret.as_bytes());
+        let invitation = crate::chat_core::RoomInviteV2::new(topic, secret).encode();
+        let bob_hex = hex::encode(bob_ep.as_bytes());
+
+        let bob_tracker =
+            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, bob_ep, bob_sk);
+        bob_tracker.publish_once().await.unwrap();
+
+        let alice_tracker = PrivateRoomTracker::new(
+            Box::new(backend.clone()),
+            topic,
+            secret,
+            alice_ep,
+            SecretKey::generate(),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        let config = ContinuousTrackerConfig {
+            discover_interval: Duration::from_millis(50),
+            publish_interval: Duration::from_secs(3600),
+            ..Default::default()
+        };
+
+        let continuous = PrivateContinuousTracker::start(alice_tracker, config.sanitize(), tx);
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        continuous.shutdown().await;
+
+        for forbidden in [raw_secret.as_str(), invitation.as_str(), bob_hex.as_str()] {
+            assert!(
+                !logs_contain(forbidden),
+                "sensitive value appeared in tracing output: {forbidden}"
+            );
+        }
     }
 }

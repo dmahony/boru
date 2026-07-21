@@ -44,6 +44,8 @@ use crate::public_room_tracker::PublicRoomTracker;
 use iroh::EndpointId;
 use n0_error::Result;
 
+use distributed_topic_tracker::unix_minute;
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -142,6 +144,195 @@ impl ContinuousTrackerConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Publication policy
+// ---------------------------------------------------------------------------
+
+/// Configuration for [`PublicationPolicy`].
+///
+/// Controls how frequently the tracker re-publishes its presence on the DHT,
+/// balancing freshness against redundant writes that could trigger CAS
+/// conflicts (BEP 44 mutable items with equal sequence numbers).
+#[derive(Debug, Clone)]
+pub struct PublicationPolicyConfig {
+    /// After this age since the last successful publish, publishing is
+    /// allowed even when the DHT minute has not changed.
+    ///
+    /// This acts as a heartbeat: when a record's age exceeds this threshold
+    /// the policy will publish again in the current DHT minute so the DHT
+    /// nodes refresh their lease.
+    ///
+    /// Default: 5 minutes (half the typical 10-minute Mainline DHT lease).
+    pub max_refresh_age: Duration,
+
+    /// Base delay applied on the first consecutive failure.
+    ///
+    /// On each subsequent failure the delay doubles, capped at
+    /// [`max_backoff`](Self::max_backoff).
+    ///
+    /// Default: 5 seconds.
+    pub backoff_base: Duration,
+
+    /// Maximum backoff delay.
+    ///
+    /// Default: 5 minutes.
+    pub max_backoff: Duration,
+}
+
+impl Default for PublicationPolicyConfig {
+    fn default() -> Self {
+        Self {
+            max_refresh_age: Duration::from_secs(300), // 5 minutes
+            backoff_base: Duration::from_secs(5),
+            max_backoff: Duration::from_secs(300), // 5 minutes
+        }
+    }
+}
+
+/// Tracks publication state and decides when a new publish is required.
+///
+/// # Policy rules
+///
+/// 1. **Minute coordination.**  Never publish more than once per DHT unix
+///    minute (the sequence number used in mutable BEP 44 items).  Publishing
+///    twice with the same sequence wastes bandwidth and risks CAS-rejection on
+///    DHT nodes that enforce strict ordering.
+///
+/// 2. **Refresh heartbeat.**  If [`max_refresh_age`] has elapsed since the
+///    last successful publish, the policy allows a re-publish even within the
+///    same DHT minute — this keeps DHT leases alive on nodes that have already
+///    accepted our record.
+///
+/// 3. **Exponential backoff.**  Consecutive failures increase the delay before
+///    the next attempt, protecting against flapping on transient DHT errors.
+///    A single success resets the failure counter.
+///
+/// 4. **Never block indefinitely.**  Backoff is bounded by
+///    [`max_backoff`](PublicationPolicyConfig::max_backoff), so even a
+///    permanently failing DHT will eventually plateu rather than grow
+///    unbounded.
+///
+/// This type is `Clone` so it can be shared between a publish loop and
+/// test assertions.  It does **not** use any interior mutability — the
+/// caller updates state via the return values of [`decide`](Self::decide).
+#[derive(Debug, Clone)]
+pub struct PublicationPolicy {
+    /// The DHT unix minute at which we last published successfully.
+    last_publish_minute: Option<u64>,
+    /// Wall-clock instant of the last successful publish.
+    last_publish_at: Option<Instant>,
+    /// Consecutive publish failures since the last success.
+    consecutive_failures: u32,
+    /// Configuration.
+    config: PublicationPolicyConfig,
+}
+
+impl PublicationPolicy {
+    /// Create a new policy with the given configuration.
+    pub fn new(config: PublicationPolicyConfig) -> Self {
+        Self {
+            last_publish_minute: None,
+            last_publish_at: None,
+            consecutive_failures: 0,
+            config,
+        }
+    }
+
+    /// Decide whether a publish should proceed at `current_minute`.
+    ///
+    /// Returns a [`PublicationDecision`] that tells the caller what to do.
+    ///
+    /// # Arguments
+    ///
+    /// * `current_minute` — the current DHT unix minute (from
+    ///   `distributed_topic_tracker::unix_minute`).
+    /// * `now` — the current wall-clock instant.
+    pub fn decide(&self, current_minute: u64, now: Instant) -> PublicationDecision {
+        let Some(last_minute) = self.last_publish_minute else {
+            // Never published → publish now.
+            return PublicationDecision::Publish;
+        };
+
+        let Some(last_at) = self.last_publish_at else {
+            return PublicationDecision::Publish;
+        };
+
+        // ── Minute check ──────────────────────────────────────────
+        if current_minute == last_minute {
+            // Same minute.  Only re-publish if the refresh age has elapsed.
+            let age = now.duration_since(last_at);
+            if age < self.config.max_refresh_age {
+                return PublicationDecision::Skip {
+                    reason: "same DHT minute, within refresh age",
+                    next_check_after: self.config.max_refresh_age.saturating_sub(age),
+                };
+            }
+            // Refresh heartbeat: allow re-publish even in same minute.
+        }
+
+        // ── Backoff check ─────────────────────────────────────────
+        if self.consecutive_failures > 0 {
+            let backoff = self
+                .config
+                .backoff_base
+                .checked_mul(2u32.saturating_pow(self.consecutive_failures.saturating_sub(1)))
+                .unwrap_or(self.config.max_backoff)
+                .min(self.config.max_backoff);
+            let elapsed = now.duration_since(last_at);
+            if elapsed < backoff {
+                return PublicationDecision::Skip {
+                    reason: "backoff active after consecutive failures",
+                    next_check_after: backoff.saturating_sub(elapsed),
+                };
+            }
+        }
+
+        PublicationDecision::Publish
+    }
+
+    /// Record a successful publication at `current_minute`.
+    ///
+    /// Call this **after** a successful publish.
+    pub fn record_success(&mut self, current_minute: u64) {
+        self.last_publish_minute = Some(current_minute);
+        self.last_publish_at = Some(Instant::now());
+        self.consecutive_failures = 0;
+    }
+
+    /// Record a publish failure.
+    ///
+    /// Call this **after** an unsuccessful publish attempt.
+    pub fn record_failure(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+    }
+
+    // ── Accessors (for tests) ──────────────────────────────────────
+
+    /// The last DHT minute we published to, if any.
+    pub fn last_publish_minute(&self) -> Option<u64> {
+        self.last_publish_minute
+    }
+
+    /// Number of consecutive publish failures.
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+}
+
+/// The result of a [`PublicationPolicy::decide`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicationDecision {
+    /// Publish now.
+    Publish,
+    /// Skip publishing, with the reason and a hint for when to check again.
+    Skip {
+        /// Human-readable reason for the skip.
+        reason: &'static str,
+        /// Duration after which a next check may return a different result.
+        next_check_after: Duration,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // ContinuousTracker
 // ---------------------------------------------------------------------------
 
@@ -188,9 +379,13 @@ impl ContinuousTracker {
         let cancel = CancellationToken::new();
         let tracker = Arc::new(tracker);
 
+        // Create the publication policy with default settings.
+        let policy = PublicationPolicy::new(PublicationPolicyConfig::default());
+
         let cancel_p = cancel.clone();
         let tracker_p = Arc::clone(&tracker);
         let cfg_p = config.clone();
+        let policy_p = policy;
 
         let cancel_d = cancel.clone();
         let tracker_d = Arc::clone(&tracker);
@@ -198,7 +393,7 @@ impl ContinuousTracker {
 
         let task_handle = tokio::task::spawn(async move {
             let publish_task = tokio::task::spawn(async move {
-                publish_loop(tracker_p, cfg_p, cancel_p).await;
+                publish_loop(tracker_p, cfg_p, policy_p, cancel_p).await;
             });
             let discover_task = tokio::task::spawn(async move {
                 discover_loop(tracker_d, cfg_d, new_peers_tx, cancel_d).await;
@@ -243,6 +438,9 @@ impl ContinuousTracker {
         let cancel = CancellationToken::new();
         let tracker = Arc::new(tracker);
 
+        // Create the publication policy with default settings.
+        let policy = PublicationPolicy::new(PublicationPolicyConfig::default());
+
         // Create the DynamicPeerJoiner.
         let local_ep = *tracker.local_endpoint_id();
         let joiner_config = DynamicPeerJoinerConfig {
@@ -263,6 +461,7 @@ impl ContinuousTracker {
         let cancel_p = cancel.clone();
         let tracker_p = Arc::clone(&tracker);
         let cfg_p = config.clone();
+        let policy_p = policy;
 
         let cancel_d = cancel.clone();
         let tracker_d = Arc::clone(&tracker);
@@ -272,7 +471,7 @@ impl ContinuousTracker {
         let task_cancel = cancel.clone();
         let task_handle = tokio::task::spawn(async move {
             let publish_task = tokio::task::spawn(async move {
-                publish_loop(tracker_p, cfg_p, cancel_p).await;
+                publish_loop(tracker_p, cfg_p, policy_p, cancel_p).await;
             });
             let discover_task = tokio::task::spawn(async move {
                 discover_loop(tracker_d, cfg_d, discovery_tx, cancel_d).await;
@@ -345,22 +544,21 @@ impl ContinuousTracker {
 // Background loops
 // ---------------------------------------------------------------------------
 
-/// Periodic publication loop.
+/// Periodic publication loop with policy-governed timing.
 ///
-/// Publishes local presence at the configured interval (with jitter).
-/// On failure, retries with exponential backoff up to `max_retry_delay`.
-/// Tracks consecutive failures to detect degraded DHT state.
+/// Uses a [`PublicationPolicy`] to decide whether each tick should produce
+/// a real DHT write.  On success, the policy is updated so subsequent ticks
+/// within the same DHT minute are skipped (unless refresh age triggers a
+/// heartbeat).  On failure, the policy applies exponential backoff.
 async fn publish_loop(
     tracker: Arc<PublicRoomTracker>,
     config: ContinuousTrackerConfig,
+    mut policy: PublicationPolicy,
     cancel: CancellationToken,
 ) {
     let room = tracker.identity().short_id();
     let mut ticker = interval(config.publish_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    // Track consecutive failures for degraded-state detection.
-    let mut consecutive_failures: u32 = 0;
 
     loop {
         tokio::select! {
@@ -372,6 +570,22 @@ async fn publish_loop(
             _ = ticker.tick() => {
                 // Apply jitter before proceeding.
                 let _ = apply_jitter(config.publish_interval, config.jitter_factor);
+
+                // ── Policy check ──────────────────────────────────────────
+                let now = Instant::now();
+                let current_minute = unix_minute(0);
+                match policy.decide(current_minute, now) {
+                    PublicationDecision::Skip { reason, next_check_after } => {
+                        trace!(
+                            room = %room,
+                            reason,
+                            next_check_ms = next_check_after.as_millis() as u64,
+                            "publish skipped by policy",
+                        );
+                        continue;
+                    }
+                    PublicationDecision::Publish => {}
+                }
 
                 let start = Instant::now();
                 let result = retry_with_backoff(
@@ -386,9 +600,10 @@ async fn publish_loop(
 
                 match result {
                     Ok(()) => {
-                        consecutive_failures = 0;
+                        policy.record_success(current_minute);
                         debug!(
                             room = %room,
+                            minute = current_minute,
                             duration_us = duration_us,
                             "continuous publish succeeded",
                         );
@@ -397,12 +612,13 @@ async fn publish_loop(
                         if cancel.is_cancelled() {
                             break;
                         }
-                        consecutive_failures += 1;
-                        if consecutive_failures >= 3 {
+                        policy.record_failure();
+                        let failures = policy.consecutive_failures();
+                        if failures >= 3 {
                             warn!(
                                 room = %room,
                                 error = %e,
-                                consecutive_failures = consecutive_failures,
+                                consecutive_failures = failures,
                                 duration_us = duration_us,
                                 fallback = "continue_with_stale_advertisement",
                                 "continuous publish degraded DHT state",
@@ -411,7 +627,7 @@ async fn publish_loop(
                             warn!(
                                 room = %room,
                                 error = %e,
-                                consecutive_failures = consecutive_failures,
+                                consecutive_failures = failures,
                                 duration_us = duration_us,
                                 "continuous publish failed after retries",
                             );
@@ -604,7 +820,7 @@ async fn discover_loop(
 // ---------------------------------------------------------------------------
 
 /// Apply uniform jitter to a duration: `base ± (base * jitter_factor)`.
-fn apply_jitter(base: Duration, factor: f64) -> Duration {
+pub(crate) fn apply_jitter(base: Duration, factor: f64) -> Duration {
     if factor <= 0.0 {
         return base;
     }
@@ -619,7 +835,7 @@ fn apply_jitter(base: Duration, factor: f64) -> Duration {
 ///
 /// Returns `Ok(value)` on first success, or `Err(error)` after backoff
 /// is exhausted or cancellation is signalled.
-async fn retry_with_backoff<T, F, Fut>(
+pub(crate) async fn retry_with_backoff<T, F, Fut>(
     mut f: F,
     initial_delay: Duration,
     max_delay: Duration,
@@ -1536,5 +1752,148 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), continuous.shutdown())
             .await
             .expect("shutdown with joiner did not complete within timeout");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // PublicationPolicy tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Fresh policy always decides Publish.
+    #[test]
+    fn fresh_policy_publishes() {
+        let policy = PublicationPolicy::new(PublicationPolicyConfig::default());
+        let minute = 1_000_000;
+        let result = policy.decide(minute, Instant::now());
+        assert_eq!(result, PublicationDecision::Publish);
+    }
+
+    /// After a successful publish, publishing in the same minute is skipped.
+    #[test]
+    fn same_minute_is_skipped() {
+        let mut policy = PublicationPolicy::new(PublicationPolicyConfig {
+            max_refresh_age: Duration::from_secs(300),
+            ..Default::default()
+        });
+        let minute = 1_000_000;
+        policy.record_success(minute);
+
+        // Same minute → Skip.
+        let result = policy.decide(minute, Instant::now());
+        assert!(
+            matches!(result, PublicationDecision::Skip { .. }),
+            "expected Skip for same minute, got {result:?}"
+        );
+    }
+
+    /// Publishing in a different minute is allowed.
+    #[test]
+    fn different_minute_is_allowed() {
+        let mut policy = PublicationPolicy::new(PublicationPolicyConfig::default());
+        policy.record_success(1_000_000);
+
+        let result = policy.decide(1_000_001, Instant::now());
+        assert_eq!(result, PublicationDecision::Publish);
+    }
+
+    /// After refresh age, re-publishing in the same minute is allowed.
+    #[test]
+    fn refresh_age_triggers_re_publish() {
+        let max_refresh_age = Duration::from_millis(10);
+        let mut policy = PublicationPolicy::new(PublicationPolicyConfig {
+            max_refresh_age,
+            ..Default::default()
+        });
+        let minute = 1_000_000;
+        policy.record_success(minute);
+
+        // Immediately — skip (same minute, within refresh age).
+        let early = policy.decide(minute, Instant::now());
+        assert!(
+            matches!(early, PublicationDecision::Skip { .. }),
+            "expected Skip immediately after publish"
+        );
+
+        // Wait past refresh age.
+        std::thread::sleep(max_refresh_age * 2);
+        let late = policy.decide(minute, Instant::now());
+        assert_eq!(late, PublicationDecision::Publish);
+    }
+
+    /// Consecutive failures cause backoff.
+    #[test]
+    fn backoff_on_consecutive_failures() {
+        let mut policy = PublicationPolicy::new(PublicationPolicyConfig {
+            backoff_base: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(10),
+            ..Default::default()
+        });
+        let minute = 1_000_000;
+
+        // First publish succeeds.
+        policy.record_success(minute);
+
+        // Simulate 2 consecutive failures.
+        policy.record_failure();
+        policy.record_failure();
+
+        // Different minute, but backoff should block.
+        let result = policy.decide(1_000_001, Instant::now());
+        assert!(
+            matches!(result, PublicationDecision::Skip { .. }),
+            "expected Skip due to backoff, got {result:?}"
+        );
+    }
+
+    /// After a success, the failure counter resets.
+    #[test]
+    fn success_resets_failures() {
+        let mut policy = PublicationPolicy::new(PublicationPolicyConfig::default());
+
+        policy.record_failure();
+        policy.record_failure();
+        assert_eq!(policy.consecutive_failures(), 2);
+
+        policy.record_success(1_000_000);
+        assert_eq!(policy.consecutive_failures(), 0);
+    }
+
+    /// Backoff is bounded by max_backoff.
+    #[test]
+    fn backoff_respects_max() {
+        let mut policy = PublicationPolicy::new(PublicationPolicyConfig {
+            backoff_base: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(50),
+            ..Default::default()
+        });
+        let minute = 1_000_000;
+        policy.record_success(minute);
+
+        // After many failures, backoff should max out.
+        for _ in 0..10 {
+            policy.record_failure();
+        }
+
+        // Different minute — still blocked by backoff, but the delay
+        // should be capped at max_backoff (50ms), not 10 * 2^9 ms.
+        let now = Instant::now();
+        let result = policy.decide(1_000_001, now);
+        if let PublicationDecision::Skip {
+            next_check_after, ..
+        } = result
+        {
+            let max_expected = Duration::from_millis(50);
+            assert!(
+                next_check_after <= max_expected,
+                "backoff {next_check_after:?} exceeded max {max_expected:?}"
+            );
+        }
+    }
+
+    /// Policy is Clone, enabling sharing across loops.
+    #[test]
+    fn policy_is_clone() {
+        let policy = PublicationPolicy::new(PublicationPolicyConfig::default());
+        let cloned = policy.clone();
+        assert_eq!(cloned.consecutive_failures(), policy.consecutive_failures());
     }
 }
