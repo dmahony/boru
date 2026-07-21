@@ -50,7 +50,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::gui_test_actions::{GuiActionHistory, GuiActionRateLimiter};
+use crate::gui_test_actions::{ActionRecord, ActionStatus, GuiActionHistory, GuiActionRateLimiter};
 use boru_chat::chat_core::{broadcast_diagnostic_probe, message_hash, Message};
 use boru_chat::conversations::ConversationNetEvent;
 use boru_chat::diagnostics::{
@@ -2625,7 +2625,7 @@ mod tests {
     async fn test_gui_open_room_missing_room_id() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_open_room_request(json!({}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_err(), "Missing room_id should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -2638,7 +2638,7 @@ mod tests {
     async fn test_gui_open_room_empty_room_id() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_open_room_request(json!({"room_id": ""}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_err(), "Empty room_id should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -2653,7 +2653,7 @@ mod tests {
         // MAX_GUI_ROOM_ID_LEN = 128, so 129 should fail
         let long_id = "a".repeat(129);
         let req = make_open_room_request(json!({"room_id": long_id}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_err(), "Oversized room_id should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -2668,7 +2668,7 @@ mod tests {
         // Exactly 128 chars (MAX_GUI_ROOM_ID_LEN) should succeed
         let max_id = "a".repeat(128);
         let req = make_open_room_request(json!({"room_id": max_id}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_ok(), "Max-length room_id should succeed");
 
         let value = result.unwrap();
@@ -2694,7 +2694,7 @@ mod tests {
         // '@' is not in [a-zA-Z0-9_-]
         let bad = "room@name";
         let req = make_open_room_request(json!({"room_id": bad}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_err(), "Special chars should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -2708,7 +2708,7 @@ mod tests {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let bad = "room name";
         let req = make_open_room_request(json!({"room_id": bad}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_err(), "Spaces should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -2722,7 +2722,7 @@ mod tests {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let bad = "room/path";
         let req = make_open_room_request(json!({"room_id": bad}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_err(), "Slash should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -2736,7 +2736,7 @@ mod tests {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let bad = "room\nname";
         let req = make_open_room_request(json!({"room_id": bad}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_err(), "Control chars should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -2750,7 +2750,7 @@ mod tests {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let valid_id = "TestRoom123";
         let req = make_open_room_request(json!({"room_id": valid_id}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_ok(), "Valid room_id should succeed");
 
         let value = result.unwrap();
@@ -2785,7 +2785,7 @@ mod tests {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let valid_id = "my-room-name-42";
         let req = make_open_room_request(json!({"room_id": valid_id}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_ok(), "Hyphen room_id should succeed");
 
         let value = result.unwrap();
@@ -2809,7 +2809,7 @@ mod tests {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let valid_id = "room_name_42";
         let req = make_open_room_request(json!({"room_id": valid_id}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_ok(), "Underscore room_id should succeed");
 
         let value = result.unwrap();
@@ -2834,7 +2834,7 @@ mod tests {
         // A hex-like string without 0x prefix — still valid alphanumeric
         let valid_id = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let req = make_open_room_request(json!({"room_id": valid_id}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_ok(), "Alphanumeric room_id should succeed");
 
         let value = result.unwrap();
@@ -2858,7 +2858,7 @@ mod tests {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let valid_id = "TestRoom";
         let req = make_open_room_request(json!({"room_id": valid_id}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_ok(), "Valid room_id should succeed");
 
         let json_str = serde_json::to_string(&result.unwrap()).unwrap();
@@ -2881,12 +2881,12 @@ mod tests {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         // Fill the capacity-1 channel first
         let fill_req = make_open_room_request(json!({"room_id": "SomeRoom"}));
-        let fill_result = handle_gui_open_room(&fill_req, tx.clone()).await;
+        let fill_result = handle_gui_open_room(&fill_req, tx.clone());
         assert!(fill_result.is_ok(), "First fill should succeed");
 
         let valid_id = "SomeRoom2";
         let req = make_open_room_request(json!({"room_id": valid_id}));
-        let result = handle_gui_open_room(&req, tx).await;
+        let result = handle_gui_open_room(&req, tx);
         assert!(result.is_err(), "Should error when channel is full");
         let err = result.unwrap_err();
         assert!(
@@ -2918,7 +2918,7 @@ mod tests {
     #[tokio::test]
     async fn test_missing_conversation_id() {
         let (tx, req) = make_test_env(json!({}));
-        let result = handle_gui_open_conversation(&req, tx).await;
+        let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("Missing required argument: conversation_id"));
@@ -2929,7 +2929,7 @@ mod tests {
         // 67 chars exceeds the max of 66
         let long_id = "a".repeat(67);
         let (tx, req) = make_test_env(json!({ "conversation_id": long_id }));
-        let result = handle_gui_open_conversation(&req, tx).await;
+        let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("too long"));
@@ -2940,7 +2940,7 @@ mod tests {
         let (tx, req) = make_test_env(
             json!({ "conversation_id": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567\n" }),
         );
-        let result = handle_gui_open_conversation(&req, tx).await;
+        let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("control characters"));
@@ -2952,7 +2952,7 @@ mod tests {
         let (tx, req) = make_test_env(
             json!({ "conversation_id": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" }),
         );
-        let result = handle_gui_open_conversation(&req, tx).await;
+        let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("Invalid conversation_id"));
@@ -2963,7 +2963,7 @@ mod tests {
         // Only 32 hex chars instead of 64
         let short = "a".repeat(32);
         let (tx, req) = make_test_env(json!({ "conversation_id": short }));
-        let result = handle_gui_open_conversation(&req, tx).await;
+        let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("Invalid conversation_id"));
@@ -2972,7 +2972,7 @@ mod tests {
     #[tokio::test]
     async fn test_conversation_id_path_traversal_attempt() {
         let (tx, req) = make_test_env(json!({ "conversation_id": "../../etc/passwd" }));
-        let result = handle_gui_open_conversation(&req, tx).await;
+        let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("Invalid conversation_id"));
@@ -2981,7 +2981,7 @@ mod tests {
     #[tokio::test]
     async fn test_conversation_id_shell_metacharacters() {
         let (tx, req) = make_test_env(json!({ "conversation_id": "abcd; rm -rf /" }));
-        let result = handle_gui_open_conversation(&req, tx).await;
+        let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("Invalid conversation_id"));
@@ -2992,7 +2992,7 @@ mod tests {
         let valid_id = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         let req = make_request(json!({ "conversation_id": valid_id }));
-        let result = handle_gui_open_conversation(&req, tx).await;
+        let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
 
         let response = result.unwrap();
@@ -3028,7 +3028,7 @@ mod tests {
         let valid_id = "0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         let req = make_request(json!({ "conversation_id": valid_id }));
-        let result = handle_gui_open_conversation(&req, tx).await;
+        let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
         let response = result.unwrap();
         assert_eq!(response["sent"], true);
@@ -3045,7 +3045,7 @@ mod tests {
 
         let valid_id = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let req = make_request(json!({ "conversation_id": valid_id }));
-        let result = handle_gui_open_conversation(&req, tx).await;
+        let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_err());
         // With receiver dropped, we should get "channel is closed"
         let err = result.unwrap_err();
@@ -3067,7 +3067,7 @@ mod tests {
     async fn test_set_composer_missing_text() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({}));
-        let result = handle_set_composer(&req, tx).await;
+        let result = handle_set_composer(&req, tx);
         assert!(result.is_err(), "Missing text should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -3082,7 +3082,7 @@ mod tests {
         // Create text far beyond the 4096-char clamp limit
         let long_text = "a".repeat(5000);
         let req = make_set_composer_request(json!({ "text": long_text }));
-        let result = handle_set_composer(&req, tx).await;
+        let result = handle_set_composer(&req, tx);
         assert!(
             result.is_ok(),
             "Oversized text should be clamped, not rejected"
@@ -3113,7 +3113,7 @@ mod tests {
     async fn test_set_composer_control_chars() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({ "text": "hello\nworld" }));
-        let result = handle_set_composer(&req, tx).await;
+        let result = handle_set_composer(&req, tx);
         assert!(
             result.is_err(),
             "Control characters should produce an error"
@@ -3129,7 +3129,7 @@ mod tests {
     async fn test_set_composer_control_chars_tab() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({ "text": "hello\tworld" }));
-        let result = handle_set_composer(&req, tx).await;
+        let result = handle_set_composer(&req, tx);
         assert!(result.is_err(), "Tab character should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -3142,7 +3142,7 @@ mod tests {
     async fn test_set_composer_success() {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({ "text": "Hello, world!" }));
-        let result = handle_set_composer(&req, tx).await;
+        let result = handle_set_composer(&req, tx);
         assert!(
             result.is_ok(),
             "Valid text should succeed, got: {:?}",
@@ -3194,7 +3194,7 @@ mod tests {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         let unicode_text = "Hello, 世界! 🌍";
         let req = make_set_composer_request(json!({ "text": unicode_text }));
-        let result = handle_set_composer(&req, tx).await;
+        let result = handle_set_composer(&req, tx);
         assert!(result.is_ok(), "Unicode text should succeed");
 
         let value = result.unwrap();
@@ -3219,7 +3219,7 @@ mod tests {
     async fn test_set_composer_empty_text() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({ "text": "" }));
-        let result = handle_set_composer(&req, tx).await;
+        let result = handle_set_composer(&req, tx);
         assert!(result.is_err(), "Empty text should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -3233,11 +3233,11 @@ mod tests {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         // Fill the capacity-1 channel first
         let fill_req = make_set_composer_request(json!({ "text": "fill" }));
-        let fill_result = handle_set_composer(&fill_req, tx.clone()).await;
+        let fill_result = handle_set_composer(&fill_req, tx.clone());
         assert!(fill_result.is_ok(), "First fill should succeed");
 
         let req = make_set_composer_request(json!({ "text": "hello" }));
-        let result = handle_set_composer(&req, tx).await;
+        let result = handle_set_composer(&req, tx);
         assert!(result.is_err(), "Should error when channel is full");
         let err = result.unwrap_err();
         assert!(
@@ -3252,7 +3252,7 @@ mod tests {
         let (tx, rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         drop(rx); // Close the receiver
         let req = make_set_composer_request(json!({ "text": "hello" }));
-        let result = handle_set_composer(&req, tx).await;
+        let result = handle_set_composer(&req, tx);
         assert!(result.is_err(), "Should error when channel is closed");
         let err = result.unwrap_err();
         assert!(
@@ -3267,7 +3267,7 @@ mod tests {
         // Exactly 4096 chars — the MAX_COMPOSER_LEN boundary
         let exact_text = "a".repeat(4096);
         let req = make_set_composer_request(json!({ "text": exact_text.clone() }));
-        let result = handle_set_composer(&req, tx).await;
+        let result = handle_set_composer(&req, tx);
         assert!(
             result.is_ok(),
             "Exactly max-length text should succeed, got: {:?}",
@@ -3313,7 +3313,7 @@ mod tests {
         let secret_text = "This is a secret message that should never appear in logs";
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({ "text": secret_text }));
-        let result = handle_set_composer(&req, tx).await;
+        let result = handle_set_composer(&req, tx);
         assert!(result.is_ok(), "Valid text should succeed");
 
         // The MCP response is metadata-only; user text must not be reflected
@@ -3349,7 +3349,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_composer_success() {
         let (handle, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
-        let result = handle_submit_composer(handle).await;
+        let result = handle_submit_composer(handle);
         assert!(result.is_ok(), "SubmitComposer should succeed");
 
         let value = result.unwrap();
@@ -3385,7 +3385,7 @@ mod tests {
         };
         handle.enqueue(fill).expect("First enqueue should succeed");
 
-        let result = handle_submit_composer(handle).await;
+        let result = handle_submit_composer(handle);
         assert!(result.is_err(), "Should error when channel is full");
         let err = result.unwrap_err();
         assert!(
@@ -3398,7 +3398,7 @@ mod tests {
     async fn test_submit_composer_channel_closed() {
         let (handle, rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         drop(rx); // Close the receiver
-        let result = handle_submit_composer(handle).await;
+        let result = handle_submit_composer(handle);
         assert!(result.is_err(), "Should error when channel is closed");
         let err = result.unwrap_err();
         assert!(
@@ -3414,7 +3414,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_composer_no_secrets() {
         let (handle, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
-        let result = handle_submit_composer(handle).await.unwrap();
+        let result = handle_submit_composer(handle).unwrap();
         let response_str = serde_json::to_string(&result).unwrap();
         assert!(!response_str.contains("secret_key"));
         assert!(!response_str.contains("secret"));
@@ -3430,7 +3430,7 @@ mod tests {
         let valid_id = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         let req = make_request(json!({ "conversation_id": valid_id }));
-        let result = handle_gui_open_conversation(&req, tx).await.unwrap();
+        let result = handle_gui_open_conversation(&req, tx).unwrap();
         let response_str = serde_json::to_string(&result).unwrap();
         assert!(!response_str.contains("secret_key"));
         assert!(!response_str.contains("secret"));
@@ -3454,7 +3454,7 @@ mod tests {
     async fn test_navigate_missing_destination() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({}));
-        let result = handle_gui_navigate(&req, tx).await;
+        let result = handle_gui_navigate(&req, tx);
         assert!(
             result.is_err(),
             "Missing destination should produce an error"
@@ -3470,7 +3470,7 @@ mod tests {
     async fn test_navigate_invalid_destination() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "not_a_real_screen"}));
-        let result = handle_gui_navigate(&req, tx).await;
+        let result = handle_gui_navigate(&req, tx);
         assert!(
             result.is_err(),
             "Invalid destination should produce an error"
@@ -3491,7 +3491,7 @@ mod tests {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let long = "a".repeat(5000);
         let req = make_navigate_request(json!({"destination": long}));
-        let result = handle_gui_navigate(&req, tx).await;
+        let result = handle_gui_navigate(&req, tx);
         assert!(
             result.is_err(),
             "Oversized destination should produce an error"
@@ -3507,7 +3507,7 @@ mod tests {
     async fn test_navigate_control_chars() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "chat_list\n"}));
-        let result = handle_gui_navigate(&req, tx).await;
+        let result = handle_gui_navigate(&req, tx);
         assert!(result.is_err(), "Control chars should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -3520,7 +3520,7 @@ mod tests {
     async fn test_navigate_to_chat_list() {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "chat_list"}));
-        let result = handle_gui_navigate(&req, tx).await;
+        let result = handle_gui_navigate(&req, tx);
         assert!(result.is_ok(), "Valid destination should succeed");
 
         let value = result.unwrap();
@@ -3547,7 +3547,7 @@ mod tests {
     async fn test_navigate_to_friends() {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "friends"}));
-        let result = handle_gui_navigate(&req, tx).await;
+        let result = handle_gui_navigate(&req, tx);
         assert!(result.is_ok(), "Valid destination should succeed");
 
         let value = result.unwrap();
@@ -3569,7 +3569,7 @@ mod tests {
     async fn test_navigate_to_settings() {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "settings"}));
-        let result = handle_gui_navigate(&req, tx).await;
+        let result = handle_gui_navigate(&req, tx);
         assert!(result.is_ok(), "Valid destination should succeed");
 
         let value = result.unwrap();
@@ -3657,11 +3657,11 @@ mod tests {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         // Fill the capacity-1 channel first
         let fill_req = make_navigate_request(json!({"destination": "chat_list"}));
-        let fill_result = handle_gui_navigate(&fill_req, tx.clone()).await;
+        let fill_result = handle_gui_navigate(&fill_req, tx.clone());
         assert!(fill_result.is_ok(), "First fill should succeed");
 
         let req = make_navigate_request(json!({"destination": "settings"}));
-        let result = handle_gui_navigate(&req, tx).await;
+        let result = handle_gui_navigate(&req, tx);
         assert!(result.is_err(), "Should error when channel is full");
         let err = result.unwrap_err();
         assert!(
@@ -3675,7 +3675,7 @@ mod tests {
     async fn test_navigate_no_secrets_exposed() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "chat_list"}));
-        let result = handle_gui_navigate(&req, tx).await;
+        let result = handle_gui_navigate(&req, tx);
         assert!(result.is_ok());
         let response_str = serde_json::to_string(&result.unwrap()).unwrap();
         assert!(!response_str.contains("secret_key"));
@@ -3700,7 +3700,7 @@ mod tests {
     async fn test_toggle_dark_mode_missing_enabled() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_toggle_dark_mode_request(json!({}));
-        let result = handle_gui_toggle_dark_mode(&req, tx).await;
+        let result = handle_gui_toggle_dark_mode(&req, tx);
         assert!(result.is_err(), "Missing enabled should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -3713,7 +3713,7 @@ mod tests {
     async fn test_toggle_dark_mode_invalid_type() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_toggle_dark_mode_request(json!({"enabled": "not_a_bool"}));
-        let result = handle_gui_toggle_dark_mode(&req, tx).await;
+        let result = handle_gui_toggle_dark_mode(&req, tx);
         assert!(
             result.is_err(),
             "Non-boolean enabled should produce an error"
@@ -3755,7 +3755,7 @@ mod tests {
     async fn test_toggle_dark_mode_enable() {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_toggle_dark_mode_request(json!({"enabled": true}));
-        let result = handle_gui_toggle_dark_mode(&req, tx).await;
+        let result = handle_gui_toggle_dark_mode(&req, tx);
         assert!(result.is_ok(), "Valid enabled=true should succeed");
 
         let value = result.unwrap();
@@ -3784,7 +3784,7 @@ mod tests {
     async fn test_toggle_dark_mode_disable() {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_toggle_dark_mode_request(json!({"enabled": false}));
-        let result = handle_gui_toggle_dark_mode(&req, tx).await;
+        let result = handle_gui_toggle_dark_mode(&req, tx);
         assert!(result.is_ok(), "Valid enabled=false should succeed");
 
         let value = result.unwrap();
@@ -3809,11 +3809,11 @@ mod tests {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         // Fill the channel with one send that nobody reads
         let req1 = make_toggle_dark_mode_request(json!({"enabled": true}));
-        let result1 = handle_gui_toggle_dark_mode(&req1, tx.clone()).await;
+        let result1 = handle_gui_toggle_dark_mode(&req1, tx.clone());
         assert!(result1.is_ok(), "First send should succeed");
 
         // now the channel is full; second must fail
-        let result2 = handle_gui_toggle_dark_mode(&req1, tx).await;
+        let result2 = handle_gui_toggle_dark_mode(&req1, tx);
         assert!(result2.is_err(), "Should error when channel is full");
         let err = result2.unwrap_err();
         assert!(
@@ -3828,7 +3828,7 @@ mod tests {
     async fn test_toggle_dark_mode_no_secrets_exposed() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let req = make_toggle_dark_mode_request(json!({"enabled": true}));
-        let result = handle_gui_toggle_dark_mode(&req, tx).await;
+        let result = handle_gui_toggle_dark_mode(&req, tx);
         assert!(result.is_ok());
         let response_str = serde_json::to_string(&result.unwrap()).unwrap();
         assert!(!response_str.contains("secret_key"));
@@ -4214,7 +4214,7 @@ mod tests {
     async fn test_send_gui_action_missing_command() {
         let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
         let req = make_send_gui_action_request(json!({ "idempotency_key": "key123" }));
-        let result = handle_send_gui_action(&req, tx).await;
+        let result = handle_send_gui_action(&req, tx);
         assert!(result.is_err(), "Missing command should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -4229,7 +4229,7 @@ mod tests {
         let req = make_send_gui_action_request(json!({
             "command": { "command": "unknown_type" }
         }));
-        let result = handle_send_gui_action(&req, tx).await;
+        let result = handle_send_gui_action(&req, tx);
         assert!(result.is_err(), "Invalid command should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -4245,7 +4245,7 @@ mod tests {
             "command": { "command": "go_to_chat_list" },
             "idempotency_key": "bad\nkey"
         }));
-        let result = handle_send_gui_action(&req, tx).await;
+        let result = handle_send_gui_action(&req, tx);
         assert!(
             result.is_err(),
             "Control chars in idempotency_key should produce an error"
@@ -4265,7 +4265,7 @@ mod tests {
             "command": { "command": "go_to_chat_list" },
             "idempotency_key": long_key
         }));
-        let result = handle_send_gui_action(&req, tx).await;
+        let result = handle_send_gui_action(&req, tx);
         assert!(result.is_err(), "Oversized key should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -4280,7 +4280,7 @@ mod tests {
         let req = make_send_gui_action_request(json!({
             "command": { "command": "go_to_chat_list" }
         }));
-        let result = handle_send_gui_action(&req, tx).await;
+        let result = handle_send_gui_action(&req, tx);
         assert!(result.is_ok(), "Valid command should succeed");
 
         let value = result.unwrap();
@@ -4311,7 +4311,7 @@ mod tests {
             "command": { "command": "open_friends" },
             "idempotency_key": "my_custom_key_42"
         }));
-        let result = handle_send_gui_action(&req, tx).await;
+        let result = handle_send_gui_action(&req, tx);
         assert!(
             result.is_ok(),
             "Valid command with custom key should succeed"
@@ -4342,7 +4342,7 @@ mod tests {
             "idempotency_key": "lifecycle_trace_42"
         }));
 
-        let response = handle_send_gui_action(&req, handle).await.unwrap();
+        let response = handle_send_gui_action(&req, handle).unwrap();
         assert_eq!(response["sent"], true);
         assert_eq!(response["idempotency_key"], "lifecycle_trace_42");
 
@@ -4364,7 +4364,6 @@ mod tests {
             &make_get_action_status_request("lifecycle_trace_42"),
             &state,
         )
-        .await
         .unwrap();
         assert_eq!(status_response["found"], true);
         assert_eq!(status_response["status"]["state"], "queued");
@@ -4413,9 +4412,8 @@ mod tests {
             params: json!({"action_id": "action-42"}),
             id: Some(Value::Number(1.into())),
         };
-        let result = handle_get_gui_action_status(&req, &state)
-            .await
-            .expect("recorded action should be found");
+        let result =
+            handle_get_gui_action_status(&req, &state).expect("recorded action should be found");
 
         assert_eq!(result["found"], true);
         assert_eq!(result["action_id"], "action-42");
@@ -4437,7 +4435,6 @@ mod tests {
         };
 
         let result = handle_get_gui_action_status(&req, &state)
-            .await
             .expect("unknown IDs should return a structured result");
         assert_eq!(result["found"], false);
         assert_eq!(result["action_id"], "does-not-exist");
@@ -4455,7 +4452,6 @@ mod tests {
         };
 
         let error = handle_get_gui_action_status(&req, &state)
-            .await
             .expect_err("control characters must be rejected");
         assert!(error.contains("control characters"));
     }
@@ -4467,13 +4463,13 @@ mod tests {
         let fill_req = make_send_gui_action_request(json!({
             "command": { "command": "go_to_chat_list" }
         }));
-        let fill_result = handle_send_gui_action(&fill_req, tx.clone()).await;
+        let fill_result = handle_send_gui_action(&fill_req, tx.clone());
         assert!(fill_result.is_ok(), "First fill should succeed");
 
         let req = make_send_gui_action_request(json!({
             "command": { "command": "go_to_chat_list" }
         }));
-        let result = handle_send_gui_action(&req, tx).await;
+        let result = handle_send_gui_action(&req, tx);
         assert!(result.is_err(), "Should error when channel is full");
         let err = result.unwrap_err();
         assert!(
@@ -4489,7 +4485,7 @@ mod tests {
         let req = make_send_gui_action_request(json!({
             "command": { "command": "toggle_help" }
         }));
-        let result = handle_send_gui_action(&req, tx).await;
+        let result = handle_send_gui_action(&req, tx);
         assert!(result.is_ok());
         let response_str = serde_json::to_string(&result.unwrap()).unwrap();
         assert!(!response_str.contains("secret_key"));
@@ -5400,7 +5396,7 @@ mod tests {
             params: serde_json::json!({}),
             id: Some(Value::Number(1.into())),
         };
-        let result = handle_get_gui_action_status(&req, &state).await;
+        let result = handle_get_gui_action_status(&req, &state);
         assert!(result.is_err(), "Missing action_id should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -5414,7 +5410,7 @@ mod tests {
         let (state, _gossip_rx) = make_gate_test_state(true, true).await;
         let long_id = "a".repeat(MAX_PROBE_ID_LEN + 1);
         let req = make_get_action_status_request(&long_id);
-        let result = handle_get_gui_action_status(&req, &state).await;
+        let result = handle_get_gui_action_status(&req, &state);
         assert!(
             result.is_err(),
             "Oversized action_id should produce an error"
@@ -5430,7 +5426,7 @@ mod tests {
     async fn test_get_gui_action_status_control_chars() {
         let (state, _gossip_rx) = make_gate_test_state(true, true).await;
         let req = make_get_action_status_request("bad\nkey");
-        let result = handle_get_gui_action_status(&req, &state).await;
+        let result = handle_get_gui_action_status(&req, &state);
         assert!(result.is_err(), "Control chars should produce an error");
         let err = result.unwrap_err();
         assert!(
@@ -5443,7 +5439,7 @@ mod tests {
     async fn test_get_gui_action_status_not_found() {
         let (state, _gossip_rx) = make_gate_test_state(true, true).await;
         let req = make_get_action_status_request("nonexistent_key");
-        let result = handle_get_gui_action_status(&req, &state).await;
+        let result = handle_get_gui_action_status(&req, &state);
         assert!(
             result.is_ok(),
             "Non-existent key should return ok, not error"
@@ -5473,7 +5469,7 @@ mod tests {
         state.gui_action_history.record(record);
 
         let req = make_get_action_status_request("test_key_123");
-        let result = handle_get_gui_action_status(&req, &state).await;
+        let result = handle_get_gui_action_status(&req, &state);
         assert!(result.is_ok(), "Existing action should be found");
         let value = result.unwrap();
         assert_eq!(value["found"], true, "Should report found=true");
@@ -5501,7 +5497,7 @@ mod tests {
         state.gui_action_history.record(record);
 
         let req = make_get_action_status_request("test_key_sec");
-        let result = handle_get_gui_action_status(&req, &state).await;
+        let result = handle_get_gui_action_status(&req, &state);
         assert!(result.is_ok());
         let response_str = serde_json::to_string(&result.unwrap()).unwrap();
         assert!(!response_str.contains("secret_key"));
@@ -5531,7 +5527,7 @@ mod tests {
                 "text": "x".repeat(boru_chat::diagnostics::GUI_TEST_COMMAND_MAX_STRING_LEN + 1)
             }
         }));
-        let result = handle_send_gui_action(&request, tx).await;
+        let result = handle_send_gui_action(&request, tx);
         assert!(result.is_err(), "oversized command must be rejected");
         assert!(
             rx.try_recv().is_err(),
@@ -5545,7 +5541,7 @@ mod tests {
         let request = make_send_gui_action_request(json!({
             "command": {"command": "set_composer_text", "text": "safe\nunsafe"}
         }));
-        let result = handle_send_gui_action(&request, tx).await;
+        let result = handle_send_gui_action(&request, tx);
         assert!(result.is_err(), "control characters must be rejected");
         assert!(
             rx.try_recv().is_err(),
@@ -5557,7 +5553,7 @@ mod tests {
     async fn test_unknown_navigation_destination_fails_closed_without_mutation() {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(4);
         let request = make_navigate_request(json!({"destination": "admin_console"}));
-        let result = handle_gui_navigate(&request, tx).await;
+        let result = handle_gui_navigate(&request, tx);
         assert!(result.is_err(), "unknown destinations must be rejected");
         assert!(
             rx.try_recv().is_err(),
@@ -5569,9 +5565,9 @@ mod tests {
     async fn test_queue_overflow_fails_closed_without_extra_gui_mutation() {
         let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
         let first = make_navigate_request(json!({"destination": "settings"}));
-        assert!(handle_gui_navigate(&first, tx.clone()).await.is_ok());
+        assert!(handle_gui_navigate(&first, tx.clone()).is_ok());
         let second = make_navigate_request(json!({"destination": "friends"}));
-        let result = handle_gui_navigate(&second, tx).await;
+        let result = handle_gui_navigate(&second, tx);
         assert!(result.is_err(), "full queue must reject the second action");
         assert!(result.unwrap_err().contains("queue is full"));
         let queued = rx.try_recv().expect("first action remains queued");

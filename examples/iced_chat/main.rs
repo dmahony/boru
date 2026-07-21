@@ -39,6 +39,7 @@ use boru_chat::protocol_version::CATALOGUE_ALPN;
 use boru_chat::room::RoomStore;
 use boru_chat::room_history::RoomHistoryStore;
 use boru_chat::storage::Storage;
+use boru_chat::store::MessageStore;
 use clap::Parser;
 use iroh::{
     address_lookup::{memory::MemoryLookup, AddrFilter},
@@ -571,6 +572,55 @@ fn main() -> Result<()> {
         let chat_history = Arc::new(std::sync::Mutex::new(
             ChatHistoryStore::load_or_default(&data_dir),
         ));
+        // Open the shared SQLite message store (same boru.db as download storage).
+        let message_store = Arc::new(
+            MessageStore::open(data_dir.join("boru.db"))
+                .expect("open message store for chat history"),
+        );
+
+        // ── One-time migration: JSON chat_history.json → SQLite messages table
+        if chat_history.lock().unwrap().len() > 0 {
+            let migrated = {
+                let history = chat_history.lock().unwrap();
+                let mut count = 0;
+                for entry in &history.entries {
+                    let topic = *entry.topic.as_bytes();
+                    let sender: [u8; 32] = match hex::decode(&entry.sender) {
+                        Ok(v) => match <[u8; 32]>::try_from(v) {
+                            Ok(arr) => arr,
+                            Err(_) => continue,
+                        },
+                        Err(_) => continue,
+                    };
+                    let hash: [u8; 32] = match hex::decode(&entry.hash) {
+                        Ok(v) => match <[u8; 32]>::try_from(v) {
+                            Ok(arr) => arr,
+                            Err(_) => continue,
+                        },
+                        Err(_) => continue,
+                    };
+                    let _ = message_store.insert_chat_message(
+                            &hash,
+                            &topic,
+                            &sender,
+                            entry.timestamp,
+                            &entry.kind,
+                            &entry.text_preview,
+                            if entry.signed_bytes.is_empty() { None } else { Some(&entry.signed_bytes[..]) },
+                            entry.image_identifier.as_deref(),
+                            local_public.as_bytes(),
+                        );
+                        count += 1;
+                }
+                count
+            };
+            if migrated > 0 {
+                info!("migrated {migrated} entries from chat_history.json to SQLite");
+                // Clear and save the JSON file so we don't migrate again.
+                chat_history.lock().unwrap().clear();
+                let _ = chat_history.lock().unwrap().save();
+            }
+        }
 
         // ── Backfill handler ──────────────────────────────────────────
         let backfill_handler = BackfillProtocolHandler::new(chat_history.clone());

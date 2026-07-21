@@ -1309,6 +1309,21 @@ fn prune_seen_messages() {
     }
 }
 
+/// Key used for diagnostics event deduplication: (content_hash, sender_key).
+/// Unlike [`SEEN_MESSAGES`] this does NOT include sent_at, so replayed
+/// messages with different timestamps are still collapsed into one
+/// diagnostic event.
+type DiagDedupKey = (MessageHash, PublicKey);
+
+/// Cooldown for diagnostic `MessageReceived` events: prevents the 5,000-entry
+/// buffer from being saturated by repeated identical message hashes from the
+/// same sender (e.g. stale messages replayed through the gossip mesh).  TTL
+/// is 60 seconds — generous enough to catch bursts of gossip replays while
+/// short enough that a genuine new message with the same hash from the same
+/// sender (extremely unlikely) would eventually be recorded.
+static DIAGNOSTIC_SEEN_MESSAGES: LazyLock<Mutex<HashMap<DiagDedupKey, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Apply public-room safety checks to a [`NetEvent`].
 ///
 /// Returns `Some(event)` if the event passes all checks, or `None` if the
@@ -1545,18 +1560,36 @@ pub fn handle_net_event_for_topic(
                     return Ok(());
                 }
             }
-            // Record message received diagnostic event (for all message types
-            // that pass dedup, blocked-peer, and TTL checks).
-            DIAGNOSTICS.record_with_peer(
-                None,
-                Some(from.to_string()),
-                DiagnosticEventKind::MessageReceived {
-                    message_id: Some(hex::encode(incoming_hash)),
-                    message_hash: Some(hex::encode(incoming_hash)),
-                    probe_id: None,
-                    sender_id: Some(from.to_string()),
-                },
-            );
+            // ── Diagnostics message-received dedup ────────────────────────
+            // Suppress duplicate diagnostic events for the same
+            // (message_hash, sender_id) — regardless of sent_at — to
+            // prevent the diagnostics buffer from being saturated by
+            // replayed stale messages bouncing through the gossip mesh.
+            // TTL is 60 seconds (generous for catching bursts).
+            let mut diag_had_hash = false;
+            const DIAG_DEDUP_TTL_S: u64 = 60;
+            {
+                let mut diag_seen = DIAGNOSTIC_SEEN_MESSAGES.lock().unwrap();
+                let diag_key = (incoming_hash, from);
+                let now = Instant::now();
+                if let Some(prev) = diag_seen.get_mut(&diag_key) {
+                    let expired = now.duration_since(*prev).as_secs() > DIAG_DEDUP_TTL_S;
+                    if !expired {
+                        diag_had_hash = true;
+                    } else {
+                        *prev = now; // refresh for the new window
+                    }
+                } else {
+                    diag_seen.insert(diag_key, now);
+                }
+                // Periodic eviction of stale entries to bound memory growth.
+                if diag_seen.len() >= 256 {
+                    diag_seen.retain(|_, seen_at| {
+                        now.duration_since(*seen_at).as_secs() <= DIAG_DEDUP_TTL_S
+                    });
+                }
+            }
+
             match message {
                 Message::AboutMe {
                     name,
@@ -1591,6 +1624,20 @@ pub fn handle_net_event_for_topic(
                 }
                 Message::Message { text } => {
                     if from != cb.local_public() {
+                        // Record diagnostic event for real chat messages from
+                        // remote peers, subject to the per-key cooldown.
+                        if !diag_had_hash {
+                            DIAGNOSTICS.record_with_peer(
+                                topic,
+                                Some(from.to_string()),
+                                DiagnosticEventKind::MessageReceived {
+                                    message_id: Some(hex::encode(incoming_hash)),
+                                    message_hash: Some(hex::encode(incoming_hash)),
+                                    probe_id: None,
+                                    sender_id: Some(from.to_string()),
+                                },
+                            );
+                        }
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) {
                             cb.friend_mark_online(fid);
@@ -3313,6 +3360,13 @@ mod tests {
     /// Clear the global seen-messages set so tests start fresh.
     fn clear_seen_messages() {
         if let Ok(mut seen) = SEEN_MESSAGES.lock() {
+            seen.clear();
+        }
+    }
+
+    /// Clear the diagnostics message-received cooldown set so tests start fresh.
+    fn clear_diagnostic_seen_messages() {
+        if let Ok(mut seen) = DIAGNOSTIC_SEEN_MESSAGES.lock() {
             seen.clear();
         }
     }

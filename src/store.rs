@@ -239,6 +239,27 @@ impl MessageStore {
                 last_received_at_ms INTEGER NOT NULL,
                 receive_count INTEGER NOT NULL DEFAULT 1
             );
+
+            -- Chat message history: every locally-observed message
+            -- (sent and received) is stored here with content-addressed
+            -- deduplication.  Queried by topic for room views and
+            -- by conversation_meta for the sidebar chat list.
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                msg_hash BLOB NOT NULL UNIQUE,
+                topic BLOB NOT NULL,
+                sender BLOB NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                body TEXT NOT NULL,
+                signed_bytes BLOB,
+                delivery_state TEXT NOT NULL DEFAULT 'queued',
+                image_identifier TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_topic_ts
+                ON messages(topic, timestamp_ms);
+            CREATE INDEX IF NOT EXISTS idx_messages_hash
+                ON messages(msg_hash);
             ",
         )
         .std_context("init schema")?;
@@ -948,6 +969,187 @@ impl MessageStore {
         Ok(results)
     }
 
+    // ── Chat message history (messages table) ─────────────────────────
+
+    /// Insert a chat message into the `messages` table with deduplication.
+    ///
+    /// `msg_hash` is a blake3 hash of the signed message bytes (32 bytes),
+    /// and serves as the content-addressed unique key.  `topic` and `sender`
+    /// are 32-byte gossip TopicId and PublicKey, respectively.
+    ///
+    /// Returns `true` if a new row was inserted, `false` if a duplicate
+    /// was silently ignored.
+    pub fn insert_chat_message(
+        &self,
+        msg_hash: &[u8; 32],
+        topic: &[u8; 32],
+        sender: &[u8; 32],
+        timestamp_ms: u64,
+        kind: &str,
+        body: &str,
+        signed_bytes: Option<&[u8]>,
+        image_identifier: Option<&str>,
+        local_user_id: &[u8; 32],
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO messages
+             (msg_hash, topic, sender, timestamp_ms, kind, body, signed_bytes, delivery_state, image_identifier)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8)",
+            params![
+                msg_hash.as_slice(),
+                topic.as_slice(),
+                sender.as_slice(),
+                timestamp_ms as i64,
+                kind,
+                body,
+                signed_bytes,
+                image_identifier,
+            ],
+        )
+        .std_context("insert chat message")?;
+        let is_new = conn.changes() > 0;
+
+        // Update conversation_meta for the sidebar chat list.
+        if is_new {
+            let is_local = sender == local_user_id;
+            let unread_increment = if is_local { 0 } else { 1 };
+            conn.execute(
+                "INSERT INTO conversation_meta
+                 (conversation_id, last_message_id, last_activity_at_ms,
+                  last_message_preview, last_author_user_id, unread_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(conversation_id) DO UPDATE SET
+                    last_message_id = excluded.last_message_id,
+                    last_activity_at_ms = excluded.last_activity_at_ms,
+                    last_message_preview = excluded.last_message_preview,
+                    last_author_user_id = excluded.last_author_user_id,
+                    unread_count = conversation_meta.unread_count + excluded.unread_count",
+                params![
+                    topic.as_slice(),
+                    msg_hash.as_slice(),
+                    timestamp_ms as i64,
+                    body,
+                    sender.as_slice(),
+                    unread_increment,
+                ],
+            )
+            .std_context("update conversation meta for chat message")?;
+        }
+
+        Ok(is_new)
+    }
+
+    /// Return chat messages for a given topic, most recent first,
+    /// with optional pagination (`limit` + `offset`).
+    pub fn get_messages_for_topic(
+        &self,
+        topic: &[u8; 32],
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ChatMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,
+                        signed_bytes, delivery_state, image_identifier, id
+                 FROM messages
+                 WHERE topic = ?1
+                 ORDER BY timestamp_ms ASC
+                 LIMIT ?2 OFFSET ?3",
+            )
+            .std_context("prepare get_messages_for_topic")?;
+        let mut rows = stmt
+            .query(params![topic.as_slice(), limit as i64, offset as i64])
+            .std_context("query get_messages_for_topic")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next row")? {
+            results.push(row_to_chat_message(row)?);
+        }
+        Ok(results)
+    }
+
+    /// Count messages for a topic.
+    pub fn count_messages_for_topic(&self, topic: &[u8; 32]) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE topic = ?1",
+                [topic.as_slice()],
+                |row| row.get(0),
+            )
+            .std_context("count messages for topic")?;
+        Ok(count as usize)
+    }
+
+    /// Find a message by its blake3 hash.
+    pub fn find_message_by_hash(&self, msg_hash: &[u8; 32]) -> Result<Option<ChatMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,
+                        signed_bytes, delivery_state, image_identifier, id
+                 FROM messages WHERE msg_hash = ?1",
+            )
+            .std_context("prepare find_message_by_hash")?;
+        let mut rows = stmt
+            .query([msg_hash.as_slice()])
+            .std_context("query find_message_by_hash")?;
+        if let Some(row) = rows.next().std_context("next row")? {
+            Ok(Some(row_to_chat_message(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Update the delivery state of a message identified by its hash.
+    pub fn update_message_delivery_state(
+        &self,
+        msg_hash: &[u8; 32],
+        new_state: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn
+            .execute(
+                "UPDATE messages SET delivery_state = ?1 WHERE msg_hash = ?2",
+                params![new_state, msg_hash.as_slice()],
+            )
+            .std_context("update message delivery state")?;
+        Ok(affected > 0)
+    }
+
+    /// Remove all messages for a topic (used when a room is deleted).
+    pub fn delete_messages_for_topic(&self, topic: &[u8; 32]) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn
+            .execute("DELETE FROM messages WHERE topic = ?1", [topic.as_slice()])
+            .std_context("delete messages for topic")?;
+        Ok(deleted)
+    }
+
+    /// Return up to `count` most recent messages across all topics.
+    pub fn get_recent_messages(&self, count: usize) -> Result<Vec<ChatMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,
+                        signed_bytes, delivery_state, image_identifier, id
+                 FROM messages
+                 ORDER BY timestamp_ms DESC
+                 LIMIT ?1",
+            )
+            .std_context("prepare get_recent_messages")?;
+        let mut rows = stmt
+            .query([count as i64])
+            .std_context("query get_recent_messages")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next row")? {
+            results.push(row_to_chat_message(row)?);
+        }
+        results.reverse(); // oldest first for display
+        Ok(results)
+    }
+
     // ── Deletion and tombstone methods (Step 12) ──────────────────────
 
     /// Locally delete a single message: insert a local tombstone to prevent
@@ -1108,6 +1310,57 @@ impl MessageStore {
             .unwrap_or(false);
         Ok(exists)
     }
+}
+
+// ── Chat message row type ────────────────────────────────────────────
+
+/// A chat message row read from the `messages` table.
+#[derive(Debug, Clone)]
+pub struct ChatMessageRow {
+    pub id: i64,
+    pub msg_hash: [u8; 32],
+    pub topic: [u8; 32],
+    pub sender: [u8; 32],
+    pub timestamp_ms: i64,
+    pub kind: String,
+    pub body: String,
+    pub signed_bytes: Option<Vec<u8>>,
+    pub delivery_state: String,
+    pub image_identifier: Option<String>,
+}
+
+fn row_to_chat_message(row: &rusqlite::Row) -> Result<ChatMessageRow> {
+    let hash_blob: Vec<u8> = row.get(0).std_context("get msg_hash")?;
+    let mut msg_hash = [0u8; 32];
+    msg_hash.copy_from_slice(&hash_blob);
+
+    let topic_blob: Vec<u8> = row.get(1).std_context("get topic")?;
+    let mut topic = [0u8; 32];
+    topic.copy_from_slice(&topic_blob);
+
+    let sender_blob: Vec<u8> = row.get(2).std_context("get sender")?;
+    let mut sender = [0u8; 32];
+    sender.copy_from_slice(&sender_blob);
+
+    let timestamp_ms: i64 = row.get(3).std_context("get timestamp_ms")?;
+    let kind: String = row.get(4).std_context("get kind")?;
+    let body: String = row.get(5).std_context("get body")?;
+    let signed_bytes: Option<Vec<u8>> = row.get(6).std_context("get signed_bytes")?;
+    let delivery_state: String = row.get(7).std_context("get delivery_state")?;
+    let image_identifier: Option<String> = row.get(8).std_context("get image_identifier")?;
+
+    Ok(ChatMessageRow {
+        id: row.get::<_, i64>(9).unwrap_or(0),
+        msg_hash,
+        topic,
+        sender,
+        timestamp_ms,
+        kind,
+        body,
+        signed_bytes,
+        delivery_state,
+        image_identifier,
+    })
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────

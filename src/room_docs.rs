@@ -862,11 +862,16 @@ pub async fn forward_room_events_for_chat(
 ) {
     use crate::chat_core::{NetEvent, SignedMessage};
 
+    // Track decode errors to avoid log storms: warn on the first few, then
+    // degrade to DEBUG so one broken topic doesn't saturate the log.
+    let mut decode_errors: u32 = 0;
+    const MAX_WARN_DECODE_ERRORS: u32 = 3;
+
     while let Some(event_result) = receiver.next().await {
         let event = match event_result {
             Ok(e) => e,
             Err(err) => {
-                tracing::warn!("room event forwarder: gossip event error (dropped): {err}");
+                tracing::debug!("room event forwarder: gossip event error (dropped): {err}");
                 continue;
             }
         };
@@ -910,7 +915,17 @@ pub async fn forward_room_events_for_chat(
                     }
                 }
                 Err(err) => {
-                    tracing::warn!("room event forwarder: decode error (dropped): {err}");
+                    if decode_errors < MAX_WARN_DECODE_ERRORS {
+                        tracing::warn!("room event forwarder: decode error (dropped): {err}");
+                    } else if decode_errors == MAX_WARN_DECODE_ERRORS {
+                        tracing::warn!(
+                            "room event forwarder: reached {MAX_WARN_DECODE_ERRORS} \
+                             decode errors — suppressing further WARNs, switching to DEBUG"
+                        );
+                    } else {
+                        tracing::debug!("room event forwarder: decode error (dropped): {err}");
+                    }
+                    decode_errors += 1;
                     continue;
                 }
             },

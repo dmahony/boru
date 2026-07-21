@@ -1583,6 +1583,10 @@ pub struct IcedChat {
     pending_file: Option<(String, String)>,
     /// Pending image download: (filename, blob_hash, sender_pk).
     pending_image: VecDeque<(String, MessageHash, PublicKey)>,
+    /// Image selected by the user and currently being processed.
+    pending_image_upload: Option<String>,
+    /// Animation frame for the inline image-processing spinner.
+    image_upload_spinner_frame: usize,
     /// Index of the chat entry that owns the current download attachment.
     download_entry_index: Option<usize>,
     /// Transfer ID for the active download, used to keep updates attached to
@@ -2463,6 +2467,8 @@ pub enum AppMessage {
     OpenImagePreview(usize),
     /// Close the image preview and return to the previous screen.
     CloseImagePreview,
+    /// Image processing failed after the user selected it.
+    ImageUploadFailed(String),
 
     // ── GUI test actions (MCP-driven) ──
     /// An action received from the MCP GUI test actions channel.
@@ -3158,6 +3164,8 @@ impl IcedChat {
             pending_file: None,
             pending_offline_ids: HashMap::new(),
             pending_image: VecDeque::new(),
+            pending_image_upload: None,
+            image_upload_spinner_frame: 0,
             download_entry_index: None,
             active_download_transfer_id: None,
             transfer_id_to_index: HashMap::new(),
@@ -4060,6 +4068,7 @@ impl IcedChat {
             AppMessage::ConfirmBlockFriend => "ConfirmBlockFriend",
             AppMessage::OpenImagePreview(..) => "OpenImagePreview",
             AppMessage::CloseImagePreview => "CloseImagePreview",
+            AppMessage::ImageUploadFailed(_) => "ImageUploadFailed",
             AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
             AppMessage::ImageDownloaded { .. } => "ImageDownloaded",
             AppMessage::FriendAdded { .. } => "FriendAdded",
@@ -7463,6 +7472,8 @@ impl IcedChat {
                 }
                 let filename = parts[0].to_string();
                 let abs_path = parts[1].to_string();
+                self.pending_image_upload = Some(filename.clone());
+                self.image_upload_spinner_frame = 0;
 
                 let blob_store = self.blob_store.clone();
                 let sender = self.sender.clone();
@@ -7544,7 +7555,7 @@ impl IcedChat {
                                 image_identifier: None,
                             }
                         }
-                        Err(e) => AppMessage::ErrorMsg(e),
+                        Err(e) => AppMessage::ImageUploadFailed(e),
                     },
                 )
             }
@@ -7741,6 +7752,7 @@ impl IcedChat {
                 message_hash,
                 image_identifier,
             } => {
+                self.pending_image_upload = None;
                 if self.has_message(&message_hash) {
                     return self.start_next_pending_image_download();
                 }
@@ -7813,6 +7825,11 @@ impl IcedChat {
                     }
                     entry.bump_gen();
                 }
+                iced::Task::none()
+            }
+            AppMessage::ImageUploadFailed(error) => {
+                self.pending_image_upload = None;
+                self.push_system(format!("Image upload failed: {error}"));
                 iced::Task::none()
             }
             AppMessage::ErrorMsg(msg) => {
@@ -8613,6 +8630,9 @@ impl IcedChat {
             }
 
             AppMessage::ConnMonitorTick => {
+                if self.pending_image_upload.is_some() {
+                    self.image_upload_spinner_frame = (self.image_upload_spinner_frame + 1) % 10;
+                }
                 // Flush debounced neighbor status changes — batch rapid
                 // online/offline transitions into one visible update per tick.
                 self.flush_pending_neighbor_status();
@@ -12568,6 +12588,26 @@ impl IcedChat {
             }
         }
 
+        if let Some(filename) = &self.pending_image_upload {
+            const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let spinner = SPINNER_FRAMES[self.image_upload_spinner_frame % SPINNER_FRAMES.len()];
+            col = col.push(
+                container(
+                    Row::new()
+                        .push(text(spinner).size(TYPO_LG).color(text_muted(&theme)))
+                        .push(
+                            text(format!("Processing {filename}…"))
+                                .size(TYPO_SM)
+                                .color(text_muted(&theme)),
+                        )
+                        .spacing(SPACE_8)
+                        .align_y(iced::Alignment::Center),
+                )
+                .padding([SPACE_8, SPACE_10])
+                .style(container_card),
+            );
+        }
+
         // Bottom spacer
         // Bottom spacer (precomputed by layout cache)
         if bottom_h > 0.0 {
@@ -12678,7 +12718,7 @@ impl IcedChat {
     /// "Back" button at the top. The sidebar remains visible — only the main
     /// panel content switches to the preview.
     fn view_image_preview(&self, entry_index: usize) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, scrollable, text, Column};
+        use iced::widget::{button, column, container, text, Column};
         use iced::{Alignment, Length};
 
         let theme = self.theme();
@@ -12729,15 +12769,11 @@ impl IcedChat {
                     .padding([SPACE_4, SPACE_8]),
             )
             .push(
-                scrollable(
-                    container(image_element)
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .center_x(Length::Fill)
-                        .center_y(Length::Fill),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill),
+                container(image_element)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
             )
             .width(Length::Fill)
             .height(Length::Fill);
