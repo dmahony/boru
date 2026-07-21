@@ -7513,15 +7513,16 @@ impl IcedChat {
                             .await
                             .map_err(|e| format!("Failed to inspect file: {e}"))?;
                         let file_size = metadata.len();
-                        if file_size > 50 * 1024 * 1024 {
-                            return Err("File must be 50 MiB or smaller.".to_string());
-                        }
-                        let bytes = tokio::fs::read(&path_buf)
+                        // Stream the file into iroh blobs — no whole-file
+                        // memory limit needed.
+                        let file = tokio::fs::File::open(&path_buf)
                             .await
-                            .map_err(|e| format!("Failed to read file: {e}"))?;
+                            .map_err(|e| format!("Failed to open file: {e}"))?;
+                        let stream = tokio_util::io::ReaderStream::new(file);
                         let tag = blob_store
                             .blobs()
-                            .add_bytes(bytes)
+                            .add_stream(Box::pin(stream))
+                            .await
                             .await
                             .map_err(|e| format!("Failed to store file: {e}"))?;
                         let ticket_str = blob_ticket_string(
