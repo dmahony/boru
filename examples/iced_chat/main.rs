@@ -847,6 +847,7 @@ fn main() -> Result<()> {
                 gui_test_actions::GuiActionRateLimiter::default(),
             )),
             gui_state_rx: Some(_gui_state_rx.clone()),
+            storage: boru_chat::storage::Storage::open(&data_dir).ok(),
         };
 
         if let Err(e) = runtime.block_on(mcp_server::spawn_mcp_server(mcp_config, mcp_state)) {
