@@ -4522,6 +4522,38 @@ mod tests {
     }
 
     #[test]
+    fn referenced_shared_file_keeps_source_path_without_inline_bytes() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object("referenced-hash", 42, "text/plain", "notes.txt", &[])
+            .unwrap();
+        storage
+            .set_file_object_source_path("referenced-hash", Some("/tmp/notes.txt"))
+            .unwrap();
+        storage
+            .upsert_shared_file(
+                "referenced-hash",
+                "alice_key",
+                "meta-ref",
+                "notes.txt",
+                None,
+                true,
+            )
+            .unwrap();
+
+        let object = storage
+            .get_file_object("referenced-hash")
+            .unwrap()
+            .expect("referenced file object");
+        assert_eq!(object.data.as_deref(), Some(&[][..]));
+        assert_eq!(object.source_path.as_deref(), Some("/tmp/notes.txt"));
+        assert_eq!(
+            storage.list_shared_files("alice_key", true).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
     fn v2_catalogue_limits_reject_new_entries_but_allow_updates() {
         let limits = CatalogueLimitsConfig {
             max_files_per_catalogue: 1,

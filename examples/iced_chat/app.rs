@@ -9112,16 +9112,34 @@ impl IcedChat {
                             Some(ref stg) => stg.clone(),
                             None => return Err("Storage is not available".to_string()),
                         };
-                        // Read file on blocking thread
+                        // Inspect and hash the file on a blocking thread. Keep
+                        // the file referenced by its source path instead of
+                        // loading the entire file into memory and duplicating
+                        // it in SQLite. Large files previously made this
+                        // settings action terminate the process while the
+                        // async task was reading/storing the selected file.
                         let abs_path = std::path::PathBuf::from(&path);
-                        let (file_data, metadata) = tokio::task::spawn_blocking({
+                        let (metadata, hash) = tokio::task::spawn_blocking({
                             let path = abs_path.clone();
                             move || {
+                                use std::io::Read;
+
                                 let meta = std::fs::metadata(&path)
                                     .map_err(|e| format!("Cannot read file: {e}"))?;
-                                let data = std::fs::read(&path)
+                                let mut file = std::fs::File::open(&path)
                                     .map_err(|e| format!("Cannot read file: {e}"))?;
-                                Ok::<_, String>((data, meta))
+                                let mut hasher = blake3::Hasher::new();
+                                let mut buffer = [0u8; 1024 * 1024];
+                                loop {
+                                    let read = file
+                                        .read(&mut buffer)
+                                        .map_err(|e| format!("Cannot read file: {e}"))?;
+                                    if read == 0 {
+                                        break;
+                                    }
+                                    hasher.update(&buffer[..read]);
+                                }
+                                Ok::<_, String>((meta, hasher.finalize()))
                             }
                         })
                         .await
@@ -9133,8 +9151,6 @@ impl IcedChat {
                             .unwrap_or("unknown")
                             .to_string();
                         let size = metadata.len();
-                        // Compute blake3 content hash
-                        let hash = blake3::hash(&file_data);
                         let hash_hex = hash.to_hex().to_string();
 
                         // Compute metadata_id (same as SharedFile::new does)
@@ -9170,9 +9186,11 @@ impl IcedChat {
                             _ => "application/octet-stream",
                         };
 
-                        // Store file object + source path + shared file entry
+                        // Store a referenced file object + source path + shared
+                        // file entry. The transfer handler re-reads and
+                        // verifies the source path when a peer requests it.
                         stg.put_file_object(
-                            &hash_hex, size, mime_type, &filename, &file_data,
+                            &hash_hex, size, mime_type, &filename, &[],
                         )
                         .map_err(|e| format!("Failed to store file: {e}"))?;
                         stg.set_file_object_source_path(&hash_hex, Some(&path))
