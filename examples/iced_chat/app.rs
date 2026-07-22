@@ -25,8 +25,8 @@ use boru_chat::chat_callbacks::{ChatCallbacks, TransferId, TransferProgress};
 use boru_chat::chat_core::{
     collect_bootstrap_peers, download_blob_to_file, download_blob_with_safety, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
-    handle_net_event_with_safety_for_topic, message_hash, seed_memory_lookup, MeshHealth,
-    MessageHash, RoomInviteV2,
+    handle_net_event_with_safety_for_topic, merge_bootstrap_peer_addrs, message_hash,
+    seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
 use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
@@ -136,10 +136,12 @@ impl Clone for SharedTracker {
 // ── Settings persistence ─────────────────────────────────────────
 /// On-disk settings stored as JSON in the application data directory.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub dark_mode: bool,
     pub sound_enabled: bool,
     pub chat_text_size: f32,
+    pub share_direct_addresses: bool,
 }
 
 impl Default for AppSettings {
@@ -148,6 +150,7 @@ impl Default for AppSettings {
             dark_mode: false,
             sound_enabled: true,
             chat_text_size: TYPO_SM,
+            share_direct_addresses: false,
         }
     }
 }
@@ -171,6 +174,21 @@ impl AppSettings {
             let _ = std::fs::write(&path, json);
         }
     }
+}
+
+fn invitation_endpoint_addr(
+    endpoint_addr: EndpointAddr,
+    share_direct_addresses: bool,
+) -> EndpointAddr {
+    if share_direct_addresses {
+        return endpoint_addr;
+    }
+
+    let mut addr = EndpointAddr::new(endpoint_addr.id);
+    for relay_url in endpoint_addr.relay_urls() {
+        addr = addr.with_relay_url(relay_url.clone());
+    }
+    addr
 }
 
 /// Scrollable ID for the chat log — used to auto-scroll to bottom.
@@ -203,11 +221,13 @@ const MAX_ENTRIES: usize = 2000;
 /// arrives.
 const MAX_PROFILE_IMAGE_HANDLES: usize = 500;
 
-/// Version string: "v0.101.0" or "v0.101.0 (abc1234)" when git hash is available.
+/// Version string: the next SemVer version calculated from conventional
+/// commits since the latest version tag, with the current git hash appended.
 pub fn version_tag() -> String {
+    let version = option_env!("BORU_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
     match option_env!("GIT_HASH") {
-        Some(h) => format!("v{} ({})", env!("CARGO_PKG_VERSION"), h),
-        None => format!("v{}", env!("CARGO_PKG_VERSION")),
+        Some(h) => format!("v{} ({})", version, h),
+        None => format!("v{}", version),
     }
 }
 
@@ -1668,6 +1688,8 @@ pub struct IcedChat {
     pub dark_mode: bool,
     /// Whether notification sounds are enabled.
     sound_enabled: bool,
+    /// Whether room invitations may include direct endpoint addresses.
+    share_direct_addresses: bool,
     /// Font size for chat message body text (pixels).
     chat_text_size: f32,
     /// Whether the "clear history" confirmation is shown.
@@ -2315,6 +2337,8 @@ pub enum AppMessage {
     OpenFriendChat(PublicKey),
     /// Toggle notification sounds on/off.
     ToggleSound(bool),
+    /// Toggle whether room invitations include direct endpoint addresses.
+    ToggleInviteAddressSharing(bool),
     /// Set the chat message body text size in pixels.
     SetChatTextSize(f32),
     /// Open the native picker for a local profile image.
@@ -2871,6 +2895,7 @@ fn section_card<'a>(
 struct SettingsCachedKey {
     dark_mode: bool,
     sound_enabled: bool,
+    direct_address_sharing: bool,
     chat_text_size_bits: u32,
     direct_peers: usize,
     relayed_peers: usize,
@@ -3217,6 +3242,7 @@ impl IcedChat {
             settings_return_to: None,
             dark_mode: app_settings.dark_mode,
             sound_enabled: app_settings.sound_enabled,
+            share_direct_addresses: app_settings.share_direct_addresses,
             chat_text_size: app_settings.chat_text_size,
             history_confirm_clear: false,
             room_delete_confirm_topic: None,
@@ -3325,7 +3351,10 @@ impl IcedChat {
     fn room_ticket(&self, topic: TopicId) -> Ticket {
         Ticket {
             topic,
-            peers: vec![self.endpoint.watch_addr().get()],
+            peers: vec![invitation_endpoint_addr(
+                self.endpoint.watch_addr().get(),
+                self.share_direct_addresses,
+            )],
             discovery_secret: None,
         }
     }
@@ -3370,6 +3399,7 @@ impl IcedChat {
         let settings = AppSettings {
             dark_mode: self.dark_mode,
             sound_enabled: self.sound_enabled,
+            share_direct_addresses: self.share_direct_addresses,
             chat_text_size: self.chat_text_size,
         };
         settings.save(&self.data_dir);
@@ -4101,6 +4131,7 @@ impl IcedChat {
             AppMessage::FriendIdCopiedClear => "FriendIdCopiedClear",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
             AppMessage::ToggleSound(_) => "ToggleSound",
+            AppMessage::ToggleInviteAddressSharing(_) => "ToggleInviteAddressSharing",
             AppMessage::SetChatTextSize(_) => "SetChatTextSize",
             AppMessage::PickProfileImage => "PickProfileImage",
             AppMessage::ProfileImagePicked(_) => "ProfileImagePicked",
@@ -4809,6 +4840,7 @@ impl IcedChat {
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let dht = self.dht.clone();
 
+                let share_direct_addresses = self.share_direct_addresses;
                 iced::Task::perform(
                     async move {
                         // Subscribe to the new topic
@@ -4817,7 +4849,10 @@ impl IcedChat {
                             .await
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
-                        let local_peer_addr = endpoint.watch_addr().get();
+                        let local_peer_addr = invitation_endpoint_addr(
+                            endpoint.watch_addr().get(),
+                            share_direct_addresses,
+                        );
 
                         // Optionally publish to DHT for private-room discovery.
                         // Clone dht so we can also use it for continuous tracking.
@@ -5120,6 +5155,7 @@ impl IcedChat {
                         .as_ref()
                         .is_some_and(|conversation| conversation.topic == topic)
                 });
+                let share_direct_addresses = self.share_direct_addresses;
 
                 iced::Task::perform(
                     async move {
@@ -5165,7 +5201,10 @@ impl IcedChat {
                             .await
                             .map_err(|e| format!("room subscription task failed: {e}"))??;
                         let (sender, receiver) = sub.split();
-                        let local_peer_addr = endpoint.watch_addr().get();
+                        let local_peer_addr = invitation_endpoint_addr(
+                            endpoint.watch_addr().get(),
+                            share_direct_addresses,
+                        );
 
                         let room_tracker = if !private_dht_disabled {
                             if let (Some(secret), Some(dht)) = (saved_discovery_secret, dht.clone())
@@ -5552,6 +5591,7 @@ impl IcedChat {
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
+                let share_direct_addresses = self.share_direct_addresses;
 
                 iced::Task::perform(
                     async move {
@@ -5676,7 +5716,10 @@ impl IcedChat {
                                 join_cancel,
                             );
                         }
-                        let local_peer_addr = endpoint.watch_addr().get();
+                        let local_peer_addr = invitation_endpoint_addr(
+                            endpoint.watch_addr().get(),
+                            share_direct_addresses,
+                        );
                         let new_ticket = Ticket {
                             topic,
                             peers: vec![local_peer_addr.clone()],
@@ -6480,7 +6523,7 @@ impl IcedChat {
                     };
                     let secret_key = self.secret_key.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let progress_queue = self.download_progress_queue.clone();
                     let endpoint = self.endpoint.clone();
                     return iced::Task::perform(
                         async move {
@@ -6929,8 +6972,8 @@ impl IcedChat {
                 self.conversation_store.touch_and_bump(&topic);
                 // Update the sidebar preview BEFORE taking the mutable borrow
                 // on self.conversations (avoids borrow conflict).
-                let is_inactive = topic != self.topic
-                    || !matches!(self.screen, Screen::Chat { .. });
+                let is_inactive =
+                    topic != self.topic || !matches!(self.screen, Screen::Chat { .. });
                 if is_inactive {
                     self.update_room_preview(&topic, &event);
                 }
@@ -7034,23 +7077,40 @@ impl IcedChat {
                             Ok((sender, ContactAction::ConversationInvite { topic, addrs }))
                                 if addrs.iter().all(|addr| addr.id == sender) =>
                             {
-                                let local_pk = self.local_public;
                                 // ConversationInvite is an authenticated, explicit
-                                // Chat click.  Validate the stable topic before
-                                // accepting it, then auto-accept and open it.
-                                if topic != direct_topic(&local_pk, &sender) {
+                                // Chat click. Validate the stable topic before any
+                                // durable mutation, then auto-accept and open it.
+                                let Some(persisted_addrs) = confirmed_direct_invite_addrs(
+                                    self.local_public,
+                                    &self.friends,
+                                    sender,
+                                    topic,
+                                    &addrs,
+                                ) else {
                                     debug!("ignoring contact invite with invalid direct topic");
                                     return iced::Task::none();
-                                }
+                                };
                                 let fid = FriendId::from_public_key(sender);
-                                let record = self.friends.ensure_friend(fid);
-                                record.record_addrs(addrs.clone());
+                                let label = self
+                                    .friends
+                                    .get(&fid)
+                                    .map(|record| record.display_label(&fid))
+                                    .unwrap_or_else(|| sender.fmt_short().to_string());
+                                let record = self.friends.ensure_friend(fid.clone());
+                                record.record_addrs(persisted_addrs.clone());
                                 record.set_direct_conversation(
                                     topic,
                                     DirectConversationState::Active,
                                 );
                                 record.relationship = FriendRelationship::Friends;
-                                let room = RoomStore::with_peers(&self.data_dir, topic, addrs);
+                                self.conversation_store.upsert(ConversationEntry::new(
+                                    topic,
+                                    sender.to_string(),
+                                    label,
+                                ));
+                                let _ = self.conversation_store.save();
+                                let room =
+                                    RoomStore::with_peers(&self.data_dir, topic, persisted_addrs);
                                 let _ = room.save();
                                 self.try_save_friends();
                                 self.friend_online_cache.insert(sender);
@@ -7529,11 +7589,7 @@ impl IcedChat {
                             .await
                             .await
                             .map_err(|e| format!("Failed to store file: {e}"))?;
-                        let ticket_str = blob_ticket_string(
-                            endpoint_addr,
-                            tag.hash,
-                            tag.format,
-                        );
+                        let ticket_str = blob_ticket_string(endpoint_addr, tag.hash, tag.format);
                         let msg = crate::Message::FileShare {
                             name: filename.clone(),
                             ticket: ticket_str.clone(),
@@ -7546,9 +7602,7 @@ impl IcedChat {
                         Ok((filename, ticket_str))
                     },
                     |r: Result<(String, String), String>| match r {
-                        Ok((name, ticket)) => {
-                            AppMessage::FileDownloaded { name, ticket }
-                        }
+                        Ok((name, ticket)) => AppMessage::FileDownloaded { name, ticket },
                         Err(e) => AppMessage::ErrorMsg(e),
                     },
                 )
@@ -7671,9 +7725,20 @@ impl IcedChat {
                 }
                 if let Some(e) = self.entries.get_mut(entry_index) {
                     if let Some(ref mut d) = e.download {
-                        d.state = DownloadState::Active { bytes: 0, total: None };
+                        d.state = DownloadState::Active {
+                            bytes: 0,
+                            total: None,
+                        };
                     }
                 }
+                // The Active card is taller than the Ready card. Rebuild the
+                // virtualized layout immediately so the card and all later
+                // messages keep their correct positions before the first
+                // progress event arrives.
+                self.layout_cache
+                    .borrow_mut()
+                    .invalidate_from(entry_index);
+                self.keep_latest_visible();
                 self.download_entry_index = Some(entry_index);
                 let blob_store = self.blob_store.clone();
                 let endpoint = self.endpoint.clone();
@@ -7686,8 +7751,9 @@ impl IcedChat {
                 let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
-                        let ticket: iroh_blobs::ticket::BlobTicket =
-                            ticket_str.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
+                        let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                            .parse()
+                            .map_err(|e| format!("Invalid ticket: {e}"))?;
                         let (addr, hash, _format) = ticket.into_parts();
                         let node_id = addr.id;
                         let candidates = download_candidates(node_id, &neighbors);
@@ -8860,7 +8926,8 @@ impl IcedChat {
                     let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
                     tasks.push(iced::Task::perform(
                         async move {
-                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir) {
+                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir)
+                            {
                                 Ok(Some(s)) => s,
                                 _ => return Vec::new(),
                             };
@@ -9252,6 +9319,7 @@ impl IcedChat {
                 let settings = AppSettings {
                     dark_mode: self.dark_mode,
                     sound_enabled: self.sound_enabled,
+                    share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
@@ -9275,6 +9343,7 @@ impl IcedChat {
                 let settings = AppSettings {
                     dark_mode: self.dark_mode,
                     sound_enabled: self.sound_enabled,
+                    share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
@@ -9500,10 +9569,28 @@ impl IcedChat {
                 let settings = AppSettings {
                     dark_mode: self.dark_mode,
                     sound_enabled: self.sound_enabled,
+                    share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
                 let progress_queue = self.download_progress_queue.clone();
+                iced::Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        settings.save(&data_dir);
+                    }),
+                    |_| AppMessage::Noop,
+                )
+            }
+
+            AppMessage::ToggleInviteAddressSharing(enabled) => {
+                self.share_direct_addresses = enabled;
+                let settings = AppSettings {
+                    dark_mode: self.dark_mode,
+                    sound_enabled: self.sound_enabled,
+                    share_direct_addresses: self.share_direct_addresses,
+                    chat_text_size: self.chat_text_size,
+                };
+                let data_dir = self.data_dir.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9547,7 +9634,7 @@ impl IcedChat {
                         let image_store = self.image_store.clone();
                         let user = self.local_public.to_string();
                         let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                        let progress_queue = self.download_progress_queue.clone();
                         self.push_system("Saving profile image…");
                         iced::Task::perform(
                             async move {
@@ -9659,7 +9746,7 @@ impl IcedChat {
                     let image_store = self.image_store.clone();
                     let identifier = self.profile_image_identifier.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let progress_queue = self.download_progress_queue.clone();
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -10286,6 +10373,24 @@ impl IcedChat {
 }
 
 // ── Net event handling ────────────────────────────────────────────────
+
+fn confirmed_direct_invite_addrs(
+    local_public: PublicKey,
+    friends: &FriendsStore,
+    sender: PublicKey,
+    topic: TopicId,
+    addrs: &[EndpointAddr],
+) -> Option<Vec<EndpointAddr>> {
+    if topic != direct_topic(&local_public, &sender) {
+        return None;
+    }
+    let fid = FriendId::from_public_key(sender);
+    let known_addrs = friends
+        .get(&fid)
+        .map(|record| record.known_addrs.clone())
+        .unwrap_or_default();
+    Some(merge_bootstrap_peer_addrs(&known_addrs, addrs))
+}
 
 impl IcedChat {
     /// Resolve a peer identifier (public key string or friend alias) to a [`PublicKey`].
@@ -13071,6 +13176,7 @@ impl IcedChat {
         SettingsCachedKey {
             dark_mode: self.dark_mode,
             sound_enabled: self.sound_enabled,
+            direct_address_sharing: self.share_direct_addresses,
             chat_text_size_bits: self.chat_text_size.to_bits(),
             direct_peers: self.direct_peers,
             relayed_peers: self.relayed_peers,
@@ -13348,6 +13454,45 @@ impl IcedChat {
 
         let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into()]);
 
+        // ── Invitations section ──
+        let invitation_label = if key.direct_address_sharing {
+            "Direct address sharing on"
+        } else {
+            "Direct address sharing off"
+        };
+        let invitation_row = Row::new()
+            .push(
+                Column::new()
+                    .push(text(invitation_label).size(TYPO_MD))
+                    .push(
+                        text("Include your direct endpoint addresses in room invitations.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(
+                button(
+                    text(if key.direct_address_sharing {
+                        "Hide addresses"
+                    } else {
+                        "Share addresses"
+                    })
+                    .size(TYPO_SM),
+                )
+                .on_press(AppMessage::ToggleInviteAddressSharing(
+                    !key.direct_address_sharing,
+                ))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        let invitation_card = section_card("INVITATIONS", vec![invitation_row.into()]);
+
         // ── Network section ──
         let public_key_row = Row::new()
             .push(
@@ -13484,6 +13629,8 @@ impl IcedChat {
             .push(appearance_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(notifications_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(invitation_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(network_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
@@ -15017,6 +15164,76 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_direct_invite_addrs_keeps_relay_only_peer_metadata() {
+        let local = SecretKey::generate().public();
+        let peer = SecretKey::generate().public();
+        let topic = direct_topic(&local, &peer);
+        let data_dir = std::env::temp_dir().join(format!(
+            "boru-confirmed-invite-relay-only-{}",
+            std::process::id()
+        ));
+        let mut friends = FriendsStore::empty_at(&data_dir);
+        let fid = FriendId::from_public_key(peer);
+        let existing = vec![EndpointAddr::new(peer)];
+        friends.ensure_friend(fid).record_addrs(existing.clone());
+
+        let merged = confirmed_direct_invite_addrs(local, &friends, peer, topic, &[])
+            .expect("matching topic should confirm");
+
+        assert_eq!(
+            merged, existing,
+            "relay-only invites should preserve known peers"
+        );
+    }
+
+    #[test]
+    fn confirmed_direct_invite_addrs_deduplicates_duplicate_peers() {
+        let local = SecretKey::generate().public();
+        let peer = SecretKey::generate().public();
+        let topic = direct_topic(&local, &peer);
+        let data_dir =
+            std::env::temp_dir().join(format!("boru-confirmed-invite-dup-{}", std::process::id()));
+        let mut friends = FriendsStore::empty_at(&data_dir);
+        let fid = FriendId::from_public_key(peer);
+        let existing = vec![EndpointAddr::new(peer)];
+        friends.ensure_friend(fid).record_addrs(existing.clone());
+
+        let incoming = vec![EndpointAddr::new(peer), EndpointAddr::new(peer)];
+        let merged = confirmed_direct_invite_addrs(local, &friends, peer, topic, &incoming)
+            .expect("matching topic should confirm");
+
+        assert_eq!(merged, existing, "duplicate peers should be deduplicated");
+    }
+
+    #[test]
+    fn confirmed_direct_invite_addrs_rejects_before_mutating_state() {
+        let local = SecretKey::generate().public();
+        let peer = SecretKey::generate().public();
+        let wrong_topic = TopicId::from_bytes([99; 32]);
+        let data_dir = std::env::temp_dir().join(format!(
+            "boru-confirmed-invite-reject-{}",
+            std::process::id()
+        ));
+        let mut friends = FriendsStore::empty_at(&data_dir);
+        let fid = FriendId::from_public_key(peer);
+        friends
+            .ensure_friend(fid)
+            .record_addrs(vec![EndpointAddr::new(peer)]);
+        let before = friends.clone();
+
+        let confirmed = confirmed_direct_invite_addrs(local, &friends, peer, wrong_topic, &[]);
+
+        assert!(
+            confirmed.is_none(),
+            "invalid topic should not confirm the invite"
+        );
+        assert_eq!(
+            friends.friends, before.friends,
+            "state must remain unchanged"
+        );
+    }
+
+    #[test]
     fn gui_dark_mode_command_maps_to_normal_toggle_message() {
         assert!(matches!(
             gui_dark_mode_message(&GuiTestCommand::ToggleDarkMode { enabled: true }),
@@ -15040,11 +15257,13 @@ mod tests {
             dark_mode: false,
             sound_enabled: false,
             chat_text_size: 17.0,
+            share_direct_addresses: false,
         };
         let toggled = AppSettings {
             dark_mode: true,
             sound_enabled: original.sound_enabled,
             chat_text_size: original.chat_text_size,
+            share_direct_addresses: original.share_direct_addresses,
         };
         toggled.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
@@ -15056,17 +15275,98 @@ mod tests {
     }
 
     #[test]
-    fn gui_file_share_ticket_is_parseable_and_has_sender_address() {
-        let key = SecretKey::generate();
-        let addr = EndpointAddr::new(key.public());
-        let hash = iroh_blobs::Hash::from_bytes([7; 32]);
+    fn invitation_endpoint_addr_strips_direct_addrs_by_default() {
+        let peer = SecretKey::generate().public();
+        let relay: iroh::RelayUrl = "https://relay.example.test./".parse().unwrap();
+        let direct: std::net::SocketAddr = "192.0.2.44:4321".parse().unwrap();
+        let addr = EndpointAddr::new(peer)
+            .with_relay_url(relay.clone())
+            .with_ip_addr(direct);
 
-        let ticket = blob_ticket_string(addr, hash, iroh_blobs::BlobFormat::Raw);
-        let parsed: BlobTicket = ticket.parse().expect("GUI ticket must be parseable");
+        let sanitized = invitation_endpoint_addr(addr.clone(), false);
 
-        assert_eq!(parsed.addr().id, key.public());
-        assert_eq!(parsed.hash(), hash);
+        assert_eq!(sanitized.id, peer);
+        assert_eq!(sanitized.relay_urls().next().cloned(), Some(relay));
+        assert!(sanitized.ip_addrs().next().is_none());
+        assert!(addr.ip_addrs().next().is_some(), "fixture should contain a direct address");
     }
+
+    #[test]
+    fn invitation_endpoint_addr_keeps_direct_addrs_when_opted_in() {
+        let peer = SecretKey::generate().public();
+        let relay: iroh::RelayUrl = "https://relay.example.test./".parse().unwrap();
+        let direct: std::net::SocketAddr = "192.0.2.44:4321".parse().unwrap();
+        let addr = EndpointAddr::new(peer)
+            .with_relay_url(relay.clone())
+            .with_ip_addr(direct);
+
+        let opted_in = invitation_endpoint_addr(addr.clone(), true);
+
+        assert_eq!(opted_in, addr);
+    }
+
+    #[test]
+    fn room_ticket_payload_round_trips_without_direct_addresses() {
+        let peer = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([42; 32]);
+        let relay: iroh::RelayUrl = "https://relay.example.test./".parse().unwrap();
+        let direct: std::net::SocketAddr = "192.0.2.44:4321".parse().unwrap();
+        let addr = EndpointAddr::new(peer)
+            .with_relay_url(relay)
+            .with_ip_addr(direct);
+        let ticket = Ticket {
+            topic,
+            peers: vec![invitation_endpoint_addr(addr, false)],
+            discovery_secret: None,
+        };
+        let encoded = ticket.to_string();
+        let decoded = encoded.parse::<Ticket>().expect("ticket payload should parse");
+
+        assert_eq!(decoded, ticket);
+        assert!(decoded.peers[0].ip_addrs().next().is_none());
+    }
+
+    #[test]
+    fn room_ticket_payload_round_trips_with_direct_addresses_when_opted_in() {
+        let peer = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([43; 32]);
+        let relay: iroh::RelayUrl = "https://relay.example.test./".parse().unwrap();
+        let direct: std::net::SocketAddr = "192.0.2.45:4321".parse().unwrap();
+        let addr = EndpointAddr::new(peer)
+            .with_relay_url(relay)
+            .with_ip_addr(direct);
+        let ticket = Ticket {
+            topic,
+            peers: vec![invitation_endpoint_addr(addr.clone(), true)],
+            discovery_secret: None,
+        };
+        let encoded = ticket.to_string();
+        let decoded = encoded.parse::<Ticket>().expect("ticket payload should parse");
+
+        assert_eq!(decoded, ticket);
+        assert!(decoded.peers[0].ip_addrs().next().is_some());
+        assert_eq!(decoded.peers[0], addr);
+    }
+
+    #[test]
+    fn room_invite_v2_qr_payload_round_trips_without_endpoint_info() {
+        let topic = TopicId::from_bytes([44; 32]);
+        let secret = DiscoverySecret::from_bytes([0x2au8; 32]);
+        let invite = RoomInviteV2::new(topic, secret);
+        let encoded = invite.encode();
+
+        assert!(encoded.starts_with("boru1:"));
+        assert_eq!(encoded.matches(':').count(), 1);
+        let parsed = RoomInvitation::parse(&encoded).expect("invite should parse");
+        match parsed {
+            RoomInvitation::Stable(restored) => {
+                assert_eq!(restored.topic, topic);
+                assert_eq!(restored.discovery_secret, secret);
+            }
+            RoomInvitation::Legacy(_) => panic!("stable invite should not fall back to legacy"),
+        }
+    }
+
 
     #[test]
     fn hash_only_file_share_value_is_not_a_blob_ticket() {
@@ -16703,7 +17003,9 @@ mod tests {
             let router = iroh::protocol::Router::builder(endpoint.clone())
                 .accept(boru_chat::net::GOSSIP_ALPN, gossip.clone())
                 .spawn();
-            let blob_store = iroh_blobs::store::mem::MemStore::new();
+            let blob_store = iroh_blobs::store::fs::FsStore::load(data_dir.join("blobs"))
+                .await
+                .expect("create fs blob store");
             let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
             let friends = boru_chat::friends::FriendsStore::empty_at(&data_dir);
             let mut room_history = boru_chat::room_history::RoomHistoryStore::empty_at(&data_dir);

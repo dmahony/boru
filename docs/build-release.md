@@ -105,17 +105,28 @@ cargo test --all-features
 
 ### Versioning
 
-The project follows semantic versioning. The current version is `0.101.0`.
+The project follows semantic versioning. `Cargo.toml` contains the package
+baseline version. The GUI's displayed version is calculated at build time from
+conventional commits since the newest `v<version>` tag:
+
+- breaking changes (`!:` or `BREAKING CHANGE:`) → major bump
+- `feat` → minor bump
+- `fix`, `perf`, `refactor`, or `revert` → patch bump
+- `docs`, `chore`, `test`, `style`, `ci`, and `build` → no bump
+
+Multiple significant commits in one release window produce one bump at the
+highest applicable level. For example, any `feat` commits plus fixes produce a
+minor bump, not one minor bump per feature. The displayed GUI version remains
+stable between builds and includes the current git hash when available.
 
 ### Release Steps
 
-1. Update version in `Cargo.toml`
+1. Review the build-calculated version and create the corresponding `v<version>` tag
 2. Update `.github/workflows/ci.yml` if MSRV changes
 3. Run `git cliff --prepend CHANGELOG.md --tag v<version> --unreleased`
    (also automated via `release.toml` pre-release-hook)
-4. Commit with message `chore: release v<version>`
-5. Tag with `v<version>`
-6. Push
+4. Commit the changelog with message `chore: release v<version>`
+5. Push the tag
 
 ### Release Configuration (`release.toml`)
 

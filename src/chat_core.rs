@@ -87,6 +87,19 @@ pub fn collect_bootstrap_peers(
     (peer_ids, all_addrs)
 }
 
+/// Merge bootstrap peer addresses from a new invitation with any addresses we
+/// already know for the peer, deduplicating by endpoint id.
+///
+/// This keeps relay-only invitations usable: if the incoming invitation has no
+/// hints, we retain the previously stored peer metadata instead of replacing it
+/// with an empty list.
+pub fn merge_bootstrap_peer_addrs(
+    existing: &[EndpointAddr],
+    incoming: &[EndpointAddr],
+) -> Vec<EndpointAddr> {
+    collect_bootstrap_peers([incoming, existing]).1
+}
+
 /// Seed an [`iroh::address_lookup::memory::MemoryLookup`] with every
 /// [`EndpointAddr`] from a deduplicated address list, so that
 /// `endpoint.connect()` can resolve the peers by their addresses.
@@ -1668,10 +1681,7 @@ pub fn handle_net_event_for_topic(
                         }
                         if !is_muted {
                             let sender_name = cb.resolve_name(&from);
-                            cb.push_system(format!(
-                                "{} shared a file: {}",
-                                sender_name, name
-                            ));
+                            cb.push_system(format!("{} shared a file: {}", sender_name, name));
                             cb.set_pending_file(name, ticket);
                         }
                     }
@@ -2270,14 +2280,20 @@ pub async fn download_blob_to_file(
     max_bytes: Option<u64>,
 ) -> Result<()> {
     let id = TransferId::next();
-    let shared_cb: TransferProgressCallback =
-        Arc::new(Mutex::new(Some(Box::new(on_progress))));
+    let shared_cb: TransferProgressCallback = Arc::new(Mutex::new(Some(Box::new(on_progress))));
     let emit = |ev: TransferProgress| {
         if let Ok(mut guard) = shared_cb.lock() {
-            if let Some(cb) = guard.as_mut() { cb(ev); }
+            if let Some(cb) = guard.as_mut() {
+                cb(ev);
+            }
         }
     };
-    emit(TransferProgress::Started { id, kind, name: name.clone(), total: None });
+    emit(TransferProgress::Started {
+        id,
+        kind,
+        name: name.clone(),
+        total: None,
+    });
     let cancel_guard = CancelGuard::new(id, kind, name.clone(), shared_cb.clone());
 
     // Phase 1: download to the local blob store
@@ -2291,22 +2307,37 @@ pub async fn download_blob_to_file(
                 if let Some(max) = max_bytes {
                     if n > max {
                         emit(TransferProgress::Failed {
-                            id, name: name.clone(),
+                            id,
+                            name: name.clone(),
                             error: format!("blob too large ({} bytes, limit {} bytes)", n, max),
                         });
                         return Err(n0_error::anyerr!("blob too large"));
                     }
                 }
-                emit(TransferProgress::Progress { id, kind, name: name.clone(), bytes: n, total: None });
+                emit(TransferProgress::Progress {
+                    id,
+                    kind,
+                    name: name.clone(),
+                    bytes: n,
+                    total: None,
+                });
             }
             Some(DownloadProgressItem::Error(e)) => {
                 cancel_guard.disarm();
-                emit(TransferProgress::Failed { id, name, error: format!("{e}") });
+                emit(TransferProgress::Failed {
+                    id,
+                    name,
+                    error: format!("{e}"),
+                });
                 return Err(e);
             }
             Some(DownloadProgressItem::DownloadError) => {
                 cancel_guard.disarm();
-                emit(TransferProgress::Failed { id, name, error: "Download error".into() });
+                emit(TransferProgress::Failed {
+                    id,
+                    name,
+                    error: "Download error".into(),
+                });
                 return Err(n0_error::anyerr!("Download error"));
             }
             None => break,
@@ -2322,7 +2353,9 @@ pub async fn download_blob_to_file(
     let mut buf = vec![0u8; 256 * 1024];
     loop {
         let n = reader.read(&mut buf).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         tokio::io::AsyncWriteExt::write_all(&mut file, &buf[..n]).await?;
     }
     tokio::io::AsyncWriteExt::flush(&mut file).await?;
@@ -4110,6 +4143,39 @@ mod tests {
         let (ids, addrs) = collect_bootstrap_peers([&[addr.clone()][..]]);
         assert_eq!(ids, vec![pk], "single source should produce its peer ID");
         assert_eq!(addrs.len(), 1, "single source should produce its addr");
+    }
+
+    #[test]
+    fn test_merge_bootstrap_peer_addrs_keeps_existing_when_incoming_is_empty() {
+        let sk = SecretKey::generate();
+        let pk = sk.public();
+        let existing = vec![EndpointAddr::new(pk)];
+
+        let merged = merge_bootstrap_peer_addrs(&existing, &[]);
+
+        assert_eq!(
+            merged, existing,
+            "relay-only invites must preserve known peers"
+        );
+    }
+
+    #[test]
+    fn test_merge_bootstrap_peer_addrs_deduplicates_duplicate_peers() {
+        let sk1 = SecretKey::generate();
+        let sk2 = SecretKey::generate();
+        let pk1 = sk1.public();
+        let pk2 = sk2.public();
+
+        let existing = vec![EndpointAddr::new(pk1), EndpointAddr::new(pk2)];
+        let incoming = vec![
+            EndpointAddr::new(pk2),
+            EndpointAddr::new(pk1),
+            EndpointAddr::new(pk1),
+        ];
+
+        let merged = merge_bootstrap_peer_addrs(&existing, &incoming);
+
+        assert_eq!(merged, vec![EndpointAddr::new(pk2), EndpointAddr::new(pk1)]);
     }
 
     #[test]
