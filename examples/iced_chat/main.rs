@@ -147,7 +147,7 @@ pub use boru_core::chat_core::forward_gossip_events;
 // ── Identity persistence ──────────────────────────────────────────────
 
 fn get_data_dir(cli_override: Option<PathBuf>) -> PathBuf {
-    boru_chat::data_dir::resolve_data_dir(cli_override)
+    boru_core::data_dir::resolve_data_dir(cli_override)
 }
 
 fn load_or_generate_secret_key(data_dir: &Path) -> Result<(SecretKey, PathBuf)> {
