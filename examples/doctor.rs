@@ -149,62 +149,15 @@ fn secret_key_mode_ok(mode: u32) -> bool {
 }
 
 fn get_data_dir() -> PathBuf {
-    if let Ok(val) = env::var("BORU_CHAT_DATA_DIR") {
-        return PathBuf::from(val);
-    }
-    if let Some(val) = env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(val).join("boru-chat");
-    }
-    if let Some(val) = env::var_os("HOME") {
-        return PathBuf::from(val)
-            .join(".local")
-            .join("share")
-            .join("boru-chat");
-    }
-    if let Some(val) = env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(val).join("boru-chat");
-    }
-    std::env::current_dir()
-        .unwrap_or_default()
-        .join(".boru-chat")
+    boru_chat::data_dir::resolve_data_dir(None)
 }
 
 fn resolve_data_dir(override_dir: Option<PathBuf>) -> PathBuf {
-    match override_dir {
-        Some(d) => d,
-        None => get_data_dir(),
-    }
+    boru_chat::data_dir::resolve_data_dir(override_dir)
 }
 
 fn candidate_data_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    if let Ok(val) = env::var("BORU_CHAT_DATA_DIR") {
-        dirs.push(PathBuf::from(val));
-    }
-    if let Some(val) = env::var_os("XDG_DATA_HOME") {
-        dirs.push(PathBuf::from(val).join("boru-chat"));
-    }
-    if let Some(val) = env::var_os("HOME") {
-        dirs.push(
-            PathBuf::from(val)
-                .join(".local")
-                .join("share")
-                .join("boru-chat"),
-        );
-    }
-
-    // Deduplicate by canonical path where possible
-    let mut seen = std::collections::HashSet::new();
-    dirs.retain(|d| {
-        if seen.contains(d) {
-            return false;
-        }
-        seen.insert(d.clone());
-        true
-    });
-
-    dirs
+    boru_chat::data_dir::legacy_candidate_dirs()
 }
 
 // ── Individual check functions ──────────────────────────────────────────────
@@ -496,8 +449,11 @@ fn check_env_overrides() -> Check {
     let name = "environment".to_string();
     let mut hints = Vec::new();
 
-    if let Ok(dir) = env::var("BORU_CHAT_DATA_DIR") {
-        hints.push(format!("BORU_CHAT_DATA_DIR={dir}"));
+    if let Ok(dir) = env::var(boru_chat::data_dir::ENV_BORU_DATA_DIR) {
+        hints.push(format!("{}={dir}", boru_chat::data_dir::ENV_BORU_DATA_DIR));
+    }
+    if let Ok(dir) = env::var(boru_chat::data_dir::ENV_BORU_CHAT_DATA_DIR) {
+        hints.push(format!("{}={dir}", boru_chat::data_dir::ENV_BORU_CHAT_DATA_DIR));
     }
     if let Some(xdg) = env::var_os("XDG_DATA_HOME") {
         hints.push(format!("XDG_DATA_HOME={}", xdg.to_string_lossy()));
