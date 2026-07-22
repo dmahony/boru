@@ -42,7 +42,7 @@ use std::{
 use bytes::Bytes;
 use iroh::{PublicKey, SecretKey};
 
-use boru_chat::{
+use boru_core::{
     storage::Storage,
     store::{DeliveryStatus, MessageId, MessageStore, OutboxRow, StoredEnvelope},
 };

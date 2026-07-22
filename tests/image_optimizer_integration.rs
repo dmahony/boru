@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use boru_chat::image_optimizer::{
+use boru_core::image_optimizer::{
     compress_image, optimize_chat_image, CHAT_IMAGE_MAX_BYTES, CHAT_IMAGE_OPTIMIZED_MAX_BYTES,
     INLINE_IMAGE_MAX_DIM,
 };

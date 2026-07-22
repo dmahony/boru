@@ -12,12 +12,12 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use boru_chat::chat_core::{ChatEntry, ChatKind};
-use boru_chat::chat_history::ChatHistoryStore;
-use boru_chat::conversations::ConversationStore;
-use boru_chat::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore};
-use boru_chat::perf::PerfTracker;
-use boru_chat::proto::TopicId;
+use boru_core::chat_core::{ChatEntry, ChatKind};
+use boru_core::chat_history::ChatHistoryStore;
+use boru_core::conversations::ConversationStore;
+use boru_core::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore};
+use boru_core::perf::PerfTracker;
+use boru_core::proto::TopicId;
 use iroh::{PublicKey, SecretKey};
 
 use rand::RngExt;
@@ -77,7 +77,7 @@ fn load_stores_from_disk(data_dir: &str) -> (FriendsStore, ChatHistoryStore, Con
 #[test]
 fn stress_startup_data_loading() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
 
     // The data must be pre-generated at /tmp/iroh-stress-test-data
     let data_dir = std::env::var("STRESS_DATA_DIR")
@@ -166,7 +166,7 @@ fn stress_startup_data_loading() {
 #[test]
 fn stress_entry_scrolling() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
 
     let entries = make_chat_entries(DATASET_MESSAGES);
 
@@ -243,7 +243,7 @@ fn stress_entry_scrolling() {
 #[test]
 fn stress_conversation_switching() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
 
     let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
@@ -291,7 +291,7 @@ fn stress_conversation_switching() {
 #[test]
 fn stress_profile_opening() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
 
     let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
     let _secret_key = SecretKey::from_bytes(&[0u8; 32]);
@@ -344,7 +344,7 @@ fn stress_profile_opening() {
 #[test]
 fn stress_downloads() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
 
     let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
@@ -403,7 +403,7 @@ fn stress_downloads() {
 #[test]
 fn stress_search() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
 
     let entries = make_chat_entries(DATASET_MESSAGES);
 
@@ -466,7 +466,7 @@ fn stress_search() {
 #[test]
 fn stress_all_operations() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
 
     let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
@@ -639,7 +639,7 @@ fn stress_all_operations() {
 #[test]
 fn stress_memory_pressure() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
 
     let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
 

@@ -7,7 +7,7 @@
 //!   A broadcasts -> B should receive
 //!   B broadcasts -> A should receive
 
-use boru_chat::{
+use boru_core::{
     api::{Event as GossipEvent, GossipTopic},
     chat_core::{Message, SignedMessage},
     net::{Gossip, GOSSIP_ALPN},

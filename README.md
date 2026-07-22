@@ -5,7 +5,7 @@ Private, peer-to-peer communication built on
 
 > Private communication, directly between people.
 
-Boru is a Rust library (`boru_chat`) and example GUI application
+Boru is a Rust library (`boru_core`) and example GUI application
 (`examples/iced_chat`) that provides peer-to-peer messaging over gossip trees:
 
 - **Gossip protocol** — room-based message broadcasting over QUIC
@@ -101,7 +101,7 @@ restart. There is no continuous catalogue-polling worker.
 
 Clicking download performs a fresh authorization request over
 `/boru-file-access/1`. The owner re-checks the live relationship, grants,
-offer, availability, expected hash, size, and version, then issues a
+availability, expected hash, size, and version, then issues a
 requester-bound signed descriptor that expires after 60 seconds. Cached
 catalogue visibility does not authorize access.
 

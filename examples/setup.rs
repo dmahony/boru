@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
 };
 
-use boru_chat::{net::Gossip, ALPN};
+use boru_core::{net::Gossip, ALPN};
 use iroh::{endpoint::presets, protocol::Router, Endpoint, SecretKey};
 use n0_error::{Result, StdResultExt};
 

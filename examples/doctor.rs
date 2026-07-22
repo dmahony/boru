@@ -22,10 +22,10 @@ use clap::Parser;
 use iroh::SecretKey;
 use n0_error::Result;
 
-use boru_chat::chat_history::ChatHistoryStore;
-use boru_chat::friends::FriendsStore;
-use boru_chat::room::RoomStore;
-use boru_chat::room_history::RoomHistoryStore;
+use boru_core::chat_history::ChatHistoryStore;
+use boru_core::friends::FriendsStore;
+use boru_core::room::RoomStore;
+use boru_core::room_history::RoomHistoryStore;
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 

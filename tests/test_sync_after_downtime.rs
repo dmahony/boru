@@ -32,7 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use iroh::{PublicKey, SecretKey};
 
-use boru_chat::{
+use boru_core::{
     mailbox::MailboxPublicKey,
     storage::Storage,
     store::{MessageId, StoredEnvelope},

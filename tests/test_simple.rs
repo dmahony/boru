@@ -1,4 +1,4 @@
-use boru_chat::{
+use boru_core::{
     catalogue_handler::CatalogueHandler,
     friends::{FriendId, FriendRecord, FriendRelationship, FriendsStore},
     protocol_version::CATALOGUE_ALPN,
@@ -96,20 +96,20 @@ async fn simple_test() {
     match tokio::time::timeout(Duration::from_secs(5), conn.accept_bi()).await {
         Ok(Ok((mut send, mut recv))) => {
             eprintln!("--- open_bi OK ---");
-            let wire_req = boru_chat::catalogue_protocol::CatalogWireRequest::new(
-                boru_chat::catalogue_protocol::CatalogRequest::GetCatalogue {
+            let wire_req = boru_core::catalogue_protocol::CatalogWireRequest::new(
+                boru_core::catalogue_protocol::CatalogRequest::GetCatalogue {
                     known_revision: None,
                 },
             );
             let payload = postcard::to_stdvec(&wire_req).unwrap();
-            boru_chat::protocol_version::write_frame(&mut send, 1, &payload)
+            boru_core::protocol_version::write_frame(&mut send, 1, &payload)
                 .await
                 .unwrap();
             send.finish().unwrap();
 
             let result = tokio::time::timeout(
                 Duration::from_secs(5),
-                boru_chat::protocol_version::read_frame(&mut recv, &[1], "catalogue"),
+                boru_core::protocol_version::read_frame(&mut recv, &[1], "catalogue"),
             )
             .await;
             match result {

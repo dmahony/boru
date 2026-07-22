@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use boru_chat::safe_destination::{prepare_download_destination, safe_destination_path};
+use boru_core::safe_destination::{prepare_download_destination, safe_destination_path};
 use tempfile::TempDir;
 
 fn assert_safe_or_rejected(download_dir: &Path, remote_name: &str) {

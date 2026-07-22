@@ -26,7 +26,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use boru_chat::{
+use boru_core::{
     catalogue_model::{FileCatalogueCollection, RemoteSharedFile, SignedFileCatalogue},
     diagnostics::{DiagnosticEventKind, Diagnostics},
     download_manager::DownloadManager,
@@ -145,9 +145,9 @@ fn make_manager_diag(storage: Storage) -> (DownloadManager, Arc<Diagnostics>, te
 #[cfg(feature = "net")]
 #[tokio::test]
 async fn peer_profile_data_flow() {
-    use boru_chat::catalogue_client::fetch_remote_catalogue;
-    use boru_chat::catalogue_handler::CatalogueHandler;
-    use boru_chat::protocol_version::CATALOGUE_ALPN;
+    use boru_core::catalogue_client::fetch_remote_catalogue;
+    use boru_core::catalogue_handler::CatalogueHandler;
+    use boru_core::protocol_version::CATALOGUE_ALPN;
     use iroh::{
         address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint,
         RelayMode,
@@ -284,9 +284,9 @@ async fn peer_profile_data_flow() {
 #[cfg(feature = "net")]
 #[tokio::test]
 async fn refresh_cycle_updates_cached_data() {
-    use boru_chat::catalogue_client::fetch_remote_catalogue;
-    use boru_chat::catalogue_handler::CatalogueHandler;
-    use boru_chat::protocol_version::CATALOGUE_ALPN;
+    use boru_core::catalogue_client::fetch_remote_catalogue;
+    use boru_core::catalogue_handler::CatalogueHandler;
+    use boru_core::protocol_version::CATALOGUE_ALPN;
     use iroh::{
         address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint,
         RelayMode,
@@ -777,9 +777,9 @@ async fn pause_and_resume_download() {
 #[cfg(feature = "net")]
 #[tokio::test]
 async fn permission_denied_non_friend() {
-    use boru_chat::catalogue_client::fetch_remote_catalogue;
-    use boru_chat::catalogue_handler::CatalogueHandler;
-    use boru_chat::protocol_version::CATALOGUE_ALPN;
+    use boru_core::catalogue_client::fetch_remote_catalogue;
+    use boru_core::catalogue_handler::CatalogueHandler;
+    use boru_core::protocol_version::CATALOGUE_ALPN;
     use iroh::{
         address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, Endpoint,
         RelayMode,

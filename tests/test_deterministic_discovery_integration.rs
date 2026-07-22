@@ -27,11 +27,11 @@
 
 use std::time::{Duration, Instant};
 
-use boru_chat::discovery_backend::{InMemoryDiscoveryBackend, TopicDiscoveryBackend};
-use boru_chat::discovery_secret::DiscoverySecret;
-use boru_chat::private_room_tracker::PrivateRoomTracker;
-use boru_chat::proto::TopicId;
-use boru_chat::public_room_continuous::{
+use boru_core::discovery_backend::{InMemoryDiscoveryBackend, TopicDiscoveryBackend};
+use boru_core::discovery_secret::DiscoverySecret;
+use boru_core::private_room_tracker::PrivateRoomTracker;
+use boru_core::proto::TopicId;
+use boru_core::public_room_continuous::{
     ContinuousTrackerConfig, PublicationDecision, PublicationPolicy, PublicationPolicyConfig,
 };
 use iroh::{EndpointId, SecretKey};
@@ -345,7 +345,7 @@ async fn dedup_prevents_repeat_peer_emissions() {
     let (tx, mut rx) = mpsc::channel(16);
     let config = fast_discover_config();
 
-    let continuous = boru_chat::private_room_tracker::PrivateContinuousTracker::start(
+    let continuous = boru_core::private_room_tracker::PrivateContinuousTracker::start(
         alice_tracker,
         config.sanitize(),
         tx,
@@ -405,7 +405,7 @@ async fn shutdown_during_publish_completes_promptly() {
         ..Default::default()
     };
 
-    let continuous = boru_chat::private_room_tracker::PrivateContinuousTracker::start(
+    let continuous = boru_core::private_room_tracker::PrivateContinuousTracker::start(
         tracker,
         config.sanitize(),
         tx,
@@ -428,7 +428,7 @@ async fn repeated_start_shutdown_cycles() {
         let (tracker, _ep) = make_tracker(&backend);
         let (tx, _rx) = mpsc::channel(16);
 
-        let continuous = boru_chat::private_room_tracker::PrivateContinuousTracker::start(
+        let continuous = boru_core::private_room_tracker::PrivateContinuousTracker::start(
             tracker,
             fast_discover_config().sanitize(),
             tx,
@@ -628,7 +628,7 @@ async fn discovery_respects_per_cycle_cap() {
         ..Default::default()
     };
 
-    let continuous = boru_chat::private_room_tracker::PrivateContinuousTracker::start(
+    let continuous = boru_core::private_room_tracker::PrivateContinuousTracker::start(
         discoverer,
         config.sanitize(),
         tx,
@@ -714,7 +714,7 @@ async fn shutdown_with_dropped_receiver() {
     let (tx, rx) = mpsc::channel(16);
     drop(rx); // receiver dropped immediately
 
-    let continuous = boru_chat::private_room_tracker::PrivateContinuousTracker::start(
+    let continuous = boru_core::private_room_tracker::PrivateContinuousTracker::start(
         tracker,
         fast_discover_config().sanitize(),
         tx,

@@ -2002,7 +2002,7 @@ impl std::fmt::Display for GuiActionId {
 /// # Examples
 ///
 /// ```
-/// use boru_chat::diagnostics::ExpectedState;
+/// use boru_core::diagnostics::ExpectedState;
 ///
 /// let state = ExpectedState::ScreenIs("chat_list".into());
 /// assert!(state.matches_str("screen", "chat_list"));
@@ -3031,7 +3031,7 @@ impl GuiTestCommand {
     /// # Examples
     ///
     /// ```
-    /// use boru_chat::diagnostics::{GuiTestCommand, ExpectedState};
+    /// use boru_core::diagnostics::{GuiTestCommand, ExpectedState};
     ///
     /// let cmd = GuiTestCommand::GoToChatList;
     /// assert_eq!(cmd.expected_state(), Some(ExpectedState::ScreenIs("ChatList".into())));

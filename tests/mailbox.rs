@@ -1,4 +1,4 @@
-use boru_chat::mailbox::{MailboxAck, MailboxIdentity, MailboxStore, DEFAULT_MAILBOX_TTL};
+use boru_core::mailbox::{MailboxAck, MailboxIdentity, MailboxStore, DEFAULT_MAILBOX_TTL};
 use iroh::SecretKey;
 use std::time::Duration;
 

@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use boru_chat::{
+use boru_core::{
     api::{Event as GossipEvent, GossipReceiver},
     chat_core::check_peer_connection_type,
     net::{Gossip, GOSSIP_ALPN},
@@ -487,16 +487,16 @@ async fn interop_three_peers_message_flow() -> Result<()> {
     assert!(
         matches!(
             conn_ab,
-            boru_chat::chat_core::ConnectionType::Relayed
-                | boru_chat::chat_core::ConnectionType::Direct
+            boru_core::chat_core::ConnectionType::Relayed
+                | boru_core::chat_core::ConnectionType::Direct
         ),
         "connection type A↔B should be known, got {conn_ab:?}"
     );
     assert!(
         matches!(
             conn_ac,
-            boru_chat::chat_core::ConnectionType::Relayed
-                | boru_chat::chat_core::ConnectionType::Direct
+            boru_core::chat_core::ConnectionType::Relayed
+                | boru_core::chat_core::ConnectionType::Direct
         ),
         "connection type A↔C should be known, got {conn_ac:?}"
     );
@@ -608,8 +608,8 @@ async fn interop_no_relay_direct_connect() -> Result<()> {
     assert!(
         matches!(
             conn_ab,
-            boru_chat::chat_core::ConnectionType::Direct
-                | boru_chat::chat_core::ConnectionType::Relayed
+            boru_core::chat_core::ConnectionType::Direct
+                | boru_core::chat_core::ConnectionType::Relayed
         ),
         "connection A→B should be known, got {conn_ab:?}"
     );

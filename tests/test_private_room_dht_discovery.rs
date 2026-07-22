@@ -8,12 +8,12 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use boru_chat::chat_core::Ticket;
-use boru_chat::discovery_backend::{InMemoryDiscoveryBackend, TopicDiscoveryBackend};
-use boru_chat::discovery_secret::DiscoverySecret;
-use boru_chat::private_room_tracker::PrivateRoomTracker;
-use boru_chat::proto::TopicId;
-use boru_chat::room::RoomStore;
+use boru_core::chat_core::Ticket;
+use boru_core::discovery_backend::{InMemoryDiscoveryBackend, TopicDiscoveryBackend};
+use boru_core::discovery_secret::DiscoverySecret;
+use boru_core::private_room_tracker::PrivateRoomTracker;
+use boru_core::proto::TopicId;
+use boru_core::room::RoomStore;
 use iroh::{EndpointAddr, SecretKey};
 use tempfile::tempdir;
 
@@ -192,7 +192,7 @@ async fn shutdown_is_idempotent_for_in_memory_backend_and_does_not_hang() -> Tes
     tokio::time::timeout(Duration::from_secs(1), tracker.shutdown()).await?;
     let _ = tokio::time::timeout(Duration::from_secs(1), backend.shutdown()).await?;
     assert!(backend
-        .lookup(&boru_chat::discovery_backend::NamespaceId::new([0; 32]))
+        .lookup(&boru_core::discovery_backend::NamespaceId::new([0; 32]))
         .await?
         .is_empty());
     Ok(())

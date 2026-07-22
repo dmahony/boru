@@ -14,13 +14,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use boru_chat::discovery_backend::{
+use boru_core::discovery_backend::{
     canonical_lobby_key, EncryptedDiscoveryRecord, InMemoryDiscoveryBackend, NamespaceId,
     TopicDiscoveryBackend,
 };
-use boru_chat::discovery_record::create_discovery_record;
-use boru_chat::public_room::{public_room_identity, PublicNetwork};
-use boru_chat::public_room_tracker::PublicRoomTracker;
+use boru_core::discovery_record::create_discovery_record;
+use boru_core::public_room::{public_room_identity, PublicNetwork};
+use boru_core::public_room_tracker::PublicRoomTracker;
 use distributed_topic_tracker::unix_minute;
 use iroh::{EndpointId, SecretKey};
 use n0_error::Result;

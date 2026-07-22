@@ -1,6 +1,6 @@
 //! Repository-level integration tests for the relational storage layer.
 //!
-//! These tests exercise [`boru_chat::storage::Storage`] through its public API
+//! These tests exercise [`boru_core::storage::Storage`] through its public API
 //! and verify correctness across restarts, replay protection, ordering,
 //! key rotation, tombstoning, legacy migration, and attachment integrity.
 //!
@@ -27,7 +27,7 @@ use bytes::Bytes;
 use iroh::{PublicKey, SecretKey};
 use rusqlite::{params, Connection};
 
-use boru_chat::{
+use boru_core::{
     storage::Storage,
     store::{DeliveryStatus, MessageId, StoredEnvelope},
 };
