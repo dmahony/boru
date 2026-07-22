@@ -4,7 +4,8 @@
 //! with dynamic room switching — like Telegram/Signal.
 
 use boru_chat::abuse_controls::{
-    sanitize_display_text, sanitize_single_line, DEFAULT_MAX_DISPLAY_LENGTH,
+    sanitize_display_text, sanitize_single_line, sanitize_single_line_with_max,
+    DEFAULT_MAX_DISPLAY_LENGTH,
 };
 use boru_chat::catalogue_client::fetch_paginated_remote_catalogue;
 use boru_chat::catalogue_model::RemoteSharedFile;
@@ -693,6 +694,7 @@ pub(crate) const BUTTON_ICON: fn(
 };
 
 /// Transparent full-size backdrop button — invisible but clickable.
+#[allow(dead_code)]
 pub(crate) const BUTTON_BACKDROP: fn(
     &iced::Theme,
     iced::widget::button::Status,
@@ -705,6 +707,7 @@ pub(crate) const BUTTON_BACKDROP: fn(
 
 /// Transparent-wide button — no background, no border, inherits parent text color.
 /// Used for clickable rows that should look like plain containers.
+#[allow(dead_code)]
 pub(crate) const BUTTON_TRANSPARENT: fn(
     &iced::Theme,
     iced::widget::button::Status,
@@ -1407,6 +1410,10 @@ impl ChatEntry {
 /// of the active screen — only the right-hand main panel changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {
+    /// One-time welcome screen for first-run onboarding.
+    Welcome,
+    /// Profile creation / setup screen.
+    ProfileSetup,
     /// No chat selected — empty state shown in the main panel.
     ChatList,
     /// An individual chat room with a given topic.
@@ -1551,6 +1558,10 @@ pub struct IcedChat {
     pending_topic: Option<TopicId>,
     /// Screen to return to when closing the settings page.
     settings_return_to: Option<Screen>,
+    /// Whether the profile identity details expander is open.
+    profile_identity_details_open: bool,
+    /// Whether the add-someone advanced section is open.
+    add_someone_advanced_open: bool,
 
     // ── Multi-conversation state ──
     /// Per-conversation runtime state. Each direct chat or group room
@@ -1614,6 +1625,7 @@ pub struct IcedChat {
     memory_lookup: MemoryLookup,
     local_label: String,
     local_public: PublicKey,
+    local_identity_qr: iced::widget::qr_code::Data,
     relay_mode: RelayMode,
     runtime_handle: tokio::runtime::Handle,
     pub net_rx: Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>,
@@ -1841,13 +1853,12 @@ pub struct IcedChat {
     /// Persistent profile store (display name, bio, sharing controls).
     profile_store: UserProfileStore,
     /// Bio text input for the profile settings page.
-    #[expect(dead_code)]
     profile_bio_input: String,
     /// Whether file sharing is enabled (cached for quick UI access).
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     shared_folder_enabled: bool,
     /// Path to the shared files folder.
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     shared_folder_path: PathBuf,
     /// Indexes and watches the shared folder for file changes.
     #[allow(dead_code)]
@@ -2311,6 +2322,12 @@ pub enum AppMessage {
     CopyFriendId,
     /// Clear the "Copied!" visual feedback after copy.
     FriendIdCopiedClear,
+    /// Toggle advanced identity details in the profile setup / settings cards.
+    ToggleProfileIdentityDetails,
+    /// Toggle the advanced add-someone / friend-request section.
+    ToggleAddSomeoneAdvanced,
+    /// Open the advanced add-someone / friend-request section.
+    OpenAddSomeoneAdvanced,
     /// Open a direct chat with an online friend.
     OpenFriendChat(PublicKey),
     /// Toggle notification sounds on/off.
@@ -2464,6 +2481,10 @@ pub enum AppMessage {
     InviteWhisperInputChanged(String),
     /// Send a room invite via whisper to the entered peer key.
     InviteSendWhisper,
+    /// Open the profile creation / onboarding screen.
+    OpenProfileSetup,
+    /// Open the welcome screen from any onboarding step.
+    OpenWelcome,
     /// Open the image at the given entry index in full-panel preview.
     OpenImagePreview(usize),
     /// Close the image preview and return to the previous screen.
@@ -2867,6 +2888,23 @@ fn section_card<'a>(
         .into()
 }
 
+const PROFILE_DISPLAY_NAME_MAX_CHARS: usize = 64;
+
+fn normalize_profile_display_name(input: &str) -> String {
+    sanitize_single_line_with_max(input, PROFILE_DISPLAY_NAME_MAX_CHARS)
+        .trim()
+        .to_string()
+}
+
+fn profile_display_name_error(input: &str) -> Option<String> {
+    let normalized = normalize_profile_display_name(input);
+    if normalized.is_empty() {
+        Some("Display name is required.".to_string())
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct SettingsCachedKey {
     dark_mode: bool,
@@ -2927,9 +2965,10 @@ fn profile_identity_card(
     public_key: String,
     copied_friend_id: bool,
     profile_image_handle: Option<iced::widget::image::Handle>,
+    show_advanced_identity_details: bool,
 ) -> iced::Element<'static, AppMessage> {
     let _timer = PerfTracker::timer("profile_identity_card", "build");
-    use iced::widget::{button, container, text, text_input, Column, Row};
+    use iced::widget::{button, container, text, text_input, Column, Row, Space};
     use iced::{Alignment, Length};
 
     let nickname_input = container(
@@ -2983,37 +3022,72 @@ fn profile_identity_card(
     }
     let profile_row = profile_row.spacing(SPACE_12).align_y(Alignment::Center);
 
-    let copy_label = if copied_friend_id { "Copied!" } else { "Copy" };
-    let friend_id_row = Row::new()
+    let advanced_header = Row::new()
         .push(
             Column::new()
-                .push(text("Friend ID").size(TYPO_MD))
+                .push(text("Advanced identity details").size(TYPO_MD))
                 .push(
-                    text(public_key)
+                    text("Show the full device identity and copy the public key.")
                         .size(TYPO_XS)
-                        .style(text_muted_style)
-                        // Public keys contain no whitespace, so glyph wrapping is
-                        // required to keep the complete ID visible in narrow windows.
-                        .wrapping(iced::widget::text::Wrapping::Glyph),
+                        .style(text_muted_style),
                 )
                 .spacing(SPACE_2)
                 .width(Length::Fill)
                 .align_x(Alignment::Start),
         )
         .push(
-            button(text(copy_label).size(TYPO_SM))
-                .on_press(AppMessage::CopyFriendId)
-                .padding([SPACE_6, SPACE_12]),
+            button(
+                text(if show_advanced_identity_details {
+                    "Hide"
+                } else {
+                    "Show"
+                })
+                .size(TYPO_XS),
+            )
+            .on_press(AppMessage::ToggleProfileIdentityDetails)
+            .padding([SPACE_4, SPACE_8]),
         )
         .spacing(SPACE_12)
         .align_y(Alignment::Center);
+
+    let advanced_body: Option<iced::Element<'static, AppMessage>> =
+        if show_advanced_identity_details {
+            let copy_label = if copied_friend_id {
+                "Copied!"
+            } else {
+                "Copy public identity"
+            };
+            Some(
+                Column::new()
+                    .push(
+                        text(public_key)
+                            .size(TYPO_XS)
+                            .style(text_muted_style)
+                            // Public keys contain no whitespace, so glyph wrapping is
+                            // required to keep the complete ID visible in narrow windows.
+                            .wrapping(iced::widget::text::Wrapping::Glyph),
+                    )
+                    .push(Space::new().height(Length::Fixed(SPACE_4)))
+                    .push(
+                        button(text(copy_label).size(TYPO_SM))
+                            .on_press(AppMessage::CopyFriendId)
+                            .padding([SPACE_6, SPACE_12]),
+                    )
+                    .spacing(SPACE_4)
+                    .align_x(Alignment::Start)
+                    .into(),
+            )
+        } else {
+            None
+        };
 
     section_card(
         "IDENTITY",
         vec![
             nickname_input.into(),
             profile_row.into(),
-            friend_id_row.into(),
+            advanced_header.into(),
+            advanced_body.unwrap_or_else(|| iced::widget::Space::new().into()),
         ],
     )
 }
@@ -3154,8 +3228,21 @@ impl IcedChat {
             .as_ref()
             .and_then(|stg| stg.list_shared_files(&local_public.to_string(), true).ok())
             .unwrap_or_default();
+        let profile_store = UserProfileStore::load_or_default(&data_dir, local_public);
+        let saved_profile = profile_store.profile().clone();
+        let onboarding_needed = first_run || saved_profile.display_name.trim().is_empty();
+        let initial_screen = if onboarding_needed {
+            Screen::Welcome
+        } else {
+            Screen::ChatList
+        };
+        let initial_local_label = if saved_profile.display_name.trim().is_empty() {
+            local_label.clone()
+        } else {
+            saved_profile.display_name.clone()
+        };
         Self {
-            screen: Screen::ChatList,
+            screen: initial_screen,
             previous_screen: None,
             pending_topic: None,
             room_history,
@@ -3184,8 +3271,10 @@ impl IcedChat {
             blob_store,
             endpoint,
             memory_lookup,
-            local_label,
+            local_label: initial_local_label,
             local_public,
+            local_identity_qr: iced::widget::qr_code::Data::new(local_public.as_bytes())
+                .expect("public key should always fit in a QR code"),
             relay_mode,
             runtime_handle,
             net_rx,
@@ -3215,6 +3304,8 @@ impl IcedChat {
             viewport_height: 0.0,
             settings: app_settings.clone(),
             settings_return_to: None,
+            profile_identity_details_open: onboarding_needed,
+            add_someone_advanced_open: false,
             dark_mode: app_settings.dark_mode,
             sound_enabled: app_settings.sound_enabled,
             chat_text_size: app_settings.chat_text_size,
@@ -3285,8 +3376,8 @@ impl IcedChat {
             blocked_sharers: HashSet::new(),
             profile_cache: HashMap::new(),
             pending_downloads: HashSet::new(),
-            profile_store: UserProfileStore::empty_at(&data_dir, local_public),
-            profile_bio_input: String::new(),
+            profile_store,
+            profile_bio_input: saved_profile.bio.clone(),
             shared_folder_enabled: false,
             shared_folder_path: PathBuf::from(""),
             boru_downloads_dir: {
@@ -4064,6 +4155,11 @@ impl IcedChat {
             AppMessage::FriendRenameInputChanged(_) => "FriendRenameInputChanged",
             AppMessage::FriendRenameConfirm => "FriendRenameConfirm",
             AppMessage::CopyPeerId(_) => "CopyPeerId",
+            AppMessage::ToggleProfileIdentityDetails => "ToggleProfileIdentityDetails",
+            AppMessage::OpenProfileSetup => "OpenProfileSetup",
+            AppMessage::OpenWelcome => "OpenWelcome",
+            AppMessage::ToggleAddSomeoneAdvanced => "ToggleAddSomeoneAdvanced",
+            AppMessage::OpenAddSomeoneAdvanced => "OpenAddSomeoneAdvanced",
             AppMessage::DismissToast => "DismissToast",
             AppMessage::ShowRemoveFriendConfirm => "ShowRemoveFriendConfirm",
             AppMessage::CancelRemoveFriend => "CancelRemoveFriend",
@@ -4641,6 +4737,8 @@ impl IcedChat {
 impl IcedChat {
     fn publish_gui_state(&self) {
         let (active_screen, active_room) = match &self.screen {
+            Screen::Welcome => ("Welcome", None),
+            Screen::ProfileSetup => ("ProfileSetup", None),
             Screen::Chat { topic } => ("Chat", Some(topic.to_string())),
             Screen::ChatList => ("ChatList", None),
             Screen::FriendRequests => ("FriendRequests", None),
@@ -4650,6 +4748,7 @@ impl IcedChat {
             Screen::FriendProfile(_) => ("FriendProfile", None),
             Screen::ImagePreview { topic, .. } => ("ImagePreview", Some(topic.to_string())),
         };
+
         let _ = self.gui_state_tx.send(IcedStateSnapshot {
             node_id: self.local_public.to_string(),
             version: version_tag(),
@@ -4804,7 +4903,7 @@ impl IcedChat {
                 let personal_topic = self.personal_room_topic();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let endpoint = self.endpoint.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let dht = self.dht.clone();
@@ -5069,7 +5168,7 @@ impl IcedChat {
                 let runtime_handle = self.runtime_handle.clone();
                 let memory_lookup = self.memory_lookup.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
@@ -5548,7 +5647,7 @@ impl IcedChat {
                 let memory_lookup = self.memory_lookup.clone();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
@@ -6480,7 +6579,7 @@ impl IcedChat {
                     };
                     let secret_key = self.secret_key.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let _progress_queue = self.download_progress_queue.clone();
                     let endpoint = self.endpoint.clone();
                     return iced::Task::perform(
                         async move {
@@ -6741,6 +6840,29 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::OpenWelcome => {
+                self.settings_return_to = None;
+                self.screen = Screen::Welcome;
+                iced::Task::none()
+            }
+
+            AppMessage::OpenProfileSetup => {
+                self.settings_return_to = None;
+                self.profile_identity_details_open = true;
+                self.screen = Screen::ProfileSetup;
+                iced::Task::none()
+            }
+
+            AppMessage::ToggleAddSomeoneAdvanced => {
+                self.add_someone_advanced_open = !self.add_someone_advanced_open;
+                iced::Task::none()
+            }
+
+            AppMessage::OpenAddSomeoneAdvanced => {
+                self.add_someone_advanced_open = true;
+                iced::Task::none()
+            }
+
             AppMessage::CloseSettings => {
                 self.screen = self.settings_return_to.take().unwrap_or(Screen::ChatList);
                 iced::Task::none()
@@ -6749,6 +6871,7 @@ impl IcedChat {
             // ── Friend Requests ───────────────────────────────────────
             AppMessage::OpenFriendRequests => {
                 self.screen = Screen::FriendRequests;
+                self.add_someone_advanced_open = true;
                 if let Some(action_id) = self.pending_open_friends_action.take() {
                     let _ = self
                         .gui_action_history
@@ -6929,8 +7052,8 @@ impl IcedChat {
                 self.conversation_store.touch_and_bump(&topic);
                 // Update the sidebar preview BEFORE taking the mutable borrow
                 // on self.conversations (avoids borrow conflict).
-                let is_inactive = topic != self.topic
-                    || !matches!(self.screen, Screen::Chat { .. });
+                let is_inactive =
+                    topic != self.topic || !matches!(self.screen, Screen::Chat { .. });
                 if is_inactive {
                     self.update_room_preview(&topic, &event);
                 }
@@ -7508,15 +7631,15 @@ impl IcedChat {
                 let sender = self.sender.clone();
                 let secret_key = self.secret_key.clone();
                 let endpoint_addr = self.endpoint.addr();
-                let local_label = self.local_label.clone();
-                let local_pk = self.local_public;
+                let _local_label = self.local_label.clone();
+                let _local_pk = self.local_public;
                 iced::Task::perform(
                     async move {
                         let path_buf = std::path::PathBuf::from(&abs_path);
                         let metadata = tokio::fs::metadata(&path_buf)
                             .await
                             .map_err(|e| format!("Failed to inspect file: {e}"))?;
-                        let file_size = metadata.len();
+                        let _file_size = metadata.len();
                         // Stream the file into iroh blobs — no whole-file
                         // memory limit needed.
                         let file = tokio::fs::File::open(&path_buf)
@@ -7529,11 +7652,7 @@ impl IcedChat {
                             .await
                             .await
                             .map_err(|e| format!("Failed to store file: {e}"))?;
-                        let ticket_str = blob_ticket_string(
-                            endpoint_addr,
-                            tag.hash,
-                            tag.format,
-                        );
+                        let ticket_str = blob_ticket_string(endpoint_addr, tag.hash, tag.format);
                         let msg = crate::Message::FileShare {
                             name: filename.clone(),
                             ticket: ticket_str.clone(),
@@ -7546,9 +7665,7 @@ impl IcedChat {
                         Ok((filename, ticket_str))
                     },
                     |r: Result<(String, String), String>| match r {
-                        Ok((name, ticket)) => {
-                            AppMessage::FileDownloaded { name, ticket }
-                        }
+                        Ok((name, ticket)) => AppMessage::FileDownloaded { name, ticket },
                         Err(e) => AppMessage::ErrorMsg(e),
                     },
                 )
@@ -7671,14 +7788,17 @@ impl IcedChat {
                 }
                 if let Some(e) = self.entries.get_mut(entry_index) {
                     if let Some(ref mut d) = e.download {
-                        d.state = DownloadState::Active { bytes: 0, total: None };
+                        d.state = DownloadState::Active {
+                            bytes: 0,
+                            total: None,
+                        };
                     }
                 }
                 self.download_entry_index = Some(entry_index);
                 let blob_store = self.blob_store.clone();
                 let endpoint = self.endpoint.clone();
                 let neighbors = self.neighbors.clone();
-                let safety = self.public_room_safety.clone();
+                let _safety = self.public_room_safety.clone();
                 let ticket_str = dl.ticket.clone();
                 let name = dl.name.clone();
                 let kind = dl.kind;
@@ -7686,12 +7806,13 @@ impl IcedChat {
                 let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
-                        let ticket: iroh_blobs::ticket::BlobTicket =
-                            ticket_str.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
+                        let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                            .parse()
+                            .map_err(|e| format!("Invalid ticket: {e}"))?;
                         let (addr, hash, _format) = ticket.into_parts();
                         let node_id = addr.id;
                         let candidates = download_candidates(node_id, &neighbors);
-                        use boru_chat::chat_callbacks::TransferKind;
+
                         let dl_dir = data_dir.join("downloads");
                         let _ = tokio::fs::create_dir_all(&dl_dir).await;
                         let save_path = dl_dir.join(&name);
@@ -7795,7 +7916,34 @@ impl IcedChat {
             }
 
             AppMessage::SaveProfile => {
-                // Profile persistence is disabled.
+                let display_name = normalize_profile_display_name(&self.local_label);
+                if display_name.is_empty() {
+                    self.toast_message = Some("Choose a display name before saving.".to_string());
+                    self.toast_counter = 120;
+                    return iced::Task::none();
+                }
+
+                self.local_label = display_name.clone();
+                let bio =
+                    sanitize_display_text(&self.profile_bio_input, DEFAULT_MAX_DISPLAY_LENGTH)
+                        .trim()
+                        .to_string();
+                self.profile_bio_input = bio.clone();
+                self.profile_store.profile_mut().display_name = display_name;
+                self.profile_store.profile_mut().bio = bio;
+                if let Err(err) = self.profile_store.save() {
+                    debug!(error = %err, "failed to save profile store");
+                    self.toast_message = Some("Failed to save profile.".to_string());
+                    self.toast_counter = 120;
+                    return iced::Task::none();
+                }
+                self.first_run = false;
+                self.toast_message = Some("Profile saved".to_string());
+                self.toast_counter = 120;
+                if matches!(self.screen, Screen::ProfileSetup) {
+                    self.screen = Screen::FriendRequests;
+                    self.add_someone_advanced_open = true;
+                }
                 iced::Task::none()
             }
 
@@ -8132,12 +8280,8 @@ impl IcedChat {
                     let label = self.resolve_name(&peer);
                     return iced::Task::perform(
                         async move {
-                            let removed = mgr.remove_friend(&peer).await.unwrap_or(false);
-                            if removed {
-                                AppMessage::FriendRemoved { label }
-                            } else {
-                                AppMessage::FriendRemoved { label }
-                            }
+                            let _removed = mgr.remove_friend(&peer).await.unwrap_or(false);
+                            AppMessage::FriendRemoved { label }
                         },
                         |msg| msg,
                     );
@@ -8860,7 +9004,8 @@ impl IcedChat {
                     let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
                     tasks.push(iced::Task::perform(
                         async move {
-                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir) {
+                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir)
+                            {
                                 Ok(Some(s)) => s,
                                 _ => return Vec::new(),
                             };
@@ -9179,7 +9324,7 @@ impl IcedChat {
                 let endpoint = self.endpoint.clone();
                 let secret_key = self.secret_key.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let peers_with_mailbox: Vec<PublicKey> = self
                     .friends
                     .iter()
@@ -9255,7 +9400,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9265,7 +9410,8 @@ impl IcedChat {
             }
 
             AppMessage::SetNickname(name) => {
-                self.local_label = name;
+                self.local_label =
+                    sanitize_single_line_with_max(&name, PROFILE_DISPLAY_NAME_MAX_CHARS);
                 iced::Task::none()
             }
 
@@ -9278,7 +9424,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9480,6 +9626,11 @@ impl IcedChat {
                 return iced::clipboard::write(text);
             }
 
+            AppMessage::ToggleProfileIdentityDetails => {
+                self.profile_identity_details_open = !self.profile_identity_details_open;
+                iced::Task::none()
+            }
+
             AppMessage::CopyFriendId => {
                 let pk = self.local_public.to_string();
                 self.friend_id_copied = true;
@@ -9503,7 +9654,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9547,7 +9698,7 @@ impl IcedChat {
                         let image_store = self.image_store.clone();
                         let user = self.local_public.to_string();
                         let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                        let _progress_queue = self.download_progress_queue.clone();
                         self.push_system("Saving profile image…");
                         iced::Task::perform(
                             async move {
@@ -9659,7 +9810,7 @@ impl IcedChat {
                     let image_store = self.image_store.clone();
                     let identifier = self.profile_image_identifier.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let _progress_queue = self.download_progress_queue.clone();
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -10823,6 +10974,8 @@ impl IcedChat {
 
         // Main panel depends on the active screen.
         let main_panel: iced::Element<'_, AppMessage> = match &self.screen {
+            Screen::Welcome => self.view_welcome_screen(),
+            Screen::ProfileSetup => self.view_profile_setup_screen(),
             Screen::ChatList => self.view_main_empty_state(),
             Screen::Chat { .. } => self.view_chat_panel(),
             Screen::FriendRequests => self.view_friend_requests(),
@@ -10872,7 +11025,7 @@ impl IcedChat {
         &self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Column, Space};
+        use iced::widget::{button, container, row, text, Column, Space};
         use iced::{Alignment, Length};
 
         let dark_mode = self.dark_mode;
@@ -11186,7 +11339,7 @@ impl IcedChat {
 
     /// Left sidebar containing Chats, Friends, Discover, and Requests sections.
     fn view_sidebar(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{container, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let header = Row::new()
@@ -12180,6 +12333,120 @@ impl IcedChat {
 
     /// Landing screen shown when no conversation is selected.
     /// Replaces the old "Select a conversation" placeholder with an
+    /// One-time welcome screen that introduces the onboarding flow.
+    fn view_welcome_screen(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, text, Column, Space};
+        use iced::{Alignment, Length};
+
+        let title = text("Welcome to Boru Chat")
+            .size(TYPO_XL)
+            .width(Length::Fill);
+
+        let subtitle = text("Create your profile, then add someone with a QR code or invitation.")
+            .size(TYPO_SM)
+            .style(text_muted_style)
+            .width(Length::Fill);
+
+        let explainer = text(
+            "No central account is needed: your identity is created on this device, and you can connect by sharing an invitation.",
+        )
+        .size(TYPO_SM)
+        .style(text_muted_style)
+        .width(Length::Fill);
+
+        let primary = button(text("Get started").size(TYPO_SM))
+            .on_press(AppMessage::OpenProfileSetup)
+            .padding([SPACE_10, SPACE_16])
+            .width(Length::Fill)
+            .style(BUTTON_PRIMARY);
+
+        let advanced = button(text("Advanced setup").size(TYPO_SM))
+            .on_press(AppMessage::OpenSettings)
+            .padding([SPACE_10, SPACE_16])
+            .width(Length::Fill)
+            .style(BUTTON_OUTLINE);
+
+        let body = Column::new()
+            .spacing(SPACE_12)
+            .push(title)
+            .push(subtitle)
+            .push(explainer)
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(primary)
+            .push(advanced)
+            .align_x(Alignment::Start);
+
+        container(body)
+            .padding([SPACE_24, SPACE_24])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(container_primary)
+            .into()
+    }
+
+    fn view_profile_setup_screen(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, scrollable, text, Column};
+        use iced::Length;
+
+        let validation_error = profile_display_name_error(&self.local_label);
+        let intro = Column::new()
+            .spacing(SPACE_6)
+            .push(text("Create your profile").size(TYPO_XL))
+            .push(
+                text("Use a display name people recognize. You can change it later from settings.")
+                    .size(TYPO_SM)
+                    .style(text_muted_style),
+            );
+
+        let mut content = Column::new()
+            .spacing(SPACE_16)
+            .push(intro)
+            .push(profile_identity_card(
+                self.local_label.clone(),
+                self.local_public.to_string(),
+                self.friend_id_copied,
+                self.profile_image_handle.clone(),
+                self.profile_identity_details_open,
+            ));
+
+        if let Some(error) = validation_error {
+            content =
+                content.push(
+                    text(error)
+                        .size(TYPO_SM)
+                        .style(|_| iced::widget::text::Style {
+                            color: Some(Color::from_rgb(0.82, 0.27, 0.27)),
+                        }),
+                );
+        } else {
+            content = content.push(
+                text("Display names can be changed later.")
+                    .size(TYPO_XS)
+                    .style(text_muted_style),
+            );
+        }
+
+        content = content.push(
+            button(text("Save profile and continue").size(TYPO_SM))
+                .on_press(AppMessage::SaveProfile)
+                .padding([SPACE_10, SPACE_16])
+                .width(Length::Fill)
+                .style(BUTTON_PRIMARY),
+        );
+
+        let body = scrollable(container(content.padding([SPACE_24, SPACE_24])).width(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        container(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(container_primary)
+            .into()
+    }
+
     /// engaging home screen: branding, status, quick actions, and
     /// a scrollable recent-activity feed.
     fn view_main_empty_state(&self) -> iced::Element<'_, AppMessage> {
@@ -13099,6 +13366,7 @@ impl IcedChat {
         let profile_public_key = self.local_public.to_string();
         let profile_friend_id_copied = self.friend_id_copied;
         let profile_image_handle = self.profile_image_handle.clone();
+        let profile_identity_details_open = self.profile_identity_details_open;
         let identity_card: iced::Element<'static, AppMessage> =
             lazy(profile_identity_key, move |_| {
                 profile_identity_card(
@@ -13106,6 +13374,7 @@ impl IcedChat {
                     profile_public_key.clone(),
                     profile_friend_id_copied,
                     profile_image_handle.clone(),
+                    profile_identity_details_open,
                 )
             })
             .into();
@@ -13512,14 +13781,14 @@ impl IcedChat {
             .into()
     }
 
-    /// View for the friend request management screen.
+    /// View for the add-someone screen.
     ///
-    /// Shows three sections:
-    /// 1. Send a friend request — peer key input + Send button
-    /// 2. Incoming requests — pending requests with accept/decline buttons
-    /// 3. Outgoing requests — pending outgoing requests with cancel button
+    /// Shows quick-start options for sharing identity or joining via invitation,
+    /// plus an advanced section for raw public-key friend requests.
     fn view_friend_requests(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, row, scrollable, text, text_input, Column, Space};
+        use iced::widget::{
+            button, container, qr_code, row, scrollable, text, text_input, Column, Space,
+        };
         use iced::{Alignment, Color, Length};
 
         let theme = self.theme();
@@ -13528,38 +13797,131 @@ impl IcedChat {
         let mut content = Column::new().spacing(SPACE_12).padding(SPACE_24);
 
         // ── Header ──
-        let back_btn = button(text("← Back").size(TYPO_MD))
+        let back_btn = button(text("Skip for now").size(TYPO_MD))
             .on_press(AppMessage::CloseFriendRequests)
-            .style(|t, _status| iced::widget::button::Style {
-                background: Some(iced::Background::Color(bg_surface(t))),
-                border: iced::Border {
-                    color: border_muted(t),
-                    width: 1.0,
-                    radius: SPACE_8.into(),
-                },
-                text_color: text_muted_style(t)
-                    .color
-                    .unwrap_or(iced::Color::from_rgb(0.6, 0.6, 0.6)),
-                ..Default::default()
-            })
+            .style(BUTTON_OUTLINE)
             .padding([SPACE_8, SPACE_16]);
 
         content = content.push(
             row![
-                text("Friend Requests").size(TYPO_XL).width(Length::Fill),
+                text("Add Someone").size(TYPO_XL).width(Length::Fill),
                 back_btn,
             ]
             .spacing(SPACE_8)
             .align_y(Alignment::Center),
         );
 
-        content = content.push(Space::new().height(Length::Fixed(SPACE_16)));
+        content = content.push(Space::new().height(Length::Fixed(SPACE_12)));
+        content = content.push(
+            text("Choose the easiest path first. If you already have an invitation or code, use the advanced section below.")
+                .size(TYPO_SM)
+                .style(text_muted_style),
+        );
+        content = content.push(Space::new().height(Length::Fixed(SPACE_12)));
 
-        // ── Send a Friend Request ──
-        let send_section = section_card(
-            "SEND A FRIEND REQUEST",
+        let quick_start = section_card(
+            "QUICK START",
             vec![
-                text("Enter the recipient's public key below and tap Send.")
+                Column::new()
+                    .push(
+                        button(text("Show my QR code").size(TYPO_SM))
+                            .on_press(AppMessage::OpenAddSomeoneAdvanced)
+                            .width(Length::Fill)
+                            .padding([SPACE_10, SPACE_16])
+                            .style(BUTTON_PRIMARY),
+                    )
+                    .push(
+                        text("Let the other person scan a code that represents your device identity.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .spacing(SPACE_4)
+                    .into(),
+                Column::new()
+                    .push(
+                        button(text("Scan their QR code").size(TYPO_SM))
+                            .on_press(AppMessage::OpenAddSomeoneAdvanced)
+                            .width(Length::Fill)
+                            .padding([SPACE_10, SPACE_16])
+                            .style(BUTTON_OUTLINE),
+                    )
+                    .push(
+                        text("Use a camera or scanner to bring their code into the app without typing it.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .spacing(SPACE_4)
+                    .into(),
+                Column::new()
+                    .push(
+                        text("Paste invitation").size(TYPO_MD),
+                    )
+                    .push(
+                        text("Paste an invitation string you received from the other person.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .push(
+                        row![
+                            text_input("Invitation…", &self.join_ticket_input)
+                                .on_input(AppMessage::JoinTicketInputChanged)
+                                .width(Length::Fill),
+                            button(text("Join").size(TYPO_SM))
+                                .on_press(AppMessage::JoinFromTicket)
+                                .padding([SPACE_6, SPACE_12])
+                                .style(BUTTON_PRIMARY),
+                        ]
+                        .spacing(SPACE_8)
+                        .align_y(Alignment::Center),
+                    )
+                    .spacing(SPACE_4)
+                    .into(),
+            ],
+        );
+        content = content.push(quick_start);
+
+        content = content.push(Space::new().height(Length::Fixed(SPACE_12)));
+        let advanced_toggle = button(
+            text(if self.add_someone_advanced_open {
+                "Hide advanced"
+            } else {
+                "Show advanced"
+            })
+            .size(TYPO_SM),
+        )
+        .on_press(AppMessage::ToggleAddSomeoneAdvanced)
+        .padding([SPACE_8, SPACE_16])
+        .style(BUTTON_OUTLINE);
+        content = content.push(advanced_toggle);
+        content = content.push(Space::new().height(Length::Fixed(SPACE_12)));
+
+        if self.add_someone_advanced_open {
+            let qr_card = {
+                section_card(
+                    "YOUR QR CODE",
+                    vec![
+                        text("Let the other person scan this code to add you without typing.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style)
+                            .into(),
+                        container(qr_code(&self.local_identity_qr).total_size(168.0))
+                            .width(Length::Fill)
+                            .center_x(Length::Fill)
+                            .into(),
+                        text("If scanning isn't available, copy your public identity below.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style)
+                            .into(),
+                    ],
+                )
+            };
+            content = content.push(qr_card);
+            content = content.push(Space::new().height(Length::Fixed(SPACE_12)));
+        }
+        let send_section = section_card(
+            "ADVANCED",
+            vec![
+                text("Enter the recipient's public key below if you already have it.")
                     .size(TYPO_XS)
                     .style(text_muted_style)
                     .into(),
@@ -14298,7 +14660,7 @@ impl IcedChat {
         use iced::widget::{button, container, row, scrollable, text, text_input, Column, Space};
         use iced::{Alignment, Length};
 
-        let theme = self.theme();
+        let _theme = self.theme();
         let dark_mode = self.dark_mode;
 
         // ── Gather data ──
@@ -14784,11 +15146,11 @@ impl IcedChat {
     /// Confirmation overlay for removing a friend.
     fn view_remove_confirm_overlay<'a>(
         &self,
-        peer: PublicKey,
+        _peer: PublicKey,
         name: &str,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Column, Space};
+        use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
         let dialog = column![]
@@ -14867,11 +15229,11 @@ impl IcedChat {
     /// Confirmation overlay for blocking a friend.
     fn view_block_confirm_overlay<'a>(
         &self,
-        peer: PublicKey,
+        _peer: PublicKey,
         name: &str,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Column, Space};
+        use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
         let dialog = column![]

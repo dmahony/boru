@@ -50,7 +50,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::gui_test_actions::{ActionRecord, ActionStatus, GuiActionHistory, GuiActionRateLimiter};
+use crate::gui_test_actions::{GuiActionHistory, GuiActionRateLimiter};
 use boru_chat::chat_core::{broadcast_diagnostic_probe, message_hash, Message};
 use boru_chat::conversations::ConversationNetEvent;
 use boru_chat::diagnostics::{
