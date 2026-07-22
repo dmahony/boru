@@ -363,21 +363,7 @@ pub fn ensure_shared_folder(path: &Path) -> Result<()> {
 
 /// Default local shared-folder location.
 pub fn default_shared_folder_path() -> PathBuf {
-    std::env::var_os("BORU_CHAT_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs_fallback_home()
-                .join(".local")
-                .join("share")
-                .join("boru")
-        })
-        .join("shared")
-}
-
-fn dirs_fallback_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::data_dir::shared_folder_path(None)
 }
 
 fn mime_type(path: &Path) -> String {
