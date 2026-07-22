@@ -1,4 +1,4 @@
-# ── boru-chat development justfile ───────────────────────────────────────
+# ── Boru development justfile ─────────────────────────────────────────────
 # Install: cargo install just
 # Usage:   just <recipe>
 
