@@ -328,3 +328,11 @@ pub mod blob_transfer;
 /// Transfer lifecycle telemetry — structured events for download workflows.
 #[cfg(feature = "net")]
 pub mod transfer_telemetry;
+
+/// Data directory resolution with backward compatibility.
+///
+/// Resolves the application's persistent data directory using the
+/// documented priority order (CLI override → BORU_DATA_DIR →
+/// BORU_CHAT_DATA_DIR → legacy auto-detection → new XDG default →
+/// new CWD fallback).  Always available (no feature gate).
+pub mod data_dir;
