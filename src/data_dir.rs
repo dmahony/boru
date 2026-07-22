@@ -68,12 +68,17 @@ pub fn resolve_data_dir(cli_override: Option<PathBuf>) -> PathBuf {
         return PathBuf::from(val);
     }
 
-    // 3. Legacy env var BORU_CHAT_DATA_DIR
+    // 3. Legacy env var BORU_CHAT_DATA_DIR (deprecated)
     if let Ok(val) = std::env::var(ENV_BORU_CHAT_DATA_DIR) {
+        eprintln!(
+            "warning: environment variable {} is deprecated, use {} instead",
+            ENV_BORU_CHAT_DATA_DIR,
+            ENV_BORU_DATA_DIR
+        );
         return PathBuf::from(val);
     }
 
-    // 4. Auto-detect legacy directory (existing installation)
+    // 4. Auto-detect legacy directory (existing installation) — deprecated
     let new_dir = new_default_dir();
     let new_dir_exists = new_dir.exists();
 
@@ -84,6 +89,13 @@ pub fn resolve_data_dir(cli_override: Option<PathBuf>) -> PathBuf {
             if new_dir_exists {
                 return new_dir;
             }
+            eprintln!(
+                "warning: using legacy data directory {:?} (deprecated). \
+                 Set {} or use --data-dir to opt into the new location {:?}",
+                legacy.display(),
+                ENV_BORU_DATA_DIR,
+                new_dir.display()
+            );
             return legacy;
         }
     }

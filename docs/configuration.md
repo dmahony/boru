@@ -45,13 +45,14 @@ settings files. This document covers all available options.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `BORU_CHAT_DATA_DIR` | Path | — | Override the persistent data directory |
-| `BORU_CHAT_FILES_DIR` | Path | `<data_dir>/files/` | Override the image/files storage root |
-| `BORU_PERF` | `0`/`1` | `0` | Enable performance instrumentation |
-| `BORU_PERF_PRINT` | `0`/`1` | `1` | Print performance summary at exit |
-| `BORU_PERF_SLOW_MS` | Integer | `100` | Slow-operation threshold in milliseconds |
-| `BORU_DEBUG` | `0`/`1` | `0` | Enable gossip debug event log |
-| `BORU_DEBUG_PATH` | Path | `~/.local/share/boru-chat/gossip-debug.log` | Gossip debug log path |
+|| `BORU_DATA_DIR` | Path | — | Override the persistent data directory (new — preferred) |
+|| `BORU_CHAT_DATA_DIR` | Path | — | Override the persistent data directory (deprecated — use `BORU_DATA_DIR`) |
+|| `BORU_CHAT_FILES_DIR` | Path | `<data_dir>/files/` | Override the image/files storage root |
+|| `BORU_PERF` | `0`/`1` | `0` | Enable performance instrumentation |
+|| `BORU_PERF_PRINT` | `0`/`1` | `1` | Print performance summary at exit |
+|| `BORU_PERF_SLOW_MS` | Integer | `100` | Slow-operation threshold in milliseconds |
+|| `BORU_DEBUG` | `0`/`1` | `0` | Enable gossip debug event log |
+|| `BORU_DEBUG_PATH` | Path | `<data_dir>/gossip-debug.log` | Gossip debug log path |
 | `RUST_LOG` | EnvFilter | `info` | Tracing filter (overrides file log filter) |
 | `XDG_DATA_HOME` | Path | `~/.local/share` | Base for default data directory |
 
@@ -60,11 +61,13 @@ settings files. This document covers all available options.
 The data directory is resolved in this order:
 
 1. `--data-dir` CLI flag
-2. `BORU_CHAT_DATA_DIR` environment variable
-3. `$XDG_DATA_HOME/boru-chat` (typically `~/.local/share/boru-chat/`)
-4. `$HOME/.local/share/boru-chat/`
-5. `$LOCALAPPDATA/boru-chat` (Windows only)
-6. `$PWD/.boru-chat` (fallback)
+2. `BORU_DATA_DIR` environment variable (new — preferred)
+3. `BORU_CHAT_DATA_DIR` environment variable (deprecated — prints a warning)
+4. Existing legacy `boru-chat` data directory, auto-detected (deprecated — prints a warning)
+5. `$XDG_DATA_HOME/boru` (typically `~/.local/share/boru/`)
+6. `$HOME/.local/share/boru/`
+7. `$LOCALAPPDATA/boru` (Windows only)
+8. `$PWD/.boru` (fallback)
 
 ## Settings File (`settings.json`)
 
