@@ -15,7 +15,7 @@
 //! user explicitly opts in to the new paths via `--data-dir` or `BORU_DATA_DIR`.
 //! Data is never automatically moved or deleted.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ── Directory names ─────────────────────────────────────────────────────
 
@@ -171,6 +171,212 @@ pub fn legacy_candidate_dirs() -> Vec<PathBuf> {
 /// Return the shared-folder path rooted at the resolved data directory.
 pub fn shared_folder_path(cli_override: Option<PathBuf>) -> PathBuf {
     resolve_data_dir(cli_override).join(SHARED_DIR_NAME)
+}
+
+// ── Data directory migration ───────────────────────────────────────────
+
+/// Error type for migration operations.
+#[derive(Debug)]
+pub enum MigrationError {
+    /// The new data directory already exists — migration would overwrite.
+    NewDirAlreadyExists(PathBuf),
+    /// An I/O error occurred during migration.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for MigrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MigrationError::NewDirAlreadyExists(p) => {
+                write!(f, "new data directory already exists: {}", p.display())
+            }
+            MigrationError::Io(e) => write!(f, "I/O error during migration: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for MigrationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            MigrationError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for MigrationError {
+    fn from(e: std::io::Error) -> Self {
+        MigrationError::Io(e)
+    }
+}
+
+/// Result type for migration operations.
+pub type MigrationResult<T> = std::result::Result<T, MigrationError>;
+
+/// Detect whether a legacy (`boru-chat`) data directory exists on disk.
+///
+/// Checks the `BORU_CHAT_DATA_DIR` environment variable first, then
+/// scans the standard legacy candidate paths.  Returns the first
+/// existing legacy directory found, or `None`.
+pub fn detect_legacy_data_dir() -> Option<PathBuf> {
+    // Check legacy env var first
+    if let Ok(val) = std::env::var(ENV_BORU_CHAT_DATA_DIR) {
+        let p = PathBuf::from(val);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // Check candidate paths
+    for candidate in legacy_candidate_dirs() {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Migrate data from a legacy `boru-chat` directory to the new `boru`
+/// directory.
+///
+/// # Safety guarantees
+///
+/// - **Never overwrites** an existing new directory.  If `new` already
+///   exists, `Err(MigrationError::NewDirAlreadyExists)` is returned.
+/// - **Preserves file permissions** during copy (Unix `mode` bits).
+/// - **Idempotent**: running this function twice is safe — the second
+///   call sees the new directory already exists and returns
+///   `NewDirAlreadyExists`.
+/// - Recursively copies all files and subdirectories.  Symlinks are
+///   followed and their **content** is copied (not the link itself) so
+///   no dangling references are left behind.
+///
+/// # Returns
+///
+/// - `Ok(true)` if migration was performed.
+/// - `Ok(false)` if the legacy directory does not exist (no-op).
+pub fn migrate_data_dir(legacy: &Path, new: &Path) -> MigrationResult<bool> {
+    // Check preconditions
+    if !legacy.exists() {
+        return Ok(false);
+    }
+    if new.exists() {
+        return Err(MigrationError::NewDirAlreadyExists(new.to_path_buf()));
+    }
+
+    // Create the new directory, inheriting the legacy directory's permissions
+    let legacy_meta = std::fs::metadata(legacy)?;
+    std::fs::create_dir_all(new)?;
+    std::fs::set_permissions(new, legacy_meta.permissions())?;
+
+    // Recursively copy contents
+    copy_dir_contents(legacy, new)?;
+
+    Ok(true)
+}
+
+/// Recursively copy directory contents from `src` to `dst`.
+///
+/// Both `src` and `dst` must exist and be directories.  File permissions
+/// are preserved on every entry.
+fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let entry_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if entry_type.is_dir() {
+            // Create sub-directory with the same permissions
+            let meta = std::fs::metadata(&src_path)?;
+            std::fs::create_dir(&dst_path)?;
+            std::fs::set_permissions(&dst_path, meta.permissions())?;
+            copy_dir_contents(&src_path, &dst_path)?;
+        } else if entry_type.is_file() || entry_type.is_symlink() {
+            // Copy file content (for symlinks, follow and copy content
+            // to avoid dangling references into a directory that may
+            // not exist on the target system).
+            std::fs::copy(&src_path, &dst_path)?;
+            // Preserve permissions on the copy
+            let meta = std::fs::metadata(&src_path)?;
+            std::fs::set_permissions(&dst_path, meta.permissions())?;
+        }
+        // Skip other entry types (sockets, FIFOs, etc.)
+    }
+    Ok(())
+}
+
+/// Opportunistically migrate from the legacy `boru-chat` data directory
+/// to the new `boru` data directory.
+///
+/// Call this **very early** during application startup, before the data
+/// directory is first needed.  After a successful migration the new
+/// directory exists on disk and [`resolve_data_dir`] will naturally pick
+/// it up (step 4 returns the new dir when both exist, and step 5 returns
+/// it by default).
+///
+/// # Behaviour
+///
+/// - If the new directory **already exists**, no migration is attempted
+///   (fresh install or already migrated).
+/// - If a legacy directory **is found** and the new one does **not**
+///   exist, migration is performed.
+/// - If migration **succeeds**, `Some(new_dir)` is returned.
+/// - If migration **fails** (I/O error, permissions, etc.), the error
+///   is logged and the legacy directory path is returned so the caller
+///   can continue using it transparently.
+/// - If no legacy directory exists, `None` is returned.
+///
+/// # Startup integration
+///
+/// The simplest integration point is to call this function once before
+/// the first call to [`resolve_data_dir`]:
+///
+/// ```ignore
+/// let _ = boru_chat::data_dir::auto_migrate_data_dir();
+/// let data_dir = boru_chat::data_dir::resolve_data_dir(cli_override);
+/// ```
+pub fn auto_migrate_data_dir() -> Option<PathBuf> {
+    let new_dir = new_default_dir();
+    if new_dir.exists() {
+        // Already migrated or fresh install — nothing to do.
+        return None;
+    }
+
+    let legacy = detect_legacy_data_dir()?;
+
+    match migrate_data_dir(&legacy, &new_dir) {
+        Ok(true) => {
+            #[cfg(feature = "tracing")]
+            tracing::info!(
+                legacy = %legacy.display(),
+                new = %new_dir.display(),
+                "migrated data directory from legacy boru-chat to boru"
+            );
+            Some(new_dir)
+        }
+        Ok(false) => {
+            // No legacy directory — nothing to do.
+            None
+        }
+        Err(MigrationError::NewDirAlreadyExists(_)) => {
+            // Another process beat us to it — nothing to do.
+            None
+        }
+        Err(e) => {
+            // Log the error and return the legacy path as fallback so
+            // the application continues using it transparently.
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                error = %e,
+                legacy = %legacy.display(),
+                new = %new_dir.display(),
+                "data directory migration failed; continuing with legacy directory"
+            );
+            #[cfg(not(feature = "tracing"))]
+            let _ = &e;
+            Some(legacy)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -459,5 +665,226 @@ mod tests {
         let expected = home.join(".local").join("share").join("boru-chat");
         let count = dirs.iter().filter(|d| *d == &expected).count();
         assert_eq!(count, 1, "duplicate should be deduplicated");
+    }
+
+    // ── migration tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_legacy_data_dir_none() {
+        let _lock = SERIAL.lock().unwrap();
+        let mut scope = EnvScope::new();
+        let home = scope.path().join("empty_home");
+        scope.set_env(ENV_HOME, home.to_str().unwrap());
+
+        assert!(detect_legacy_data_dir().is_none());
+    }
+
+    #[test]
+    fn test_detect_legacy_data_dir_found() {
+        let _lock = SERIAL.lock().unwrap();
+        let mut scope = EnvScope::new();
+        let home = scope.path().to_str().unwrap().to_string();
+        scope.set_env(ENV_HOME, &home);
+        let legacy = scope.path().join(".local").join("share").join("boru-chat");
+        fs::create_dir_all(&legacy).unwrap();
+
+        let result = detect_legacy_data_dir();
+        assert_eq!(result, Some(legacy));
+    }
+
+    #[test]
+    fn test_detect_legacy_data_dir_env_var() {
+        let _lock = SERIAL.lock().unwrap();
+        let mut scope = EnvScope::new();
+        let custom = scope.path().join("custom_legacy");
+        fs::create_dir_all(&custom).unwrap();
+        scope.set_env(ENV_BORU_CHAT_DATA_DIR, custom.to_str().unwrap());
+
+        let result = detect_legacy_data_dir();
+        assert_eq!(result, Some(custom));
+    }
+
+    #[test]
+    fn test_migrate_data_dir_legacy_not_found() {
+        let _lock = SERIAL.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("legacy");
+        let new = tmp.path().join("new");
+
+        let result = migrate_data_dir(&legacy, &new).unwrap();
+        assert!(!result, "migration should be a no-op when legacy doesn't exist");
+    }
+
+    #[test]
+    fn test_migrate_data_dir_new_already_exists() {
+        let _lock = SERIAL.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("legacy");
+        let new = tmp.path().join("new");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&new).unwrap();
+
+        let err = migrate_data_dir(&legacy, &new).unwrap_err();
+        assert!(
+            matches!(err, MigrationError::NewDirAlreadyExists(_)),
+            "expected NewDirAlreadyExists, got {err}"
+        );
+    }
+
+    #[test]
+    fn test_migrate_data_dir_idempotent() {
+        let _lock = SERIAL.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("legacy");
+        let new = tmp.path().join("new");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("secret_key.txt"), b"test key").unwrap();
+
+        // First call — succeeds
+        let first = migrate_data_dir(&legacy, &new).unwrap();
+        assert!(first, "first migration should succeed");
+        assert!(new.exists());
+        assert!(new.join("secret_key.txt").is_file());
+        assert_eq!(
+            fs::read_to_string(new.join("secret_key.txt")).unwrap(),
+            "test key"
+        );
+
+        // Second call — should fail because new already exists
+        let err = migrate_data_dir(&legacy, &new).unwrap_err();
+        assert!(
+            matches!(err, MigrationError::NewDirAlreadyExists(_)),
+            "second migration should reject because new dir exists: {err}"
+        );
+    }
+
+    #[test]
+    fn test_migrate_data_dir_preserves_permissions() {
+        let _lock = SERIAL.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("legacy");
+        let new = tmp.path().join("new");
+
+        // Create legacy directory with restricted permissions
+        fs::create_dir_all(&legacy).unwrap();
+        let subdir = legacy.join("sub");
+        fs::create_dir(&subdir).unwrap();
+        let file_path = legacy.join("secret_key.txt");
+        fs::write(&file_path, b"test key content").unwrap();
+        let subfile = subdir.join("data.bin");
+        fs::write(&subfile, b"binary data").unwrap();
+
+        // Set known permissions on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&legacy, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&subdir, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(&subfile, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        // Perform migration
+        let result = migrate_data_dir(&legacy, &new).unwrap();
+        assert!(result, "migration should succeed");
+        assert!(new.exists());
+
+        // Verify files were copied
+        assert!(new.join("secret_key.txt").is_file());
+        assert!(new.join("sub").join("data.bin").is_file());
+        assert_eq!(
+            fs::read_to_string(new.join("secret_key.txt")).unwrap(),
+            "test key content"
+        );
+        assert_eq!(
+            fs::read_to_string(new.join("sub").join("data.bin")).unwrap(),
+            "binary data"
+        );
+
+        // Verify permissions on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&new).unwrap().permissions().mode() & 0o777,
+                0o755,
+                "new dir should inherit legacy dir permissions"
+            );
+            assert_eq!(
+                fs::metadata(new.join("sub")).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "subdir permissions preserved"
+            );
+            assert_eq!(
+                fs::metadata(new.join("secret_key.txt"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+                "file permissions preserved"
+            );
+            assert_eq!(
+                fs::metadata(new.join("sub").join("data.bin"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o644,
+                "subfile permissions preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn test_auto_migrate_data_dir_new_already_exists() {
+        let _lock = SERIAL.lock().unwrap();
+        let mut scope = EnvScope::new();
+        let home = scope.path().to_str().unwrap().to_string();
+        scope.set_env(ENV_HOME, &home);
+
+        // Create both legacy and new dir
+        let legacy = scope.path().join(".local").join("share").join("boru-chat");
+        fs::create_dir_all(&legacy).unwrap();
+        let new = scope.path().join(".local").join("share").join("boru");
+        fs::create_dir_all(&new).unwrap();
+
+        // auto_migrate should return None because new dir already exists
+        assert!(auto_migrate_data_dir().is_none());
+    }
+
+    #[test]
+    fn test_auto_migrate_data_dir_success() {
+        let _lock = SERIAL.lock().unwrap();
+        let mut scope = EnvScope::new();
+        let home = scope.path().to_str().unwrap().to_string();
+        scope.set_env(ENV_HOME, &home);
+
+        // Create only legacy dir
+        let legacy = scope.path().join(".local").join("share").join("boru-chat");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("secret_key.txt"), b"test key").unwrap();
+
+        // auto_migrate should perform migration
+        let result = auto_migrate_data_dir();
+        let new = scope.path().join(".local").join("share").join("boru");
+        assert_eq!(result, Some(new.clone()));
+        assert!(new.exists());
+        assert!(new.join("secret_key.txt").is_file());
+        assert_eq!(
+            fs::read_to_string(new.join("secret_key.txt")).unwrap(),
+            "test key"
+        );
+    }
+
+    #[test]
+    fn test_auto_migrate_data_dir_no_legacy() {
+        let _lock = SERIAL.lock().unwrap();
+        let mut scope = EnvScope::new();
+        let home = scope.path().join("clean_install");
+        scope.set_env(ENV_HOME, home.to_str().unwrap());
+
+        // No legacy dir exists — auto_migrate should be a no-op
+        assert!(auto_migrate_data_dir().is_none());
     }
 }
