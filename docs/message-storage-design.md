@@ -8,9 +8,11 @@ depends on the environment:
 | Precedence | Source |
 |---|---|
 | 1 (highest) | `--data-dir` CLI flag |
-| 2 | `BORU_CHAT_DATA_DIR` environment variable |
-| 3 | `$XDG_DATA_HOME/boru-chat` (typically `~/.local/share/boru-chat/`) |
-| 4 (fallback) | `$PWD/.boru-chat` |
+| 2 | `BORU_DATA_DIR` environment variable (new — preferred) |
+| 3 | `BORU_CHAT_DATA_DIR` environment variable (deprecated — prints a warning) |
+| 4 | Legacy `boru-chat` data directory, auto-detected (deprecated — prints a warning) |
+| 5 (new default) | `$XDG_DATA_HOME/boru` (typically `~/.local/share/boru/`) |
+| 6 (new fallback) | `$PWD/.boru` |
 
 On Unix the data directory and its SQLite database are created with restrictive
 permissions: `0o700` for the directory, `0o600` for the database file.
