@@ -9,7 +9,7 @@ use iroh::{endpoint::presets, protocol::Router, Endpoint, SecretKey};
 use n0_error::{Result, StdResultExt};
 
 fn get_data_dir() -> PathBuf {
-    boru_chat::data_dir::resolve_data_dir(None)
+    boru_core::data_dir::resolve_data_dir(None)
 }
 
 fn load_or_generate_secret_key() -> Result<(SecretKey, PathBuf)> {
