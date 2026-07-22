@@ -332,8 +332,8 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// the first call to [`resolve_data_dir`]:
 ///
 /// ```ignore
-/// let _ = boru_chat::data_dir::auto_migrate_data_dir();
-/// let data_dir = boru_chat::data_dir::resolve_data_dir(cli_override);
+/// let _ = boru_core::data_dir::auto_migrate_data_dir();
+/// let data_dir = boru_core::data_dir::resolve_data_dir(cli_override);
 /// ```
 pub fn auto_migrate_data_dir() -> Option<PathBuf> {
     let new_dir = new_default_dir();
