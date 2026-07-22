@@ -86,7 +86,9 @@ fn build_spawn_command(data_dir: &Path) -> std::result::Result<Command, String> 
     let exe =
         std::env::current_exe().map_err(|e| format!("failed to locate current executable: {e}"))?;
     let mut cmd = Command::new(exe);
-    cmd.arg("logs").env("BORU_CHAT_DATA_DIR", data_dir);
+    cmd.arg("logs")
+        .env("BORU_DATA_DIR", data_dir)
+        .env("BORU_CHAT_DATA_DIR", data_dir);
     Ok(cmd)
 }
 
@@ -139,12 +141,25 @@ mod tests {
             .collect();
         assert_eq!(args, vec!["logs"]);
 
-        let env_value = cmd
+        // Check that BORU_DATA_DIR is set (new)
+        assert!(
+            cmd.get_envs().any(|(key, _)| key == OsStr::new("BORU_DATA_DIR")),
+            "BORU_DATA_DIR should be set"
+        );
+        let new_env = cmd
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new("BORU_DATA_DIR"))
+            .and_then(|(_, value)| value)
+            .expect("BORU_DATA_DIR env should be set");
+        assert_eq!(new_env, data_dir.as_os_str());
+
+        // Check that BORU_CHAT_DATA_DIR is set (legacy)
+        let legacy_env = cmd
             .get_envs()
             .find(|(key, _)| *key == OsStr::new("BORU_CHAT_DATA_DIR"))
             .and_then(|(_, value)| value)
-            .expect("data dir env should be set");
-        assert_eq!(env_value, data_dir.as_os_str());
+            .expect("BORU_CHAT_DATA_DIR env should be set");
+        assert_eq!(legacy_env, data_dir.as_os_str());
         assert!(!args.iter().any(|arg| arg == "--data-dir"));
     }
 }
