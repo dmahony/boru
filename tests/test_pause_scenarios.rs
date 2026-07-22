@@ -9,9 +9,9 @@
 
 use std::sync::atomic::Ordering;
 
-use boru_chat::download::DownloadState;
-use boru_chat::download_manager::DownloadManager;
-use boru_chat::storage::Storage;
+use boru_core::download::DownloadState;
+use boru_core::download_manager::DownloadManager;
+use boru_core::storage::Storage;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

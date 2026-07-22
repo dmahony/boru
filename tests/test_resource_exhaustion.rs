@@ -42,7 +42,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use boru_chat::{
+use boru_core::{
     catalogue_client::{fetch_remote_catalogue, RemoteCatalogueFetchError},
     catalogue_handler::CatalogueHandler,
     catalogue_limits::{
@@ -170,7 +170,7 @@ async fn fetch_catalogue(
     client_sk: &SecretKey,
     server_pk: PublicKey,
     server_addr: EndpointAddr,
-) -> Result<boru_chat::catalogue_model::SignedFileCatalogue, RemoteCatalogueFetchError> {
+) -> Result<boru_core::catalogue_model::SignedFileCatalogue, RemoteCatalogueFetchError> {
     let lookup = MemoryLookup::new();
     lookup.set_endpoint_info(server_addr);
     let client_ep = Endpoint::builder(presets::N0DisableRelay)
@@ -957,8 +957,8 @@ fn abuse_limiter_combined_budgets_all_independent() {
 
 #[test]
 fn upload_limiter_full_rejects_excess_global() {
-    let limiter = boru_chat::file_access_handler::UploadLimiter::new(
-        boru_chat::file_access_handler::UploadLimitsConfig {
+    let limiter = boru_core::file_access_handler::UploadLimiter::new(
+        boru_core::file_access_handler::UploadLimitsConfig {
             max_active_uploads: 2,
             max_uploads_per_peer: 3,
             max_queued_uploads: 2,
@@ -974,7 +974,7 @@ fn upload_limiter_full_rejects_excess_global() {
     // Third should be rejected (global queue depth = 2).
     assert_eq!(
         limiter.try_enqueue("peer-c").unwrap_err(),
-        boru_chat::file_access_handler::UploadError::QueueFull,
+        boru_core::file_access_handler::UploadError::QueueFull,
     );
 
     // Dropping a slot frees it.
@@ -990,8 +990,8 @@ fn upload_limiter_full_rejects_excess_global() {
 
 #[test]
 fn upload_limiter_per_peer_full_rejects_excess() {
-    let limiter = boru_chat::file_access_handler::UploadLimiter::new(
-        boru_chat::file_access_handler::UploadLimitsConfig {
+    let limiter = boru_core::file_access_handler::UploadLimiter::new(
+        boru_core::file_access_handler::UploadLimitsConfig {
             max_active_uploads: 10,
             max_uploads_per_peer: 1,
             max_queued_uploads: 10,
@@ -1003,7 +1003,7 @@ fn upload_limiter_per_peer_full_rejects_excess() {
     let first = limiter.try_enqueue("alice").expect("first alice");
     assert_eq!(
         limiter.try_enqueue("alice").unwrap_err(),
-        boru_chat::file_access_handler::UploadError::PeerLimitReached,
+        boru_core::file_access_handler::UploadError::PeerLimitReached,
     );
     // Different peer succeeds.
     let _bob = limiter.try_enqueue("bob").expect("bob enqueues");
@@ -1019,8 +1019,8 @@ fn upload_limiter_per_peer_full_rejects_excess() {
 
 #[test]
 fn upload_limiter_verification_full_rejects_excess() {
-    let limiter = boru_chat::file_access_handler::UploadLimiter::new(
-        boru_chat::file_access_handler::UploadLimitsConfig {
+    let limiter = boru_core::file_access_handler::UploadLimiter::new(
+        boru_core::file_access_handler::UploadLimitsConfig {
             max_active_uploads: 10,
             max_uploads_per_peer: 3,
             max_queued_uploads: 10,
@@ -1034,7 +1034,7 @@ fn upload_limiter_verification_full_rejects_excess() {
         .expect("first verification");
     assert_eq!(
         limiter.try_acquire_verification().unwrap_err(),
-        boru_chat::file_access_handler::UploadError::VerificationBusy,
+        boru_core::file_access_handler::UploadError::VerificationBusy,
     );
     drop(v1);
     assert!(limiter.try_acquire_verification().is_ok());

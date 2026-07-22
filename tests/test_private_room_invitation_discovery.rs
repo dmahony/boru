@@ -24,7 +24,7 @@
 //!   prevent valid peer discovery.
 //! * **Clean shutdown** — every tracker shuts down idempotently without hanging.
 
-use boru_chat::{
+use boru_core::{
     chat_core::RoomInvitation,
     discovery_backend::{InMemoryDiscoveryBackend, TopicDiscoveryBackend},
     discovery_secret::DiscoverySecret,
@@ -100,7 +100,7 @@ fn multi_peer_offline_flow_through_stable_invitation() {
     let secret = test_secret();
 
     // ── Step 1: A creates the stable invitation ──────────────────────
-    let invite = boru_chat::chat_core::RoomInviteV2::new(topic, secret);
+    let invite = boru_core::chat_core::RoomInviteV2::new(topic, secret);
     let invite_str = invite.encode();
     assert!(
         invite_str.starts_with("boru1:"),
@@ -190,7 +190,7 @@ fn multi_peer_offline_flow_through_stable_invitation() {
 #[test]
 fn no_peers_returns_empty() {
     let backend = InMemoryDiscoveryBackend::new();
-    let invite = boru_chat::chat_core::RoomInviteV2::new(test_topic(), test_secret());
+    let invite = boru_core::chat_core::RoomInviteV2::new(test_topic(), test_secret());
     let invite_str = invite.encode();
 
     let (tracker, _ep) = tracker_from_invitation(&backend, &invite_str);
@@ -212,7 +212,7 @@ fn no_peers_returns_empty() {
 #[test]
 fn late_peer_discovers_existing_publishers() {
     let backend = InMemoryDiscoveryBackend::new();
-    let invite = boru_chat::chat_core::RoomInviteV2::new(test_topic(), test_secret());
+    let invite = boru_core::chat_core::RoomInviteV2::new(test_topic(), test_secret());
     let invite_str = invite.encode();
 
     // A publishes
@@ -253,7 +253,7 @@ fn late_peer_discovers_existing_publishers() {
 #[test]
 fn backend_outage_clears_discovery_and_recovers() {
     let backend = InMemoryDiscoveryBackend::new();
-    let invite = boru_chat::chat_core::RoomInviteV2::new(test_topic(), test_secret());
+    let invite = boru_core::chat_core::RoomInviteV2::new(test_topic(), test_secret());
     let invite_str = invite.encode();
 
     let (tracker_a, _ep_a) = tracker_from_invitation(&backend, &invite_str);
@@ -303,7 +303,7 @@ fn backend_outage_clears_discovery_and_recovers() {
 #[test]
 fn stale_and_valid_records() {
     let backend = InMemoryDiscoveryBackend::new();
-    let invite = boru_chat::chat_core::RoomInviteV2::new(test_topic(), test_secret());
+    let invite = boru_core::chat_core::RoomInviteV2::new(test_topic(), test_secret());
     let invite_str = invite.encode();
 
     // A publishes (cached record)
@@ -344,7 +344,7 @@ fn stale_and_valid_records() {
 #[test]
 fn malformed_records_do_not_block_discovery() {
     let backend = InMemoryDiscoveryBackend::new();
-    let invite = boru_chat::chat_core::RoomInviteV2::new(test_topic(), test_secret());
+    let invite = boru_core::chat_core::RoomInviteV2::new(test_topic(), test_secret());
     let invite_str = invite.encode();
 
     // A publishes a valid record
@@ -358,7 +358,7 @@ fn malformed_records_do_not_block_discovery() {
     // Raw garbage (cannot even parse as EncryptedRecord envelope)
     block_on(backend.publish(
         &ns,
-        boru_chat::discovery_backend::EncryptedDiscoveryRecord::new(vec![0xde, 0xad, 0xbe, 0xef]),
+        boru_core::discovery_backend::EncryptedDiscoveryRecord::new(vec![0xde, 0xad, 0xbe, 0xef]),
     ))
     .expect("inject garbage record");
 
@@ -369,7 +369,7 @@ fn malformed_records_do_not_block_discovery() {
     let oversized = vec![0xabu8; garbage_size];
     block_on(backend.publish(
         &ns,
-        boru_chat::discovery_backend::EncryptedDiscoveryRecord::new(oversized),
+        boru_core::discovery_backend::EncryptedDiscoveryRecord::new(oversized),
     ))
     .expect("inject oversized record");
 
@@ -378,7 +378,7 @@ fn malformed_records_do_not_block_discovery() {
     let fake_envelope = vec![0u8; 200];
     block_on(backend.publish(
         &ns,
-        boru_chat::discovery_backend::EncryptedDiscoveryRecord::new(fake_envelope),
+        boru_core::discovery_backend::EncryptedDiscoveryRecord::new(fake_envelope),
     ))
     .expect("inject fake envelope record");
 
@@ -411,7 +411,7 @@ fn malformed_records_do_not_block_discovery() {
 #[test]
 fn clean_shutdown_through_invitation_flow() {
     let backend = InMemoryDiscoveryBackend::new();
-    let invite = boru_chat::chat_core::RoomInviteV2::new(test_topic(), test_secret());
+    let invite = boru_core::chat_core::RoomInviteV2::new(test_topic(), test_secret());
     let invite_str = invite.encode();
 
     // Create and shutdown immediately without publishing
@@ -438,7 +438,7 @@ fn clean_shutdown_through_invitation_flow() {
 /// discover peers purely through DHT discovery, not via embedded addresses.
 #[test]
 fn stable_invitation_has_no_endpoint_info() {
-    let invite = boru_chat::chat_core::RoomInviteV2::new(test_topic(), test_secret());
+    let invite = boru_core::chat_core::RoomInviteV2::new(test_topic(), test_secret());
     let invite_str = invite.encode();
 
     let parsed = RoomInvitation::parse(&invite_str).expect("parse stable invitation");
@@ -457,7 +457,7 @@ fn stable_invitation_has_no_endpoint_info() {
 
     // Legacy tickets with the same topic CAN carry peers — prove the formats differ
     let legacy =
-        boru_chat::chat_core::Ticket::new(test_topic(), vec![EndpointAddr::new(identity().1)]);
+        boru_core::chat_core::Ticket::new(test_topic(), vec![EndpointAddr::new(identity().1)]);
     let legacy_parsed = RoomInvitation::parse(&legacy.to_string()).expect("parse legacy ticket");
     assert!(
         !legacy_parsed.bootstrap_peers().is_empty(),
@@ -478,7 +478,7 @@ fn stable_invitation_has_no_endpoint_info() {
 #[test]
 fn five_peers_all_see_each_other() {
     let backend = InMemoryDiscoveryBackend::new();
-    let invite = boru_chat::chat_core::RoomInviteV2::new(test_topic(), test_secret());
+    let invite = boru_core::chat_core::RoomInviteV2::new(test_topic(), test_secret());
     let invite_str = invite.encode();
 
     const N: usize = 5;
@@ -541,7 +541,7 @@ fn v1_wire_format_is_accepted() {
     let backend = InMemoryDiscoveryBackend::new();
     let topic = test_topic();
     let secret = test_secret();
-    let invite = boru_chat::chat_core::RoomInviteV2::new(topic, secret);
+    let invite = boru_core::chat_core::RoomInviteV2::new(topic, secret);
     let invite_str = invite.encode();
 
     // Publish using V1 format (Tracker A).
@@ -569,12 +569,12 @@ fn v1_wire_format_is_accepted() {
 fn v1_invitation_roundtrip() {
     let topic = test_topic();
     let secret = test_secret();
-    let invite = boru_chat::chat_core::RoomInviteV2::new(topic, secret);
+    let invite = boru_core::chat_core::RoomInviteV2::new(topic, secret);
     let encoded = invite.encode();
 
     // Parse.
     let parsed =
-        boru_chat::chat_core::RoomInvitation::parse(&encoded).expect("parse V1 invitation");
+        boru_core::chat_core::RoomInvitation::parse(&encoded).expect("parse V1 invitation");
     assert!(
         parsed.discovery_secret().is_some(),
         "V1 invitation must carry a discovery secret"
@@ -585,8 +585,8 @@ fn v1_invitation_roundtrip() {
 
     // The namespace derived from the parsed invitation must match.
     let ns_from_parsed =
-        boru_chat::private_room_tracker::private_room_namespace(&parsed.topic(), parsed_secret);
-    let ns_original = boru_chat::private_room_tracker::private_room_namespace(&topic, &secret);
+        boru_core::private_room_tracker::private_room_namespace(&parsed.topic(), parsed_secret);
+    let ns_original = boru_core::private_room_tracker::private_room_namespace(&topic, &secret);
     assert_eq!(
         ns_from_parsed, ns_original,
         "namespace from parsed invitation must match"
@@ -599,8 +599,8 @@ fn v1_invitation_roundtrip() {
 fn v1_invitation_is_deterministic() {
     let topic = test_topic();
     let secret = test_secret();
-    let a = boru_chat::chat_core::RoomInviteV2::new(topic, secret).encode();
-    let b = boru_chat::chat_core::RoomInviteV2::new(topic, secret).encode();
+    let a = boru_core::chat_core::RoomInviteV2::new(topic, secret).encode();
+    let b = boru_core::chat_core::RoomInviteV2::new(topic, secret).encode();
     assert_eq!(a, b, "V1 invitation must be deterministic");
 }
 
@@ -608,7 +608,7 @@ fn v1_invitation_is_deterministic() {
 /// If these change, the migration tests must be updated.
 #[test]
 fn v1_constants_are_stable() {
-    let invite = boru_chat::chat_core::RoomInviteV2::new(test_topic(), test_secret());
+    let invite = boru_core::chat_core::RoomInviteV2::new(test_topic(), test_secret());
     let encoded = invite.encode();
     // The prefix must remain stable for backward compatibility.
     assert!(
@@ -632,7 +632,7 @@ fn v2_subkeys_are_distinct_from_v1_namespace() {
     let secret = test_secret();
 
     // V1 namespace.
-    let v1_ns = boru_chat::private_room_tracker::private_room_namespace(&topic, &secret);
+    let v1_ns = boru_core::private_room_tracker::private_room_namespace(&topic, &secret);
 
     // V2 subkeys.
     let (v2_ns, v2_enc, v2_sig) = secret.v2_subkeys(topic.as_bytes());
@@ -665,8 +665,8 @@ fn v2_subkeys_are_distinct_from_v1_namespace() {
 /// a DIFFERENT signature that the V1 validator would reject.
 #[test]
 fn v1_record_accepted_v2_subkey_rejected_by_v1_validator() {
-    use boru_chat::discovery_record::create_discovery_record;
-    use boru_chat::discovery_validation::{DiscoveryRecordValidator, ValidationConfig};
+    use boru_core::discovery_record::create_discovery_record;
+    use boru_core::discovery_validation::{DiscoveryRecordValidator, ValidationConfig};
     use distributed_topic_tracker::unix_minute;
 
     let secret = test_secret();

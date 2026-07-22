@@ -1,8 +1,8 @@
-//! Tests that use the [`boru_chat::proto::sim::Simulator`].
+//! Tests that use the [`boru_core::proto::sim::Simulator`].
 
 use std::{env, fmt, str::FromStr, time::Duration};
 
-use boru_chat::proto::{
+use boru_core::proto::{
     sim::{BootstrapMode, LatencyConfig, NetworkConfig, Simulator, SimulatorConfig},
     Config,
 };

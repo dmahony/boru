@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use boru_chat::{
+use boru_core::{
     chat_callbacks::ChatCallbacks,
     chat_core::{
         self, forward_gossip_events, refresh_bootstrap_peers, seed_memory_lookup, ChatEntry,
@@ -70,7 +70,7 @@ impl ChatCallbacks for SimChat {
         _peer: PublicKey,
         label: String,
         text: String,
-        _hash: Option<boru_chat::chat_core::MessageHash>,
+        _hash: Option<boru_core::chat_core::MessageHash>,
         _sent_at: Option<u64>,
     ) {
         self.received_messages.push(format!("[{label}] {text}"));
@@ -80,18 +80,18 @@ impl ChatCallbacks for SimChat {
     fn set_pending_image(
         &mut self,
         _name: String,
-        _hash: boru_chat::chat_core::MessageHash,
+        _hash: boru_core::chat_core::MessageHash,
         _from: PublicKey,
     ) {
     }
-    fn has_message(&self, hash: &boru_chat::chat_core::MessageHash) -> bool {
+    fn has_message(&self, hash: &boru_core::chat_core::MessageHash) -> bool {
         self.entries
             .iter()
             .any(|e| e.message_hash.as_ref() == Some(hash))
     }
-    fn edit_message(&mut self, _hash: &boru_chat::chat_core::MessageHash, _new_text: String) {}
-    fn delete_message(&mut self, _hash: &boru_chat::chat_core::MessageHash) {}
-    fn add_reaction(&mut self, _hash: &boru_chat::chat_core::MessageHash, _emoji: String) {}
+    fn edit_message(&mut self, _hash: &boru_core::chat_core::MessageHash, _new_text: String) {}
+    fn delete_message(&mut self, _hash: &boru_core::chat_core::MessageHash) {}
+    fn add_reaction(&mut self, _hash: &boru_core::chat_core::MessageHash, _emoji: String) {}
     fn on_neighbor_up(&mut self, peer: PublicKey) {
         self.neighbors.insert(peer);
     }
@@ -137,7 +137,7 @@ async fn spawn_peer(
 }
 
 /// Wait for `sub.is_joined()` by draining events with a short timeout.
-async fn wait_joined(sub: &mut boru_chat::api::GossipTopic, max_ticks: u32) -> bool {
+async fn wait_joined(sub: &mut boru_core::api::GossipTopic, max_ticks: u32) -> bool {
     for _ in 0..max_ticks {
         sleep(Duration::from_millis(200)).await;
         // Drain any pending events so the gossip actor can update join state.

@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use boru_chat::proto::sim::{
+use boru_core::proto::sim::{
     BootstrapMode, NetworkConfig, RoundStats, RoundStatsAvg, RoundStatsDiff, Simulator,
     SimulatorConfig,
 };

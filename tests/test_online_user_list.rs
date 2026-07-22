@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use boru_chat::{
+use boru_core::{
     chat_core::{handle_net_event, ChatCallbacks, MessageHash, NetEvent},
     friends::FriendId,
 };

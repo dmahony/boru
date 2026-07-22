@@ -7,8 +7,8 @@
 
 use std::io::Write;
 
-use boru_chat::download::verify_install_and_complete;
-use boru_chat::storage::Storage;
+use boru_core::download::verify_install_and_complete;
+use boru_core::storage::Storage;
 use tempfile::TempDir;
 
 /// Seed a file-object entry, create a download, then advance it to the

@@ -23,23 +23,23 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use boru_chat::backfill::{BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN};
-use boru_chat::catalogue_handler::CatalogueHandler;
-use boru_chat::chat_core::friend_ping::{
+use boru_core::backfill::{BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN};
+use boru_core::catalogue_handler::CatalogueHandler;
+use boru_core::chat_core::friend_ping::{
     FriendPingManager, PingHandler, DEFAULT_CONNECT_TIMEOUT, DEFAULT_PING_INTERVAL,
     FRIEND_PING_ALPN,
 };
-use boru_chat::chat_history::ChatHistoryStore;
-use boru_chat::friends::{FriendId, FriendsStore};
-use boru_chat::inbox::{inbox_message_id, InboxHandle, InboxMessageId, InboxProtocol, INBOX_ALPN};
-use boru_chat::mailbox::{MailboxStore, MAX_SYNC_ENVELOPES};
-use boru_chat::net::{Gossip, GOSSIP_ALPN};
-use boru_chat::proto::TopicId;
-use boru_chat::protocol_version::CATALOGUE_ALPN;
-use boru_chat::room::RoomStore;
-use boru_chat::room_history::RoomHistoryStore;
-use boru_chat::storage::Storage;
-use boru_chat::store::MessageStore;
+use boru_core::chat_history::ChatHistoryStore;
+use boru_core::friends::{FriendId, FriendsStore};
+use boru_core::inbox::{inbox_message_id, InboxHandle, InboxMessageId, InboxProtocol, INBOX_ALPN};
+use boru_core::mailbox::{MailboxStore, MAX_SYNC_ENVELOPES};
+use boru_core::net::{Gossip, GOSSIP_ALPN};
+use boru_core::proto::TopicId;
+use boru_core::protocol_version::CATALOGUE_ALPN;
+use boru_core::room::RoomStore;
+use boru_core::room_history::RoomHistoryStore;
+use boru_core::storage::Storage;
+use boru_core::store::MessageStore;
 use clap::Parser;
 use iroh::{
     address_lookup::{memory::MemoryLookup, AddrFilter},
@@ -48,7 +48,7 @@ use iroh::{
 };
 use iroh_blobs::{store::fs::FsStore, BlobsProtocol};
 
-use boru_chat::whisper::{WhisperBuilder, WHISPER_ALPN};
+use boru_core::whisper::{WhisperBuilder, WHISPER_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
 #[cfg(feature = "gui")]
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
@@ -137,12 +137,12 @@ enum Command {
 }
 
 // ── Message protocol ──────────────────────────────────────────────────
-pub use boru_chat::chat_core::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
-use boru_chat::diagnostics::GuiTestHandle;
-use boru_chat::diagnostics::IcedMessageJournal;
+pub use boru_core::chat_core::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
+use boru_core::diagnostics::GuiTestHandle;
+use boru_core::diagnostics::IcedMessageJournal;
 
 // ── Network event bridging ────────────────────────────────────────────
-pub use boru_chat::chat_core::forward_gossip_events;
+pub use boru_core::chat_core::forward_gossip_events;
 
 // ── Identity persistence ──────────────────────────────────────────────
 
@@ -783,7 +783,7 @@ fn main() -> Result<()> {
 
         // Create the network event channel (shared across rooms, tagged by topic)
         let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel::<
-            boru_chat::conversations::ConversationNetEvent,
+            boru_core::conversations::ConversationNetEvent,
         >();
         let net_rx = Arc::new(Mutex::new(net_rx));
 
@@ -875,7 +875,7 @@ fn main() -> Result<()> {
     let gui_action_history = gui_action_handle.history();
 
     // Create a watch channel for GUI state snapshots (used for diagnostics)
-    let (gui_state_tx, _gui_state_rx) = watch::channel(boru_chat::diagnostics::IcedStateSnapshot {
+    let (gui_state_tx, _gui_state_rx) = watch::channel(boru_core::diagnostics::IcedStateSnapshot {
         node_id: String::new(),
         version: String::new(),
         active_screen: String::new(),
@@ -932,7 +932,7 @@ fn main() -> Result<()> {
 
         // Share the global DIAGNOSTICS singleton so MCP sees events from
         // the running application.
-        let mcp_diagnostics = boru_chat::chat_core::DIAGNOSTICS.clone();
+        let mcp_diagnostics = boru_core::chat_core::DIAGNOSTICS.clone();
 
         let mcp_state = mcp_server::McpAppState {
             diagnostics: mcp_diagnostics,

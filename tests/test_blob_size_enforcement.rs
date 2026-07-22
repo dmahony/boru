@@ -9,10 +9,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use boru_chat::chat_callbacks::TransferKind;
-use boru_chat::chat_core::download_blob_with_safety;
-use boru_chat::public_room_config::PublicRoomConfig;
-use boru_chat::public_room_safety::PublicRoomSafety;
+use boru_core::chat_callbacks::TransferKind;
+use boru_core::chat_core::download_blob_with_safety;
+use boru_core::public_room_config::PublicRoomConfig;
+use boru_core::public_room_safety::PublicRoomSafety;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, PublicKey,
     RelayMode, SecretKey,

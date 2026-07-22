@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-pub use boru_chat::diagnostics::GuiTestCommand;
+pub use boru_core::diagnostics::GuiTestCommand;
 use serde::{Deserialize, Serialize};
 
 /// Maximum length of any user-facing string parameter.

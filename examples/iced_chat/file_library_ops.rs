@@ -377,7 +377,7 @@ pub fn import_file(
     display_name: &str,
     description: Option<&str>,
     library_dir: &Path,
-    storage: &boru_chat::storage::Storage,
+    storage: &boru_core::storage::Storage,
     profile_user_id: &str,
     metadata_id: &str,
     selected_collections: &[i64],
@@ -437,7 +437,7 @@ pub fn import_file(
 
     // 7. Insert or reuse file_object.
     let mime_type = guess_mime_type(display_name);
-    let now_ms = boru_chat::chat_core::now_ms();
+    let now_ms = boru_core::chat_core::now_ms();
 
     find_or_create_file_object(storage, content_hash, size, &mime_type, display_name)
         .map_err(|e| ImportError::DatabaseError(e.to_string()))?;
@@ -508,7 +508,7 @@ pub fn offer_referenced_file(
     display_name: &str,
     description: Option<&str>,
     library_dir: &Path,
-    storage: &boru_chat::storage::Storage,
+    storage: &boru_core::storage::Storage,
     profile_user_id: &str,
     metadata_id: &str,
     selected_collections: &[i64],
@@ -540,7 +540,7 @@ pub fn offer_referenced_file(
     //    For referenced files, we store with empty data. The source path is
     //    stored in the private `.refs/` registry, not in the DB.
     let mime_type = guess_mime_type(display_name);
-    let now_ms = boru_chat::chat_core::now_ms();
+    let now_ms = boru_core::chat_core::now_ms();
 
     // Use `with_conn` to check-then-insert atomically.
     if !storage
@@ -612,7 +612,7 @@ pub fn offer_referenced_file(
 /// * `mime_type` — MIME type string.
 /// * `filename` — Display filename.
 pub fn find_or_create_file_object(
-    storage: &boru_chat::storage::Storage,
+    storage: &boru_core::storage::Storage,
     content_hash: &str,
     size: u64,
     mime_type: &str,
@@ -664,7 +664,7 @@ pub enum FileLibraryOpResult {
 /// or if the file is not a referenced file.
 pub fn detect_changed_file(
     library_dir: &Path,
-    storage: &boru_chat::storage::Storage,
+    storage: &boru_core::storage::Storage,
     content_hash: &str,
     profile_user_id: &str,
 ) -> anyhow::Result<Option<String>> {
@@ -713,7 +713,7 @@ pub fn detect_changed_file(
 /// 7. Increment manifest revision.
 pub fn update_referenced_file_to_new_version(
     library_dir: &Path,
-    storage: &boru_chat::storage::Storage,
+    storage: &boru_core::storage::Storage,
     old_content_hash: &str,
     profile_user_id: &str,
     metadata_id: &str,
@@ -773,7 +773,7 @@ pub fn update_referenced_file_to_new_version(
         &new_hash,
         profile_user_id,
         "Available",
-        Some(boru_chat::chat_core::now_ms()),
+        Some(boru_core::chat_core::now_ms()),
         &new_hash,
         hashed.size_bytes,
     )?;
@@ -785,7 +785,7 @@ pub fn update_referenced_file_to_new_version(
     let manifest_hash = format!(
         "file-update:{}:{}",
         new_hash,
-        boru_chat::chat_core::now_ms()
+        boru_core::chat_core::now_ms()
     );
     storage.bump_manifest_revision(profile_user_id, &manifest_hash)?;
 
@@ -801,7 +801,7 @@ pub fn update_referenced_file_to_new_version(
 /// is an imported file with no other references, the caller may also delete
 /// the managed bytes on disk.
 pub fn remove_offer_from_profile(
-    storage: &boru_chat::storage::Storage,
+    storage: &boru_core::storage::Storage,
     content_hash: &str,
     profile_user_id: &str,
     library_dir: &Path,
@@ -814,7 +814,7 @@ pub fn remove_offer_from_profile(
     let manifest_hash = format!(
         "file-remove:{}:{}",
         content_hash,
-        boru_chat::chat_core::now_ms()
+        boru_core::chat_core::now_ms()
     );
     storage.bump_manifest_revision(profile_user_id, &manifest_hash)?;
 
@@ -845,7 +845,7 @@ pub fn remove_offer_from_profile(
 /// Only succeeds if the file has no shared_files or message_attachments
 /// referencing it.
 pub fn delete_imported_copy(
-    storage: &boru_chat::storage::Storage,
+    storage: &boru_core::storage::Storage,
     content_hash: &str,
     library_dir: &Path,
 ) -> anyhow::Result<bool> {
@@ -883,7 +883,7 @@ pub fn delete_imported_copy(
 /// 5. Mark completed (or failed with retryable state).
 /// 6. Return the number of bytes freed.
 pub fn cleanup_unreferenced_imported_objects(
-    storage: &boru_chat::storage::Storage,
+    storage: &boru_core::storage::Storage,
     library_dir: &Path,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<u64> {
@@ -1037,7 +1037,7 @@ pub fn remove_stale_temp_files(library_dir: &Path) -> std::io::Result<usize> {
 ///
 /// Returns the number of operations that were recovered.
 pub fn recover_interrupted_operations(
-    storage: &boru_chat::storage::Storage,
+    storage: &boru_core::storage::Storage,
 ) -> anyhow::Result<usize> {
     let count = storage.fail_all_incomplete_operations("startup_recovery")?;
     Ok(count)
@@ -1056,7 +1056,7 @@ pub fn recover_interrupted_operations(
 /// Returns a summary of what was found and recovered.
 pub fn startup_recovery(
     library_dir: &Path,
-    storage: &boru_chat::storage::Storage,
+    storage: &boru_core::storage::Storage,
     profile_user_id: &str,
 ) -> std::result::Result<StartupRecoverySummary, StartupRecoveryError> {
     let mut summary = StartupRecoverySummary::default();
@@ -1297,8 +1297,8 @@ mod tests {
         (dir, path)
     }
 
-    fn test_storage() -> boru_chat::storage::Storage {
-        boru_chat::storage::Storage::memory().expect("create memory storage")
+    fn test_storage() -> boru_core::storage::Storage {
+        boru_core::storage::Storage::memory().expect("create memory storage")
     }
 
     // ── Step 6: Hashing tests ──────────────────────────────────────────

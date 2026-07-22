@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use boru_chat::{
+use boru_core::{
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
     room_docs::{
@@ -49,7 +49,7 @@ async fn create_test_endpoint(
 async fn drain(
     md: &room_docs::RoomMetadataDoc,
     roster: &room_docs::RosterDoc,
-    rx: &mut boru_chat::api::GossipReceiver,
+    rx: &mut boru_core::api::GossipReceiver,
     idle: Duration,
     max: usize,
 ) {
@@ -68,7 +68,7 @@ async fn drain(
 /// Format room info output in the same style as the `/room info` CLI command.
 fn format_room_info(
     md: &RoomMetadata,
-    members: &std::collections::HashMap<String, boru_chat::room_docs::RosterMember>,
+    members: &std::collections::HashMap<String, boru_core::room_docs::RosterMember>,
 ) -> String {
     let mut out = format!(
         "Room: {} | Description: {} | Rules: {}",

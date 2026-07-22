@@ -25,7 +25,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use boru_chat::{
+use boru_core::{
     contact::{ContactAction, SignedContactMessage},
     friend_request::{FriendRequestError, FriendRequestStatus, FriendRequestStore},
 };
@@ -405,7 +405,7 @@ fn signed_conversation_invite_round_trip() {
     let alice_sk = SecretKey::generate();
     let bob_pk = SecretKey::generate().public();
 
-    let topic = boru_chat::contact::direct_topic(&alice_sk.public(), &bob_pk);
+    let topic = boru_core::contact::direct_topic(&alice_sk.public(), &bob_pk);
     let action = ContactAction::ConversationInvite {
         topic,
         addrs: vec![],

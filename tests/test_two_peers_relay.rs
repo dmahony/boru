@@ -1,7 +1,7 @@
 //! Debug test: trace why two peers don't connect via gossip.
 //! Creates two peers with relay enabled, subscribes both, sends a message.
 
-use boru_chat::{
+use boru_core::{
     api::Event as GossipEvent,
     chat_core::{Message, SignedMessage},
     net::{Gossip, GOSSIP_ALPN},

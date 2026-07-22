@@ -4,9 +4,9 @@ use std::{
     thread,
 };
 
-use boru_chat::chat_history::{ChatHistoryStore, HistoryEntry};
-use boru_chat::image_store::ImageStore;
-use boru_chat::proto::TopicId;
+use boru_core::chat_history::{ChatHistoryStore, HistoryEntry};
+use boru_core::image_store::ImageStore;
+use boru_core::proto::TopicId;
 
 const CHAT_IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
 

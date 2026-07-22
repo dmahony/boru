@@ -1,12 +1,10 @@
-# Boru
+# boru-core
 
 Private, peer-to-peer communication built on
 [iroh](https://github.com/n0-computer/iroh).
 
 > Private communication, directly between people.
 
-Boru is a Rust library (`boru_chat`) and example GUI application
-(`examples/iced_chat`) that provides peer-to-peer messaging over gossip trees:
 
 - **Gossip protocol** — room-based message broadcasting over QUIC
 - **Direct messaging** — inbox protocol for offline delivery, whisper protocol
