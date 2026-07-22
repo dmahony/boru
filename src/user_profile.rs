@@ -512,6 +512,10 @@ pub struct UserProfileStore {
     #[serde(default = "default_schema_version")]
     schema_version: u32,
 
+    /// Whether the onboarding flow has been completed or explicitly skipped.
+    #[serde(default)]
+    onboarding_completed: bool,
+
     /// The user's profile.
     profile: UserProfile,
 
@@ -528,6 +532,7 @@ impl Default for UserProfileStore {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            onboarding_completed: false,
             profile: UserProfile::default(),
             shared_files: Vec::new(),
             data_dir: PathBuf::new(),
@@ -564,6 +569,16 @@ impl UserProfileStore {
     /// Return a mutable reference to the current profile.
     pub fn profile_mut(&mut self) -> &mut UserProfile {
         &mut self.profile
+    }
+
+    /// Whether the onboarding flow has already been completed.
+    pub fn onboarding_completed(&self) -> bool {
+        self.onboarding_completed
+    }
+
+    /// Mark onboarding as completed or not completed.
+    pub fn set_onboarding_completed(&mut self, completed: bool) {
+        self.onboarding_completed = completed;
     }
 
     /// Replace the current profile with a new one.
@@ -927,6 +942,20 @@ mod tests {
         let mut store = UserProfileStore::empty_at("/tmp", key);
         store.profile_mut().display_name = "Bob".into();
         assert_eq!(store.profile().display_name, "Bob");
+    }
+
+    #[test]
+    fn onboarding_completion_round_trips_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_key();
+
+        let mut store = UserProfileStore::empty_at(dir.path(), key);
+        assert!(!store.onboarding_completed());
+        store.set_onboarding_completed(true);
+        store.save().unwrap();
+
+        let loaded = UserProfileStore::load(dir.path(), key).unwrap();
+        assert!(loaded.onboarding_completed());
     }
 
     #[test]

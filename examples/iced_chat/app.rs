@@ -1401,12 +1401,27 @@ impl ChatEntry {
 
 // ── Screen navigation ─────────────────────────────────────────────────
 
+/// Explicit onboarding step within the onboarding screen state machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnboardingStep {
+    Welcome,
+    CreateProfile,
+    AddSomeone,
+    ShowMyCode,
+    ScanCode,
+    PasteInvitation,
+    PairingResult,
+    Complete,
+}
+
 /// The active view in the main panel.
 ///
 /// The sidebar (chat list, friends, requests) is always visible regardless
 /// of the active screen — only the right-hand main panel changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {
+    /// First-run onboarding flow.
+    Onboarding(OnboardingStep),
     /// No chat selected — empty state shown in the main panel.
     ChatList,
     /// An individual chat room with a given topic.
@@ -1551,6 +1566,8 @@ pub struct IcedChat {
     pending_topic: Option<TopicId>,
     /// Screen to return to when closing the settings page.
     settings_return_to: Option<Screen>,
+    /// Screen to return to when closing onboarding.
+    onboarding_return_to: Option<Screen>,
 
     // ── Multi-conversation state ──
     /// Per-conversation runtime state. Each direct chat or group room
@@ -2156,6 +2173,18 @@ pub enum AppMessage {
     ToggleHelp,
     OpenSettings,
     CloseSettings,
+    /// Open the onboarding flow from settings or a debug shortcut.
+    OpenOnboarding,
+    /// Close onboarding and return to the screen that launched it.
+    CloseOnboarding,
+    /// Move to the next onboarding step.
+    AdvanceOnboarding,
+    /// Move to the previous onboarding step.
+    BackOnboarding,
+    /// Jump to an explicit onboarding step (used for branching choices).
+    SelectOnboardingStep(OnboardingStep),
+    /// Mark onboarding as complete, persist the flag, and return to chat.
+    CompleteOnboarding,
     /// Open the friend requests management screen.
     OpenFriendRequests,
     /// Toggle a sidebar section's collapsed state by index (0=chats, 1=friends, 2=discover, 3=requests).
@@ -3147,7 +3176,17 @@ impl IcedChat {
                 Err(e) => tracing::warn!("download-manager: startup recovery failed: {e}"),
             }
         }
-        let first_run = room_history.is_empty() && friends.is_empty();
+        let mut profile_store = UserProfileStore::load_or_default(&data_dir, local_public);
+        let first_run =
+            !profile_store.onboarding_completed() && room_history.is_empty() && friends.is_empty();
+        if first_run {
+            profile_store.set_onboarding_completed(false);
+        }
+        let screen = if first_run {
+            Screen::Onboarding(OnboardingStep::Welcome)
+        } else {
+            Screen::ChatList
+        };
         let app_settings = AppSettings::load(&data_dir);
         // Load shared files from storage for the settings GUI.
         let shared_files = storage
@@ -3155,7 +3194,7 @@ impl IcedChat {
             .and_then(|stg| stg.list_shared_files(&local_public.to_string(), true).ok())
             .unwrap_or_default();
         Self {
-            screen: Screen::ChatList,
+            screen,
             previous_screen: None,
             pending_topic: None,
             room_history,
@@ -3215,6 +3254,7 @@ impl IcedChat {
             viewport_height: 0.0,
             settings: app_settings.clone(),
             settings_return_to: None,
+            onboarding_return_to: None,
             dark_mode: app_settings.dark_mode,
             sound_enabled: app_settings.sound_enabled,
             chat_text_size: app_settings.chat_text_size,
@@ -3285,7 +3325,7 @@ impl IcedChat {
             blocked_sharers: HashSet::new(),
             profile_cache: HashMap::new(),
             pending_downloads: HashSet::new(),
-            profile_store: UserProfileStore::empty_at(&data_dir, local_public),
+            profile_store,
             profile_bio_input: String::new(),
             shared_folder_enabled: false,
             shared_folder_path: PathBuf::from(""),
@@ -4015,6 +4055,49 @@ impl IcedChat {
         }
     }
 
+    fn onboarding_next_step(step: OnboardingStep) -> Option<OnboardingStep> {
+        match step {
+            OnboardingStep::Welcome => Some(OnboardingStep::CreateProfile),
+            OnboardingStep::CreateProfile => Some(OnboardingStep::AddSomeone),
+            OnboardingStep::AddSomeone => Some(OnboardingStep::PairingResult),
+            OnboardingStep::ShowMyCode
+            | OnboardingStep::ScanCode
+            | OnboardingStep::PasteInvitation => Some(OnboardingStep::PairingResult),
+            OnboardingStep::PairingResult => Some(OnboardingStep::Complete),
+            OnboardingStep::Complete => None,
+        }
+    }
+
+    fn onboarding_previous_step(step: OnboardingStep) -> Option<OnboardingStep> {
+        match step {
+            OnboardingStep::Welcome => None,
+            OnboardingStep::CreateProfile => Some(OnboardingStep::Welcome),
+            OnboardingStep::AddSomeone => Some(OnboardingStep::CreateProfile),
+            OnboardingStep::ShowMyCode
+            | OnboardingStep::ScanCode
+            | OnboardingStep::PasteInvitation => Some(OnboardingStep::AddSomeone),
+            OnboardingStep::PairingResult => Some(OnboardingStep::AddSomeone),
+            OnboardingStep::Complete => Some(OnboardingStep::PairingResult),
+        }
+    }
+
+    fn start_onboarding(&mut self, return_to: Option<Screen>) {
+        self.onboarding_return_to = return_to;
+        self.screen = Screen::Onboarding(OnboardingStep::Welcome);
+    }
+
+    fn close_onboarding(&mut self) {
+        self.screen = self.onboarding_return_to.take().unwrap_or(Screen::ChatList);
+    }
+
+    fn persist_onboarding_completion(&mut self) {
+        self.first_run = false;
+        self.profile_store.set_onboarding_completed(true);
+        if let Err(err) = self.profile_store.save() {
+            tracing::warn!("failed to persist onboarding completion: {err}");
+        }
+    }
+
     fn log_variant(message: &AppMessage) -> &'static str {
         match message {
             AppMessage::GoToChatList => "GoToChatList",
@@ -4035,6 +4118,12 @@ impl IcedChat {
             AppMessage::ToggleHelp => "ToggleHelp",
             AppMessage::OpenSettings => "OpenSettings",
             AppMessage::CloseSettings => "CloseSettings",
+            AppMessage::OpenOnboarding => "OpenOnboarding",
+            AppMessage::CloseOnboarding => "CloseOnboarding",
+            AppMessage::AdvanceOnboarding => "AdvanceOnboarding",
+            AppMessage::BackOnboarding => "BackOnboarding",
+            AppMessage::SelectOnboardingStep(_) => "SelectOnboardingStep",
+            AppMessage::CompleteOnboarding => "CompleteOnboarding",
             AppMessage::NetEvent(_) => "NetEvent",
             AppMessage::FriendEvent(_) => "FriendEvent",
             AppMessage::WhisperEvent(_) => "WhisperEvent",
@@ -4641,6 +4730,7 @@ impl IcedChat {
 impl IcedChat {
     fn publish_gui_state(&self) {
         let (active_screen, active_room) = match &self.screen {
+            Screen::Onboarding(_) => ("Onboarding", None),
             Screen::Chat { topic } => ("Chat", Some(topic.to_string())),
             Screen::ChatList => ("ChatList", None),
             Screen::FriendRequests => ("FriendRequests", None),
@@ -4723,6 +4813,52 @@ impl IcedChat {
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::Completed);
                 }
+                iced::Task::none()
+            }
+
+            AppMessage::OpenOnboarding => {
+                let return_to = if matches!(self.screen, Screen::Settings) {
+                    Some(Screen::Settings)
+                } else {
+                    Some(self.screen.clone())
+                };
+                self.start_onboarding(return_to);
+                iced::Task::none()
+            }
+
+            AppMessage::CloseOnboarding => {
+                self.close_onboarding();
+                iced::Task::none()
+            }
+
+            AppMessage::AdvanceOnboarding => {
+                if let Screen::Onboarding(step) = self.screen {
+                    if let Some(next_step) = Self::onboarding_next_step(step) {
+                        self.screen = Screen::Onboarding(next_step);
+                    }
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::BackOnboarding => {
+                if let Screen::Onboarding(step) = self.screen {
+                    if let Some(prev_step) = Self::onboarding_previous_step(step) {
+                        self.screen = Screen::Onboarding(prev_step);
+                    } else {
+                        self.close_onboarding();
+                    }
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::SelectOnboardingStep(step) => {
+                self.screen = Screen::Onboarding(step);
+                iced::Task::none()
+            }
+
+            AppMessage::CompleteOnboarding => {
+                self.persist_onboarding_completion();
+                self.close_onboarding();
                 iced::Task::none()
             }
 
@@ -6480,7 +6616,7 @@ impl IcedChat {
                     };
                     let secret_key = self.secret_key.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let progress_queue = self.download_progress_queue.clone();
                     let endpoint = self.endpoint.clone();
                     return iced::Task::perform(
                         async move {
@@ -6701,6 +6837,8 @@ impl IcedChat {
                     self.show_add_menu = false;
                 } else if self.help_visible {
                     self.help_visible = false;
+                } else if matches!(self.screen, Screen::Onboarding(_)) {
+                    self.close_onboarding();
                 } else if matches!(self.screen, Screen::Settings) {
                     self.screen = self.settings_return_to.take().unwrap_or(Screen::ChatList);
                 } else if !self.composer_text.is_empty() {
@@ -6929,8 +7067,8 @@ impl IcedChat {
                 self.conversation_store.touch_and_bump(&topic);
                 // Update the sidebar preview BEFORE taking the mutable borrow
                 // on self.conversations (avoids borrow conflict).
-                let is_inactive = topic != self.topic
-                    || !matches!(self.screen, Screen::Chat { .. });
+                let is_inactive =
+                    topic != self.topic || !matches!(self.screen, Screen::Chat { .. });
                 if is_inactive {
                     self.update_room_preview(&topic, &event);
                 }
@@ -7529,11 +7667,7 @@ impl IcedChat {
                             .await
                             .await
                             .map_err(|e| format!("Failed to store file: {e}"))?;
-                        let ticket_str = blob_ticket_string(
-                            endpoint_addr,
-                            tag.hash,
-                            tag.format,
-                        );
+                        let ticket_str = blob_ticket_string(endpoint_addr, tag.hash, tag.format);
                         let msg = crate::Message::FileShare {
                             name: filename.clone(),
                             ticket: ticket_str.clone(),
@@ -7546,9 +7680,7 @@ impl IcedChat {
                         Ok((filename, ticket_str))
                     },
                     |r: Result<(String, String), String>| match r {
-                        Ok((name, ticket)) => {
-                            AppMessage::FileDownloaded { name, ticket }
-                        }
+                        Ok((name, ticket)) => AppMessage::FileDownloaded { name, ticket },
                         Err(e) => AppMessage::ErrorMsg(e),
                     },
                 )
@@ -7671,7 +7803,10 @@ impl IcedChat {
                 }
                 if let Some(e) = self.entries.get_mut(entry_index) {
                     if let Some(ref mut d) = e.download {
-                        d.state = DownloadState::Active { bytes: 0, total: None };
+                        d.state = DownloadState::Active {
+                            bytes: 0,
+                            total: None,
+                        };
                     }
                 }
                 self.download_entry_index = Some(entry_index);
@@ -7686,8 +7821,9 @@ impl IcedChat {
                 let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
-                        let ticket: iroh_blobs::ticket::BlobTicket =
-                            ticket_str.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
+                        let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                            .parse()
+                            .map_err(|e| format!("Invalid ticket: {e}"))?;
                         let (addr, hash, _format) = ticket.into_parts();
                         let node_id = addr.id;
                         let candidates = download_candidates(node_id, &neighbors);
@@ -8860,7 +8996,8 @@ impl IcedChat {
                     let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
                     tasks.push(iced::Task::perform(
                         async move {
-                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir) {
+                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir)
+                            {
                                 Ok(Some(s)) => s,
                                 _ => return Vec::new(),
                             };
@@ -9547,7 +9684,7 @@ impl IcedChat {
                         let image_store = self.image_store.clone();
                         let user = self.local_public.to_string();
                         let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                        let progress_queue = self.download_progress_queue.clone();
                         self.push_system("Saving profile image…");
                         iced::Task::perform(
                             async move {
@@ -9659,7 +9796,7 @@ impl IcedChat {
                     let image_store = self.image_store.clone();
                     let identifier = self.profile_image_identifier.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let progress_queue = self.download_progress_queue.clone();
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -10823,6 +10960,7 @@ impl IcedChat {
 
         // Main panel depends on the active screen.
         let main_panel: iced::Element<'_, AppMessage> = match &self.screen {
+            Screen::Onboarding(step) => self.view_onboarding_screen(*step),
             Screen::ChatList => self.view_main_empty_state(),
             Screen::Chat { .. } => self.view_chat_panel(),
             Screen::FriendRequests => self.view_friend_requests(),
@@ -13082,6 +13220,318 @@ impl IcedChat {
         }
     }
 
+    fn view_onboarding_screen(&self, step: OnboardingStep) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::{Alignment, Length};
+
+        let theme = self.theme();
+        let text_color = text_system(&theme);
+        let mut content = Column::new().spacing(SPACE_12).padding(SPACE_24);
+
+        let header = match step {
+            OnboardingStep::Welcome => "Welcome",
+            OnboardingStep::CreateProfile => "Create your profile",
+            OnboardingStep::AddSomeone => "Add someone",
+            OnboardingStep::ShowMyCode => "Show your code",
+            OnboardingStep::ScanCode => "Scan a code",
+            OnboardingStep::PasteInvitation => "Paste an invitation",
+            OnboardingStep::PairingResult => "Pairing result",
+            OnboardingStep::Complete => "You're ready",
+        };
+
+        content = content.push(text(header).size(TYPO_XL));
+        content = content.push(Space::new().height(Length::Fixed(SPACE_8)));
+
+        let body = match step {
+            OnboardingStep::Welcome => vec![
+                "Boru Chat connects you directly to other peers.",
+                "This short setup will help you create a profile and find someone to talk to.",
+            ],
+            OnboardingStep::CreateProfile => vec![
+                "Set your display name and bio in Settings so people can recognize you.",
+                "You can reopen this guide later from Settings any time.",
+            ],
+            OnboardingStep::AddSomeone => vec![
+                "Choose how you want to connect.",
+                "You can show your code, scan someone else's code, paste an invite, or skip pairing for now.",
+            ],
+            OnboardingStep::ShowMyCode => vec![
+                "Share your public key or invite ticket with the person you want to reach.",
+                "Your local code is shown below for convenience.",
+            ],
+            OnboardingStep::ScanCode => vec![
+                "Use your camera or a QR scanner to capture the other person's invite.",
+                "After scanning, you'll review the pairing result before continuing.",
+            ],
+            OnboardingStep::PasteInvitation => vec![
+                "Paste the invitation ticket you received from the other person.",
+                "You can find the Join Ticket control in the chat list or use the add menu.",
+            ],
+            OnboardingStep::PairingResult => vec![
+                "If the pairing worked, you're ready to move into chat.",
+                "If it failed, you can retry or back up and try another method.",
+            ],
+            OnboardingStep::Complete => vec![
+                "You're ready to use the app.",
+                "Finishing will remember that onboarding is done and take you back to chat.",
+            ],
+        };
+
+        for paragraph in body {
+            content = content.push(
+                text(paragraph)
+                    .size(TYPO_SM)
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::Word),
+            );
+        }
+
+        content = content.push(Space::new().height(Length::Fixed(SPACE_8)));
+
+        match step {
+            OnboardingStep::Welcome => {
+                content = content.push(
+                    Row::new()
+                        .push(
+                            button(text("Close").size(TYPO_SM))
+                                .on_press(AppMessage::CloseOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .push(
+                            button(text("Continue").size(TYPO_SM))
+                                .on_press(AppMessage::AdvanceOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .spacing(SPACE_8)
+                        .align_y(Alignment::Center),
+                );
+            }
+            OnboardingStep::CreateProfile => {
+                content = content.push(
+                    Row::new()
+                        .push(
+                            button(text("Open Settings").size(TYPO_SM))
+                                .on_press(AppMessage::OpenSettings)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .push(
+                            button(text("Continue").size(TYPO_SM))
+                                .on_press(AppMessage::AdvanceOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .push(
+                            button(text("Close").size(TYPO_SM))
+                                .on_press(AppMessage::CloseOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .spacing(SPACE_8)
+                        .align_y(Alignment::Center),
+                );
+            }
+            OnboardingStep::AddSomeone => {
+                content = content.push(
+                    Column::new()
+                        .push(
+                            Row::new()
+                                .push(
+                                    button(text("Show my code").size(TYPO_SM))
+                                        .on_press(AppMessage::SelectOnboardingStep(
+                                            OnboardingStep::ShowMyCode,
+                                        ))
+                                        .style(BUTTON_GHOST_BG)
+                                        .padding([SPACE_6, SPACE_12]),
+                                )
+                                .push(
+                                    button(text("Scan code").size(TYPO_SM))
+                                        .on_press(AppMessage::SelectOnboardingStep(
+                                            OnboardingStep::ScanCode,
+                                        ))
+                                        .style(BUTTON_GHOST_BG)
+                                        .padding([SPACE_6, SPACE_12]),
+                                )
+                                .spacing(SPACE_8)
+                                .align_y(Alignment::Center),
+                        )
+                        .push(Space::new().height(Length::Fixed(SPACE_8)))
+                        .push(
+                            Row::new()
+                                .push(
+                                    button(text("Paste invitation").size(TYPO_SM))
+                                        .on_press(AppMessage::SelectOnboardingStep(
+                                            OnboardingStep::PasteInvitation,
+                                        ))
+                                        .style(BUTTON_GHOST_BG)
+                                        .padding([SPACE_6, SPACE_12]),
+                                )
+                                .push(
+                                    button(text("Skip pairing").size(TYPO_SM))
+                                        .on_press(AppMessage::AdvanceOnboarding)
+                                        .style(BUTTON_GHOST_BG)
+                                        .padding([SPACE_6, SPACE_12]),
+                                )
+                                .spacing(SPACE_8)
+                                .align_y(Alignment::Center),
+                        )
+                        .push(Space::new().height(Length::Fixed(SPACE_8)))
+                        .push(
+                            Row::new()
+                                .push(
+                                    button(text("Back").size(TYPO_SM))
+                                        .on_press(AppMessage::BackOnboarding)
+                                        .style(BUTTON_GHOST_BG)
+                                        .padding([SPACE_6, SPACE_12]),
+                                )
+                                .push(
+                                    button(text("Close").size(TYPO_SM))
+                                        .on_press(AppMessage::CloseOnboarding)
+                                        .style(BUTTON_GHOST_BG)
+                                        .padding([SPACE_6, SPACE_12]),
+                                )
+                                .spacing(SPACE_8)
+                                .align_y(Alignment::Center),
+                        )
+                        .spacing(SPACE_8),
+                );
+            }
+            OnboardingStep::ShowMyCode => {
+                content = content.push(
+                    container(
+                        Column::new()
+                            .push(text(self.local_public.to_string()).size(TYPO_SM))
+                            .push(text(self.ticket_str.clone()).size(TYPO_XS))
+                            .spacing(SPACE_4),
+                    )
+                    .padding(SPACE_12),
+                );
+                content = content.push(
+                    Row::new()
+                        .push(
+                            button(text("Back").size(TYPO_SM))
+                                .on_press(AppMessage::BackOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .push(
+                            button(text("Continue").size(TYPO_SM))
+                                .on_press(AppMessage::AdvanceOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .push(
+                            button(text("Close").size(TYPO_SM))
+                                .on_press(AppMessage::CloseOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .spacing(SPACE_8)
+                        .align_y(Alignment::Center),
+                );
+            }
+            OnboardingStep::ScanCode | OnboardingStep::PasteInvitation => {
+                content = content.push(
+                    Row::new()
+                        .push(
+                            button(text("Back").size(TYPO_SM))
+                                .on_press(AppMessage::BackOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .push(
+                            button(text("Continue").size(TYPO_SM))
+                                .on_press(AppMessage::AdvanceOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .push(
+                            button(text("Close").size(TYPO_SM))
+                                .on_press(AppMessage::CloseOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .spacing(SPACE_8)
+                        .align_y(Alignment::Center),
+                );
+            }
+            OnboardingStep::PairingResult => {
+                content = content.push(
+                    Row::new()
+                        .push(
+                            button(text("Try again").size(TYPO_SM))
+                                .on_press(AppMessage::SelectOnboardingStep(
+                                    OnboardingStep::AddSomeone,
+                                ))
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .push(
+                            button(text("Continue").size(TYPO_SM))
+                                .on_press(AppMessage::AdvanceOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .push(
+                            button(text("Close").size(TYPO_SM))
+                                .on_press(AppMessage::CloseOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .spacing(SPACE_8)
+                        .align_y(Alignment::Center),
+                );
+            }
+            OnboardingStep::Complete => {
+                content = content.push(
+                    Row::new()
+                        .push(
+                            button(text("Finish onboarding").size(TYPO_SM))
+                                .on_press(AppMessage::CompleteOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .push(
+                            button(text("Back").size(TYPO_SM))
+                                .on_press(AppMessage::BackOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .push(
+                            button(text("Close").size(TYPO_SM))
+                                .on_press(AppMessage::CloseOnboarding)
+                                .style(BUTTON_GHOST_BG)
+                                .padding([SPACE_6, SPACE_12]),
+                        )
+                        .spacing(SPACE_8)
+                        .align_y(Alignment::Center),
+                );
+            }
+        }
+
+        let card = container(content)
+            .width(Length::Fill)
+            .max_width(720.0)
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: 1.0,
+                    radius: SPACE_12.into(),
+                },
+                text_color: Some(text_color),
+                ..Default::default()
+            });
+
+        container(scrollable(card).width(Length::Fill).height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(container_primary)
+            .into()
+    }
+
     fn view_settings_screen(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, container, lazy, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
@@ -13453,6 +13903,15 @@ impl IcedChat {
                 .align_y(Alignment::Center)
         };
 
+        let onboarding_card = section_card(
+            "ONBOARDING",
+            vec![button(text("Show onboarding again").size(TYPO_SM))
+                .on_press(AppMessage::OpenOnboarding)
+                .style(BUTTON_GHOST_BG)
+                .padding([SPACE_6, SPACE_12])
+                .into()],
+        );
+
         let data_card = section_card("DATA", vec![clear_history_row.into()]);
 
         // ── Bottom navigation ──
@@ -13488,6 +13947,7 @@ impl IcedChat {
             .push(network_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(relay_card)
+            .push(onboarding_card)
             .push(data_card)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(nav_row)
