@@ -9,25 +9,7 @@ use iroh::{endpoint::presets, protocol::Router, Endpoint, SecretKey};
 use n0_error::{Result, StdResultExt};
 
 fn get_data_dir() -> PathBuf {
-    if let Ok(val) = env::var("BORU_CHAT_DATA_DIR") {
-        return PathBuf::from(val);
-    }
-    if let Some(val) = env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(val).join("boru-chat");
-    }
-    if let Some(val) = env::var_os("HOME") {
-        return PathBuf::from(val)
-            .join(".local")
-            .join("share")
-            .join("boru-chat");
-    }
-    if let Some(val) = env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(val).join("boru-chat");
-    }
-    // Fallback
-    std::env::current_dir()
-        .unwrap_or_default()
-        .join(".boru-chat")
+    boru_chat::data_dir::resolve_data_dir(None)
 }
 
 fn load_or_generate_secret_key() -> Result<(SecretKey, PathBuf)> {

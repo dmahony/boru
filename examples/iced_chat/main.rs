@@ -100,7 +100,8 @@ struct Args {
     publish_direct_addresses: bool,
     /// Directory for persistent identity and friend state. Chat and room
     /// history are kept in memory only.
-    /// Defaults to BORU_CHAT_DATA_DIR env var, or ~/.local/share/boru-chat/.
+    /// Defaults to the environment variables BORU_DATA_DIR or
+    /// BORU_CHAT_DATA_DIR, or ~/.local/share/boru/.
     #[clap(long)]
     data_dir: Option<PathBuf>,
 
@@ -146,27 +147,7 @@ pub use boru_chat::chat_core::forward_gossip_events;
 // ── Identity persistence ──────────────────────────────────────────────
 
 fn get_data_dir(cli_override: Option<PathBuf>) -> PathBuf {
-    if let Some(dir) = cli_override {
-        return dir;
-    }
-    if let Ok(val) = std::env::var("BORU_CHAT_DATA_DIR") {
-        return PathBuf::from(val);
-    }
-    if let Some(val) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(val).join("boru-chat");
-    }
-    if let Some(val) = std::env::var_os("HOME") {
-        return PathBuf::from(val)
-            .join(".local")
-            .join("share")
-            .join("boru-chat");
-    }
-    if let Some(val) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(val).join("boru-chat");
-    }
-    std::env::current_dir()
-        .unwrap_or_default()
-        .join(".boru-chat")
+    boru_chat::data_dir::resolve_data_dir(cli_override)
 }
 
 fn load_or_generate_secret_key(data_dir: &Path) -> Result<(SecretKey, PathBuf)> {
