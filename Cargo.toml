@@ -118,6 +118,8 @@ comfy-table = { version = "7.1.4", optional = true }
 
 iced = { version = "0.14", default-features = false, features = ["tokio", "x11", "wayland", "tiny-skia", "image", "lazy", "wgpu"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+qrcode = "0.14"
+rqrr = "0.8"
 mimalloc = { version = "0.1", optional = true }
 profiling = { version = "1", default-features = false, features = [
     "tracy-client",

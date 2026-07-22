@@ -11,6 +11,7 @@ use boru_chat::catalogue_model::RemoteSharedFile;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -88,6 +89,9 @@ use boru_chat::diagnostics::IcedMessageJournal;
 use boru_chat::diagnostics::IcedStateSnapshot;
 use boru_chat::diagnostics::DEFAULT_ACTION_STATE_TIMEOUT_MS;
 use iced::Color;
+use image::{DynamicImage, ImageFormat, Luma};
+use qrcode::QrCode;
+use rqrr::PreparedImage;
 
 // ── Shared ContinuousTracker wrapper ─────────────────────────────────
 /// Wraps [`PrivateContinuousTracker`] so it can be stored in the Clone-derived
@@ -223,6 +227,41 @@ fn blob_ticket_string(
     format: iroh_blobs::BlobFormat,
 ) -> String {
     BlobTicket::new(addr, hash, format).to_string()
+}
+
+fn invitation_input_to_ticket(input: &str) -> Result<Ticket, String> {
+    let invitation = RoomInvitation::parse(input.trim()).map_err(|e| e.to_string())?;
+    Ok(match invitation {
+        RoomInvitation::Stable(invite) => Ticket {
+            topic: invite.topic,
+            peers: Vec::new(),
+            discovery_secret: Some(invite.discovery_secret),
+        },
+        RoomInvitation::Legacy(ticket) => ticket,
+    })
+}
+
+fn qr_code_png_bytes(text: &str) -> Result<Vec<u8>, String> {
+    let code = QrCode::new(text.as_bytes()).map_err(|e| e.to_string())?;
+    let image = code.render::<Luma<u8>>().max_dimensions(320, 320).build();
+    let mut bytes = Vec::new();
+    DynamicImage::ImageLuma8(image)
+        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+fn decode_invitation_from_image(bytes: &[u8]) -> Result<String, String> {
+    let image = image::load_from_memory(bytes)
+        .map_err(|e| format!("failed to decode image: {e}"))?
+        .to_luma8();
+    let mut prepared = PreparedImage::prepare(image);
+    for grid in prepared.detect_grids() {
+        if let Ok((_, content)) = grid.decode() {
+            return Ok(content);
+        }
+    }
+    Err("no QR code found in image".to_string())
 }
 
 // ── Spacing units (4px base) ─────────────────────────────────────────
@@ -1798,6 +1837,12 @@ pub struct IcedChat {
     friend_id_copied: bool,
     /// Whether the invite menu popover is currently visible.
     show_invite_menu: bool,
+    /// Whether the "show my QR code" dialog is visible.
+    show_identity_qr_dialog: bool,
+    /// Whether the paste-invitation dialog is visible.
+    show_paste_invitation_dialog: bool,
+    /// Invitation text entered in the paste-invitation dialog.
+    paste_invitation_input: String,
     /// The peer public key input text in the invite whisper field.
     invite_whisper_input: String,
     /// Shared DHT client for creating private-room discovery records.
@@ -2136,6 +2181,22 @@ pub enum AppMessage {
     JoinFromTicket,
     /// The room switch / join failed.
     RoomJoinFailed(String),
+    /// Show the local identity QR code.
+    ShowIdentityQrCode,
+    /// Hide the local identity QR code dialog.
+    CloseIdentityQrCode,
+    /// Hide the paste-invitation dialog.
+    ClosePasteInvitation,
+    /// Open the paste-invitation dialog.
+    ShowPasteInvitation,
+    /// Update the paste-invitation dialog input.
+    PasteInvitationInputChanged(String),
+    /// Submit the pasted invitation.
+    ConfirmPasteInvitation,
+    /// Open the file picker for an invitation image.
+    ScanInvitationImage,
+    /// The invitation image file picker returned a path.
+    ScanInvitationImagePicked(String),
 
     // ── Add Menu ──
     /// Toggle the \"Add\" menu dropdown in the sidebar header.
@@ -3266,6 +3327,9 @@ impl IcedChat {
             pending_neighbor_status: HashMap::new(),
             friend_id_copied: false,
             show_invite_menu: false,
+            show_identity_qr_dialog: false,
+            show_paste_invitation_dialog: false,
+            paste_invitation_input: String::new(),
             invite_whisper_input: String::new(),
             dht,
             private_dht_disabled,
@@ -4025,6 +4089,14 @@ impl IcedChat {
             AppMessage::CancelCreateRoom => "CancelCreateRoom",
             AppMessage::CreateNewRoomDhtToggled(_) => "CreateNewRoomDhtToggled",
             AppMessage::JoinFromTicket => "JoinFromTicket",
+            AppMessage::ShowIdentityQrCode => "ShowIdentityQrCode",
+            AppMessage::CloseIdentityQrCode => "CloseIdentityQrCode",
+            AppMessage::ClosePasteInvitation => "ClosePasteInvitation",
+            AppMessage::ShowPasteInvitation => "ShowPasteInvitation",
+            AppMessage::PasteInvitationInputChanged(_) => "PasteInvitationInputChanged",
+            AppMessage::ConfirmPasteInvitation => "ConfirmPasteInvitation",
+            AppMessage::ScanInvitationImage => "ScanInvitationImage",
+            AppMessage::ScanInvitationImagePicked(_) => "ScanInvitationImagePicked",
             AppMessage::RoomJoinFailed(_) => "RoomJoinFailed",
             AppMessage::JoinTicketInputChanged(_) => "JoinTicketInputChanged",
             AppMessage::NewChatCreated => "NewChatCreated",
@@ -4465,11 +4537,19 @@ impl IcedChat {
     /// Cancel buttons rather than mutating dialog state directly.
     fn close_dialog_message(
         show_create_room_dialog: bool,
+        show_identity_qr_dialog: bool,
+        show_paste_invitation_dialog: bool,
         history_confirm_clear: bool,
         room_delete_confirm_topic: Option<TopicId>,
     ) -> Result<AppMessage, GuiActionError> {
         if show_create_room_dialog {
             return Ok(AppMessage::CancelCreateRoom);
+        }
+        if show_identity_qr_dialog {
+            return Ok(AppMessage::CloseIdentityQrCode);
+        }
+        if show_paste_invitation_dialog {
+            return Ok(AppMessage::ClosePasteInvitation);
         }
         if history_confirm_clear {
             return Ok(AppMessage::ClearHistoryRequested);
@@ -4486,6 +4566,8 @@ impl IcedChat {
     fn close_current_dialog(&self) -> Result<AppMessage, GuiActionError> {
         Self::close_dialog_message(
             self.show_create_room_dialog,
+            self.show_identity_qr_dialog,
+            self.show_paste_invitation_dialog,
             self.history_confirm_clear,
             self.room_delete_confirm_topic,
         )
@@ -4666,6 +4748,8 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             composer_text: self.composer_text.clone(),
             dialog_open: self.show_create_room_dialog
+                || self.show_identity_qr_dialog
+                || self.show_paste_invitation_dialog
                 || self.history_confirm_clear
                 || self.room_delete_confirm_topic.is_some(),
             unread_count: 0,
@@ -5512,19 +5596,14 @@ impl IcedChat {
                 // immediate feedback and looked like a no-op.
                 let ticket_input = self.join_ticket_input.trim();
                 if ticket_input.is_empty() {
-                    self.chat_list_error = "Paste a ticket before joining a room.".to_string();
+                    self.chat_list_error = "Paste an invitation before joining a room.".to_string();
                     self.screen = Screen::ChatList;
                     return iced::Task::none();
                 }
-                let ticket = match RoomInvitation::parse(ticket_input) {
-                    Ok(RoomInvitation::Stable(invite)) => Ticket {
-                        topic: invite.topic,
-                        peers: Vec::new(),
-                        discovery_secret: Some(invite.discovery_secret),
-                    },
-                    Ok(RoomInvitation::Legacy(ticket)) => ticket,
+                let ticket = match invitation_input_to_ticket(ticket_input) {
+                    Ok(ticket) => ticket,
                     Err(e) => {
-                        self.chat_list_error = format!("Invalid ticket: {e}");
+                        self.chat_list_error = format!("Invalid invitation: {e}");
                         self.screen = Screen::ChatList;
                         return iced::Task::none();
                     }
@@ -6035,6 +6114,83 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            AppMessage::ShowIdentityQrCode => {
+                self.show_add_menu = false;
+                self.show_identity_qr_dialog = true;
+                self.show_paste_invitation_dialog = false;
+                self.paste_invitation_input.clear();
+                iced::Task::none()
+            }
+            AppMessage::CloseIdentityQrCode => {
+                self.show_identity_qr_dialog = false;
+                self.complete_close_dialog_action();
+                iced::Task::none()
+            }
+            AppMessage::ShowPasteInvitation => {
+                self.show_add_menu = false;
+                self.show_paste_invitation_dialog = true;
+                self.show_identity_qr_dialog = false;
+                self.paste_invitation_input.clear();
+                self.chat_list_error.clear();
+                iced::Task::none()
+            }
+            AppMessage::ClosePasteInvitation => {
+                self.show_paste_invitation_dialog = false;
+                self.complete_close_dialog_action();
+                iced::Task::none()
+            }
+            AppMessage::PasteInvitationInputChanged(text) => {
+                self.paste_invitation_input = text;
+                if !self.chat_list_error.is_empty() {
+                    self.chat_list_error.clear();
+                }
+                iced::Task::none()
+            }
+            AppMessage::ConfirmPasteInvitation => {
+                let pasted = self.paste_invitation_input.trim().to_string();
+                if pasted.is_empty() {
+                    self.chat_list_error = "Paste an invitation first.".to_string();
+                    return iced::Task::none();
+                }
+                self.join_ticket_input = pasted;
+                self.show_paste_invitation_dialog = false;
+                iced::Task::done(AppMessage::JoinFromTicket)
+            }
+            AppMessage::ScanInvitationImage => {
+                self.show_add_menu = false;
+                iced::Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Select an invitation QR code image")
+                        .pick_file(),
+                    |file| {
+                        if let Some(file) = file {
+                            AppMessage::ScanInvitationImagePicked(
+                                file.path().to_string_lossy().to_string(),
+                            )
+                        } else {
+                            AppMessage::Noop
+                        }
+                    },
+                )
+            }
+            AppMessage::ScanInvitationImagePicked(path) => {
+                if path.is_empty() {
+                    return iced::Task::none();
+                }
+                match std::fs::read(&path).and_then(|bytes| {
+                    decode_invitation_from_image(&bytes).map_err(std::io::Error::other)
+                }) {
+                    Ok(text) => {
+                        self.join_ticket_input = text;
+                        self.show_paste_invitation_dialog = false;
+                        iced::Task::done(AppMessage::JoinFromTicket)
+                    }
+                    Err(e) => {
+                        self.chat_list_error = format!("Could not read invitation image: {e}");
+                        iced::Task::none()
+                    }
+                }
+            }
 
             // ── Chat ─────────────────────────────────────────────────
             AppMessage::InputChanged(text) => {
@@ -6480,7 +6636,7 @@ impl IcedChat {
                     };
                     let secret_key = self.secret_key.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let progress_queue = self.download_progress_queue.clone();
                     let endpoint = self.endpoint.clone();
                     return iced::Task::perform(
                         async move {
@@ -6929,8 +7085,8 @@ impl IcedChat {
                 self.conversation_store.touch_and_bump(&topic);
                 // Update the sidebar preview BEFORE taking the mutable borrow
                 // on self.conversations (avoids borrow conflict).
-                let is_inactive = topic != self.topic
-                    || !matches!(self.screen, Screen::Chat { .. });
+                let is_inactive =
+                    topic != self.topic || !matches!(self.screen, Screen::Chat { .. });
                 if is_inactive {
                     self.update_room_preview(&topic, &event);
                 }
@@ -7529,11 +7685,7 @@ impl IcedChat {
                             .await
                             .await
                             .map_err(|e| format!("Failed to store file: {e}"))?;
-                        let ticket_str = blob_ticket_string(
-                            endpoint_addr,
-                            tag.hash,
-                            tag.format,
-                        );
+                        let ticket_str = blob_ticket_string(endpoint_addr, tag.hash, tag.format);
                         let msg = crate::Message::FileShare {
                             name: filename.clone(),
                             ticket: ticket_str.clone(),
@@ -7546,9 +7698,7 @@ impl IcedChat {
                         Ok((filename, ticket_str))
                     },
                     |r: Result<(String, String), String>| match r {
-                        Ok((name, ticket)) => {
-                            AppMessage::FileDownloaded { name, ticket }
-                        }
+                        Ok((name, ticket)) => AppMessage::FileDownloaded { name, ticket },
                         Err(e) => AppMessage::ErrorMsg(e),
                     },
                 )
@@ -7671,7 +7821,10 @@ impl IcedChat {
                 }
                 if let Some(e) = self.entries.get_mut(entry_index) {
                     if let Some(ref mut d) = e.download {
-                        d.state = DownloadState::Active { bytes: 0, total: None };
+                        d.state = DownloadState::Active {
+                            bytes: 0,
+                            total: None,
+                        };
                     }
                 }
                 self.download_entry_index = Some(entry_index);
@@ -7686,8 +7839,9 @@ impl IcedChat {
                 let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
-                        let ticket: iroh_blobs::ticket::BlobTicket =
-                            ticket_str.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
+                        let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                            .parse()
+                            .map_err(|e| format!("Invalid ticket: {e}"))?;
                         let (addr, hash, _format) = ticket.into_parts();
                         let node_id = addr.id;
                         let candidates = download_candidates(node_id, &neighbors);
@@ -8860,7 +9014,8 @@ impl IcedChat {
                     let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
                     tasks.push(iced::Task::perform(
                         async move {
-                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir) {
+                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir)
+                            {
                                 Ok(Some(s)) => s,
                                 _ => return Vec::new(),
                             };
@@ -9547,7 +9702,7 @@ impl IcedChat {
                         let image_store = self.image_store.clone();
                         let user = self.local_public.to_string();
                         let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                        let progress_queue = self.download_progress_queue.clone();
                         self.push_system("Saving profile image…");
                         iced::Task::perform(
                             async move {
@@ -9659,7 +9814,7 @@ impl IcedChat {
                     let image_store = self.image_store.clone();
                     let identifier = self.profile_image_identifier.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let progress_queue = self.download_progress_queue.clone();
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -10860,6 +11015,10 @@ impl IcedChat {
 
         if self.show_create_room_dialog {
             self.view_create_room_dialog(base)
+        } else if self.show_identity_qr_dialog {
+            self.view_identity_qr_dialog(base)
+        } else if self.show_paste_invitation_dialog {
+            self.view_paste_invitation_dialog(base)
         } else if self.show_add_menu {
             self.view_sidebar_add_menu(base)
         } else {
@@ -10879,52 +11038,41 @@ impl IcedChat {
         let theme = Self::theme_from_dark(dark_mode);
 
         // Build the dropdown panel
-        struct MenuItem {
-            icon: &'static str,
-            label: &'static str,
-            action: Option<AppMessage>,
-            disabled: bool,
+        enum MenuEntry {
+            Action {
+                icon: &'static str,
+                label: &'static str,
+                action: Option<AppMessage>,
+                disabled: bool,
+            },
+            Section(&'static str),
         }
 
         let items = vec![
-            MenuItem {
+            MenuEntry::Action {
                 icon: "👤",
-                label: "Add Friend",
-                action: Some(AppMessage::OpenFriendRequests),
+                label: "Show my QR code",
+                action: Some(AppMessage::ShowIdentityQrCode),
                 disabled: false,
             },
-            MenuItem {
-                icon: "🔗",
-                label: "Join Ticket",
-                action: Some(AppMessage::JoinFromTicket),
-                disabled: false,
-            },
-            MenuItem {
+            MenuEntry::Action {
                 icon: "📷",
-                label: "Scan QR Code",
-                action: None,
-                disabled: true,
+                label: "Scan invitation image",
+                action: Some(AppMessage::ScanInvitationImage),
+                disabled: false,
             },
-            MenuItem {
-                icon: "📥",
-                label: "Import Friend",
+            MenuEntry::Action {
+                icon: "📋",
+                label: "Paste invitation",
+                action: Some(AppMessage::ShowPasteInvitation),
+                disabled: false,
+            },
+            MenuEntry::Section("Advanced"),
+            MenuEntry::Action {
+                icon: "🔑",
+                label: "Add by public key",
                 action: Some(AppMessage::ImportFriendFromFile),
                 disabled: false,
-            },
-        ];
-
-        let future_items = vec![
-            MenuItem {
-                icon: "👥",
-                label: "Create Group Chat",
-                action: None,
-                disabled: true,
-            },
-            MenuItem {
-                icon: "📱",
-                label: "Pair Device",
-                action: None,
-                disabled: true,
             },
         ];
 
@@ -10943,47 +11091,63 @@ impl IcedChat {
 
         let sep_color = border_muted(&theme);
 
-        // Primary items
+        // Primary items and section headers
         for item in &items {
-            let label_color = if item.disabled {
-                text_muted(&theme)
-            } else {
-                text_remote_body(&theme)
-            };
+            match item {
+                MenuEntry::Action {
+                    icon,
+                    label,
+                    action,
+                    disabled,
+                } => {
+                    let label_color = if *disabled {
+                        text_muted(&theme)
+                    } else {
+                        text_remote_body(&theme)
+                    };
 
-            let mut btn = button(
-                row![
-                    text(item.icon).size(TYPO_SM),
-                    text(item.label).size(TYPO_SM).color(label_color),
-                ]
-                .spacing(SPACE_8)
-                .align_y(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([SPACE_8, SPACE_12])
-            .style(move |_t, status| {
-                let bg = if matches!(status, iced::widget::button::Status::Hovered) {
-                    iced::Color::from_rgba(0.3, 0.3, 0.3, 0.2)
-                } else {
-                    iced::Color::TRANSPARENT
-                };
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(bg)),
-                    border: iced::Border {
-                        radius: SPACE_4.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
+                    let mut btn = button(
+                        row![
+                            text(*icon).size(TYPO_SM),
+                            text(*label).size(TYPO_SM).color(label_color),
+                        ]
+                        .spacing(SPACE_8)
+                        .align_y(Alignment::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding([SPACE_8, SPACE_12])
+                    .style(move |_t, status| {
+                        let bg = if matches!(status, iced::widget::button::Status::Hovered) {
+                            iced::Color::from_rgba(0.3, 0.3, 0.3, 0.2)
+                        } else {
+                            iced::Color::TRANSPARENT
+                        };
+                        iced::widget::button::Style {
+                            background: Some(iced::Background::Color(bg)),
+                            border: iced::Border {
+                                radius: SPACE_4.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }
+                    });
+
+                    if let Some(msg) = action {
+                        if !*disabled {
+                            btn = btn.on_press(msg.clone());
+                        }
+                    }
+
+                    menu_col = menu_col.push(btn);
                 }
-            });
-
-            if !item.disabled {
-                if let Some(msg) = &item.action {
-                    btn = btn.on_press(msg.clone());
+                MenuEntry::Section(label) => {
+                    menu_col = menu_col.push(
+                        container(text(*label).size(TYPO_XXS).color(text_muted(&theme)))
+                            .padding([SPACE_8, SPACE_12])
+                            .width(Length::Fill),
+                    );
                 }
             }
-
-            menu_col = menu_col.push(btn);
         }
 
         // Separator
@@ -10999,38 +11163,6 @@ impl IcedChat {
             .padding([SPACE_4, SPACE_12])
             .width(Length::Fill),
         );
-
-        // Future items
-        let future_label_color = text_muted(&theme);
-        for item in &future_items {
-            let btn = button(
-                row![
-                    text(item.icon).size(TYPO_SM),
-                    text(item.label).size(TYPO_SM).color(future_label_color),
-                ]
-                .spacing(SPACE_8)
-                .align_y(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([SPACE_8, SPACE_12])
-            .style(move |_t, status| {
-                let bg = if matches!(status, iced::widget::button::Status::Hovered) {
-                    iced::Color::from_rgba(0.3, 0.3, 0.3, 0.2)
-                } else {
-                    iced::Color::TRANSPARENT
-                };
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(bg)),
-                    border: iced::Border {
-                        radius: SPACE_4.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            });
-
-            menu_col = menu_col.push(btn);
-        }
 
         // Dropdown panel styling
         let menu_panel = container(menu_col)
@@ -11082,7 +11214,7 @@ impl IcedChat {
             .push(text("Create New Room").size(18))
             .push(
                 checkbox(self.create_room_dht_enabled)
-                    .label("Enable DHT discovery")
+                    .label("Make this room discoverable")
                     .on_toggle(AppMessage::CreateNewRoomDhtToggled),
             )
             .push(
@@ -11104,6 +11236,140 @@ impl IcedChat {
 
         let overlay = container(dialog)
             .width(Length::Fixed(320.0))
+            .height(Length::Shrink)
+            .padding(24)
+            .style(move |_t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(
+                    0.15, 0.15, 0.15, 0.95,
+                ))),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    width: 1.0,
+                    color: iced::Color::from_rgb(0.4, 0.4, 0.4),
+                },
+                ..Default::default()
+            });
+
+        iced::widget::stack![
+            base,
+            container(overlay)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        ]
+        .into()
+    }
+
+    /// Show the local identity/public-key QR code for sharing.
+    fn view_identity_qr_dialog<'a>(
+        &self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, column, container, image, row, text};
+        use iced::{Alignment, Length};
+
+        let qr = qr_code_png_bytes(&self.local_public.to_string()).ok();
+        let qr_image: iced::Element<'a, AppMessage> = if let Some(bytes) = qr {
+            image(iced::widget::image::Handle::from_bytes(bytes))
+                .content_fit(iced::ContentFit::ScaleDown)
+                .width(Length::Fixed(240.0))
+                .height(Length::Fixed(240.0))
+                .into()
+        } else {
+            container(text("QR unavailable").size(TYPO_XS))
+                .width(Length::Fixed(240.0))
+                .height(Length::Fixed(240.0))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into()
+        };
+
+        let dialog_content = column![]
+            .push(text("My identity code").size(18))
+            .push(text("Scan this code or copy your public key to add you.").size(TYPO_XS))
+            .push(container(qr_image).padding(12))
+            .push(
+                container(text(self.local_public.to_string()).size(TYPO_XXS))
+                    .width(Length::Fixed(320.0)),
+            )
+            .push(
+                row![]
+                    .push(
+                        button(text("Close"))
+                            .on_press(AppMessage::CloseIdentityQrCode)
+                            .padding(8),
+                    )
+                    .spacing(12)
+                    .align_y(Alignment::Center),
+            )
+            .spacing(12)
+            .align_x(Alignment::Center);
+
+        let overlay = container(dialog_content)
+            .width(Length::Fixed(380.0))
+            .height(Length::Shrink)
+            .padding(24)
+            .style(move |_t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(
+                    0.15, 0.15, 0.15, 0.95,
+                ))),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    width: 1.0,
+                    color: iced::Color::from_rgb(0.4, 0.4, 0.4),
+                },
+                ..Default::default()
+            });
+
+        iced::widget::stack![
+            base,
+            container(overlay)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        ]
+        .into()
+    }
+
+    /// Dialog to paste an invitation string from another device.
+    fn view_paste_invitation_dialog<'a>(
+        &self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, column, container, row, text, text_input};
+        use iced::{Alignment, Length};
+
+        let input = text_input("Paste invitation", &self.paste_invitation_input)
+            .on_input(AppMessage::PasteInvitationInputChanged)
+            .padding(10)
+            .size(TYPO_XS)
+            .width(Length::Fixed(340.0));
+
+        let dialog = column![]
+            .push(text("Paste invitation").size(18))
+            .push(text("Paste the invitation text or QR payload here.").size(TYPO_XS))
+            .push(input)
+            .push(
+                row![]
+                    .push(
+                        button(text("Cancel"))
+                            .on_press(AppMessage::ClosePasteInvitation)
+                            .padding(8),
+                    )
+                    .push(
+                        button(text("Join room"))
+                            .on_press(AppMessage::ConfirmPasteInvitation)
+                            .padding(8),
+                    )
+                    .spacing(12),
+            )
+            .spacing(12)
+            .align_x(Alignment::Center);
+
+        let overlay = container(dialog)
+            .width(Length::Fixed(400.0))
             .height(Length::Shrink)
             .padding(24)
             .style(move |_t| iced::widget::container::Style {
