@@ -23,7 +23,7 @@ env:
   RUSTFLAGS: -Dwarnings
   RUSTDOCFLAGS: -Dwarnings
   SCCACHE_CACHE_SIZE: "50G"
-  CRATES_LIST: "boru-chat"
+  CRATES_LIST: "boru"
   IROH_FORCE_STAGING_RELAYS: "1"
 
 jobs:
