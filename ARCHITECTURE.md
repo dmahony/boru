@@ -1,8 +1,8 @@
-# boru-chat Architecture
+# Boru Architecture
 
 ## Overview
 
-boru-chat is a peer-to-peer chat application built on [iroh](https://github.com/n0-computer/iroh), a QUIC-based networking library. Messages are broadcast over gossip trees (PlumTree/HyParView), and direct messaging uses dedicated QUIC protocols for offline delivery and private 1:1 channels.
+Boru is a peer-to-peer chat application built on [iroh](https://github.com/n0-computer/iroh), a QUIC-based networking library. Messages are broadcast over gossip trees (PlumTree/HyParView), and direct messaging uses dedicated QUIC protocols for offline delivery and private 1:1 channels.
 
 The project provides a Rust library (`boru_chat`) and an example GUI application (`examples/iced_chat`).
 
@@ -51,9 +51,7 @@ The project provides a Rust library (`boru_chat`) and an example GUI application
 │  │  │              │  │ Outbox,  │                 │    │
 │  │  │              │  │ Profile  │                 │    │
 │  │  └──────────────┘  └──────────┘                 │    │
-│  └──────────────────────────────────────────────────┘    │
-│                                                          │
-│  ┌──────────────────────────────────────────────────┐    │
+│  │  ┌──────────────────────────────────────────────────┐    │
 │  │        Discovery System                           │    │
 │  │  ┌──────────────┐  ┌────────────┐  ┌──────────┐ │    │
 │  │  │ Public Room  │  │ Private    │  │ DHT /    │ │    │
@@ -108,7 +106,7 @@ Deterministic public-room identities derived from (network, room name, protocol 
 
 ### Discovery System — Architecture
 
-boru-chat uses **two independent DHT systems** for different purposes:
+Boru uses **two independent DHT systems** for different purposes:
 
 | Layer | Purpose | Crate | Type |
 |---|---|---|---|

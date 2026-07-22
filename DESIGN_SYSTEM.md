@@ -1,11 +1,11 @@
-# Boru Chat — Design System
+# Boru — Design System
 
 > **Version:** 1.0  
 > **Created:** 2026-07-21  
-> **Scope:** `examples/iced_chat/` — the `iced` desktop GUI for boru-chat  
+> **Scope:** `examples/iced_chat/` — the `iced` desktop GUI for Boru  
 > **Audience:** Developers implementing the UI redesign (Steps 2–9)
 
-This document specifies every visual token, component, and behaviour in the Boru Chat UI. All values reference the existing codebase and propose a unified system to replace the current ad-hoc styling.
+This document specifies every visual token, component, and behaviour in the Boru UI. All values reference the existing codebase and propose a unified system to replace the current ad-hoc styling.
 
 ---
 
@@ -93,7 +93,7 @@ Base unit: **4px**. All spacing values are multiples or fractions of this base.
 
 | Context                           | Padding / Gap values                | File:Line(s)                   |
 |-----------------------------------|-------------------------------------|--------------------------------|
-| Sidebar header (Boru Chat title)  | `top:12 right:12 bottom:4 left:12`  | `app.rs:10225-10230`           |
+| Sidebar header (Boru title)  | `top:12 right:12 bottom:4 left:12`  | `app.rs:10225-10230`           |
 | Sidebar rows (conversation, friend)| `[6, 12]` (vertical, horizontal)   | `app.rs:10481`                 |
 | Section headers                   | `top:8 right:12 bottom:4 left:12`   | `app.rs:10321-10327`           |
 | Chat panel padding                | `SPACE_16` all around               | `app.rs:11024`                 |
@@ -463,7 +463,7 @@ Implementation: `container_card` at `app.rs:462-472`.
 │  │  Sidebar (bg_surface)     │  Main Panel         │ │
 │  │                           │  (bg_primary)       │ │
 │  │  ┌─ Header ─────────────┐ │  ┌─ Chat Panel ──┐ │ │
-│  │  │ Boru Chat    ＋  ⚙  │ │  │ Header        │ │ │
+│  │  │ Boru         ＋  ⚙  │ │  │ Header        │ │ │
 │  │  └──────────────────────┘ │  │               │ │ │
 │  │  ┌─ Identity Row ───────┐ │  │ Chat Log      │ │ │
 │  │  │ Label | Relay mode   │ │  │ (scrollable)  │ │ │
