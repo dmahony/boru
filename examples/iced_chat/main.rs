@@ -331,7 +331,7 @@ fn main() -> Result<()> {
     let _startup_timer = perf_tracker::PerfTracker::timer("app_startup", "full startup");
 
     // Opportunistically migrate legacy boru-chat data directory to new boru path
-    let _ = boru_chat::data_dir::auto_migrate_data_dir();
+    let _ = boru_core::data_dir::auto_migrate_data_dir();
 
     let data_dir = get_data_dir(args.data_dir.clone());
 

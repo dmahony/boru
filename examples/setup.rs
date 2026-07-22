@@ -55,7 +55,7 @@ fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf
 #[tokio::main]
 async fn main() -> Result<()> {
     // Opportunistically migrate legacy boru-chat data directory to new boru path
-    let _ = boru_chat::data_dir::auto_migrate_data_dir();
+    let _ = boru_core::data_dir::auto_migrate_data_dir();
 
     // load or generate persistent secret key
     let (secret_key, key_path) = load_or_generate_secret_key()?;
