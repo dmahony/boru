@@ -28,7 +28,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use boru_chat::{
+use boru_core::{
     chat_history::{ChatHistoryStore, HistoryEntry},
     contact::direct_topic,
     conversations::{ConversationEntry, ConversationKind, ConversationStore},

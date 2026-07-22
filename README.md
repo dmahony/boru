@@ -1,11 +1,11 @@
-# boru-chat
+# boru-core
 
 Gossip messages over broadcast trees — a peer-to-peer chat application built on
 [iroh](https://github.com/n0-computer/iroh).
 
 ## Architecture
 
-boru-chat is a Rust library (`boru_chat`) and example GUI application
+boru-core is a Rust library (`boru_core`) and example GUI application
 (`examples/iced_chat`) that provides:
 
 - **Gossip protocol** — room-based message broadcasting over QUIC

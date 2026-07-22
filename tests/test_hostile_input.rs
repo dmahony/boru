@@ -28,13 +28,13 @@
 
 #![cfg(feature = "net")]
 
-use boru_chat::chat_core::{
+use boru_core::chat_core::{
     handle_net_event, handle_net_event_for_topic, message_hash, now_secs, ChatCallbacks, ChatEntry,
     Message, MessageHash, NetEvent, SignedMessage,
 };
-use boru_chat::chat_history::DeliveryState;
-use boru_chat::friends::{FriendId, FriendsStore};
-use boru_chat::proto::TopicId;
+use boru_core::chat_history::DeliveryState;
+use boru_core::friends::{FriendId, FriendsStore};
+use boru_core::proto::TopicId;
 use iroh::{PublicKey, SecretKey};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1206,7 +1206,7 @@ fn all_message_variants_handle_gracefully() {
             hash: [0x00; 32],
         },
         Message::Heartbeat,
-        Message::DiagnosticProbe(boru_chat::diagnostics::DiagnosticProbe {
+        Message::DiagnosticProbe(boru_core::diagnostics::DiagnosticProbe {
             probe_id: "test".into(),
             sender_id: remote_key.public().to_string(),
             room_id: "test".into(),

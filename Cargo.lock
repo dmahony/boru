@@ -825,7 +825,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "boru-chat"
+name = "boru-core"
 version = "0.101.0"
 dependencies = [
  "aes-gcm",

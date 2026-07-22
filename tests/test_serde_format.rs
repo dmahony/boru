@@ -1,8 +1,8 @@
 //! Quick test to verify serialization format of TopicId and other types.
 #[test]
 fn check_conversation_format() {
-    use boru_chat::conversations::{ConversationEntry, ConversationStore};
-    use boru_chat::proto::TopicId;
+    use boru_core::conversations::{ConversationEntry, ConversationStore};
+    use boru_core::proto::TopicId;
     use iroh::SecretKey;
 
     let topic = TopicId::from_bytes([0xBBu8; 32]);

@@ -129,7 +129,7 @@ fn is_stripped_unicode_format(c: char) -> bool {
 /// # Examples
 ///
 /// ```
-/// use boru_chat::abuse_controls::sanitize_display_text;
+/// use boru_core::abuse_controls::sanitize_display_text;
 ///
 /// let clean = sanitize_display_text("hello\u{0000}world\nline2", 100);
 /// assert_eq!(clean, "hello\u{FFFD}world\nline2");
@@ -168,7 +168,7 @@ pub fn sanitize_display_text(text: &str, max_chars: usize) -> String {
 /// # Examples
 ///
 /// ```
-/// use boru_chat::abuse_controls::sanitize_single_line;
+/// use boru_core::abuse_controls::sanitize_single_line;
 ///
 /// let clean = sanitize_single_line("hello\nworld\u{0000}test");
 /// assert_eq!(clean, "hello world test");

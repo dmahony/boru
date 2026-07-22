@@ -36,7 +36,7 @@
 //!
 //! ```ignore
 //! use std::time::Duration;
-//! use boru_chat::public_room_config::PublicRoomConfig;
+//! use boru_core::public_room_config::PublicRoomConfig;
 //!
 //! let cfg = PublicRoomConfig {
 //!     discover_interval: Duration::from_millis(10),

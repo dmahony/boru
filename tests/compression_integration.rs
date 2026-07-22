@@ -14,7 +14,7 @@
 //! - Size reduction verification
 //! - Output format verification (valid JPEG, no EXIF, RGB only)
 
-use boru_chat::compression::compress_image;
+use boru_core::compression::compress_image;
 use image::{
     codecs::jpeg::JpegEncoder, codecs::png::PngEncoder, ExtendedColorType, GenericImageView,
     ImageEncoder,

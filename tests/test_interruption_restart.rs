@@ -6,7 +6,7 @@
 //! reopen — the Storage layer preserves state but does not rewrite active rows
 //! at startup.
 
-use boru_chat::storage::Storage;
+use boru_core::storage::Storage;
 
 fn make_storage(hash: &str) -> Storage {
     let storage = Storage::memory().expect("in-memory storage");

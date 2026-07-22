@@ -19,7 +19,7 @@
 //! # // compile-only check; the real fixture comes from test helpers
 //! # fn _check() {
 //! let raw = b"dummy bytes that won't decode -- this is a doc-test skeleton";
-//! let result = boru_chat::compression::compress_image(raw, 1280, 80);
+//! let result = boru_core::compression::compress_image(raw, 1280, 80);
 //! assert!(result.is_err()); // dummy input can't decode
 //! # }
 //! ```

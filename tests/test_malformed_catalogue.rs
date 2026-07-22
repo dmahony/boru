@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use boru_chat::{
+use boru_core::{
     catalogue_client::{fetch_remote_catalogue, RemoteCatalogueFetchError},
     catalogue_handler::CatalogueHandler,
     catalogue_limits::MAX_CATALOGUE_FILES,
@@ -494,7 +494,7 @@ async fn catalogue_page_instead_of_signed_catalogue_is_rejected() {
     harness.bump_server_revision();
     harness.make_client_friend();
 
-    let page = boru_chat::catalogue_protocol::CataloguePage {
+    let page = boru_core::catalogue_protocol::CataloguePage {
         revision: 1,
         items: vec![RemoteSharedFile::new(
             "hash-005", "page.txt", None, FILE_SIZE, MIME_TYPE, None, 1,
@@ -534,7 +534,7 @@ async fn error_response_is_handled_safely() {
     harness
         .start_server_with_handler(ConstantResponseHandler {
             response: CatalogResponse::error(
-                boru_chat::catalogue_protocol::CatalogErrorCode::Busy,
+                boru_core::catalogue_protocol::CatalogErrorCode::Busy,
                 "server too busy",
             ),
         })
@@ -1077,7 +1077,7 @@ async fn oversized_response_payload_rejected() {
     // Send a raw payload that is larger than MAX_CATALOGUE_RESPONSE_BYTES.
     // The client-side check_response_payload_size should catch it before
     // any deserialization.
-    let oversized = vec![0xABu8; boru_chat::catalogue_limits::MAX_CATALOGUE_RESPONSE_BYTES + 1];
+    let oversized = vec![0xABu8; boru_core::catalogue_limits::MAX_CATALOGUE_RESPONSE_BYTES + 1];
     harness
         .start_server_with_handler(RawPayloadHandler { payload: oversized })
         .await;

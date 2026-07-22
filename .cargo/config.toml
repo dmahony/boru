@@ -1,4 +1,4 @@
-# Cargo aliases for boru-chat examples
+# Cargo aliases for boru-core examples
 #
 # Run with:  cargo chat open
 #            cargo chat join <ticket>

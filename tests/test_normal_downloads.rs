@@ -13,10 +13,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use boru_chat::chat_callbacks::TransferKind;
-use boru_chat::chat_core::download_blob_with_safety;
-use boru_chat::file_access_handler::prepare_imported_file;
-use boru_chat::storage::Storage;
+use boru_core::chat_callbacks::TransferKind;
+use boru_core::chat_core::download_blob_with_safety;
+use boru_core::file_access_handler::prepare_imported_file;
+use boru_core::storage::Storage;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, PublicKey,
     RelayMode, SecretKey,

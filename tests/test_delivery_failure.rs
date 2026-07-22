@@ -1,4 +1,4 @@
-use boru_chat::outbox_delivery::{DeliveryError, DeliveryFailure, FailureClass};
+use boru_core::outbox_delivery::{DeliveryError, DeliveryFailure, FailureClass};
 
 #[test]
 fn every_failure_has_stable_code_and_expected_classification() {

@@ -1,4 +1,4 @@
-use boru_chat::{
+use boru_core::{
     mailbox::MailboxIdentity,
     storage::{OutgoingDmFault, Storage},
 };

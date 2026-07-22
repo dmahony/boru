@@ -9,7 +9,7 @@
 //! Tests requiring the `net` feature are gated behind `#[cfg(feature = "net")]`.
 //! Tests requiring the `gui` feature are gated behind `#[cfg(feature = "gui")]`.
 
-use boru_chat::diagnostics::{
+use boru_core::diagnostics::{
     classify_failures, classify_message_layer, FailureAnalysis, FailureLayer, IcedMessageJournal,
     IcedStateSnapshot,
 };
@@ -150,7 +150,7 @@ fn test_classify_message_layer_no_secret_leakage() {
 
 #[test]
 fn test_classify_failures_details_no_secrets() {
-    use boru_chat::diagnostics::Diagnostics;
+    use boru_core::diagnostics::Diagnostics;
 
     let diagnostics = Diagnostics::new();
     let journal = IcedMessageJournal::new();
@@ -158,7 +158,7 @@ fn test_classify_failures_details_no_secrets() {
     // Record a realistic failure
     diagnostics.record(
         None,
-        boru_chat::diagnostics::DiagnosticEventKind::ConnectionFailed {
+        boru_core::diagnostics::DiagnosticEventKind::ConnectionFailed {
             addresses: vec!["127.0.0.1:1234".to_string()],
             error: "Connection refused".to_string(),
         },

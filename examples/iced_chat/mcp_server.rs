@@ -51,15 +51,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::gui_test_actions::{ActionRecord, ActionStatus, GuiActionHistory, GuiActionRateLimiter};
-use boru_chat::chat_core::{broadcast_diagnostic_probe, message_hash, Message};
-use boru_chat::conversations::ConversationNetEvent;
-use boru_chat::diagnostics::{
+use boru_core::chat_core::{broadcast_diagnostic_probe, message_hash, Message};
+use boru_core::conversations::ConversationNetEvent;
+use boru_core::diagnostics::{
     self, classify_discovery_test, classify_failures, generate_probe_id, ConnectionDiagnosticState,
     DiagnosticEvent, DiagnosticEventKind, DiagnosticStageState, Diagnostics, DiscoveryTestResult,
     GuiWaitCondition, IcedMessageJournal, IcedStateSnapshot, PeerDiagnosticState, ProbeTestResult,
 };
-use boru_chat::net::Gossip;
-use boru_chat::proto::TopicId;
+use boru_core::net::Gossip;
+use boru_core::proto::TopicId;
 use bytes::Bytes;
 use iroh::{Endpoint, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -288,11 +288,11 @@ pub struct McpAppState {
     /// Whether GUI test-action MCP tools are registered.
     pub gui_test_actions_enabled: bool,
     /// Sender for GUI test actions (None if test actions are disabled).
-    pub gui_action_tx: Option<boru_chat::diagnostics::GuiTestHandle>,
+    pub gui_action_tx: Option<boru_core::diagnostics::GuiTestHandle>,
     /// History of GUI test actions (shared with the Iced GUI loop).
     pub gui_action_history: GuiActionHistory,
     /// Shared lifecycle history populated at MCP enqueue and Iced receipt.
-    pub gui_action_lifecycle: boru_chat::diagnostics::GuiActionHistory,
+    pub gui_action_lifecycle: boru_core::diagnostics::GuiActionHistory,
     /// Rate limiter for GUI test actions, shared across MCP connections.
     pub gui_action_rate_limiter: Arc<Mutex<GuiActionRateLimiter>>,
     /// Latest GUI state, published by the Iced application through a watch channel.
@@ -660,14 +660,14 @@ fn validate_gui_tool_params(method: &str, params: &Value) -> Result<(), String> 
 /// `boru_send_gui_action` — send a GUI test command through the channel.
 fn handle_send_gui_action(
     req: &JsonRpcRequest,
-    tx: boru_chat::diagnostics::GuiTestHandle,
+    tx: boru_core::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
     let command_value = req
         .params
         .get("command")
         .ok_or_else(|| "Missing required argument: command".to_string())?;
 
-    let command: boru_chat::diagnostics::GuiTestCommand =
+    let command: boru_core::diagnostics::GuiTestCommand =
         serde_json::from_value(command_value.clone())
             .map_err(|e| format!("Invalid command: {e}"))?;
 
@@ -697,8 +697,8 @@ fn handle_send_gui_action(
     let command_json =
         serde_json::to_string(&command).map_err(|e| format!("Failed to serialize command: {e}"))?;
 
-    let request = boru_chat::diagnostics::GuiActionRequest {
-        action_id: boru_chat::diagnostics::GuiActionId(idempotency_key.clone()),
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(idempotency_key.clone()),
         requested_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -708,7 +708,7 @@ fn handle_send_gui_action(
 
     // Send through the channel (non-blocking via enqueue)
     tx.enqueue(request).map_err(|e| match e.code {
-        boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
         _ => format!("GUI action channel error: {}", e.message),
@@ -775,7 +775,7 @@ fn handle_get_gui_action_status(
 
     // Prefer the shared lifecycle store: it is populated at enqueue time and
     // updated by the Iced loop, so status is observable even while pending.
-    let lifecycle_id = boru_chat::diagnostics::GuiActionId(action_id.to_string());
+    let lifecycle_id = boru_core::diagnostics::GuiActionId(action_id.to_string());
     if let Some(status) = state.gui_action_lifecycle.get(&lifecycle_id) {
         return Ok(serde_json::json!({
             "found": true,
@@ -901,7 +901,7 @@ fn handle_get_gui_snapshot(state: &McpAppState) -> Result<Value, String> {
 /// - Control characters are rejected.
 fn handle_set_composer(
     req: &JsonRpcRequest,
-    tx: boru_chat::diagnostics::GuiTestHandle,
+    tx: boru_core::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
     let mut text = req
         .params
@@ -948,8 +948,8 @@ fn handle_set_composer(
     let command_json =
         serde_json::to_string(&command).map_err(|e| format!("Failed to serialize command: {e}"))?;
 
-    let request = boru_chat::diagnostics::GuiActionRequest {
-        action_id: boru_chat::diagnostics::GuiActionId(idempotency_key.clone()),
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(idempotency_key.clone()),
         requested_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -959,7 +959,7 @@ fn handle_set_composer(
 
     // Send through the channel (non-blocking via enqueue)
     tx.enqueue(request).map_err(|e| match e.code {
-        boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
         _ => format!("GUI action channel error: {}", e.message),
@@ -1006,7 +1006,7 @@ fn handle_set_composer(
 ///   response's structural fields.
 fn handle_gui_open_room(
     req: &JsonRpcRequest,
-    tx: boru_chat::diagnostics::GuiTestHandle,
+    tx: boru_core::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
     let room_id = req
         .params
@@ -1050,8 +1050,8 @@ fn handle_gui_open_room(
     let command_json =
         serde_json::to_string(&command).map_err(|e| format!("Failed to serialize command: {e}"))?;
 
-    let request = boru_chat::diagnostics::GuiActionRequest {
-        action_id: boru_chat::diagnostics::GuiActionId(idempotency_key.clone()),
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(idempotency_key.clone()),
         requested_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1061,7 +1061,7 @@ fn handle_gui_open_room(
 
     // Send through the channel (non-blocking via enqueue)
     tx.enqueue(request).map_err(|e| match e.code {
-        boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
         _ => format!("GUI action channel error: {}", e.message),
@@ -1090,7 +1090,7 @@ fn handle_gui_open_room(
 /// - Full conversation_id is NOT logged — only length is emitted.
 fn handle_gui_open_conversation(
     req: &JsonRpcRequest,
-    tx: boru_chat::diagnostics::GuiTestHandle,
+    tx: boru_core::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
     let conversation_id = req
         .params
@@ -1139,8 +1139,8 @@ fn handle_gui_open_conversation(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
-    let request = boru_chat::diagnostics::GuiActionRequest {
-        action_id: boru_chat::diagnostics::GuiActionId(idempotency_key.clone()),
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(idempotency_key.clone()),
         requested_at_ms: now_ms,
         command: command_json,
     };
@@ -1148,7 +1148,7 @@ fn handle_gui_open_conversation(
     // Send through the channel (non-blocking — try_send to avoid blocking the
     // MCP connection handler).
     tx.enqueue(request).map_err(|e| match e.code {
-        boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
         _ => format!("GUI action channel error: {}", e.message),
@@ -1178,19 +1178,19 @@ fn handle_gui_open_conversation(
 ///
 /// - No secrets are exposed — the composer text is never read or logged.
 /// - Rate-limited by the shared `GuiActionRateLimiter`.
-fn handle_submit_composer(tx: boru_chat::diagnostics::GuiTestHandle) -> Result<Value, String> {
+fn handle_submit_composer(tx: boru_core::diagnostics::GuiTestHandle) -> Result<Value, String> {
     info!("boru_gui_submit_composer: SubmitComposer action queued");
 
     let idempotency_key = crate::gui_test_actions::generate_action_key();
 
-    let command = boru_chat::diagnostics::GuiTestCommand::SubmitComposer;
+    let command = boru_core::diagnostics::GuiTestCommand::SubmitComposer;
 
     // Serialize the command to JSON for the GuiActionRequest.command field
     let command_json =
         serde_json::to_string(&command).map_err(|e| format!("Failed to serialize command: {e}"))?;
 
-    let request = boru_chat::diagnostics::GuiActionRequest {
-        action_id: boru_chat::diagnostics::GuiActionId(idempotency_key.clone()),
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(idempotency_key.clone()),
         requested_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1200,7 +1200,7 @@ fn handle_submit_composer(tx: boru_chat::diagnostics::GuiTestHandle) -> Result<V
 
     // Send through the channel (non-blocking via enqueue)
     tx.enqueue(request).map_err(|e| match e.code {
-        boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
         _ => format!("GUI action channel error: {}", e.message),
@@ -1216,16 +1216,16 @@ fn handle_submit_composer(tx: boru_chat::diagnostics::GuiTestHandle) -> Result<V
 /// Queue a parameterless semantic composer control action.
 fn handle_composer_control(
     control: &str,
-    tx: boru_chat::diagnostics::GuiTestHandle,
+    tx: boru_core::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
     let command = match control {
-        "clear" => boru_chat::diagnostics::GuiTestCommand::ClearComposer,
-        "focus" => boru_chat::diagnostics::GuiTestCommand::FocusComposer,
+        "clear" => boru_core::diagnostics::GuiTestCommand::ClearComposer,
+        "focus" => boru_core::diagnostics::GuiTestCommand::FocusComposer,
         _ => return Err("unknown composer control".to_string()),
     };
     let action_id = crate::gui_test_actions::generate_action_key();
-    let request = boru_chat::diagnostics::GuiActionRequest {
-        action_id: boru_chat::diagnostics::GuiActionId(action_id.clone()),
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(action_id.clone()),
         requested_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1276,19 +1276,19 @@ fn handle_composer_control(
 ///
 /// - No caller-supplied input is involved — the command has no parameters.
 /// - Rate-limited by the shared `GuiActionRateLimiter`.
-fn handle_gui_close_dialog(tx: boru_chat::diagnostics::GuiTestHandle) -> Result<Value, String> {
+fn handle_gui_close_dialog(tx: boru_core::diagnostics::GuiTestHandle) -> Result<Value, String> {
     info!("boru_gui_close_dialog: CloseDialog action queued");
 
     let idempotency_key = crate::gui_test_actions::generate_action_key();
 
-    let command_json = serde_json::to_string(&boru_chat::diagnostics::GuiTestCommand::CloseDialog)
+    let command_json = serde_json::to_string(&boru_core::diagnostics::GuiTestCommand::CloseDialog)
         .map_err(|e| format!("Failed to serialize command: {e}"))?;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
-    let request = boru_chat::diagnostics::GuiActionRequest {
-        action_id: boru_chat::diagnostics::GuiActionId(idempotency_key.clone()),
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(idempotency_key.clone()),
         requested_at_ms: now_ms,
         command: command_json,
     };
@@ -1296,7 +1296,7 @@ fn handle_gui_close_dialog(tx: boru_chat::diagnostics::GuiTestHandle) -> Result<
     // Send through the channel (non-blocking — try_send to avoid blocking the
     // MCP connection handler).
     tx.enqueue(request).map_err(|e| match e.code {
-        boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
         _ => format!("GUI action channel error: {}", e.message),
@@ -1368,15 +1368,15 @@ async fn handle_run_local_gui_message_test(
     let initial_diagnostics = state.diagnostics.latest_sequence();
     let mut steps = Vec::new();
     async fn send_action(
-        tx: &boru_chat::diagnostics::GuiTestHandle,
-        command: boru_chat::diagnostics::GuiTestCommand,
+        tx: &boru_core::diagnostics::GuiTestHandle,
+        command: boru_core::diagnostics::GuiTestCommand,
         journal: &IcedMessageJournal,
         deadline: tokio::time::Instant,
     ) -> Result<(String, String), String> {
         let action_id = crate::gui_test_actions::generate_action_key();
         let command_json = serde_json::to_string(&command).map_err(|e| e.to_string())?;
-        let request = boru_chat::diagnostics::GuiActionRequest {
-            action_id: boru_chat::diagnostics::GuiActionId(action_id.clone()),
+        let request = boru_core::diagnostics::GuiActionRequest {
+            action_id: boru_core::diagnostics::GuiActionId(action_id.clone()),
             requested_at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1698,7 +1698,7 @@ pub struct GuiNavigateResponse {
 /// ```
 fn handle_gui_navigate(
     req: &JsonRpcRequest,
-    tx: boru_chat::diagnostics::GuiTestHandle,
+    tx: boru_core::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
     let destination = req
         .params
@@ -1738,8 +1738,8 @@ fn handle_gui_navigate(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    let request = boru_chat::diagnostics::GuiActionRequest {
-        action_id: boru_chat::diagnostics::GuiActionId(idempotency_key.clone()),
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(idempotency_key.clone()),
         requested_at_ms: now_ms,
         command: command_json,
     };
@@ -1747,7 +1747,7 @@ fn handle_gui_navigate(
     // Send through the channel (non-blocking — try_send to avoid blocking the
     // MCP connection handler).
     tx.enqueue(request).map_err(|e| match e.code {
-        boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
         _ => format!("GUI action channel error: {}", e.message),
@@ -1783,7 +1783,7 @@ fn handle_gui_navigate(
 ///   caller-supplied value.
 fn handle_gui_toggle_dark_mode(
     req: &JsonRpcRequest,
-    tx: boru_chat::diagnostics::GuiTestHandle,
+    tx: boru_core::diagnostics::GuiTestHandle,
 ) -> Result<Value, String> {
     let enabled = req
         .params
@@ -1798,12 +1798,12 @@ fn handle_gui_toggle_dark_mode(
 
     let idempotency_key = crate::gui_test_actions::generate_action_key();
 
-    let command = boru_chat::diagnostics::GuiTestCommand::ToggleDarkMode { enabled };
+    let command = boru_core::diagnostics::GuiTestCommand::ToggleDarkMode { enabled };
     let command_json =
         serde_json::to_string(&command).map_err(|e| format!("Failed to serialize command: {e}"))?;
 
-    let request = boru_chat::diagnostics::GuiActionRequest {
-        action_id: boru_chat::diagnostics::GuiActionId(idempotency_key.clone()),
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(idempotency_key.clone()),
         requested_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1813,7 +1813,7 @@ fn handle_gui_toggle_dark_mode(
 
     // Send through the channel (non-blocking via enqueue)
     tx.enqueue(request).map_err(|e| match e.code {
-        boru_chat::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
             format!("GUI action queue is full (capacity: {})", tx.capacity())
         }
         _ => format!("GUI action channel error: {}", e.message),
@@ -1940,8 +1940,8 @@ async fn handle_join_lobby_room(
     let command = crate::gui_test_actions::GuiTestCommand::OpenRoom {
         room_id: room_id.clone(),
     };
-    let request = boru_chat::diagnostics::GuiActionRequest {
-        action_id: boru_chat::diagnostics::GuiActionId(action_id.clone()),
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(action_id.clone()),
         requested_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -2607,7 +2607,7 @@ fn parse_topic_id(s: &str) -> Result<TopicId, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boru_chat::diagnostics::GuiTestCommand;
+    use boru_core::diagnostics::GuiTestCommand;
     use serde_json::json;
 
     // ── handle_gui_open_room validation tests ──────────────────────────
@@ -2623,7 +2623,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_missing_room_id() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_open_room_request(json!({}));
         let result = handle_gui_open_room(&req, tx);
         assert!(result.is_err(), "Missing room_id should produce an error");
@@ -2636,7 +2636,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_empty_room_id() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_open_room_request(json!({"room_id": ""}));
         let result = handle_gui_open_room(&req, tx);
         assert!(result.is_err(), "Empty room_id should produce an error");
@@ -2649,7 +2649,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_too_long() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         // MAX_GUI_ROOM_ID_LEN = 128, so 129 should fail
         let long_id = "a".repeat(129);
         let req = make_open_room_request(json!({"room_id": long_id}));
@@ -2664,7 +2664,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_max_length_accepted() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         // Exactly 128 chars (MAX_GUI_ROOM_ID_LEN) should succeed
         let max_id = "a".repeat(128);
         let req = make_open_room_request(json!({"room_id": max_id}));
@@ -2690,7 +2690,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_invalid_chars_special() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         // '@' is not in [a-zA-Z0-9_-]
         let bad = "room@name";
         let req = make_open_room_request(json!({"room_id": bad}));
@@ -2705,7 +2705,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_invalid_chars_space() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let bad = "room name";
         let req = make_open_room_request(json!({"room_id": bad}));
         let result = handle_gui_open_room(&req, tx);
@@ -2719,7 +2719,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_invalid_chars_slash() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let bad = "room/path";
         let req = make_open_room_request(json!({"room_id": bad}));
         let result = handle_gui_open_room(&req, tx);
@@ -2733,7 +2733,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_control_chars() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let bad = "room\nname";
         let req = make_open_room_request(json!({"room_id": bad}));
         let result = handle_gui_open_room(&req, tx);
@@ -2747,7 +2747,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_success_basic() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let valid_id = "TestRoom123";
         let req = make_open_room_request(json!({"room_id": valid_id}));
         let result = handle_gui_open_room(&req, tx);
@@ -2782,7 +2782,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_success_with_hyphen() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let valid_id = "my-room-name-42";
         let req = make_open_room_request(json!({"room_id": valid_id}));
         let result = handle_gui_open_room(&req, tx);
@@ -2806,7 +2806,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_success_with_underscore() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let valid_id = "room_name_42";
         let req = make_open_room_request(json!({"room_id": valid_id}));
         let result = handle_gui_open_room(&req, tx);
@@ -2830,7 +2830,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_success_all_alphanumeric() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         // A hex-like string without 0x prefix — still valid alphanumeric
         let valid_id = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let req = make_open_room_request(json!({"room_id": valid_id}));
@@ -2855,7 +2855,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_no_secret_tickets_exposed() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let valid_id = "TestRoom";
         let req = make_open_room_request(json!({"room_id": valid_id}));
         let result = handle_gui_open_room(&req, tx);
@@ -2878,7 +2878,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gui_open_room_channel_full() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         // Fill the capacity-1 channel first
         let fill_req = make_open_room_request(json!({"room_id": "SomeRoom"}));
         let fill_result = handle_gui_open_room(&fill_req, tx.clone());
@@ -2910,8 +2910,8 @@ mod tests {
     }
 
     /// Creates a channel and returns the sender and a dummy request for testing.
-    fn make_test_env(params: Value) -> (boru_chat::diagnostics::GuiTestHandle, JsonRpcRequest) {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+    fn make_test_env(params: Value) -> (boru_core::diagnostics::GuiTestHandle, JsonRpcRequest) {
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         (tx, make_request(params))
     }
 
@@ -2990,7 +2990,7 @@ mod tests {
     #[tokio::test]
     async fn test_valid_conversation_id() {
         let valid_id = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_request(json!({ "conversation_id": valid_id }));
         let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
@@ -3026,7 +3026,7 @@ mod tests {
     #[tokio::test]
     async fn test_valid_conversation_id_with_0x_prefix() {
         let valid_id = "0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_request(json!({ "conversation_id": valid_id }));
         let result = handle_gui_open_conversation(&req, tx);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
@@ -3038,7 +3038,7 @@ mod tests {
     #[tokio::test]
     async fn test_channel_full_error() {
         // Create a channel with capacity 1 and fill it
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         // Don't consume from rx, so the channel stays 0-length effectively
         // Actually channel(1) means capacity 1. Let me use channel(0) to test full.
         drop(_rx); // Close receiver
@@ -3065,7 +3065,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_composer_missing_text() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({}));
         let result = handle_set_composer(&req, tx);
         assert!(result.is_err(), "Missing text should produce an error");
@@ -3078,7 +3078,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_composer_too_long() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         // Create text far beyond the 4096-char clamp limit
         let long_text = "a".repeat(5000);
         let req = make_set_composer_request(json!({ "text": long_text }));
@@ -3111,7 +3111,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_composer_control_chars() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({ "text": "hello\nworld" }));
         let result = handle_set_composer(&req, tx);
         assert!(
@@ -3127,7 +3127,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_composer_control_chars_tab() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({ "text": "hello\tworld" }));
         let result = handle_set_composer(&req, tx);
         assert!(result.is_err(), "Tab character should produce an error");
@@ -3140,7 +3140,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_composer_success() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({ "text": "Hello, world!" }));
         let result = handle_set_composer(&req, tx);
         assert!(
@@ -3191,7 +3191,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_composer_unicode_text() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let unicode_text = "Hello, 世界! 🌍";
         let req = make_set_composer_request(json!({ "text": unicode_text }));
         let result = handle_set_composer(&req, tx);
@@ -3217,7 +3217,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_composer_empty_text() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({ "text": "" }));
         let result = handle_set_composer(&req, tx);
         assert!(result.is_err(), "Empty text should produce an error");
@@ -3230,7 +3230,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_composer_channel_full() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         // Fill the capacity-1 channel first
         let fill_req = make_set_composer_request(json!({ "text": "fill" }));
         let fill_result = handle_set_composer(&fill_req, tx.clone());
@@ -3249,7 +3249,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_composer_channel_closed() {
-        let (tx, rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         drop(rx); // Close the receiver
         let req = make_set_composer_request(json!({ "text": "hello" }));
         let result = handle_set_composer(&req, tx);
@@ -3263,7 +3263,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_composer_exact_max_length() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         // Exactly 4096 chars — the MAX_COMPOSER_LEN boundary
         let exact_text = "a".repeat(4096);
         let req = make_set_composer_request(json!({ "text": exact_text.clone() }));
@@ -3311,7 +3311,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_composer_full_text_not_exposed_in_response() {
         let secret_text = "This is a secret message that should never appear in logs";
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_set_composer_request(json!({ "text": secret_text }));
         let result = handle_set_composer(&req, tx);
         assert!(result.is_ok(), "Valid text should succeed");
@@ -3348,7 +3348,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_composer_success() {
-        let (handle, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (handle, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let result = handle_submit_composer(handle);
         assert!(result.is_ok(), "SubmitComposer should succeed");
 
@@ -3369,17 +3369,17 @@ mod tests {
         assert_eq!(received.action_id.0, action_id);
         // The command should be the JSON serialization of SubmitComposer
         let expected_json =
-            serde_json::to_string(&boru_chat::diagnostics::GuiTestCommand::SubmitComposer).unwrap();
+            serde_json::to_string(&boru_core::diagnostics::GuiTestCommand::SubmitComposer).unwrap();
         assert_eq!(received.command, expected_json);
     }
 
     #[tokio::test]
     async fn test_submit_composer_channel_full() {
         // GuiTestHandle::channel clamps to min 1, so use capacity 1 and fill it
-        let (handle, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (handle, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         // Fill the capacity-1 channel first
-        let fill = boru_chat::diagnostics::GuiActionRequest {
-            action_id: boru_chat::diagnostics::GuiActionId::new(),
+        let fill = boru_core::diagnostics::GuiActionRequest {
+            action_id: boru_core::diagnostics::GuiActionId::new(),
             requested_at_ms: 1000,
             command: "FillCommand".to_string(),
         };
@@ -3396,7 +3396,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_composer_channel_closed() {
-        let (handle, rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (handle, rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         drop(rx); // Close the receiver
         let result = handle_submit_composer(handle);
         assert!(result.is_err(), "Should error when channel is closed");
@@ -3413,7 +3413,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_composer_no_secrets() {
-        let (handle, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (handle, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let result = handle_submit_composer(handle).unwrap();
         let response_str = serde_json::to_string(&result).unwrap();
         assert!(!response_str.contains("secret_key"));
@@ -3428,7 +3428,7 @@ mod tests {
     #[tokio::test]
     async fn test_response_contains_no_secrets() {
         let valid_id = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_request(json!({ "conversation_id": valid_id }));
         let result = handle_gui_open_conversation(&req, tx).unwrap();
         let response_str = serde_json::to_string(&result).unwrap();
@@ -3452,7 +3452,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_navigate_missing_destination() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({}));
         let result = handle_gui_navigate(&req, tx);
         assert!(
@@ -3468,7 +3468,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_navigate_invalid_destination() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "not_a_real_screen"}));
         let result = handle_gui_navigate(&req, tx);
         assert!(
@@ -3488,7 +3488,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_navigate_destination_too_long() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let long = "a".repeat(5000);
         let req = make_navigate_request(json!({"destination": long}));
         let result = handle_gui_navigate(&req, tx);
@@ -3505,7 +3505,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_navigate_control_chars() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "chat_list\n"}));
         let result = handle_gui_navigate(&req, tx);
         assert!(result.is_err(), "Control chars should produce an error");
@@ -3518,7 +3518,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_navigate_to_chat_list() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "chat_list"}));
         let result = handle_gui_navigate(&req, tx);
         assert!(result.is_ok(), "Valid destination should succeed");
@@ -3538,14 +3538,14 @@ mod tests {
             .expect("Should have received a GuiActionRequest");
         assert_eq!(received.action_id.0, action_id);
         // Serialized as {"command":"go_to_chat_list"} with tag = "command" format
-        let cmd: boru_chat::diagnostics::GuiTestCommand =
+        let cmd: boru_core::diagnostics::GuiTestCommand =
             serde_json::from_str(&received.command).expect("deserialize command");
-        assert_eq!(cmd, boru_chat::diagnostics::GuiTestCommand::GoToChatList);
+        assert_eq!(cmd, boru_core::diagnostics::GuiTestCommand::GoToChatList);
     }
 
     #[tokio::test]
     async fn test_navigate_to_friends() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "friends"}));
         let result = handle_gui_navigate(&req, tx);
         assert!(result.is_ok(), "Valid destination should succeed");
@@ -3567,7 +3567,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_navigate_to_settings() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "settings"}));
         let result = handle_gui_navigate(&req, tx);
         assert!(result.is_ok(), "Valid destination should succeed");
@@ -3578,10 +3578,10 @@ mod tests {
         let received = rx
             .try_recv()
             .expect("Should have received a GuiActionRequest");
-        let cmd: boru_chat::diagnostics::GuiTestCommand =
+        let cmd: boru_core::diagnostics::GuiTestCommand =
             serde_json::from_str(&received.command).expect("deserialize command");
         match cmd {
-            boru_chat::diagnostics::GuiTestCommand::OpenSettings => {}
+            boru_core::diagnostics::GuiTestCommand::OpenSettings => {}
             other => panic!("Expected OpenSettings command, got: {other:?}"),
         }
     }
@@ -3594,7 +3594,7 @@ mod tests {
             ("settings", GuiTestCommand::OpenSettings),
         ] {
             let (mut state, _gossip_rx) = make_gate_test_state(true, true).await;
-            let (tx, mut action_rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+            let (tx, mut action_rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
             state.gui_action_tx = Some(tx);
             let req = make_navigate_request(json!({"destination": destination}));
             let response = handle_request(&req, &state).await;
@@ -3654,7 +3654,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_navigate_channel_full() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         // Fill the capacity-1 channel first
         let fill_req = make_navigate_request(json!({"destination": "chat_list"}));
         let fill_result = handle_gui_navigate(&fill_req, tx.clone());
@@ -3673,7 +3673,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_navigate_no_secrets_exposed() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_navigate_request(json!({"destination": "chat_list"}));
         let result = handle_gui_navigate(&req, tx);
         assert!(result.is_ok());
@@ -3698,7 +3698,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_toggle_dark_mode_missing_enabled() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_toggle_dark_mode_request(json!({}));
         let result = handle_gui_toggle_dark_mode(&req, tx);
         assert!(result.is_err(), "Missing enabled should produce an error");
@@ -3711,7 +3711,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_toggle_dark_mode_invalid_type() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_toggle_dark_mode_request(json!({"enabled": "not_a_bool"}));
         let result = handle_gui_toggle_dark_mode(&req, tx);
         assert!(
@@ -3753,7 +3753,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_toggle_dark_mode_enable() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_toggle_dark_mode_request(json!({"enabled": true}));
         let result = handle_gui_toggle_dark_mode(&req, tx);
         assert!(result.is_ok(), "Valid enabled=true should succeed");
@@ -3772,17 +3772,17 @@ mod tests {
             .try_recv()
             .expect("Should have received a GuiActionRequest");
         assert_eq!(received.action_id.0, action_id);
-        let cmd: boru_chat::diagnostics::GuiTestCommand =
+        let cmd: boru_core::diagnostics::GuiTestCommand =
             serde_json::from_str(&received.command).unwrap();
         assert_eq!(
             cmd,
-            boru_chat::diagnostics::GuiTestCommand::ToggleDarkMode { enabled: true }
+            boru_core::diagnostics::GuiTestCommand::ToggleDarkMode { enabled: true }
         );
     }
 
     #[tokio::test]
     async fn test_toggle_dark_mode_disable() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_toggle_dark_mode_request(json!({"enabled": false}));
         let result = handle_gui_toggle_dark_mode(&req, tx);
         assert!(result.is_ok(), "Valid enabled=false should succeed");
@@ -3795,18 +3795,18 @@ mod tests {
         let received = rx
             .try_recv()
             .expect("Should have received a GuiActionRequest");
-        let cmd: boru_chat::diagnostics::GuiTestCommand =
+        let cmd: boru_core::diagnostics::GuiTestCommand =
             serde_json::from_str(&received.command).unwrap();
         assert_eq!(
             cmd,
-            boru_chat::diagnostics::GuiTestCommand::ToggleDarkMode { enabled: false }
+            boru_core::diagnostics::GuiTestCommand::ToggleDarkMode { enabled: false }
         );
     }
 
     #[tokio::test]
     async fn test_toggle_dark_mode_channel_full() {
         // Use capacity 1 so the second send fails
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         // Fill the channel with one send that nobody reads
         let req1 = make_toggle_dark_mode_request(json!({"enabled": true}));
         let result1 = handle_gui_toggle_dark_mode(&req1, tx.clone());
@@ -3826,7 +3826,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_toggle_dark_mode_no_secrets_exposed() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let req = make_toggle_dark_mode_request(json!({"enabled": true}));
         let result = handle_gui_toggle_dark_mode(&req, tx);
         assert!(result.is_ok());
@@ -4212,7 +4212,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_gui_action_missing_command() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_send_gui_action_request(json!({ "idempotency_key": "key123" }));
         let result = handle_send_gui_action(&req, tx);
         assert!(result.is_err(), "Missing command should produce an error");
@@ -4225,7 +4225,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_gui_action_invalid_command_value() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_send_gui_action_request(json!({
             "command": { "command": "unknown_type" }
         }));
@@ -4240,7 +4240,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_gui_action_invalid_idempotency_key_control_chars() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_send_gui_action_request(json!({
             "command": { "command": "go_to_chat_list" },
             "idempotency_key": "bad\nkey"
@@ -4259,7 +4259,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_gui_action_invalid_idempotency_key_too_long() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let long_key = "a".repeat(MAX_PROBE_ID_LEN + 1);
         let req = make_send_gui_action_request(json!({
             "command": { "command": "go_to_chat_list" },
@@ -4276,7 +4276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_gui_action_success_with_auto_key() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_send_gui_action_request(json!({
             "command": { "command": "go_to_chat_list" }
         }));
@@ -4296,17 +4296,17 @@ mod tests {
             .try_recv()
             .expect("Should have received a GuiActionRequest");
         assert_eq!(received.action_id.0, key);
-        let cmd: boru_chat::diagnostics::GuiTestCommand =
+        let cmd: boru_core::diagnostics::GuiTestCommand =
             serde_json::from_str(&received.command).unwrap();
         match cmd {
-            boru_chat::diagnostics::GuiTestCommand::GoToChatList => {}
+            boru_core::diagnostics::GuiTestCommand::GoToChatList => {}
             other => panic!("Expected GoToChatList command, got: {other:?}"),
         }
     }
 
     #[tokio::test]
     async fn test_send_gui_action_success_with_custom_key() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_send_gui_action_request(json!({
             "command": { "command": "open_friends" },
             "idempotency_key": "my_custom_key_42"
@@ -4325,17 +4325,17 @@ mod tests {
             .try_recv()
             .expect("Should have received a GuiActionRequest");
         assert_eq!(received.action_id.0, "my_custom_key_42");
-        let cmd: boru_chat::diagnostics::GuiTestCommand =
+        let cmd: boru_core::diagnostics::GuiTestCommand =
             serde_json::from_str(&received.command).unwrap();
         match cmd {
-            boru_chat::diagnostics::GuiTestCommand::OpenFriends => {}
+            boru_core::diagnostics::GuiTestCommand::OpenFriends => {}
             other => panic!("Expected OpenFriends command, got: {other:?}"),
         }
     }
 
     #[tokio::test]
     async fn test_send_gui_action_is_visible_to_lifecycle_status_query() {
-        let (handle, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (handle, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let lifecycle = handle.history();
         let req = make_send_gui_action_request(json!({
             "command": { "command": "go_to_chat_list" },
@@ -4347,11 +4347,11 @@ mod tests {
         assert_eq!(response["idempotency_key"], "lifecycle_trace_42");
 
         let queued = lifecycle
-            .get(&boru_chat::diagnostics::GuiActionId(
+            .get(&boru_core::diagnostics::GuiActionId(
                 "lifecycle_trace_42".into(),
             ))
             .expect("MCP enqueue must record the action before dispatch");
-        assert_eq!(queued.state, boru_chat::diagnostics::GuiActionState::Queued);
+        assert_eq!(queued.state, boru_core::diagnostics::GuiActionState::Queued);
         assert!(queued.requested_at_ms > 0);
         assert!(queued.updated_at_ms >= queued.requested_at_ms);
 
@@ -4458,7 +4458,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_gui_action_channel_full() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         // Fill the capacity-1 channel first
         let fill_req = make_send_gui_action_request(json!({
             "command": { "command": "go_to_chat_list" }
@@ -4481,7 +4481,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_gui_action_no_secrets_in_response() {
-        let (tx, _rx) = boru_chat::diagnostics::GuiTestHandle::channel(16);
+        let (tx, _rx) = boru_core::diagnostics::GuiTestHandle::channel(16);
         let req = make_send_gui_action_request(json!({
             "command": { "command": "toggle_help" }
         }));
@@ -4634,7 +4634,7 @@ mod tests {
             .bind()
             .await
             .expect("test endpoint bind");
-        let gossip = boru_chat::net::Gossip::builder().spawn(endpoint.clone());
+        let gossip = boru_core::net::Gossip::builder().spawn(endpoint.clone());
         let (gossip_tx, gossip_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let state = McpAppState {
@@ -4649,12 +4649,12 @@ mod tests {
             gossip,
             gui_test_actions_enabled: gui_enabled,
             gui_action_tx: if has_tx {
-                Some(boru_chat::diagnostics::GuiTestHandle::channel(256).0)
+                Some(boru_core::diagnostics::GuiTestHandle::channel(256).0)
             } else {
                 None
             },
             gui_action_history: GuiActionHistory::new(),
-            gui_action_lifecycle: boru_chat::diagnostics::GuiActionHistory::default(),
+            gui_action_lifecycle: boru_core::diagnostics::GuiActionHistory::default(),
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
         };
@@ -5287,7 +5287,7 @@ mod tests {
             .bind()
             .await
             .expect("test endpoint bind");
-        let gossip = boru_chat::net::Gossip::builder().spawn(endpoint.clone());
+        let gossip = boru_core::net::Gossip::builder().spawn(endpoint.clone());
         let (gossip_tx, _gossip_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let state = McpAppState {
@@ -5303,7 +5303,7 @@ mod tests {
             gui_test_actions_enabled: true,
             gui_action_tx: None,
             gui_action_history: GuiActionHistory::new(),
-            gui_action_lifecycle: boru_chat::diagnostics::GuiActionHistory::default(),
+            gui_action_lifecycle: boru_core::diagnostics::GuiActionHistory::default(),
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
         };
@@ -5345,7 +5345,7 @@ mod tests {
             .bind()
             .await
             .expect("test endpoint bind");
-        let gossip = boru_chat::net::Gossip::builder().spawn(endpoint.clone());
+        let gossip = boru_core::net::Gossip::builder().spawn(endpoint.clone());
         let (gossip_tx, _gossip_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let state = McpAppState {
@@ -5361,7 +5361,7 @@ mod tests {
             gui_test_actions_enabled: true,
             gui_action_tx: None,
             gui_action_history: GuiActionHistory::new(),
-            gui_action_lifecycle: boru_chat::diagnostics::GuiActionHistory::default(),
+            gui_action_lifecycle: boru_core::diagnostics::GuiActionHistory::default(),
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
         };
@@ -5520,11 +5520,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_oversized_gui_command_fails_closed_without_mutation() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(4);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(4);
         let request = make_send_gui_action_request(json!({
             "command": {
                 "command": "set_composer_text",
-                "text": "x".repeat(boru_chat::diagnostics::GUI_TEST_COMMAND_MAX_STRING_LEN + 1)
+                "text": "x".repeat(boru_core::diagnostics::GUI_TEST_COMMAND_MAX_STRING_LEN + 1)
             }
         }));
         let result = handle_send_gui_action(&request, tx);
@@ -5537,7 +5537,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_control_character_gui_command_fails_closed_without_mutation() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(4);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(4);
         let request = make_send_gui_action_request(json!({
             "command": {"command": "set_composer_text", "text": "safe\nunsafe"}
         }));
@@ -5551,7 +5551,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unknown_navigation_destination_fails_closed_without_mutation() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(4);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(4);
         let request = make_navigate_request(json!({"destination": "admin_console"}));
         let result = handle_gui_navigate(&request, tx);
         assert!(result.is_err(), "unknown destinations must be rejected");
@@ -5563,7 +5563,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_overflow_fails_closed_without_extra_gui_mutation() {
-        let (tx, mut rx) = boru_chat::diagnostics::GuiTestHandle::channel(1);
+        let (tx, mut rx) = boru_core::diagnostics::GuiTestHandle::channel(1);
         let first = make_navigate_request(json!({"destination": "settings"}));
         assert!(handle_gui_navigate(&first, tx.clone()).is_ok());
         let second = make_navigate_request(json!({"destination": "friends"}));

@@ -251,7 +251,7 @@ pub struct LocalFileLibraryState {
     /// All files (unfiltered, used for search/filter queries).
     pub all_rows: Vec<FileLibraryRow>,
     /// Available collections for this profile.
-    pub collections: Vec<boru_chat::storage::FileCollection>,
+    pub collections: Vec<boru_core::storage::FileCollection>,
     /// Index of the selected/highlighted file offer (None = nothing selected).
     pub selected_index: Option<usize>,
     /// Active filter.

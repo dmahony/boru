@@ -2,7 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use boru_chat::{
+use boru_core::{
     chat_callbacks::ChatCallbacks,
     chat_core::{handle_net_event, Message, MessageHash, NetEvent, Ticket},
     friends::{FriendId, FriendsStore},

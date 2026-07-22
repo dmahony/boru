@@ -1,7 +1,7 @@
 //! Test: can two peers exchange messages via gossip?
 //! Uses relay mode, waits for both to join, sends, asserts delivery.
 
-use boru_chat::{
+use boru_core::{
     api::{Event as GossipEvent, GossipTopic},
     chat_core::{Message, SignedMessage},
     net::{Gossip, GOSSIP_ALPN},
