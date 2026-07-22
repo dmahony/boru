@@ -2,7 +2,7 @@
 //! Subscribes, spawns forward_gossip_events, sends via sender.broadcast,
 //! receives via NetEvent channel -> handle_net_event -> ChatCallbacks.
 
-use boru_chat::{
+use boru_core::{
     api::GossipSender,
     chat_callbacks::ChatCallbacks,
     chat_core::{

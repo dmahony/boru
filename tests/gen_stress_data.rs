@@ -2,10 +2,10 @@
 //! Run: STRESS_DATA_DIR=/tmp/iroh-stress-test-data cargo test --test gen_stress_data --features net,test-utils -- --nocapture
 use std::path::Path;
 
-use boru_chat::chat_history::{ChatHistoryStore, HistoryEntry};
-use boru_chat::conversations::{ConversationEntry, ConversationKind, ConversationStore};
-use boru_chat::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore};
-use boru_chat::proto::TopicId;
+use boru_core::chat_history::{ChatHistoryStore, HistoryEntry};
+use boru_core::conversations::{ConversationEntry, ConversationKind, ConversationStore};
+use boru_core::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore};
+use boru_core::proto::TopicId;
 use iroh::SecretKey;
 use rand::RngExt;
 use rand::SeedableRng;
@@ -95,7 +95,7 @@ fn generate_stress_data() {
             topic,
             text_preview: body,
             signed_bytes,
-            delivery_state: boru_chat::chat_history::DeliveryState::Sent,
+            delivery_state: boru_core::chat_history::DeliveryState::Sent,
             image_bytes: None,
             image_identifier: None,
         });

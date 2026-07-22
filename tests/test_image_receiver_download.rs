@@ -11,13 +11,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use boru_chat::chat_callbacks::ChatCallbacks;
-use boru_chat::chat_core::{
+use boru_core::chat_callbacks::ChatCallbacks;
+use boru_core::chat_core::{
     download_candidates, handle_net_event, ChatEntry, Message, MessageHash, NetEvent, SignedMessage,
 };
-use boru_chat::friends::FriendId;
-use boru_chat::net::{Gossip, GOSSIP_ALPN};
-use boru_chat::proto::TopicId;
+use boru_core::friends::FriendId;
+use boru_core::net::{Gossip, GOSSIP_ALPN};
+use boru_core::proto::TopicId;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, PublicKey,
     RelayMode, SecretKey,
@@ -235,7 +235,7 @@ async fn test_receiver_downloads_image_entry() -> Result<()> {
     let (sender_a, receiver_a) = sub_a.split();
     let (net_tx_a, net_rx_a) = tokio::sync::mpsc::unbounded_channel();
     let _net_rx_a = Arc::new(Mutex::new(net_rx_a));
-    task::spawn(boru_chat::chat_core::forward_gossip_events(
+    task::spawn(boru_core::chat_core::forward_gossip_events(
         receiver_a, net_tx_a,
     ));
 
@@ -260,7 +260,7 @@ async fn test_receiver_downloads_image_entry() -> Result<()> {
     let (_sender_b, receiver_b) = sub_b.split();
     let (net_tx_b, net_rx_b) = tokio::sync::mpsc::unbounded_channel();
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
-    task::spawn(boru_chat::chat_core::forward_gossip_events(
+    task::spawn(boru_core::chat_core::forward_gossip_events(
         receiver_b, net_tx_b,
     ));
 

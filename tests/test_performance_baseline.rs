@@ -16,14 +16,14 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use boru_chat::chat_callbacks::ChatCallbacks;
-use boru_chat::chat_core::{
+use boru_core::chat_callbacks::ChatCallbacks;
+use boru_core::chat_core::{
     handle_net_event as chat_net_event, ChatEntry, Message, MessageHash, NetEvent, SignedMessage,
 };
-use boru_chat::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore};
-use boru_chat::net::{Gossip, GOSSIP_ALPN};
-use boru_chat::perf::PerfTracker;
-use boru_chat::proto::TopicId;
+use boru_core::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore};
+use boru_core::net::{Gossip, GOSSIP_ALPN};
+use boru_core::perf::PerfTracker;
+use boru_core::proto::TopicId;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, PublicKey,
     RelayMode, SecretKey,
@@ -171,7 +171,7 @@ impl ChatCallbacks for BenchPeer {
 #[tokio::test]
 async fn baseline_startup_time() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
     let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
     // Measure endpoint creation time
@@ -253,7 +253,7 @@ async fn baseline_startup_time() {
 #[tokio::test]
 async fn baseline_message_latency() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
     let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
     // Create two peers
@@ -408,7 +408,7 @@ async fn baseline_message_latency() {
 #[test]
 fn baseline_data_scaling() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
     let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
     // ── 500 friends in a Store ──
@@ -523,7 +523,7 @@ fn baseline_data_scaling() {
                 prev_day_ht = Some(d);
             }
             match entry.kind {
-                boru_chat::chat_core::ChatKind::System => h += SYSTEM_H,
+                boru_core::chat_core::ChatKind::System => h += SYSTEM_H,
                 _ => {
                     h += MSG_BASE_H;
                     if !entry.reactions.is_empty() {
@@ -545,7 +545,7 @@ fn baseline_data_scaling() {
 #[tokio::test]
 async fn baseline_simultaneous_downloads() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
     let rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
     use iroh_blobs::store::mem::MemStore;
     use tokio::io::AsyncReadExt;
@@ -625,7 +625,7 @@ async fn baseline_simultaneous_downloads() {
 #[tokio::test]
 async fn baseline_net_event_throughput() {
     let _ = tracing_subscriber::fmt::try_init();
-    boru_chat::perf::init();
+    boru_core::perf::init();
     let _rng = &mut rand::rngs::ChaCha12Rng::seed_from_u64(42);
     let sk = SecretKey::from_bytes(&[0u8; 32]);
 

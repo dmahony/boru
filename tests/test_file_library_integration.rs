@@ -1,7 +1,7 @@
 //! File Library Integration Tests (Step 23)
 //!
 //! These tests exercise the file library's storage layer through the public
-//! `boru_chat::storage::Storage` API, using temporary directories for
+//! `boru_core::storage::Storage` API, using temporary directories for
 //! isolation. No network access.
 //!
 //! Scenarios:
@@ -17,8 +17,8 @@
 
 use std::path::PathBuf;
 
-fn test_storage() -> boru_chat::storage::Storage {
-    boru_chat::storage::Storage::memory().expect("create memory storage")
+fn test_storage() -> boru_core::storage::Storage {
+    boru_core::storage::Storage::memory().expect("create memory storage")
 }
 
 /// Helper: create a file with content and return its path.

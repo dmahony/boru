@@ -15,7 +15,7 @@
 //!   call [`initiate_download`], then let [`DownloadManager::tick`] process
 //!   the queued row through the state machine.
 
-use boru_chat::{
+use boru_core::{
     download_initiation::{initiate_download, InitiateDownloadError},
     download_manager::DownloadManager,
     storage::Storage,

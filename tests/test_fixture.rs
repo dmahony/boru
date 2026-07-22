@@ -26,7 +26,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use boru_chat::discovery_backend::InMemoryDiscoveryBackend;
+//! use boru_core::discovery_backend::InMemoryDiscoveryBackend;
 //! use test_fixture::{PeerId, TwoPeerFixture};
 //!
 //! #[tokio::test]
@@ -46,7 +46,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use boru_chat::{
+use boru_core::{
     catalogue_handler::CatalogueHandler,
     chat_core::{forward_gossip_events, NetEvent},
     discovery_backend::{InMemoryDiscoveryBackend, TopicDiscoveryBackend},
@@ -144,7 +144,7 @@ pub struct FixturePeer {
     /// Protocol router that accepts gossip and catalogue ALPNs.
     pub router: Option<Router>,
     /// Sender half of the gossip topic subscription.
-    pub sender: Option<boru_chat::api::GossipSender>,
+    pub sender: Option<boru_core::api::GossipSender>,
     /// Channel for forwarding gossip events into the callback
     /// infrastructure.
     pub net_event_tx: Option<tokio::sync::mpsc::UnboundedSender<NetEvent>>,
@@ -635,7 +635,7 @@ fn handle_net_event_inner(_event: NetEvent, _peer_id: PeerId) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boru_chat::discovery_backend::{EncryptedDiscoveryRecord, NamespaceId};
+    use boru_core::discovery_backend::{EncryptedDiscoveryRecord, NamespaceId};
     use std::sync::Arc;
 
     // ── Deterministic identity tests ───────────────────────────────

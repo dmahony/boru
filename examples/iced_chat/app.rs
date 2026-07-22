@@ -3,11 +3,11 @@
 //! Supports a chat-list (inbox) screen and individual chat-room screens,
 //! with dynamic room switching — like Telegram/Signal.
 
-use boru_chat::abuse_controls::{
+use boru_core::abuse_controls::{
     sanitize_display_text, sanitize_single_line, DEFAULT_MAX_DISPLAY_LENGTH,
 };
-use boru_chat::catalogue_client::fetch_paginated_remote_catalogue;
-use boru_chat::catalogue_model::RemoteSharedFile;
+use boru_core::catalogue_client::fetch_paginated_remote_catalogue;
+use boru_core::catalogue_model::RemoteSharedFile;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -18,50 +18,50 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use boru_chat::api::{GossipSender, GossipTopic};
-use boru_chat::backfill::BackfillHandle;
-pub(crate) use boru_chat::chat_callbacks::TransferKind;
-use boru_chat::chat_callbacks::{ChatCallbacks, TransferId, TransferProgress};
-use boru_chat::chat_core::{
+use boru_core::api::{GossipSender, GossipTopic};
+use boru_core::backfill::BackfillHandle;
+pub(crate) use boru_core::chat_callbacks::TransferKind;
+use boru_core::chat_callbacks::{ChatCallbacks, TransferId, TransferProgress};
+use boru_core::chat_core::{
     collect_bootstrap_peers, download_blob_to_file, download_blob_with_safety, download_candidates,
     friend_ping::{FriendEvent, FriendPingManager, FriendStatus},
     handle_net_event_with_safety_for_topic, merge_bootstrap_peer_addrs, message_hash,
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
-use boru_chat::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
-use boru_chat::contact::{direct_topic, ContactAction, SignedContactMessage};
-use boru_chat::conversations::{
+use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
+use boru_core::contact::{direct_topic, ContactAction, SignedContactMessage};
+use boru_core::conversations::{
     spawn_conversation_forwarder, ConversationEntry, ConversationNetEvent, ConversationStore,
 };
-use boru_chat::discovery_backend::MainlineDhtBackend;
-use boru_chat::discovery_secret::DiscoverySecret;
-use boru_chat::download_limits::DownloadLimitsConfig;
-use boru_chat::download_manager::DownloadManager;
-use boru_chat::file_indexer::FileIndexer;
-use boru_chat::friend_request::{
+use boru_core::discovery_backend::MainlineDhtBackend;
+use boru_core::discovery_secret::DiscoverySecret;
+use boru_core::download_limits::DownloadLimitsConfig;
+use boru_core::download_manager::DownloadManager;
+use boru_core::file_indexer::FileIndexer;
+use boru_core::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
 };
-use boru_chat::friends::{DirectConversationState, FriendId, FriendRelationship, FriendsStore};
-use boru_chat::image_optimizer::{
+use boru_core::friends::{DirectConversationState, FriendId, FriendRelationship, FriendsStore};
+use boru_core::image_optimizer::{
     compress_image, optimize_chat_image_to_webp, CHAT_IMAGE_MAX_BYTES,
 };
-use boru_chat::image_store::ImageStore;
-use boru_chat::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
-use boru_chat::mailbox::{seal_for, IncomingAcceptance, MailboxAck, MailboxIdentity, MailboxStore};
-use boru_chat::net::Gossip;
-use boru_chat::outbox::{OutboxEntry, OutboxStore};
-use boru_chat::private_room_tracker::{PrivateContinuousTracker, PrivateRoomTracker};
-use boru_chat::proto::TopicId;
-use boru_chat::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
-use boru_chat::public_room_safety::PublicRoomSafety;
-use boru_chat::room::RoomStore;
-use boru_chat::room_cleanup::delete_room_history;
-use boru_chat::room_docs::{self, RoomMetadata};
-use boru_chat::room_history::RoomHistoryStore;
-use boru_chat::storage::{SharedFileRow, Storage};
-use boru_chat::store::MessageStore;
-use boru_chat::user_profile::{SharedFile, UserProfile, UserProfileStore};
-use boru_chat::whisper::{WhisperEvent, WhisperHandle};
+use boru_core::image_store::ImageStore;
+use boru_core::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
+use boru_core::mailbox::{seal_for, IncomingAcceptance, MailboxAck, MailboxIdentity, MailboxStore};
+use boru_core::net::Gossip;
+use boru_core::outbox::{OutboxEntry, OutboxStore};
+use boru_core::private_room_tracker::{PrivateContinuousTracker, PrivateRoomTracker};
+use boru_core::proto::TopicId;
+use boru_core::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
+use boru_core::public_room_safety::PublicRoomSafety;
+use boru_core::room::RoomStore;
+use boru_core::room_cleanup::delete_room_history;
+use boru_core::room_docs::{self, RoomMetadata};
+use boru_core::room_history::RoomHistoryStore;
+use boru_core::storage::{SharedFileRow, Storage};
+use boru_core::store::MessageStore;
+use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
+use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
     address_lookup::memory::MemoryLookup, EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher,
 };
@@ -74,19 +74,19 @@ use tracing::{debug, info, warn};
 
 use crate::perf_tracker::PerfTracker;
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
-use boru_chat::chat_core::{RoomInvitation, DIAGNOSTICS};
-use boru_chat::diagnostics::DiagnosticEventKind;
-use boru_chat::diagnostics::FailureLayer;
-use boru_chat::diagnostics::GuiActionError;
-use boru_chat::diagnostics::GuiActionErrorCode;
-use boru_chat::diagnostics::GuiActionHistory;
-use boru_chat::diagnostics::GuiActionId;
-use boru_chat::diagnostics::GuiActionRequest;
-use boru_chat::diagnostics::GuiActionState;
-use boru_chat::diagnostics::GuiTestCommand;
-use boru_chat::diagnostics::IcedMessageJournal;
-use boru_chat::diagnostics::IcedStateSnapshot;
-use boru_chat::diagnostics::DEFAULT_ACTION_STATE_TIMEOUT_MS;
+use boru_core::chat_core::{RoomInvitation, DIAGNOSTICS};
+use boru_core::diagnostics::DiagnosticEventKind;
+use boru_core::diagnostics::FailureLayer;
+use boru_core::diagnostics::GuiActionError;
+use boru_core::diagnostics::GuiActionErrorCode;
+use boru_core::diagnostics::GuiActionHistory;
+use boru_core::diagnostics::GuiActionId;
+use boru_core::diagnostics::GuiActionRequest;
+use boru_core::diagnostics::GuiActionState;
+use boru_core::diagnostics::GuiTestCommand;
+use boru_core::diagnostics::IcedMessageJournal;
+use boru_core::diagnostics::IcedStateSnapshot;
+use boru_core::diagnostics::DEFAULT_ACTION_STATE_TIMEOUT_MS;
 use iced::Color;
 
 // ── Shared ContinuousTracker wrapper ─────────────────────────────────
@@ -1639,7 +1639,7 @@ pub struct IcedChat {
     pub net_rx: Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>,
     net_tx: UnboundedSender<ConversationNetEvent>,
     #[expect(dead_code)]
-    backfill_handle: boru_chat::backfill::BackfillHandle,
+    backfill_handle: boru_core::backfill::BackfillHandle,
     friends: FriendsStore,
     friends_dirty: bool,
     friend_mgr: FriendPingManager,
@@ -3320,7 +3320,7 @@ impl IcedChat {
                 let _ = std::fs::create_dir_all(&dl);
                 dl
             },
-            file_indexer: FileIndexer::new(boru_chat::file_indexer::default_shared_folder_path()),
+            file_indexer: FileIndexer::new(boru_core::file_indexer::default_shared_folder_path()),
             shared_files,
             peer_catalogue_view: None,
             catalogue_loading: false,
@@ -3496,7 +3496,7 @@ impl IcedChat {
         let image_store = self.image_store.clone();
         iced::Task::perform(
             async move {
-                use boru_chat::chat_callbacks::TransferKind;
+                use boru_core::chat_callbacks::TransferKind;
                 let blob_hash: iroh_blobs::Hash = hash.into();
                 let candidates = download_candidates(sender_pk, &neighbors);
                 match download_blob_with_safety(
@@ -3555,7 +3555,7 @@ impl IcedChat {
     }
 
     fn handle_download_progress(&mut self, progress: TransferProgress) {
-        use boru_chat::chat_callbacks::TransferKind;
+        use boru_core::chat_callbacks::TransferKind;
 
         let mut invalidate_from = None;
         let mut clear_active_transfer = false;
@@ -4902,7 +4902,7 @@ impl IcedChat {
                             let (new_peers_tx, new_peers_rx) =
                                 tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
                             let join_cancel = tokio_util::sync::CancellationToken::new();
-                            let _join_task = boru_chat::public_room_continuous::spawn_join_fanout(
+                            let _join_task = boru_core::public_room_continuous::spawn_join_fanout(
                                 new_peers_rx,
                                 sender.clone(),
                                 join_cancel.clone(),
@@ -5221,7 +5221,7 @@ impl IcedChat {
                                     tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
                                 let join_cancel = tokio_util::sync::CancellationToken::new();
                                 let _join_task =
-                                    boru_chat::public_room_continuous::spawn_join_fanout(
+                                    boru_core::public_room_continuous::spawn_join_fanout(
                                         new_peers_rx,
                                         sender.clone(),
                                         join_cancel.clone(),
@@ -5710,7 +5710,7 @@ impl IcedChat {
                             .map_err(|e| format!("room subscription task failed: {e}"))??;
                         let (sender, receiver) = sub.split();
                         if let Some((new_peers_rx, join_cancel)) = pending_dht_fanout {
-                            let _join_task = boru_chat::public_room_continuous::spawn_join_fanout(
+                            let _join_task = boru_core::public_room_continuous::spawn_join_fanout(
                                 new_peers_rx,
                                 sender.clone(),
                                 join_cancel,
@@ -6296,7 +6296,7 @@ impl IcedChat {
                 }
 
                 if trimmed == "/connections" {
-                    use boru_chat::chat_core::check_peer_connection_type;
+                    use boru_core::chat_core::check_peer_connection_type;
                     let neighbors: Vec<iroh::PublicKey> = self.neighbors.iter().copied().collect();
                     if neighbors.is_empty() {
                         self.push_system("No known peers to inspect.");
@@ -6315,13 +6315,13 @@ impl IcedChat {
                                     lines.push(format!(
                                         "  {label} — {} ({})",
                                         match ctype {
-                                            boru_chat::chat_core::ConnectionType::Direct => {
+                                            boru_core::chat_core::ConnectionType::Direct => {
                                                 "direct"
                                             }
-                                            boru_chat::chat_core::ConnectionType::Relayed => {
+                                            boru_core::chat_core::ConnectionType::Relayed => {
                                                 "relayed"
                                             }
-                                            boru_chat::chat_core::ConnectionType::Unknown => {
+                                            boru_core::chat_core::ConnectionType::Unknown => {
                                                 "unknown"
                                             }
                                         },
@@ -7022,7 +7022,7 @@ impl IcedChat {
 
             AppMessage::WhisperEvent(event) => {
                 match event {
-                    boru_chat::whisper::WhisperEvent::Control { from, content } => {
+                    boru_core::whisper::WhisperEvent::Control { from, content } => {
                         match SignedContactMessage::verify(&content, Some(from)) {
                             Ok((sender, ContactAction::FriendRequest { name })) => {
                                 // Keep the request pending until the user explicitly
@@ -7139,7 +7139,7 @@ impl IcedChat {
                             }
                         }
                     }
-                    boru_chat::whisper::WhisperEvent::Message { from, content } => {
+                    boru_core::whisper::WhisperEvent::Message { from, content } => {
                         let text = String::from_utf8_lossy(&content).to_string();
                         let label = self
                             .names
@@ -7205,7 +7205,7 @@ impl IcedChat {
                         }
                     }
 
-                    boru_chat::whisper::WhisperEvent::Connected { peer } => {
+                    boru_core::whisper::WhisperEvent::Connected { peer } => {
                         let label = self
                             .names
                             .get(&peer)
@@ -7308,7 +7308,7 @@ impl IcedChat {
                             );
                         }
                     }
-                    boru_chat::whisper::WhisperEvent::Disconnected { peer } => {
+                    boru_core::whisper::WhisperEvent::Disconnected { peer } => {
                         let label = self
                             .names
                             .get(&peer)
@@ -7316,11 +7316,11 @@ impl IcedChat {
                             .unwrap_or_else(|| peer.fmt_short().to_string());
                         self.push_system(format!("[Whisper] Disconnected from {label}"));
                     }
-                    boru_chat::whisper::WhisperEvent::MailboxEnvelope { .. } => {
+                    boru_core::whisper::WhisperEvent::MailboxEnvelope { .. } => {
                         // Mailbox envelopes are encrypted and processed by the mailbox
                         // store — the GUI chat does not interpret them.
                     }
-                    boru_chat::whisper::WhisperEvent::MailboxAck { .. } => {
+                    boru_core::whisper::WhisperEvent::MailboxAck { .. } => {
                         // Mailbox acknowledgements are verified and removed by the
                         // mailbox store — the GUI chat does not interpret them.
                     }
@@ -7768,7 +7768,7 @@ impl IcedChat {
                         let (addr, hash, _format) = ticket.into_parts();
                         let node_id = addr.id;
                         let candidates = download_candidates(node_id, &neighbors);
-                        use boru_chat::chat_callbacks::TransferKind;
+                        use boru_core::chat_callbacks::TransferKind;
                         let dl_dir = data_dir.join("downloads");
                         let _ = tokio::fs::create_dir_all(&dl_dir).await;
                         let save_path = dl_dir.join(&name);
@@ -8186,7 +8186,7 @@ impl IcedChat {
                 let new_name = self.friend_profile_rename_input.trim().to_string();
                 if !new_name.is_empty() {
                     if let Screen::FriendProfile(peer) = &self.screen {
-                        let fid = boru_chat::friends::FriendId::from_public_key(*peer);
+                        let fid = boru_core::friends::FriendId::from_public_key(*peer);
                         self.friends.set_label(fid, &new_name);
                         self.friends_sidebar_revision =
                             self.friends_sidebar_revision.wrapping_add(1);
@@ -8256,9 +8256,9 @@ impl IcedChat {
             AppMessage::ConfirmBlockFriend => {
                 self.friend_block_confirm = false;
                 if let Screen::FriendProfile(peer) = &self.screen {
-                    let fid = boru_chat::friends::FriendId::from_public_key(*peer);
+                    let fid = boru_core::friends::FriendId::from_public_key(*peer);
                     if let Some(record) = self.friends.get_mut(&fid) {
-                        record.relationship = boru_chat::friends::FriendRelationship::Blocked;
+                        record.relationship = boru_core::friends::FriendRelationship::Blocked;
                         self.friends_sidebar_revision =
                             self.friends_sidebar_revision.wrapping_add(1);
                     }
@@ -8413,7 +8413,7 @@ impl IcedChat {
                 if matches!(command, GuiTestCommand::GoToChatList) {
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
-                        boru_chat::diagnostics::ExpectedState::ScreenIs("ChatList".to_string()),
+                        boru_core::diagnostics::ExpectedState::ScreenIs("ChatList".to_string()),
                     );
                     let _ = self
                         .gui_action_history
@@ -8430,7 +8430,7 @@ impl IcedChat {
                 if matches!(command, GuiTestCommand::OpenFriends) {
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
-                        boru_chat::diagnostics::ExpectedState::ScreenIs(
+                        boru_core::diagnostics::ExpectedState::ScreenIs(
                             "FriendRequests".to_string(),
                         ),
                     );
@@ -8446,7 +8446,7 @@ impl IcedChat {
                 if matches!(command, GuiTestCommand::OpenSettings) {
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
-                        boru_chat::diagnostics::ExpectedState::ScreenIs("Settings".to_string()),
+                        boru_core::diagnostics::ExpectedState::ScreenIs("Settings".to_string()),
                     );
                     let _ = self
                         .gui_action_history
@@ -8470,7 +8470,7 @@ impl IcedChat {
                     };
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
-                        boru_chat::diagnostics::ExpectedState::Generic("dialog_closed".to_string()),
+                        boru_core::diagnostics::ExpectedState::Generic("dialog_closed".to_string()),
                     );
                     let _ = self
                         .gui_action_history
@@ -8489,7 +8489,7 @@ impl IcedChat {
                     }
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
-                        boru_chat::diagnostics::ExpectedState::ComposerTextIs(text.clone()),
+                        boru_core::diagnostics::ExpectedState::ComposerTextIs(text.clone()),
                     );
                     let _ = self
                         .gui_action_history
@@ -8508,7 +8508,7 @@ impl IcedChat {
                     }
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
-                        boru_chat::diagnostics::ExpectedState::ComposerTextIs(String::new()),
+                        boru_core::diagnostics::ExpectedState::ComposerTextIs(String::new()),
                     );
                     let _ = self
                         .gui_action_history
@@ -8547,7 +8547,7 @@ impl IcedChat {
                     }
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
-                        boru_chat::diagnostics::ExpectedState::MessageSent,
+                        boru_core::diagnostics::ExpectedState::MessageSent,
                     );
                     let _ = self
                         .gui_action_history
@@ -8559,7 +8559,7 @@ impl IcedChat {
                 if let Some(AppMessage::ToggleDark(enabled)) = gui_dark_mode_message(&command) {
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
-                        boru_chat::diagnostics::ExpectedState::DarkModeIs(enabled),
+                        boru_core::diagnostics::ExpectedState::DarkModeIs(enabled),
                     );
                     let _ = self
                         .gui_action_history
@@ -8594,7 +8594,7 @@ impl IcedChat {
                         };
                         let _ = self.gui_action_history.set_expected_state(
                             &action_id,
-                            boru_chat::diagnostics::ExpectedState::ScreenIs(format!(
+                            boru_core::diagnostics::ExpectedState::ScreenIs(format!(
                                 "PeerProfile({peer})"
                             )),
                         );
@@ -8623,7 +8623,7 @@ impl IcedChat {
                         };
                         let _ = self.gui_action_history.set_expected_state(
                             &action_id,
-                            boru_chat::diagnostics::ExpectedState::ScreenIs(format!(
+                            boru_core::diagnostics::ExpectedState::ScreenIs(format!(
                                 "PeerCatalogue({peer})"
                             )),
                         );
@@ -8750,7 +8750,7 @@ impl IcedChat {
 
                 let _ = self.gui_action_history.set_expected_state(
                     &action_id,
-                    boru_chat::diagnostics::ExpectedState::RoomSelected(topic.to_string()),
+                    boru_core::diagnostics::ExpectedState::RoomSelected(topic.to_string()),
                 );
                 let _ = self
                     .gui_action_history
@@ -8952,8 +8952,7 @@ impl IcedChat {
                     let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
                     tasks.push(iced::Task::perform(
                         async move {
-                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir)
-                            {
+                            let mut store = match boru_core::mailbox::MailboxStore::load(&data_dir) {
                                 Ok(Some(s)) => s,
                                 _ => return Vec::new(),
                             };
@@ -9126,7 +9125,7 @@ impl IcedChat {
                     let safety = self.public_room_safety.clone();
                     tasks.push(iced::Task::perform(
                         async move {
-                            use boru_chat::chat_callbacks::TransferKind;
+                            use boru_core::chat_callbacks::TransferKind;
                             let ticket: BlobTicket = ticket_str
                                 .parse::<BlobTicket>()
                                 .map_err(|e| format!("Parse profile image ticket: {e}"))?;
@@ -9329,7 +9328,7 @@ impl IcedChat {
                         status.state == GuiActionState::AppMessageQueued
                             && matches!(
                                 status.expected_state,
-                                Some(boru_chat::diagnostics::ExpectedState::DarkModeIs(expected))
+                                Some(boru_core::diagnostics::ExpectedState::DarkModeIs(expected))
                                     if expected == enabled
                             )
                     })
@@ -9916,7 +9915,7 @@ impl IcedChat {
                 let record = self.friends.ensure_friend(fid);
                 record.set_direct_conversation(topic, DirectConversationState::Active);
                 self.conversation_store
-                    .upsert(boru_chat::conversations::ConversationEntry::new(
+                    .upsert(boru_core::conversations::ConversationEntry::new(
                         topic,
                         peer.to_string(),
                         peer.fmt_short().to_string(),
@@ -10303,7 +10302,7 @@ impl IcedChat {
         let failed_peer = peer;
         iced::Task::perform(
             async move {
-                use boru_chat::chat_callbacks::TransferKind;
+                use boru_core::chat_callbacks::TransferKind;
                 let ticket: BlobTicket = ticket_str
                     .parse::<BlobTicket>()
                     .map_err(|e| format!("Parse profile image ticket: {e}"))?;
@@ -11374,7 +11373,7 @@ impl IcedChat {
             .friend_request_store
             .list_incoming_by_status(
                 &self.local_public.to_string(),
-                boru_chat::friend_request::FriendRequestStatus::Pending,
+                boru_core::friend_request::FriendRequestStatus::Pending,
             )
             .len();
 
@@ -11875,7 +11874,7 @@ impl IcedChat {
             .discovered_peers
             .iter()
             .map(|peer| {
-                let fid = boru_chat::friends::FriendId::from_public_key(*peer);
+                let fid = boru_core::friends::FriendId::from_public_key(*peer);
                 SidebarDiscoveredPeerRow {
                     peer: *peer,
                     display_name: self.resolve_name(peer),
@@ -12175,7 +12174,7 @@ impl IcedChat {
             .friend_request_store
             .list_incoming_by_status(
                 &local_pk_str,
-                boru_chat::friend_request::FriendRequestStatus::Pending,
+                boru_core::friend_request::FriendRequestStatus::Pending,
             )
             .into_iter()
             .filter_map(|request| {
@@ -14482,7 +14481,7 @@ impl IcedChat {
         let dark_mode = self.dark_mode;
 
         // ── Gather data ──
-        let fid = boru_chat::friends::FriendId::from_public_key(peer);
+        let fid = boru_core::friends::FriendId::from_public_key(peer);
         let friend_record = self.friends.get(&fid);
         let profile_data = self.profile_cache.get(&peer);
         let display_name = profile_data
@@ -17032,41 +17031,41 @@ mod tests {
                 .expect("bind endpoint");
             endpoint.online().await;
 
-            let gossip = boru_chat::net::Gossip::builder().spawn(endpoint.clone());
+            let gossip = boru_core::net::Gossip::builder().spawn(endpoint.clone());
             let router = iroh::protocol::Router::builder(endpoint.clone())
-                .accept(boru_chat::net::GOSSIP_ALPN, gossip.clone())
+                .accept(boru_core::net::GOSSIP_ALPN, gossip.clone())
                 .spawn();
             let blob_store = iroh_blobs::store::fs::FsStore::load(data_dir.join("blobs"))
                 .await
                 .expect("create fs blob store");
             let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
-            let friends = boru_chat::friends::FriendsStore::empty_at(&data_dir);
-            let mut room_history = boru_chat::room_history::RoomHistoryStore::empty_at(&data_dir);
+            let friends = boru_core::friends::FriendsStore::empty_at(&data_dir);
+            let mut room_history = boru_core::room_history::RoomHistoryStore::empty_at(&data_dir);
             room_history
                 .rooms
-                .push(boru_chat::room_history::RoomHistoryEntry::new(
+                .push(boru_core::room_history::RoomHistoryEntry::new(
                     room_topic,
                     "Existing chat",
                     true,
                 ));
             let chat_history = std::sync::Arc::new(std::sync::Mutex::new(
-                boru_chat::chat_history::ChatHistoryStore::empty_at(&data_dir),
+                boru_core::chat_history::ChatHistoryStore::empty_at(&data_dir),
             ));
-            let backfill_handle = boru_chat::backfill::BackfillHandle::spawn(endpoint.clone());
+            let backfill_handle = boru_core::backfill::BackfillHandle::spawn(endpoint.clone());
             let whisper_builder =
-                boru_chat::whisper::WhisperBuilder::new(endpoint.clone(), local_sk.clone());
+                boru_core::whisper::WhisperBuilder::new(endpoint.clone(), local_sk.clone());
             let _whisper_protocol = whisper_builder.protocol_handler();
             let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
             let whisper_events_rx =
                 std::sync::Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
-            let (inbox_handle, inbox_events_rx_tmp) = boru_chat::inbox::InboxHandle::new();
-            let _inbox_protocol = boru_chat::inbox::InboxProtocol::new(inbox_handle.inner());
+            let (inbox_handle, inbox_events_rx_tmp) = boru_core::inbox::InboxHandle::new();
+            let _inbox_protocol = boru_core::inbox::InboxProtocol::new(inbox_handle.inner());
             let inbox_events_rx = std::sync::Arc::new(tokio::sync::Mutex::new(inbox_events_rx_tmp));
             let (friend_mgr, friend_events_rx_tmp) =
-                boru_chat::chat_core::friend_ping::FriendPingManager::spawn(
+                boru_core::chat_core::friend_ping::FriendPingManager::spawn(
                     endpoint.clone(),
-                    boru_chat::chat_core::friend_ping::DEFAULT_PING_INTERVAL,
-                    boru_chat::chat_core::friend_ping::DEFAULT_CONNECT_TIMEOUT,
+                    boru_core::chat_core::friend_ping::DEFAULT_PING_INTERVAL,
+                    boru_core::chat_core::friend_ping::DEFAULT_CONNECT_TIMEOUT,
                 );
             let friend_events_rx =
                 std::sync::Arc::new(tokio::sync::Mutex::new(friend_events_rx_tmp));
@@ -17128,9 +17127,9 @@ mod tests {
             Arc::new(Mutex::new(dummy_discovered_rx)),
             None,
             false,
-            boru_chat::diagnostics::IcedMessageJournal::default(),
+            boru_core::diagnostics::IcedMessageJournal::default(),
             None,
-            tokio::sync::watch::channel(boru_chat::diagnostics::IcedStateSnapshot {
+            tokio::sync::watch::channel(boru_core::diagnostics::IcedStateSnapshot {
                 node_id: String::new(),
                 version: String::new(),
                 active_screen: String::new(),
@@ -17310,7 +17309,7 @@ mod tests {
 
         /// Replica of IcedChat::handle_download_progress (lines 1818–1923).
         fn handle_download_progress(&mut self, progress: TransferProgress) {
-            use boru_chat::chat_callbacks::TransferKind;
+            use boru_core::chat_callbacks::TransferKind;
 
             let mut invalidate_from = None;
             let mut clear_active_transfer = false;
@@ -18014,18 +18013,18 @@ mod tests {
             let pk = sk.public();
             friends.insert(
                 pk.to_string(),
-                boru_chat::friends::FriendRecord {
+                boru_core::friends::FriendRecord {
                     label: Some(format!("Friend{}", i)),
                     last_announced_name: None,
                     last_announced_profile_image_ticket: None,
-                    status: boru_chat::friends::FriendStatus {
+                    status: boru_core::friends::FriendStatus {
                         online: i % 2 == 0,
                         last_seen_at_unix_ms: None,
                         last_offline_at_unix_ms: None,
                     },
                     known_addrs: vec![],
                     addrs_updated_at_unix_ms: None,
-                    relationship: boru_chat::friends::FriendRelationship::NotFriend,
+                    relationship: boru_core::friends::FriendRelationship::NotFriend,
                     rooms: std::collections::BTreeMap::new(),
                     direct_conversation: None,
                     mailbox_public_key: None,
@@ -18375,7 +18374,7 @@ mod tests {
 
     #[test]
     fn gui_action_subscription_delivers_queued_request_to_app_message() {
-        use boru_chat::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
+        use boru_core::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
         use n0_future::StreamExt;
         let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_friend_tx, friend_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -18427,7 +18426,7 @@ mod tests {
         let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_discovered_tx, discovered_rx) = tokio::sync::mpsc::channel(1);
         let (handle, gui_rx) =
-            boru_chat::diagnostics::GuiTestHandle::channel(PRODUCERS * PER_PRODUCER);
+            boru_core::diagnostics::GuiTestHandle::channel(PRODUCERS * PER_PRODUCER);
         let barrier = Arc::new(std::sync::Barrier::new(PRODUCERS));
         let mut workers = Vec::new();
         for producer in 0..PRODUCERS {
@@ -18436,8 +18435,8 @@ mod tests {
             workers.push(thread::spawn(move || {
                 producer_barrier.wait();
                 for sequence in 0..PER_PRODUCER {
-                    let request = boru_chat::diagnostics::GuiActionRequest {
-                        action_id: boru_chat::diagnostics::GuiActionId::new(),
+                    let request = boru_core::diagnostics::GuiActionRequest {
+                        action_id: boru_core::diagnostics::GuiActionId::new(),
                         requested_at_ms: sequence as i64,
                         command: format!("producer_{producer}_sequence_{sequence}"),
                     };
@@ -18495,7 +18494,7 @@ mod tests {
 
     #[test]
     fn gui_action_channel_item_maps_to_app_message() {
-        use boru_chat::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
+        use boru_core::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
         let request = GuiActionRequest {
             action_id: GuiActionId::new(),
             requested_at_ms: chrono::Utc::now().timestamp_millis(),
@@ -18515,7 +18514,7 @@ mod tests {
     /// its payload before the subscription maps it into an AppMessage.
     #[test]
     fn gui_action_channel_preserves_request_payload() {
-        use boru_chat::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
+        use boru_core::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let request = GuiActionRequest {
             action_id: GuiActionId::new(),
@@ -18539,7 +18538,7 @@ mod tests {
     /// through the channel.
     #[test]
     fn gui_action_preserves_command_with_text_field() {
-        use boru_chat::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
+        use boru_core::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let command = GuiTestCommand::SetComposerText {
             text: "Hello, world!".to_string(),
@@ -18568,7 +18567,7 @@ mod tests {
     /// Verify that a ToggleDarkMode command preserves its bool payload.
     #[test]
     fn gui_action_preserves_command_with_bool_field() {
-        use boru_chat::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
+        use boru_core::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let command = GuiTestCommand::ToggleDarkMode { enabled: true };
         let request = GuiActionRequest {
@@ -18595,7 +18594,7 @@ mod tests {
     /// Verify that a full channel gracefully returns TrySendError::Full.
     #[test]
     fn gui_action_channel_full_returns_close_semantics() {
-        use boru_chat::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
+        use boru_core::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let command_str = serde_json::to_string(&GuiTestCommand::GoToChatList).unwrap();
@@ -18693,7 +18692,7 @@ mod tests {
     fn assert_gui_action_completed(
         app: &IcedChat,
         action_id: &GuiActionId,
-        expected: boru_chat::diagnostics::ExpectedState,
+        expected: boru_core::diagnostics::ExpectedState,
     ) {
         let status = app
             .gui_action_history
@@ -18790,7 +18789,7 @@ mod tests {
         assert_gui_action_completed(
             &app,
             &action_id,
-            boru_chat::diagnostics::ExpectedState::RoomSelected(topic.to_string()),
+            boru_core::diagnostics::ExpectedState::RoomSelected(topic.to_string()),
         );
         drop(runtime);
     }
@@ -18854,7 +18853,7 @@ mod tests {
         assert_gui_action_completed(
             &app,
             &action_id,
-            boru_chat::diagnostics::ExpectedState::ComposerTextIs("integration message".into()),
+            boru_core::diagnostics::ExpectedState::ComposerTextIs("integration message".into()),
         );
         drop(runtime);
     }
@@ -18894,7 +18893,7 @@ mod tests {
         assert_gui_action_completed(
             &app,
             &action_id,
-            boru_chat::diagnostics::ExpectedState::MessageSent,
+            boru_core::diagnostics::ExpectedState::MessageSent,
         );
         drop(runtime);
     }
@@ -18904,7 +18903,7 @@ mod tests {
         let (runtime, mut app, local, peer) = build_join_request_test_app();
         let topic = direct_topic(&local, &peer);
         app.conversation_store
-            .upsert(boru_chat::conversations::ConversationEntry::new(
+            .upsert(boru_core::conversations::ConversationEntry::new(
                 topic,
                 peer.to_string(),
                 peer.fmt_short().to_string(),
@@ -18925,7 +18924,7 @@ mod tests {
                 .get(&action_id)
                 .unwrap()
                 .expected_state,
-            Some(boru_chat::diagnostics::ExpectedState::ConversationSelected(
+            Some(boru_core::diagnostics::ExpectedState::ConversationSelected(
                 _
             ))
         ));
@@ -18960,7 +18959,7 @@ mod tests {
         assert_eq!(action.state, GuiActionState::Rejected);
         assert_eq!(
             action.error.as_ref().map(|error| &error.code),
-            Some(&boru_chat::diagnostics::GuiActionErrorCode::UnknownConversation)
+            Some(&boru_core::diagnostics::GuiActionErrorCode::UnknownConversation)
         );
         assert!(app.pending_open_conversation_action.is_none());
         drop(runtime);
@@ -18996,7 +18995,7 @@ mod tests {
             assert_gui_action_completed(
                 &app,
                 &action_id,
-                boru_chat::diagnostics::ExpectedState::DarkModeIs(enabled),
+                boru_core::diagnostics::ExpectedState::DarkModeIs(enabled),
             );
         }
         drop(runtime);

@@ -4,7 +4,7 @@
 //! Creates two peers, both subscribe to the same gossip topic,
 //! sends signed AboutMe, and verifies the other peer decodes it.
 
-use boru_chat::{
+use boru_core::{
     api::Event as GossipEvent,
     chat_core::{Message, SignedMessage},
     net::{Gossip, GOSSIP_ALPN},

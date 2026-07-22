@@ -7,9 +7,9 @@
 //! - Legacy ticket compatibility (no overlap)
 //! - Expected prefix "boru1:"
 
-use boru_chat::chat_core::{RoomInvitation, RoomInviteV2, Ticket};
-use boru_chat::discovery_secret::DiscoverySecret;
-use boru_chat::proto::TopicId;
+use boru_core::chat_core::{RoomInvitation, RoomInviteV2, Ticket};
+use boru_core::discovery_secret::DiscoverySecret;
+use boru_core::proto::TopicId;
 
 /// A known 32-byte secret for deterministic tests.
 fn test_secret() -> DiscoverySecret {

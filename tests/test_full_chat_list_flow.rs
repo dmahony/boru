@@ -5,7 +5,7 @@
 //! 4. A sends a message — verify B receives it
 //! 5. B sends a message — verify A receives it
 
-use boru_chat::{
+use boru_core::{
     api::GossipSender,
     chat_callbacks::ChatCallbacks,
     chat_core::{
@@ -128,7 +128,7 @@ async fn test_full_chat_list_flow() -> Result<()> {
     println!("\n[Step 1] A: CreateNewRoom (random topic)");
 
     // Create ticket exactly like iced_chat does in room_ticket()
-    let ticket = boru_chat::chat_core::Ticket {
+    let ticket = boru_core::chat_core::Ticket {
         topic,
         peers: vec![addr_a],
         discovery_secret: None,
@@ -158,7 +158,7 @@ async fn test_full_chat_list_flow() -> Result<()> {
 
     // STEP 2: B joins via the ticket (like JoinFromTicket in chat list)
     println!("\n[Step 2] B: JoinFromTicket");
-    let parsed_ticket: boru_chat::chat_core::Ticket = ticket_str.parse().unwrap();
+    let parsed_ticket: boru_core::chat_core::Ticket = ticket_str.parse().unwrap();
     println!(
         "  Parsed topic={}, peers={}",
         parsed_ticket.topic,

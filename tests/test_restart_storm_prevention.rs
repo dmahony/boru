@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use boru_chat::{
+use boru_core::{
     bounded_startup_scheduler::BoundedStartupScheduler,
     download_limits::{DownloadLimiter, DownloadLimitsConfig},
 };
@@ -43,7 +43,7 @@ fn config_with(startup: usize, concurrent: usize) -> DownloadLimitsConfig {
 fn enqueue_n(
     limiter: &DownloadLimiter,
     n: usize,
-) -> Vec<boru_chat::download_limits::QueuedDownload> {
+) -> Vec<boru_core::download_limits::QueuedDownload> {
     (0..n)
         .map(|i| {
             let peer = format!("peer-{:02}", i % 10);

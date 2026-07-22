@@ -12,9 +12,9 @@
 //! 5. **Message expiry** — TTL-based expiry in OutboxStore and handle_net_event stale-message drop
 //! 6. **Edge cases** — empty stores, missing entries, backward transitions, concurrent saves
 
-use boru_chat::chat_history::{blake3_hex, ChatHistoryStore, DeliveryState, HistoryEntry};
-use boru_chat::outbox::{OutboxEntry, OutboxStore};
-use boru_chat::proto::TopicId;
+use boru_core::chat_history::{blake3_hex, ChatHistoryStore, DeliveryState, HistoryEntry};
+use boru_core::outbox::{OutboxEntry, OutboxStore};
+use boru_core::proto::TopicId;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

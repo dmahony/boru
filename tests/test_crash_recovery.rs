@@ -26,7 +26,7 @@ use std::{
 
 use iroh::{PublicKey, SecretKey};
 
-use boru_chat::{
+use boru_core::{
     storage::Storage,
     store::{DeliveryStatus, MessageId, StoredEnvelope},
 };

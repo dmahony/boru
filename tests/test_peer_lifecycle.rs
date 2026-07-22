@@ -22,7 +22,7 @@ mod fixture;
 
 use fixture::{PeerId, TwoPeerFixture};
 
-use boru_chat::{
+use boru_core::{
     catalogue_client::{fetch_remote_catalogue, RemoteCatalogueFetchError},
     catalogue_model::SignedFileCatalogue,
     friends::{FriendId, FriendRecord, FriendRelationship},
