@@ -17,7 +17,7 @@ version = "0.101.0"
 # ──────────────────────────────────────────────────────────────────────
 edition = "2021"
 readme = "README.md"
-description = "gossip messages over broadcast trees"
+description = "private, peer-to-peer communication built on Iroh"
 license = "MIT/Apache-2.0"
 authors = ["n0 team"]
 repository = "https://github.com/dmahony/boru-chat"
