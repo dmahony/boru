@@ -56,6 +56,13 @@ use n0_error::{bail_any, Result, StdResultExt};
 
 /// Default relay server — user's VPS, relay TLS on 8443 (nginx TLS on 443).
 const VPS_RELAY_URL: &str = "https://boru.chat:8443";
+
+const WINDOW_ICON_PNG: &[u8] = include_bytes!("../../assets/icons/boru-chat-256.png");
+
+fn window_icon() -> Option<iced::window::Icon> {
+    iced::window::icon::from_file_data(WINDOW_ICON_PNG, Some(image::ImageFormat::Png)).ok()
+}
+
 use tokio::sync::{watch, Mutex};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -1023,6 +1030,10 @@ fn main() -> Result<()> {
         IcedChat::view,
     )
     .title(|_: &IcedChat| format!("Boru {}", app::version_tag()))
+    .window(iced::window::Settings {
+        icon: window_icon(),
+        ..Default::default()
+    })
     .subscription(|state: &IcedChat| {
         let subs: Vec<iced::Subscription<app::AppMessage>> = vec![
             IcedChat::subscription(
