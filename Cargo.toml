@@ -370,3 +370,7 @@ required-features = ["net"]
 name = "test_interrupted_transfer_harness"
 path = "tests/test_interrupted_transfer_harness.rs"
 
+[[test]]
+name = "test_branding_rename"
+path = "tests/test_branding_rename.rs"
+
