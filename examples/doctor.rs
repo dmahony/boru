@@ -1,4 +1,4 @@
-//! boru-chat install doctor / sanity-check.
+//! Boru install doctor / sanity-check.
 //!
 //! Runs a battery of checks against the local install to verify:
 //!   - Data directory existence and permissions (0700 on Unix)

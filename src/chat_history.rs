@@ -1,4 +1,4 @@
-//! Durable chat history storage for boru-chat.
+//! Durable chat history storage for Boru.
 //!
 //! Chat messages are persisted atomically so room history remains available
 //! after restart. Outgoing messages additionally live in the durable outbox

@@ -1,4 +1,4 @@
-//! Durable friend request store and API for boru-chat.
+//! Durable friend request store and API for Boru.
 //!
 //! This module owns the on-disk `friend_requests.json` file that lives beside
 //! the persistent `secret_key.txt` identity file and the `friends.json` friends

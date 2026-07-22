@@ -1,4 +1,4 @@
-//! Core diagnostics — bounded event and probe storage for boru-chat.
+//! Core diagnostics — bounded event and probe storage for Boru.
 //!
 //! Provides a thread-safe [`Diagnostics`] singleton that records
 //! [`DiagnosticEvent`]s and [`ReceivedProbe`]s with bounded capacity.

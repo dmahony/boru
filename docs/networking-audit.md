@@ -1,7 +1,7 @@
 # Networking Audit — Task 1.2
 
 Audited: 2026-07-18
-Codebase: Boru, commit 9ed4f23
+Codebase: iroh-gossip-chat (formerly `boru-chat`), commit 9ed4f23
 
 ## 1. Protocol Landscape
 

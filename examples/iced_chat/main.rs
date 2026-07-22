@@ -1,4 +1,4 @@
-//! Iced desktop frontend for boru-chat.
+//! Iced desktop frontend for Boru.
 //!
 //! Usage:
 //!   cargo run --features gui --example iced_chat       # show chat list

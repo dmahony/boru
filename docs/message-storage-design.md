@@ -8,11 +8,12 @@ depends on the environment:
 | Precedence | Source |
 |---|---|
 | 1 (highest) | `--data-dir` CLI flag |
-| 2 | `BORU_DATA_DIR` environment variable (new — preferred) |
-| 3 | `BORU_CHAT_DATA_DIR` environment variable (deprecated — prints a warning) |
-| 4 | Legacy `boru-chat` data directory, auto-detected (deprecated — prints a warning) |
-| 5 (new default) | `$XDG_DATA_HOME/boru` (typically `~/.local/share/boru/`) |
-| 6 (new fallback) | `$PWD/.boru` |
+| 2 | `BORU_DATA_DIR` environment variable (also checks legacy `BORU_CHAT_DATA_DIR`) |
+| 3 | `$XDG_DATA_HOME/boru` (typically `~/.local/share/boru/`) |
+| 4 (fallback) | `$PWD/.boru` |
+
+Legacy paths (`~/.local/share/boru-chat/`, `$PWD/.boru-chat`) and the legacy
+`BORU_CHAT_DATA_DIR` env var are also checked for backward compatibility.
 
 On Unix the data directory and its SQLite database are created with restrictive
 permissions: `0o700` for the directory, `0o600` for the database file.
@@ -284,7 +285,7 @@ Images uploaded by users are stored outside SQLite, rooted at `<data_dir>/files/
   JPEG magic bytes (`FF D8 FF`) and overrides the extension to `jpg`.
 - Directories have `0o700` permissions on Unix; the store prevents symlink
   traversal by rejecting symlinked user directories.
-- The `BORU_CHAT_FILES_DIR` env var can override the files root.
+- The `BORU_FILES_DIR` env var can override the files root (legacy `BORU_CHAT_FILES_DIR` also accepted).
 
 ---
 

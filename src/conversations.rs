@@ -1,4 +1,4 @@
-//! Durable conversation records for boru-chat.
+//! Durable conversation records for Boru.
 //!
 //! A conversation is a persisted record keyed by gossip [`TopicId`] that
 //! survives application restarts.  Each entry tracks the direct one-to-one

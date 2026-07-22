@@ -1,4 +1,4 @@
-//! Durable friends list storage for boru-chat.
+//! Durable friends list storage for Boru.
 //!
 //! This module owns the on-disk `friends.json` file that lives beside the
 //! persistent `secret_key.txt` identity file.

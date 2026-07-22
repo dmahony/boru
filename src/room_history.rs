@@ -1,4 +1,4 @@
-//! Transient multi-room state for boru-chat.
+//! Transient multi-room state for Boru.
 //!
 //! Room history is intentionally not retained across process restarts.  The
 //! in-memory list is used only for the current process; legacy `rooms.json`

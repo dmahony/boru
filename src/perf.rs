@@ -1,4 +1,4 @@
-//! Performance instrumentation for boru-chat.
+//! Performance instrumentation for Boru.
 //!
 //! Provides lightweight, feature-gated timing primitives that record duration
 //! samples, emit tracing events, and optionally warn when operations exceed a

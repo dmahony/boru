@@ -1,4 +1,4 @@
-//! Public API for using boru-chat
+//! Public API for using Boru
 //!
 //! The API is usable both locally and over RPC.
 

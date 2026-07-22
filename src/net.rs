@@ -1,4 +1,4 @@
-//! Networking for the `boru-chat` protocol
+//! Networking for the `Boru` protocol
 
 use std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},

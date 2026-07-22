@@ -45,14 +45,13 @@ settings files. This document covers all available options.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-|| `BORU_DATA_DIR` | Path | — | Override the persistent data directory (new — preferred) |
-|| `BORU_CHAT_DATA_DIR` | Path | — | Override the persistent data directory (deprecated — use `BORU_DATA_DIR`) |
-|| `BORU_CHAT_FILES_DIR` | Path | `<data_dir>/files/` | Override the image/files storage root |
-|| `BORU_PERF` | `0`/`1` | `0` | Enable performance instrumentation |
-|| `BORU_PERF_PRINT` | `0`/`1` | `1` | Print performance summary at exit |
-|| `BORU_PERF_SLOW_MS` | Integer | `100` | Slow-operation threshold in milliseconds |
-|| `BORU_DEBUG` | `0`/`1` | `0` | Enable gossip debug event log |
-|| `BORU_DEBUG_PATH` | Path | `<data_dir>/gossip-debug.log` | Gossip debug log path |
+| `BORU_DATA_DIR` | Path | — | Override the persistent data directory (also checks legacy `BORU_CHAT_DATA_DIR` for backward compatibility) |
+| `BORU_FILES_DIR` | Path | `<data_dir>/files/` | Override the image/files storage root |
+| `BORU_PERF` | `0`/`1` | `0` | Enable performance instrumentation |
+| `BORU_PERF_PRINT` | `0`/`1` | `1` | Print performance summary at exit |
+| `BORU_PERF_SLOW_MS` | Integer | `100` | Slow-operation threshold in milliseconds |
+| `BORU_DEBUG` | `0`/`1` | `0` | Enable gossip debug event log |
+| `BORU_DEBUG_PATH` | Path | `~/.local/share/boru/gossip-debug.log` | Gossip debug log path |
 | `RUST_LOG` | EnvFilter | `info` | Tracing filter (overrides file log filter) |
 | `XDG_DATA_HOME` | Path | `~/.local/share` | Base for default data directory |
 
@@ -61,13 +60,14 @@ settings files. This document covers all available options.
 The data directory is resolved in this order:
 
 1. `--data-dir` CLI flag
-2. `BORU_DATA_DIR` environment variable (new — preferred)
-3. `BORU_CHAT_DATA_DIR` environment variable (deprecated — prints a warning)
-4. Existing legacy `boru-chat` data directory, auto-detected (deprecated — prints a warning)
-5. `$XDG_DATA_HOME/boru` (typically `~/.local/share/boru/`)
-6. `$HOME/.local/share/boru/`
-7. `$LOCALAPPDATA/boru` (Windows only)
-8. `$PWD/.boru` (fallback)
+2. `BORU_DATA_DIR` environment variable
+3. `$XDG_DATA_HOME/boru` (typically `~/.local/share/boru/`)
+4. `$HOME/.local/share/boru/`
+5. `$LOCALAPPDATA/boru` (Windows only)
+6. `$PWD/.boru` (fallback)
+
+Boru also honours the legacy `BORU_CHAT_DATA_DIR` variable and legacy paths
+(`$XDG_DATA_HOME/boru-chat`, `$PWD/.boru-chat`) for backward compatibility.
 
 ## Settings File (`settings.json`)
 
@@ -115,11 +115,11 @@ Environment overrides are available through the following variables via
 
 | Variable | Overrides |
 |----------|-----------|
-| `BORU_CHAT_MAX_CONCURRENT_DOWNLOADS` | `max_concurrent_downloads` |
-| `BORU_CHAT_MAX_STARTUP_DOWNLOADS` | `max_startup_downloads` |
-| `BORU_CHAT_MAX_DOWNLOADS_PER_PEER` | `max_downloads_per_peer` |
-| `BORU_CHAT_MAX_QUEUED_DOWNLOADS` | `max_queued_downloads` |
-| `BORU_CHAT_PROGRESS_DB_UPDATE_INTERVAL_MS` | `progress_update_interval` |
+| `BORU_MAX_CONCURRENT_DOWNLOADS` | `max_concurrent_downloads` |
+| `BORU_MAX_STARTUP_DOWNLOADS` | `max_startup_downloads` |
+| `BORU_MAX_DOWNLOADS_PER_PEER` | `max_downloads_per_peer` |
+| `BORU_MAX_QUEUED_DOWNLOADS` | `max_queued_downloads` |
+| `BORU_PROGRESS_DB_UPDATE_INTERVAL_MS` | `progress_update_interval` |
 | A startup caller can use `DownloadLimiter::try_enqueue_startup` so restored
 downloads observe the burst cap, while ordinary calls to `try_enqueue` use the
 global concurrency cap.

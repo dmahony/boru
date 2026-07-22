@@ -1,10 +1,12 @@
-# boru-core
+# Boru
 
-Private, peer-to-peer communication built on
+Gossip messages over broadcast trees — a peer-to-peer chat application built on
 [iroh](https://github.com/n0-computer/iroh).
 
-> Private communication, directly between people.
+## Architecture
 
+Boru is a Rust library (`boru_core`) and example GUI application
+(`examples/iced_chat`) that provides:
 
 - **Gossip protocol** — room-based message broadcasting over QUIC
 - **Direct messaging** — inbox protocol for offline delivery, whisper protocol
@@ -18,22 +20,14 @@ Private, peer-to-peer communication built on
 
 ## Storage
 
-All persistent data lives under a single data directory, resolved in this order
-(the old `BORU_CHAT_DATA_DIR` environment variable is still supported with a
-deprecation warning):
+All persistent data lives under a single data directory, resolved in this order:
 
 1. `--data-dir` CLI flag
-2. `BORU_DATA_DIR` environment variable (new — preferred)
-3. `BORU_CHAT_DATA_DIR` environment variable (deprecated — prints a warning)
-4. Legacy `boru-chat` data directory, auto-detected (deprecated — prints a warning)
-5. `$XDG_DATA_HOME/boru` (new default)
-6. `$PWD/.boru` (new fallback)
-
-> **Backward compatibility**: Existing installations that have a `boru-chat` data
-> directory will continue using it automatically with a deprecation warning.
-> To migrate to the new paths, set `BORU_DATA_DIR` or use the `--data-dir` flag.
-> Data is never automatically moved or deleted.
-### File Layout
+2. `BORU_DATA_DIR` environment variable (also checks legacy `BORU_CHAT_DATA_DIR` for backward compatibility)
+3. `$XDG_DATA_HOME/boru` (typically `~/.local/share/boru/`)
+4. `$PWD/.boru`
+###
+File Layout
 
 ```text
 <data_dir>/
@@ -195,7 +189,7 @@ fallback, and operator guidance.
 cargo run --example iced_chat --features gui -- --name <nickname>
 
 # With a specific data directory
-BORU_CHAT_DATA_DIR=~/.boru-chat cargo run --example iced_chat --features gui -- --name <nickname>
+BORU_DATA_DIR=~/.boru cargo run --example iced_chat --features gui -- --name <nickname>
 ```
 
 ## Features

@@ -1,4 +1,4 @@
-//! User profile and shared file data models for boru-chat.
+//! User profile and shared file data models for Boru.
 //!
 //! This module defines [`UserProfile`] (local user identity and preferences)
 //! and [`SharedFile`] (metadata about files the user shares with peers).

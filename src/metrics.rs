@@ -1,4 +1,4 @@
-//! Metrics for boru-chat
+//! Metrics for Boru
 
 use iroh_metrics::{Counter, MetricsGroup};
 

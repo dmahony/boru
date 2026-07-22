@@ -1,7 +1,7 @@
 //! Manual live Mainline DHT test harness.
 //!
 //! Connects to the real Mainline BitTorrent DHT and verifies that the
-//! boru-chat public-room discovery system can publish and lookup records.
+//! Boru public-room discovery system can publish and lookup records.
 //!
 //! # WARNING — Firewall and UDP caveats
 //!

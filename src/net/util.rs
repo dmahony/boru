@@ -1,4 +1,4 @@
-//! Utilities for boru-chat networking
+//! Utilities for Boru networking
 
 use std::{
     collections::{hash_map, HashMap},
