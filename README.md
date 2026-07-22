@@ -1,11 +1,11 @@
-# boru-chat
+# Boru
 
 Gossip messages over broadcast trees — a peer-to-peer chat application built on
 [iroh](https://github.com/n0-computer/iroh).
 
 ## Architecture
 
-boru-chat is a Rust library (`boru_chat`) and example GUI application
+Boru is a Rust library (`boru_core`) and example GUI application
 (`examples/iced_chat`) that provides:
 
 - **Gossip protocol** — room-based message broadcasting over QUIC
@@ -23,9 +23,9 @@ boru-chat is a Rust library (`boru_chat`) and example GUI application
 All persistent data lives under a single data directory, resolved in this order:
 
 1. `--data-dir` CLI flag
-2. `BORU_CHAT_DATA_DIR` environment variable
-3. `$XDG_DATA_HOME/boru-chat` (typically `~/.local/share/boru-chat/`)
-4. `$PWD/.boru-chat`
+2. `BORU_DATA_DIR` environment variable (also checks legacy `BORU_CHAT_DATA_DIR` for backward compatibility)
+3. `$XDG_DATA_HOME/boru` (typically `~/.local/share/boru/`)
+4. `$PWD/.boru`
 ###
 File Layout
 
@@ -189,7 +189,7 @@ fallback, and operator guidance.
 cargo run --example iced_chat --features gui -- --name <nickname>
 
 # With a specific data directory
-BORU_CHAT_DATA_DIR=~/.boru-chat cargo run --example iced_chat --features gui -- --name <nickname>
+BORU_DATA_DIR=~/.boru cargo run --example iced_chat --features gui -- --name <nickname>
 ```
 
 ## Features

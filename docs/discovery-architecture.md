@@ -1,6 +1,6 @@
 # Discovery Architecture
 
-boru-chat uses **two independent discovery layers** that serve different purposes
+Boru uses **two independent discovery layers** that serve different purposes
 and use separate DHT instances:
 
 1. **Address resolution** — resolves an `EndpointId` to transport addresses
@@ -468,7 +468,7 @@ The `distributed-topic-tracker` crate uses Mainline DHT mutable records
 
 ### 12.2 Two-Client Recommendation
 
-When running two instances of boru-chat on the same machine (e.g. GUI + CLI):
+When running two instances of Boru on the same machine (e.g. GUI + CLI):
 
 - Each instance creates its own DHT sockets (separate UDP ports).  This is
   normal and does not cause conflicts.

@@ -31,7 +31,7 @@ impl TopicId {
 
 /// Protocol wire message
 ///
-/// This is the wire frame of the `boru-chat` protocol.
+/// This is the wire frame of the `Boru` protocol.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message<PI> {
     pub(crate) topic: TopicId,
@@ -142,7 +142,7 @@ impl<PI> From<InEvent<PI>> for InEventMapped<PI> {
     }
 }
 
-/// The state of the `boru-chat` protocol.
+/// The state of the `Boru` protocol.
 ///
 /// The implementation works as an IO-less state machine. The implementer injects events through
 /// [`Self::handle`], which returns an iterator of [`OutEvent`]s to be processed.

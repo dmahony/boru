@@ -218,7 +218,7 @@ pub mod image_optimizer;
 /// encoder with no C FFI dependencies.
 pub mod compression;
 
-/// Opt-in boru-chat debug tracing — append-only event log for diagnosing
+/// Opt-in Boru debug tracing — append-only event log for diagnosing
 /// mesh-forwarding bugs.
 ///
 /// Enable with `BORU_DEBUG=1`.  Auto-initialised by the gossip actor;

@@ -1,4 +1,4 @@
-//! Durable room metadata for boru-chat.
+//! Durable room metadata for Boru.
 //!
 //! This module owns the on-disk `room.json` file that lives beside the
 //! persistent `secret_key.txt` identity file.  When a user runs `open`

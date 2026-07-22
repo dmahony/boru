@@ -1,7 +1,7 @@
 //! Manual live Mainline DHT test harness.
 //!
 //! Connects to the real Mainline BitTorrent DHT and verifies that the
-//! boru-chat public-room discovery system can publish and lookup records.
+//! Boru public-room discovery system can publish and lookup records.
 //!
 //! # WARNING — Firewall and UDP caveats
 //!
@@ -83,7 +83,7 @@ use distributed_topic_tracker::{Dht, DhtConfig};
 #[derive(Parser, Debug)]
 #[command(
     name = "dht_harness",
-    about = "Manual live Mainline DHT test harness for boru-chat",
+    about = "Manual live Mainline DHT test harness for Boru",
     version,
     long_about = None
 )]
@@ -157,7 +157,7 @@ async fn main() -> Result<()> {
     let identity = public_room_identity(network);
 
     let short_id = identity.short_id();
-    println!("─── boru-chat DHT Test Harness ──────────────────────");
+    println!("─── Boru DHT Test Harness ──────────────────────");
     println!("  Network:      {network_label}");
     println!("  Room ID:      {short_id}");
     println!();

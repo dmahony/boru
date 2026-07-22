@@ -1,10 +1,10 @@
-//! Implementation of the boru-chat protocol, as an IO-less state machine
+//! Implementation of the Boru protocol, as an IO-less state machine
 //!
-//! This module implements the boru-chat protocol. The entry point is [`State`], which contains
+//! This module implements the Boru protocol. The entry point is [`State`], which contains
 //! the protocol state for a node.
 //!
-//! The boru-chat protocol is made up from two parts: A swarm membership protocol, based on
-//! [HyParView][hyparview], and a gossip broadcasting protocol, based on [PlumTree][plumtree].
+//! The Boru protocol is made up from two parts: A swarm membership protocol, based on
+//! [HyParView], and a broadcast protocol, based on [PlumTree].
 //!
 //! For a full explanation it is recommended to read the two papers. What follows is a brief
 //! outline of the protocols.

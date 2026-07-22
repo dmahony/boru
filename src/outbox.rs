@@ -1,4 +1,4 @@
-//! Durable encrypted outbox storage for boru-chat.
+//! Durable encrypted outbox storage for Boru.
 //!
 //! Outgoing messages (signed+encoded) are persisted *before* they are
 //! broadcast so that in-flight messages survive a crash or restart.

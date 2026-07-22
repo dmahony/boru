@@ -170,7 +170,7 @@ then DhtAddressLookup (if not disabled). The resolution policy in
 | `--no-relay` | Flag | Off | Disable relay entirely |
 | `--no-dht` | Flag | Off | Disable private-room DHT + DhtAddressLookup |
 | `--bind-port` | `u16` | 0 (OS-assigned) | Local QUIC port |
-| `--data-dir` | `PathBuf` | `~/.local/share/boru-chat/` | Persistence |
+| `--data-dir` | `PathBuf` | `~/.local/share/boru/` | Persistence |
 
 ### `--no-dht` scope (documented + implemented)
 

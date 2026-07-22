@@ -1,4 +1,4 @@
-# UX Audit: Boru Chat (Iced GUI)
+# UX Audit: Boru (Iced GUI)
 
 **Date:** 2026-07-21  
 **Version audited:** commit 02fac77 (latest UI redesign from Step 1–8)  
@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-Boru Chat's Iced GUI is a functional, privacy-first peer-to-peer messaging application with a clean design system, consistent typography/spacing, proper dark/light mode support, and well-structured screens. The redesign from Steps 1–8 has significantly improved visual polish.
+Boru's Iced GUI is a functional, privacy-first peer-to-peer messaging application with a clean design system, consistent typography/spacing, proper dark/light mode support, and well-structured screens. The redesign from Steps 1–8 has significantly improved visual polish.
 
 **Overall UX maturity:** Early-stage but solid foundation. The app is usable by a technically-literate user but presents barriers for non-technical and first-time users. Most issues are medium-impact; one high-impact dead button was found.
 
@@ -23,7 +23,7 @@ Boru Chat's Iced GUI is a functional, privacy-first peer-to-peer messaging appli
 
 **Flow:**
 1. Launch app → secret key generated silently → main window appears.
-2. See "BORU CHAT" heading + "Private. Peer-to-peer. No central servers." tagline.
+2. See "BORU" heading + "Private. Peer-to-peer. No central servers." tagline.
 3. Status card shows connection health, relay mode, friend count.
 4. Four action buttons: "Start Chat", "Add Friend", "Join Ticket", "Browse Files".
 5. Recent activity feed (empty on first launch).
@@ -266,7 +266,7 @@ Boru Chat's Iced GUI is a functional, privacy-first peer-to-peer messaging appli
 
 ## Conclusion
 
-Boru Chat has a solid visual foundation — the design system is consistent, the color palette is well-chosen, and the overall layout is clean. The app is already usable by technically-literate users who understand p2p networking concepts.
+Boru has a solid visual foundation — the design system is consistent, the color palette is well-chosen, and the overall layout is clean. The app is already usable by technically-literate users who understand p2p networking concepts.
 
 The **single highest-impact issue** is the dead "Voice" button, which will cause immediate confusion when clicked. Beyond that, the main UX gap is the **lack of onboarding** and the **exposure of networking jargon** to first-time users. The core chat experience (send/receive messages, share files, add friends) works well once the user understands the mental model.
 
