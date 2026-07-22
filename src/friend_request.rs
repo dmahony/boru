@@ -137,7 +137,7 @@ impl FriendRequestStatus {
 }
 
 /// A persisted friend request between two peers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FriendRequest {
     /// Unique identifier for this request.
     pub id: String,
@@ -246,6 +246,14 @@ pub struct FriendRequestStore {
     /// Friend requests indexed by their unique id.
     #[serde(default)]
     requests: BTreeMap<String, FriendRequest>,
+    /// Pending signed message bytes indexed by request id.
+    ///
+    /// These are the raw signed [`SignedContactMessage`] bytes created when
+    /// accepting a [`PeerInvitation`](crate::peer_invitation::PeerInvitation).
+    /// They survive restarts so the caller can retry delivery of requests that
+    /// were created but not yet successfully sent over the whisper channel.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pending_signed_messages: BTreeMap<String, Vec<u8>>,
     /// Two-way index: `(requester, recipient) → request_id` for fast duplicate
     /// detection and pair lookup. Only indexes non-terminal (Pending) requests.
     #[serde(skip)]
@@ -260,6 +268,7 @@ impl Default for FriendRequestStore {
         Self {
             schema_version: SCHEMA_VERSION,
             requests: BTreeMap::new(),
+            pending_signed_messages: BTreeMap::new(),
             pair_index: BTreeMap::new(),
             data_dir: PathBuf::new(),
         }
@@ -661,6 +670,31 @@ impl FriendRequestStore {
             self.requests.remove(id);
         }
         count
+    }
+
+    /// Store a pending signed message associated with a request id.
+    ///
+    /// These bytes survive persistence across saves/loads so the caller
+    /// can retry delivery of a friend request that was created but not
+    /// yet successfully sent over the whisper channel.
+    pub fn store_pending_signed_message(
+        &mut self,
+        request_id: impl Into<String>,
+        message: Vec<u8>,
+    ) {
+        self.pending_signed_messages
+            .insert(request_id.into(), message);
+    }
+
+    /// Take (remove and return) the pending signed message for a request,
+    /// if one exists.
+    pub fn take_pending_signed_message(&mut self, request_id: &str) -> Option<Vec<u8>> {
+        self.pending_signed_messages.remove(request_id)
+    }
+
+    /// Check whether a request has a pending signed message stored.
+    pub fn has_pending_signed_message(&self, request_id: &str) -> bool {
+        self.pending_signed_messages.contains_key(request_id)
     }
 }
 

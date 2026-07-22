@@ -50,6 +50,11 @@ use boru_chat::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
 use boru_chat::mailbox::{seal_for, IncomingAcceptance, MailboxAck, MailboxIdentity, MailboxStore};
 use boru_chat::net::Gossip;
 use boru_chat::outbox::{OutboxEntry, OutboxStore};
+use boru_chat::pairing_service::{
+    accept_peer_invitation, open_or_create_first_conversation, FirstConversationResult,
+    PairingContext, PairingOutcome,
+};
+use boru_chat::peer_invitation::PeerInvitation;
 use boru_chat::private_room_tracker::{PrivateContinuousTracker, PrivateRoomTracker};
 use boru_chat::proto::TopicId;
 use boru_chat::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
@@ -692,6 +697,7 @@ pub(crate) const BUTTON_ICON: fn(
     ..Default::default()
 };
 
+#[expect(dead_code)]
 /// Transparent full-size backdrop button — invisible but clickable.
 pub(crate) const BUTTON_BACKDROP: fn(
     &iced::Theme,
@@ -703,6 +709,7 @@ pub(crate) const BUTTON_BACKDROP: fn(
     ..Default::default()
 };
 
+#[expect(dead_code)]
 /// Transparent-wide button — no background, no border, inherits parent text color.
 /// Used for clickable rows that should look like plain containers.
 pub(crate) const BUTTON_TRANSPARENT: fn(
@@ -1423,6 +1430,12 @@ pub enum Screen {
     ImagePreview { topic: TopicId, entry_index: usize },
     /// Redesigned friend profile view with context menu and action buttons.
     FriendProfile(PublicKey),
+    /// Result of accepting a peer invitation — shows pairing outcome and
+    /// optional "Send first message" action.
+    PairingResult(Box<PairingOutcome>),
+    /// Error from accepting a peer invitation — shows error details and
+    /// a "Back to Chat List" action.
+    PairingError(String),
 }
 
 // ── Per-conversation runtime state ─────────────────────────────────────
@@ -1765,6 +1778,7 @@ pub struct IcedChat {
     friend_request_search_input: String,
     /// Error message shown in the friend requests screen.
     friend_request_error: String,
+
     /// Queue of download progress events from background download tasks.
     /// Drained on each ConnMonitorTick and converted into AppMessage::DownloadProgress.
     download_progress_queue: Arc<StdMutex<VecDeque<TransferProgress>>>,
@@ -1815,6 +1829,10 @@ pub struct IcedChat {
     show_create_room_dialog: bool,
     /// Whether the \"Add\" menu dropdown in the sidebar header is open.
     show_add_menu: bool,
+    /// Whether the invitation paste dialog is shown.
+    show_invitation_input: bool,
+    /// The invitation URI text input in the paste dialog.
+    invitation_input: String,
     // ── Friend Profile screen state ──
     /// Whether the three-dot context menu in the friend profile is open.
     friend_profile_menu_open: bool,
@@ -1892,6 +1910,10 @@ pub struct IcedChat {
     pending_close_dialog_action: Option<GuiActionId>,
     /// SelectPeer action waiting for the normal peer-profile navigation path.
     pending_select_peer_action: Option<(GuiActionId, PublicKey)>,
+    /// When `true`, the composer should be focused after the next room opens.
+    /// Set by `OpenPairingConversation` so the user can start typing immediately
+    /// after clicking "Send first message".
+    pending_pairing_composer_focus: bool,
     /// Sender for GUI state snapshots — publishes an [`IcedStateSnapshot`] after
     /// each `update()` so the MCP server can watch for condition changes.
     pub gui_state_tx: tokio::sync::watch::Sender<IcedStateSnapshot>,
@@ -2490,6 +2512,22 @@ pub enum AppMessage {
         expected: String,
         elapsed_ms: u64,
     },
+
+    // ── Pairing (Phases 13-15) ──
+    /// Accept a peer invitation URI (boru-chat://pair/...).
+    AcceptPairingInvitation(String),
+    /// The pairing flow completed with an outcome.
+    PairingCompleted(Result<Box<PairingOutcome>, String>),
+    /// The signed friend request was sent via whisper after pairing.
+    PairingSendResult(Result<(), String>),
+    /// "Send first message" — opens the conversation for a paired peer.
+    OpenPairingConversation(PublicKey),
+    /// Text input for the invitation paste dialog.
+    InvitationInputChanged(String),
+    /// Submit the invitation from the paste dialog.
+    SubmitInvitation,
+    /// Close the invitation paste dialog without submitting.
+    CancelInvitationInput,
 }
 
 /// Map semantic GUI navigation commands to the same application messages used
@@ -3256,6 +3294,7 @@ impl IcedChat {
             join_request_list: Vec::new(),
             friend_request_search_input: String::new(),
             friend_request_error: String::new(),
+
             download_progress_queue: Arc::new(StdMutex::new(VecDeque::new())),
             public_room_safety: None,
             conversation_store: ConversationStore::load_or_default(&data_dir),
@@ -3273,6 +3312,8 @@ impl IcedChat {
             room_trackers: HashMap::new(),
             show_create_room_dialog: false,
             show_add_menu: false,
+            show_invitation_input: false,
+            invitation_input: String::new(),
 
             friend_profile_menu_open: false,
             friend_profile_rename_input: String::new(),
@@ -3310,6 +3351,7 @@ impl IcedChat {
             pending_open_settings_action: None,
             pending_close_dialog_action: None,
             pending_select_peer_action: None,
+            pending_pairing_composer_focus: false,
             gui_state_tx,
             recent_activity: VecDeque::with_capacity(50),
         }
@@ -4160,6 +4202,13 @@ impl IcedChat {
             AppMessage::OfflineDMStatus { .. } => "OfflineDMStatus",
             AppMessage::SaveProfile => "SaveProfile",
             AppMessage::ProfileSaved => "ProfileSaved",
+            AppMessage::AcceptPairingInvitation(_) => "AcceptPairingInvitation",
+            AppMessage::PairingCompleted(_) => "PairingCompleted",
+            AppMessage::PairingSendResult(_) => "PairingSendResult",
+            AppMessage::OpenPairingConversation(_) => "OpenPairingConversation",
+            AppMessage::InvitationInputChanged(_) => "InvitationInputChanged",
+            AppMessage::SubmitInvitation => "SubmitInvitation",
+            AppMessage::CancelInvitationInput => "CancelInvitationInput",
             AppMessage::GuiTestActionReceived(_) => "GuiTestActionReceived",
             AppMessage::GuiActionTimeout(_) => "GuiActionTimeout",
             AppMessage::GuiTestWaitSatisfied(_) => "GuiTestWaitSatisfied",
@@ -4649,6 +4698,8 @@ impl IcedChat {
             Screen::PeerCatalogue(_) => ("PeerCatalogue", None),
             Screen::FriendProfile(_) => ("FriendProfile", None),
             Screen::ImagePreview { topic, .. } => ("ImagePreview", Some(topic.to_string())),
+            Screen::PairingResult(_) => ("PairingResult", None),
+            Screen::PairingError(_) => ("PairingError", None),
         };
         let _ = self.gui_state_tx.send(IcedStateSnapshot {
             node_id: self.local_public.to_string(),
@@ -4804,7 +4855,7 @@ impl IcedChat {
                 let personal_topic = self.personal_room_topic();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let endpoint = self.endpoint.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let dht = self.dht.clone();
@@ -5019,6 +5070,9 @@ impl IcedChat {
                         self.layout_cache.borrow_mut().invalidate_all();
                     }
                     complete_open_room_action(self);
+                    if std::mem::take(&mut self.pending_pairing_composer_focus) {
+                        return iced::widget::operation::focus(COMPOSER_INPUT);
+                    }
                     return iced::Task::none();
                 }
 
@@ -5027,6 +5081,9 @@ impl IcedChat {
                 // draft text, and all other per-conversation state.
                 if self.switch_to_conversation(topic) {
                     complete_open_room_action(self);
+                    if std::mem::take(&mut self.pending_pairing_composer_focus) {
+                        return iced::widget::operation::focus(COMPOSER_INPUT);
+                    }
                     return iced::Task::none();
                 }
 
@@ -5069,7 +5126,7 @@ impl IcedChat {
                 let runtime_handle = self.runtime_handle.clone();
                 let memory_lookup = self.memory_lookup.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
@@ -5483,6 +5540,10 @@ impl IcedChat {
                     return iced::Task::done(AppMessage::GoToChatList);
                 }
 
+                if std::mem::take(&mut self.pending_pairing_composer_focus) {
+                    return iced::widget::operation::focus(COMPOSER_INPUT);
+                }
+
                 iced::Task::none()
             }
 
@@ -5548,7 +5609,7 @@ impl IcedChat {
                 let memory_lookup = self.memory_lookup.clone();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
@@ -6480,7 +6541,7 @@ impl IcedChat {
                     };
                     let secret_key = self.secret_key.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let _progress_queue = self.download_progress_queue.clone();
                     let endpoint = self.endpoint.clone();
                     return iced::Task::perform(
                         async move {
@@ -6929,8 +6990,8 @@ impl IcedChat {
                 self.conversation_store.touch_and_bump(&topic);
                 // Update the sidebar preview BEFORE taking the mutable borrow
                 // on self.conversations (avoids borrow conflict).
-                let is_inactive = topic != self.topic
-                    || !matches!(self.screen, Screen::Chat { .. });
+                let is_inactive =
+                    topic != self.topic || !matches!(self.screen, Screen::Chat { .. });
                 if is_inactive {
                     self.update_room_preview(&topic, &event);
                 }
@@ -7508,15 +7569,15 @@ impl IcedChat {
                 let sender = self.sender.clone();
                 let secret_key = self.secret_key.clone();
                 let endpoint_addr = self.endpoint.addr();
-                let local_label = self.local_label.clone();
-                let local_pk = self.local_public;
+                let _local_label = self.local_label.clone();
+                let _local_pk = self.local_public;
                 iced::Task::perform(
                     async move {
                         let path_buf = std::path::PathBuf::from(&abs_path);
                         let metadata = tokio::fs::metadata(&path_buf)
                             .await
                             .map_err(|e| format!("Failed to inspect file: {e}"))?;
-                        let file_size = metadata.len();
+                        let _file_size = metadata.len();
                         // Stream the file into iroh blobs — no whole-file
                         // memory limit needed.
                         let file = tokio::fs::File::open(&path_buf)
@@ -7529,11 +7590,7 @@ impl IcedChat {
                             .await
                             .await
                             .map_err(|e| format!("Failed to store file: {e}"))?;
-                        let ticket_str = blob_ticket_string(
-                            endpoint_addr,
-                            tag.hash,
-                            tag.format,
-                        );
+                        let ticket_str = blob_ticket_string(endpoint_addr, tag.hash, tag.format);
                         let msg = crate::Message::FileShare {
                             name: filename.clone(),
                             ticket: ticket_str.clone(),
@@ -7546,9 +7603,7 @@ impl IcedChat {
                         Ok((filename, ticket_str))
                     },
                     |r: Result<(String, String), String>| match r {
-                        Ok((name, ticket)) => {
-                            AppMessage::FileDownloaded { name, ticket }
-                        }
+                        Ok((name, ticket)) => AppMessage::FileDownloaded { name, ticket },
                         Err(e) => AppMessage::ErrorMsg(e),
                     },
                 )
@@ -7671,14 +7726,17 @@ impl IcedChat {
                 }
                 if let Some(e) = self.entries.get_mut(entry_index) {
                     if let Some(ref mut d) = e.download {
-                        d.state = DownloadState::Active { bytes: 0, total: None };
+                        d.state = DownloadState::Active {
+                            bytes: 0,
+                            total: None,
+                        };
                     }
                 }
                 self.download_entry_index = Some(entry_index);
                 let blob_store = self.blob_store.clone();
                 let endpoint = self.endpoint.clone();
                 let neighbors = self.neighbors.clone();
-                let safety = self.public_room_safety.clone();
+                let _safety = self.public_room_safety.clone();
                 let ticket_str = dl.ticket.clone();
                 let name = dl.name.clone();
                 let kind = dl.kind;
@@ -7686,12 +7744,13 @@ impl IcedChat {
                 let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
-                        let ticket: iroh_blobs::ticket::BlobTicket =
-                            ticket_str.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
+                        let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                            .parse()
+                            .map_err(|e| format!("Invalid ticket: {e}"))?;
                         let (addr, hash, _format) = ticket.into_parts();
                         let node_id = addr.id;
                         let candidates = download_candidates(node_id, &neighbors);
-                        use boru_chat::chat_callbacks::TransferKind;
+
                         let dl_dir = data_dir.join("downloads");
                         let _ = tokio::fs::create_dir_all(&dl_dir).await;
                         let save_path = dl_dir.join(&name);
@@ -8133,11 +8192,8 @@ impl IcedChat {
                     return iced::Task::perform(
                         async move {
                             let removed = mgr.remove_friend(&peer).await.unwrap_or(false);
-                            if removed {
-                                AppMessage::FriendRemoved { label }
-                            } else {
-                                AppMessage::FriendRemoved { label }
-                            }
+                            let _ = removed; // result logged server-side
+                            AppMessage::FriendRemoved { label }
                         },
                         |msg| msg,
                     );
@@ -8860,7 +8916,8 @@ impl IcedChat {
                     let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
                     tasks.push(iced::Task::perform(
                         async move {
-                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir) {
+                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir)
+                            {
                                 Ok(Some(s)) => s,
                                 _ => return Vec::new(),
                             };
@@ -9179,7 +9236,7 @@ impl IcedChat {
                 let endpoint = self.endpoint.clone();
                 let secret_key = self.secret_key.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let peers_with_mailbox: Vec<PublicKey> = self
                     .friends
                     .iter()
@@ -9255,7 +9312,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9278,7 +9335,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9503,7 +9560,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9547,7 +9604,7 @@ impl IcedChat {
                         let image_store = self.image_store.clone();
                         let user = self.local_public.to_string();
                         let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                        let _progress_queue = self.download_progress_queue.clone();
                         self.push_system("Saving profile image…");
                         iced::Task::perform(
                             async move {
@@ -9659,7 +9716,7 @@ impl IcedChat {
                     let image_store = self.image_store.clone();
                     let identifier = self.profile_image_identifier.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let _progress_queue = self.download_progress_queue.clone();
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -9926,6 +9983,159 @@ impl IcedChat {
                 // Profile was saved — nothing more to do. The broadcast
                 // already happened as part of SaveProfile handling.
                 iced::Task::none()
+            }
+
+            // ── Pairing (Phases 13-15) ──────────────────────────────────
+            AppMessage::AcceptPairingInvitation(uri) => {
+                if uri.is_empty() {
+                    // Show the paste dialog
+                    self.show_invitation_input = true;
+                    self.invitation_input.clear();
+                    self.show_add_menu = false;
+                    iced::Task::none()
+                } else {
+                    // Parse and process the invitation URI
+                    match PeerInvitation::from_uri(&uri) {
+                        None => {
+                            self.screen =
+                                Screen::PairingError("Invalid invitation URI".to_string());
+                            iced::Task::none()
+                        }
+                        Some(invitation) => {
+                            let context = PairingContext::new(
+                                self.secret_key.clone(),
+                                self.local_label.clone(),
+                                vec![], // relay URLs are optional invitation hints
+                                vec![], // direct addresses
+                            );
+                            let (outcome, signed_msg) = match accept_peer_invitation(
+                                &invitation,
+                                &context,
+                                &mut self.friends,
+                                &mut self.friend_request_store,
+                            ) {
+                                Ok(result) => result,
+                                Err(e) => {
+                                    self.screen = Screen::PairingError(format!("{e}"));
+                                    return iced::Task::none();
+                                }
+                            };
+                            self.try_save_friends();
+                            let _ = self.friend_request_store.save();
+
+                            // Send signed message via whisper if present
+                            let task = if let Some(payload) = signed_msg {
+                                let peer = outcome.peer();
+                                let whisper_handle = self.whisper_handle.clone();
+                                iced::Task::batch(vec![
+                                    iced::Task::done(AppMessage::PairingCompleted(Ok(Box::new(
+                                        outcome,
+                                    )))),
+                                    iced::Task::perform(
+                                        async move {
+                                            whisper_handle.send_control(peer, payload.into()).await
+                                        },
+                                        |result| {
+                                            AppMessage::PairingSendResult(
+                                                result.map_err(|e| e.to_string()),
+                                            )
+                                        },
+                                    ),
+                                ])
+                            } else {
+                                iced::Task::done(AppMessage::PairingCompleted(Ok(Box::new(
+                                    outcome,
+                                ))))
+                            };
+                            task
+                        }
+                    }
+                }
+            }
+
+            AppMessage::InvitationInputChanged(text) => {
+                self.invitation_input = text;
+                iced::Task::none()
+            }
+
+            AppMessage::SubmitInvitation => {
+                let uri = self.invitation_input.trim().to_string();
+                self.show_invitation_input = false;
+                if uri.is_empty() {
+                    return iced::Task::none();
+                }
+                // Dispatch to AcceptPairingInvitation with the non-empty URI
+                iced::Task::done(AppMessage::AcceptPairingInvitation(uri))
+            }
+
+            AppMessage::CancelInvitationInput => {
+                self.show_invitation_input = false;
+                self.invitation_input.clear();
+                iced::Task::none()
+            }
+
+            AppMessage::PairingCompleted(result) => {
+                match result {
+                    Ok(outcome) => {
+                        if matches!(
+                            outcome.as_ref(),
+                            PairingOutcome::RequestSent { .. }
+                                | PairingOutcome::PendingConnection { .. }
+                        ) {
+                            self.outgoing_request_states
+                                .insert(outcome.peer(), OutgoingRequestState::Pending);
+                            self.rebuild_join_request_list();
+                        }
+                        self.screen = Screen::PairingResult(outcome);
+                    }
+                    Err(e) => {
+                        self.screen = Screen::PairingError(e);
+                    }
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::PairingSendResult(result) => {
+                if let Err(e) = result {
+                    warn!("Failed to send paired friend request via whisper: {e}");
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::OpenPairingConversation(peer) => {
+                let topic = direct_topic(&self.local_public, &peer);
+                // Idempotent: if already viewing this conversation, just focus
+                // the composer instead of recreating everything.
+                if self.topic == topic && matches!(self.screen, Screen::Chat { .. }) {
+                    self.pending_pairing_composer_focus = false;
+                    return iced::widget::operation::focus(COMPOSER_INPUT);
+                }
+                // Use the library function for idempotent conversation creation.
+                match open_or_create_first_conversation(
+                    &self.local_public,
+                    peer,
+                    &mut self.friends,
+                    &mut self.conversation_store,
+                ) {
+                    Ok(FirstConversationResult::Ready { topic: _ }) => {
+                        self.pending_pairing_composer_focus = true;
+                        iced::Task::done(AppMessage::OpenRoom(topic))
+                    }
+                    Ok(FirstConversationResult::NotReady { peer: _, reason }) => {
+                        // Messaging is not yet available.  The pairing result
+                        // view already hides the "Send first message" button
+                        // for non-ready outcomes via show_send_message(), but
+                        // handle gracefully in case of a race.
+                        warn!("cannot open pairing conversation: {}", reason.summary());
+                        self.chat_list_error = reason.summary().to_string();
+                        iced::Task::none()
+                    }
+                    Err(e) => {
+                        warn!("failed to open pairing conversation: {e}");
+                        self.chat_list_error = format!("Cannot open conversation: {e}");
+                        iced::Task::none()
+                    }
+                }
             }
         };
         // Publish after applying the message so diagnostics observe the
@@ -10834,6 +11044,8 @@ impl IcedChat {
                 topic: _,
                 entry_index,
             } => self.view_image_preview(*entry_index),
+            Screen::PairingResult(outcome) => self.view_pairing_result(outcome),
+            Screen::PairingError(error) => self.view_pairing_error(error),
         };
 
         let content = row![
@@ -10862,6 +11074,8 @@ impl IcedChat {
             self.view_create_room_dialog(base)
         } else if self.show_add_menu {
             self.view_sidebar_add_menu(base)
+        } else if self.show_invitation_input {
+            self.view_invitation_dialog(base)
         } else {
             base.into()
         }
@@ -10872,7 +11086,7 @@ impl IcedChat {
         &self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Column, Space};
+        use iced::widget::{button, container, row, text, Column, Space};
         use iced::{Alignment, Length};
 
         let dark_mode = self.dark_mode;
@@ -10909,6 +11123,12 @@ impl IcedChat {
                 icon: "📥",
                 label: "Import Friend",
                 action: Some(AppMessage::ImportFriendFromFile),
+                disabled: false,
+            },
+            MenuItem {
+                icon: "📋",
+                label: "Paste Invitation",
+                action: Some(AppMessage::AcceptPairingInvitation(String::new())),
                 disabled: false,
             },
         ];
@@ -11129,6 +11349,83 @@ impl IcedChat {
         .into()
     }
 
+    /// Dialog for pasting a peer invitation URI.
+    fn view_invitation_dialog<'a>(
+        &self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, column, container, text, text_input, Space};
+        use iced::{Alignment, Length};
+
+        let input_style = move |_t: &iced::Theme, _s: text_input::Status| text_input::Style {
+            background: iced::Background::Color(iced::Color::from_rgba(0.2, 0.2, 0.2, 0.8)),
+            border: iced::Border {
+                radius: 6.0.into(),
+                width: 1.0,
+                color: iced::Color::from_rgb(0.4, 0.4, 0.4),
+            },
+            icon: Default::default(),
+            placeholder: iced::Color::from_rgb(0.65, 0.65, 0.65),
+            value: iced::Color::WHITE,
+            selection: iced::Color::from_rgb(0.3, 0.5, 0.8),
+        };
+
+        let dialog = column![]
+            .push(text("Paste Invitation").size(18))
+            .push(Space::new().height(8))
+            .push(
+                text_input("boru-chat://pair/...", &self.invitation_input)
+                    .on_input(AppMessage::InvitationInputChanged)
+                    .on_submit(AppMessage::SubmitInvitation)
+                    .padding(10)
+                    .width(Length::Fixed(400.0))
+                    .style(input_style),
+            )
+            .push(Space::new().height(16))
+            .push(
+                iced::widget::row![]
+                    .push(
+                        button(text("Cancel"))
+                            .on_press(AppMessage::CancelInvitationInput)
+                            .padding(8),
+                    )
+                    .push(
+                        button(text("Submit"))
+                            .on_press(AppMessage::SubmitInvitation)
+                            .padding(8),
+                    )
+                    .spacing(12),
+            )
+            .spacing(12)
+            .align_x(Alignment::Center);
+
+        let overlay = container(dialog)
+            .width(Length::Fixed(460.0))
+            .height(Length::Shrink)
+            .padding(24)
+            .style(move |_t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(
+                    0.15, 0.15, 0.15, 0.95,
+                ))),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    width: 1.0,
+                    color: iced::Color::from_rgb(0.4, 0.4, 0.4),
+                },
+                ..Default::default()
+            });
+
+        iced::widget::stack![
+            base,
+            container(overlay)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        ]
+        .into()
+    }
+
     // ── Sidebar ────────────────────────────────────────────────────────
 
     /// Render a collapsible section header for the sidebar.
@@ -11186,7 +11483,7 @@ impl IcedChat {
 
     /// Left sidebar containing Chats, Friends, Discover, and Requests sections.
     fn view_sidebar(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{container, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let header = Row::new()
@@ -12925,6 +13222,234 @@ impl IcedChat {
             .into()
     }
 
+    // ── Pairing result screen (Phase 14) ──
+
+    /// Render the pairing result screen showing the outcome of accepting a
+    /// peer invitation.
+    fn view_pairing_result(&self, outcome: &PairingOutcome) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, scrollable, text, Space};
+        use iced::{Alignment, Color, Length};
+
+        let theme = self.theme();
+        let peer = outcome.peer();
+        let display_name = self.resolve_name(&peer);
+        let can_msg = outcome.show_send_message();
+
+        // Per-variant UI elements — build the text content directly so the
+        // iced::Element owns the strings and no local references escape.
+        let (icon, title, explanation, accent) = match outcome {
+            PairingOutcome::RequestSent { .. } => {
+                (
+                    "✓",
+                    format!("{display_name} added"),
+                    format!(
+                        "Your invitation was accepted and a friend request was sent to {display_name}.\n\
+                         They need to accept the request before you can start chatting."
+                    ),
+                    accent_green(&theme),
+                )
+            }
+            PairingOutcome::AlreadyFriends { .. } => {
+                (
+                    "ℹ",
+                    format!("Already friends with {display_name}"),
+                    format!(
+                        "You and {display_name} are already connected as friends.\n\
+                         Start a conversation right away."
+                    ),
+                    accent_primary(&theme),
+                )
+            }
+            PairingOutcome::ExistingOutgoingRequest { .. } => {
+                (
+                    "⏳",
+                    format!("Request pending to {display_name}"),
+                    format!(
+                        "You've already sent a friend request to {display_name}.\n\
+                         Waiting for them to respond."
+                    ),
+                    Color::from_rgb(0.85, 0.65, 0.13),
+                )
+            }
+            PairingOutcome::ExistingIncomingRequest { .. } => {
+                (
+                    "📩",
+                    format!("Incoming request from {display_name}"),
+                    format!(
+                        "{display_name} already sent you a friend request.\n\
+                         Check your friend requests to accept or decline it."
+                    ),
+                    accent_primary(&theme),
+                )
+            }
+            PairingOutcome::Connected { .. } => {
+                (
+                    "✓",
+                    format!("Connected with {display_name}"),
+                    format!(
+                        "You are now connected with {display_name}.\n\
+                         Start a conversation!"
+                    ),
+                    accent_green(&theme),
+                )
+            }
+            PairingOutcome::PendingConnection { .. } => {
+                (
+                    "🔄",
+                    format!("Connection pending with {display_name}"),
+                    format!(
+                        "Your request has been saved and will complete when {display_name}\n\
+                         becomes available. No further action is needed."
+                    ),
+                    accent_primary(&theme),
+                )
+            }
+        };
+
+        // Icon + title row — move title string into text widget
+        let header = row![]
+            .push(text(icon).size(TYPO_XL).color(accent).width(Length::Shrink))
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
+            .push(text(title).size(TYPO_LG).color(accent).width(Length::Fill))
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+
+        // Explanation text — move explanation string into text widget
+        let explanation_text = column![]
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(
+                text(explanation)
+                    .size(TYPO_SM)
+                    .color(text_muted(&theme))
+                    .width(Length::Fill),
+            )
+            .width(Length::Fill);
+
+        // Action buttons
+        let mut actions = column![].spacing(SPACE_8).width(Length::Shrink);
+
+        if can_msg {
+            actions = actions.push(
+                button(
+                    text("Send first message")
+                        .size(TYPO_MD)
+                        .width(Length::Shrink),
+                )
+                .on_press(AppMessage::OpenPairingConversation(peer))
+                .padding([SPACE_10, SPACE_16])
+                .style(move |_t, status| iced::widget::button::Style {
+                    background: Some(iced::Background::Color(match status {
+                        iced::widget::button::Status::Hovered => {
+                            let mut c = accent;
+                            c.r = (c.r * 1.15).min(1.0);
+                            c.g = (c.g * 1.15).min(1.0);
+                            c.b = (c.b * 1.15).min(1.0);
+                            c
+                        }
+                        _ => accent,
+                    })),
+                    text_color: Color::WHITE,
+                    border: iced::Border {
+                        radius: SPACE_6.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            );
+        }
+
+        actions = actions.push(
+            button(text("Back to Chat List").size(TYPO_SM))
+                .on_press(AppMessage::GoToChatList)
+                .padding([SPACE_8, SPACE_16])
+                .style(move |t, _status| iced::widget::button::Style {
+                    text_color: text_muted(t),
+                    ..Default::default()
+                }),
+        );
+
+        // Peer ID (technical detail — small)
+        let peer_id = text(peer.to_string())
+            .size(TYPO_XXS)
+            .color(text_muted(&theme));
+
+        let content = column![]
+            .push(header)
+            .push(explanation_text)
+            .push(Space::new().height(Length::Fixed(SPACE_16)))
+            .push(actions)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(peer_id)
+            .width(Length::Fill)
+            .align_x(Alignment::Start);
+
+        container(
+            scrollable(container(content).width(Length::Fill).padding(20))
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+
+    /// Show an error screen for failed pairing (expired invitation, incompatible
+    /// version, self-invitation, invalid URI, etc.).  Provides a "Back" action.
+    fn view_pairing_error<'a>(&self, error: &'a str) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, column, container, row, scrollable, text, Space};
+        use iced::{Alignment, Length};
+
+        let theme = self.theme();
+
+        let content = column![]
+            .push(
+                row![]
+                    .push(
+                        text("✕")
+                            .size(TYPO_XL)
+                            .color(color_error(&theme))
+                            .width(Length::Shrink),
+                    )
+                    .push(Space::new().width(Length::Fixed(SPACE_8)))
+                    .push(
+                        text("Invitation Error")
+                            .size(TYPO_LG)
+                            .color(color_error(&theme))
+                            .width(Length::Fill),
+                    )
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill),
+            )
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(
+                text(error)
+                    .size(TYPO_SM)
+                    .color(text_muted(&theme))
+                    .width(Length::Fill),
+            )
+            .push(Space::new().height(Length::Fixed(SPACE_16)))
+            .push(
+                button(text("Back to Chat List").size(TYPO_SM))
+                    .on_press(AppMessage::GoToChatList)
+                    .padding([SPACE_8, SPACE_16])
+                    .style(move |t, _status| iced::widget::button::Style {
+                        text_color: text_muted(t),
+                        ..Default::default()
+                    }),
+            )
+            .width(Length::Fill)
+            .align_x(Alignment::Start);
+
+        container(
+            scrollable(container(content).width(Length::Fill).padding(20))
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+
     /// Full-panel image preview: renders the image at full panel width with a
     /// "Back" button at the top. The sidebar remains visible — only the main
     /// panel content switches to the preview.
@@ -14298,7 +14823,7 @@ impl IcedChat {
         use iced::widget::{button, container, row, scrollable, text, text_input, Column, Space};
         use iced::{Alignment, Length};
 
-        let theme = self.theme();
+        let _theme = self.theme();
         let dark_mode = self.dark_mode;
 
         // ── Gather data ──
@@ -14784,11 +15309,11 @@ impl IcedChat {
     /// Confirmation overlay for removing a friend.
     fn view_remove_confirm_overlay<'a>(
         &self,
-        peer: PublicKey,
+        _peer: PublicKey,
         name: &str,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Column, Space};
+        use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
         let dialog = column![]
@@ -14867,11 +15392,11 @@ impl IcedChat {
     /// Confirmation overlay for blocking a friend.
     fn view_block_confirm_overlay<'a>(
         &self,
-        peer: PublicKey,
+        _peer: PublicKey,
         name: &str,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Column, Space};
+        use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
         let dialog = column![]
@@ -18665,5 +19190,148 @@ mod tests {
             );
         }
         drop(runtime);
+    }
+
+    #[test]
+    fn open_pairing_conversation_creates_conversation_and_navigates() {
+        let (_runtime, mut app, local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&local, &peer);
+
+        // Set up: start on the pairing result screen with AlreadyFriends outcome
+        app.screen = Screen::PairingResult(Box::new(PairingOutcome::AlreadyFriends { peer }));
+
+        // Execute: "Send first message"
+        let task = app.update(AppMessage::OpenPairingConversation(peer));
+
+        // Verify: conversation entry was created
+        assert!(
+            app.conversation_store.find(&topic).is_some(),
+            "conversation must exist in store"
+        );
+
+        // Verify: the task is to open the room (not a noop)
+        // Dropping the task doesn't execute it; OpenRoom will fire on next
+        // update call which would normally switch to Screen::Chat.
+        drop(task);
+
+        // Conversation entry has the peer id
+        let entry = app.conversation_store.find(&topic).unwrap();
+        assert_eq!(entry.peer_id, peer.to_string());
+
+        // Flag is set for composer focus after navigation
+        assert!(app.pending_pairing_composer_focus);
+    }
+
+    #[test]
+    fn open_pairing_conversation_does_not_duplicate_existing() {
+        let (_runtime, mut app, local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&local, &peer);
+
+        // Pre-create a conversation entry (as if from a prior OpenConversation call)
+        app.conversation_store
+            .upsert(boru_chat::conversations::ConversationEntry::new(
+                topic,
+                peer.to_string(),
+                peer.fmt_short().to_string(),
+            ));
+        let _ = app.conversation_store.save();
+        let count_before = app.conversation_store.active_iter().count();
+
+        // Set up: start on pairing result screen
+        app.screen = Screen::PairingResult(Box::new(PairingOutcome::AlreadyFriends { peer }));
+
+        // Execute
+        let task = app.update(AppMessage::OpenPairingConversation(peer));
+        drop(task);
+
+        // Verify: no duplicate conversation entry
+        let count_after = app.conversation_store.active_iter().count();
+        assert_eq!(
+            count_after, count_before,
+            "should not create a second conversation entry"
+        );
+        assert!(
+            app.conversation_store.find(&topic).is_some(),
+            "conversation must still exist"
+        );
+    }
+
+    #[test]
+    fn open_pairing_conversation_idempotent_on_repeated_taps() {
+        let (_runtime, mut app, local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&local, &peer);
+
+        // Set up: already viewing the conversation (simulated after first tap
+        // navigated to Chat screen)
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+
+        // Execute: second tap on "Send first message"
+        let task = app.update(AppMessage::OpenPairingConversation(peer));
+
+        // Should take the idempotent fast-path: just focus composer, don't
+        // recreate the conversation.
+        drop(task);
+
+        // Verify: conversation still exists exactly once
+        assert!(
+            app.conversation_store.find(&topic).is_some(),
+            "conversation must exist"
+        );
+        assert_eq!(
+            app.conversation_store.active_iter().count(),
+            1,
+            "exactly one conversation entry"
+        );
+
+        // Verify: the flag is NOT set (the idempotent path clears it and returns focus)
+        assert!(!app.pending_pairing_composer_focus);
+    }
+
+    #[test]
+    fn open_pairing_conversation_with_connected_outcome() {
+        let (_runtime, mut app, local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&local, &peer);
+
+        // Connected outcome also shows the "Send first message" button
+        app.screen = Screen::PairingResult(Box::new(PairingOutcome::Connected { peer }));
+
+        let task = app.update(AppMessage::OpenPairingConversation(peer));
+        drop(task);
+
+        assert!(
+            app.conversation_store.find(&topic).is_some(),
+            "conversation must be created from Connected outcome"
+        );
+        assert!(app.pending_pairing_composer_focus);
+    }
+
+    #[test]
+    fn pairing_result_view_shows_send_message_button_only_when_allowed() {
+        // Unit coverage: show_send_message must return true only for
+        // AlreadyFriends and Connected outcomes.
+        let peer = SecretKey::generate().public();
+        assert!(PairingOutcome::AlreadyFriends { peer }.show_send_message());
+        assert!(PairingOutcome::Connected { peer }.show_send_message());
+        assert!(!PairingOutcome::RequestSent {
+            peer,
+            request: FriendRequest::new("alice", "bob", None)
+        }
+        .show_send_message());
+        assert!(!PairingOutcome::ExistingOutgoingRequest {
+            peer,
+            request: FriendRequest::new("alice", "bob", None)
+        }
+        .show_send_message());
+        assert!(!PairingOutcome::ExistingIncomingRequest {
+            peer,
+            request: FriendRequest::new("alice", "bob", None)
+        }
+        .show_send_message());
+        assert!(!PairingOutcome::PendingConnection {
+            peer,
+            request: FriendRequest::new("alice", "bob", None)
+        }
+        .show_send_message());
     }
 }

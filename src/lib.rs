@@ -328,3 +328,18 @@ pub mod blob_transfer;
 /// Transfer lifecycle telemetry — structured events for download workflows.
 #[cfg(feature = "net")]
 pub mod transfer_telemetry;
+
+/// Versioned, serializable peer invitation for out-of-band pairing (QR, URL).
+///
+/// Defines [`PeerInvitation`] with compact postcard + URL-safe base64 encoding,
+/// validation rules, and URI `boru-chat://pair/...` support.
+#[cfg(feature = "net")]
+pub mod peer_invitation;
+
+/// Pairing service — connects PeerInvitation to friend request infrastructure.
+///
+/// Defines [`PairingOutcome`], [`PairingContext`], and [`accept_peer_invitation`]
+/// which validates an invitation, updates stores, signs a friend request, and
+/// returns a structured outcome for the UI to display.
+#[cfg(feature = "net")]
+pub mod pairing_service;
