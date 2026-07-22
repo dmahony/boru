@@ -54,7 +54,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use boru_chat::storage::Storage;
+use boru_core::storage::Storage;
 
 use iroh::SecretKey;
 use tempfile::TempDir;
@@ -392,13 +392,13 @@ impl InterruptedTransferHarness {
 
     /// Fetch a download row and assert its state matches `expected_state`.
     ///
-    /// Returns the [`Download`](boru_chat::storage::Download) for further
+    /// Returns the [`Download`](boru_core::storage::Download) for further
     /// field inspection (bytes_downloaded, retry_count, etc.).
     pub fn assert_download_state(
         &self,
         dl_id: i64,
         expected_state: &str,
-    ) -> Result<boru_chat::storage::Download, anyhow::Error> {
+    ) -> Result<boru_core::storage::Download, anyhow::Error> {
         let dl = self
             .receiver()
             .get_download(dl_id)?
@@ -421,7 +421,7 @@ impl InterruptedTransferHarness {
         expected_state: Option<&str>,
         expected_bytes: Option<u64>,
         expected_retries: Option<u32>,
-    ) -> Result<boru_chat::storage::Download, anyhow::Error> {
+    ) -> Result<boru_core::storage::Download, anyhow::Error> {
         let dl = self
             .receiver()
             .get_download(dl_id)?
@@ -536,7 +536,7 @@ impl InterruptedTransferHarness {
         expected_hash: &str,
     ) -> Result<(), anyhow::Error> {
         let verified =
-            boru_chat::download::verify_download_file(path, expected_size, expected_hash)?;
+            boru_core::download::verify_download_file(path, expected_size, expected_hash)?;
         assert_eq!(verified.bytes, expected_size);
         assert_eq!(verified.content_hash, expected_hash);
         Ok(())
@@ -566,7 +566,7 @@ impl InterruptedTransferHarness {
     }
 
     /// List all downloads for the current file+peer combination.
-    pub fn list_downloads(&self) -> Result<Vec<boru_chat::storage::Download>, anyhow::Error> {
+    pub fn list_downloads(&self) -> Result<Vec<boru_core::storage::Download>, anyhow::Error> {
         let results = self
             .receiver()
             .find_downloads_for_file(&self.content_hash, Some(&self.sender_peer))?;

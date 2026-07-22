@@ -46,7 +46,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use boru_chat::chat_core::{ChatEntry, Message, MessageHash, SignedMessage};
+use boru_core::chat_core::{ChatEntry, Message, MessageHash, SignedMessage};
 use rand::SeedableRng;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ fn height_estimation_pass(entries: &[ChatEntry]) -> (Vec<f32>, Vec<f32>, f32) {
             }
             prev_day_ht = Some(d);
         }
-        use boru_chat::chat_core::ChatKind;
+        use boru_core::chat_core::ChatKind;
         match entry.kind {
             ChatKind::System => h += SYSTEM_H,
             _ => {
@@ -486,11 +486,11 @@ async fn test_image_blob_operations_scaling() {
 async fn test_many_messages_handle_net_event_scaling() -> n0_error::Result<()> {
     use std::sync::Arc;
 
-    use boru_chat::chat_callbacks::ChatCallbacks;
-    use boru_chat::chat_core::{forward_gossip_events, handle_net_event, SignedMessage as SM};
-    use boru_chat::friends::{FriendId, FriendsStore};
-    use boru_chat::net::{Gossip, GOSSIP_ALPN};
-    use boru_chat::proto::TopicId;
+    use boru_core::chat_callbacks::ChatCallbacks;
+    use boru_core::chat_core::{forward_gossip_events, handle_net_event, SignedMessage as SM};
+    use boru_core::friends::{FriendId, FriendsStore};
+    use boru_core::net::{Gossip, GOSSIP_ALPN};
+    use boru_core::proto::TopicId;
     use iroh::{
         address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, PublicKey,
         RelayMode, SecretKey,
@@ -793,7 +793,7 @@ async fn test_many_messages_handle_net_event_scaling() -> n0_error::Result<()> {
 
 #[test]
 fn test_imageshare_processing_no_degradation() {
-    use boru_chat::chat_core::SignedMessage as SM;
+    use boru_core::chat_core::SignedMessage as SM;
     use iroh::SecretKey;
 
     let sk = SecretKey::from_bytes(&[0u8; 32]);
@@ -1016,7 +1016,7 @@ fn test_cumulative_window_lookup_cost() {
 
 #[test]
 fn test_friends_store_iteration_scaling() {
-    use boru_chat::friends::{
+    use boru_core::friends::{
         FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore,
     };
     use iroh::SecretKey;
@@ -1110,8 +1110,8 @@ fn test_friends_store_iteration_scaling() {
 
 #[test]
 fn test_chat_history_push_scaling() {
-    use boru_chat::chat_history::{ChatHistoryStore, HistoryEntry};
-    use boru_chat::proto::TopicId;
+    use boru_core::chat_history::{ChatHistoryStore, HistoryEntry};
+    use boru_core::proto::TopicId;
 
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -1133,7 +1133,7 @@ fn test_chat_history_push_scaling() {
                     topic: TopicId::from_bytes([i as u8; 32]),
                     text_preview: format!("Message #{i} with some padding content."),
                     signed_bytes: vec![i as u8; 128],
-                    delivery_state: boru_chat::chat_history::DeliveryState::Sent,
+                    delivery_state: boru_core::chat_history::DeliveryState::Sent,
                     image_bytes: None,
                     image_identifier: None,
                 });
@@ -1157,7 +1157,7 @@ fn test_chat_history_push_scaling() {
                     topic: TopicId::from_bytes([i as u8; 32]),
                     text_preview: format!("Message #{i} with some padding content."),
                     signed_bytes: vec![i as u8; 128],
-                    delivery_state: boru_chat::chat_history::DeliveryState::Sent,
+                    delivery_state: boru_core::chat_history::DeliveryState::Sent,
                     image_bytes: None,
                     image_identifier: None,
                 });
@@ -1196,7 +1196,7 @@ fn test_chat_history_push_scaling() {
 
 #[test]
 fn test_serialization_scaling() {
-    use boru_chat::friends::{
+    use boru_core::friends::{
         FriendId, FriendRecord, FriendRelationship, FriendStatus, FriendsStore,
     };
     use iroh::SecretKey;

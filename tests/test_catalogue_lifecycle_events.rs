@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use boru_chat::{
+use boru_core::{
     catalogue_client::{
         fetch_remote_catalogue, handle_catalogue_notice, process_and_store_remote_catalogue,
         validate_complete_catalogue, RemoteCatalogueFetchError,

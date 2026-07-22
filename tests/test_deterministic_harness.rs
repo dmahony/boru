@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use boru_chat::{
+use boru_core::{
     chat_callbacks::ChatCallbacks,
     chat_core::{
         forward_gossip_events, handle_net_event, ChatEntry, Message, MessageHash, NetEvent,
@@ -244,7 +244,7 @@ pub struct PeerNode {
     pub whisper_handle: Option<WhisperHandle>,
     pub whisper_event_rx:
         Option<Arc<TokioMutex<tokio::sync::mpsc::UnboundedReceiver<WhisperEvent>>>>,
-    pub sender: Option<boru_chat::api::GossipSender>,
+    pub sender: Option<boru_core::api::GossipSender>,
     pub net_event_tx: Option<tokio::sync::mpsc::UnboundedSender<NetEvent>>,
 }
 

@@ -18,11 +18,11 @@
 //!  11. Short stable transfer identifiers
 //!  12. Privacy: no sensitive fields in serialized events
 
-use boru_chat::diagnostics::{
+use boru_core::diagnostics::{
     event_names, short_transfer_id, DiagnosticEventKind, Diagnostics, ErrorCategory,
     TransferLifecycleEvent,
 };
-use boru_chat::transfer_telemetry::TransferTelemetry;
+use boru_core::transfer_telemetry::TransferTelemetry;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

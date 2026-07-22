@@ -8,7 +8,7 @@
 
 use std::fs;
 
-use boru_chat::safe_destination::{prepare_download_destination, safe_destination_path};
+use boru_core::safe_destination::{prepare_download_destination, safe_destination_path};
 use tempfile::TempDir;
 
 // ── Error message verification ─────────────────────────────────────

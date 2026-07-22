@@ -29,12 +29,12 @@
 
 #![cfg(feature = "net")]
 
-use boru_chat::abuse_controls::{
+use boru_core::abuse_controls::{
     sanitize_display_text, sanitize_single_line, DEFAULT_MAX_DISPLAY_LENGTH,
     DEFAULT_MAX_SINGLE_LINE_LENGTH,
 };
-use boru_chat::proto::TopicId;
-use boru_chat::room_docs::RoomMetadata;
+use boru_core::proto::TopicId;
+use boru_core::room_docs::RoomMetadata;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 

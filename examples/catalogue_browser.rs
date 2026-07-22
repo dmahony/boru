@@ -7,7 +7,7 @@
 //!   cargo run --example catalogue_browser --features net -- <PEER_PUBLIC_KEY_HEX>
 use std::time::Duration;
 
-use boru_chat::catalogue_client::fetch_paginated_remote_catalogue;
+use boru_core::catalogue_client::fetch_paginated_remote_catalogue;
 use iroh::{endpoint::presets, Endpoint, PublicKey, RelayMap, RelayMode, RelayUrl, SecretKey};
 
 #[tokio::main]
@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let secret_key = SecretKey::generate();
     let ep = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
-        .alpns(vec![boru_chat::protocol_version::CATALOGUE_ALPN.to_vec()])
+        .alpns(vec![boru_core::protocol_version::CATALOGUE_ALPN.to_vec()])
         .relay_mode(RelayMode::Custom(relay_map))
         .bind()
         .await?;

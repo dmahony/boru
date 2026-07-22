@@ -12,7 +12,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use boru_chat::{
+use boru_core::{
     catalogue_client::{
         fetch_paginated_remote_catalogue, fetch_remote_catalogue, RemoteCatalogueFetchError,
     },
@@ -278,7 +278,7 @@ impl CatalogueHarness {
         from: PeerId,
         owner: PeerId,
     ) -> std::result::Result<
-        boru_chat::catalogue_model::SignedFileCatalogue,
+        boru_core::catalogue_model::SignedFileCatalogue,
         RemoteCatalogueFetchError,
     > {
         let client = self.peer(from);
@@ -459,7 +459,7 @@ impl ProtocolHandler for CustomHandlerEnum {
                     }
                 };
                 let payload = match request {
-                    boru_chat::catalogue_protocol::CatalogRequest::GetCataloguePage {
+                    boru_core::catalogue_protocol::CatalogRequest::GetCataloguePage {
                         cursor,
                         ..
                     } => {
@@ -516,7 +516,7 @@ impl ProtocolHandler for CustomHandlerEnum {
                     }
                 };
                 let payload = match request {
-                    boru_chat::catalogue_protocol::CatalogRequest::GetCataloguePage {
+                    boru_core::catalogue_protocol::CatalogRequest::GetCataloguePage {
                         cursor,
                         ..
                     } => {
@@ -1849,19 +1849,19 @@ async fn descriptor_already_expired_at_verification() -> Result<()> {
     let requester_pk = requester_key.public();
 
     // Create a descriptor issued at t=1000, expires at t=2000.
-    let desc = boru_chat::file_access_protocol::sign_download_descriptor(
+    let desc = boru_core::file_access_protocol::sign_download_descriptor(
         &owner_key,
         requester_pk,
         "shared-file-1".to_string(),
         [0u8; 32], // blob_hash
         4096,      // size_bytes
-        boru_chat::file_access_protocol::BlobFormat::Raw,
+        boru_core::file_access_protocol::BlobFormat::Raw,
         1000, // issued_at_ms
         2000, // expires_at_ms
     );
 
     // Verify at t=5000 → long past expiry → Expired.
-    let result = boru_chat::file_access_protocol::verify_download_descriptor(
+    let result = boru_core::file_access_protocol::verify_download_descriptor(
         &desc,
         &owner_pk,
         &requester_pk,
@@ -1869,12 +1869,12 @@ async fn descriptor_already_expired_at_verification() -> Result<()> {
     );
     assert_eq!(
         result,
-        boru_chat::file_access_protocol::DescriptorVerification::Expired,
+        boru_core::file_access_protocol::DescriptorVerification::Expired,
         "descriptor should be expired when now_ms > expires_at_ms",
     );
 
     // Verify at t=1500 → within validity window → Valid.
-    let valid = boru_chat::file_access_protocol::verify_download_descriptor(
+    let valid = boru_core::file_access_protocol::verify_download_descriptor(
         &desc,
         &owner_pk,
         &requester_pk,
@@ -1882,12 +1882,12 @@ async fn descriptor_already_expired_at_verification() -> Result<()> {
     );
     assert_eq!(
         valid,
-        boru_chat::file_access_protocol::DescriptorVerification::Valid,
+        boru_core::file_access_protocol::DescriptorVerification::Valid,
         "descriptor should be valid when now_ms in [issued_at, expires_at]",
     );
 
     // Verify at t=2000 (exact expiry boundary) → Valid (inclusive).
-    let boundary = boru_chat::file_access_protocol::verify_download_descriptor(
+    let boundary = boru_core::file_access_protocol::verify_download_descriptor(
         &desc,
         &owner_pk,
         &requester_pk,
@@ -1895,12 +1895,12 @@ async fn descriptor_already_expired_at_verification() -> Result<()> {
     );
     assert_eq!(
         boundary,
-        boru_chat::file_access_protocol::DescriptorVerification::Valid,
+        boru_core::file_access_protocol::DescriptorVerification::Valid,
         "descriptor should be valid at exact expires_at_ms (inclusive boundary)",
     );
 
     // Verify at t=2001 — one ms past expiry → Expired.
-    let one_past = boru_chat::file_access_protocol::verify_download_descriptor(
+    let one_past = boru_core::file_access_protocol::verify_download_descriptor(
         &desc,
         &owner_pk,
         &requester_pk,
@@ -1908,7 +1908,7 @@ async fn descriptor_already_expired_at_verification() -> Result<()> {
     );
     assert_eq!(
         one_past,
-        boru_chat::file_access_protocol::DescriptorVerification::Expired,
+        boru_core::file_access_protocol::DescriptorVerification::Expired,
         "descriptor should be expired 1 ms after expires_at_ms",
     );
 
@@ -1923,19 +1923,19 @@ async fn descriptor_not_yet_valid_at_verification() -> Result<()> {
     let requester_pk = requester_key.public();
 
     // Create a descriptor issued at t=3000, expires at t=5000.
-    let desc = boru_chat::file_access_protocol::sign_download_descriptor(
+    let desc = boru_core::file_access_protocol::sign_download_descriptor(
         &owner_key,
         requester_pk,
         "shared-file-2".to_string(),
         [1u8; 32],
         2048,
-        boru_chat::file_access_protocol::BlobFormat::Raw,
+        boru_core::file_access_protocol::BlobFormat::Raw,
         3000, // issued_at_ms
         5000, // expires_at_ms
     );
 
     // Verify at t=500 → before issue time → NotYetValid.
-    let result = boru_chat::file_access_protocol::verify_download_descriptor(
+    let result = boru_core::file_access_protocol::verify_download_descriptor(
         &desc,
         &owner_pk,
         &requester_pk,
@@ -1943,12 +1943,12 @@ async fn descriptor_not_yet_valid_at_verification() -> Result<()> {
     );
     assert_eq!(
         result,
-        boru_chat::file_access_protocol::DescriptorVerification::NotYetValid,
+        boru_core::file_access_protocol::DescriptorVerification::NotYetValid,
         "descriptor should be not-yet-valid when now_ms < issued_at_ms",
     );
 
     // Verify at t=3000 (exact issue boundary) → Valid (inclusive).
-    let boundary = boru_chat::file_access_protocol::verify_download_descriptor(
+    let boundary = boru_core::file_access_protocol::verify_download_descriptor(
         &desc,
         &owner_pk,
         &requester_pk,
@@ -1956,12 +1956,12 @@ async fn descriptor_not_yet_valid_at_verification() -> Result<()> {
     );
     assert_eq!(
         boundary,
-        boru_chat::file_access_protocol::DescriptorVerification::Valid,
+        boru_core::file_access_protocol::DescriptorVerification::Valid,
         "descriptor should be valid at exact issued_at_ms (inclusive boundary)",
     );
 
     // Verify at t=2999 — 1 ms before issue → NotYetValid.
-    let just_before = boru_chat::file_access_protocol::verify_download_descriptor(
+    let just_before = boru_core::file_access_protocol::verify_download_descriptor(
         &desc,
         &owner_pk,
         &requester_pk,
@@ -1969,7 +1969,7 @@ async fn descriptor_not_yet_valid_at_verification() -> Result<()> {
     );
     assert_eq!(
         just_before,
-        boru_chat::file_access_protocol::DescriptorVerification::NotYetValid,
+        boru_core::file_access_protocol::DescriptorVerification::NotYetValid,
         "descriptor should be not-yet-valid 1 ms before issued_at_ms",
     );
 

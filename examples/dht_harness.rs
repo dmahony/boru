@@ -71,9 +71,9 @@ use iroh::{EndpointId, SecretKey};
 use n0_error::{bail_any, Result, StdResultExt};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use boru_chat::discovery_backend::MainlineDhtBackend;
-use boru_chat::public_room::{public_room_identity, PublicNetwork};
-use boru_chat::public_room_tracker::PublicRoomTracker;
+use boru_core::discovery_backend::MainlineDhtBackend;
+use boru_core::public_room::{public_room_identity, PublicNetwork};
+use boru_core::public_room_tracker::PublicRoomTracker;
 use distributed_topic_tracker::{Dht, DhtConfig};
 
 // ---------------------------------------------------------------------------

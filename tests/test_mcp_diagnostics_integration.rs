@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use boru_chat::{
+use boru_core::{
     api::{Event as GossipEvent, GossipTopic},
     chat_core::{broadcast_diagnostic_probe, message_hash, Message, SignedMessage},
     diagnostics::{DiagnosticEventKind, DiagnosticProbe, Diagnostics},
@@ -279,7 +279,7 @@ async fn test_two_peers_exchange_probe() -> Result<()> {
 
 // ── Tests 17-20: Iced diagnostics types (no GUI required) ─────────────
 
-use boru_chat::diagnostics::{
+use boru_core::diagnostics::{
     classify_failures, classify_message_layer, FailureAnalysis, FailureLayer, IcedMessageJournal,
 };
 
@@ -456,7 +456,7 @@ fn test_classify_failures_from_diagnostics_events() {
     // Record a network failure in diagnostics
     diagnostics.record(
         None,
-        boru_chat::diagnostics::DiagnosticEventKind::ConnectionFailed {
+        boru_core::diagnostics::DiagnosticEventKind::ConnectionFailed {
             addresses: vec!["127.0.0.1:1234".to_string()],
             error: "Connection refused".to_string(),
         },
@@ -520,7 +520,7 @@ fn test_classify_failures_since_sequence() {
     // Record an older event and a newer one
     diagnostics.record(
         None,
-        boru_chat::diagnostics::DiagnosticEventKind::RoomJoinFailed,
+        boru_core::diagnostics::DiagnosticEventKind::RoomJoinFailed,
     );
 
     // Record a successful Iced message (seq 1 in journal)
@@ -614,7 +614,7 @@ fn test_failure_analysis_serde() {
 
 #[test]
 fn test_iced_message_journal_entry_serde() {
-    use boru_chat::diagnostics::IcedMessageJournalEntry;
+    use boru_core::diagnostics::IcedMessageJournalEntry;
 
     let entry = IcedMessageJournalEntry {
         sequence: 42,

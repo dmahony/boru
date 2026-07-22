@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use boru_chat::{
+use boru_core::{
     bounded_startup_scheduler::BoundedStartupScheduler,
     download_limits::{DownloadLimitError, DownloadLimiter, DownloadLimitsConfig},
 };

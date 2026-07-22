@@ -8,7 +8,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::Duration;
 
-use boru_chat::{
+use boru_core::{
     api::{Event as GossipEvent, GossipTopic},
     chat_core::{Message, SignedMessage},
     net::{Gossip, GOSSIP_ALPN},
@@ -359,7 +359,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
     info!("A subscribes (no bootstrap peers)");
     let sub_a = gossip_a.subscribe(topic, vec![]).await?;
     let (sender_a, receiver_a) = sub_a.split();
-    use boru_chat::chat_core::forward_gossip_events;
+    use boru_core::chat_core::forward_gossip_events;
     let (net_tx_a, net_rx_a) = tokio::sync::mpsc::unbounded_channel();
     let net_rx_a = Arc::new(Mutex::new(net_rx_a));
     task::spawn(forward_gossip_events(receiver_a, net_tx_a));
@@ -399,7 +399,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         neighbors: std::collections::HashSet<iroh::PublicKey>,
         received: Vec<String>,
     }
-    impl boru_chat::chat_callbacks::ChatCallbacks for TestChat {
+    impl boru_core::chat_callbacks::ChatCallbacks for TestChat {
         fn local_public(&self) -> iroh::PublicKey {
             self.local_public
         }
@@ -409,9 +409,9 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         fn is_friend(&self, _peer: &iroh::PublicKey) -> bool {
             false
         }
-        fn friend_mark_online(&mut self, _fid: boru_chat::friends::FriendId) {}
-        fn friend_mark_offline(&mut self, _fid: boru_chat::friends::FriendId) {}
-        fn friend_set_name(&mut self, _fid: boru_chat::friends::FriendId, _name: String) {}
+        fn friend_mark_online(&mut self, _fid: boru_core::friends::FriendId) {}
+        fn friend_mark_offline(&mut self, _fid: boru_core::friends::FriendId) {}
+        fn friend_set_name(&mut self, _fid: boru_core::friends::FriendId, _name: String) {}
         fn mark_friends_dirty(&mut self) {}
         fn push_system(&mut self, text: String) {
             self.received.push(format!("[sys] {text}"));
@@ -421,7 +421,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
             _peer: iroh::PublicKey,
             label: String,
             text: String,
-            _hash: Option<boru_chat::chat_core::MessageHash>,
+            _hash: Option<boru_core::chat_core::MessageHash>,
             _sent_at: Option<u64>,
         ) {
             self.received.push(format!("[{label}] {text}"));
@@ -430,16 +430,16 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         fn set_pending_image(
             &mut self,
             _name: String,
-            _hash: boru_chat::chat_core::MessageHash,
+            _hash: boru_core::chat_core::MessageHash,
             _from: iroh::PublicKey,
         ) {
         }
-        fn has_message(&self, _hash: &boru_chat::chat_core::MessageHash) -> bool {
+        fn has_message(&self, _hash: &boru_core::chat_core::MessageHash) -> bool {
             false
         }
-        fn edit_message(&mut self, _hash: &boru_chat::chat_core::MessageHash, _new_text: String) {}
-        fn delete_message(&mut self, _hash: &boru_chat::chat_core::MessageHash) {}
-        fn add_reaction(&mut self, _hash: &boru_chat::chat_core::MessageHash, _emoji: String) {}
+        fn edit_message(&mut self, _hash: &boru_core::chat_core::MessageHash, _new_text: String) {}
+        fn delete_message(&mut self, _hash: &boru_core::chat_core::MessageHash) {}
+        fn add_reaction(&mut self, _hash: &boru_core::chat_core::MessageHash, _emoji: String) {}
         fn on_neighbor_up(&mut self, peer: iroh::PublicKey) {
             self.neighbors.insert(peer);
         }
@@ -462,11 +462,11 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
     };
 
     fn drain_net(
-        rx: &Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<boru_chat::chat_core::NetEvent>>>,
+        rx: &Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<boru_core::chat_core::NetEvent>>>,
         sim: &mut TestChat,
     ) {
         while let Ok(event) = rx.try_lock().unwrap().try_recv() {
-            let _ = boru_chat::chat_core::handle_net_event(event, sim);
+            let _ = boru_core::chat_core::handle_net_event(event, sim);
         }
     }
 

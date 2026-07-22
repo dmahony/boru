@@ -26,7 +26,7 @@ use iroh::{
 use n0_error::Result;
 use tempfile::TempDir;
 
-use boru_chat::{
+use boru_core::{
     catalogue_client::{fetch_remote_catalogue, RemoteCatalogueFetchError},
     catalogue_handler::CatalogueHandler,
     catalogue_model::RemoteSharedFile,

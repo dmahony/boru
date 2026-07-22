@@ -17,7 +17,7 @@
 //!   9. Pause an already-paused download is idempotent
 //!  10. Fail a download that has progress, verify error & retry_count
 
-use boru_chat::{download::DownloadState, storage::Storage};
+use boru_core::{download::DownloadState, storage::Storage};
 
 const FILE_SIZE: u64 = 1024;
 

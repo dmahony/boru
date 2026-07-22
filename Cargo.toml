@@ -1,5 +1,5 @@
 [package]
-name = "boru"
+name = "boru-core"
 version = "0.101.0"
 # ── EDITION ─────────────────────────────────────────────────────────
 # edition = "2021" ← correct.  If you see "Rust 2015" in an error message

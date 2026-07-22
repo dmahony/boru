@@ -1,4 +1,4 @@
-use boru_chat::{
+use boru_core::{
     mailbox::{MailboxAck, MailboxIdentity},
     storage::{AckProcessingFault, Storage},
 };
@@ -10,7 +10,7 @@ fn setup() -> (
     Storage,
     SecretKey,
     SecretKey,
-    boru_chat::storage::OutgoingDm,
+    boru_core::storage::OutgoingDm,
 ) {
     let dir = TempDir::new().unwrap();
     let storage = Storage::open(dir.path()).unwrap();
@@ -30,7 +30,7 @@ fn setup() -> (
 }
 
 fn ack(
-    outgoing: &boru_chat::storage::OutgoingDm,
+    outgoing: &boru_core::storage::OutgoingDm,
     sender: &SecretKey,
     recipient: &SecretKey,
 ) -> MailboxAck {
