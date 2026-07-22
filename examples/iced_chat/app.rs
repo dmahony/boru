@@ -7746,9 +7746,7 @@ impl IcedChat {
                 // virtualized layout immediately so the card and all later
                 // messages keep their correct positions before the first
                 // progress event arrives.
-                self.layout_cache
-                    .borrow_mut()
-                    .invalidate_from(entry_index);
+                self.layout_cache.borrow_mut().invalidate_from(entry_index);
                 self.keep_latest_visible();
                 self.download_entry_index = Some(entry_index);
                 let blob_store = self.blob_store.clone();
@@ -8952,7 +8950,8 @@ impl IcedChat {
                     let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
                     tasks.push(iced::Task::perform(
                         async move {
-                            let mut store = match boru_core::mailbox::MailboxStore::load(&data_dir) {
+                            let mut store = match boru_core::mailbox::MailboxStore::load(&data_dir)
+                            {
                                 Ok(Some(s)) => s,
                                 _ => return Vec::new(),
                             };
@@ -15320,7 +15319,10 @@ mod tests {
         assert_eq!(sanitized.id, peer);
         assert_eq!(sanitized.relay_urls().next().cloned(), Some(relay));
         assert!(sanitized.ip_addrs().next().is_none());
-        assert!(addr.ip_addrs().next().is_some(), "fixture should contain a direct address");
+        assert!(
+            addr.ip_addrs().next().is_some(),
+            "fixture should contain a direct address"
+        );
     }
 
     #[test]
@@ -15352,7 +15354,9 @@ mod tests {
             discovery_secret: None,
         };
         let encoded = ticket.to_string();
-        let decoded = encoded.parse::<Ticket>().expect("ticket payload should parse");
+        let decoded = encoded
+            .parse::<Ticket>()
+            .expect("ticket payload should parse");
 
         assert_eq!(decoded, ticket);
         assert!(decoded.peers[0].ip_addrs().next().is_none());
@@ -15373,7 +15377,9 @@ mod tests {
             discovery_secret: None,
         };
         let encoded = ticket.to_string();
-        let decoded = encoded.parse::<Ticket>().expect("ticket payload should parse");
+        let decoded = encoded
+            .parse::<Ticket>()
+            .expect("ticket payload should parse");
 
         assert_eq!(decoded, ticket);
         assert!(decoded.peers[0].ip_addrs().next().is_some());
@@ -15398,7 +15404,6 @@ mod tests {
             RoomInvitation::Legacy(_) => panic!("stable invite should not fall back to legacy"),
         }
     }
-
 
     #[test]
     fn hash_only_file_share_value_is_not_a_blob_ticket() {

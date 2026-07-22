@@ -155,6 +155,9 @@ Resolution priority: `Current → Persisted → Mdns → Configured → Relay �
 - **Tickets**: Both room types support out-of-band invitation tickets that
   encode the room identity (topic + optional secret + bootstrap relay),
   bypassing DHT entirely.
+- **Stable invitations**: `boru1:` invitations encode only the room topic and
+  discovery secret. They do not contain endpoint, relay, or creator identity
+  data, which makes them safer to paste or render as QR codes.
 
 ### Wire Format
 
@@ -181,6 +184,38 @@ decoding, identity match, and signature — in that order, cheapest first.
 See [`docs/discovery-architecture.md`](docs/discovery-architecture.md) for
 the full architecture, namespace derivation, validation pipeline, DHT outage
 fallback, and operator guidance.
+
+## First run and pairing
+
+When Boru starts with a fresh data directory, the GUI opens on a landing
+screen with the app name, connection status, and quick actions. The first
+action a user takes marks the first-run state complete; existing profiles with
+saved history skip straight to the chat list.
+
+Recommended first-time pairing paths:
+
+1. Use a `boru1:` invitation when you want a compact, endpoint-free invite
+   that can be pasted or encoded as QR.
+2. Use `Join Ticket` when you are working with a legacy ticket that already
+   contains bootstrap peers.
+3. Use `Add Friend` when you want the advanced public-key flow and already
+   have the other peer's public key.
+4. If QR import fails, paste the invitation text instead or re-generate the
+   invitation from the sending device.
+
+Privacy note: a stable invitation carries the room topic plus discovery
+secret only. It does not expose relay URLs, direct addresses, or creator
+identity in the payload or logs.
+
+## Platform notes
+
+- The GUI requires a desktop graphical session (X11 or Wayland).
+- For headless smoke tests, wrap the example in `xvfb-run`.
+- Persistent identity and friend state use `BORU_DATA_DIR`; the legacy
+  `BORU_CHAT_DATA_DIR` variable is still accepted for compatibility.
+- If you need to move between machines, copy the data directory rather than
+  just the visible chat history, because the secret key and friend state live
+  there.
 
 ## Running
 

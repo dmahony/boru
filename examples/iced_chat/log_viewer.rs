@@ -96,11 +96,7 @@ pub fn run(log_path: PathBuf) -> NResult<()> {
     let state = LogViewer::load(log_path.clone());
     iced::application(move || (state.clone(), iced::Task::none()), update, view)
         .title(move |_: &LogViewer| {
-            format!(
-                "Boru logs {} — {}",
-                app::version_tag(),
-                log_path.display()
-            )
+            format!("Boru logs {} — {}", app::version_tag(), log_path.display())
         })
         .subscription(|_| iced::time::every(Duration::from_secs(1)).map(|_| Message::Refresh))
         .run()
@@ -143,7 +139,8 @@ mod tests {
 
         // Check that BORU_DATA_DIR is set (new)
         assert!(
-            cmd.get_envs().any(|(key, _)| key == OsStr::new("BORU_DATA_DIR")),
+            cmd.get_envs()
+                .any(|(key, _)| key == OsStr::new("BORU_DATA_DIR")),
             "BORU_DATA_DIR should be set"
         );
         let new_env = cmd

@@ -2,7 +2,7 @@
 
 ## Metadata exposed to peers
 
-A profile advertises signed, requester-filtered metadata through the catalogue protocol. A visible `RemoteSharedFile` contains a stable shared-file ID, display name, optional description, MIME type, size, content hash, version/update metadata, and collection IDs. The catalogue does not contain local filesystem paths, database row IDs, permission rows, upload secrets, blob tickets, or unrestricted addresses.
+A profile advertises signed, requester-filtered metadata through the catalogue protocol. A visible `RemoteSharedFile` contains a stable shared-file ID, display name, optional description, MIME type, size, content hash, version/update metadata, and collection IDs. The catalogue does not contain local filesystem paths, database row IDs, permission rows, upload secrets, blob tickets, or unrestricted addresses. Stable `boru1:` invitations likewise carry only the room topic and discovery secret; they omit endpoint, relay, and creator identity data.
 
 Filtering is per authenticated requester. Blocked peers are denied; friends or explicitly granted peers see only enabled, available entries permitted for that peer. A non-friend in the default contacts-only mode receives an empty view. A catalogue cache is a local projection and is not shared back to the owner or other peers.
 

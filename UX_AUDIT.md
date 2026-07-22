@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-Boru's Iced GUI is a functional, privacy-first peer-to-peer messaging application with a clean design system, consistent typography/spacing, proper dark/light mode support, and well-structured screens. The redesign from Steps 1–8 has significantly improved visual polish.
+Boru's Iced GUI is a functional, privacy-first peer-to-peer messaging application with a clean design system, consistent typography/spacing, proper dark/light mode support, and well-structured screens. The redesign from Steps 1–8 has significantly improved visual polish, and the new first-run landing screen now gives users an obvious starting point.
 
 **Overall UX maturity:** Early-stage but solid foundation. The app is usable by a technically-literate user but presents barriers for non-technical and first-time users. Most issues are medium-impact; one high-impact dead button was found.
 
@@ -34,7 +34,7 @@ Boru's Iced GUI is a functional, privacy-first peer-to-peer messaging applicatio
 - The sidebar is always visible for orientation.
 
 **What doesn't:**
-- **No onboarding flow.** A first-time user has zero guidance on what to do first. The four buttons assume domain knowledge.
+- **First-run guidance is landing-screen based, not a guided overlay.** A first-time user now sees the branding/status/quick-action landing screen, which is much better than the old blank placeholder, but still assumes the user will infer the next step.
 - **"Start Chat" creates a random room** — but the user has no context for what a "room" is. After creation, the room exists but nobody can find it unless the user shares the ticket or DHT discovery is enabled (which uses networking jargon the user might not understand).
 - **"Add Friend"** opens a screen asking for a "Peer public key" (52-character hex string) — this is a hard ask for a non-technical user.
 - **The "+" button** in the sidebar header opens a menu with "Add Friend", "Join Ticket", "Scan QR Code" (disabled), "Import Friend" — but the user has no way of knowing what these do without trial-and-error.
@@ -115,7 +115,7 @@ Boru's Iced GUI is a functional, privacy-first peer-to-peer messaging applicatio
 
 | Issue | Severity | Description |
 |-------|----------|-------------|
-| No onboarding | MEDIUM | First launch shows branding and buttons but no guidance. Consider a one-time welcome overlay or tooltip sequence. |
+| First-run guidance | INFO | First launch now shows branding, status, and quick actions. If further guidance is needed, a lightweight welcome overlay or tooltip sequence could still help. |
 | Jargon on status card | LOW | "Mesh" and "Relay" are displayed on every launch. A casual user doesn't need to see these. Consider hiding them behind an "Advanced" toggle or showing them only in Settings. |
 
 ### B. Sidebar (`view_sidebar` and children)
@@ -194,7 +194,7 @@ Boru's Iced GUI is a functional, privacy-first peer-to-peer messaging applicatio
 ## Answers to Audit Questions
 
 ### Can a user start chatting in under 30 seconds?
-**No.** The shortest path requires either: (1) creating a room and sharing the ticket with someone via another channel, or (2) knowing a friend's public key and sending a friend request. Both require pre-existing technical knowledge and out-of-band coordination. No onboarding exists to guide the user through either flow.
+**Still usually no.** The landing screen makes the first step clearer, but the user still needs either: (1) a ticket/invitation shared out of band, or (2) a friend's public key for the advanced pairing flow.
 
 ### Is every screen self-explanatory?
 **Mostly no.** Screens that *are* self-explanatory: the chat panel (type and send), help overlay (command list), friend requests (send/accept/decline). Screens that *aren't*: the empty state (no guidance on first steps), create room dialog (DHT jargon), settings network section (raw counts without context). The app assumes domain knowledge about p2p networking.

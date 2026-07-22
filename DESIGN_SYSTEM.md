@@ -286,7 +286,23 @@ Used for "Cancel", "Remove" actions in download cards.
 | Size / padding | `[SPACE_4]` (4px all sides) | `app.rs:10174, 10187` |
 | Font size   | `TYPO_MD` (15px)               | |
 | Text colour | `text_muted`, `accent_primary` on hover | `app.rs:10176-10182` |
-| Background  | None                           | |
+| Background  | None                           |
+
+### First-run landing / pairing surface
+
+The landing screen shown on first run is composed from existing cards and the button system above, but it should be treated as a reusable composition:
+
+| Element | Style / behaviour | File:Line |
+|---------|-------------------|-----------|
+| Brand heading | `TYPO_XL`, accent colour, upper-case title | `app.rs:12345-12349` |
+| Tagline | `TYPO_SM`, muted body text | `app.rs:12351-12354` |
+| Status card | Surface card with stacked status rows | `app.rs:12371-12419` |
+| Quick actions | Two-column action buttons with consistent heights | `app.rs:12438-12449` |
+
+Guidelines:
+- Keep the landing area visually simple; it should feel like a guided start, not a second settings page.
+- Reuse the existing primary/ghost button styles rather than introducing a new button family.
+- Pairing and invitation helper text should stay short and copyable so the QR/paste workflow remains easy to scan.
 
 ### 4.2 Cards / Containers
 

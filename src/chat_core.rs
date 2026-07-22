@@ -2268,6 +2268,7 @@ pub async fn download_blob_with_progress(
 /// The blob is downloaded to the local store, then streamed from the store
 /// to `save_path` in fixed-size chunks.  No whole-file buffer is allocated.
 /// Progress events (`TransferProgress`) are emitted via `on_progress`.
+#[allow(clippy::too_many_arguments)]
 pub async fn download_blob_to_file(
     blob_store: &iroh_blobs::api::Store,
     endpoint: &Endpoint,
@@ -2276,7 +2277,7 @@ pub async fn download_blob_to_file(
     name: String,
     kind: TransferKind,
     save_path: &std::path::Path,
-    mut on_progress: impl FnMut(TransferProgress) + Send + 'static,
+    on_progress: impl FnMut(TransferProgress) + Send + 'static,
     max_bytes: Option<u64>,
 ) -> Result<()> {
     let id = TransferId::next();
@@ -3493,6 +3494,7 @@ mod tests {
     }
 
     /// Clear the diagnostics message-received cooldown set so tests start fresh.
+    #[allow(dead_code)]
     fn clear_diagnostic_seen_messages() {
         if let Ok(mut seen) = DIAGNOSTIC_SEEN_MESSAGES.lock() {
             seen.clear();

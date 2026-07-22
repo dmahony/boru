@@ -72,8 +72,7 @@ pub fn resolve_data_dir(cli_override: Option<PathBuf>) -> PathBuf {
     if let Ok(val) = std::env::var(ENV_BORU_CHAT_DATA_DIR) {
         eprintln!(
             "warning: environment variable {} is deprecated, use {} instead",
-            ENV_BORU_CHAT_DATA_DIR,
-            ENV_BORU_DATA_DIR
+            ENV_BORU_CHAT_DATA_DIR, ENV_BORU_DATA_DIR
         );
         return PathBuf::from(val);
     }
@@ -227,12 +226,9 @@ pub fn detect_legacy_data_dir() -> Option<PathBuf> {
         }
     }
     // Check candidate paths
-    for candidate in legacy_candidate_dirs() {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    legacy_candidate_dirs()
+        .into_iter()
+        .find(|candidate| candidate.exists())
 }
 
 /// Migrate data from a legacy `boru-chat` directory to the new `boru`
@@ -382,8 +378,8 @@ pub fn auto_migrate_data_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use std::fs;
+    use std::path::Path;
 
     /// Serial execution lock for data-dir tests that mutate global env vars.
     /// Using `std::sync::Mutex` instead of depending on `serial_test` crate.
@@ -635,9 +631,7 @@ mod tests {
         scope.set_env(ENV_HOME, "/home/testuser");
 
         let dirs = legacy_candidate_dirs();
-        assert!(dirs.contains(&PathBuf::from(
-            "/home/testuser/.local/share/boru-chat"
-        )));
+        assert!(dirs.contains(&PathBuf::from("/home/testuser/.local/share/boru-chat")));
     }
 
     #[test]
@@ -712,7 +706,10 @@ mod tests {
         let new = tmp.path().join("new");
 
         let result = migrate_data_dir(&legacy, &new).unwrap();
-        assert!(!result, "migration should be a no-op when legacy doesn't exist");
+        assert!(
+            !result,
+            "migration should be a no-op when legacy doesn't exist"
+        );
     }
 
     #[test]

@@ -2064,7 +2064,7 @@ fn handle_get_discovery_events(req: &JsonRpcRequest, state: &McpAppState) -> Res
 
     let limit = req
         .params
-        .get("count")          // prefer 'count' for agent-friendliness
+        .get("count") // prefer 'count' for agent-friendliness
         .or_else(|| req.params.get("limit"))
         .and_then(|v| v.as_u64())
         .unwrap_or(20) as usize; // reduced from 200 to 20 for LLM context economy
@@ -2668,9 +2668,9 @@ async fn handle_browse_peer_catalogue(
     validate_bounded(peer_id, MAX_PEER_ID_LEN, "peer_id")?;
     validate_no_control_chars(peer_id, "peer_id")?;
 
-    let peer_pk: iroh::PublicKey = peer_id.parse().map_err(|e| {
-        format!("Invalid peer_id '{peer_id}': {e}")
-    })?;
+    let peer_pk: iroh::PublicKey = peer_id
+        .parse()
+        .map_err(|e| format!("Invalid peer_id '{peer_id}': {e}"))?;
 
     let catalogue = fetch_remote_catalogue(&state.endpoint, peer_pk, None)
         .await
@@ -2749,10 +2749,7 @@ async fn handle_browse_peer_catalogue(
 /// - Catalogue not fetched for peer
 /// - File not found in catalogue
 /// - Conflicting download already active
-fn handle_download_file(
-    req: &JsonRpcRequest,
-    state: &McpAppState,
-) -> Result<Value, String> {
+fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
     let content_hash = req
         .params
         .get("content_hash")
@@ -2765,20 +2762,16 @@ fn handle_download_file(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "Missing required argument: peer_id".to_string())?;
 
-    let known_size = req
-        .params
-        .get("known_size")
-        .and_then(|v| v.as_u64());
+    let known_size = req.params.get("known_size").and_then(|v| v.as_u64());
 
     validate_bounded(content_hash, MAX_CONTENT_HASH_LEN, "content_hash")?;
     validate_bounded(peer_id, MAX_PEER_ID_LEN, "peer_id")?;
     validate_no_control_chars(content_hash, "content_hash")?;
     validate_no_control_chars(peer_id, "peer_id")?;
 
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or_else(|| "Storage not available. Download management requires persistent storage.".to_string())?;
+    let storage = state.storage.as_ref().ok_or_else(|| {
+        "Storage not available. Download management requires persistent storage.".to_string()
+    })?;
 
     let result = initiate_download(storage, content_hash, peer_id, known_size)
         .map_err(|e| format!("Failed to initiate download: {e}"))?;
@@ -5826,10 +5819,23 @@ mod tests {
         let (state, _rx) = make_gate_test_state(true, true).await;
         let request = make_generic_request("boru_browse_peer_catalogue");
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_some(), "Missing peer_id should produce error");
+        assert!(
+            response.error.is_some(),
+            "Missing peer_id should produce error"
+        );
         assert_eq!(response.error.as_ref().unwrap().code, -32000);
-        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-        assert!(data.contains("Missing required argument"), "Error should mention missing peer_id, got: {data}");
+        let data = response
+            .error
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            data.contains("Missing required argument"),
+            "Error should mention missing peer_id, got: {data}"
+        );
     }
 
     #[tokio::test]
@@ -5838,9 +5844,22 @@ mod tests {
         let mut request = make_generic_request("boru_browse_peer_catalogue");
         request.params = json!({"peer_id": ""});
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_some(), "Empty peer_id should produce error");
-        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-        assert!(data.contains("peer_id"), "Error should mention peer_id, got: {data}");
+        assert!(
+            response.error.is_some(),
+            "Empty peer_id should produce error"
+        );
+        let data = response
+            .error
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            data.contains("peer_id"),
+            "Error should mention peer_id, got: {data}"
+        );
     }
 
     #[tokio::test]
@@ -5849,7 +5868,10 @@ mod tests {
         let mut request = make_generic_request("boru_browse_peer_catalogue");
         request.params = json!({"peer_id": "bad\npeer"});
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_some(), "Control chars in peer_id should produce error");
+        assert!(
+            response.error.is_some(),
+            "Control chars in peer_id should produce error"
+        );
     }
 
     #[tokio::test]
@@ -5858,9 +5880,22 @@ mod tests {
         let mut request = make_generic_request("boru_browse_peer_catalogue");
         request.params = json!({"peer_id": "not-a-valid-peer-key"});
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_some(), "Invalid peer_id should produce error");
-        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-        assert!(data.contains("Invalid peer_id"), "Error should mention invalid peer_id, got: {data}");
+        assert!(
+            response.error.is_some(),
+            "Invalid peer_id should produce error"
+        );
+        let data = response
+            .error
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            data.contains("Invalid peer_id"),
+            "Error should mention invalid peer_id, got: {data}"
+        );
     }
 
     // ── boru_download_file tests ──────────────────────────────────────
@@ -5871,9 +5906,22 @@ mod tests {
         let mut request = make_generic_request("boru_download_file");
         request.params = json!({"peer_id": "abc123"});
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_some(), "Missing content_hash should produce error");
-        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-        assert!(data.contains("Missing required argument"), "Error should mention missing argument, got: {data}");
+        assert!(
+            response.error.is_some(),
+            "Missing content_hash should produce error"
+        );
+        let data = response
+            .error
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            data.contains("Missing required argument"),
+            "Error should mention missing argument, got: {data}"
+        );
     }
 
     #[tokio::test]
@@ -5882,9 +5930,22 @@ mod tests {
         let mut request = make_generic_request("boru_download_file");
         request.params = json!({"content_hash": "abc"});
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_some(), "Missing peer_id should produce error");
-        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-        assert!(data.contains("Missing required argument"), "Error should mention missing argument, got: {data}");
+        assert!(
+            response.error.is_some(),
+            "Missing peer_id should produce error"
+        );
+        let data = response
+            .error
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            data.contains("Missing required argument"),
+            "Error should mention missing argument, got: {data}"
+        );
     }
 
     #[tokio::test]
@@ -5896,9 +5957,22 @@ mod tests {
             "peer_id": "abc123",
         });
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_some(), "Oversized content_hash should produce error");
-        let data = response.error.as_ref().unwrap().data.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-        assert!(data.contains("too long"), "Error should mention too long, got: {data}");
+        assert!(
+            response.error.is_some(),
+            "Oversized content_hash should produce error"
+        );
+        let data = response
+            .error
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            data.contains("too long"),
+            "Error should mention too long, got: {data}"
+        );
     }
 
     #[tokio::test]
@@ -5910,7 +5984,10 @@ mod tests {
             "peer_id": "abc123",
         });
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_some(), "Control chars in content_hash should produce error");
+        assert!(
+            response.error.is_some(),
+            "Control chars in content_hash should produce error"
+        );
     }
 
     #[tokio::test]
@@ -5922,6 +5999,9 @@ mod tests {
             "peer_id": "bad\npeer",
         });
         let response = handle_request(&request, &state).await;
-        assert!(response.error.is_some(), "Control chars in peer_id should produce error");
+        assert!(
+            response.error.is_some(),
+            "Control chars in peer_id should produce error"
+        );
     }
 }

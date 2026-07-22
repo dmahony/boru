@@ -148,6 +148,7 @@ fn secret_key_mode_ok(mode: u32) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn get_data_dir() -> PathBuf {
     boru_core::data_dir::resolve_data_dir(None)
 }
@@ -453,7 +454,10 @@ fn check_env_overrides() -> Check {
         hints.push(format!("{}={dir}", boru_core::data_dir::ENV_BORU_DATA_DIR));
     }
     if let Ok(dir) = env::var(boru_core::data_dir::ENV_BORU_CHAT_DATA_DIR) {
-        hints.push(format!("{}={dir}", boru_core::data_dir::ENV_BORU_CHAT_DATA_DIR));
+        hints.push(format!(
+            "{}={dir}",
+            boru_core::data_dir::ENV_BORU_CHAT_DATA_DIR
+        ));
     }
     if let Some(xdg) = env::var_os("XDG_DATA_HOME") {
         hints.push(format!("XDG_DATA_HOME={}", xdg.to_string_lossy()));
