@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ── CPU flamegraph for boru-chat GUI example ──────────────────────────
+# ── CPU flamegraph for Boru GUI example ──────────────────────────
 # Requires: cargo-flamegraph (`cargo install flamegraph`), perf on Linux
 #
 # Usage:

@@ -1,6 +1,6 @@
 # Discovery Architecture
 
-boru-chat uses **two independent discovery layers** that serve different purposes
+Boru uses **two independent discovery layers** that serve different purposes
 and use separate DHT instances:
 
 1. **Address resolution** — resolves an `EndpointId` to transport addresses
