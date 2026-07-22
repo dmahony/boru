@@ -4279,6 +4279,14 @@ impl IcedChat {
 
         // Keep chat messages available to the active session only.
         for entry in &self.entries[self.history_saved_count..] {
+            let already_saved = {
+                let history = self.chat_history.lock().unwrap();
+                history.get_by_event_id(entry.event_id).is_some()
+            };
+            if already_saved {
+                continue;
+            }
+
             let kind = match entry.kind {
                 ChatKind::System => "system",
                 _ if entry.image_bytes.is_some() => "image",
@@ -4293,10 +4301,17 @@ impl IcedChat {
                     .map(|pk| pk.to_string())
                     .unwrap_or_default(),
             };
+            let signed_bytes = self
+                .outbox
+                .lock()
+                .unwrap()
+                .get(entry.event_id)
+                .map(|outbox_entry| outbox_entry.signed_bytes.clone())
+                .unwrap_or_default();
             let mut history_entry = HistoryEntry::new(
                 topic,
                 sender,
-                Vec::new(), // signed bytes not available here
+                signed_bytes,
                 kind,
                 body_text,
             );
@@ -6889,18 +6904,22 @@ impl IcedChat {
                 let _timer = PerfTracker::timer("net_event", format!("topic={}", conv_event.topic));
                 let topic = conv_event.topic;
                 let event = conv_event.event;
-                // Bump conversation's last-seen timestamp so it moves to the
-                // top of the sorted chat list on any network activity.
-                self.conversation_store.touch_and_bump(&topic);
-                let conversation = self
-                    .conversations
-                    .entry(topic)
-                    .or_insert_with(|| ConversationLive::new(topic));
                 if topic != self.topic || !matches!(self.screen, Screen::Chat { .. }) {
+                    self.record_conversation_activity(&topic, &event);
+                    self.update_room_preview(&topic, &event);
+                    self.persist_room_history();
+                    let conversation = self
+                        .conversations
+                        .entry(topic)
+                        .or_insert_with(|| ConversationLive::new(topic));
                     conversation.pending_events.push_back(event);
                     conversation.unread = conversation.unread.saturating_add(1);
                     return iced::Task::none();
                 }
+                let conversation = self
+                    .conversations
+                    .entry(topic)
+                    .or_insert_with(|| ConversationLive::new(topic));
                 conversation.unread = 0;
                 let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
                 if let Some(read_receipt_task) = self.process_net_event_sync(&topic, &event) {
@@ -9580,6 +9599,17 @@ impl IcedChat {
                         if n == 1 { "" } else { "s" }
                     ));
                 }
+                let topic = direct_topic(&self.local_public, &peer);
+                let fid = FriendId::from_public_key(peer);
+                let record = self.friends.ensure_friend(fid);
+                record.set_direct_conversation(topic, DirectConversationState::Active);
+                self.conversation_store.upsert(ConversationEntry::new(
+                    topic,
+                    peer.to_string(),
+                    label,
+                ));
+                let _ = self.conversation_store.save();
+                self.try_save_friends();
                 iced::Task::none()
             }
 
@@ -9778,12 +9808,45 @@ impl IcedChat {
 
     fn persist_room_history(&mut self) {
         if self.room_history_dirty {
-            self.room_history_dirty = false;
-            let store = self.room_history.clone();
-            let _ = std::thread::spawn(move || {
-                let _ = store.save();
-            });
+            match self.room_history.save() {
+                Ok(_) => self.room_history_dirty = false,
+                Err(err) => debug!(error = %err, "failed to save room history"),
+            }
         }
+    }
+
+    fn record_conversation_activity(&mut self, topic: &TopicId, event: &NetEvent) {
+        if let NetEvent::Message { from, .. } = event {
+            if *from != self.local_public {
+                if direct_topic(&self.local_public, from) == *topic {
+                    let fid = FriendId::from_public_key(*from);
+                    let label = self
+                        .friends
+                        .get(&fid)
+                        .map(|record| record.display_label(&fid))
+                        .unwrap_or_else(|| from.fmt_short().to_string());
+                    self.friends.ensure_friend(fid);
+                    self.conversation_store.upsert(ConversationEntry::new(
+                        *topic,
+                        from.to_string(),
+                        label,
+                    ));
+                } else {
+                    let room_label = self
+                        .room_history
+                        .find(topic)
+                        .map(|room| room.display_name())
+                        .unwrap_or_else(|| {
+                            let hex = topic.to_string();
+                            format!("room {}", &hex[..hex.len().min(8)])
+                        });
+                    self.conversation_store
+                        .upsert(ConversationEntry::new_group(*topic, room_label));
+                }
+            }
+        }
+        self.conversation_store.touch_and_bump(topic);
+        let _ = self.conversation_store.save();
     }
 
     fn update_room_preview(&mut self, topic: &TopicId, event: &NetEvent) {
@@ -10063,10 +10126,7 @@ impl IcedChat {
     /// Persist the conversation store if it has changes.
     #[expect(dead_code)]
     fn try_save_conversation_store(&mut self) {
-        let store = self.conversation_store.clone();
-        let _ = std::thread::spawn(move || {
-            let _ = store.save();
-        });
+        let _ = self.conversation_store.save();
     }
 }
 
