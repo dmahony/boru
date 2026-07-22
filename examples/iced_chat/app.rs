@@ -6480,7 +6480,7 @@ impl IcedChat {
                     };
                     let secret_key = self.secret_key.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let progress_queue = self.download_progress_queue.clone();
                     let endpoint = self.endpoint.clone();
                     return iced::Task::perform(
                         async move {
@@ -6929,8 +6929,8 @@ impl IcedChat {
                 self.conversation_store.touch_and_bump(&topic);
                 // Update the sidebar preview BEFORE taking the mutable borrow
                 // on self.conversations (avoids borrow conflict).
-                let is_inactive = topic != self.topic
-                    || !matches!(self.screen, Screen::Chat { .. });
+                let is_inactive =
+                    topic != self.topic || !matches!(self.screen, Screen::Chat { .. });
                 if is_inactive {
                     self.update_room_preview(&topic, &event);
                 }
@@ -7529,11 +7529,7 @@ impl IcedChat {
                             .await
                             .await
                             .map_err(|e| format!("Failed to store file: {e}"))?;
-                        let ticket_str = blob_ticket_string(
-                            endpoint_addr,
-                            tag.hash,
-                            tag.format,
-                        );
+                        let ticket_str = blob_ticket_string(endpoint_addr, tag.hash, tag.format);
                         let msg = crate::Message::FileShare {
                             name: filename.clone(),
                             ticket: ticket_str.clone(),
@@ -7546,9 +7542,7 @@ impl IcedChat {
                         Ok((filename, ticket_str))
                     },
                     |r: Result<(String, String), String>| match r {
-                        Ok((name, ticket)) => {
-                            AppMessage::FileDownloaded { name, ticket }
-                        }
+                        Ok((name, ticket)) => AppMessage::FileDownloaded { name, ticket },
                         Err(e) => AppMessage::ErrorMsg(e),
                     },
                 )
@@ -7671,7 +7665,10 @@ impl IcedChat {
                 }
                 if let Some(e) = self.entries.get_mut(entry_index) {
                     if let Some(ref mut d) = e.download {
-                        d.state = DownloadState::Active { bytes: 0, total: None };
+                        d.state = DownloadState::Active {
+                            bytes: 0,
+                            total: None,
+                        };
                     }
                 }
                 self.download_entry_index = Some(entry_index);
@@ -7686,8 +7683,9 @@ impl IcedChat {
                 let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
-                        let ticket: iroh_blobs::ticket::BlobTicket =
-                            ticket_str.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
+                        let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                            .parse()
+                            .map_err(|e| format!("Invalid ticket: {e}"))?;
                         let (addr, hash, _format) = ticket.into_parts();
                         let node_id = addr.id;
                         let candidates = download_candidates(node_id, &neighbors);
@@ -9500,7 +9498,7 @@ impl IcedChat {
                         let image_store = self.image_store.clone();
                         let user = self.local_public.to_string();
                         let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                        let progress_queue = self.download_progress_queue.clone();
                         self.push_system("Saving profile image…");
                         iced::Task::perform(
                             async move {
@@ -9612,7 +9610,7 @@ impl IcedChat {
                     let image_store = self.image_store.clone();
                     let identifier = self.profile_image_identifier.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let progress_queue = self.download_progress_queue.clone();
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
