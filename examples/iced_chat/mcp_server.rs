@@ -310,7 +310,7 @@ pub struct McpAppState {
     pub gui_state_rx: Option<watch::Receiver<IcedStateSnapshot>>,
     /// Persistent storage for file catalogues and download state.
     /// `None` when storage is unavailable (e.g. ephemeral mode).
-    pub storage: Option<boru_chat::storage::Storage>,
+    pub storage: Option<boru_core::storage::Storage>,
 }
 
 // =============================================================================
