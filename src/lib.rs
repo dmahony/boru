@@ -27,6 +27,8 @@ pub mod discovery_validation;
 pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;
+/// Versioned, privacy-aware peer invitations for out-of-band pairing.
+pub mod peer_invitation;
 pub mod proto;
 pub mod public_room;
 #[cfg(feature = "net")]
@@ -44,6 +46,8 @@ pub mod public_room_config;
 /// an mpsc channel for the caller to join.
 #[cfg(feature = "net")]
 pub mod public_room_continuous;
+/// QR encoding and decoding for peer invitations.
+pub mod qr;
 
 /// Bounded dynamic peer joiner — joins discovered peers into the gossip mesh
 /// with dedup, backoff, retries, and concurrency limits.
@@ -328,3 +332,4 @@ pub mod blob_transfer;
 /// Transfer lifecycle telemetry — structured events for download workflows.
 #[cfg(feature = "net")]
 pub mod transfer_telemetry;
+// dummy

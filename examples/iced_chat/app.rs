@@ -693,6 +693,7 @@ pub(crate) const BUTTON_ICON: fn(
 };
 
 /// Transparent full-size backdrop button — invisible but clickable.
+#[allow(dead_code)]
 pub(crate) const BUTTON_BACKDROP: fn(
     &iced::Theme,
     iced::widget::button::Status,
@@ -705,6 +706,7 @@ pub(crate) const BUTTON_BACKDROP: fn(
 
 /// Transparent-wide button — no background, no border, inherits parent text color.
 /// Used for clickable rows that should look like plain containers.
+#[allow(dead_code)]
 pub(crate) const BUTTON_TRANSPARENT: fn(
     &iced::Theme,
     iced::widget::button::Status,
@@ -4804,7 +4806,7 @@ impl IcedChat {
                 let personal_topic = self.personal_room_topic();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let endpoint = self.endpoint.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let dht = self.dht.clone();
@@ -5069,7 +5071,7 @@ impl IcedChat {
                 let runtime_handle = self.runtime_handle.clone();
                 let memory_lookup = self.memory_lookup.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
@@ -5548,7 +5550,7 @@ impl IcedChat {
                 let memory_lookup = self.memory_lookup.clone();
                 let forward_handle_slot = self.forward_handle_slot.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
@@ -6480,7 +6482,7 @@ impl IcedChat {
                     };
                     let secret_key = self.secret_key.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let _progress_queue = self.download_progress_queue.clone();
                     let endpoint = self.endpoint.clone();
                     return iced::Task::perform(
                         async move {
@@ -6929,8 +6931,8 @@ impl IcedChat {
                 self.conversation_store.touch_and_bump(&topic);
                 // Update the sidebar preview BEFORE taking the mutable borrow
                 // on self.conversations (avoids borrow conflict).
-                let is_inactive = topic != self.topic
-                    || !matches!(self.screen, Screen::Chat { .. });
+                let is_inactive =
+                    topic != self.topic || !matches!(self.screen, Screen::Chat { .. });
                 if is_inactive {
                     self.update_room_preview(&topic, &event);
                 }
@@ -7508,15 +7510,15 @@ impl IcedChat {
                 let sender = self.sender.clone();
                 let secret_key = self.secret_key.clone();
                 let endpoint_addr = self.endpoint.addr();
-                let local_label = self.local_label.clone();
-                let local_pk = self.local_public;
+                let _local_label = self.local_label.clone();
+                let _local_pk = self.local_public;
                 iced::Task::perform(
                     async move {
                         let path_buf = std::path::PathBuf::from(&abs_path);
                         let metadata = tokio::fs::metadata(&path_buf)
                             .await
                             .map_err(|e| format!("Failed to inspect file: {e}"))?;
-                        let file_size = metadata.len();
+                        let _file_size = metadata.len();
                         // Stream the file into iroh blobs — no whole-file
                         // memory limit needed.
                         let file = tokio::fs::File::open(&path_buf)
@@ -7529,11 +7531,7 @@ impl IcedChat {
                             .await
                             .await
                             .map_err(|e| format!("Failed to store file: {e}"))?;
-                        let ticket_str = blob_ticket_string(
-                            endpoint_addr,
-                            tag.hash,
-                            tag.format,
-                        );
+                        let ticket_str = blob_ticket_string(endpoint_addr, tag.hash, tag.format);
                         let msg = crate::Message::FileShare {
                             name: filename.clone(),
                             ticket: ticket_str.clone(),
@@ -7546,9 +7544,7 @@ impl IcedChat {
                         Ok((filename, ticket_str))
                     },
                     |r: Result<(String, String), String>| match r {
-                        Ok((name, ticket)) => {
-                            AppMessage::FileDownloaded { name, ticket }
-                        }
+                        Ok((name, ticket)) => AppMessage::FileDownloaded { name, ticket },
                         Err(e) => AppMessage::ErrorMsg(e),
                     },
                 )
@@ -7671,14 +7667,17 @@ impl IcedChat {
                 }
                 if let Some(e) = self.entries.get_mut(entry_index) {
                     if let Some(ref mut d) = e.download {
-                        d.state = DownloadState::Active { bytes: 0, total: None };
+                        d.state = DownloadState::Active {
+                            bytes: 0,
+                            total: None,
+                        };
                     }
                 }
                 self.download_entry_index = Some(entry_index);
                 let blob_store = self.blob_store.clone();
                 let endpoint = self.endpoint.clone();
                 let neighbors = self.neighbors.clone();
-                let safety = self.public_room_safety.clone();
+                let _safety = self.public_room_safety.clone();
                 let ticket_str = dl.ticket.clone();
                 let name = dl.name.clone();
                 let kind = dl.kind;
@@ -7686,12 +7685,13 @@ impl IcedChat {
                 let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
-                        let ticket: iroh_blobs::ticket::BlobTicket =
-                            ticket_str.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
+                        let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                            .parse()
+                            .map_err(|e| format!("Invalid ticket: {e}"))?;
                         let (addr, hash, _format) = ticket.into_parts();
                         let node_id = addr.id;
                         let candidates = download_candidates(node_id, &neighbors);
-                        use boru_chat::chat_callbacks::TransferKind;
+
                         let dl_dir = data_dir.join("downloads");
                         let _ = tokio::fs::create_dir_all(&dl_dir).await;
                         let save_path = dl_dir.join(&name);
@@ -8132,12 +8132,8 @@ impl IcedChat {
                     let label = self.resolve_name(&peer);
                     return iced::Task::perform(
                         async move {
-                            let removed = mgr.remove_friend(&peer).await.unwrap_or(false);
-                            if removed {
-                                AppMessage::FriendRemoved { label }
-                            } else {
-                                AppMessage::FriendRemoved { label }
-                            }
+                            let _removed = mgr.remove_friend(&peer).await.unwrap_or(false);
+                            AppMessage::FriendRemoved { label }
                         },
                         |msg| msg,
                     );
@@ -8860,7 +8856,8 @@ impl IcedChat {
                     let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
                     tasks.push(iced::Task::perform(
                         async move {
-                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir) {
+                            let mut store = match boru_chat::mailbox::MailboxStore::load(&data_dir)
+                            {
                                 Ok(Some(s)) => s,
                                 _ => return Vec::new(),
                             };
@@ -9179,7 +9176,7 @@ impl IcedChat {
                 let endpoint = self.endpoint.clone();
                 let secret_key = self.secret_key.clone();
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 let peers_with_mailbox: Vec<PublicKey> = self
                     .friends
                     .iter()
@@ -9255,7 +9252,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9278,7 +9275,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9503,7 +9500,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                 };
                 let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                let _progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         settings.save(&data_dir);
@@ -9547,7 +9544,7 @@ impl IcedChat {
                         let image_store = self.image_store.clone();
                         let user = self.local_public.to_string();
                         let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                        let _progress_queue = self.download_progress_queue.clone();
                         self.push_system("Saving profile image…");
                         iced::Task::perform(
                             async move {
@@ -9659,7 +9656,7 @@ impl IcedChat {
                     let image_store = self.image_store.clone();
                     let identifier = self.profile_image_identifier.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let _progress_queue = self.download_progress_queue.clone();
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -10872,7 +10869,7 @@ impl IcedChat {
         &self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Column, Space};
+        use iced::widget::{button, container, row, text, Column, Space};
         use iced::{Alignment, Length};
 
         let dark_mode = self.dark_mode;
@@ -11186,7 +11183,7 @@ impl IcedChat {
 
     /// Left sidebar containing Chats, Friends, Discover, and Requests sections.
     fn view_sidebar(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{container, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let header = Row::new()
@@ -14298,7 +14295,7 @@ impl IcedChat {
         use iced::widget::{button, container, row, scrollable, text, text_input, Column, Space};
         use iced::{Alignment, Length};
 
-        let theme = self.theme();
+        let _theme = self.theme();
         let dark_mode = self.dark_mode;
 
         // ── Gather data ──
@@ -14784,11 +14781,11 @@ impl IcedChat {
     /// Confirmation overlay for removing a friend.
     fn view_remove_confirm_overlay<'a>(
         &self,
-        peer: PublicKey,
+        _peer: PublicKey,
         name: &str,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Column, Space};
+        use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
         let dialog = column![]
@@ -14867,11 +14864,11 @@ impl IcedChat {
     /// Confirmation overlay for blocking a friend.
     fn view_block_confirm_overlay<'a>(
         &self,
-        peer: PublicKey,
+        _peer: PublicKey,
         name: &str,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Column, Space};
+        use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
         let dialog = column![]
@@ -16703,7 +16700,9 @@ mod tests {
             let router = iroh::protocol::Router::builder(endpoint.clone())
                 .accept(boru_chat::net::GOSSIP_ALPN, gossip.clone())
                 .spawn();
-            let blob_store = iroh_blobs::store::mem::MemStore::new();
+            let blob_store = iroh_blobs::store::fs::FsStore::load(data_dir.join("blobs"))
+                .await
+                .unwrap();
             let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
             let friends = boru_chat::friends::FriendsStore::empty_at(&data_dir);
             let mut room_history = boru_chat::room_history::RoomHistoryStore::empty_at(&data_dir);

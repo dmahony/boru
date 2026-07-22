@@ -8,6 +8,7 @@
 mod app;
 mod download_progress_view;
 mod gui_test_actions;
+mod invitation_qr;
 mod log_viewer;
 mod mcp_server;
 mod perf_tracker;
@@ -579,7 +580,7 @@ fn main() -> Result<()> {
         );
 
         // ── One-time migration: JSON chat_history.json → SQLite messages table
-        if chat_history.lock().unwrap().len() > 0 {
+        if !chat_history.lock().unwrap().is_empty() {
             let migrated = {
                 let history = chat_history.lock().unwrap();
                 let mut count = 0;

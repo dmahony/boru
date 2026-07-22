@@ -1668,10 +1668,7 @@ pub fn handle_net_event_for_topic(
                         }
                         if !is_muted {
                             let sender_name = cb.resolve_name(&from);
-                            cb.push_system(format!(
-                                "{} shared a file: {}",
-                                sender_name, name
-                            ));
+                            cb.push_system(format!("{} shared a file: {}", sender_name, name));
                             cb.set_pending_file(name, ticket);
                         }
                     }
@@ -2258,6 +2255,7 @@ pub async fn download_blob_with_progress(
 /// The blob is downloaded to the local store, then streamed from the store
 /// to `save_path` in fixed-size chunks.  No whole-file buffer is allocated.
 /// Progress events (`TransferProgress`) are emitted via `on_progress`.
+#[allow(clippy::too_many_arguments)]
 pub async fn download_blob_to_file(
     blob_store: &iroh_blobs::api::Store,
     endpoint: &Endpoint,
@@ -2266,18 +2264,24 @@ pub async fn download_blob_to_file(
     name: String,
     kind: TransferKind,
     save_path: &std::path::Path,
-    mut on_progress: impl FnMut(TransferProgress) + Send + 'static,
+    on_progress: impl FnMut(TransferProgress) + Send + 'static,
     max_bytes: Option<u64>,
 ) -> Result<()> {
     let id = TransferId::next();
-    let shared_cb: TransferProgressCallback =
-        Arc::new(Mutex::new(Some(Box::new(on_progress))));
+    let shared_cb: TransferProgressCallback = Arc::new(Mutex::new(Some(Box::new(on_progress))));
     let emit = |ev: TransferProgress| {
         if let Ok(mut guard) = shared_cb.lock() {
-            if let Some(cb) = guard.as_mut() { cb(ev); }
+            if let Some(cb) = guard.as_mut() {
+                cb(ev);
+            }
         }
     };
-    emit(TransferProgress::Started { id, kind, name: name.clone(), total: None });
+    emit(TransferProgress::Started {
+        id,
+        kind,
+        name: name.clone(),
+        total: None,
+    });
     let cancel_guard = CancelGuard::new(id, kind, name.clone(), shared_cb.clone());
 
     // Phase 1: download to the local blob store
@@ -2291,22 +2295,37 @@ pub async fn download_blob_to_file(
                 if let Some(max) = max_bytes {
                     if n > max {
                         emit(TransferProgress::Failed {
-                            id, name: name.clone(),
+                            id,
+                            name: name.clone(),
                             error: format!("blob too large ({} bytes, limit {} bytes)", n, max),
                         });
                         return Err(n0_error::anyerr!("blob too large"));
                     }
                 }
-                emit(TransferProgress::Progress { id, kind, name: name.clone(), bytes: n, total: None });
+                emit(TransferProgress::Progress {
+                    id,
+                    kind,
+                    name: name.clone(),
+                    bytes: n,
+                    total: None,
+                });
             }
             Some(DownloadProgressItem::Error(e)) => {
                 cancel_guard.disarm();
-                emit(TransferProgress::Failed { id, name, error: format!("{e}") });
+                emit(TransferProgress::Failed {
+                    id,
+                    name,
+                    error: format!("{e}"),
+                });
                 return Err(e);
             }
             Some(DownloadProgressItem::DownloadError) => {
                 cancel_guard.disarm();
-                emit(TransferProgress::Failed { id, name, error: "Download error".into() });
+                emit(TransferProgress::Failed {
+                    id,
+                    name,
+                    error: "Download error".into(),
+                });
                 return Err(n0_error::anyerr!("Download error"));
             }
             None => break,
@@ -2322,7 +2341,9 @@ pub async fn download_blob_to_file(
     let mut buf = vec![0u8; 256 * 1024];
     loop {
         let n = reader.read(&mut buf).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         tokio::io::AsyncWriteExt::write_all(&mut file, &buf[..n]).await?;
     }
     tokio::io::AsyncWriteExt::flush(&mut file).await?;
@@ -3280,7 +3301,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_net_event_file_share_is_ignored_without_authorisation() {
+    fn handle_net_event_file_share_from_unknown_peer_is_displayed() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
 
@@ -3293,8 +3314,11 @@ mod tests {
             sent_at: now_secs(),
         };
         handle_net_event(event, &mut app).unwrap();
-        assert!(app.pending_file.is_none());
-        assert!(!app.entries.iter().any(|e| e.body.contains("doc.pdf")));
+        assert!(
+            app.pending_file.is_some(),
+            "file share from a non-muted remote peer must queue a download"
+        );
+        assert!(app.entries.iter().any(|e| e.body.contains("doc.pdf")));
     }
 
     #[test]
@@ -3460,6 +3484,7 @@ mod tests {
     }
 
     /// Clear the diagnostics message-received cooldown set so tests start fresh.
+    #[allow(dead_code)]
     fn clear_diagnostic_seen_messages() {
         if let Ok(mut seen) = DIAGNOSTIC_SEEN_MESSAGES.lock() {
             seen.clear();
