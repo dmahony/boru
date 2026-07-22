@@ -119,6 +119,20 @@ pub struct UserProfile {
     /// File metadata announced in ProfileUpdate broadcasts.
     #[serde(default)]
     pub shared_files: Vec<SharedFileMeta>,
+
+    /// Whether the initial onboarding flow has been completed.
+    ///
+    /// `false` (default) for fresh profiles; `true` once the user has
+    /// completed the first-run setup or loaded an established profile.
+    ///
+    /// Uses `Option<bool>` to distinguish "missing from legacy JSON" (`None`)
+    /// from "explicitly set to false" (`Some(false)`).  Inference during
+    /// loading only fires when the value is `None`.
+    ///
+    /// `#[serde(skip)]` prevents this field from leaking into gossip
+    /// ProfileUpdate messages (postcard-encoded via `Message::ProfileUpdate`).
+    #[serde(skip)]
+    onboarding_completed: Option<bool>,
 }
 
 impl Default for UserProfile {
@@ -139,6 +153,7 @@ impl Default for UserProfile {
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             allowed_extensions: Vec::new(),
             shared_files: Vec::new(),
+            onboarding_completed: None,
         }
     }
 }
@@ -280,6 +295,19 @@ impl UserProfile {
     /// Returns `true` if other peers are allowed to download our shared files.
     pub fn is_download_allowed(&self) -> bool {
         self.allow_downloads
+    }
+
+    /// Return whether the initial onboarding flow has been completed.
+    ///
+    /// Fresh profiles with no stored data default to `false`.
+    pub fn onboarding_completed(&self) -> bool {
+        self.onboarding_completed.unwrap_or(false)
+    }
+
+    /// Update the onboarding completion state. Call [`save`](Self::save) to
+    /// persist it.
+    pub fn set_onboarding_completed(&mut self, completed: bool) {
+        self.onboarding_completed = Some(completed);
     }
 
     /// Check whether a file at `path` is allowed by the current profile
@@ -506,7 +534,7 @@ where
 /// Persistent user profile and shared file metadata store.
 ///
 /// Serialised to `profile.json` in the configured data directory.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserProfileStore {
     /// Format version for future migrations.
     #[serde(default = "default_schema_version")]
@@ -522,6 +550,17 @@ pub struct UserProfileStore {
     /// Data directory used for load/save operations (not serialised).
     #[serde(skip)]
     data_dir: PathBuf,
+
+    /// Whether the initial onboarding flow has been completed.
+    ///
+    /// Persisted separately from [`UserProfile`] because onboarding is a
+    /// local-only setting that must not leak into gossip ProfileUpdate
+    /// messages (which use postcard via `Message::ProfileUpdate`).
+    ///
+    /// `None` = legacy profile (inference fires), `Some(false)` = explicitly
+    /// incomplete, `Some(true)` = completed.
+    #[serde(default)]
+    onboarding_completed: Option<bool>,
 }
 
 impl Default for UserProfileStore {
@@ -531,6 +570,7 @@ impl Default for UserProfileStore {
             profile: UserProfile::default(),
             shared_files: Vec::new(),
             data_dir: PathBuf::new(),
+            onboarding_completed: None,
         }
     }
 }
@@ -569,6 +609,25 @@ impl UserProfileStore {
     /// Replace the current profile with a new one.
     pub fn set_profile(&mut self, profile: UserProfile) {
         self.profile = profile;
+    }
+
+    /// Return whether the initial onboarding flow has been completed.
+    ///
+    /// Fresh profiles with no stored data default to `false`.
+    pub fn onboarding_completed(&self) -> bool {
+        self.onboarding_completed
+            .or(self.profile.onboarding_completed)
+            .unwrap_or(false)
+    }
+
+    /// Update the onboarding completion state.
+    ///
+    /// Persists to both the in-memory profile and the store-level field that
+    /// gets written to `profile.json`.  Call [`save`](Self::save) to flush to
+    /// disk.
+    pub fn set_onboarding_completed(&mut self, completed: bool) {
+        self.onboarding_completed = Some(completed);
+        self.profile.onboarding_completed = Some(completed);
     }
 
     /// Return an immutable iterator over shared files.
@@ -630,6 +689,24 @@ impl UserProfileStore {
 
         store.data_dir = data_dir.to_path_buf();
 
+        // Sync the persisted onboarding state into the profile (which has
+        // `#[serde(skip)]` to avoid leaking into gossip ProfileUpdate).
+        store.profile.onboarding_completed = store.onboarding_completed;
+
+        // Infer onboarding completion for established profiles.
+        // A profile that was loaded from disk and has meaningful data
+        // (display name, bio, shared files, or a non-placeholder identity)
+        // is considered already onboarded — no need to force first-run flow.
+        // This only fires when `onboarding_completed` was absent from the
+        // JSON (legacy profile), preserving explicit `false` values.
+        let has_meaningful_data = !store.profile.display_name.is_empty()
+            || !store.profile.bio.is_empty()
+            || !store.shared_files.is_empty();
+        if has_meaningful_data && store.onboarding_completed.is_none() {
+            store.onboarding_completed = Some(true);
+            store.profile.onboarding_completed = Some(true);
+        }
+
         // Validate the loaded profile — if it fails, bail so the caller
         // can decide what to do (e.g. fall back to an empty store).
         store.profile.validate()?;
@@ -665,9 +742,37 @@ impl UserProfileStore {
         }
         // Validate before persisting.
         self.profile.validate()?;
-        let path = self.file_path();
-        atomic_write_json(&path, self, "profile store")?;
+        // Sync the profile's in-memory onboarding state back to the store
+        // so it gets serialised to profile.json (the profile field itself
+        // uses #[serde(skip)]).
+        let mut store_to_save = self.clone();
+        store_to_save.onboarding_completed = self.profile.onboarding_completed;
+        let path = store_to_save.file_path();
+        atomic_write_json(&path, &store_to_save, "profile store")?;
         Ok(path)
+    }
+
+    /// Supplement the onboarding-completion inference with external context.
+    ///
+    /// Call this after [`load`](Self::load) when you have access to additional
+    /// evidence of an established profile — such as friends, room history,
+    /// conversations, or SQLite storage data.  Supply `has_existing_data =
+    /// true` when any of those stores contain records for this user.
+    ///
+    /// If the profile already has `onboarding_completed = true`, this is a
+    /// no-op.  If the stored value is `false` (fresh profile) but external
+    /// evidence exists, the flag is set to `true` so the user is not
+    /// unexpectedly forced into onboarding.
+    ///
+    /// Returns `true` if the value was changed, `false` otherwise.
+    pub fn infer_onboarding_from_external(&mut self, has_existing_data: bool) -> bool {
+        if self.onboarding_completed.is_none() && has_existing_data {
+            self.onboarding_completed = Some(true);
+            self.profile.onboarding_completed = Some(true);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -1235,5 +1340,220 @@ mod tests {
             }
             _ => panic!("expected ProfileUpdate"),
         }
+    }
+
+    // ── Onboarding tests ──────────────────────────────────────────────
+
+    #[test]
+    fn onboarding_default_is_false() {
+        let profile = UserProfile::new(test_key());
+        assert!(
+            !profile.onboarding_completed(),
+            "fresh profile should have onboarding_completed = false"
+        );
+    }
+
+    #[test]
+    fn onboarding_set_and_read() {
+        let mut profile = UserProfile::new(test_key());
+        assert!(!profile.onboarding_completed());
+
+        profile.set_onboarding_completed(true);
+        assert!(profile.onboarding_completed());
+
+        profile.set_onboarding_completed(false);
+        assert!(!profile.onboarding_completed());
+    }
+
+    #[test]
+    fn onboarding_roundtrip_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_key();
+
+        // Create and save with onboarding = true
+        let mut store = UserProfileStore::empty_at(dir.path(), key);
+        store.profile.set_onboarding_completed(true);
+        store.profile.display_name = "Test".into();
+        store.save().unwrap();
+
+        // Load and verify
+        let loaded = UserProfileStore::load(dir.path(), key).unwrap();
+        assert!(
+            loaded.profile.onboarding_completed(),
+            "onboarding should survive save/load roundtrip"
+        );
+    }
+
+    #[test]
+    fn onboarding_default_false_on_fresh_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_key();
+
+        // No file exists — load returns empty_at
+        let store = UserProfileStore::load(dir.path(), key).unwrap();
+        assert!(
+            !store.profile.onboarding_completed(),
+            "fresh profile with no file should be incomplete"
+        );
+    }
+
+    #[test]
+    fn onboarding_missing_field_in_legacy_json_defaults_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_key();
+        let path = dir.path().join(PROFILE_FILE_NAME);
+
+        // Write a profile.json WITHOUT the onboarding_completed field
+        let legacy = r#"{
+            "schema_version": 1,
+            "profile": {
+                "user_id": "0101010101010101010101010101010101010101010101010101010101010101",
+                "display_name": "LegacyUser",
+                "bio": "I predate onboarding"
+            },
+            "shared_files": []
+        }"#;
+        fs::write(&path, legacy).unwrap();
+
+        let store = UserProfileStore::load(dir.path(), key).unwrap();
+        // The missing field should default to None via #[serde(default)],
+        // and then inference should set it to true because this profile has
+        // a display_name and bio — proof of an established user.
+        assert!(
+            store.profile.onboarding_completed(),
+            "legacy profile with display_name should be inferred as onboarded on load"
+        );
+    }
+
+    #[test]
+    fn onboarding_missing_field_legacy_empty_profile_stays_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_key();
+        let path = dir.path().join(PROFILE_FILE_NAME);
+
+        // Write a minimal profile.json with no onboarding field and no profile data
+        let legacy = r#"{
+            "schema_version": 1,
+            "profile": {
+                "user_id": "0101010101010101010101010101010101010101010101010101010101010101"
+            },
+            "shared_files": []
+        }"#;
+        fs::write(&path, legacy).unwrap();
+
+        let store = UserProfileStore::load(dir.path(), key).unwrap();
+        // No meaningful data → no inference → stays false
+        assert!(
+            !store.profile.onboarding_completed(),
+            "empty legacy profile without meaningful data should remain incomplete"
+        );
+    }
+
+    #[test]
+    fn onboarding_inference_from_display_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_key();
+
+        let mut store = UserProfileStore::empty_at(dir.path(), key);
+        store.profile.display_name = "ExistingUser".into();
+        // Don't set onboarding_completed — simulate upgrade scenario
+        store.save().unwrap();
+
+        // Reload with inference
+        let loaded = UserProfileStore::load(dir.path(), key).unwrap();
+        assert!(
+            loaded.profile.onboarding_completed(),
+            "profile with non-empty display_name should infer onboarding"
+        );
+    }
+
+    #[test]
+    fn onboarding_inference_from_bio() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_key();
+
+        let mut store = UserProfileStore::empty_at(dir.path(), key);
+        store.profile.bio = "A bio".into();
+        store.save().unwrap();
+
+        let loaded = UserProfileStore::load(dir.path(), key).unwrap();
+        assert!(
+            loaded.profile.onboarding_completed(),
+            "profile with non-empty bio should infer onboarding"
+        );
+    }
+
+    #[test]
+    fn onboarding_inference_from_shared_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_key();
+        let now = SystemTime::now();
+
+        let mut store = UserProfileStore::empty_at(dir.path(), key);
+        store.add_shared_file(SharedFile::new("doc.pdf", 100, "application/pdf", now));
+        store.save().unwrap();
+
+        let loaded = UserProfileStore::load(dir.path(), key).unwrap();
+        assert!(
+            loaded.profile.onboarding_completed(),
+            "profile with shared files should infer onboarding"
+        );
+    }
+
+    #[test]
+    fn onboarding_infer_from_external_sets_when_false() {
+        let key = test_key();
+        let mut store = UserProfileStore::empty_at("/tmp", key);
+        assert!(!store.profile.onboarding_completed());
+
+        let changed = store.infer_onboarding_from_external(true);
+        assert!(changed, "should return true when value changed");
+        assert!(store.profile.onboarding_completed());
+    }
+
+    #[test]
+    fn onboarding_infer_from_external_noop_when_true() {
+        let key = test_key();
+        let mut store = UserProfileStore::empty_at("/tmp", key);
+        store.set_onboarding_completed(true);
+
+        let changed = store.infer_onboarding_from_external(true);
+        assert!(!changed, "should return false when already true");
+        assert!(store.onboarding_completed());
+    }
+
+    #[test]
+    fn onboarding_infer_from_external_noop_when_no_data() {
+        let key = test_key();
+        let mut store = UserProfileStore::empty_at("/tmp", key);
+        assert!(!store.onboarding_completed());
+
+        let changed = store.infer_onboarding_from_external(false);
+        assert!(
+            !changed,
+            "should return false when has_existing_data is false"
+        );
+        assert!(!store.onboarding_completed());
+    }
+
+    #[test]
+    fn onboarding_explicit_false_survives_load_with_data() {
+        // If a user explicitly sets onboarding_completed = false and saves,
+        // then reloads, the inference should NOT override the explicit value
+        // (this test verifies that inference only runs when onboarding is false).
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_key();
+
+        let mut store = UserProfileStore::empty_at(dir.path(), key);
+        store.profile.display_name = "User".into();
+        store.profile.set_onboarding_completed(false); // explicitly false
+        store.save().unwrap();
+
+        let loaded = UserProfileStore::load(dir.path(), key).unwrap();
+        // Inference requires onboarding_completed == false to trigger
+        assert!(
+            !loaded.profile.onboarding_completed(),
+            "explicitly-false onboarding should stay false after load (inference only sets when false)"
+        );
     }
 }

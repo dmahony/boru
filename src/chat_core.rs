@@ -1668,10 +1668,7 @@ pub fn handle_net_event_for_topic(
                         }
                         if !is_muted {
                             let sender_name = cb.resolve_name(&from);
-                            cb.push_system(format!(
-                                "{} shared a file: {}",
-                                sender_name, name
-                            ));
+                            cb.push_system(format!("{} shared a file: {}", sender_name, name));
                             cb.set_pending_file(name, ticket);
                         }
                     }
@@ -2270,14 +2267,20 @@ pub async fn download_blob_to_file(
     max_bytes: Option<u64>,
 ) -> Result<()> {
     let id = TransferId::next();
-    let shared_cb: TransferProgressCallback =
-        Arc::new(Mutex::new(Some(Box::new(on_progress))));
+    let shared_cb: TransferProgressCallback = Arc::new(Mutex::new(Some(Box::new(on_progress))));
     let emit = |ev: TransferProgress| {
         if let Ok(mut guard) = shared_cb.lock() {
-            if let Some(cb) = guard.as_mut() { cb(ev); }
+            if let Some(cb) = guard.as_mut() {
+                cb(ev);
+            }
         }
     };
-    emit(TransferProgress::Started { id, kind, name: name.clone(), total: None });
+    emit(TransferProgress::Started {
+        id,
+        kind,
+        name: name.clone(),
+        total: None,
+    });
     let cancel_guard = CancelGuard::new(id, kind, name.clone(), shared_cb.clone());
 
     // Phase 1: download to the local blob store
@@ -2291,22 +2294,37 @@ pub async fn download_blob_to_file(
                 if let Some(max) = max_bytes {
                     if n > max {
                         emit(TransferProgress::Failed {
-                            id, name: name.clone(),
+                            id,
+                            name: name.clone(),
                             error: format!("blob too large ({} bytes, limit {} bytes)", n, max),
                         });
                         return Err(n0_error::anyerr!("blob too large"));
                     }
                 }
-                emit(TransferProgress::Progress { id, kind, name: name.clone(), bytes: n, total: None });
+                emit(TransferProgress::Progress {
+                    id,
+                    kind,
+                    name: name.clone(),
+                    bytes: n,
+                    total: None,
+                });
             }
             Some(DownloadProgressItem::Error(e)) => {
                 cancel_guard.disarm();
-                emit(TransferProgress::Failed { id, name, error: format!("{e}") });
+                emit(TransferProgress::Failed {
+                    id,
+                    name,
+                    error: format!("{e}"),
+                });
                 return Err(e);
             }
             Some(DownloadProgressItem::DownloadError) => {
                 cancel_guard.disarm();
-                emit(TransferProgress::Failed { id, name, error: "Download error".into() });
+                emit(TransferProgress::Failed {
+                    id,
+                    name,
+                    error: "Download error".into(),
+                });
                 return Err(n0_error::anyerr!("Download error"));
             }
             None => break,
@@ -2322,7 +2340,9 @@ pub async fn download_blob_to_file(
     let mut buf = vec![0u8; 256 * 1024];
     loop {
         let n = reader.read(&mut buf).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         tokio::io::AsyncWriteExt::write_all(&mut file, &buf[..n]).await?;
     }
     tokio::io::AsyncWriteExt::flush(&mut file).await?;

@@ -140,6 +140,8 @@ pub struct AppSettings {
     pub dark_mode: bool,
     pub sound_enabled: bool,
     pub chat_text_size: f32,
+    #[serde(default)]
+    onboarding_completed: bool,
 }
 
 impl Default for AppSettings {
@@ -148,6 +150,7 @@ impl Default for AppSettings {
             dark_mode: false,
             sound_enabled: true,
             chat_text_size: TYPO_SM,
+            onboarding_completed: false,
         }
     }
 }
@@ -159,9 +162,31 @@ impl AppSettings {
     pub fn load(data_dir: &std::path::Path) -> Self {
         let path = data_dir.join(Self::FILE_NAME);
         match std::fs::read_to_string(&path) {
-            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Ok(json) => {
+                let mut settings: Self = serde_json::from_str(&json).unwrap_or_default();
+                // Older settings files predate onboarding. Their existence is
+                // evidence of an established profile, so migrate them as done.
+                if serde_json::from_str::<serde_json::Value>(&json)
+                    .ok()
+                    .and_then(|value| value.get("onboarding_completed").cloned())
+                    .is_none()
+                {
+                    settings.set_onboarding_completed(true);
+                }
+                settings
+            }
             Err(_) => Self::default(),
         }
+    }
+
+    /// Return whether the initial onboarding flow has been completed.
+    pub fn onboarding_completed(&self) -> bool {
+        self.onboarding_completed
+    }
+
+    /// Update the onboarding completion state. Call [`Self::save`] to persist it.
+    pub fn set_onboarding_completed(&mut self, completed: bool) {
+        self.onboarding_completed = completed;
     }
 
     /// Save settings to disk in the application data directory.
@@ -1747,8 +1772,6 @@ pub struct IcedChat {
     friend_profile_versions: HashMap<PublicKey, u64>,
     /// Performance metrics for the last render — used by regression tests.
     perf: std::cell::RefCell<PerfMetrics>,
-    /// Whether this is the user's first run (no room history, no friends, no chats).
-    first_run: bool,
     /// Incrementally maintained layout cache for the chat log.
     /// Avoids O(n) full-height scan on every render.
     layout_cache: std::cell::RefCell<LayoutCache>,
@@ -2317,6 +2340,8 @@ pub enum AppMessage {
     ToggleSound(bool),
     /// Set the chat message body text size in pixels.
     SetChatTextSize(f32),
+    /// Re-open the onboarding flow without restricting advanced setup.
+    ShowOnboardingAgain,
     /// Open the native picker for a local profile image.
     PickProfileImage,
     /// Result of reading the selected profile image.
@@ -2872,6 +2897,7 @@ struct SettingsCachedKey {
     dark_mode: bool,
     sound_enabled: bool,
     chat_text_size_bits: u32,
+    onboarding_completed: bool,
     direct_peers: usize,
     relayed_peers: usize,
     neighbors_len: usize,
@@ -3147,8 +3173,26 @@ impl IcedChat {
                 Err(e) => tracing::warn!("download-manager: startup recovery failed: {e}"),
             }
         }
-        let first_run = room_history.is_empty() && friends.is_empty();
-        let app_settings = AppSettings::load(&data_dir);
+        let mut app_settings = AppSettings::load(&data_dir);
+        // Existing room or friend data proves this is not a fresh profile.
+        // Migrate such profiles without forcing them through onboarding.
+        let has_existing_profile_data = !room_history.is_empty() || !friends.is_empty();
+        if has_existing_profile_data && !app_settings.onboarding_completed() {
+            app_settings.set_onboarding_completed(true);
+            app_settings.save(&data_dir);
+        }
+        // Load or create the persistent profile store (display name, bio, etc.)
+        let mut profile_store = UserProfileStore::load_or_default(&data_dir, local_public);
+        // Supplement the profile-level inference with external context:
+        // existing friends or room history proves this is not a fresh profile.
+        profile_store.infer_onboarding_from_external(has_existing_profile_data);
+        // If the AppSettings was migrated but the profile is still fresh,
+        // sync the inferred onboarding state back to the profile store.
+        if app_settings.onboarding_completed() && !profile_store.onboarding_completed() {
+            profile_store.set_onboarding_completed(true);
+        }
+        // Persist onboarding state if it changed during inference.
+        let _ = profile_store.save();
         // Load shared files from storage for the settings GUI.
         let shared_files = storage
             .as_ref()
@@ -3249,7 +3293,6 @@ impl IcedChat {
             pending_profile_image_tickets: std::collections::VecDeque::new(),
             friend_profile_versions: HashMap::new(),
             perf: std::cell::RefCell::new(PerfMetrics::default()),
-            first_run,
             layout_cache: std::cell::RefCell::new(LayoutCache::new(app_settings.chat_text_size)),
             friend_request_store: FriendRequestStore::load_or_default(&data_dir),
             outgoing_request_states: HashMap::new(),
@@ -3285,7 +3328,7 @@ impl IcedChat {
             blocked_sharers: HashSet::new(),
             profile_cache: HashMap::new(),
             pending_downloads: HashSet::new(),
-            profile_store: UserProfileStore::empty_at(&data_dir, local_public),
+            profile_store,
             profile_bio_input: String::new(),
             shared_folder_enabled: false,
             shared_folder_path: PathBuf::from(""),
@@ -3371,6 +3414,7 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             sound_enabled: self.sound_enabled,
             chat_text_size: self.chat_text_size,
+            onboarding_completed: self.profile_store.onboarding_completed(),
         };
         settings.save(&self.data_dir);
     }
@@ -4102,6 +4146,7 @@ impl IcedChat {
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
             AppMessage::ToggleSound(_) => "ToggleSound",
             AppMessage::SetChatTextSize(_) => "SetChatTextSize",
+            AppMessage::ShowOnboardingAgain => "ShowOnboardingAgain",
             AppMessage::PickProfileImage => "PickProfileImage",
             AppMessage::ProfileImagePicked(_) => "ProfileImagePicked",
             AppMessage::ProfileImageUploaded(_) => "ProfileImageUploaded",
@@ -5338,7 +5383,13 @@ impl IcedChat {
                 self.layout_cache.borrow_mut().clear();
                 self.names.clear();
                 self.composer_text.clear();
-                self.first_run = false; // First action taken — onboarding complete
+                // Persist onboarding as completed — joining a room proves
+                // the user is past first-run.
+                if !self.profile_store.onboarding_completed() {
+                    self.profile_store.set_onboarding_completed(true);
+                    let _ = self.profile_store.save();
+                }
+                self.save_settings();
                 self.push_system(format!(
                     "Connected as {}.  Topic: {topic}",
                     self.local_label
@@ -6480,7 +6531,7 @@ impl IcedChat {
                     };
                     let secret_key = self.secret_key.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let progress_queue = self.download_progress_queue.clone();
                     let endpoint = self.endpoint.clone();
                     return iced::Task::perform(
                         async move {
@@ -6929,8 +6980,8 @@ impl IcedChat {
                 self.conversation_store.touch_and_bump(&topic);
                 // Update the sidebar preview BEFORE taking the mutable borrow
                 // on self.conversations (avoids borrow conflict).
-                let is_inactive = topic != self.topic
-                    || !matches!(self.screen, Screen::Chat { .. });
+                let is_inactive =
+                    topic != self.topic || !matches!(self.screen, Screen::Chat { .. });
                 if is_inactive {
                     self.update_room_preview(&topic, &event);
                 }
@@ -7529,11 +7580,7 @@ impl IcedChat {
                             .await
                             .await
                             .map_err(|e| format!("Failed to store file: {e}"))?;
-                        let ticket_str = blob_ticket_string(
-                            endpoint_addr,
-                            tag.hash,
-                            tag.format,
-                        );
+                        let ticket_str = blob_ticket_string(endpoint_addr, tag.hash, tag.format);
                         let msg = crate::Message::FileShare {
                             name: filename.clone(),
                             ticket: ticket_str.clone(),
@@ -7546,9 +7593,7 @@ impl IcedChat {
                         Ok((filename, ticket_str))
                     },
                     |r: Result<(String, String), String>| match r {
-                        Ok((name, ticket)) => {
-                            AppMessage::FileDownloaded { name, ticket }
-                        }
+                        Ok((name, ticket)) => AppMessage::FileDownloaded { name, ticket },
                         Err(e) => AppMessage::ErrorMsg(e),
                     },
                 )
@@ -7671,7 +7716,10 @@ impl IcedChat {
                 }
                 if let Some(e) = self.entries.get_mut(entry_index) {
                     if let Some(ref mut d) = e.download {
-                        d.state = DownloadState::Active { bytes: 0, total: None };
+                        d.state = DownloadState::Active {
+                            bytes: 0,
+                            total: None,
+                        };
                     }
                 }
                 self.download_entry_index = Some(entry_index);
@@ -7686,8 +7734,9 @@ impl IcedChat {
                 let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
-                        let ticket: iroh_blobs::ticket::BlobTicket =
-                            ticket_str.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
+                        let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                            .parse()
+                            .map_err(|e| format!("Invalid ticket: {e}"))?;
                         let (addr, hash, _format) = ticket.into_parts();
                         let node_id = addr.id;
                         let candidates = download_candidates(node_id, &neighbors);
@@ -8712,7 +8761,13 @@ impl IcedChat {
                 label,
                 was_new,
             } => {
-                self.first_run = false;
+                // Persist onboarding as completed — adding a friend proves
+                // the user is past first-run.
+                if !self.profile_store.onboarding_completed() {
+                    self.profile_store.set_onboarding_completed(true);
+                    let _ = self.profile_store.save();
+                }
+                self.save_settings();
                 let friend_id = FriendId::new(fid);
                 self.friends.ensure_friend(friend_id.clone());
                 if self
@@ -9206,6 +9261,7 @@ impl IcedChat {
                     dark_mode: self.dark_mode,
                     sound_enabled: self.sound_enabled,
                     chat_text_size: self.chat_text_size,
+                    onboarding_completed: self.profile_store.onboarding_completed(),
                 };
                 let data_dir = self.data_dir.clone();
                 let progress_queue = self.download_progress_queue.clone();
@@ -9229,6 +9285,7 @@ impl IcedChat {
                     dark_mode: self.dark_mode,
                     sound_enabled: self.sound_enabled,
                     chat_text_size: self.chat_text_size,
+                    onboarding_completed: self.profile_store.onboarding_completed(),
                 };
                 let data_dir = self.data_dir.clone();
                 let progress_queue = self.download_progress_queue.clone();
@@ -9238,6 +9295,16 @@ impl IcedChat {
                     }),
                     |_| AppMessage::Noop,
                 )
+            }
+
+            AppMessage::ShowOnboardingAgain => {
+                self.profile_store.set_onboarding_completed(false);
+                let _ = self.profile_store.save();
+                // Sync the change back to settings.json for backward compat.
+                let mut settings = AppSettings::load(&self.data_dir);
+                settings.set_onboarding_completed(false);
+                settings.save(&self.data_dir);
+                iced::Task::none()
             }
 
             AppMessage::OpenDownloadsFolder => {
@@ -9454,6 +9521,7 @@ impl IcedChat {
                     dark_mode: self.dark_mode,
                     sound_enabled: self.sound_enabled,
                     chat_text_size: self.chat_text_size,
+                    onboarding_completed: self.profile_store.onboarding_completed(),
                 };
                 let data_dir = self.data_dir.clone();
                 let progress_queue = self.download_progress_queue.clone();
@@ -9500,7 +9568,7 @@ impl IcedChat {
                         let image_store = self.image_store.clone();
                         let user = self.local_public.to_string();
                         let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                        let progress_queue = self.download_progress_queue.clone();
                         self.push_system("Saving profile image…");
                         iced::Task::perform(
                             async move {
@@ -9612,7 +9680,7 @@ impl IcedChat {
                     let image_store = self.image_store.clone();
                     let identifier = self.profile_image_identifier.clone();
                     let data_dir = self.data_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
+                    let progress_queue = self.download_progress_queue.clone();
                     iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -10324,18 +10392,12 @@ impl IcedChat {
 
         iced::Task::perform(
             async move {
-                let profile = UserProfile {
-                    user_id,
-                    display_name,
-                    bio,
-                    avatar_identifier: None,
-                    shared_folder_path: shared_path,
-                    file_sharing_enabled: shared_enabled,
-                    allow_downloads: false,
-                    max_file_size: 100 * 1024 * 1024,
-                    allowed_extensions: Vec::new(),
-                    shared_files: Vec::new(),
-                };
+                let mut profile = UserProfile::new(user_id);
+                profile.display_name = display_name;
+                profile.bio = bio;
+                profile.shared_folder_path = shared_path;
+                profile.file_sharing_enabled = shared_enabled;
+                profile.avatar_identifier = None;
                 if let Ok(encoded) =
                     SignedMessage::sign_and_encode(&sk, &crate::Message::ProfileUpdate(profile))
                 {
@@ -13025,6 +13087,7 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             sound_enabled: self.sound_enabled,
             chat_text_size_bits: self.chat_text_size.to_bits(),
+            onboarding_completed: self.profile_store.onboarding_completed(),
             direct_peers: self.direct_peers,
             relayed_peers: self.relayed_peers,
             neighbors_len: self.neighbors.len(),
@@ -13301,6 +13364,33 @@ impl IcedChat {
 
         let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into()]);
 
+        let onboarding_row = Row::new()
+            .push(
+                Column::new()
+                    .push(text("Onboarding").size(TYPO_MD))
+                    .push(
+                        text(if key.onboarding_completed {
+                            "Completed. You can open it again at any time."
+                        } else {
+                            "Not completed yet. Advanced setup remains available."
+                        })
+                        .size(TYPO_XS)
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(
+                button(text("Show onboarding again").size(TYPO_SM))
+                    .on_press(AppMessage::ShowOnboardingAgain)
+                    .style(BUTTON_OUTLINE)
+                    .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+        let onboarding_card = section_card("ONBOARDING", vec![onboarding_row.into()]);
+
         // ── Network section ──
         let public_key_row = Row::new()
             .push(
@@ -13437,6 +13527,8 @@ impl IcedChat {
             .push(appearance_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(notifications_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(onboarding_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(network_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
@@ -14993,11 +15085,13 @@ mod tests {
             dark_mode: false,
             sound_enabled: false,
             chat_text_size: 17.0,
+            onboarding_completed: false,
         };
         let toggled = AppSettings {
             dark_mode: true,
             sound_enabled: original.sound_enabled,
             chat_text_size: original.chat_text_size,
+            onboarding_completed: original.onboarding_completed,
         };
         toggled.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
@@ -15005,6 +15099,28 @@ mod tests {
         assert!(loaded.dark_mode);
         assert!(!loaded.sound_enabled);
         assert_eq!(loaded.chat_text_size, 17.0);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn onboarding_flag_persists_and_old_settings_migrate_as_completed() {
+        let data_dir =
+            std::env::temp_dir().join(format!("boru-gui-onboarding-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).expect("test settings directory should be created");
+
+        let mut settings = AppSettings::default();
+        assert!(!settings.onboarding_completed());
+        settings.set_onboarding_completed(true);
+        settings.save(&data_dir);
+        assert!(AppSettings::load(&data_dir).onboarding_completed());
+
+        std::fs::write(
+            data_dir.join("settings.json"),
+            r#"{"dark_mode":false,"sound_enabled":true,"chat_text_size":13.0}"#,
+        )
+        .expect("legacy settings should be written");
+        assert!(AppSettings::load(&data_dir).onboarding_completed());
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
@@ -16656,7 +16772,9 @@ mod tests {
             let router = iroh::protocol::Router::builder(endpoint.clone())
                 .accept(boru_chat::net::GOSSIP_ALPN, gossip.clone())
                 .spawn();
-            let blob_store = iroh_blobs::store::mem::MemStore::new();
+            let blob_store = iroh_blobs::store::fs::FsStore::load(data_dir.join("blobs"))
+                .await
+                .expect("create filesystem blob store");
             let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
             let friends = boru_chat::friends::FriendsStore::empty_at(&data_dir);
             let mut room_history = boru_chat::room_history::RoomHistoryStore::empty_at(&data_dir);
