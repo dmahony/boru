@@ -1,10 +1,10 @@
 # Resource Exhaustion Attack Mitigations
 
-This document catalogues every resource-exhaustion attack scenario that Boru Chat
+This document catalogues every resource-exhaustion attack scenario that Boru
 protects against, the protection mechanism, and the test that validates it.
 
 A single malicious client **cannot** cause a denial of service against a properly
-configured Boru Chat node.
+configured Boru node.
 
 ---
 

@@ -1,6 +1,6 @@
 # Protocol Layers
 
-boru-chat uses multiple distinct QUIC-based protocols, each with its own ALPN
+Boru uses multiple distinct QUIC-based protocols, each with its own ALPN
 (Application-Layer Protocol Negotiation) string and purpose.
 
 ## Protocol Overview
@@ -200,7 +200,7 @@ status. Implemented in `chat_core::friend_ping`.
 
 ## Discovery System
 
-boru-chat uses two independent DHT systems for different purposes:
+Boru uses two independent DHT systems for different purposes:
 
 | Layer | Purpose | Crate | DHT Instance |
 |---|---|---|---|

@@ -1018,7 +1018,7 @@ fn main() -> Result<()> {
         IcedChat::update,
         IcedChat::view,
     )
-    .title(|_: &IcedChat| format!("Boru Chat {}", app::version_tag()))
+    .title(|_: &IcedChat| format!("Boru {}", app::version_tag()))
     .subscription(|state: &IcedChat| {
         let subs: Vec<iced::Subscription<app::AppMessage>> = vec![
             IcedChat::subscription(

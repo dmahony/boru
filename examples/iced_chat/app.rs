@@ -11190,7 +11190,7 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let header = Row::new()
-            .push(text("Boru Chat").size(TYPO_LG).width(Length::Fill))
+            .push(text("Boru").size(TYPO_LG).width(Length::Fill))
             .push(
                 iced::widget::button(iced::widget::text("＋").size(TYPO_MD))
                     .on_press(AppMessage::ToggleAddMenu)
@@ -12206,7 +12206,7 @@ impl IcedChat {
             .count();
 
         // ── Branding / header ──
-        let heading = text("BORU CHAT")
+        let heading = text("BORU")
             .size(TYPO_XL)
             .color(accent_primary(&theme))
             .width(Length::Fill);
