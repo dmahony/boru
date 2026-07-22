@@ -172,7 +172,7 @@ jobs:
         # some non-Wasm-compatible code made it into the final code.
         - name: Ensure no 'import "env"' in iroh-relay Wasm
           run: |
-            ! wasm-tools print --skeleton target/wasm32-unknown-unknown/debug/boru_chat.wasm | grep 'import "env"'
+            ! wasm-tools print --skeleton target/wasm32-unknown-unknown/debug/boru.wasm | grep 'import "env"'
         
 
   check_semver:
@@ -201,7 +201,7 @@ jobs:
         # uses: obi1kenobi/cargo-semver-checks-action@v2
         uses: n0-computer/cargo-semver-checks-action@feat-baseline
         with:
-          package: boru-chat
+          package: boru
           baseline-rev: ${{ env.HEAD_COMMIT_SHA }}
           use-cache: false
 
@@ -236,7 +236,7 @@ jobs:
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: boru-chat docs
+      - name: boru docs
         run: cargo docs-rs
 
   clippy_check:
