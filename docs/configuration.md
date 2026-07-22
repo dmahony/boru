@@ -1,6 +1,6 @@
 # Configuration
 
-boru-chat is configured through CLI flags, environment variables, and JSON
+Boru is configured through CLI flags, environment variables, and JSON
 settings files. This document covers all available options.
 
 ## CLI Flags

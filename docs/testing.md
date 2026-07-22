@@ -1,6 +1,6 @@
 # Testing Infrastructure
 
-boru-chat has a comprehensive test suite spanning unit tests, integration tests,
+Boru has a comprehensive test suite spanning unit tests, integration tests,
 deterministic simulation, and GUI tests.
 
 ## Test Layout

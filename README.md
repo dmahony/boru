@@ -1,12 +1,12 @@
-# boru-chat
+# Boru
 
-Gossip messages over broadcast trees — a peer-to-peer chat application built on
+Private, peer-to-peer communication built on
 [iroh](https://github.com/n0-computer/iroh).
 
-## Architecture
+> Private communication, directly between people.
 
-boru-chat is a Rust library (`boru_chat`) and example GUI application
-(`examples/iced_chat`) that provides:
+Boru is a Rust library (`boru_chat`) and example GUI application
+(`examples/iced_chat`) that provides peer-to-peer messaging over gossip trees:
 
 - **Gossip protocol** — room-based message broadcasting over QUIC
 - **Direct messaging** — inbox protocol for offline delivery, whisper protocol
@@ -26,8 +26,7 @@ All persistent data lives under a single data directory, resolved in this order:
 2. `BORU_CHAT_DATA_DIR` environment variable
 3. `$XDG_DATA_HOME/boru-chat` (typically `~/.local/share/boru-chat/`)
 4. `$PWD/.boru-chat`
-###
-File Layout
+### File Layout
 
 ```text
 <data_dir>/

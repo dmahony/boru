@@ -37,7 +37,7 @@ impl LogViewer {
 
     fn view(&self) -> Element<'_, Message> {
         let header = row![
-            text("Boru Chat logs").size(22),
+            text("Boru logs").size(22),
             text(format!(" {}", app::version_tag()))
                 .size(TYPO_XXS)
                 .style(text_muted_style)
@@ -97,7 +97,7 @@ pub fn run(log_path: PathBuf) -> NResult<()> {
     iced::application(move || (state.clone(), iced::Task::none()), update, view)
         .title(move |_: &LogViewer| {
             format!(
-                "Boru Chat logs {} — {}",
+                "Boru logs {} — {}",
                 app::version_tag(),
                 log_path.display()
             )

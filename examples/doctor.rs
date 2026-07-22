@@ -30,7 +30,7 @@ use boru_chat::room_history::RoomHistoryStore;
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
-#[command(name = "doctor", about = "Check boru-chat install health")]
+#[command(name = "doctor", about = "Check Boru install health")]
 struct Args {
     /// Override the data directory to check (default: auto-detect).
     #[arg(long)]
@@ -532,7 +532,7 @@ fn format_human(checks: &[Check], data_dir: &Path) {
     let mut failures = 0;
     let mut skipped = 0;
 
-    println!("═══ boru-chat doctor ═══");
+    println!("═══ Boru doctor ═══");
     println!("data dir: {}", data_dir.display());
     println!();
 
