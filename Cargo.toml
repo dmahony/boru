@@ -1,5 +1,5 @@
 [package]
-name = "boru-chat"
+name = "boru"
 version = "0.101.0"
 # ── EDITION ─────────────────────────────────────────────────────────
 # edition = "2021" ← correct.  If you see "Rust 2015" in an error message
@@ -17,10 +17,10 @@ version = "0.101.0"
 # ──────────────────────────────────────────────────────────────────────
 edition = "2021"
 readme = "README.md"
-description = "gossip messages over broadcast trees"
+description = "Private peer-to-peer communication built on Iroh"
 license = "MIT/Apache-2.0"
 authors = ["n0 team"]
-repository = "https://github.com/dmahony/boru-chat"
+repository = "https://github.com/dmahony/boru"
 resolver = "2"
 
 # Sadly this also needs to be updated in .github/workflows/ci.yml
