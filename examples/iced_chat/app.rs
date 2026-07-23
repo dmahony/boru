@@ -1836,6 +1836,9 @@ pub struct IcedChat {
     /// so the friends/discovered-peers list re-renders only when a peer's
     /// profile actually changes, not on every ConnMonitorTick.
     friend_profile_versions: HashMap<PublicKey, u64>,
+    /// Tracks last retry attempt time per peer for failed profile image downloads.
+    /// Used by retry_stale_profile_images to implement a cooldown between retries.
+    last_failed_profile_retry: HashMap<PublicKey, std::time::Instant>,
     /// Performance metrics for the last render — used by regression tests.
     perf: std::cell::RefCell<PerfMetrics>,
     /// Whether this is the user's first run (no room history, no friends, no chats).
@@ -3495,6 +3498,7 @@ impl IcedChat {
             friend_image_tickets: HashMap::new(),
             pending_profile_image_tickets: pending_friend_tickets,
             friend_profile_versions: HashMap::new(),
+            last_failed_profile_retry: HashMap::new(),
             perf: std::cell::RefCell::new(PerfMetrics::default()),
             first_run,
             layout_cache: std::cell::RefCell::new(LayoutCache::new(app_settings.chat_text_size)),
@@ -9678,6 +9682,9 @@ impl IcedChat {
                         }
                     }
                 }
+                // Retry failed profile image downloads for friends whose
+                // image ticket is stored but handle is not yet cached.
+                self.retry_stale_profile_images();
                 self.enforce_image_budget();
                 self.enforce_entry_cap();
 
@@ -10882,6 +10889,51 @@ impl IcedChat {
                 Err(_) => AppMessage::ProfileImageDownloadFailed(failed_peer),
             },
         )
+    }
+
+    fn retry_stale_profile_images(&mut self) {
+        use std::time::Instant;
+        const RETRY_COOLDOWN_SECS: u64 = 5;
+        let now = Instant::now();
+        for (fid, record) in self.friends.iter() {
+            let Some(ticket) = record.last_announced_profile_image_ticket.as_ref() else {
+                continue;
+            };
+            if ticket.is_empty() {
+                continue;
+            }
+            let Ok(peer) = fid.parse_public_key() else {
+                continue;
+            };
+            // Skip if we already have a cached handle for this peer
+            if self
+                .friend_image_handles
+                .get(&peer)
+                .is_some_and(|h| h.is_some())
+            {
+                continue;
+            }
+            // If never retried before, allow immediate retry
+            let never_retried = !self.last_failed_profile_retry.contains_key(&peer);
+            let last = self
+                .last_failed_profile_retry
+                .get(&peer)
+                .copied()
+                .unwrap_or(now);
+            if !never_retried && now.duration_since(last).as_secs() < RETRY_COOLDOWN_SECS {
+                continue;
+            }
+            self.last_failed_profile_retry.insert(peer, now);
+            // Avoid re-pushing if already queued
+            let already_queued = self
+                .pending_profile_image_tickets
+                .iter()
+                .any(|(p, _)| *p == peer);
+            if !already_queued {
+                self.pending_profile_image_tickets
+                    .push_back((peer, ticket.clone()));
+            }
+        }
     }
 
     fn try_save_friends(&mut self) {
@@ -12597,9 +12649,18 @@ impl IcedChat {
         let mut peers: Vec<SidebarDiscoveredPeerRow> = self
             .discovered_peers
             .iter()
-            .map(|peer| {
+            .filter_map(|peer| {
                 let fid = boru_core::friends::FriendId::from_public_key(*peer);
-                SidebarDiscoveredPeerRow {
+                // Skip peers who are already friends — show only non-friend peers.
+                let is_friend = self
+                    .friends
+                    .get(&fid)
+                    .map(|r| r.relationship.can_message())
+                    .unwrap_or(false);
+                if is_friend {
+                    return None;
+                }
+                Some(SidebarDiscoveredPeerRow {
                     peer: *peer,
                     display_name: self.resolve_name(peer),
                     avatar: Self::sidebar_avatar_handle(
@@ -12608,14 +12669,10 @@ impl IcedChat {
                             .and_then(|avatar| avatar.as_ref()),
                     ),
                     online: self.neighbors.contains(peer),
-                    is_friend: self
-                        .friends
-                        .get(&fid)
-                        .map(|r| r.relationship.can_message())
-                        .unwrap_or(false),
+                    is_friend: false,
                     request_state: self.outgoing_request_states.get(peer).cloned(),
                     profile_version: self.friend_profile_versions.get(peer).copied().unwrap_or(0),
-                }
+                })
             })
             .collect();
         peers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
