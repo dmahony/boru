@@ -47,7 +47,7 @@ use boru_core::image_optimizer::{
 };
 use boru_core::image_store::ImageStore;
 use boru_core::inbox::{send_ack, send_deliver, send_sync_request, InboxEvent};
-use boru_core::mailbox::{seal_for, IncomingAcceptance, MailboxAck, MailboxIdentity, MailboxStore};
+use boru_core::mailbox::{seal_for, IncomingAcceptance, MailboxAck, MailboxIdentity, MailboxPublicKey, MailboxStore};
 use boru_core::net::Gossip;
 use boru_core::outbox::{OutboxEntry, OutboxStore};
 use boru_core::private_room_tracker::{PrivateContinuousTracker, PrivateRoomTracker};
@@ -9784,6 +9784,7 @@ impl IcedChat {
                     sound_enabled: self.sound_enabled,
                     share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
+                    display_name: Some(self.local_label.clone()),
                 };
                 let data_dir = self.data_dir.clone();
                 let progress_queue = self.download_progress_queue.clone();
@@ -9822,6 +9823,7 @@ impl IcedChat {
                     sound_enabled: self.sound_enabled,
                     share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
+                    display_name: Some(self.local_label.clone()),
                 };
                 let data_dir = self.data_dir.clone();
                 let progress_queue = self.download_progress_queue.clone();
@@ -10053,6 +10055,7 @@ impl IcedChat {
                     sound_enabled: self.sound_enabled,
                     share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
+                    display_name: Some(self.local_label.clone()),
                 };
                 let data_dir = self.data_dir.clone();
                 let progress_queue = self.download_progress_queue.clone();
@@ -10071,6 +10074,7 @@ impl IcedChat {
                     sound_enabled: self.sound_enabled,
                     share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
+                    display_name: Some(self.local_label.clone()),
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -16350,12 +16354,14 @@ mod tests {
             sound_enabled: false,
             chat_text_size: 17.0,
             share_direct_addresses: false,
+            display_name: None,
         };
         let toggled = AppSettings {
             dark_mode: true,
             sound_enabled: original.sound_enabled,
             chat_text_size: original.chat_text_size,
             share_direct_addresses: original.share_direct_addresses,
+            display_name: None,
         };
         toggled.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
