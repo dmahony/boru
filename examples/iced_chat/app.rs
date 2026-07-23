@@ -12604,72 +12604,132 @@ impl IcedChat {
             .color(text_muted(&theme))
             .width(Length::Fill);
 
-        // ── Status section ──
-        let online_dot = "●";
-        let online_color = accent_green(&theme);
-        let mesh_label = match &self.mesh_health {
-            MeshHealth::Good => "Mesh: healthy".to_string(),
-            MeshHealth::Degraded(reason) => format!("Mesh: degraded — {reason}"),
-            MeshHealth::Offline(reason) => format!("Mesh: offline — {reason}"),
-        };
-        let relay_label = fmt_relay_mode(&self.relay_mode);
-        let friend_status_text = if total_friend_count == 0 || online_friend_count == 0 {
-            "No friends are online right now.".to_string()
+        // ── Status cards ──
+        let is_connected = !self.neighbors.is_empty()
+            || self.relayed_peers > 0
+            || self.direct_peers > 0;
+
+        let connection_indicator: iced::Element<'_, AppMessage> = if is_connected {
+            row![
+                text("●").size(TYPO_MD).color(accent_green(&theme)),
+                text("Connected").size(TYPO_SM).color(accent_green(&theme)),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .into()
         } else {
-            format!("Friends Online: {online_friend_count} / {total_friend_count}")
+            row![
+                text("●").size(TYPO_MD).color(color_error(&theme)),
+                text("Disconnected")
+                    .size(TYPO_SM)
+                    .color(color_error(&theme)),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .into()
         };
 
-        let status_items = Column::new()
-            .spacing(SPACE_6)
-            .push(
-                row![
-                    text(online_dot).size(TYPO_MD).color(online_color),
-                    text("Online").size(TYPO_SM).color(online_color),
-                ]
-                .spacing(SPACE_6)
-                .align_y(Alignment::Center),
-            )
-            .push(
-                row![
-                    text(online_dot).size(TYPO_MD).color(accent_primary(&theme)),
-                    text(mesh_label.clone())
-                        .size(TYPO_SM)
-                        .color(text_system(&theme)),
-                ]
-                .spacing(SPACE_6)
-                .align_y(Alignment::Center),
-            )
-            .push(
-                row![
-                    text(online_dot).size(TYPO_MD).color(accent_primary(&theme)),
-                    text(relay_label.clone())
-                        .size(TYPO_SM)
-                        .color(text_system(&theme)),
-                ]
-                .spacing(SPACE_6)
-                .align_y(Alignment::Center),
-            )
-            .push(
-                row![
-                    text(online_dot)
-                        .size(TYPO_MD)
-                        .color(if total_friend_count > 0 {
-                            accent_green(&theme)
-                        } else {
-                            text_muted(&theme)
-                        }),
-                    text(friend_status_text)
-                        .size(TYPO_SM)
-                        .color(text_system(&theme)),
-                ]
-                .spacing(SPACE_6)
-                .align_y(Alignment::Center),
-            );
+        let network_label = match &self.relay_mode {
+            RelayMode::Disabled => "Direct".to_string(),
+            _ => {
+                let full = fmt_relay_mode(&self.relay_mode);
+                // Short form — strip scheme and truncate
+                let short = full
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://");
+                if short.len() > 28 {
+                    format!("{}…", &short[..25])
+                } else {
+                    short.to_string()
+                }
+            }
+        };
 
-        let status_card = container(status_items)
-            .padding([SPACE_12, SPACE_16])
-            .width(Length::Fill)
-            .style(container_card);
+        let friends_online_text = if total_friend_count == 0 {
+            "0 / 0".to_string()
+        } else {
+            format!("{online_friend_count} / {total_friend_count}")
+        };
+
+        let relay_text = fmt_relay_mode(&self.relay_mode);
+
+        // Build a single status card container — inlined to avoid
+        // nested-function lifetime issues with the local `theme`.
+        let status_cards = iced::widget::Row::new()
+            .push(
+                container(
+                    Column::new()
+                        .push(text("🔌").size(TYPO_LG))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Connection").size(TYPO_XS).color(text_muted(&theme)))
+                        .push(Space::new().height(Length::Fixed(SPACE_4)))
+                        .push(connection_indicator)
+                        .spacing(SPACE_2)
+                        .align_x(Alignment::Center),
+                )
+                .padding([SPACE_12, SPACE_8])
+                .width(Length::Fill)
+                .style(container_card),
+            )
+            .push(
+                container(
+                    Column::new()
+                        .push(text("🌐").size(TYPO_LG))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Network").size(TYPO_XS).color(text_muted(&theme)))
+                        .push(Space::new().height(Length::Fixed(SPACE_4)))
+                        .push(
+                            text(network_label)
+                                .size(TYPO_SM)
+                                .color(text_system(&theme)),
+                        )
+                        .spacing(SPACE_2)
+                        .align_x(Alignment::Center),
+                )
+                .padding([SPACE_12, SPACE_8])
+                .width(Length::Fill)
+                .style(container_card),
+            )
+            .push(
+                container(
+                    Column::new()
+                        .push(text("👥").size(TYPO_LG))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Friends Online").size(TYPO_XS).color(text_muted(&theme)))
+                        .push(Space::new().height(Length::Fixed(SPACE_4)))
+                        .push(
+                            text(friends_online_text)
+                                .size(TYPO_SM)
+                                .color(text_system(&theme)),
+                        )
+                        .spacing(SPACE_2)
+                        .align_x(Alignment::Center),
+                )
+                .padding([SPACE_12, SPACE_8])
+                .width(Length::Fill)
+                .style(container_card),
+            )
+            .push(
+                container(
+                    Column::new()
+                        .push(text("📡").size(TYPO_LG))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Relay").size(TYPO_XS).color(text_muted(&theme)))
+                        .push(Space::new().height(Length::Fixed(SPACE_4)))
+                        .push(
+                            text(relay_text)
+                                .size(TYPO_SM)
+                                .color(text_system(&theme)),
+                        )
+                        .spacing(SPACE_2)
+                        .align_x(Alignment::Center),
+                )
+                .padding([SPACE_12, SPACE_8])
+                .width(Length::Fill)
+                .style(container_card),
+            )
+            .spacing(SPACE_8)
+            .width(Length::Fill);
 
         // ── Quick actions ──
         fn action_button(
@@ -12780,7 +12840,7 @@ impl IcedChat {
             .push(Space::new().height(Length::Fixed(SPACE_4)))
             .push(tagline)
             .push(Space::new().height(Length::Fixed(SPACE_24)))
-            .push(status_card)
+            .push(status_cards)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(actions)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
