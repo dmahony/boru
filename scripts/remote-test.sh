@@ -4,6 +4,7 @@
 # The machine manifest is local-only. Keep it out of GitHub; this script is
 # also excluded from this checkout's Git index by .git/info/exclude.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 MANIFEST="${BORU_TEST_MANIFEST:-$PROJECT_DIR/config/test-machines.toml}"
