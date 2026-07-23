@@ -5709,10 +5709,7 @@ impl IcedChat {
                 self.names.clear();
                 self.composer_text.clear();
                 self.first_run = false; // First action taken — onboarding complete
-                self.push_system(format!(
-                    "Connected as {}.",
-                    self.local_label
-                ));
+                self.push_system("Chat joined.");
                 self.push_system("Type a message and press Enter to send.  /help for commands.");
 
                 // If the ticket contains a discovery secret, also display a
@@ -13663,14 +13660,23 @@ impl IcedChat {
             "—".to_string()
         };
         let ticket_clip = ticket_short.clone();
+
+        // Count online peers for this room.
+        let online_peers = self.friend_online_cache.len();
+
         let info_row = row![
-            text(format!("Topic: {short_topic}…")).size(TYPO_XXS).color(self.color_muted()),
+            text(format!("Topic: {short_topic}…"))
+                .size(TYPO_XXS).color(self.color_muted()),
             text(" · ").size(TYPO_XXS).color(self.color_muted()),
             button(text(format!("Ticket: {ticket_clip}")).size(TYPO_XXS).color(self.color_muted()))
                 .on_press(AppMessage::CopyToClipboard(self.ticket_str.clone()))
                 .style(BUTTON_GHOST_BG),
+            text(" · ").size(TYPO_XXS).color(self.color_muted()),
+            text(format!("{} online", online_peers))
+                .size(TYPO_XXS).color(self.color_muted()),
         ]
-        .spacing(SPACE_4);
+        .spacing(SPACE_4)
+        .align_y(Alignment::Center);
 
         let full_header = column![header, info_row].spacing(SPACE_2);
 
