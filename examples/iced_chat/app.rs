@@ -7498,6 +7498,13 @@ impl IcedChat {
                         }
                     }
                     boru_core::whisper::WhisperEvent::Message { from, content } => {
+                        // The whisper session manager sends an empty DM for
+                        // connection establishment / address discovery; these
+                        // contain no user-readable text and should not create
+                        // chat entries or increment the unread counter.
+                        if content.is_empty() {
+                            return iced::Task::none();
+                        }
                         let text = String::from_utf8_lossy(&content).to_string();
                         let label = self
                             .names
