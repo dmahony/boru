@@ -454,9 +454,12 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| {
             std::path::PathBuf::from("/home/dan/iroh-gossip-chat/scripts/splash.py")
         });
+    let splash_log_path = data_dir.join("instance.log");
     let mut splash_child = if splash_script.exists() {
         std::process::Command::new("python3")
             .arg(&splash_script)
+            .arg("--log")
+            .arg(&splash_log_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
