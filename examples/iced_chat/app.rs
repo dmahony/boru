@@ -742,6 +742,52 @@ pub(crate) const BUTTON_TRANSPARENT: fn(
     ..Default::default()
 };
 
+/// Card-style button — surface background, subtle border, hover lift.
+/// Matches `container_card` visually but adds interactive hover/press feedback.
+pub(crate) const BUTTON_CARD: fn(
+    &iced::Theme,
+    iced::widget::button::Status,
+) -> iced::widget::button::Style = |theme, status| iced::widget::button::Style {
+    background: Some(iced::Background::Color(match status {
+        iced::widget::button::Status::Hovered => bg_hover(theme),
+        iced::widget::button::Status::Pressed => {
+            let mut c = bg_hover(theme);
+            c.r *= 0.92;
+            c.g *= 0.92;
+            c.b *= 0.92;
+            c
+        }
+        _ => bg_surface(theme),
+    })),
+    text_color: match status {
+        iced::widget::button::Status::Hovered => accent_primary(theme),
+        iced::widget::button::Status::Pressed => {
+            let mut c = accent_primary(theme);
+            c.r *= 0.85;
+            c.g *= 0.85;
+            c.b *= 0.85;
+            c
+        }
+        _ => Color::from_rgb(0.5, 0.5, 0.5),
+    },
+    border: iced::Border {
+        color: match status {
+            iced::widget::button::Status::Hovered => accent_primary(theme),
+            iced::widget::button::Status::Pressed => {
+                let mut c = accent_primary(theme);
+                c.r *= 0.85;
+                c.g *= 0.85;
+                c.b *= 0.85;
+                c
+            }
+            _ => border_muted(theme),
+        },
+        width: 1.0,
+        radius: SPACE_8.into(),
+    },
+    ..Default::default()
+};
+
 // ── Chat entry types ──────────────────────────────────────────────────
 
 /// Current time as Unix epoch milliseconds.
@@ -12731,38 +12777,73 @@ impl IcedChat {
             .spacing(SPACE_8)
             .width(Length::Fill);
 
-        // ── Quick actions ──
-        fn action_button(
-            label: &'static str,
-            msg: AppMessage,
-        ) -> iced::Element<'static, AppMessage> {
-            button(text(label).size(TYPO_SM))
-                .on_press(msg)
-                .padding([SPACE_10, SPACE_16])
+        // ── Action cards ──
+        let action_cards = iced::widget::Row::new()
+            .push(
+                button(
+                    Column::new()
+                        .push(text("💬").size(TYPO_XL))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Start Chat").size(TYPO_SM))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Start a new conversation").size(TYPO_XS).color(text_muted(&theme)))
+                        .spacing(SPACE_2)
+                        .align_x(Alignment::Center),
+                )
+                .on_press(AppMessage::ToggleAddMenu)
+                .padding([SPACE_12, SPACE_8])
                 .width(Length::Fill)
-                .style(BUTTON_OUTLINE)
-                .into()
-        }
-
-        let actions = Column::new()
-            .push(
-                row![
-                    action_button("Start Chat", AppMessage::CreateNewRoom),
-                    action_button("Add Friend", AppMessage::OpenFriendRequests),
-                ]
-                .spacing(SPACE_8)
-                .width(Length::Fill),
+                .style(BUTTON_CARD),
             )
-            .push(Space::new().height(Length::Fixed(SPACE_4)))
             .push(
-                row![
-                    action_button("Join Ticket", AppMessage::JoinFromTicket),
-                    action_button("Browse Files", AppMessage::AddSharedFile),
-                ]
-                .spacing(SPACE_8)
-                .width(Length::Fill),
+                button(
+                    Column::new()
+                        .push(text("👤").size(TYPO_XL))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Add Friend").size(TYPO_SM))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Add a friend by key or file").size(TYPO_XS).color(text_muted(&theme)))
+                        .spacing(SPACE_2)
+                        .align_x(Alignment::Center),
+                )
+                .on_press(AppMessage::OpenFriendRequests)
+                .padding([SPACE_12, SPACE_8])
+                .width(Length::Fill)
+                .style(BUTTON_CARD),
             )
-            .spacing(SPACE_4)
+            .push(
+                button(
+                    Column::new()
+                        .push(text("🎫").size(TYPO_XL))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Join Ticket").size(TYPO_SM))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Join a room via ticket").size(TYPO_XS).color(text_muted(&theme)))
+                        .spacing(SPACE_2)
+                        .align_x(Alignment::Center),
+                )
+                .on_press(AppMessage::JoinFromTicket)
+                .padding([SPACE_12, SPACE_8])
+                .width(Length::Fill)
+                .style(BUTTON_CARD),
+            )
+            .push(
+                button(
+                    Column::new()
+                        .push(text("📁").size(TYPO_XL))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Browse Files").size(TYPO_SM))
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
+                        .push(text("Browse shared files").size(TYPO_XS).color(text_muted(&theme)))
+                        .spacing(SPACE_2)
+                        .align_x(Alignment::Center),
+                )
+                .on_press(AppMessage::OpenSettings)
+                .padding([SPACE_12, SPACE_8])
+                .width(Length::Fill)
+                .style(BUTTON_CARD),
+            )
+            .spacing(SPACE_8)
             .width(Length::Fill);
 
         // ── Recent activity ──
@@ -12842,7 +12923,7 @@ impl IcedChat {
             .push(Space::new().height(Length::Fixed(SPACE_24)))
             .push(status_cards)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
-            .push(actions)
+            .push(action_cards)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(activity_card)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
