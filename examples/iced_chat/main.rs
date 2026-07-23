@@ -590,8 +590,10 @@ fn main() -> Result<()> {
         let notice = "Direct iroh transport is operational.".to_string();
 
         let gossip = Gossip::builder().spawn(endpoint.clone());
+        splash_send("Gossip mesh ready");
         let blob_store = FsStore::load(data_dir.join("blobs")).await?;
         let blobs_protocol = BlobsProtocol::new(&blob_store, None);
+        splash_send("Blob store ready");
 
         // ── Persistent history stores ────────────────────────────────
         let room_history = RoomHistoryStore::empty_at(&data_dir);
@@ -656,6 +658,7 @@ fn main() -> Result<()> {
         let whisper_builder = WhisperBuilder::new(endpoint.clone(), secret_key.clone());
         let whisper_handler = whisper_builder.protocol_handler();
         let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
+        splash_send("Whisper protocol ready");
 
         // ── Inbox protocol ─────────────────────────────────────────────
         // Direct QUIC channels for offline message delivery to peers.
@@ -716,9 +719,11 @@ fn main() -> Result<()> {
             .await;
         let inbox_protocol = InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
         let inbox_events_rx = Arc::new(Mutex::new(inbox_events_rx_tmp));
+        splash_send("Inbox protocol ready");
 
         // ── Friends list (needed before router for CatalogueHandler) ───
         let friends = FriendsStore::load_or_default(&data_dir);
+        splash_send(&format!("Loaded {} friends", friends.len()));
         if !friends.is_empty() {
             info!("> loaded {} friend(s) from disk", friends.len());
         }
@@ -740,6 +745,7 @@ fn main() -> Result<()> {
             .accept(INBOX_ALPN, inbox_protocol)
             .accept(CATALOGUE_ALPN, catalogue_handler)
             .spawn();
+        splash_send("Protocol router ready");
 
         // Subscribe to the lobby topic so the gossip mesh is ready for
         // LAN-discovered peers. This must happen inside runtime.block_on
@@ -817,6 +823,7 @@ fn main() -> Result<()> {
                 });
             }
             info!("subscribed to lobby topic");
+            splash_send("Lobby joined — discovering peers");
         } else {
             warn!("failed to subscribe to lobby topic");
         }
@@ -824,6 +831,7 @@ fn main() -> Result<()> {
 
         // Spawn the backfill background actor for requesting history
         let backfill_handle = BackfillHandle::spawn(endpoint.clone());
+        splash_send("Backfill service ready");
 
         let whisper_events_rx = Arc::new(Mutex::new(whisper_events_rx_tmp));
 
@@ -842,9 +850,11 @@ fn main() -> Result<()> {
         );
         drop(_guard);
         let friend_events_rx = Arc::new(Mutex::new(friend_events_rx_tmp));
+        splash_send("Friend ping manager ready");
 
         // Register existing friends with the ping manager
         // (we're already inside runtime.block_on, so .await directly)
+        splash_send("Registering known friends...");
         for peer in friends
             .iter()
             .filter_map(|(id, _)| id.parse_public_key().ok())
