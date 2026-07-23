@@ -1626,6 +1626,9 @@ pub struct IcedChat {
     /// Pending topic we're connecting to (used during the async handoff
     /// from clicking a room to actually subscribing).
     pending_topic: Option<TopicId>,
+    /// True while the async gossip subscription for a room is in flight.
+    /// Shows a spinner in the chat view instead of an empty panel.
+    room_loading: bool,
     /// Screen to return to when closing the settings page.
     settings_return_to: Option<Screen>,
 
@@ -3384,6 +3387,7 @@ impl IcedChat {
             splash_spinner_frame: 0,
             previous_screen: None,
             pending_topic: None,
+            room_loading: false,
             room_history,
             room_history_dirty: false,
             join_ticket_input: String::new(),
@@ -5138,6 +5142,8 @@ impl IcedChat {
                 let dht = self.dht.clone();
 
                 let share_direct_addresses = self.share_direct_addresses;
+                // Show a loading spinner while the gossip subscription is in flight.
+                self.room_loading = true;
                 iced::Task::perform(
                     async move {
                         // Subscribe to the new topic
@@ -5466,6 +5472,8 @@ impl IcedChat {
                         .is_some_and(|conversation| conversation.topic == topic)
                 });
                 let share_direct_addresses = self.share_direct_addresses;
+                // Show a loading spinner while the gossip subscription is in flight.
+                self.room_loading = true;
 
                 iced::Task::perform(
                     async move {
@@ -5647,6 +5655,7 @@ impl IcedChat {
             } => {
                 info!("RoomOpened FIRED topic={topic}");
                 self.pending_topic = None;
+                self.room_loading = false;
                 self.sender = Some(sender.clone());
 
                 // Retroactively join any pending discovered peers now that the lobby sender is available
@@ -5838,6 +5847,7 @@ impl IcedChat {
 
             AppMessage::RoomJoinFailed(e) => {
                 self.pending_topic = None;
+                self.room_loading = false;
                 if let Some((action_id, expected_topic)) = self.pending_open_room_action.take() {
                     let _ = self.gui_action_history.set_error(
                         &action_id,
@@ -5903,6 +5913,8 @@ impl IcedChat {
                 let private_dht_disabled = self.private_dht_disabled;
                 let dht = self.dht.clone();
                 let share_direct_addresses = self.share_direct_addresses;
+                // Show a loading spinner while the gossip subscription is in flight.
+                self.room_loading = true;
 
                 iced::Task::perform(
                     async move {
@@ -13452,6 +13464,28 @@ impl IcedChat {
     /// Contains header + message log + composer.
     fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::{widget, Length};
+
+        // Show a loading spinner while the gossip subscription is in flight.
+        if self.room_loading {
+            const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let spinner = SPINNER_FRAMES[self.splash_spinner_frame % SPINNER_FRAMES.len()];
+            let dark_mode = self.theme_prefers_dark();
+            return widget::container(
+                widget::column![
+                    widget::text(spinner).size(40.0).color(Self::accent_color(dark_mode)),
+                    widget::text("Loading conversation…")
+                        .size(14.0)
+                        .color(Self::muted_color(dark_mode)),
+                ]
+                .spacing(SPACE_12)
+                .align_x(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
+        }
 
         let content = widget::column![
             self.view_chat_header(),

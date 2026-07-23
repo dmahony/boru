@@ -1039,8 +1039,8 @@ fn main() -> Result<()> {
     .subscription(|state: &IcedChat| {
         let mut subs: Vec<iced::Subscription<app::AppMessage>> = vec![];
 
-        // Splash tick at 100ms while showing the splash screen
-        if state.screen == app::Screen::Splash {
+        // Splash tick at 100ms while showing the splash screen or loading a room
+        if state.screen == app::Screen::Splash || state.room_loading {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(100))
                     .map(|_| app::AppMessage::SplashTick),
