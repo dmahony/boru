@@ -788,6 +788,43 @@ pub(crate) const BUTTON_CARD: fn(
     ..Default::default()
 };
 
+/// File-drop area style — wide dashed-looking border, semi-transparent bg,
+/// accent-colored border on hover/press. Simulates dashed border since
+/// iced 0.14 doesn't support native dashed borders.
+pub(crate) const FILE_DROP_AREA: fn(
+    &iced::Theme,
+    iced::widget::button::Status,
+) -> iced::widget::button::Style = |theme, status| {
+    let is_hovered = matches!(
+        status,
+        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+    );
+    let base_bg = bg_surface(theme);
+    iced::widget::button::Style {
+        background: Some(iced::Background::Color(Color {
+            a: if is_hovered { 0.60 } else { 0.35 },
+            ..base_bg
+        })),
+        border: iced::Border {
+            color: if is_hovered {
+                accent_primary(theme)
+            } else {
+                let mut c = accent_primary(theme);
+                c.a = 0.5;
+                c
+            },
+            width: 2.0,
+            radius: 12.0.into(),
+        },
+        text_color: if is_hovered {
+            accent_primary(theme)
+        } else {
+            text_muted(theme)
+        },
+        ..Default::default()
+    }
+};
+
 // ── Chat entry types ──────────────────────────────────────────────────
 
 /// Current time as Unix epoch milliseconds.
@@ -12857,62 +12894,34 @@ impl IcedChat {
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(
                 // ── File-drop area card ──
-                container(
+                button(
                     Column::new()
                         .push(
                             text("📁")
                                 .size(TYPO_XL * 1.5)
                                 .width(Length::Fill),
                         )
+                        .push(Space::new().height(Length::Fixed(SPACE_4)))
                         .push(
                             text("Drop files to share")
                                 .size(TYPO_MD)
                                 .width(Length::Fill),
                         )
+                        .push(Space::new().height(Length::Fixed(SPACE_2)))
                         .push(
                             text("Drag & drop files here to share them with friends")
                                 .size(TYPO_XS)
                                 .color(text_muted(&theme))
                                 .width(Length::Fill),
                         )
-                        .spacing(SPACE_6)
+                        .spacing(0)
                         .align_x(Alignment::Center)
                         .width(Length::Fill),
                 )
+                .on_press(AppMessage::AddSharedFile)
                 .padding([SPACE_16, SPACE_12])
                 .width(Length::Fill)
-                .style(move |t: &iced::Theme| {
-                    let base = container_card(t);
-                    let is_dark = matches!(t, iced::Theme::Dark);
-                    iced::widget::container::Style {
-                        background: Some(iced::Background::Color({
-                            let mut c = base
-                                .background
-                                .as_ref()
-                                .and_then(|b| {
-                                    if let iced::Background::Color(c) = b {
-                                        Some(*c)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or(iced::Color::TRANSPARENT);
-                            c.a = 0.5;
-                            c
-                        })),
-                        border: iced::Border {
-                            color: if matches!(t, iced::Theme::Dark) {
-                                iced::Color::from_rgb(0.4, 0.4, 0.8)
-                            } else {
-                                iced::Color::from_rgb(0.3, 0.3, 0.7)
-                            },
-                            width: 2.0,
-                            radius: 12.0.into(),
-                            ..Default::default()
-                        },
-                        ..base
-                    }
-                }),
+                .style(FILE_DROP_AREA),
             )
             .spacing(0)
             .width(Length::Fill);
