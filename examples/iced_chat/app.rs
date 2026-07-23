@@ -6306,6 +6306,8 @@ impl IcedChat {
                     let secret_key = self.secret_key.clone();
                     let whisper_handle = self.whisper_handle.clone();
                     let local_addr = self.endpoint.addr();
+                    // Advertise our mailbox key alongside the invite.
+                    let mailbox_key = self.local_mailbox_key;
                     let action = ContactAction::ConversationInvite {
                         topic,
                         addrs: vec![local_addr],
@@ -6322,10 +6324,10 @@ impl IcedChat {
                         ];
                         // Also advertise our mailbox key so the friend can
                         // encrypt offline messages to us.
-                        if let Some(mailbox) = self.local_mailbox_key {
+                        if let Some(mailbox) = mailbox_key {
                             let mb_action = ContactAction::MailboxAdvertise { mailbox };
                             if let Ok(mb_payload) = SignedContactMessage::sign(&secret_key, &mb_action) {
-                                let wh = whisper_handle.clone();
+                                let wh = self.whisper_handle.clone();
                                 tasks.push(iced::Task::perform(
                                     async move { let _ = wh.send_control(peer, mb_payload.into()).await; },
                                     |_| AppMessage::Noop,
