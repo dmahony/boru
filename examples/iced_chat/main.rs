@@ -11,6 +11,7 @@ mod download_progress_view;
 mod gui_test_actions;
 mod log_viewer;
 mod mcp_server;
+mod notification;
 mod perf_tracker;
 mod presentation;
 
