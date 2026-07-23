@@ -75,6 +75,7 @@ use tracing::{debug, info, warn};
 use crate::connection_details::{
     self, ConnectionDetailsDialogAction, ConnectionDetailsDialogState, ConnectionDetailsViewModel,
 };
+use crate::notification::service::{NotificationService, WindowFocusState};
 use crate::perf_tracker::PerfTracker;
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_core::chat_core::{RoomInvitation, DIAGNOSTICS};
