@@ -13473,7 +13473,7 @@ impl IcedChat {
             let dark_mode = self.theme() == iced::Theme::Dark;
             return widget::container(
                 widget::column![
-                    widget::text(spinner).size(40.0).color(Self::accent_primary(&theme)),
+                    widget::text(spinner).size(40.0).color(accent_primary(&theme)),
                     widget::text("Loading conversation…")
                         .size(14.0)
                         .color(Self::muted_color(dark_mode)),
