@@ -3362,7 +3362,7 @@ impl IcedChat {
         // takes priority; when no --name was given the constructor receives
         // the public-key short form (which looks like "90af827f0d").  If a
         // persisted name exists we prefer it over that auto-generated default.
-        let local_label = if local_label != local_public.fmt_short() {
+        let local_label = if local_label != local_public.fmt_short().to_string() {
             local_label  // user explicitly passed --name, use it
         } else if let Some(ref saved) = app_settings.display_name {
             saved.clone()  // use persisted name
