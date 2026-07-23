@@ -13653,7 +13653,29 @@ impl IcedChat {
         .align_y(Alignment::Center),]
         .spacing(SPACE_4);
 
-        container(header)
+        // Topic + ticket info row (shortened, ticket click-to-copy).
+        let topic_hex = self.topic.to_string();
+        let short_topic = &topic_hex[..8.min(topic_hex.len())];
+        let ticket_short = if self.ticket_str.len() > 12 {
+            format!("{}…{}", &self.ticket_str[..6], &self.ticket_str[self.ticket_str.len()-6..])
+        } else if !self.ticket_str.is_empty() {
+            self.ticket_str.clone()
+        } else {
+            "—".to_string()
+        };
+        let ticket_clip = ticket_short.clone();
+        let info_row = row![
+            text(format!("Topic: {short_topic}…")).size(TYPO_XXS).color(self.color_muted()),
+            text(" · ").size(TYPO_XXS).color(self.color_muted()),
+            button(text(format!("Ticket: {ticket_clip}")).size(TYPO_XXS).color(self.color_muted()))
+                .on_press(AppMessage::CopyToClipboard(self.ticket_str.clone()))
+                .style(BUTTON_GHOST_BG),
+        ]
+        .spacing(SPACE_4);
+
+        let full_header = column![header, info_row].spacing(SPACE_2);
+
+        container(full_header)
             .width(Length::Fill)
             .padding(SPACE_12)
             .style(container_surface)
