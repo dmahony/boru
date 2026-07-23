@@ -12854,6 +12854,66 @@ impl IcedChat {
             .push(status_cards)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(action_cards)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(
+                // ── File-drop area card ──
+                container(
+                    Column::new()
+                        .push(
+                            text("📁")
+                                .size(TYPO_XL * 1.5)
+                                .width(Length::Fill),
+                        )
+                        .push(
+                            text("Drop files to share")
+                                .size(TYPO_MD)
+                                .width(Length::Fill),
+                        )
+                        .push(
+                            text("Drag & drop files here to share them with friends")
+                                .size(TYPO_XS)
+                                .color(text_muted(&theme))
+                                .width(Length::Fill),
+                        )
+                        .spacing(SPACE_6)
+                        .align_x(Alignment::Center)
+                        .width(Length::Fill),
+                )
+                .padding([SPACE_16, SPACE_12])
+                .width(Length::Fill)
+                .style(move |t: &iced::Theme| {
+                    let base = container_card(t);
+                    let is_dark = matches!(t, iced::Theme::Dark);
+                    iced::widget::container::Style {
+                        background: Some(iced::Background::Color({
+                            let mut c = base
+                                .background
+                                .as_ref()
+                                .and_then(|b| {
+                                    if let iced::Background::Color(c) = b {
+                                        Some(*c)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(iced::Color::TRANSPARENT);
+                            c.a = 0.5;
+                            c
+                        })),
+                        border: iced::Border {
+                            color: if matches!(t, iced::Theme::Dark) {
+                                iced::Color::from_rgb(0.4, 0.4, 0.8)
+                            } else {
+                                iced::Color::from_rgb(0.3, 0.3, 0.7)
+                            },
+                            width: 2.0,
+                            radius: 12.0.into(),
+                            ..Default::default()
+                        },
+                        ..base
+                    }
+                }),
+            )
             .spacing(0)
             .width(Length::Fill);
 
