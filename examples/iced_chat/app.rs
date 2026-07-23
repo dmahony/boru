@@ -298,7 +298,15 @@ impl<'a> From<BoruLogo<'a>> for iced::Element<'a, AppMessage> {
         use iced::Font;
 
         let font_size = logo.size.pt();
-        let font = Font::with_name(BRAND_LOGO_FONT);
+        // Use the typographic family "Montserrat" with weight 900 (Black)
+        // instead of the display family "Montserrat Black" so the font
+        // system matches by family + weight.
+        let font = Font {
+            family: iced::font::Family::Name("Montserrat"),
+            weight: iced::font::Weight::Black,
+            stretch: iced::font::Stretch::Normal,
+            style: iced::font::Style::Normal,
+        };
         let mut t = text("BORU").font(font).size(font_size);
         if let Some(c) = logo.color {
             t = t.style(move |_t| text::Style { color: Some(c) });
