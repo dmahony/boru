@@ -466,7 +466,7 @@ fn main() -> Result<()> {
         None
     };
     let mut splash_stdin = splash_child.as_mut().and_then(|c| c.stdin.take());
-    let splash_send = |msg: &str| {
+    let mut splash_send = |msg: &str| {
         if let Some(ref mut stdin) = splash_stdin {
             use std::io::Write;
             let _ = writeln!(stdin, "{}", msg);
