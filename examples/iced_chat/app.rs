@@ -10376,9 +10376,34 @@ impl IcedChat {
                 if let Err(err) = self.purge_room_history(topic) {
                     self.push_system(format!("Could not delete room history: {err}"));
                 }
-                // Remove from conversation store and navigate away if this was the current chat.
+                // Remove from conversation store and persist so the deletion
+                // survives a restart.
                 self.conversations.remove(&topic);
                 self.conversation_store.remove(&topic);
+                if let Err(err) = self.conversation_store.save() {
+                    warn!("failed to save conversation store after delete: {err}");
+                }
+                // Also remove from the SQLite message store so the chat
+                // messages and conversation metadata don't linger on disk.
+                let store_path = self.data_dir.join("message_store.db");
+                if store_path.exists() {
+                    match MessageStore::open(&store_path) {
+                        Ok(store) => {
+                            let topic_bytes = topic.as_bytes();
+                            if let Err(err) = store.delete_messages_for_topic(topic_bytes) {
+                                warn!("failed to delete messages for topic: {err}");
+                            }
+                            // Soft-delete the conversation meta row so it
+                            // stays tombstoned across backfill/restart.
+                            if let Err(err) = store.delete_conversation(topic_bytes) {
+                                warn!("failed to delete conversation meta: {err}");
+                            }
+                        }
+                        Err(err) => {
+                            warn!("failed to open message store for cleanup: {err}");
+                        }
+                    }
+                }
                 if matches!(&self.screen, Screen::Chat { topic: t } if t == &topic) {
                     self.screen = Screen::ChatList;
                 }
