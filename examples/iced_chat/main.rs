@@ -443,6 +443,37 @@ fn main() -> Result<()> {
     let storage = Arc::new(Storage::open(&data_dir).expect("storage"));
     info!("download-storage: opened at {}", data_dir.display());
 
+    // ── Start a native splash window so the user sees feedback immediately ─
+    // The splash shows a spinner and startup progress messages while the
+    // heavy network initialization runs.  It is closed just before the
+    // Iced window opens.
+    // Look for splash.py next to the binary first, then in the source tree.
+    let splash_script = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("splash.py")))
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from("/home/dan/iroh-gossip-chat/scripts/splash.py")
+        });
+    let mut splash_child = if splash_script.exists() {
+        std::process::Command::new("python3")
+            .arg(&splash_script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()
+    } else {
+        None
+    };
+    let mut splash_stdin = splash_child.as_mut().and_then(|c| c.stdin.take());
+    let splash_send = |msg: &str| {
+        if let Some(ref mut stdin) = splash_stdin {
+            use std::io::Write;
+            let _ = writeln!(stdin, "{}", msg);
+        }
+    };
+    splash_send("Starting network...");
+
     // ── Build the endpoint, gossip, and router (no topic subscription yet) ──
 
     let (
@@ -495,6 +526,7 @@ fn main() -> Result<()> {
             }
         };
         info!("> endpoint: {}", endpoint.id());
+        splash_send("Endpoint ready");
 
         // The same mDNS service is registered with the endpoint and used for
         // discovery events. This keeps published endpoint addresses and the
@@ -536,6 +568,7 @@ fn main() -> Result<()> {
                                 }
                             );
                             registry.add(dht);
+                            splash_send("DHT lookup registered");
                         }
                         Err(err) => {
                             warn!(
@@ -715,6 +748,7 @@ fn main() -> Result<()> {
         let (discovered_peers_tx, discovered_peers_rx_tmp) =
             tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(64);
         let lobby_topic = app::IcedChat::default_lobby_topic();
+        splash_send("Joining lobby...");
         if let Ok(sub) = gossip.subscribe(lobby_topic, Vec::new()).await {
             let (sender, mut receiver) = sub.split();
             // Drain the receiver to prevent backpressure.
@@ -875,6 +909,14 @@ fn main() -> Result<()> {
             dht_for_private,
         ))
     })?;
+
+    // Close the native splash window — the Iced window opens next.
+    splash_send("Starting UI...");
+    splash_send("DONE");
+    drop(splash_stdin);
+    if let Some(mut child) = splash_child.take() {
+        let _ = child.wait();
+    }
 
     // ── Start MCP diagnostic server if requested ────────────────────────
     // Create the Iced message journal shared between MCP and the GUI.
