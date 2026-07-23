@@ -12918,35 +12918,76 @@ impl IcedChat {
             .width(Length::Fill);
 
         // ── Right column: friends online list + recent activity ──
-        let friends_header = text("Friends Online")
-            .size(TYPO_XS)
-            .color(text_muted(&theme));
+        let is_dark = matches!(theme, iced::Theme::Dark);
+        let badge_color = accent_primary(&theme);
+        let online_badge = container(
+            text(online_friend_count.to_string())
+                .size(TYPO_XXS)
+                .color(Color::WHITE),
+        )
+        .padding([1.0, 5.0])
+        .style(move |_t| iced::widget::container::Style {
+            background: Some(iced::Background::Color(badge_color)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let friends_header = row![
+            text("FRIENDS ONLINE")
+                .size(TYPO_XS)
+                .color(text_muted(&theme)),
+            online_badge,
+        ]
+        .spacing(SPACE_6)
+        .align_y(Alignment::Center);
 
         let friends_online_items: Vec<iced::Element<'_, AppMessage>> = {
-            let online_friends: Vec<String> = self
+            let online_friends: Vec<(String, bool)> = self
                 .friends
                 .iter()
                 .filter_map(|(fid, _)| {
                     fid.parse_public_key()
                         .ok()
                         .filter(|pk| self.friend_online_cache.contains(pk))
-                        .and_then(|pk| self.names.get(&pk).cloned())
+                        .and_then(|pk| self.names.get(&pk).cloned().map(|n| (n, is_dark)))
                 })
                 .collect();
             if online_friends.is_empty() {
                 vec![Self::empty_state_block(
                     &theme,
-                    "No friends online right now.",
+                    "No friends online",
                     None,
                     [SPACE_4, 0.0],
                 )]
             } else {
                 online_friends
                     .into_iter()
-                    .map(|name| {
+                    .map(|(name, dark)| {
+                        let init_text = crate::presentation::initials(&name);
+                        let init_color = crate::presentation::initials_color(&name, dark);
                         container(
                             row![
-                                text("●").size(TYPO_SM).color(accent_green(&theme)),
+                                // Colored initial dot
+                                container(
+                                    text(init_text)
+                                        .size(TYPO_XXS)
+                                        .color(Color::WHITE)
+                                        .width(Length::Fill),
+                                )
+                                .center_y(Length::Fill)
+                                .width(Length::Fixed(20.0))
+                                .height(Length::Fixed(20.0))
+                                .style(move |_t| iced::widget::container::Style {
+                                    background: Some(iced::Background::Color(init_color)),
+                                    border: iced::Border {
+                                        radius: 10.0.into(),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                }),
                                 text(name).size(TYPO_SM).color(text_system(&theme)),
                             ]
                             .spacing(SPACE_6)
