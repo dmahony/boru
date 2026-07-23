@@ -1480,6 +1480,8 @@ impl ChatEntry {
 /// of the active screen — only the right-hand main panel changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {
+    /// Splash screen shown at startup with a loading spinner.
+    Splash,
     /// No chat selected — empty state shown in the main panel.
     ChatList,
     /// An individual chat room with a given topic.
@@ -1616,7 +1618,7 @@ impl ConversationLive {
 
 pub struct IcedChat {
     // ── Navigation ──
-    screen: Screen,
+    pub screen: Screen,
     /// Screen to return to when closing image preview.
     previous_screen: Option<Screen>,
     /// Pending topic we're connecting to (used during the async handoff
@@ -1847,6 +1849,10 @@ pub struct IcedChat {
     /// Queue of download progress events from background download tasks.
     /// Drained on each ConnMonitorTick and converted into AppMessage::DownloadProgress.
     download_progress_queue: Arc<StdMutex<VecDeque<TransferProgress>>>,
+    /// Snapshot of the last download progress event timestamp for speed calculation.
+    last_download_progress_at: Option<std::time::Instant>,
+    /// Bytes received at the last progress event for speed calculation.
+    last_download_progress_bytes: u64,
     /// Public-room safety enforcement (rate limits, size limits, download queue bounding).
     /// `None` (default) means private-room behavior — all safety checks are skipped.
     pub public_room_safety: Option<Arc<PublicRoomSafety>>,
@@ -1985,6 +1991,10 @@ pub struct IcedChat {
     /// Current window width, updated by resize events.
     /// Used for responsive layout decisions (breakpoint at 640px).
     window_width: f32,
+    /// Timestamp when the splash screen first appeared (used for minimum-display timing).
+    pub splash_start_time: std::time::Instant,
+    /// Animation frame counter for the splash screen spinner.
+    splash_spinner_frame: usize,
 }
 
 /// Cached profile data received from a peer via ProfileUpdate gossip.
@@ -2060,6 +2070,7 @@ struct SidebarChatsDependency {
     dark_mode: bool,
     conversations: Vec<SidebarChatsRow>,
     is_empty: bool,
+    room_delete_confirm_topic: Option<TopicId>,
 }
 
 /// Cached dependency for the sidebar's Discovered Peers section.
@@ -2373,6 +2384,8 @@ pub enum AppMessage {
     FriendListResult(Vec<(String, String)>),
     /// Delete a room from history (home screen delete or /leave).
     DeleteRoom(TopicId),
+    /// Periodic tick for the splash screen spinner animation.
+    SplashTick,
     /// Periodic tick for connection type refresh.
     ConnMonitorTick,
     /// Periodic tick for mesh quiescence watchdog.
@@ -3331,7 +3344,9 @@ impl IcedChat {
             .and_then(|stg| stg.list_shared_files(&local_public.to_string(), true).ok())
             .unwrap_or_default();
         Self {
-            screen: Screen::ChatList,
+            screen: Screen::Splash,
+            splash_start_time: std::time::Instant::now(),
+            splash_spinner_frame: 0,
             previous_screen: None,
             pending_topic: None,
             room_history,
@@ -3436,6 +3451,8 @@ impl IcedChat {
             friend_request_search_input: String::new(),
             friend_request_error: String::new(),
             download_progress_queue: Arc::new(StdMutex::new(VecDeque::new())),
+            last_download_progress_at: None,
+            last_download_progress_bytes: 0,
             public_room_safety: None,
             conversation_store: ConversationStore::load_or_default(&data_dir),
             discovered_peers: Vec::new(),
@@ -3758,6 +3775,16 @@ impl IcedChat {
                             if download.transfer_id.is_none() {
                                 download.transfer_id = Some(id);
                             }
+                            // Compute transfer speed if we have a previous timestamp.
+                            let now = std::time::Instant::now();
+                            if let Some(last_at) = self.last_download_progress_at {
+                                let elapsed = now.duration_since(last_at).as_secs_f64().max(0.001);
+                                let delta = bytes.saturating_sub(self.last_download_progress_bytes);
+                                let speed = (delta as f64 / elapsed) as u64;
+                                download.speed_bytes_per_sec = Some(speed);
+                            }
+                            self.last_download_progress_at = Some(now);
+                            self.last_download_progress_bytes = bytes;
                             download.state = DownloadState::Active { bytes, total };
                             self.transfer_id_to_index.insert(id, idx);
                             invalidate_from = Some(idx);
@@ -4275,6 +4302,7 @@ impl IcedChat {
             AppMessage::FriendRemoved { .. } => "FriendRemoved",
             AppMessage::FriendListResult(_) => "FriendListResult",
             AppMessage::DeleteRoom(_) => "DeleteRoom",
+            AppMessage::SplashTick => "SplashTick",
             AppMessage::ConnMonitorTick => "ConnMonitorTick",
             AppMessage::MeshWatchdogTick => "MeshWatchdogTick",
             AppMessage::OutboxRetryTick => "OutboxRetryTick",
@@ -4530,7 +4558,7 @@ impl IcedChat {
             self.chat_history.lock().unwrap().push(history_entry);
         }
         self.history_saved_count = current_count;
-        self.chat_history_dirty = true;
+        self.try_save_chat_history();
     }
 }
 
@@ -4701,6 +4729,7 @@ impl IcedChat {
             Screen::FriendRequests => "Friend requests open".to_string(),
             Screen::Settings => "Settings open".to_string(),
             Screen::ChatList => "Chat list open".to_string(),
+            Screen::Splash => "Splash screen".to_string(),
         };
 
         let mesh_state = match &self.mesh_health {
@@ -4909,6 +4938,7 @@ impl IcedChat {
             Screen::PeerCatalogue(_) => ("PeerCatalogue", None),
             Screen::FriendProfile(_) => ("FriendProfile", None),
             Screen::ImagePreview { topic, .. } => ("ImagePreview", Some(topic.to_string())),
+            Screen::Splash => ("Splash", None),
         };
         let _ = self.gui_state_tx.send(IcedStateSnapshot {
             node_id: self.local_public.to_string(),
@@ -7815,36 +7845,54 @@ impl IcedChat {
                 let endpoint_addr = self.endpoint.addr();
                 let local_label = self.local_label.clone();
                 let local_pk = self.local_public;
+                // Cap large file uploads with a generous timeout so a stuck
+                // connection doesn't leave the spinner frozen forever.
+                let upload_timeout = std::time::Duration::from_secs(3600);
                 iced::Task::perform(
                     async move {
-                        let path_buf = std::path::PathBuf::from(&abs_path);
-                        let metadata = tokio::fs::metadata(&path_buf)
-                            .await
-                            .map_err(|e| format!("Failed to inspect file: {e}"))?;
-                        let file_size = metadata.len();
-                        // Stream the file into iroh blobs — no whole-file
-                        // memory limit needed.
-                        let file = tokio::fs::File::open(&path_buf)
-                            .await
-                            .map_err(|e| format!("Failed to open file: {e}"))?;
-                        let stream = tokio_util::io::ReaderStream::new(file);
-                        let tag = blob_store
-                            .blobs()
-                            .add_stream(Box::pin(stream))
-                            .await
-                            .await
-                            .map_err(|e| format!("Failed to store file: {e}"))?;
-                        let ticket_str = blob_ticket_string(endpoint_addr, tag.hash, tag.format);
-                        let msg = crate::Message::FileShare {
-                            name: filename.clone(),
-                            ticket: ticket_str.clone(),
-                        };
-                        let encoded_msg = SignedMessage::sign_and_encode(&secret_key, &msg)
-                            .map_err(|e| format!("Failed to sign: {e}"))?;
-                        if let Some(ref sender) = sender {
-                            sender.broadcast(encoded_msg).await.ok();
+                        let result = tokio::time::timeout(
+                            upload_timeout,
+                            async move {
+                                let path_buf = std::path::PathBuf::from(&abs_path);
+                                let metadata = tokio::fs::metadata(&path_buf)
+                                    .await
+                                    .map_err(|e| format!("Failed to inspect file: {e}"))?;
+                                let file_size = metadata.len();
+                                // Stream the file into iroh blobs — no whole-file
+                                // memory limit needed.
+                                let file = tokio::fs::File::open(&path_buf)
+                                    .await
+                                    .map_err(|e| format!("Failed to open file: {e}"))?;
+                                let stream = tokio_util::io::ReaderStream::new(file);
+                                let tag = blob_store
+                                    .blobs()
+                                    .add_stream(Box::pin(stream))
+                                    .await
+                                    .await
+                                    .map_err(|e| format!("Failed to store file: {e}"))?;
+                                let ticket_str =
+                                    blob_ticket_string(endpoint_addr, tag.hash, tag.format);
+                                let msg = crate::Message::FileShare {
+                                    name: filename.clone(),
+                                    ticket: ticket_str.clone(),
+                                };
+                                let encoded_msg =
+                                    SignedMessage::sign_and_encode(&secret_key, &msg)
+                                        .map_err(|e| format!("Failed to sign: {e}"))?;
+                                if let Some(ref sender) = sender {
+                                    sender.broadcast(encoded_msg).await.ok();
+                                }
+                                Ok::<_, String>((filename, ticket_str))
+                            },
+                        )
+                        .await;
+                        match result {
+                            Ok(Ok(v)) => Ok(v),
+                            Ok(Err(e)) => Err(e),
+                            Err(_elapsed) => {
+                                Err("Upload timed out after 1 hour.".to_string())
+                            }
                         }
-                        Ok((filename, ticket_str))
                     },
                     |r: Result<(String, String), String>| match r {
                         Ok((name, ticket)) => AppMessage::FileDownloaded { name, ticket },
@@ -9151,6 +9199,16 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::SplashTick => {
+                // Advance the spinner animation.
+                self.splash_spinner_frame = (self.splash_spinner_frame + 1) % 10;
+                // Transition to ChatList after at least 500ms.
+                if self.splash_start_time.elapsed() >= std::time::Duration::from_millis(500) {
+                    self.screen = Screen::ChatList;
+                }
+                iced::Task::none()
+            }
+
             AppMessage::ConnMonitorTick => {
                 if self.pending_image_upload.is_some() {
                     self.image_upload_spinner_frame = (self.image_upload_spinner_frame + 1) % 10;
@@ -10166,6 +10224,12 @@ impl IcedChat {
                 }
                 if let Err(err) = self.purge_room_history(topic) {
                     self.push_system(format!("Could not delete room history: {err}"));
+                }
+                // Remove from conversation store and navigate away if this was the current chat.
+                self.conversations.remove(&topic);
+                self.conversation_store.remove(topic);
+                if matches!(&self.screen, Screen::Chat { topic: t } if t == &topic) {
+                    self.screen = Screen::ChatList;
                 }
                 iced::Task::none()
             }
@@ -11239,6 +11303,74 @@ impl IcedChat {
         PublicKey::from_str(&item.target_user).ok()
     }
 
+    /// Render the splash screen: centered app name with a spinning indicator.
+    fn view_splash(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{column, container, row, text, Space};
+        use iced::{Alignment, Length};
+
+        const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let spinner = SPINNER_FRAMES[self.splash_spinner_frame % SPINNER_FRAMES.len()];
+
+        let theme = self.theme();
+        let text_color = if self.dark_mode {
+            iced::Color::from_rgb(0.9, 0.9, 0.9)
+        } else {
+            iced::Color::from_rgb(0.1, 0.1, 0.1)
+        };
+        let muted_color = if self.dark_mode {
+            iced::Color::from_rgb(0.6, 0.6, 0.6)
+        } else {
+            iced::Color::from_rgb(0.5, 0.5, 0.5)
+        };
+
+        let content = column![
+            // App icon placeholder (large emoji or icon)
+            text("🗣️").size(72),
+            Space::new().height(Length::Fixed(20.0)),
+            // App name
+            text("Boru")
+                .size(36)
+                .style(move |_t| text::Style { color: Some(text_color) }),
+            // Version or tagline
+            text("private peer-to-peer chat")
+                .size(14)
+                .style(move |_t| text::Style { color: Some(muted_color) }),
+            Space::new().height(Length::Fixed(40.0)),
+            // Spinner with "Loading…"
+            row![
+                text(spinner)
+                    .size(24)
+                    .style(move |_t| text::Style { color: Some(muted_color) }),
+                Space::new().width(Length::Fixed(12.0)),
+                text("Loading…")
+                    .size(16)
+                    .style(move |_t| text::Style { color: Some(muted_color) }),
+            ]
+            .align_y(Alignment::Center),
+        ]
+        .align_x(Alignment::Center)
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(move |t| {
+                let bg = if t == &iced::Theme::Dark {
+                    iced::Color::from_rgb(0.08, 0.08, 0.12)
+                } else {
+                    iced::Color::from_rgb(0.97, 0.97, 0.98)
+                };
+                container::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    ..Default::default()
+                }
+            })
+            .into()
+    }
+
     pub fn view(&self) -> iced::Element<'_, AppMessage> {
         let _timer = PerfTracker::timer("view", format!("{:?}", self.screen));
         use iced::widget::{container, row};
@@ -11249,6 +11381,7 @@ impl IcedChat {
 
         // Main panel depends on the active screen.
         let main_panel: iced::Element<'_, AppMessage> = match &self.screen {
+            Screen::Splash => self.view_splash(),
             Screen::ChatList => self.view_main_empty_state(),
             Screen::Chat { .. } => self.view_chat_panel(),
             Screen::FriendRequests => self.view_friend_requests(),
@@ -11830,6 +11963,7 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             conversations,
             is_empty: self.conversation_store.is_empty(),
+            room_delete_confirm_topic: self.room_delete_confirm_topic,
         }
     }
 
@@ -11880,6 +12014,7 @@ impl IcedChat {
 
         let mut section = Column::new().spacing(SPACE_2);
 
+        let delete_confirm = dep.room_delete_confirm_topic;
         for row in &dep.conversations {
             section = section.push(Self::view_sidebar_conversation_row(
                 dep.dark_mode,
@@ -11891,6 +12026,7 @@ impl IcedChat {
                 row.last_seen_at_unix_ms,
                 row.online,
                 row.avatar.clone(),
+                delete_confirm,
             ));
         }
 
@@ -11980,6 +12116,7 @@ impl IcedChat {
         last_seen_at_unix_ms: u64,
         online: bool,
         avatar: SidebarAvatarHandle,
+        delete_confirm_topic: Option<TopicId>,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, image, text, Column, Row, Space};
         use iced::{Alignment, Background, Border, Length};
@@ -12122,6 +12259,56 @@ impl IcedChat {
         }
 
         // ── Build the content row ─────────────────────────────────
+        // ── Delete button ────────────────
+        let is_deleting = delete_confirm_topic == Some(topic);
+        let delete_btn_text = if is_deleting { "Delete?" } else { "✕" };
+        let delete_btn = button(
+            container(text(delete_btn_text).size(TYPO_XS))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .width(Length::Fixed(24.0))
+                .height(Length::Fixed(24.0)),
+        )
+        .on_press(if is_deleting {
+            AppMessage::ConfirmDeleteRoom(topic)
+        } else {
+            AppMessage::DeleteRoomRequested(topic)
+        })
+        .padding(SPACE_2)
+        .style(move |t, status| {
+            if is_deleting {
+                iced::widget::button::Style {
+                    background: Some(Background::Color(color_error(t))),
+                    text_color: Color::WHITE,
+                    border: Border {
+                        radius: SPACE_4.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            } else if matches!(status, iced::widget::button::Status::Hovered) {
+                iced::widget::button::Style {
+                    background: Some(Background::Color(Color::from_rgba(0.8, 0.2, 0.2, 0.15))),
+                    text_color: color_error(t),
+                    border: Border {
+                        radius: SPACE_4.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            } else {
+                iced::widget::button::Style {
+                    text_color: text_muted(t),
+                    background: None,
+                    border: Border {
+                        radius: SPACE_4.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            }
+        });
+
         let content_row = Row::new()
             .push(avatar_with_dot)
             .push(
@@ -12145,6 +12332,7 @@ impl IcedChat {
                     .spacing(SPACE_2)
                     .width(Length::Fill),
             )
+            .push(delete_btn)
             .spacing(SPACE_8)
             .padding([SPACE_6, SPACE_12])
             .width(Length::Fill);
@@ -12721,15 +12909,9 @@ impl IcedChat {
             }
         };
 
-        let friends_online_text = if total_friend_count == 0 {
-            "0 / 0".to_string()
-        } else {
-            format!("{online_friend_count} / {total_friend_count}")
-        };
-
         let relay_text = fmt_relay_mode(&self.relay_mode);
 
-        // Build status cards row (same 4 cards as before)
+        // Build status cards row (2 cards: Connection + Network)
         let status_cards = iced::widget::Row::new()
             .push(
                 container(
@@ -12765,44 +12947,6 @@ impl IcedChat {
                 .width(Length::Fill)
                 .style(container_card),
             )
-            .push(
-                container(
-                    Column::new()
-                        .push(text("👥").size(TYPO_LG))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Friends Online").size(TYPO_XS).color(text_muted(&theme)))
-                        .push(Space::new().height(Length::Fixed(SPACE_4)))
-                        .push(
-                            text(friends_online_text)
-                                .size(TYPO_SM)
-                                .color(text_system(&theme)),
-                        )
-                        .spacing(SPACE_2)
-                        .align_x(Alignment::Center),
-                )
-                .padding([SPACE_12, SPACE_8])
-                .width(Length::Fill)
-                .style(container_card),
-            )
-            .push(
-                container(
-                    Column::new()
-                        .push(text("📡").size(TYPO_LG))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Relay").size(TYPO_XS).color(text_muted(&theme)))
-                        .push(Space::new().height(Length::Fixed(SPACE_4)))
-                        .push(
-                            text(relay_text)
-                                .size(TYPO_SM)
-                                .color(text_system(&theme)),
-                        )
-                        .spacing(SPACE_2)
-                        .align_x(Alignment::Center),
-                )
-                .padding([SPACE_12, SPACE_8])
-                .width(Length::Fill)
-                .style(container_card),
-            )
             .spacing(SPACE_8)
             .width(Length::Fill);
 
@@ -12815,7 +12959,7 @@ impl IcedChat {
                         .push(Space::new().height(Length::Fixed(SPACE_2)))
                         .push(text("Start Chat").size(TYPO_SM))
                         .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Start a new conversation").size(TYPO_XS).color(text_muted(&theme)))
+                        .push(text("Start a new conversation or join by ticket").size(TYPO_XS).color(text_muted(&theme)))
                         .spacing(SPACE_2)
                         .align_x(Alignment::Center),
                 )
@@ -12836,22 +12980,6 @@ impl IcedChat {
                         .align_x(Alignment::Center),
                 )
                 .on_press(AppMessage::OpenFriendRequests)
-                .padding([SPACE_12, SPACE_8])
-                .width(Length::Fill)
-                .style(BUTTON_CARD),
-            )
-            .push(
-                button(
-                    Column::new()
-                        .push(text("🎫").size(TYPO_XL))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Join Ticket").size(TYPO_SM))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Join a room via ticket").size(TYPO_XS).color(text_muted(&theme)))
-                        .spacing(SPACE_2)
-                        .align_x(Alignment::Center),
-                )
-                .on_press(AppMessage::JoinFromTicket)
                 .padding([SPACE_12, SPACE_8])
                 .width(Length::Fill)
                 .style(BUTTON_CARD),
@@ -12940,11 +13068,18 @@ impl IcedChat {
                     }
                 }),
             )
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(advanced_card)
             .spacing(0)
             .width(Length::Fill);
 
-        // ── Right column: friends online list + recent activity ──
-        let friends_header = text("Friends Online")
+            // ── Right column: friends online list + recent activity ──
+        let friends_online_label = if total_friend_count == 0 {
+            "Friends Online".to_string()
+        } else {
+            format!("Friends Online ({online_friend_count} / {total_friend_count})")
+        };
+        let friends_header = text(&friends_online_label)
             .size(TYPO_XS)
             .color(text_muted(&theme));
 
@@ -13241,6 +13376,8 @@ impl IcedChat {
             .map(|r| r.display_name())
             .unwrap_or_else(|| format!("Room {}", short_topic));
 
+        let is_deleting = self.room_delete_confirm_topic == Some(self.topic);
+        let delete_label = if is_deleting { "Delete?" } else { "Delete Chat" };
         let header = column![row![
             button(text("← Back").size(TYPO_SM))
                 .on_press(AppMessage::GoToChatList)
@@ -13250,6 +13387,26 @@ impl IcedChat {
                 .size(TYPO_LG)
                 .width(Length::Fill)
                 .wrapping(Wrapping::Word),
+            button(text(delete_label).size(TYPO_SM))
+                .on_press(if is_deleting {
+                    AppMessage::ConfirmDeleteRoom(self.topic)
+                } else {
+                    AppMessage::DeleteRoomRequested(self.topic)
+                })
+                .style(if is_deleting {
+                    move |t, _status| iced::widget::button::Style {
+                        background: Some(iced::Background::Color(color_error(t))),
+                        text_color: Color::WHITE,
+                        border: iced::Border {
+                            radius: SPACE_6.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                } else {
+                    BUTTON_GHOST_BG
+                })
+                .padding([SPACE_6, SPACE_12]),
             button(text("Settings").size(TYPO_SM))
                 .on_press(AppMessage::OpenSettings)
                 .style(BUTTON_GHOST_BG)
@@ -16742,6 +16899,10 @@ mod tests {
     fn open_friend_requests_navigates_to_dedicated_screen() {
         let (_runtime, mut app, _local_public, _peer_public) = build_join_request_test_app();
 
+        assert_eq!(app.screen, Screen::Splash);
+        // Advance past the splash screen.
+        app.splash_start_time = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let _ = app.update(AppMessage::SplashTick);
         assert_eq!(app.screen, Screen::ChatList);
 
         let _ = app.update(AppMessage::OpenFriendRequests);

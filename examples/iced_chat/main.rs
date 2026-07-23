@@ -69,7 +69,7 @@ use tokio::sync::{watch, Mutex};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use app::{DiscoveredPeersUpdate, IcedChat};
+use app::{DiscoveredPeersUpdate, IcedChat, Screen};
 
 use perf_tracker::PerfTracker;
 
@@ -1037,7 +1037,17 @@ fn main() -> Result<()> {
         ..Default::default()
     })
     .subscription(|state: &IcedChat| {
-        let subs: Vec<iced::Subscription<app::AppMessage>> = vec![
+        let mut subs: Vec<iced::Subscription<app::AppMessage>> = vec![];
+
+        // Splash tick at 100ms while showing the splash screen
+        if state.screen == app::Screen::Splash {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(100))
+                    .map(|_| app::AppMessage::SplashTick),
+            );
+        }
+
+        subs.extend(vec![
             IcedChat::subscription(
                 Arc::clone(&state.net_rx),
                 Arc::clone(&state.friend_events_rx),
@@ -1047,7 +1057,7 @@ fn main() -> Result<()> {
                 state.gui_action_rx.clone(),
             ),
             app::keyboard_shortcuts_subscription(),
-        ];
+        ]);
         iced::Subscription::batch(subs)
     })
     .theme(|state: &IcedChat| {

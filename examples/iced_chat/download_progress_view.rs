@@ -256,6 +256,23 @@ pub fn view_download_progress(
     // ── Row 3: Progress bar + percentage ────────────────────────────────
     let progress_row = progress_section(state, dark_mode);
 
+    // ── Row 3b: Speed + bytes detail (always visible when active) ─────
+    let speed_detail_row = match state {
+        DownloadState::Active { bytes, .. } => {
+            let detail = format!("{} received", human_size(*bytes));
+            let speed = attachment
+                .speed_bytes_per_sec
+                .map(|s| format!(" • {}/s", human_size(s)))
+                .unwrap_or_default();
+            Some(
+                text(format!("{detail}{speed}"))
+                    .size(TYPO_XS)
+                    .color(accent_primary(&theme)),
+            )
+        }
+        _ => None,
+    };
+
     // ── Row 4: Action buttons ───────────────────────────────────────────
     let action_row = action_buttons(entry_index, state, &name_str);
 
@@ -304,6 +321,9 @@ pub fn view_download_progress(
     }
     if let Some(prog) = progress_row {
         body = body.push(prog);
+    }
+    if let Some(speed_detail) = speed_detail_row {
+        body = body.push(speed_detail);
     }
     body = body.push(action_row);
     // "Open folder" link — always visible below the action buttons
