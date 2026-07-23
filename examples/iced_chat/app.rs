@@ -5710,11 +5710,10 @@ impl IcedChat {
                 self.composer_text.clear();
                 self.first_run = false; // First action taken — onboarding complete
                 self.push_system(format!(
-                    "Connected as {}.  Topic: {topic}",
+                    "Connected as {}.",
                     self.local_label
                 ));
                 self.push_system("Type a message and press Enter to send.  /help for commands.");
-                self.push_system(format!("Ticket to join this room: {ticket}"));
 
                 // If the ticket contains a discovery secret, also display a
                 // stable boru1: invitation (no endpoint info, compact format).
