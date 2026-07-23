@@ -266,7 +266,6 @@ fn test_shared_dir_name_unchanged() {
 /// produces the expected result for a well-known input.
 #[test]
 fn test_public_room_topic_deterministic() {
-    use boru_core::proto::state::TopicId;
     use boru_core::topic_derivation::public_room_topic;
 
     // Derive the topic for the default lobby on mainnet (network_byte = 0).
@@ -382,7 +381,7 @@ fn test_data_dir_directory_names() {
     let has_boru_chat = legacy_dirs.iter().any(|d| {
         d.file_name()
             .and_then(|n| n.to_str())
-            .map_or(false, |n| n.contains("boru-chat"))
+            .is_some_and(|n| n.contains("boru-chat"))
     });
     assert!(
         has_boru_chat,

@@ -220,7 +220,6 @@ impl PerfTracker {
     }
 
     /// Reset all accumulated samples.
-    #[expect(dead_code)]
     pub fn reset() {
         let mut samples = PERF.samples.lock();
         samples.clear();

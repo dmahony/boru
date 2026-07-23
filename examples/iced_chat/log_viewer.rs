@@ -36,13 +36,15 @@ impl LogViewer {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        use crate::app::{SPACE_12, TYPO_LG, TYPO_SM, TYPO_XS};
+
         let header = row![
-            text("Boru logs").size(22),
+            text("Boru logs").size(TYPO_LG),
             text(format!(" {}", app::version_tag()))
                 .size(TYPO_XXS)
                 .style(text_muted_style)
         ]
-        .spacing(12)
+        .spacing(SPACE_12)
         .push(button("Reload").on_press(Message::Refresh));
 
         let body = if self.contents.is_empty() {
@@ -50,21 +52,21 @@ impl LogViewer {
                 "No log output yet.\n\nThe log file is:\n{}",
                 self.log_path.display()
             ))
-            .size(14)
+            .size(TYPO_SM)
         } else {
             text(&self.contents)
                 .font(iced::Font::MONOSPACE)
-                .size(13)
+                .size(TYPO_SM)
                 .width(Length::Fill)
         };
 
         column![
             header,
-            text(self.log_path.display().to_string()).size(12),
+            text(self.log_path.display().to_string()).size(TYPO_XS),
             scrollable(container(body).width(Length::Fill)).height(Length::Fill),
         ]
-        .spacing(12)
-        .padding(12)
+        .spacing(SPACE_12)
+        .padding(SPACE_12)
         .into()
     }
 }
@@ -96,11 +98,7 @@ pub fn run(log_path: PathBuf) -> NResult<()> {
     let state = LogViewer::load(log_path.clone());
     iced::application(move || (state.clone(), iced::Task::none()), update, view)
         .title(move |_: &LogViewer| {
-            format!(
-                "Boru logs {} — {}",
-                app::version_tag(),
-                log_path.display()
-            )
+            format!("Boru logs {} — {}", app::version_tag(), log_path.display())
         })
         .subscription(|_| iced::time::every(Duration::from_secs(1)).map(|_| Message::Refresh))
         .run()
@@ -143,7 +141,8 @@ mod tests {
 
         // Check that BORU_DATA_DIR is set (new)
         assert!(
-            cmd.get_envs().any(|(key, _)| key == OsStr::new("BORU_DATA_DIR")),
+            cmd.get_envs()
+                .any(|(key, _)| key == OsStr::new("BORU_DATA_DIR")),
             "BORU_DATA_DIR should be set"
         );
         let new_env = cmd

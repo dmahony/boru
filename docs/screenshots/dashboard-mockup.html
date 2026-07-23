@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { background: #1a1a2e; font-family: sans-serif; display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; padding: 20px; color: #ccc; }
+  h2 { color: #4a9eff; width: 100%; text-align: center; margin-bottom: 10px; }
+  .caption { width: 100%; text-align: center; color: #999; font-size: 13px; margin-bottom: 20px; }
+  .frame { border: 2px solid #383852; border-radius: 8px; overflow: hidden; }
+  img { display: block; }
+</style>
+</head>
+<body>
+<h2>Boru Dashboard — Wide Layout (1280×720)</h2>
+<div class="caption">This mockup represents the actual Iced GUI rendering from examples/iced_chat.</div>
+<div class="frame">
+  <div style="width:1100px;height:700px;background:#1a1a2e;display:flex;font-family:-apple-system,sans-serif;font-size:13px;color:#ccc;">
+    <!-- Sidebar -->
+    <div style="width:280px;background:#2a2a3e;display:flex;flex-direction:column;border-right:1px solid #383852;">
+      <div style="display:flex;align-items:center;padding:12px;border-bottom:1px solid #383852;">
+        <div style="flex:1;font-size:18px;font-weight:600;color:#fff;">Boru</div>
+        <div style="color:#999;font-size:15px;padding:6px 8px;cursor:default;">＋</div>
+        <div style="color:#999;font-size:15px;padding:6px 8px;cursor:default;">⚙</div>
+      </div>
+      <div style="display:flex;align-items:center;padding:8px 12px;gap:8px;border-bottom:1px solid #383852;">
+        <div style="width:24px;height:24px;border-radius:50%;background:#4a9eff;display:flex;align-items:center;justify-content:center;color:white;font-size:10px;font-weight:600;">T</div>
+        <div style="flex:1;">
+          <div style="color:#ccc;font-size:13px;">Test</div>
+          <div style="color:#999;font-size:11px;">● relayed</div>
+        </div>
+      </div>
+      <div style="padding:8px 12px 4px;color:#999;font-size:11px;display:flex;">CHATS<span style="margin-left:6px;color:#666;">(3)</span><span style="margin-left:auto;color:#666;">▼</span></div>
+      <div style="display:flex;align-items:center;padding:6px 12px;gap:8px;">
+        <div style="width:24px;height:24px;border-radius:50%;background:#e67e22;display:flex;align-items:center;justify-content:center;color:white;font-size:10px;">B</div>
+        <span style="color:#3ddc84;">●</span>
+        <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#ccc;">Blue Falcon<span style="color:#4a9eff;"> [2]</span></span>
+        <span style="color:#666;font-size:10px;">2m</span>
+      </div>
+      <div style="display:flex;align-items:center;padding:6px 12px;gap:8px;">
+        <div style="width:24px;height:24px;border-radius:50%;background:#3498db;display:flex;align-items:center;justify-content:center;color:white;font-size:10px;">Q</div>
+        <span style="color:#666;">○</span>
+        <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#999;">Quiet Harbour</span>
+        <span style="color:#666;font-size:10px;">5h</span>
+      </div>
+      <div style="padding:8px 12px 4px;color:#999;font-size:11px;display:flex;">FRIENDS<span style="margin-left:6px;color:#666;">(2)</span><span style="margin-left:auto;color:#666;">▼</span></div>
+      <div style="margin:4px 12px;padding:4px 8px;background:#222238;border:1px solid #383852;border-radius:4px;color:#666;font-size:11px;">Add friend by key…</div>
+      <div style="display:flex;align-items:center;padding:6px 12px;gap:8px;">
+        <div style="width:24px;height:24px;border-radius:50%;background:#2ecc71;display:flex;align-items:center;justify-content:center;color:white;font-size:10px;">A</div>
+        <span style="color:#3ddc84;">●</span>
+        <span style="flex:1;color:#ccc;">Alice</span>
+        <span style="color:#999;cursor:default;">…</span>
+      </div>
+      <div style="display:flex;align-items:center;padding:6px 12px;gap:8px;">
+        <div style="width:24px;height:24px;border-radius:50%;background:#9b59b6;display:flex;align-items:center;justify-content:center;color:white;font-size:10px;">C</div>
+        <span style="color:#666;">○</span>
+        <span style="flex:1;color:#999;">Crimson Fox</span>
+        <span style="color:#999;cursor:default;">…</span>
+      </div>
+      <div style="padding:8px 12px 4px;color:#999;font-size:11px;display:flex;">DISCOVER<span style="margin-left:6px;color:#666;">(1)</span><span style="margin-left:auto;color:#666;">▼</span></div>
+      <div style="display:flex;align-items:center;padding:6px 12px;gap:8px;">
+        <div style="width:24px;height:24px;border-radius:50%;background:#f39c12;display:flex;align-items:center;justify-content:center;color:white;font-size:10px;">S</div>
+        <span style="color:#3ddc84;">●</span>
+        <span style="flex:1;color:#ccc;">Silver Hawk</span>
+        <span style="padding:4px 8px;border:1px solid #383852;border-radius:4px;color:#999;font-size:11px;cursor:default;">Chat</span>
+        <span style="padding:4px 8px;border:1px solid #383852;border-radius:4px;color:#999;font-size:11px;cursor:default;">Browse</span>
+      </div>
+      <div style="padding:8px 12px 4px;color:#999;font-size:11px;display:flex;">REQUESTS<span style="margin-left:6px;color:#666;">(1)</span><span style="margin-left:auto;color:#666;">▼</span></div>
+      <div style="padding:4px 12px;">
+        <div style="padding:2px 6px;border:1px solid #383852;border-radius:4px;color:#999;font-size:10px;text-align:center;cursor:default;background:#2a2a3e;">Manage Requests</div>
+      </div>
+      <div style="display:flex;align-items:center;padding:6px 12px;gap:8px;">
+        <span style="flex:1;color:#ccc;">Brave River</span>
+        <span style="padding:2px 4px;border-radius:4px;background:#4a9eff;color:white;font-size:11px;cursor:default;">✓</span>
+        <span style="padding:2px 4px;border-radius:4px;background:#e64040;color:white;font-size:11px;cursor:default;">✗</span>
+      </div>
+    </div>
+    <!-- Main Panel -->
+    <div style="flex:1;background:#1a1a2e;display:flex;flex-direction:column;align-items:center;overflow-y:auto;">
+      <div style="width:480px;padding:24px 0;display:flex;flex-direction:column;align-items:center;">
+        <div style="font-size:24px;color:#4a9eff;font-weight:bold;">BORU</div>
+        <div style="font-size:13px;color:#999;margin-top:4px;margin-bottom:24px;">Private. Peer-to-peer. No central servers.</div>
+        <div style="background:#2a2a3e;border:1px solid #383852;border-radius:8px;padding:12px 16px;width:100%;margin-bottom:16px;">
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 0;"><span style="color:#3ddc84;font-size:15px;">●</span><span style="color:#3ddc84;">Online</span></div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 0;"><span style="color:#4a9eff;font-size:15px;">●</span><span style="color:#999;">Mesh: healthy</span></div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 0;"><span style="color:#4a9eff;font-size:15px;">●</span><span style="color:#999;">Relay: connected</span></div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 0;"><span style="color:#3ddc84;font-size:15px;">●</span><span style="color:#999;">Friends Online: 1 / 2</span></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;width:100%;margin-bottom:16px;">
+          <div style="padding:10px 16px;border:1px solid #383852;border-radius:6px;color:#ccc;text-align:center;cursor:default;">Start Chat</div>
+          <div style="padding:10px 16px;border:1px solid #383852;border-radius:6px;color:#ccc;text-align:center;cursor:default;">Add Friend</div>
+          <div style="padding:10px 16px;border:1px solid #383852;border-radius:6px;color:#ccc;text-align:center;cursor:default;">Join Ticket</div>
+          <div style="padding:10px 16px;border:1px solid #383852;border-radius:6px;color:#ccc;text-align:center;cursor:default;">Browse Files</div>
+        </div>
+        <div style="background:#2a2a3e;border:1px solid #383852;border-radius:8px;padding:12px 16px;width:100%;">
+          <div style="font-size:11px;color:#999;margin-bottom:6px;">Recent Activity</div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 0;color:#999;"><span>•</span>Brave River came online<span style="margin-left:auto;font-size:10px;color:#666;">1m ago</span></div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 0;color:#999;"><span>•</span>Alice sent a file<span style="margin-left:auto;font-size:10px;color:#666;">5m ago</span></div>
+          <div style="display:flex;align-items:center;gap:6px;padding:2px 0;color:#999;"><span>•</span>Joined room: general<span style="margin-left:auto;font-size:10px;color:#666;">12m ago</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="caption" style="margin-top:20px;">
+  <strong>NOTE:</strong> This is an HTML mockup representing the actual Iced GUI layout and dark theme.<br>
+  The real application rendering depends on Iced v0.14 with tiny-skia/wgpu and could not be captured in this headless environment.<br>
+  See <code>DESIGN_SYSTEM.md</code> and <code>UX_AUDIT.md</code> for detailed specifications.
+</div>
+</body>
+</html>

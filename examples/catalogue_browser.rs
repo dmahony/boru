@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let relay_url_str = std::env::args()
         .nth(2)
         .unwrap_or_else(|| "https://boru.chat:8443/".to_string());
-    let relay_url: RelayUrl = relay_url_str.parse()?;
+    let _relay_url: RelayUrl = relay_url_str.parse()?;
     let relay_map = RelayMap::try_from_iter([relay_url_str.as_str()])?;
 
     let secret_key = SecretKey::generate();

@@ -70,7 +70,7 @@ fn calculated_version(package_version: &str) -> String {
     let Some(tag) = tags.lines().next() else {
         return base.to_string();
     };
-    let Some(mut version) = Version::parse(&tag) else {
+    let Some(mut version) = Version::parse(tag) else {
         return base.to_string();
     };
     let Some(commits) = command_output(&["log", &format!("{tag}..HEAD"), "--format=%B%x00"]) else {
