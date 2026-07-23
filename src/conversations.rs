@@ -28,6 +28,7 @@ use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
 use crate::chat_core::atomic_write::atomic_write_json;
+use crate::peer_names;
 use crate::proto::TopicId;
 
 const SCHEMA_VERSION: u32 = 1;
@@ -148,15 +149,22 @@ impl ConversationEntry {
     }
 
     /// Display label for the conversation.
-    pub fn display_name(&self) -> &str {
-        if self.name.is_empty() {
-            if self.peer_id.is_empty() {
-                "Unknown"
-            } else {
-                &self.peer_id[..self.peer_id.len().min(16)]
-            }
+    pub fn display_name(&self) -> String {
+        if !self.name.is_empty() {
+            return self.name.clone();
+        }
+        if self.peer_id.is_empty() {
+            return "Unknown".to_string();
+        }
+        // Use the central resolver with available information.
+        // This context doesn't have access to friends or profiles,
+        // so only the peer ID is available — the resolver falls back
+        // to the deterministic friendly name.
+        if let Ok(pk) = std::str::FromStr::from_str(&self.peer_id) {
+            peer_names::resolve_peer_name(&pk, None, None, None, None)
         } else {
-            &self.name
+            // Fallback: truncate the raw ID (unlikely — peer_id is usually a valid PublicKey).
+            self.peer_id[..self.peer_id.len().min(16)].to_string()
         }
     }
 }
@@ -709,6 +717,33 @@ mod tests {
         let topic = make_topic(0xAA);
         let entry = ConversationEntry::new(topic, "peer", "My Friend");
         assert_eq!(entry.display_name(), "My Friend");
+    }
+
+    #[test]
+    fn display_name_generates_friendly_for_valid_public_key() {
+        let topic = make_topic(0xBB);
+        let pk = iroh::SecretKey::generate().public();
+        let entry = ConversationEntry::new(topic, pk.to_string(), "");
+        let name = entry.display_name();
+        // Should be a friendly name, not a raw hex trunction
+        assert!(!name.is_empty(), "friendly name should not be empty");
+        assert!(name != "Unknown", "friendly name should not be 'Unknown'");
+        // The name should have exactly two words (adjective + noun)
+        assert!(
+            name.contains(' '),
+            "friendly name '{}' should be '<Adjective> <Noun>' format",
+            name
+        );
+        // Same peer should produce the same name deterministically
+        let entry2 = ConversationEntry::new(topic, pk.to_string(), "");
+        assert_eq!(entry2.display_name(), name);
+    }
+
+    #[test]
+    fn display_name_falls_back_to_unknown_for_empty_peer_id() {
+        let topic = make_topic(0xCC);
+        let entry = ConversationEntry::new(topic, "", "");
+        assert_eq!(entry.display_name(), "Unknown");
     }
 
     // ── touch_and_bump ────────────────────────────────────────────────

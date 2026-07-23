@@ -1,11 +1,12 @@
 # Boru — Design System
 
-> **Version:** 1.0  
-> **Created:** 2026-07-21  
-> **Scope:** `examples/iced_chat/` — the `iced` desktop GUI for Boru  
-> **Audience:** Developers implementing the UI redesign (Steps 2–9)
+> **Version:** 1.1 (final)
+> **Created:** 2026-07-21
+> **Updated:** 2026-07-23
+> **Scope:** `examples/iced_chat/` — the `iced` desktop GUI for Boru
+> **Audience:** Developers maintaining or extending the Boru GUI
 
-This document specifies every visual token, component, and behaviour in the Boru UI. All values reference the existing codebase and propose a unified system to replace the current ad-hoc styling.
+This document specifies every visual token, component, and behaviour in the Boru UI. All values reference the **current codebase** — this is a living document describing the implementation as it stands after the UI redesign (Steps 2–23). Token names, line numbers, and dimensions are verified against the source.
 
 ---
 
@@ -56,6 +57,22 @@ The current scale uses a minor-second ratio (~1.125) with six steps. These **sho
 | Settings section title | TYPO_MD | — (inherits body)     | `app.rs:11911`       |
 | Settings page heading | TYPO_XL  | — (inherits body)     | `app.rs:11768`       |
 
+### Semantic Role Map
+
+The following table maps type-size tokens to their intended semantic role. This ensures consistent choice of size for each kind of content across the UI.
+
+| Role               | Token    | px   | Font weight | Notes                            |
+|--------------------|----------|------|-------------|----------------------------------|
+| Application/page title | TYPO_XL | 24   | Bold        | Settings title, landing heading  |
+| Section heading    | TYPO_LG  | 18   | Medium      | Sidebar section labels, help title, room name |
+| Card heading       | TYPO_MD  | 15   | Medium      | Settings card section title      |
+| Primary body text  | TYPO_SM  | 13   | Regular     | Chat body (configurable), button labels (default) |
+| Secondary text     | TYPO_XS  | 11   | Regular     | Metadata, identity info, section header labels |
+| Captions           | TYPO_XXS | 10   | Regular     | Fine print, file size, speed labels |
+| Badges             | TYPO_XXS | 10   | Medium      | Unread count pill                 |
+| Button labels      | TYPO_SM  | 13   | Medium      | Primary CTAs use TYPO_MD         |
+| Secondary labels   | TYPO_XS  | 11   | Regular     | Peer labels, timestamps          |
+
 ### Line Height
 
 Iced's `text` widget uses the font's natural line height. No explicit line-height tokens are needed — the platform default is acceptable.
@@ -88,6 +105,7 @@ Base unit: **4px**. All spacing values are multiples or fractions of this base.
 | SPACE_12 | 12 | `SPACE_12: f32 = 12.0` | `app.rs:234` |
 | SPACE_16 | 16 | `SPACE_16: f32 = 16.0` | `app.rs:235` |
 | SPACE_24 | 24 | `SPACE_24: f32 = 24.0` | `app.rs:236` |
+| SPACE_32 | 32 | `SPACE_32: f32 = 32.0` | (proposed addition — large section gap) |
 
 ### Margins & Spacing by Section
 
@@ -214,7 +232,21 @@ Base unit: **4px**. All spacing values are multiples or fractions of this base.
 | Selected row bg      | `accent_primary` (blue)   | `accent_primary` (blue)   | `app.rs:10489-10490` |
 | Selected row text    | `Color::WHITE`            | `Color::WHITE`            | `app.rs:10463` |
 
-> **Note:** Unread badges currently render as inline text (`" [3]"`) rather than a pill/badge element. The redesign should introduce a dedicated unread badge pill.
+> **Note:** Unread badges currently render as inline text (`" [N]"`) rather than a pill/badge element. The redesign should introduce a dedicated unread badge pill.
+
+### 3.5 Shared Semantic Token Reference
+
+Tokens shared across both themes that are not tied to a specific component:
+
+| Token               | Light Hex | Dark Hex  | Light contrast | Usage                                         |
+|---------------------|-----------|-----------|----------------|-----------------------------------------------|
+| Elevated surface    | #ffffff   | #2f2f45   | —              | Dropdowns, context menus, tooltips            |
+| Selected surface    | #d6e4f8   | #2a3a5a   | —              | Selected row background (non-primary accent)  |
+| Warning             | #b8860b   | #e6c200   | ≥ 3:1 (large)  | Warning states, caution borders, transient errors |
+| Unread badge bg    | #2e70cc   | #4a9eff   | —              | Unread count pill background                  |
+| Keyboard focus      | #4a9eff   | #66b3ff   | —              | Focus ring / keyboard navigation indicator    |
+
+> **Usage guidance:** `Elevated surface` sits above `bg_surface` in the z/hierarchy stack — use it for popovers, context menus, and dropdown panels that float above the main content. `Keyboard focus` is applied as a 2px outline ring on interactive elements during keyboard navigation (Tab/Shift+Tab), not as a hover adornment.
 
 ---
 
@@ -356,9 +388,9 @@ Implementation: `container_card` at `app.rs:462-472`.
 
 ### 4.5 Notification Badges
 
-**Current state:** Unread counts are shown inline as `" [N]"` in the conversation name text. No dedicated badge element exists.
+**Current state:** Unread counts are shown inline as `" [N]"` in the conversation name text. No dedicated badge element exists. This is a known limitation — see "Remaining Planned UI Work" below.
 
-**Proposed spec for redesign:**
+**Planned for future implementation:**
 
 | Property     | Value proposal                 |
 |-------------|--------------------------------|
@@ -373,18 +405,20 @@ Implementation: `container_card` at `app.rs:462-472`.
 
 ### 4.6 Status Indicators
 
+**Current state:** Unicode characters for online/offline, inline with text.
+
 | Property     | Value                          | File:Line |
 |-------------|--------------------------------|-----------|
 | Online       | "●" (filled circle), green    | `app.rs:10433` |
 | Offline      | "○" (hollow circle), grey     | `app.rs:10433` |
-| Idle         | Not yet implemented — proposal: "◐" amber | |
+| Idle         | Not yet implemented — planned: "◐" amber | |
 | Font size    | Inline with name text (inherits `TYPO_SM`) | |
 | Colour - Online (light)| `#1a8c33` -> `accent_green` | `app.rs:408` |
 | Colour - Online (dark) | `#3ddc84` -> `accent_green` | `app.rs:406` |
 | Colour - Offline (lt)  | Same as `text_muted` (`#666`)  | `app.rs:10470` |
 | Colour - Offline (dk)  | Same as `text_muted` (`#999`)  | `app.rs:10470` |
 
-**Proposal:** Replace Unicode characters with a proper circle widget for better visual consistency. A solid circle of a fixed diameter (8px) with appropriate margin.
+**Planned replacement:** Replace Unicode characters with a proper circle widget for better visual consistency. A solid circle of a fixed diameter (8px) with appropriate margin.
 
 ### 4.7 Avatars
 
@@ -400,9 +434,9 @@ Implementation: `container_card` at `app.rs:462-472`.
 
 ### 4.8 Context Menus
 
-**Current state:** No context menus exist in the codebase. All interactions use explicit buttons.
+**Current state:** No context menus exist in the codebase. All interactions use explicit buttons. The friend profile "⋮" (three-dot) menu is a manually positioned overlay inside the profile view, not a reusable context-menu component.
 
-**Proposed spec for redesign:**
+**Planned for future implementation:**
 
 | Property     | Value proposal                 |
 |-------------|--------------------------------|
@@ -515,13 +549,18 @@ Iced renders `stack![]` children in order, with later children on top. The backd
 
 ## 7. Border Radii
 
-| Token           | Value  | Usage                                  | File:Line |
-|-----------------|--------|----------------------------------------|-----------|
-| `SPACE_4`       | 4px    | Small: sidebar selected row, small buttons | `app.rs:10496` |
-| `SPACE_6`       | 6px    | Buttons (primary, secondary), settings buttons | `download_progress_view.rs:128` |
-| `SPACE_8`       | 8px    | Cards, chat bubble, composer container | `app.rs:468, 11298, 11560` |
-| `SPACE_10`      | 10px   | State badge pill, download card        | `download_progress_view.rs:96, 338` |
-| `SPACE_12`      | 12px   | Avatars, dialogs, help panel           | `app.rs:10647, 11054` |
+Radii are organised by the semantic surface they belong to, not by arbitrary px values. Each category maps to one or more `SPACE_N` tokens.
+
+| Category           | px       | Token       | Usage                                              |
+|--------------------|----------|-------------|----------------------------------------------------|
+| Small controls     | 4px      | `SPACE_4`   | Sidebar selected row, small action buttons, toggle |
+| List rows          | 4px      | `SPACE_4`   | Conversation rows, friend rows (selected state)   |
+| Buttons (standard) | 6px      | `SPACE_6`   | Primary/secondary/outline buttons, state badge     |
+| Cards / containers | 8px      | `SPACE_8`   | Surface cards, chat bubbles, composer container, settings cards |
+| State pill / download card | 10px | `SPACE_10` | State badge pill, download progress card          |
+| Dialogs / avatars  | 12px     | `SPACE_12`  | Modal dialogs, help overlay, avatar circles        |
+
+> **Guideline:** Never round a surface more than 12px. Never set a corner radius to 0px for interactive elements — the minimum is 4px for the smallest controls.
 
 ---
 
@@ -541,26 +580,56 @@ Proposed for dialogs and context menus in the redesign: same shadow values.
 
 ## 9. Interactive States
 
-### Button States
+All interactive elements in the UI respond to the same seven states. This section defines the visual treatment for each state across the three main interactive patterns.
 
-| State    | Primary                               | Ghost / Text                     |
-|----------|---------------------------------------|----------------------------------|
-| Default  | Filled `accent_primary`, white text   | Muted text, no background        |
-| Hovered  | Slightly lighter primary fill         | `accent_primary` text            |
-| Pressed  | 85% brightness of accent              | 85% brightness of accent         |
-| Disabled | N/A (no disabled buttons in current UI)| N/A                             |
+| # | State            | Description                                             |
+|---|------------------|---------------------------------------------------------|
+| 1 | **Normal**       | Default resting state, no interaction                   |
+| 2 | **Hover**        | Pointer (mouse cursor) is over the element              |
+| 3 | **Pressed**      | Pointer button is held down on the element              |
+| 4 | **Selected**     | Element is the currently active / chosen item           |
+| 5 | **Keyboard focused** | Element has keyboard focus (Tab/Shift+Tab)         |
+| 6 | **Disabled**     | Element is visible but not interactive                  |
+| 7 | **Error**        | Element contains or relates to a validation failure     |
 
-### Row / Item States
+### 9.1 Button States
 
-| State    | Sidebar conversations                 | Sidebar friends / peers           |
-|----------|---------------------------------------|-----------------------------------|
-| Default  | Transparent background                | Transparent background            |
-| Selected | `accent_primary` fill, white text     | N/A                               |
-| Hovered  | None (button borderless, clickable area) | None (button borderless)         |
+| State             | Primary                                  | Ghost / Text                            | Danger                                  |
+|-------------------|------------------------------------------|-----------------------------------------|-----------------------------------------|
+| Normal            | Filled `accent_primary`, white text      | Muted text, transparent background      | Filled `color_error`, white text        |
+| Hover             | ↑ brightness 15% (lighter)              | `accent_primary` text colour            | ↑ brightness 15%                        |
+| Pressed           | ↓ brightness 15% (darker)               | ↓ brightness 15% of `accent_primary`    | ↓ brightness 15%                        |
+| Keyboard focused  | 2px solid `keyboard focus` ring         | 2px solid `keyboard focus` ring         | 2px solid `keyboard focus` ring         |
+| Selected          | N/A (momentary action)                  | N/A                                     | N/A                                     |
+| Disabled          | `bg_surface` bg, 40% opacity text       | 40% opacity text, no hover change       | 40% opacity bg, muted text              |
+| Error             | Same as Normal (form buttons) or Danger | Red-tinted text (`color_error`)         | Same as Danger                          |
 
-### Text Input States
+> **Focus ring:** Apply via `container` with `Border { width: 2px, color: keyboard_focus, radius: <button_radius> }` on the outermost button wrapper. Only visible during keyboard navigation.
 
-The composer input (`text_input`) uses iced's built-in theme styling with a custom container border (see composer section). The settings input uses iced defaults.
+### 9.2 Row / Item States
+
+| State             | Sidebar conversations                   | Sidebar friends / peers                 | Settings list rows                      |
+|-------------------|------------------------------------------|-----------------------------------------|-----------------------------------------|
+| Normal            | Transparent background, body text       | Transparent background, body text       | Transparent background                  |
+| Hover             | `bg_hover` background (currently dormant — recommended) | `bg_hover` background                  | `bg_hover` background                   |
+| Pressed           | `bg_hover` → brief flash                | `bg_hover` → brief flash                | `bg_hover` → brief flash                |
+| Selected          | `accent_primary` fill, white text, `SPACE_4` radius | N/A (handled via chat button) | N/A (handled individually)              |
+| Keyboard focused  | 2px `keyboard focus` inset ring         | 2px `keyboard focus` inset ring         | 2px `keyboard focus` ring               |
+| Disabled          | 40% opacity text, no interaction         | 40% opacity text, no interaction        | 40% opacity text                        |
+| Error             | Red left border (see error state section)| Red tinted text                          | Red text or border                      |
+
+### 9.3 Text Input States
+
+| State             | Composer input                          | Settings / join-ticket input            |
+|-------------------|------------------------------------------|-----------------------------------------|
+| Normal            | `bg_input` fill, `border_muted` border  | Iced default theme                      |
+| Hover             | Slightly lighter background             | Iced default theme                      |
+| Focused           | `accent_primary` border, 1px            | Iced default theme                      |
+| Keyboard focused  | 2px `keyboard focus` outer ring         | 2px `keyboard focus` outer ring         |
+| Disabled          | `bg_primary` fill, 40% text opacity     | Iced default greyed                     |
+| Error             | `color_error` border, tinted bg         | `color_error` border                    |
+| Pressed           | N/A (text input, not pressable)         | N/A                                     |
+| Selected          | N/A (text selection is system-level)    | N/A                                     |
 
 ---
 
@@ -605,42 +674,333 @@ The composer input (`text_input`) uses iced's built-in theme styling with a cust
 
 ---
 
-## 11. Recommended Design Token Changes
+## 11. Design Token Status
 
 ### 11.1 Adopt a central token module
 
-Currently colours, spacing, and typography are defined as `pub(crate)` constants and free functions in `app.rs`. For the redesign, consider extracting them into a dedicated `theme.rs` module.
+**Status:** *Not implemented.* Colours, spacing, and typography remain defined as `pub(crate)` constants and free functions in `app.rs`. Extracting them into a dedicated `theme.rs` module is still recommended for maintainability.
 
-### 11.2 Add missing tokens
+### 11.2 Missing tokens
 
-| Token                    | Reason                                          |
-|--------------------------|-------------------------------------------------|
-| `TYPO_XXXS` (8px)       | For very dense data (download speeds, file sizes) |
-| `SPACE_20` (20px)       | Gap between major sidebar sections              |
-| Text `WARNING` (amber)  | For transient failure states (temporary)        |
-| `ANIMATION_DURATION`    | Standard transition speed for hover/selection   |
+| Token                    | Reason                                          | Status |
+|--------------------------|-------------------------------------------------|--------|
+| `TYPO_XXXS` (8px)       | For very dense data (download speeds, file sizes) | Not added |
+| `SPACE_20` (20px)       | Gap between major sidebar sections              | Not added — sections use existing spacing tokens |
+| Text `WARNING` (amber)  | For transient failure states (temporary)        | Not added |
+| `ANIMATION_DURATION`    | Standard transition speed for hover/selection   | Not added — Iced has no animation API |
 
 ### 11.3 Standardise button API
 
-Currently button styles are defined inline in multiple places. A single `ButtonKind` enum (`Primary`, `Secondary`, `Ghost`, `Danger`, `TextOnly`) with a unified `button_style` function would reduce duplication.
+**Status:** *Partially implemented.* Button styles are still defined inline in multiple places (`BUTTON_GHOST`, `BUTTON_ICON`, `BUTTON_PRIMARY`, `BUTTON_OUTLINE`, `BUTTON_GHOST_BG`, `DANGER_BUTTON`). A single `ButtonKind` enum with a unified `button_style` function would reduce duplication but has not been merged.
 
 ### 11.4 Replace unicode status dots with vector circles
 
-The `"●"` and `"○"` characters for online/offline status are not aligned consistently across platforms. Replace them with a coloured circle widget (e.g. 8×8px container with `Border { radius: 50% }`).
+**Status:** *Not implemented.* The `"●"` and `"○"` characters remain in use.
 
 ### 11.5 Introduce real unread badge pills
 
-Replace inline `" [N]"` text with a rendered pill container (see section 4.5).
+**Status:** *Not implemented.* Inline `" [N]"` text remains in use.
 
 ---
 
-## 12. Implementation Order (for downstream Steps 2–9)
+## 12. Implementation History
 
-1. **Step 2** — Extract theme tokens into `theme.rs`, add missing tokens
-2. **Step 3** — Standardise button style helpers
-3. **Step 4** — Implement notification badge pills and status dot widgets
-4. **Step 5** — Refine sidebar spacing and layout
-5. **Step 6** — Polish chat panel (bubbles, timestamps, avatar layout)
-6. **Step 7** — Add context menus
-7. **Step 8** — Finalise modal/dialog consistency
-8. **Step 9** — UX audit (assigned to `linux` profile)
+The UI redesign was completed in the following steps (see Kanban tasks for details):
+
+1. **Step 2** — Extract theme tokens into `theme.rs`, add missing tokens *(NOT completed — tokens remain in app.rs)*
+2. **Step 3** — Standardise button style helpers *(NOT completed — button helpers remain ad-hoc)*
+3. **Step 4** — Implement notification badge pills and status dot widgets *(NOT completed)*
+4. **Step 5** — Refine sidebar spacing and layout *(COMPLETED — collapsible sections, identity row, 280px fixed width)*
+5. **Step 6** — Polish chat panel (bubbles, timestamps, avatar layout) *(COMPLETED)*
+6. **Step 7** — Add context menus *(NOT completed)*
+7. **Step 8** — Finalise modal/dialog consistency *(COMPLETED)*
+8. **Step 9** — UX audit *(COMPLETED — see UX_AUDIT.md)*
+9. **Step 10** — Landing screen redesign *(COMPLETED — status card, actions, recent activity)*
+10. **Step 11** — Sidebar section collapsible headers *(COMPLETED)*
+11. **Step 12** — Redesigned friend profile *(COMPLETED — rename inline, status, three-dot menu)*
+12. **Step 13** — Redesigned recent activity *(COMPLETED — structured rows with relative time)*
+13. **Step 14** — Friends-online panel *(COMPLETED — online status in CHATS and FRIENDS sections)*
+14. **Step 15** — Dashboard file-drop area *(NOT implemented — Iced lacks native drag-and-drop)*
+15. **Step 16** — Discovered peers section *(COMPLETED — Chat + Browse Files buttons per peer)*
+16. **Step 17** — Settings screen refinements *(COMPLETED — identity, network, appearance sections)*
+17. **Step 18** — Image preview screen *(COMPLETED)*
+18. **Step 19** — Accessibility and keyboard support audit *(COMPLETED — focus rings, keyboard shortcuts)*
+19. **Step 20** — Chats section in sidebar *(COMPLETED — online sort, unread counts, previews)*
+20. **Step 21** — Requests section in sidebar *(COMPLETED — accept/decline, Manage button)*
+21. **Step 22** — Friends section in sidebar *(COMPLETED — add by key input, alphabetically sorted)*
+22. **Step 23** — Documentation update *(COMPLETED — this document and README)*
+
+---
+
+## 13. Accessibility Requirements
+
+These requirements apply to every UI surface. No feature should ship without meeting these standards.
+
+### 13.1 Colour and Contrast
+
+| Requirement              | Target                     | How to verify                               |
+|--------------------------|----------------------------|---------------------------------------------|
+| Text contrast (normal)   | ≥ 4.5:1 against background | WCAG AA — use `color_contrast` tool        |
+| Text contrast (large)    | ≥ 3:1 against background   | 18px+ bold or 24px+ regular                 |
+| Non-text contrast        | ≥ 3:1 (borders, icons)     | Controls and visual indicators              |
+| No colour-only status    | Every status has an icon, label, or text indicator in addition to colour | Review each status indicator for colour-only encoding |
+
+> **Dark theme minimum:** All text tokens in the dark palette must achieve at least 4.5:1 against `bg_primary` (`#1a1a2e`) and `bg_surface` (`#2a2a3e`). Current dark theme `text_secondary` and `text_system` at `#999` achieve ~5.5:1 against `#2a2a3e` — this is AA-compliant but should be treated as the floor, not a comfortable margin.
+
+### 13.2 Focus Indicators
+
+| Requirement                       | Target                               |
+|-----------------------------------|--------------------------------------|
+| Visible focus ring                | 2px solid `keyboard_focus` outline   |
+| Focus order                       | Matches visual reading order (LTR)   |
+| No focus removal                  | Never suppress focus outlines without providing an equivalent visible indicator |
+| Keyboard-operable                | Every interactive element reachable via Tab/Shift+Tab |
+| Tab stops                         | Visible focus ring on every button, input, link, and interactive row |
+
+### 13.3 Touch / Click Targets
+
+| Requirement                       | Minimum size        | Notes                        |
+|-----------------------------------|---------------------|------------------------------|
+| Interactive element size          | 32×32 logical px    | Icon-only buttons            |
+| Button / input height             | 32 logical px       | Standard controls            |
+| Spacing between tappable targets  | 4px minimum         | Prevent fat-finger errors    |
+
+> **Iced-specific note:** Icon-only buttons (e.g. `"⚙"`, `"＋"`, `"?"`) must have explicit `width` and `height` set to at least 32px, with the icon centred inside. Without explicit dimensions, iced collapses these to the text extent.
+
+### 13.4 Typography and Scaling
+
+| Requirement                       | Target                                     |
+|-----------------------------------|--------------------------------------------|
+| Minimum body text size            | 13px (`TYPO_SM`) for primary content      |
+| Secondary text minimum            | 11px (`TYPO_XS`) — never smaller          |
+| Caption / badge minimum           | 10px (`TYPO_XXS`) — never smaller         |
+| Configurable text size            | Chat body size must be user-adjustable    |
+| Display scaling                   | Respect OS-level UI scaling (iced handles this natively) |
+
+> **Rule:** Never use `TYPO_XXS` (10px) for interactive labels or tappable content. Reserve it for passive read-only data (timestamps, file sizes, metadata).
+
+### 13.5 Error States (Accessibility)
+
+| Requirement                       | Target                                     |
+|-----------------------------------|--------------------------------------------|
+| Error identification              | Every error must have a text message       |
+| Error colour redundancy           | Error text must include an icon or label prefix (e.g. `!"...`) in addition to red colour |
+| Recovery guidance                 | Every error message must tell the user what to do next |
+| Transient errors                  | Toast messages must persist long enough to be read (minimum 4 seconds) |
+
+### 13.6 Screen Reader / Assistive Technology
+
+| Requirement                       | Target                                     |
+|-----------------------------------|--------------------------------------------|
+| Semantic labels                   | Every icon-only button must have an accessible label (Iced: `.tooltip()` or `aria_label` equivalent) |
+| Status announcements              | Online/offline transitions, message receipts, and errors should be reachable via assistive tech |
+| Empty states                      | Empty lists must communicate "no items" with a text message, not just a blank area |
+
+### 13.7 Colour Palette Compliance Notes
+
+- **Light theme text OK:** `text_secondary` (`#666`, 5.2:1 on white), `text_system` (`#595959`, 6.5:1) — both pass WCAG AA.
+- **Light theme green text:** `text_local_label` (`#007300`, 5.8:1) passes AA at normal size. `text_local_body` (`#005900`, 6.5:1) is comfortable.
+- **Dark theme green text:** `text_local_label` (`#33cc33`) and `text_local_body` (`#4de64d`) on `#1a1a2e` — these are vivid but should be verified with a contrast tool as the exact ratios depend on monitor calibration.
+- **Warning colour:** `#b8860b` (light) / `#e6c200` (dark) — these are for large indicators and borders, not primary text. For warning text, use `text_system` or `text_secondary`.
+- **Online indicator:** The online dot uses `accent_green` colour plus a filled-circle icon shape — never colour-only. The companion label text (e.g. "Online") or presence of the dot vs. absence communicates state redundantly.
+
+---
+
+## 14. Landing Screen (Empty State)
+
+The landing screen (`view_main_empty_state`, app.rs:12501) is shown when no conversation is selected (screen = `ChatList`).
+
+### Layout
+
+```
+┌─────────────── MAX WIDTH 480px ───────────────┐
+│                                                 │
+│                BORU (TYPO_XL, accent_primary)    │
+│          Private. Peer-to-peer. No              │
+│                   central servers.              │
+│                                                 │
+│  ┌── Status Card (container_card) ──────────┐  │
+│  │  ● Online                                │  │
+│  │  ● Mesh: healthy                         │  │
+│  │  ● Relay: connected via <relay>          │  │
+│  │  ● Friends Online: 2 / 5                 │  │
+│  └──────────────────────────────────────────┘  │
+│                                                 │
+│  ┌─────┐ ┌──────────┐ ┌───────┐ ┌──────────┐  │
+│  │Start │ │Add Friend││ Join  │ │ Browse   │  │
+│  │Chat  │ │          ││ Ticket│ │ Files    │  │
+│  └─────┘ └──────────┘ └───────┘ └──────────┘  │
+│                                                 │
+│  ┌── Activity Card (container_card) ─────────┐  │
+│  │  Recent Activity                           │  │
+│  │  • Alice came online          1m ago       │  │
+│  │  • Blue Falcon shared file   5m ago        │  │
+│  │  (scrollable, max 200px)                   │  │
+│  └────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────┘
+```
+
+### Components
+
+| Section | Implementation | Notes |
+|---------|---------------|-------|
+| **Branding** | `text("BORU").size(TYPO_XL).color(accent_primary)` | |
+| **Tagline** | `text("Private. Peer-to-peer. No central servers.")` | `TYPO_SM`, `text_muted` |
+| **Status card** | `container(…).style(container_card)` | 4 status rows with Unicode dots |
+| **Quick actions** | 2×2 grid of outline buttons | Each `width(Length::Fill)` |
+| **Recent activity** | `scrollable` within `container_card` | Max 20 events, capped at 200px height |
+
+### Status Indicators
+
+| Row | Icon | Content | Dynamic |
+|-----|------|---------|---------|
+| 1 | ● green | "Online" | Static |
+| 2 | ● blue | "Mesh: healthy / degraded / offline" | Dynamic — `MeshHealth` |
+| 3 | ● blue | Relayed/disconnected relay mode | Dynamic — `relay_mode()` |
+| 4 | ● green/grey | "Friends Online: N / M" or "No friends are online" | Dynamic |
+
+---
+
+## 15. Sidebar Structure
+
+The sidebar (`view_sidebar`, app.rs:11482) is a fixed-width (280px) left panel with a branded header, identity row, and four collapsible sections.
+
+### Layout
+
+```
+┌──── Sidebar (280px, bg_surface) ────────────┐
+│                                               │
+│  ┌─ Header ────────────────────────────┐     │
+│  │ Boru (TYPO_LG)            ＋   ⚙   │     │
+│  └─────────────────────────────────────┘     │
+│  ┌─ Identity Row ──────────────────────┐     │
+│  │ avatar  label: display_label        │     │
+│  │         relay_mode                  │     │
+│  └─────────────────────────────────────┘     │
+│  ┌─ CHATS (N) ─── [▼] ────────────────┐     │
+│  │ ● Peer_1            preview  12:34  │     │
+│  │ ○ Peer_2            preview   5h    │     │
+│  └─────────────────────────────────────┘     │
+│  ┌─ FRIENDS (N) ── [▼] ───────────────┐     │
+│  │ [Add friend by key…]                │     │
+│  │ ● Alice                          …  │     │
+│  │ ○ Bob                             …  │     │
+│  └─────────────────────────────────────┘     │
+│  ┌─ DISCOVER (N) ─ [▼] ───────────────┐     │
+│  │ ● Peer  [Chat] [Browse Files]      │     │
+│  └─────────────────────────────────────┘     │
+│  ┌─ REQUESTS (N) ─ [▼] ───────────────┐     │
+│  │ [Manage Requests]                   │     │
+│  │ Alice                        ✓  ✗  │     │
+│  └─────────────────────────────────────┘     │
+│                                               │
+│  (scrollable)                                 │
+└───────────────────────────────────────────────┘
+```
+
+### Section Behaviour
+
+| Section | Collapse | Content Source | Sort Order |
+|---------|----------|---------------|------------|
+| CHATS | Yes (toggle) | `conversation_store` | Online first, then recency, then name |
+| FRIENDS | Yes (toggle) | `friends` (JSON) | Alphabetical by display name |
+| DISCOVER | Yes (toggle) | `discovered_peers` | As-received from mDNS/DHT |
+| REQUESTS | Yes (toggle) | `friend_request_store` | Alphabetical by requester name |
+
+### Section Header
+
+Each collapsible section header is rendered by `sidebar_collapsible_section_header()`:
+
+| Property | Value |
+|----------|-------|
+| Label | ALL-CAPS section name + count badge |
+| Expand/collapse | ▲ (expanded) or ▼ (collapsed) indicator |
+| Toggle | Click on header row toggles collapse state |
+| Data | `sidebar_section_collapsed[0..3]` boolean array |
+
+### Conversation Row
+
+Rendered by `view_sidebar_conversation_row()` (app.rs:11814):
+
+| Element | Spec |
+|---------|------|
+| Avatar | 24×24px, circular, image or fallback initial |
+| Status dot | "●" green (online) or "○" grey (offline) |
+| Name | `TYPO_SM`, selected=WHITE, else `text_remote_body` |
+| Unread badge | Inline `" [N]"` appended to name |
+| Preview | `TYPO_XS`, `text_muted`, one line |
+| Timestamp | `TYPO_XXS`, `text_muted`, relative time |
+| Row padding | `[6, 12]` vertical/horizontal |
+| Selected bg | `accent_primary` fill with `SPACE_4` radius |
+| Hover bg | `bg_hover` (dormant — clicked via full-width button) |
+
+---
+
+## 16. Friend Profile View
+
+The redesigned friend profile (`view_friend_profile`, app.rs:14670) displays friend details with inline rename and action buttons.
+
+### Layout
+
+| Section | Content |
+|---------|---------|
+| **Header** | Display name (or inline rename input + ✓/✕), "⋮" menu button, "✕" close button |
+| **Status** | "● Online" or "○ Offline" with additional info ("Connected locally." when direct connection exists) |
+| **Actions** | "Chat" (primary), "Browse Files" (outline), "Remove Friend" (danger), "Block Friend" (danger) |
+| **Key info** | Peer public key (52-char hex, copyable), "Copy" button with "Copied!" feedback |
+| **Recent Messages** | Last 3 messages in the conversation (clickable to open chat) |
+| **Three-dot menu** | "Rename", "Message", "Copy Public Key", "Remove Friend", "Block Friend" (toggle), "Cancel" |
+
+### Inline Rename
+
+When the "⋮" menu "Rename" option is selected, the name element switches to a `text_input` with ✓ confirm and ✕ cancel buttons. The new name is stored as the friend's `label` in the `FriendsStore`, which takes top priority in the display-name resolution chain.
+
+---
+
+## 17. Peer Names (from `peer_names.rs`)
+
+Peer names are generated deterministically from the peer's 32-byte Ed25519 public key (see `src/peer_names.rs`).
+
+### Algorithm
+
+1. First 4 bytes → u32 → adjective index into 110+ curated adjectives
+2. Next 4 bytes + adjective component → noun index into 140+ curated nouns
+3. Output: `"<Adjective> <Noun>"` (e.g. "Blue Falcon", "Quiet Harbour")
+
+### Display Priority
+
+```
+1. Friend label (user-assigned nickname)
+2. Remote profile display name (from ProfileUpdate gossip)
+3. Last announced name (from friend record metadata)
+4. Session / device name
+5. Generated friendly name ("Blue Falcon")
+6. Truncated peer ID ("dfab…961f") — secondary text only
+```
+
+### Truncated Key
+
+`fmt_truncated()` produces: `"dfab…961f"` (first 4 hex chars + ellipsis + last 4 hex chars).
+
+---
+
+## 18. Remaining Planned Work
+
+The following items from the original design spec have NOT been implemented and remain as future work:
+
+1. **Dedicated `theme.rs` module** — tokens still live in `app.rs`
+2. **Standardised button API** — `ButtonKind` enum not merged
+3. **Unread badge pills** — inline `" [N]"` remains
+4. **Vector status dots** — Unicode ●/○ characters remain
+5. **Context menus** — no right-click menus anywhere
+6. **Dashboard file-drop area** — Iced v0.14 lacks native drag-and-drop
+7. **Toast notifications** — no transient notification system
+8. **Sidebar search/filter** — no text input for filtering chats or friends
+9. **Onboarding overlay** — no first-launch tutorial
+10. **Room-level settings** — "Settings" button opens global settings
+11. **"Voice" button** — dead button on friend profile, no action handler
+12. **Export Friend** — no counterpart to "Import Friend"
+13. **Delivery status indicators** — delivery_state tracked but not surfaced in chat log
+14. **`SPACE_20` gap token** — not added
+15. **`TYPO_XXXS` token** — not added
+16. **Animation duration token** — not applicable (Iced has no animation API)

@@ -320,6 +320,13 @@ pub mod safe_destination;
 /// reasonable length.  See the module docs for full details.
 pub mod abuse_controls;
 
+/// Human-friendly deterministic peer names derived from [`PublicKey`].
+///
+/// Provides [`generate_friendly_name`] for stable adjective‑noun names
+/// (e.g. "Blue Falcon") and [`fmt_truncated`] for short identifiers
+/// ("dfab…961f").  Used by the GUI as the fallback display‑name layer.
+pub mod peer_names;
+
 /// Blob transfer — iroh-blobs streaming download from a remote peer to a
 /// local temp file.
 #[cfg(feature = "net")]

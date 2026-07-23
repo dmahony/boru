@@ -760,7 +760,7 @@ fn skip_decision_carries_reason_and_hint() {
         } => {
             assert!(!reason.is_empty(), "Skip reason must not be empty");
             assert!(
-                next_check_after > Duration::ZERO || next_check_after == Duration::ZERO,
+                next_check_after >= Duration::ZERO,
                 "next_check_after must be non-negative"
             );
         }

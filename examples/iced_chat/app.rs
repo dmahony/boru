@@ -72,6 +72,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use crate::connection_details::{
+    self, ConnectionDetailsDialogAction, ConnectionDetailsDialogState, ConnectionDetailsViewModel,
+};
 use crate::perf_tracker::PerfTracker;
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_core::chat_core::{RoomInvitation, DIAGNOSTICS};
@@ -195,6 +198,10 @@ fn invitation_endpoint_addr(
 const CHAT_LOG: &str = "chat_log";
 /// Stable widget ID used to focus the chat composer from the `/` shortcut.
 const COMPOSER_INPUT: &str = "chat_composer";
+/// Stable widget ID used to focus the first value field in the connection-details dialog.
+const CONNECTION_DETAILS_FIRST_VALUE_INPUT: &str = "connection-details-first-value";
+/// Stable widget ID used to restore focus to the settings-page details trigger.
+const CONNECTION_DETAILS_TRIGGER_INPUT: &str = "connection-details-trigger";
 
 // ── Typography scale (minor-second ratio ~1.125) ─────────────────────
 pub(crate) const TYPO_XL: f32 = 24.0; // Primary heading (chat list title)
@@ -296,7 +303,7 @@ fn load_stored_chat_image(
 
 // ── Theme-aware chat colors ──────────────────────────────────────────
 /// Return the muted secondary color for labels, previews, and counts.
-fn text_muted(theme: &iced::Theme) -> Color {
+pub(crate) fn text_muted(theme: &iced::Theme) -> Color {
     if matches!(theme, iced::Theme::Dark) {
         Color::from_rgb(0.6, 0.6, 0.6) // ~#999, ~4.5:1 on dark bg ✓ AA
     } else {
@@ -479,7 +486,7 @@ struct FriendsSidebarCacheKey {
 }
 
 /// Container style for a card — surface background, muted border, rounded.
-fn container_card(theme: &iced::Theme) -> iced::widget::container::Style {
+pub(crate) fn container_card(theme: &iced::Theme) -> iced::widget::container::Style {
     iced::widget::container::Style {
         background: Some(iced::Background::Color(bg_surface(theme))),
         border: iced::Border {
@@ -1161,12 +1168,12 @@ impl DownloadAttachment {
         // Rows: title + action + spacing. Active adds progress + source rows.
         // Error state adds a failure-title, action, and detail rows.
         match self.state {
-            DownloadState::Ready => 92.0,
-            DownloadState::Active { total: Some(_), .. } | DownloadState::Paused { .. } => 152.0,
-            DownloadState::Active { total: None, .. } => 144.0,
-            DownloadState::Completed { .. } => 100.0,
+            DownloadState::Ready => 84.0,
+            DownloadState::Active { total: Some(_), .. } | DownloadState::Paused { .. } => 112.0,
+            DownloadState::Active { total: None, .. } => 176.0,
+            DownloadState::Completed { .. } => 92.0,
             DownloadState::Failed { .. } => 176.0,
-            DownloadState::Cancelled => 92.0,
+            DownloadState::Cancelled => 84.0,
         }
     }
 }
@@ -1837,6 +1844,12 @@ pub struct IcedChat {
     show_create_room_dialog: bool,
     /// Whether the \"Add\" menu dropdown in the sidebar header is open.
     show_add_menu: bool,
+    /// Reusable advanced connection-details dialog state.
+    connection_details_dialog: Option<ConnectionDetailsDialogState>,
+    /// Accessible status announcement shown after copying from the dialog.
+    connection_details_announcement: Option<String>,
+    /// Focus target to restore when the connection-details dialog closes.
+    connection_details_focus_target: Option<&'static str>,
     // ── Friend Profile screen state ──
     /// Whether the three-dot context menu in the friend profile is open.
     friend_profile_menu_open: bool,
@@ -2252,6 +2265,17 @@ pub enum AppMessage {
     FriendRenameConfirm,
     /// Copy a peer's public key ID to the clipboard with toast feedback.
     CopyPeerId(PublicKey),
+    /// Open the reusable connection-details dialog.
+    OpenConnectionDetails,
+    /// Close the reusable connection-details dialog.
+    CloseConnectionDetails,
+    /// Copy the support-safe connection-details summary to the clipboard.
+    CopyConnectionDetails,
+    /// Copy one redacted connection-details value to the clipboard.
+    CopyConnectionDetailsValue {
+        label: String,
+        value: String,
+    },
     /// Dismiss the toast notification.
     DismissToast,
     /// Show the "Remove Friend" confirmation dialog.
@@ -3299,6 +3323,9 @@ impl IcedChat {
             room_trackers: HashMap::new(),
             show_create_room_dialog: false,
             show_add_menu: false,
+            connection_details_dialog: None,
+            connection_details_announcement: None,
+            connection_details_focus_target: None,
 
             friend_profile_menu_open: false,
             friend_profile_rename_input: String::new(),
@@ -4094,6 +4121,10 @@ impl IcedChat {
             AppMessage::FriendRenameInputChanged(_) => "FriendRenameInputChanged",
             AppMessage::FriendRenameConfirm => "FriendRenameConfirm",
             AppMessage::CopyPeerId(_) => "CopyPeerId",
+            AppMessage::OpenConnectionDetails => "OpenConnectionDetails",
+            AppMessage::CloseConnectionDetails => "CloseConnectionDetails",
+            AppMessage::CopyConnectionDetails => "CopyConnectionDetails",
+            AppMessage::CopyConnectionDetailsValue { .. } => "CopyConnectionDetailsValue",
             AppMessage::DismissToast => "DismissToast",
             AppMessage::ShowRemoveFriendConfirm => "ShowRemoveFriendConfirm",
             AppMessage::CancelRemoveFriend => "CancelRemoveFriend",
@@ -4483,7 +4514,7 @@ fn online_friends_from_store(friends: &FriendsStore) -> HashMap<PublicKey, Strin
         .filter_map(|(id, record)| {
             id.parse_public_key()
                 .ok()
-                .map(|pk| (pk, record.display_label(id)))
+                .map(|pk| (pk, record.display_label(id, &pk)))
         })
         .collect()
 }
@@ -4496,9 +4527,13 @@ impl IcedChat {
     /// Cancel buttons rather than mutating dialog state directly.
     fn close_dialog_message(
         show_create_room_dialog: bool,
+        connection_details_dialog: bool,
         history_confirm_clear: bool,
         room_delete_confirm_topic: Option<TopicId>,
     ) -> Result<AppMessage, GuiActionError> {
+        if connection_details_dialog {
+            return Ok(AppMessage::CloseConnectionDetails);
+        }
         if show_create_room_dialog {
             return Ok(AppMessage::CancelCreateRoom);
         }
@@ -4517,9 +4552,58 @@ impl IcedChat {
     fn close_current_dialog(&self) -> Result<AppMessage, GuiActionError> {
         Self::close_dialog_message(
             self.show_create_room_dialog,
+            self.connection_details_dialog.is_some(),
             self.history_confirm_clear,
             self.room_delete_confirm_topic,
         )
+    }
+
+    fn current_connection_details_dialog(&self) -> ConnectionDetailsDialogState {
+        let room_state = match &self.screen {
+            Screen::Chat { topic } => format!("Chat room active ({topic})"),
+            Screen::ImagePreview { topic, .. } => format!("Image preview open ({topic})"),
+            Screen::FriendProfile(_) => "Friend profile open".to_string(),
+            Screen::PeerProfile(_) => "Peer profile open".to_string(),
+            Screen::PeerCatalogue(_) => "Peer catalogue open".to_string(),
+            Screen::FriendRequests => "Friend requests open".to_string(),
+            Screen::Settings => "Settings open".to_string(),
+            Screen::ChatList => "Chat list open".to_string(),
+        };
+
+        let mesh_state = match &self.mesh_health {
+            MeshHealth::Good => "Healthy".to_string(),
+            MeshHealth::Degraded(reason) => format!("Degraded — {reason}"),
+            MeshHealth::Offline(reason) => format!("Offline — {reason}"),
+        };
+
+        let relay_mode = match &self.relay_mode {
+            RelayMode::Disabled => None,
+            _ => Some(fmt_relay_mode(&self.relay_mode)),
+        };
+
+        let last_error = match &self.mesh_health {
+            MeshHealth::Good => None,
+            MeshHealth::Degraded(reason) | MeshHealth::Offline(reason) => Some(reason.clone()),
+        };
+
+        ConnectionDetailsDialogState::ready(ConnectionDetailsViewModel::new(
+            self.local_public.to_string(),
+            relay_mode,
+            format!("Room: {room_state} · Mesh: {mesh_state}"),
+            if self.discovered_peers.is_empty() {
+                "No discovered peers yet".to_string()
+            } else {
+                format!("{} discovered peers", self.discovered_peers.len())
+            },
+            format!(
+                "{} direct · {} relayed · {} neighbors",
+                self.direct_peers,
+                self.relayed_peers,
+                self.neighbors.len(),
+            ),
+            self.neighbors.len(),
+            last_error,
+        ))
     }
 
     fn complete_close_dialog_action(&mut self) {
@@ -4533,6 +4617,17 @@ impl IcedChat {
         }
     }
 
+    fn close_connection_details_dialog(&mut self) -> iced::Task<AppMessage> {
+        self.connection_details_dialog = None;
+        self.connection_details_announcement = None;
+        self.complete_close_dialog_action();
+        if let Some(target) = self.connection_details_focus_target.take() {
+            iced::widget::operation::focus(target)
+        } else {
+            iced::Task::none()
+        }
+    }
+
     /// Validate a semantic GUI test command against the current UI state.
     pub fn validate_gui_test_command(
         &self,
@@ -4540,6 +4635,7 @@ impl IcedChat {
     ) -> Result<(), GuiActionError> {
         let blocking_dialog = || {
             self.show_create_room_dialog
+                || self.connection_details_dialog.is_some()
                 || self.history_confirm_clear
                 || self.room_delete_confirm_topic.is_some()
         };
@@ -4697,6 +4793,7 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             composer_text: self.composer_text.clone(),
             dialog_open: self.show_create_room_dialog
+                || self.connection_details_dialog.is_some()
                 || self.history_confirm_clear
                 || self.room_delete_confirm_topic.is_some(),
             unread_count: 0,
@@ -6039,7 +6136,7 @@ impl IcedChat {
                 self.conversation_store.upsert(ConversationEntry::new(
                     topic,
                     peer.to_string(),
-                    record.display_label(&fid),
+                    record.display_label(&fid, &peer),
                 ));
                 let _ = self.conversation_store.save();
                 let room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
@@ -6744,6 +6841,9 @@ impl IcedChat {
 
             // ── Global keyboard shortcuts ───────────────────────────
             AppMessage::Shortcut(Shortcut::Escape) => {
+                if self.connection_details_dialog.is_some() {
+                    return iced::Task::done(AppMessage::CloseConnectionDetails);
+                }
                 if self.show_add_menu {
                     self.show_add_menu = false;
                 } else if self.help_visible {
@@ -7098,7 +7198,7 @@ impl IcedChat {
                                 let label = self
                                     .friends
                                     .get(&fid)
-                                    .map(|record| record.display_label(&fid))
+                                    .map(|record| record.display_label(&fid, &sender))
                                     .unwrap_or_else(|| sender.fmt_short().to_string());
                                 let record = self.friends.ensure_friend(fid.clone());
                                 record.record_addrs(persisted_addrs.clone());
@@ -7750,9 +7850,7 @@ impl IcedChat {
                 // virtualized layout immediately so the card and all later
                 // messages keep their correct positions before the first
                 // progress event arrives.
-                self.layout_cache
-                    .borrow_mut()
-                    .invalidate_from(entry_index);
+                self.layout_cache.borrow_mut().invalidate_from(entry_index);
                 self.keep_latest_visible();
                 self.download_entry_index = Some(entry_index);
                 let blob_store = self.blob_store.clone();
@@ -8097,7 +8195,7 @@ impl IcedChat {
                         self.profile_cache.insert(
                             peer,
                             PeerProfileData {
-                                display_name: record.display_label(&fid),
+                                display_name: record.display_label(&fid, &peer),
                                 bio: String::new(),
                                 last_updated: SystemTime::UNIX_EPOCH,
                             },
@@ -8205,6 +8303,37 @@ impl IcedChat {
                 self.toast_counter = 120; // ~2 seconds at 60fps
                 self.friend_profile_menu_open = false;
                 return iced::clipboard::write(peer_str);
+            }
+            AppMessage::OpenConnectionDetails => {
+                self.show_create_room_dialog = false;
+                self.show_add_menu = false;
+                self.friend_profile_menu_open = false;
+                self.friend_profile_renaming = false;
+                self.friend_remove_confirm = false;
+                self.friend_block_confirm = false;
+                self.history_confirm_clear = false;
+                self.room_delete_confirm_topic = None;
+                self.connection_details_announcement = None;
+                self.connection_details_focus_target = Some(CONNECTION_DETAILS_TRIGGER_INPUT);
+                self.connection_details_dialog = Some(self.current_connection_details_dialog());
+                return iced::widget::operation::focus(CONNECTION_DETAILS_FIRST_VALUE_INPUT);
+            }
+            AppMessage::CloseConnectionDetails => self.close_connection_details_dialog(),
+            AppMessage::CopyConnectionDetails => {
+                if self.connection_details_dialog.is_some() {
+                    if let Some(summary) =
+                        self.current_connection_details_dialog().support_summary()
+                    {
+                        self.connection_details_announcement =
+                            Some("Support summary copied to clipboard".to_string());
+                        return iced::clipboard::write(summary);
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::CopyConnectionDetailsValue { label, value } => {
+                self.connection_details_announcement = Some(format!("Copied {label} to clipboard"));
+                return iced::clipboard::write(value);
             }
             AppMessage::DismissToast => {
                 self.toast_message = None;
@@ -8956,7 +9085,8 @@ impl IcedChat {
                     let online_peers: Vec<PublicKey> = self.neighbors.iter().copied().collect();
                     tasks.push(iced::Task::perform(
                         async move {
-                            let mut store = match boru_core::mailbox::MailboxStore::load(&data_dir) {
+                            let mut store = match boru_core::mailbox::MailboxStore::load(&data_dir)
+                            {
                                 Ok(Some(s)) => s,
                                 _ => return Vec::new(),
                             };
@@ -10153,7 +10283,7 @@ impl IcedChat {
                 let label = self
                     .friends
                     .get(&fid)
-                    .map(|record| record.display_label(&fid))
+                    .map(|record| record.display_label(&fid, from))
                     .unwrap_or_else(|| from.fmt_short().to_string());
                 self.friends.ensure_friend(fid);
                 self.conversation_store.upsert(ConversationEntry::new(
@@ -10440,7 +10570,7 @@ impl IcedChat {
                 let label = self
                     .friends
                     .get(&fid)
-                    .map(|r| r.display_label(&fid))
+                    .map(|r| r.display_label(&fid, &peer))
                     .unwrap_or_else(|| peer.fmt_short().to_string());
                 // Only show system messages for runtime transitions, not the
                 // initial scan. A friend with no last_seen_at or last_offline_at
@@ -10999,13 +11129,43 @@ impl IcedChat {
             .width(iced::Length::Fill)
             .height(iced::Length::Fill);
 
-        if self.show_create_room_dialog {
+        if self.connection_details_dialog.is_some() {
+            self.view_connection_details_dialog(base)
+        } else if self.show_create_room_dialog {
             self.view_create_room_dialog(base)
         } else if self.show_add_menu {
             self.view_sidebar_add_menu(base)
         } else {
             base.into()
         }
+    }
+
+    /// Wrap the base layout in an overlay showing the advanced connection details.
+    fn view_connection_details_dialog<'a>(
+        &'a self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        let Some(state) = self.connection_details_dialog.as_ref() else {
+            return base.into();
+        };
+
+        let dialog = connection_details::view(
+            state,
+            self.connection_details_announcement.as_deref(),
+            |action| match action {
+                ConnectionDetailsDialogAction::Close => AppMessage::CloseConnectionDetails,
+                ConnectionDetailsDialogAction::CopyDetails => AppMessage::CopyConnectionDetails,
+                ConnectionDetailsDialogAction::CopyValue { label, value } => {
+                    AppMessage::CopyConnectionDetailsValue {
+                        label: label.to_string(),
+                        value,
+                    }
+                }
+            },
+            |_| AppMessage::Noop,
+        );
+
+        iced::widget::stack![base, dialog].into()
     }
 
     /// Wrap the base layout in an overlay showing the \"Add\" menu dropdown.
@@ -11535,11 +11695,36 @@ impl IcedChat {
         .into()
     }
 
+    /// Render a standard empty-state block with optional ghost action button.
+    /// The caller supplies context-specific padding (sidebar or main panel).
+    fn empty_state_block<'a>(
+        theme: &iced::Theme,
+        message: &'a str,
+        action: Option<(&'a str, AppMessage)>,
+        padding: [f32; 2],
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, container, text, Column};
+        use iced::Length;
+        let mut col = Column::new()
+            .push(text(message).size(TYPO_XS).color(text_muted(theme)))
+            .spacing(SPACE_6)
+            .width(Length::Fill);
+        if let Some((label, msg)) = action {
+            col = col.push(
+                button(text(label).size(TYPO_XS))
+                    .on_press(msg)
+                    .padding([SPACE_4, SPACE_8])
+                    .style(BUTTON_GHOST),
+            );
+        }
+        container(col).width(Length::Fill).padding(padding).into()
+    }
+
     fn view_sidebar_chats_content(
         dep: &SidebarChatsDependency,
         selected_topic: Rc<Cell<Option<TopicId>>>,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{container, text, Column};
+        use iced::widget::Column;
 
         let mut section = Column::new().spacing(SPACE_2);
 
@@ -11558,14 +11743,13 @@ impl IcedChat {
         }
 
         if dep.is_empty {
-            section = section.push(
-                container(
-                    text("No conversations yet.")
-                        .size(TYPO_XS)
-                        .color(Self::muted_color(dep.dark_mode)),
-                )
-                .padding([SPACE_4, SPACE_12]),
-            );
+            let theme = Self::theme_from_dark(dep.dark_mode);
+            section = section.push(Self::empty_state_block(
+                &theme,
+                "No conversations yet. Start a chat with one of your friends.",
+                Some(("Start Chat", AppMessage::CreateNewRoom)),
+                [SPACE_4, SPACE_12],
+            ));
         }
 
         section.into()
@@ -11957,14 +12141,13 @@ impl IcedChat {
         }
 
         if !has_peers {
-            section = section.push(
-                container(
-                    text("No peers discovered yet.")
-                        .size(TYPO_XS)
-                        .color(Self::muted_color(dep.dark_mode)),
-                )
-                .padding([SPACE_4, SPACE_12]),
-            );
+            let theme = Self::theme_from_dark(dep.dark_mode);
+            section = section.push(Self::empty_state_block(
+                &theme,
+                "No peers discovered yet. Peers on your local network will appear here.",
+                None,
+                [SPACE_4, SPACE_12],
+            ));
         }
 
         section.into()
@@ -12041,7 +12224,7 @@ impl IcedChat {
                 let peer = fid.parse_public_key().ok()?;
                 Some(SidebarFriendRow {
                     peer,
-                    label: record.display_label(fid),
+                    label: record.display_label(fid, &peer),
                     avatar: Self::sidebar_avatar_handle(
                         self.friend_image_handles
                             .get(&peer)
@@ -12159,14 +12342,13 @@ impl IcedChat {
         }
 
         if !has_friends {
-            section = section.push(
-                container(
-                    text("No friends yet.")
-                        .size(TYPO_XS)
-                        .color(Self::muted_color(dep.dark_mode)),
-                )
-                .padding([SPACE_4, SPACE_12]),
-            );
+            let theme = Self::theme_from_dark(dep.dark_mode);
+            section = section.push(Self::empty_state_block(
+                &theme,
+                "No friends added yet. Add someone using a key or invitation.",
+                Some(("Add Friend", AppMessage::OpenFriendRequests)),
+                [SPACE_4, SPACE_12],
+            ));
         }
 
         section.into()
@@ -12211,7 +12393,7 @@ impl IcedChat {
     fn view_sidebar_requests_content(
         dep: &SidebarRequestsDependency,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, text, Column};
+        use iced::widget::{button, container, text, Column, Row};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
@@ -12245,28 +12427,29 @@ impl IcedChat {
         );
 
         if dep.incoming.is_empty() {
-            section = section.push(
-                container(
-                    text("No pending requests.")
-                        .size(TYPO_XS)
-                        .color(Self::muted_color(dep.dark_mode)),
-                )
-                .padding([SPACE_4, SPACE_12]),
-            );
+            let theme = Self::theme_from_dark(dep.dark_mode);
+            section = section.push(Self::empty_state_block(
+                &theme,
+                "No pending requests. New friend requests will appear here.",
+                None,
+                [SPACE_4, SPACE_12],
+            ));
         } else {
             for request in &dep.incoming {
-                let row_el = row![
-                    text(request.label.clone())
-                        .size(TYPO_SM)
-                        .width(Length::Fill),
-                    button(text("✓").size(TYPO_XS))
-                        .on_press(AppMessage::IncomingFriendRequestAccept {
-                            request_id: request.request_id.clone(),
-                            peer: request.requester,
-                        })
-                        .padding([SPACE_2, SPACE_4])
-                        .style(move |t, _status| {
-                            iced::widget::button::Style {
+                let row_el = Row::new()
+                    .push(
+                        text(request.label.clone())
+                            .size(TYPO_SM)
+                            .width(Length::Fill),
+                    )
+                    .push(
+                        button(text("✓").size(TYPO_XS))
+                            .on_press(AppMessage::IncomingFriendRequestAccept {
+                                request_id: request.request_id.clone(),
+                                peer: request.requester,
+                            })
+                            .padding([SPACE_2, SPACE_4])
+                            .style(move |t, _status| iced::widget::button::Style {
                                 background: Some(iced::Background::Color(accent_primary(t))),
                                 text_color: Color::WHITE,
                                 border: iced::Border {
@@ -12274,16 +12457,16 @@ impl IcedChat {
                                     ..Default::default()
                                 },
                                 ..Default::default()
-                            }
-                        }),
-                    button(text("✗").size(TYPO_XS))
-                        .on_press(AppMessage::IncomingFriendRequestDecline {
-                            request_id: request.request_id.clone(),
-                            peer: request.requester,
-                        })
-                        .padding([SPACE_2, SPACE_4])
-                        .style(move |t, _status| {
-                            iced::widget::button::Style {
+                            }),
+                    )
+                    .push(
+                        button(text("✗").size(TYPO_XS))
+                            .on_press(AppMessage::IncomingFriendRequestDecline {
+                                request_id: request.request_id.clone(),
+                                peer: request.requester,
+                            })
+                            .padding([SPACE_2, SPACE_4])
+                            .style(move |t, _status| iced::widget::button::Style {
                                 background: Some(iced::Background::Color(color_error(t))),
                                 text_color: Color::WHITE,
                                 border: iced::Border {
@@ -12291,13 +12474,12 @@ impl IcedChat {
                                     ..Default::default()
                                 },
                                 ..Default::default()
-                            }
-                        }),
-                ]
-                .spacing(SPACE_4)
-                .align_y(Alignment::Center)
-                .padding([SPACE_4, SPACE_12])
-                .width(Length::Fill);
+                            }),
+                    )
+                    .spacing(SPACE_4)
+                    .align_y(Alignment::Center)
+                    .padding([SPACE_4, SPACE_12])
+                    .width(Length::Fill);
 
                 section = section.push(container(row_el).width(Length::Fill));
             }
@@ -12366,10 +12548,10 @@ impl IcedChat {
             MeshHealth::Offline(reason) => format!("Mesh: offline — {reason}"),
         };
         let relay_label = fmt_relay_mode(&self.relay_mode);
-        let friend_status_text = if total_friend_count > 0 {
-            format!("Friends Online: {online_friend_count} / {total_friend_count}")
+        let friend_status_text = if total_friend_count == 0 || online_friend_count == 0 {
+            "No friends are online right now.".to_string()
         } else {
-            "No friends yet".to_string()
+            format!("Friends Online: {online_friend_count} / {total_friend_count}")
         };
 
         let status_items = Column::new()
@@ -12465,13 +12647,12 @@ impl IcedChat {
 
         let activity_items: Vec<iced::Element<'_, AppMessage>> = if self.recent_activity.is_empty()
         {
-            vec![container(
-                text("Activity from friends and network will appear here.")
-                    .size(TYPO_XS)
-                    .color(text_system(&theme)),
-            )
-            .padding([SPACE_4, 0.0])
-            .into()]
+            vec![Self::empty_state_block(
+                &theme,
+                "No recent activity yet. Activity will appear here as friends connect and share files.",
+                None,
+                [SPACE_4, 0.0],
+            )]
         } else {
             self.recent_activity
                 .iter()
@@ -13530,12 +13711,27 @@ impl IcedChat {
         let invitation_card = section_card("INVITATIONS", vec![invitation_row.into()]);
 
         // ── Network section ──
-        let public_key_row = Row::new()
+        let connection_details_focus_anchor = iced::widget::text_input("", "")
+            .id(CONNECTION_DETAILS_TRIGGER_INPUT)
+            .on_input(|_| AppMessage::Noop)
+            .padding([0.0, 0.0])
+            .width(Length::Fixed(1.0));
+
+        let connection_details_trigger = iced::widget::Stack::new()
+            .push(connection_details_focus_anchor)
+            .push(
+                button(text("Advanced details").size(TYPO_SM))
+                    .on_press(AppMessage::OpenConnectionDetails)
+                    .style(BUTTON_OUTLINE)
+                    .padding([SPACE_6, SPACE_12]),
+            );
+
+        let connection_details_row = Row::new()
             .push(
                 Column::new()
-                    .push(text("Peer ID (Public Key)").size(TYPO_MD))
+                    .push(text("Advanced details").size(TYPO_MD))
                     .push(
-                        text(key.local_public_key.clone())
+                        text("Open the redacted support snapshot for connection diagnostics.")
                             .size(TYPO_XS)
                             .style(text_muted_style)
                             .wrapping(iced::widget::text::Wrapping::Glyph),
@@ -13544,6 +13740,7 @@ impl IcedChat {
                     .width(Length::Fill)
                     .align_x(Alignment::Start),
             )
+            .push(connection_details_trigger)
             .spacing(SPACE_12)
             .align_y(Alignment::Center);
 
@@ -13559,9 +13756,9 @@ impl IcedChat {
         let network_card = section_card(
             "NETWORK",
             vec![
-                public_key_row.into(),
                 connection_info.into(),
                 mesh_status.into(),
+                connection_details_row.into(),
             ],
         );
 
@@ -14491,7 +14688,7 @@ impl IcedChat {
         let display_name = profile_data
             .as_ref()
             .map(|p| p.display_name.clone())
-            .or_else(|| friend_record.map(|r| r.display_label(&fid)))
+            .or_else(|| friend_record.map(|r| r.display_label(&fid, &peer)))
             .unwrap_or_else(|| "Unknown Friend".to_string());
 
         let is_online = self.friend_online_cache.contains(&peer);
@@ -15177,26 +15374,127 @@ mod tests {
     #[test]
     fn close_dialog_uses_the_normal_cancel_message_in_priority_order() {
         assert!(matches!(
-            IcedChat::close_dialog_message(true, true, None),
+            IcedChat::close_dialog_message(true, false, true, None),
             Ok(AppMessage::CancelCreateRoom)
         ));
         assert!(matches!(
-            IcedChat::close_dialog_message(false, true, None),
+            IcedChat::close_dialog_message(false, true, true, None),
+            Ok(AppMessage::CloseConnectionDetails)
+        ));
+        assert!(matches!(
+            IcedChat::close_dialog_message(false, false, true, None),
             Ok(AppMessage::ClearHistoryRequested)
         ));
         let topic = TopicId::from_bytes([9; 32]);
         assert!(matches!(
-            IcedChat::close_dialog_message(false, false, Some(topic)),
+            IcedChat::close_dialog_message(false, false, false, Some(topic)),
             Ok(AppMessage::DeleteRoomRequested(actual)) if actual == topic
         ));
     }
 
     #[test]
     fn close_dialog_without_an_open_dialog_returns_structured_error() {
-        let error = IcedChat::close_dialog_message(false, false, None)
+        let error = IcedChat::close_dialog_message(false, false, false, None)
             .expect_err("CloseDialog must reject when no dialog is open");
         assert_eq!(error.code, GuiActionErrorCode::NoDialog);
         assert_eq!(error.message, "No application dialog is currently open");
+    }
+
+    #[test]
+    fn connection_details_open_clears_other_dialogs_and_stores_focus_target() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // Set up other dialogs that should be cleared
+        app.show_create_room_dialog = true;
+        app.history_confirm_clear = true;
+        app.friend_remove_confirm = true;
+        app.friend_block_confirm = true;
+
+        let task = app.update(AppMessage::OpenConnectionDetails);
+        drop(task); // focus task, not needed for state checks
+
+        assert!(!app.show_create_room_dialog, "create-room dialog cleared");
+        assert!(!app.history_confirm_clear, "history confirm cleared");
+        assert!(!app.friend_remove_confirm, "remove confirm cleared");
+        assert!(!app.friend_block_confirm, "block confirm cleared");
+        assert!(
+            app.connection_details_dialog.is_some(),
+            "connection details dialog opened"
+        );
+        assert!(
+            app.connection_details_announcement.is_none(),
+            "announcement starts clear"
+        );
+        assert_eq!(
+            app.connection_details_focus_target,
+            Some(CONNECTION_DETAILS_TRIGGER_INPUT),
+            "focus target stored for restoration"
+        );
+        drop(runtime);
+    }
+
+    #[test]
+    fn connection_details_open_with_existing_room_delete_confirm_clears_it() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([9; 32]);
+        app.room_delete_confirm_topic = Some(topic);
+
+        let task = app.update(AppMessage::OpenConnectionDetails);
+        drop(task);
+
+        assert!(
+            app.room_delete_confirm_topic.is_none(),
+            "room delete confirm cleared"
+        );
+        assert!(app.connection_details_dialog.is_some());
+        drop(runtime);
+    }
+
+    #[test]
+    fn connection_details_close_clears_dialog_announcement_and_restores_focus() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // Open the dialog first
+        app.connection_details_dialog = Some(app.current_connection_details_dialog());
+        app.connection_details_announcement = Some("Announcement text".to_string());
+        app.connection_details_focus_target = Some(CONNECTION_DETAILS_TRIGGER_INPUT);
+
+        let task = app.close_connection_details_dialog();
+        drop(task); // focus restoration task, not needed for state checks
+
+        assert!(app.connection_details_dialog.is_none(), "dialog cleared");
+        assert!(
+            app.connection_details_announcement.is_none(),
+            "announcement cleared"
+        );
+        assert!(
+            app.connection_details_focus_target.is_none(),
+            "focus target consumed"
+        );
+        drop(runtime);
+    }
+
+    #[test]
+    fn connection_details_close_without_focus_target_does_not_panic() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.connection_details_dialog = Some(app.current_connection_details_dialog());
+        app.connection_details_focus_target = None; // explicitly none
+
+        let task = app.close_connection_details_dialog();
+        drop(task);
+
+        assert!(app.connection_details_dialog.is_none());
+        drop(runtime);
+    }
+
+    #[test]
+    fn connection_details_close_via_close_current_dialog_routes_correctly() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.connection_details_dialog = Some(app.current_connection_details_dialog());
+
+        let message = app
+            .close_current_dialog()
+            .expect("should find dialog to close");
+        assert!(matches!(message, AppMessage::CloseConnectionDetails));
+        drop(runtime);
     }
 
     #[test]
@@ -15324,7 +15622,10 @@ mod tests {
         assert_eq!(sanitized.id, peer);
         assert_eq!(sanitized.relay_urls().next().cloned(), Some(relay));
         assert!(sanitized.ip_addrs().next().is_none());
-        assert!(addr.ip_addrs().next().is_some(), "fixture should contain a direct address");
+        assert!(
+            addr.ip_addrs().next().is_some(),
+            "fixture should contain a direct address"
+        );
     }
 
     #[test]
@@ -15356,7 +15657,9 @@ mod tests {
             discovery_secret: None,
         };
         let encoded = ticket.to_string();
-        let decoded = encoded.parse::<Ticket>().expect("ticket payload should parse");
+        let decoded = encoded
+            .parse::<Ticket>()
+            .expect("ticket payload should parse");
 
         assert_eq!(decoded, ticket);
         assert!(decoded.peers[0].ip_addrs().next().is_none());
@@ -15377,7 +15680,9 @@ mod tests {
             discovery_secret: None,
         };
         let encoded = ticket.to_string();
-        let decoded = encoded.parse::<Ticket>().expect("ticket payload should parse");
+        let decoded = encoded
+            .parse::<Ticket>()
+            .expect("ticket payload should parse");
 
         assert_eq!(decoded, ticket);
         assert!(decoded.peers[0].ip_addrs().next().is_some());
@@ -15402,7 +15707,6 @@ mod tests {
             RoomInvitation::Legacy(_) => panic!("stable invite should not fall back to legacy"),
         }
     }
-
 
     #[test]
     fn hash_only_file_share_value_is_not_a_blob_ticket() {

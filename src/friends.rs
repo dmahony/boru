@@ -288,11 +288,14 @@ impl FriendRecord {
     }
 
     /// Human-friendly label for display.
-    pub fn display_label(&self, id: &FriendId) -> String {
-        self.label
-            .clone()
-            .or_else(|| self.last_announced_name.clone())
-            .unwrap_or_else(|| id.as_str().chars().take(12).collect())
+    pub fn display_label(&self, _id: &FriendId, peer: &PublicKey) -> String {
+        crate::peer_names::resolve_peer_name(
+            peer,
+            self.label.as_deref(),
+            None, // profile display name not available in library context
+            self.last_announced_name.as_deref(),
+            None, // session name not available here
+        )
     }
 }
 

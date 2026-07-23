@@ -659,20 +659,22 @@ impl ChatCallbacks for AppState {
     }
 
     fn resolve_name(&self, peer: &PublicKey) -> String {
-        // Priority: friend label > friend's last announced name > session name > short key.
+        // Priority: friend label > friend's last announced name > session name
+        //           > stable generated friendly name.
         let fid = FriendId::from_public_key(*peer);
-        if let Some(record) = self.friends.get(&fid) {
-            if let Some(label) = &record.label {
-                return label.clone();
-            }
-            if let Some(name) = &record.last_announced_name {
-                return name.clone();
-            }
-        }
-        self.names
-            .get(peer)
-            .cloned()
-            .unwrap_or_else(|| peer.fmt_short().to_string())
+        let friend_label = self.friends.get(&fid).and_then(|r| r.label.as_deref());
+        let friend_announced = self
+            .friends
+            .get(&fid)
+            .and_then(|r| r.last_announced_name.as_deref());
+        let session_name = self.names.get(peer).map(|s| s.as_str());
+        crate::peer_names::resolve_peer_name(
+            peer,
+            friend_label,
+            None, // profile display name not available here
+            friend_announced,
+            session_name,
+        )
     }
 
     fn last_announced_name(&self, peer: &PublicKey) -> Option<String> {
@@ -1678,11 +1680,11 @@ pub fn handle_net_event_for_topic(
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) {
                             cb.friend_mark_online(fid);
-                        }
-                        if !is_muted {
-                            let sender_name = cb.resolve_name(&from);
-                            cb.push_system(format!("{} shared a file: {}", sender_name, name));
-                            cb.set_pending_file(name, ticket);
+                            if !is_muted {
+                                let sender_name = cb.resolve_name(&from);
+                                cb.push_system(format!("{} shared a file: {}", sender_name, name));
+                                cb.set_pending_file(name, ticket);
+                            }
                         }
                     }
                 }
@@ -1691,11 +1693,14 @@ pub fn handle_net_event_for_topic(
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) {
                             cb.friend_mark_online(fid);
-                        }
-                        if !is_muted {
-                            let sender_name = cb.resolve_name(&from);
-                            cb.push_system(format!("{} shared an image: {}", sender_name, name));
-                            cb.set_pending_image(name, hash, from);
+                            if !is_muted {
+                                let sender_name = cb.resolve_name(&from);
+                                cb.push_system(format!(
+                                    "{} shared an image: {}",
+                                    sender_name, name
+                                ));
+                                cb.set_pending_image(name, hash, from);
+                            }
                         }
                     }
                 }
@@ -3208,6 +3213,10 @@ mod tests {
     fn handle_net_event_image_share_sets_pending() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
+        // Must be a friend and online for the share notification to appear.
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends.ensure_friend(fid.clone());
+        app.friends.mark_online(fid);
 
         let event = NetEvent::Message {
             from: remote_key.public(),
@@ -3229,6 +3238,10 @@ mod tests {
     fn handle_net_event_two_image_shares_both_pending() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
+        // Must be a friend and online for share notifications to appear.
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends.ensure_friend(fid.clone());
+        app.friends.mark_online(fid);
 
         let event1 = NetEvent::Message {
             from: remote_key.public(),
@@ -3263,6 +3276,10 @@ mod tests {
     fn handle_net_event_five_image_shares_all_pending() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
+        // Must be a friend and online for share notifications to appear.
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends.ensure_friend(fid.clone());
+        app.friends.mark_online(fid);
 
         let names = ["img1.png", "img2.png", "img3.png", "img4.png", "img5.png"];
         for (i, name) in names.iter().enumerate() {
@@ -3374,15 +3391,26 @@ mod tests {
             &mut app,
         )
         .unwrap();
-        // Without a display name, it formats the short public key.
-        let short = remote_key.public().fmt_short();
+        // Without a display name, it falls back to a friendly name.
         assert!(
             app.entries
                 .iter()
-                .any(|e| e.body == format!("{short} left the chat")),
-            "expected '{} left the chat' but got: {:?}",
-            short,
+                .any(|e| e.body.ends_with(" left the chat")),
+            "expected '... left the chat' but got: {:?}",
             app.entries
+        );
+        let msg = app
+            .entries
+            .iter()
+            .find(|e| e.body.ends_with(" left the chat"))
+            .unwrap();
+        let name_part = msg.body.trim_end_matches(" left the chat");
+        assert!(!name_part.is_empty(), "name should not be empty");
+        assert!(
+            name_part.contains(' '),
+            "name '{}' should be a friendly name (Adjective Noun), got '{}'",
+            name_part,
+            msg.body
         );
     }
 
@@ -3428,6 +3456,40 @@ mod tests {
     }
 
     #[test]
+    fn handle_net_event_neighbor_down_falls_back_to_friendly_name() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+
+        handle_net_event(
+            NetEvent::NeighborDown {
+                peer: remote_key.public(),
+            },
+            &mut app,
+        )
+        .unwrap();
+        // Without a display name, it falls back to a friendly name.
+        assert!(
+            app.entries
+                .iter()
+                .any(|e| e.body.ends_with(" left the chat")),
+            "expected a '... left the chat' message but got: {:?}",
+            app.entries
+        );
+        let msg = app
+            .entries
+            .iter()
+            .find(|e| e.body.ends_with(" left the chat"))
+            .unwrap();
+        let name_part = msg.body.trim_end_matches(" left the chat");
+        assert!(!name_part.is_empty(), "name should not be empty");
+        assert!(
+            name_part.contains(' '),
+            "name '{}' should be a friendly name (Adjective Noun)",
+            name_part
+        );
+    }
+
+    #[test]
     fn handle_net_event_neighbor_up_falls_back_to_short_key() {
         let remote_key = SecretKey::generate();
         let mut app = test_app();
@@ -3440,15 +3502,26 @@ mod tests {
         )
         .unwrap();
 
-        // Without a display name, it formats the short public key.
-        let short = remote_key.public().fmt_short();
+        // Without a display name, it falls back to a friendly name.
         assert!(
             app.entries
                 .iter()
-                .any(|e| e.body == format!("{short} joined the chat")),
-            "expected '{} joined the chat' but got: {:?}",
-            short,
+                .any(|e| e.body.ends_with(" joined the chat")),
+            "expected a '... joined the chat' message but got: {:?}",
             app.entries
+        );
+        let msg = app
+            .entries
+            .iter()
+            .find(|e| e.body.ends_with(" joined the chat"))
+            .unwrap();
+        let name_part = msg.body.trim_end_matches(" joined the chat");
+        assert!(!name_part.is_empty(), "name should not be empty");
+        assert!(
+            name_part.contains(' '),
+            "name '{}' should be a friendly name (Adjective Noun), got '{}'",
+            name_part,
+            msg.body
         );
     }
 
@@ -3473,13 +3546,13 @@ mod tests {
             app.friends.get(&fid).is_none(),
             "non-friend should not get a friend record"
         );
-        // But we still show a system message.
-        let short = remote_key.public().fmt_short();
+        // But we still show a system message with a friendly name.
         assert!(
             app.entries
                 .iter()
-                .any(|e| e.body == format!("{short} joined the chat")),
-            "should show join message even for non-friends"
+                .any(|e| e.body.ends_with(" joined the chat")),
+            "should show join message even for non-friends, got: {:?}",
+            app.entries.iter().map(|e| &e.body).collect::<Vec<_>>()
         );
     }
 
@@ -3492,13 +3565,7 @@ mod tests {
         }
     }
 
-    /// Clear the diagnostics message-received cooldown set so tests start fresh.
-    fn clear_diagnostic_seen_messages() {
-        if let Ok(mut seen) = DIAGNOSTIC_SEEN_MESSAGES.lock() {
-            seen.clear();
-        }
-    }
-
+    // ── handle_net_event dedup tests ───────────────────────────────────
     #[test]
     fn handle_net_event_dedup_exact_duplicate_is_suppressed() {
         let key = SecretKey::generate();
@@ -3756,10 +3823,15 @@ mod tests {
     fn resolve_name_falls_back_to_short_pk_when_no_name_or_friend() {
         let remote_key = SecretKey::generate();
         let app = test_app();
-        // No name, no friend — should fall back to short key.
+        // No name, no friend — should fall back to friendly name.
         let display = app.resolve_name(&remote_key.public());
-        let short = format!("{}", remote_key.public().fmt_short());
-        assert_eq!(display, short);
+        assert!(
+            display.contains(' '),
+            "fallback should be '<Adjective> <Noun>', got '{display}'"
+        );
+        // Same peer must produce the same result deterministically.
+        let display2 = app.resolve_name(&remote_key.public());
+        assert_eq!(display, display2, "fallback must be deterministic");
     }
 
     #[test]
@@ -3770,10 +3842,14 @@ mod tests {
         // Ensure the friend exists, but with no label and no last_announced_name.
         app.friends.ensure_friend(fid);
 
-        // No session name either — should fall back to short key.
+        // No session name either — should fall back to friendly name.
         let display = app.resolve_name(&remote_key.public());
-        let short = format!("{}", remote_key.public().fmt_short());
-        assert_eq!(display, short);
+        assert!(
+            display.contains(' '),
+            "fallback should be '<Adjective> <Noun>', got '{display}'"
+        );
+        assert_ne!(display, "Unknown", "fallback should not be 'Unknown'");
+        assert_ne!(display, "", "fallback should not be empty");
     }
 
     #[test]
