@@ -7358,12 +7358,13 @@ impl IcedChat {
                     .entry(topic)
                     .or_insert_with(|| ConversationLive::new(topic));
                 if is_inactive {
-                    conversation.pending_events.push_back(event);
                     // Only count user-visible messages as unread.  Gossip
                     // protocol events (AboutMe, Presence, Heartbeat,
                     // NeighborUp/Down) are filtered from the chat log and
                     // should not increment the badge counter.
-                    if Self::_is_user_visible_event(&event) {
+                    let should_count = Self::_is_user_visible_event(&event);
+                    conversation.pending_events.push_back(event);
+                    if should_count {
                         conversation.unread = conversation.unread.saturating_add(1);
                         tracing::info!(topic=%topic, unread=conversation.unread, "queued event for inactive room");
                     }
