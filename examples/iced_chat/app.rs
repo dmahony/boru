@@ -3007,15 +3007,17 @@ struct SidebarIdentityCacheKey {
     local_label: String,
     is_online: bool,
     dark_mode: bool,
+    has_profile_image: bool,
 }
 
-/// Renders the local-user profile block in the sidebar: avatar (generated
-/// initials circle), display name, online/offline status, and a settings gear button.
+/// Renders the local-user profile block in the sidebar: avatar (profile image
+/// or generated initials circle), display name, online/offline status, and a settings gear button.
 fn view_local_profile_block(
     local_label: String,
     is_online: bool,
     dark_mode: bool,
     local_public: PublicKey,
+    profile_image_handle: Option<iced::widget::image::Handle>,
 ) -> iced::Element<'static, AppMessage> {
     let _timer = PerfTracker::timer("view_local_profile_block", "build");
     use iced::widget::{button, container, text, Column, Row, Space};
@@ -3038,35 +3040,44 @@ fn view_local_profile_block(
         local_label.clone()
     };
 
-    // ── Avatar: coloured circle with initial letter ──
-    let bytes = local_public.as_bytes();
-    let r = bytes[0] as f32 / 255.0;
-    let g = bytes[1] as f32 / 255.0;
-    let b = bytes[2] as f32 / 255.0;
-    let avatar_color = Color::from_rgb(r, g, b);
-    let first_char = display_name
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_else(|| "?".to_string());
-
-    let avatar = container(
-        text(first_char)
-            .size(TYPO_SM)
-            .color(Color::WHITE)
-            .width(Length::Fill),
-    )
-    .center_y(Length::Fill)
-    .width(Length::Fixed(36.0))
-    .height(Length::Fixed(36.0))
-    .style(move |_t| container::Style {
-        background: Some(Background::Color(avatar_color)),
-        border: Border {
-            radius: 18.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    });
+    // ── Avatar: profile image or coloured circle with initial letter ──
+    let avatar: iced::Element<'static, AppMessage> =
+        if let Some(ref handle) = profile_image_handle {
+            iced::widget::image(handle.clone())
+                .content_fit(iced::ContentFit::Cover)
+                .width(Length::Fixed(36.0))
+                .height(Length::Fixed(36.0))
+                .into()
+        } else {
+            let bytes = local_public.as_bytes();
+            let r = bytes[0] as f32 / 255.0;
+            let g = bytes[1] as f32 / 255.0;
+            let b = bytes[2] as f32 / 255.0;
+            let avatar_color = Color::from_rgb(r, g, b);
+            let first_char = display_name
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "?".to_string());
+            container(
+                text(first_char)
+                    .size(TYPO_SM)
+                    .color(Color::WHITE)
+                    .width(Length::Fill),
+            )
+            .center_y(Length::Fill)
+            .width(Length::Fixed(36.0))
+            .height(Length::Fixed(36.0))
+            .style(move |_t| container::Style {
+                background: Some(Background::Color(avatar_color)),
+                border: Border {
+                    radius: 18.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        };
 
     // ── Display name + status ──
     let name_col = Column::new()
@@ -11794,11 +11805,13 @@ impl IcedChat {
             local_label: self.local_label.clone(),
             is_online,
             dark_mode: self.dark_mode,
+            has_profile_image: self.profile_image_handle.is_some(),
         };
         let identity_label = self.local_label.clone();
         let identity_online = is_online;
         let identity_dark = self.dark_mode;
         let identity_pk = self.local_public;
+        let identity_profile_image = self.profile_image_handle.clone();
         let identity_row: iced::Element<'static, AppMessage> =
             iced::widget::lazy(identity_key, move |_| {
                 view_local_profile_block(
@@ -11806,6 +11819,7 @@ impl IcedChat {
                     identity_online,
                     identity_dark,
                     identity_pk,
+                    identity_profile_image.clone(),
                 )
             })
             .into();
