@@ -145,6 +145,7 @@ pub struct AppSettings {
     pub sound_enabled: bool,
     pub chat_text_size: f32,
     pub share_direct_addresses: bool,
+    pub display_name: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -154,6 +155,7 @@ impl Default for AppSettings {
             sound_enabled: true,
             chat_text_size: TYPO_SM,
             share_direct_addresses: false,
+            display_name: None,
         }
     }
 }
@@ -3352,6 +3354,16 @@ impl IcedChat {
         }
         let first_run = room_history.is_empty() && friends.is_empty();
         let app_settings = AppSettings::load(&data_dir);
+        // Restore the persisted display name if the user set one previously.
+        // The CLI --name flag takes priority when provided; persisted name is
+        // a fallback so the user's choice survives restarts even without --name.
+        let local_label = if !local_label.is_empty() {
+            local_label
+        } else if let Some(ref saved) = app_settings.display_name {
+            saved.clone()
+        } else {
+            local_label
+        };
         // Load shared files from storage for the settings GUI.
         let shared_files = storage
             .as_ref()
@@ -3582,7 +3594,7 @@ impl IcedChat {
         true
     }
 
-    /// Persist current dark_mode, sound_enabled, and chat_text_size to disk.
+    /// Persist current dark_mode, sound_enabled, chat_text_size, and display_name to disk.
     #[expect(dead_code)]
     fn save_settings(&self) {
         let settings = AppSettings {
@@ -3590,6 +3602,7 @@ impl IcedChat {
             sound_enabled: self.sound_enabled,
             share_direct_addresses: self.share_direct_addresses,
             chat_text_size: self.chat_text_size,
+            display_name: Some(self.local_label.clone()),
         };
         settings.save(&self.data_dir);
     }
@@ -9734,7 +9747,21 @@ impl IcedChat {
 
             AppMessage::SetNickname(name) => {
                 self.local_label = name;
-                iced::Task::none()
+                // Persist the display name so it survives restarts.
+                let settings = AppSettings {
+                    dark_mode: self.dark_mode,
+                    sound_enabled: self.sound_enabled,
+                    share_direct_addresses: self.share_direct_addresses,
+                    chat_text_size: self.chat_text_size,
+                    display_name: Some(self.local_label.clone()),
+                };
+                let data_dir = self.data_dir.clone();
+                iced::Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        settings.save(&data_dir);
+                    }),
+                    |_| AppMessage::Noop,
+                )
             }
 
             AppMessage::SetChatTextSize(size) => {
