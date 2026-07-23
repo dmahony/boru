@@ -1978,6 +1978,9 @@ pub struct IcedChat {
     pub gui_state_tx: tokio::sync::watch::Sender<IcedStateSnapshot>,
     /// Recent activity feed shown on the landing page (ring buffer, newest first).
     recent_activity: VecDeque<RecentActivityEvent>,
+    /// Current window width, updated by resize events.
+    /// Used for responsive layout decisions (breakpoint at 640px).
+    window_width: f32,
 }
 
 /// Cached profile data received from a peer via ProfileUpdate gossip.
@@ -2377,6 +2380,10 @@ pub enum AppMessage {
     ToggleDark(bool),
     /// Update the local display name (nickname).
     SetNickname(String),
+
+    /// Window was resized — carries the new width in pixels.
+    /// Used for responsive layout decisions (breakpoint at 640px).
+    WindowResized(f32),
 
     /// Internal no-op for async task completions that should not change UI state.
     Noop,
@@ -3479,6 +3486,7 @@ impl IcedChat {
             pending_select_peer_action: None,
             gui_state_tx,
             recent_activity: VecDeque::with_capacity(50),
+            window_width: 1200.0,
         }
     }
 
@@ -4264,6 +4272,8 @@ impl IcedChat {
 
             AppMessage::ToggleDark(_) => "ToggleDark",
             AppMessage::SetNickname(_) => "SetNickname",
+
+            AppMessage::WindowResized(_) => "WindowResized",
 
             AppMessage::Noop => "Noop",
             AppMessage::AddSharedFile => "AddSharedFile",
@@ -9637,6 +9647,11 @@ impl IcedChat {
                     .spawn();
                 iced::Task::none()
             }
+            AppMessage::WindowResized(width) => {
+                self.window_width = width;
+                iced::Task::none()
+            }
+
             AppMessage::Noop => iced::Task::none(),
 
             // ── Shared file catalogue management ──
@@ -12617,10 +12632,11 @@ impl IcedChat {
     /// engaging home screen: branding, status, quick actions, and
     /// a scrollable recent-activity feed.
     fn view_main_empty_state(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, row, scrollable, text, Column, Space};
+        use iced::widget::{button, column, container, row, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = self.theme();
+        let narrow = self.window_width < 640.0;
 
         // ── Counts ──
         let online_friend_count = self
@@ -12638,17 +12654,6 @@ impl IcedChat {
             .iter()
             .filter(|(_, r)| r.relationship.can_message())
             .count();
-
-        // ── Branding / header ──
-        let heading = text("BORU")
-            .size(TYPO_XL)
-            .color(accent_primary(&theme))
-            .width(Length::Fill);
-
-        let tagline = text("Private. Peer-to-peer. No central servers.")
-            .size(TYPO_SM)
-            .color(text_muted(&theme))
-            .width(Length::Fill);
 
         // ── Status cards ──
         let is_connected = !self.neighbors.is_empty()
@@ -12679,7 +12684,6 @@ impl IcedChat {
             RelayMode::Disabled => "Direct".to_string(),
             _ => {
                 let full = fmt_relay_mode(&self.relay_mode);
-                // Short form — strip scheme and truncate
                 let short = full
                     .trim_start_matches("https://")
                     .trim_start_matches("http://");
@@ -12699,8 +12703,7 @@ impl IcedChat {
 
         let relay_text = fmt_relay_mode(&self.relay_mode);
 
-        // Build a single status card container — inlined to avoid
-        // nested-function lifetime issues with the local `theme`.
+        // Build status cards row (same 4 cards as before)
         let status_cards = iced::widget::Row::new()
             .push(
                 container(
@@ -12846,7 +12849,76 @@ impl IcedChat {
             .spacing(SPACE_8)
             .width(Length::Fill);
 
-        // ── Recent activity ──
+        // ── Left column: status + action cards ──
+        let left_col = Column::new()
+            .push(status_cards)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(action_cards)
+            .spacing(0)
+            .width(Length::Fill);
+
+        // ── Right column: friends online list + recent activity ──
+        let friends_header = text("Friends Online")
+            .size(TYPO_XS)
+            .color(text_muted(&theme));
+
+        let friends_online_items: Vec<iced::Element<'_, AppMessage>> = {
+            let online_friends: Vec<String> = self
+                .friends
+                .iter()
+                .filter_map(|(fid, _)| {
+                    fid.parse_public_key()
+                        .ok()
+                        .filter(|pk| self.friend_online_cache.contains(pk))
+                        .and_then(|pk| self.names.get(&pk).cloned())
+                })
+                .collect();
+            if online_friends.is_empty() {
+                vec![Self::empty_state_block(
+                    &theme,
+                    "No friends online right now.",
+                    None,
+                    [SPACE_4, 0.0],
+                )]
+            } else {
+                online_friends
+                    .into_iter()
+                    .map(|name| {
+                        container(
+                            row![
+                                text("●").size(TYPO_SM).color(accent_green(&theme)),
+                                text(name).size(TYPO_SM).color(text_system(&theme)),
+                            ]
+                            .spacing(SPACE_6)
+                            .align_y(Alignment::Center),
+                        )
+                        .padding([SPACE_2, 0.0])
+                        .width(Length::Fill)
+                        .into()
+                    })
+                    .collect()
+            }
+        };
+
+        let friends_feed = Column::new()
+            .push(friends_header)
+            .push(Space::new().height(Length::Fixed(SPACE_6)))
+            .push(
+                scrollable(
+                    Column::with_children(friends_online_items)
+                        .spacing(SPACE_2)
+                        .width(Length::Fill),
+                )
+                .height(Length::Fixed(120.0))
+                .width(Length::Fill),
+            );
+
+        let friends_card = container(friends_feed)
+            .padding([SPACE_12, SPACE_16])
+            .width(Length::Fill)
+            .style(container_card);
+
+        // ── Recent activity (same as before) ──
         let activity_header = text("Recent Activity")
             .size(TYPO_XS)
             .color(text_muted(&theme));
@@ -12914,28 +12986,75 @@ impl IcedChat {
             .width(Length::Fill)
             .style(container_card);
 
+        // ── Right column assembly ──
+        let right_col = Column::new()
+            .push(friends_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(activity_card)
+            .spacing(0)
+            .width(Length::Fill);
+
+        // ── Header row ──
+        let header = text("Boru")
+            .size(TYPO_LG)
+            .color(accent_primary(&theme))
+            .width(Length::Fill);
+
+        // ── Divider line ──
+        let divider = container(Space::new().height(Length::Fixed(0.0)))
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(move |t: &iced::Theme| {
+                iced::widget::container::Style {
+                    background: Some(iced::Background::Color(border_muted(t))),
+                    ..Default::default()
+                }
+            });
+
+        // ── Main content area: two columns side-by-side or stacked ──
+        let main_content: iced::Element<'_, AppMessage> = if narrow {
+            // Stack vertically on narrow screens
+            Column::new()
+                .push(left_col)
+                .push(Space::new().height(Length::Fixed(SPACE_16)))
+                .push(right_col)
+                .spacing(0)
+                .width(Length::Fill)
+                .into()
+        } else {
+            // Side-by-side on wide screens: left (3/5) + right (2/5)
+            Row::new()
+                .push(
+                    container(left_col)
+                        .width(Length::FillPortion(3)),
+                )
+                .push(Space::new().width(Length::Fixed(SPACE_12)))
+                .push(
+                    container(right_col)
+                        .width(Length::FillPortion(2)),
+                )
+                .spacing(0)
+                .width(Length::Fill)
+                .into()
+        };
+
         // ── Assemble ──
         let col = Column::new()
-            .push(Space::new().height(Length::Fixed(SPACE_24)))
-            .push(heading)
-            .push(Space::new().height(Length::Fixed(SPACE_4)))
-            .push(tagline)
-            .push(Space::new().height(Length::Fixed(SPACE_24)))
-            .push(status_cards)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
-            .push(action_cards)
+            .push(header)
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(divider)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
-            .push(activity_card)
+            .push(main_content)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .align_x(Alignment::Center)
             .width(Length::Fill);
 
         scrollable(
             container(col)
-                .center_x(Length::Fill)
+                .padding(SPACE_16)
                 .width(Length::Fill)
-                .height(Length::Fill)
-                .max_width(480.0),
+                .height(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -14592,6 +14711,8 @@ impl IcedChat {
                 .map(|_| AppMessage::MeshWatchdogTick),
             iced::time::every(std::time::Duration::from_secs(30))
                 .map(|_| AppMessage::OutboxRetryTick),
+            iced::window::resize_events()
+                .map(|(_id, size)| AppMessage::WindowResized(size.width as f32)),
         ];
         // Main subscription stream — only added when gui_action_rx is available,
         // because the unfold state cannot be expressed conditionally within the
