@@ -10238,7 +10238,7 @@ impl IcedChat {
                 }
                 // Remove from conversation store and navigate away if this was the current chat.
                 self.conversations.remove(&topic);
-                self.conversation_store.remove(topic);
+                self.conversation_store.remove(&topic);
                 if matches!(&self.screen, Screen::Chat { topic: t } if t == &topic) {
                     self.screen = Screen::ChatList;
                 }
@@ -13017,6 +13017,43 @@ impl IcedChat {
             .spacing(SPACE_8)
             .width(Length::Fill);
 
+        // ── Advanced Features card ──
+        let advanced_relay_info = Row::new()
+            .push(
+                Column::new()
+                    .push(text("Relay").size(TYPO_MD))
+                    .push(
+                        text(relay_text.clone())
+                            .size(TYPO_XS)
+                            .color(text_muted(&theme)),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(
+                button(text("Advanced details").size(TYPO_SM))
+                    .on_press(AppMessage::OpenConnectionDetails)
+                    .style(BUTTON_OUTLINE)
+                    .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        let advanced_card = container(
+            Column::new()
+                .push(
+                    text("ADVANCED")
+                        .size(TYPO_XS)
+                        .color(text_muted(&theme)),
+                )
+                .push(Space::new().height(Length::Fixed(SPACE_6)))
+                .push(advanced_relay_info),
+        )
+        .padding([SPACE_12, SPACE_16])
+        .width(Length::Fill)
+        .style(container_card);
+
         // ── Left column: status + action cards ──
         let left_col = Column::new()
             .push(status_cards)
@@ -13093,7 +13130,7 @@ impl IcedChat {
         } else {
             format!("Friends Online ({online_friend_count} / {total_friend_count})")
         };
-        let friends_header = text(&friends_online_label)
+        let friends_header = text(friends_online_label.clone())
             .size(TYPO_XS)
             .color(text_muted(&theme));
 
@@ -13407,18 +13444,21 @@ impl IcedChat {
                 } else {
                     AppMessage::DeleteRoomRequested(self.topic)
                 })
-                .style(if is_deleting {
-                    move |t, _status| iced::widget::button::Style {
-                        background: Some(iced::Background::Color(color_error(t))),
-                        text_color: Color::WHITE,
-                        border: iced::Border {
-                            radius: SPACE_6.into(),
+                .style(move |t, _status| {
+                    if is_deleting {
+                        iced::widget::button::Style {
+                            background: Some(iced::Background::Color(color_error(t))),
+                            text_color: Color::WHITE,
+                            border: iced::Border {
+                                radius: SPACE_6.into(),
+                                ..Default::default()
+                            },
                             ..Default::default()
-                        },
-                        ..Default::default()
+                        }
+                    } else {
+                        let mut s = BUTTON_GHOST_BG(t, _status);
+                        s
                     }
-                } else {
-                    BUTTON_GHOST_BG
                 })
                 .padding([SPACE_6, SPACE_12]),
             button(text("Settings").size(TYPO_SM))
