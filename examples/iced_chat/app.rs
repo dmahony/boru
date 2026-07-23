@@ -5340,6 +5340,16 @@ impl IcedChat {
                 }
 
                 // Slow path: first-time subscription to this topic.
+                // Guard against duplicate OpenRoom calls for the same topic:
+                // whisper empty connection DMs, control messages, and gossip
+                // RoomOpened can all fire in quick succession, each triggering
+                // a separate subscription and resetting the chat view.
+                if self.pending_topic == Some(topic) {
+                    info!("OpenRoom: already opening topic={topic}, skipping duplicate");
+                    return iced::Task::none();
+                }
+                self.pending_topic = Some(topic);
+
                 // Save the current room first
                 self.save_room_to_history();
                 // Update room list preview for previous room
