@@ -2933,31 +2933,99 @@ struct SettingsCachedKey {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct SidebarIdentityCacheKey {
     local_label: String,
-    relay_mode_label: String,
+    is_online: bool,
     dark_mode: bool,
 }
 
-fn profile_sidebar_identity_row(
+/// Renders the local-user profile block in the sidebar: avatar (generated
+/// initials circle), display name, online/offline status, and a settings gear button.
+fn view_local_profile_block(
     local_label: String,
-    relay_mode_label: String,
+    is_online: bool,
     dark_mode: bool,
+    local_public: PublicKey,
 ) -> iced::Element<'static, AppMessage> {
-    let _timer = PerfTracker::timer("profile_sidebar_identity_row", "build");
-    use iced::widget::text;
+    let _timer = PerfTracker::timer("view_local_profile_block", "build");
+    use iced::widget::{button, container, text, Column, Row, Space};
+    use iced::{Alignment, Background, Border, Length};
 
-    let muted = if dark_mode {
-        Color::from_rgb(0.6, 0.6, 0.6)
+    let online_color = Color::from_rgb(0.2, 0.7, 0.2);
+    let status_label = if is_online { "Online" } else { "Offline" };
+    let status_color = if is_online {
+        online_color
     } else {
-        Color::from_rgb(0.4, 0.4, 0.4)
+        if dark_mode {
+            Color::from_rgb(0.5, 0.5, 0.5)
+        } else {
+            Color::from_rgb(0.6, 0.6, 0.6)
+        }
+    };
+    let display_name = if local_label.is_empty() {
+        "My Profile".to_string()
+    } else {
+        local_label.clone()
     };
 
-    iced::widget::Row::new()
+    // ── Avatar: coloured circle with initial letter ──
+    let bytes = local_public.as_bytes();
+    let r = bytes[0] as f32 / 255.0;
+    let g = bytes[1] as f32 / 255.0;
+    let b = bytes[2] as f32 / 255.0;
+    let avatar_color = Color::from_rgb(r, g, b);
+    let first_char = display_name
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_string());
+
+    let avatar = container(
+        text(first_char)
+            .size(TYPO_SM)
+            .color(Color::WHITE)
+            .width(Length::Fill),
+    )
+    .center_y(Length::Fill)
+    .width(Length::Fixed(36.0))
+    .height(Length::Fixed(36.0))
+    .style(move |_t| container::Style {
+        background: Some(Background::Color(avatar_color)),
+        border: Border {
+            radius: 18.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+
+    // ── Display name + status ──
+    let name_col = Column::new()
         .push(
-            text(format!("{} | {}", local_label, relay_mode_label))
-                .size(TYPO_XXS)
-                .color(muted),
+            text(display_name)
+                .size(TYPO_SM)
+                .width(Length::Shrink)
+                .wrapping(iced::widget::text::Wrapping::None),
         )
-        .spacing(SPACE_4)
+        .push(
+            text(status_label)
+                .size(TYPO_XXS)
+                .color(status_color)
+                .width(Length::Shrink),
+        )
+        .spacing(SPACE_2)
+        .align_x(Alignment::Start);
+
+    // ── Settings gear button ──
+    let settings_btn = button(text("⚙").size(TYPO_MD))
+        .on_press(AppMessage::OpenSettings)
+        .padding([SPACE_6, SPACE_8])
+        .style(BUTTON_ICON);
+
+    Row::new()
+        .push(avatar)
+        .push(name_col)
+        .push(Space::new().width(Length::Fill))
+        .push(settings_btn)
+        .spacing(SPACE_8)
+        .align_y(Alignment::Center)
         .into()
 }
 
@@ -11498,29 +11566,26 @@ impl IcedChat {
                     .padding([SPACE_6, SPACE_8])
                     .style(BUTTON_ICON),
             )
-            .push(
-                iced::widget::button(iced::widget::text("⚙").size(TYPO_MD))
-                    .on_press(AppMessage::OpenSettings)
-                    .padding([SPACE_6, SPACE_8])
-                    .style(BUTTON_ICON),
-            )
             .spacing(SPACE_4)
             .align_y(Alignment::Center);
 
-        let sidebar_identity_key = SidebarIdentityCacheKey {
+        let is_online = !matches!(self.mesh_health, MeshHealth::Offline(_));
+        let identity_key = SidebarIdentityCacheKey {
             local_label: self.local_label.clone(),
-            relay_mode_label: fmt_relay_mode(&self.relay_mode).to_string(),
+            is_online,
             dark_mode: self.dark_mode,
         };
-        let sidebar_local_label = self.local_label.clone();
-        let sidebar_relay_mode_label = fmt_relay_mode(&self.relay_mode).to_string();
-        let sidebar_dark_mode = self.dark_mode;
+        let identity_label = self.local_label.clone();
+        let identity_online = is_online;
+        let identity_dark = self.dark_mode;
+        let identity_pk = self.local_public;
         let identity_row: iced::Element<'static, AppMessage> =
-            iced::widget::lazy(sidebar_identity_key, move |_| {
-                profile_sidebar_identity_row(
-                    sidebar_local_label.clone(),
-                    sidebar_relay_mode_label.clone(),
-                    sidebar_dark_mode,
+            iced::widget::lazy(identity_key, move |_| {
+                view_local_profile_block(
+                    identity_label.clone(),
+                    identity_online,
+                    identity_dark,
+                    identity_pk,
                 )
             })
             .into();
