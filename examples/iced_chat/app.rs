@@ -21,6 +21,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use boru_core::api::{GossipSender, GossipTopic};
 use boru_core::backfill::BackfillHandle;
 pub(crate) use boru_core::chat_callbacks::TransferKind;
+use crate::link_preview;
 use boru_core::chat_callbacks::{ChatCallbacks, TransferId, TransferProgress};
 use boru_core::chat_core::{
     collect_bootstrap_peers, download_blob_to_file, download_blob_with_safety, download_candidates,
@@ -217,9 +218,9 @@ pub(crate) const TYPO_XXS: f32 = 10.0; // Fine print, ticket, instruction text
 // ── Brand typography tokens ───────────────────────────────────────
 /// Brand wordmark font family.  Must match the internal font name
 /// registered by `fonts::load_fonts()` at startup.
-pub(crate) const BRAND_LOGO_FONT: &str = "Montserrat Black";
-/// Brand wordmark font weight (900 = Black).
-pub(crate) const BRAND_LOGO_WEIGHT: u16 = 900;
+pub(crate) const BRAND_LOGO_FONT: &str = "Raleway ExtraBold";
+/// Brand wordmark font weight (800 = ExtraBold).
+pub(crate) const BRAND_LOGO_WEIGHT: u16 = 800;
 /// Brand heading font family (less forceful than the wordmark).
 pub(crate) const BRAND_HEADING_FONT: &str = "Montserrat Bold";
 /// Brand heading font weight (700 = Bold).
@@ -249,7 +250,7 @@ impl LogoSize {
     }
 }
 
-/// Reusable "BORU" wordmark rendered in Montserrat Black 900.
+/// Reusable "BORU" wordmark rendered in Raleway ExtraBold 800.
 ///
 /// Uses uppercase letters and the brand weight.  Colour and size are
 /// configurable through parameters.
@@ -298,12 +299,12 @@ impl<'a> From<BoruLogo<'a>> for iced::Element<'a, AppMessage> {
         use iced::Font;
 
         let font_size = logo.size.pt();
-        // Use the typographic family "Montserrat" with weight 900 (Black)
-        // instead of the display family "Montserrat Black" so the font
+        // Use the typographic family "Raleway" with weight 800 (ExtraBold)
+        // instead of the display family "Raleway ExtraBold" so the font
         // system matches by family + weight.
         let font = Font {
-            family: iced::font::Family::Name("Montserrat"),
-            weight: iced::font::Weight::Black,
+            family: iced::font::Family::Name("Raleway"),
+            weight: iced::font::Weight::ExtraBold,
             stretch: iced::font::Stretch::Normal,
             style: iced::font::Style::Normal,
         };
@@ -548,6 +549,30 @@ pub(crate) fn color_error(theme: &iced::Theme) -> Color {
         Color::from_rgb(0.75, 0.15, 0.15) // #bf2626
     }
 }
+
+/// Warning / amber colour for reconnecting states.
+pub(crate) fn color_warning(theme: &iced::Theme) -> Color {
+    if matches!(theme, iced::Theme::Dark) {
+        Color::from_rgb(0.95, 0.65, 0.15) // #f2a626
+    } else {
+        Color::from_rgb(0.70, 0.45, 0.05) // #b3730d
+    }
+}
+
+// ── Icon constants (Unicode geometric — no emoji) ────────────────────
+pub(crate) const ICON_CHAT: &str = "◇";
+pub(crate) const ICON_FRIEND: &str = "⊕";
+pub(crate) const ICON_FILES: &str = "⊞";
+pub(crate) const ICON_RETRY: &str = "↻";
+pub(crate) const ICON_SETTINGS: &str = "⚙";
+pub(crate) const ICON_CLOSE: &str = "×";
+pub(crate) const ICON_PLUS: &str = "+";
+pub(crate) const ICON_SEARCH: &str = "⌕";
+pub(crate) const ICON_MORE: &str = "⋯";
+pub(crate) const ICON_ACTIVITY: &str = "·";
+pub(crate) const ICON_NOTIFICATION: &str = "◉";
+pub(crate) const ICON_ONLINE: &str = "●";
+pub(crate) const ICON_OFFLINE: &str = "○";
 
 // ── Container style helpers ──────────────────────────────────────────────
 /// Container style for the primary window background.
@@ -1382,6 +1407,13 @@ pub struct ChatEntry {
     /// elements: when the current entry's gen differs from the cached gen,
     /// the entry's widget tree is rebuilt.
     widget_gen: u64,
+    /// Cached link preview data for URLs in this message body.
+    /// Set asynchronously by the link preview fetcher.
+    link_preview: Option<link_preview::LinkPreviewData>,
+    /// True while a link preview fetch is in flight for this entry.
+    link_preview_loading: bool,
+    /// Whether a link preview fetch for this entry failed.
+    link_preview_error: bool,
 }
 
 impl ChatEntry {
@@ -1407,6 +1439,9 @@ impl ChatEntry {
             label_text: None,
             reactions_text: None,
             formatted_time: None,
+            link_preview: None,
+            link_preview_loading: false,
+            link_preview_error: false,
         };
         s.update_cache();
         s
@@ -1435,6 +1470,9 @@ impl ChatEntry {
             label_text: None,
             reactions_text: None,
             formatted_time: None,
+            link_preview: None,
+            link_preview_loading: false,
+            link_preview_error: false,
         }
     }
     fn remote(
@@ -1465,6 +1503,9 @@ impl ChatEntry {
             label_text: None,
             reactions_text: None,
             formatted_time: None,
+            link_preview: None,
+            link_preview_loading: false,
+            link_preview_error: false,
         }
     }
 
@@ -1501,6 +1542,9 @@ impl ChatEntry {
             label_text: None,
             reactions_text: None,
             formatted_time: None,
+            link_preview: None,
+            link_preview_loading: false,
+            link_preview_error: false,
         }
     }
 
@@ -1532,6 +1576,9 @@ impl ChatEntry {
             label_text: None,
             reactions_text: None,
             formatted_time: None,
+            link_preview: None,
+            link_preview_loading: false,
+            link_preview_error: false,
         }
     }
 
@@ -1598,8 +1645,6 @@ pub enum Screen {
     PeerProfile(PublicKey),
     /// Remote file catalogue browsing — shows a peer's shared file catalogue.
     PeerCatalogue(PublicKey),
-    /// Full-screen image preview within the chat panel (sidebar stays visible).
-    ImagePreview { topic: TopicId, entry_index: usize },
     /// Redesigned friend profile view with context menu and action buttons.
     FriendProfile(PublicKey),
 }
@@ -1723,8 +1768,8 @@ impl ConversationLive {
 pub struct IcedChat {
     // ── Navigation ──
     pub screen: Screen,
-    /// Screen to return to when closing image preview.
-    previous_screen: Option<Screen>,
+    /// Track which images (by entry index) are currently enlarged in the chat log.
+    enlarged_images: HashSet<usize>,
     /// Pending topic we're connecting to (used during the async handoff
     /// from clicking a room to actually subscribing).
     pending_topic: Option<TopicId>,
@@ -2112,6 +2157,11 @@ pub struct IcedChat {
     splash_has_rendered: bool,
     /// Animation frame counter for the splash screen spinner.
     splash_spinner_frame: usize,
+    /// Cached link previews (title, description, image) keyed by URL.
+    link_preview_cache: std::sync::Arc<std::sync::Mutex<link_preview::LinkPreviewCache>>,
+    /// Entry index whose link preview is currently being fetched.
+    /// Used to prevent duplicate concurrent fetches for the same entry.
+    link_preview_fetch_index: Option<usize>,
 }
 
 /// Cached profile data received from a peer via ProfileUpdate gossip.
@@ -2699,10 +2749,8 @@ pub enum AppMessage {
     InviteWhisperInputChanged(String),
     /// Send a room invite via whisper to the entered peer key.
     InviteSendWhisper,
-    /// Open the image at the given entry index in full-panel preview.
-    OpenImagePreview(usize),
-    /// Close the image preview and return to the previous screen.
-    CloseImagePreview,
+    /// Toggle the image at the given entry index between enlarged and normal size in the chat log.
+    ToggleImageEnlarge(usize),
     /// Image processing failed after the user selected it.
     ImageUploadFailed(String),
     /// File upload/sharing failed after the user selected it.
@@ -2727,6 +2775,18 @@ pub enum AppMessage {
         expected: String,
         elapsed_ms: u64,
     },
+    /// Retry connecting to the relay (manual retry from the dashboard).
+    RetryConnection,
+    /// Subscribe to a conversation topic in the background (no UI switch).
+    BackgroundSubscribe(TopicId),
+    /// Background subscription completed.
+    BackgroundSubscribed(TopicId, Option<GossipSender>),
+
+    // ── Link preview ──
+    /// Open a detected URL in the system default browser.
+    OpenUrl(String),
+    /// A link preview was fetched for the chat entry at the given index.
+    LinkPreviewLoaded(usize, link_preview::LinkPreviewResult),
 }
 
 /// Map semantic GUI navigation commands to the same application messages used
@@ -3214,7 +3274,7 @@ fn view_local_profile_block(
         .align_x(Alignment::Start);
 
     // ── Settings gear button ──
-    let settings_btn = button(text("⚙").size(TYPO_MD))
+    let settings_btn = button(text(ICON_SETTINGS).size(TYPO_MD))
         .on_press(AppMessage::OpenSettings)
         .padding([SPACE_6, SPACE_8])
         .style(BUTTON_ICON);
@@ -3502,7 +3562,7 @@ impl IcedChat {
             splash_start_time: std::time::Instant::now(),
             splash_has_rendered: false,
             splash_spinner_frame: 0,
-            previous_screen: None,
+            enlarged_images: HashSet::new(),
             pending_topic: None,
             room_loading: false,
             room_history,
@@ -3670,6 +3730,10 @@ impl IcedChat {
             gui_state_tx,
             recent_activity: VecDeque::with_capacity(50),
             window_width: 1200.0,
+            link_preview_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                link_preview::LinkPreviewCache::new(),
+            )),
+            link_preview_fetch_index: None,
         }
     }
 
@@ -4182,49 +4246,55 @@ impl IcedChat {
                 .as_ref()
                 .map(|bytes| iced::widget::image::Handle::from_bytes(bytes.clone()));
             Some(ChatEntry {
-                kind,
-                label: sanitize_single_line(&label),
-                body: sanitize_display_text(&hist.text_preview, DEFAULT_MAX_DISPLAY_LENGTH),
-                message_hash: None,
-                edited: false,
-                reactions: Vec::new(),
-                label_text: None,
-                reactions_text: None,
-                formatted_time: None,
-                image_handle: handle,
-                avatar_handle: None,
-                image_bytes: hist.image_bytes.clone(),
-                image_identifier: hist.image_identifier.clone(),
-                image_error: None,
-                timestamp: Some(hist.timestamp as i64),
-                event_id: hist.event_id,
-                delivery_state: hist.delivery_state.clone(),
-                sender_key,
-                download: None,
-                widget_gen: 0,
+            kind,
+            label: sanitize_single_line(&label),
+            body: sanitize_display_text(&hist.text_preview, DEFAULT_MAX_DISPLAY_LENGTH),
+            message_hash: None,
+            edited: false,
+            reactions: Vec::new(),
+            label_text: None,
+            reactions_text: None,
+            formatted_time: None,
+            image_handle: handle,
+            avatar_handle: None,
+            image_bytes: hist.image_bytes.clone(),
+            image_identifier: hist.image_identifier.clone(),
+            image_error: None,
+            timestamp: Some(hist.timestamp as i64),
+            event_id: hist.event_id,
+            delivery_state: hist.delivery_state.clone(),
+            sender_key,
+            download: None,
+            widget_gen: 0,
+            link_preview: None,
+            link_preview_loading: false,
+            link_preview_error: false,
             })
-        } else {
+            } else {
             Some(ChatEntry {
-                kind,
-                label: sanitize_single_line(&label),
-                body: sanitize_display_text(&hist.text_preview, DEFAULT_MAX_DISPLAY_LENGTH),
-                message_hash: None,
-                edited: false,
-                reactions: Vec::new(),
-                label_text: None,
-                reactions_text: None,
-                formatted_time: None,
-                image_handle: None,
-                avatar_handle: None,
-                image_bytes: None,
-                image_identifier: None,
-                image_error: None,
-                timestamp: Some(hist.timestamp as i64),
-                event_id: hist.event_id,
-                delivery_state: hist.delivery_state.clone(),
-                sender_key,
-                download: None,
-                widget_gen: 0,
+            kind,
+            label: sanitize_single_line(&label),
+            body: sanitize_display_text(&hist.text_preview, DEFAULT_MAX_DISPLAY_LENGTH),
+            message_hash: None,
+            edited: false,
+            reactions: Vec::new(),
+            label_text: None,
+            reactions_text: None,
+            formatted_time: None,
+            image_handle: None,
+            avatar_handle: None,
+            image_bytes: None,
+            image_identifier: None,
+            image_error: None,
+            timestamp: Some(hist.timestamp as i64),
+            event_id: hist.event_id,
+            delivery_state: hist.delivery_state.clone(),
+            sender_key,
+            download: None,
+            widget_gen: 0,
+            link_preview: None,
+            link_preview_loading: false,
+            link_preview_error: false,
             })
         }
     }
@@ -4250,10 +4320,11 @@ impl IcedChat {
 
     /// Push an entry and update the incremental layout cache atomically.
     /// Must be the *only* way entries are added to `self.entries`.
-    fn entries_push(&mut self, mut entry: ChatEntry) {
+    /// Returns the index of the pushed entry.
+    fn entries_push(&mut self, mut entry: ChatEntry) -> usize {
         if let Some(hash) = entry.message_hash.as_ref() {
             if self.has_message(hash) {
-                return;
+                return 0;
             }
         }
         // Check if the entry's image needs background hydration.
@@ -4300,6 +4371,7 @@ impl IcedChat {
         self.keep_latest_visible();
         self.enforce_image_budget();
         self.enforce_entry_cap();
+        self.entries.len() - 1
     }
 
     /// Evict `image_bytes` from the oldest entries that have an
@@ -4420,6 +4492,8 @@ impl IcedChat {
             AppMessage::DownloadFailed(_) => "DownloadFailed",
             AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
             AppMessage::OpenDownloadsFolder => "OpenDownloadsFolder",
+            AppMessage::OpenUrl(_) => "OpenUrl",
+            AppMessage::LinkPreviewLoaded(..) => "LinkPreviewLoaded",
             AppMessage::ErrorMsg(_) => "ErrorMsg",
             AppMessage::ExecuteFileSend(_) => "ExecuteFileSend",
             AppMessage::ExecuteDownload => "ExecuteDownload",
@@ -4449,8 +4523,10 @@ impl IcedChat {
             AppMessage::ShowRenameFriendInput => "ShowRenameFriendInput",
             AppMessage::CancelBlockFriend => "CancelBlockFriend",
             AppMessage::ConfirmBlockFriend => "ConfirmBlockFriend",
-            AppMessage::OpenImagePreview(..) => "OpenImagePreview",
-            AppMessage::CloseImagePreview => "CloseImagePreview",
+            AppMessage::ToggleImageEnlarge(..) => "ToggleImageEnlarge",
+            AppMessage::RetryConnection => "RetryConnection",
+            AppMessage::BackgroundSubscribe(_) => "BackgroundSubscribe",
+            AppMessage::BackgroundSubscribed(..) => "BackgroundSubscribed",
             AppMessage::ImageUploadFailed(_) => "ImageUploadFailed",
             AppMessage::FileUploadFailed(_) => "FileUploadFailed",
             AppMessage::FileDownloaded { .. } => "FileDownloaded",
@@ -4881,7 +4957,6 @@ impl IcedChat {
     fn current_connection_details_dialog(&self) -> ConnectionDetailsDialogState {
         let room_state = match &self.screen {
             Screen::Chat { topic } => format!("Chat room active ({topic})"),
-            Screen::ImagePreview { topic, .. } => format!("Image preview open ({topic})"),
             Screen::FriendProfile(_) => "Friend profile open".to_string(),
             Screen::PeerProfile(_) => "Peer profile open".to_string(),
             Screen::PeerCatalogue(_) => "Peer catalogue open".to_string(),
@@ -5096,7 +5171,6 @@ impl IcedChat {
             Screen::PeerProfile(_) => ("PeerProfile", None),
             Screen::PeerCatalogue(_) => ("PeerCatalogue", None),
             Screen::FriendProfile(_) => ("FriendProfile", None),
-            Screen::ImagePreview { topic, .. } => ("ImagePreview", Some(topic.to_string())),
             Screen::Splash => ("Splash", None),
         };
         let _ = self.gui_state_tx.send(IcedStateSnapshot {
@@ -5815,6 +5889,68 @@ impl IcedChat {
                 self.names.clear();
                 self.composer_text.clear();
                 self.first_run = false; // First action taken — onboarding complete
+
+                // Auto-subscribe to all stored conversations so messages
+                // can be received even before the user opens each chat.
+                let store_topics: Vec<TopicId> = self
+                    .conversation_store
+                    .active_iter()
+                    .into_iter()
+                    .map(|e| e.topic)
+                    .filter(|t| *t != topic && !self.conversations.contains_key(t))
+                    .collect();
+                if !store_topics.is_empty() {
+                    info!(
+                        count = store_topics.len(),
+                        "auto-subscribing to stored conversations"
+                    );
+                    for bg_topic in store_topics {
+                        let gossip = self.gossip.clone();
+                        let net_tx = self.net_tx.clone();
+                        let sk = self.secret_key.clone();
+                        let label = self.local_label.clone();
+                        let profile_image_ticket = self.profile_image_ticket.clone();
+                        let topic = bg_topic;
+                        tokio::spawn(async move {
+                            if let Ok(sub) = gossip.subscribe(topic, vec![]).await {
+                                let (sender, receiver) = sub.split();
+                                if let (Ok(md), Ok(rd)) = (
+                                    boru_core::room_docs::create_metadata_doc(
+                                        topic,
+                                        &sender,
+                                        boru_core::room_docs::RoomMetadata {
+                                            name: Some("boru-chat".to_string()),
+                                            description: None,
+                                            rules: None,
+                                        },
+                                    )
+                                    .await,
+                                    boru_core::room_docs::create_roster_doc(
+                                        topic,
+                                        &sender,
+                                        sk.public().to_string(),
+                                        label.clone(),
+                                    )
+                                    .await,
+                                ) {
+                                    let _fh = spawn_conversation_forwarder(
+                                        topic, md, rd, receiver, net_tx, None,
+                                    );
+                                    if let Ok(msg) = crate::SignedMessage::sign_and_encode(
+                                        &sk,
+                                        &crate::Message::AboutMe {
+                                            name: label,
+                                            profile_image_ticket,
+                                        },
+                                    ) {
+                                        let _ = sender.broadcast(msg).await;
+                                    }
+                                    info!("background subscribed to {topic}");
+                                }
+                            }
+                        });
+                    }
+                }
                 self.push_system("Chat joined.");
                 self.push_system("Type a message and press Enter to send.  /help for commands.");
 
@@ -7113,7 +7249,8 @@ impl IcedChat {
                 let mut local_entry = ChatEntry::local(&self.local_label, &text);
                 local_entry.event_id = event_id;
                 local_entry.message_hash = Some(msg_hash);
-                self.entries_push(local_entry);
+                let entry_idx = self.entries_push(local_entry);
+                let preview_task = self.maybe_fetch_link_preview(entry_idx);
                 if let Some(action_id) = self.pending_submit_composer_action.take() {
                     let _ = self
                         .gui_action_history
@@ -7123,15 +7260,20 @@ impl IcedChat {
                         .set_state(&action_id, GuiActionState::Completed);
                 }
                 if let Some(sender) = self.sender.clone() {
-                    iced::Task::perform(
+                    let main_task = iced::Task::perform(
                         async move {
                             sender.broadcast(encoded).await.ok();
                             (text, event_id, msg_hash)
                         },
                         |(t, eid, mh)| AppMessage::MessageSent(t, eid, mh),
-                    )
+                    );
+                    if let Some(pt) = preview_task {
+                        iced::Task::batch([main_task, pt])
+                    } else {
+                        main_task
+                    }
                 } else {
-                    iced::Task::none()
+                    preview_task.unwrap_or(iced::Task::none())
                 }
             }
 
@@ -7491,6 +7633,13 @@ impl IcedChat {
                         peer,
                         ticket_str,
                     ));
+                }
+                // Check if the last pushed entry has a URL that needs link preview
+                if !self.entries.is_empty() {
+                    let last_idx = self.entries.len() - 1;
+                    if let Some(pt) = self.maybe_fetch_link_preview(last_idx) {
+                        tasks.push(pt);
+                    }
                 }
                 if tasks.is_empty() {
                     iced::Task::none()
@@ -8744,6 +8893,93 @@ impl IcedChat {
                 self.connection_details_dialog = Some(self.current_connection_details_dialog());
                 return iced::widget::operation::focus(CONNECTION_DETAILS_FIRST_VALUE_INPUT);
             }
+            AppMessage::RetryConnection => {
+                // The endpoint and gossip layer handle reconnection automatically.
+                // This just triggers a re-render so the user sees the current state.
+                info!("Manual retry requested from dashboard");
+                iced::Task::none()
+            }
+            AppMessage::BackgroundSubscribe(topic) => {
+                // Already subscribed — skip.
+                if self.conversations.contains_key(&topic)
+                    && self.conversations[&topic].sender.is_some()
+                {
+                    return iced::Task::none();
+                }
+                let gossip = self.gossip.clone();
+                let net_tx = self.net_tx.clone();
+                let sk = self.secret_key.clone();
+                let label = self.local_label.clone();
+                let endpoint = self.endpoint.clone();
+                let profile_image_ticket = self.profile_image_ticket.clone();
+                iced::Task::perform(
+                    async move {
+                        let sub = gossip.subscribe(topic, vec![]).await.map_err(|e| e.to_string())?;
+                        let (sender, receiver) = sub.split();
+                        let metadata_doc = boru_core::room_docs::create_metadata_doc(
+                            topic,
+                            &sender,
+                            boru_core::room_docs::RoomMetadata {
+                                name: Some("boru-chat".to_string()),
+                                description: None,
+                                rules: None,
+                            },
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        let roster_doc = boru_core::room_docs::create_roster_doc(
+                            topic,
+                            &sender,
+                            sk.public().to_string(),
+                            label.clone(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        let forward_handle = spawn_conversation_forwarder(
+                            topic,
+                            metadata_doc,
+                            roster_doc,
+                            receiver,
+                            net_tx,
+                            None,
+                        );
+                        // Broadcast AboutMe so the peer knows we're here
+                        if let Ok(msg) = crate::SignedMessage::sign_and_encode(
+                            &sk,
+                            &crate::Message::AboutMe {
+                                name: label,
+                                profile_image_ticket,
+                            },
+                        ) {
+                            let _ = sender.broadcast(msg).await;
+                        }
+                        Ok::<_, String>((sender, forward_handle, topic))
+                    },
+                    |result| match result {
+                        Ok((sender, _forward_handle, topic)) => {
+                            AppMessage::BackgroundSubscribed(topic, Some(sender))
+                        }
+                        Err(e) => {
+                            let fallback_topic = TopicId::from_bytes([0u8; 32]);
+                            warn!("BackgroundSubscribe failed: {e}");
+                            AppMessage::BackgroundSubscribed(fallback_topic, None)
+                        }
+                    },
+                )
+            }
+            AppMessage::BackgroundSubscribed(topic, sender) => {
+                let conv = self
+                    .conversations
+                    .entry(topic)
+                    .or_insert_with(|| ConversationLive::new(topic));
+                conv.sender = sender;
+                if conv.sender.is_some() {
+                    info!("background subscribed to {topic}");
+                } else {
+                    warn!("background subscribe failed for {topic}");
+                }
+                iced::Task::none()
+            }
             AppMessage::CloseConnectionDetails => self.close_connection_details_dialog(),
             AppMessage::CopyConnectionDetails => {
                 if self.connection_details_dialog.is_some() {
@@ -8860,19 +9096,11 @@ impl IcedChat {
                     iced::Task::none()
                 }
             }
-            AppMessage::OpenImagePreview(entry_index) => {
-                self.previous_screen = Some(self.screen.clone());
-                self.screen = Screen::ImagePreview {
-                    topic: self.topic,
-                    entry_index,
-                };
-                iced::Task::none()
-            }
-            AppMessage::CloseImagePreview => {
-                self.screen = self
-                    .previous_screen
-                    .take()
-                    .unwrap_or(Screen::Chat { topic: self.topic });
+            AppMessage::ToggleImageEnlarge(entry_index) => {
+                // Toggle the image between enlarged and normal size
+                if !self.enlarged_images.insert(entry_index) {
+                    self.enlarged_images.remove(&entry_index);
+                }
                 iced::Task::none()
             }
 
@@ -9994,6 +10222,44 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::OpenUrl(url) => {
+                // Open the URL in the system default browser.
+                // Use xdg-open on Linux, open on macOS, etc.
+                let url2 = url.clone();
+                iced::Task::perform(
+                    async move {
+                        let result = open::that(&url2);
+                        if let Err(e) = result {
+                            tracing::warn!(url = %url2, error = %e, "failed to open URL");
+                        }
+                    },
+                    |_| AppMessage::Noop,
+                )
+            }
+
+            AppMessage::LinkPreviewLoaded(idx, result) => {
+                if idx >= self.entries.len() {
+                    tracing::warn!(entry_index = idx, "LinkPreviewLoaded: out of bounds");
+                    return iced::Task::none();
+                }
+                let entry = &mut self.entries[idx];
+                match result {
+                    link_preview::LinkPreviewResult::Success(data) => {
+                        entry.link_preview = Some(data);
+                        entry.link_preview_loading = false;
+                        entry.link_preview_error = false;
+                    }
+                    link_preview::LinkPreviewResult::Error(e) => {
+                        tracing::debug!(entry_index = idx, error = %e, "link preview fetch failed");
+                        entry.link_preview_loading = false;
+                        entry.link_preview_error = true;
+                    }
+                }
+                entry.bump_gen();
+                self.link_preview_fetch_index = None;
+                iced::Task::none()
+            }
+
             AppMessage::Noop => iced::Task::none(),
 
             // ── Shared file catalogue management ──
@@ -10936,6 +11202,47 @@ impl IcedChat {
         read_receipt_task
     }
 
+    /// If the entry at `entry_index` contains a URL, check the cache and
+    /// spawn a background task to fetch a link preview.
+    /// Returns `Some(task)` if a fetch was started, `None` otherwise.
+    fn maybe_fetch_link_preview(&mut self, entry_index: usize) -> Option<iced::Task<AppMessage>> {
+        if entry_index >= self.entries.len() {
+            return None;
+        }
+        // Don't start a new fetch if one is already in-flight
+        if self.link_preview_fetch_index.is_some() {
+            return None;
+        }
+        let body = self.entries[entry_index].body.clone();
+        let first_url = link_preview::find_first_url(&body)?;
+
+        // Check cache first
+        if self.link_preview_cache.lock().ok()?.get(&first_url).is_some() {
+            // Already cached, mark the entry
+            if let Some(data) = self.link_preview_cache.lock().ok()?.get(&first_url) {
+                if let link_preview::LinkPreviewResult::Success(d) = data {
+                    self.entries[entry_index].link_preview = Some(d);
+                }
+            }
+            return None;
+        }
+
+        self.link_preview_fetch_index = Some(entry_index);
+        self.entries[entry_index].link_preview_loading = true;
+
+        let cache = self.link_preview_cache.clone();
+        Some(iced::Task::perform(
+            async move {
+                let url_to_fetch = first_url.clone();
+                let result = link_preview::fetch_link_preview(&url_to_fetch).await;
+                // Cache the result regardless of success/failure
+                cache.lock().ok()?.insert(&url_to_fetch, result.clone());
+                Some(AppMessage::LinkPreviewLoaded(entry_index, result))
+            },
+            |opt_msg| opt_msg.unwrap_or(AppMessage::Noop),
+        ))
+    }
+
     /// Create a background task to download a profile image blob from a peer.
     /// Returns an `AppMessage::ProfileImageDownloaded` or
     /// `AppMessage::ProfileImageDownloadFailed` when done.
@@ -11536,6 +11843,27 @@ impl IcedChat {
         }
     }
 
+    /// Return a time-of-day greeting ("morning", "afternoon", "evening").
+    fn time_of_day_greeting(&self) -> &'static str {
+        // Use std::time to avoid chrono dependency issues
+        let hour = {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            // UTC hour, converted to approximate local by offset guess
+            // This is a rough heuristic — exact local time not critical for a greeting
+            ((now % 86400) / 3600) as u32
+        };
+        if hour < 12 {
+            "morning"
+        } else if hour < 17 {
+            "afternoon"
+        } else {
+            "evening"
+        }
+    }
+
     fn sidebar_avatar_handle(handle: Option<&iced::widget::image::Handle>) -> SidebarAvatarHandle {
         let handle = handle.cloned();
         let key = handle.as_ref().map(|h| {
@@ -11673,7 +12001,7 @@ impl IcedChat {
             // App icon placeholder (large emoji or icon)
             text("🗣️").size(72),
             Space::new().height(Length::Fixed(20.0)),
-            // App name — Montserrat Black wordmark
+            // App name — Raleway ExtraBold wordmark
             boru_logo(LogoSize::Large)
                 .color(text_color)
                 .into_element(),
@@ -11735,15 +12063,11 @@ impl IcedChat {
             Screen::PeerProfile(peer) => self.view_peer_profile(*peer),
             Screen::PeerCatalogue(peer) => self.view_peer_catalogue(*peer),
             Screen::FriendProfile(peer) => self.view_friend_profile(*peer),
-            Screen::ImagePreview {
-                topic: _,
-                entry_index,
-            } => self.view_image_preview(*entry_index),
         };
 
         let content = row![
             container(sidebar)
-                .width(Length::Fixed(280.0))
+                .width(Length::Fixed(300.0))
                 .height(Length::Fill)
                 .style(move |t| {
                     iced::widget::container::Style {
@@ -11823,25 +12147,25 @@ impl IcedChat {
 
         let items = vec![
             MenuItem {
-                icon: "👤",
+                icon: ICON_FRIEND,
                 label: "Add Friend",
                 action: Some(AppMessage::OpenFriendRequests),
                 disabled: false,
             },
             MenuItem {
-                icon: "🔗",
+                icon: ICON_CHAT,
                 label: "Join Ticket",
                 action: Some(AppMessage::JoinFromTicket),
                 disabled: false,
             },
             MenuItem {
-                icon: "📷",
+                icon: "—",
                 label: "Scan QR Code",
                 action: None,
                 disabled: true,
             },
             MenuItem {
-                icon: "📥",
+                icon: ICON_FILES,
                 label: "Import Friend",
                 action: Some(AppMessage::ImportFriendFromFile),
                 disabled: false,
@@ -11850,7 +12174,7 @@ impl IcedChat {
 
         let future_items = vec![
             MenuItem {
-                icon: "👥",
+                icon: "—",
                 label: "Create Group Chat",
                 action: None,
                 disabled: true,
@@ -12127,7 +12451,7 @@ impl IcedChat {
         let header = Row::new()
             .push(boru_logo(LogoSize::Small).into_element())
             .push(
-                iced::widget::button(iced::widget::text("＋").size(TYPO_MD))
+                iced::widget::button(iced::widget::text(ICON_PLUS).size(TYPO_MD))
                     .on_press(AppMessage::ToggleAddMenu)
                     .padding([SPACE_6, SPACE_8])
                     .style(BUTTON_ICON),
@@ -12610,7 +12934,7 @@ impl IcedChat {
         // ── Build the content row ─────────────────────────────────
         // ── Delete button ────────────────
         let is_deleting = delete_confirm_topic == Some(topic);
-        let delete_btn_text = if is_deleting { "Delete?" } else { "✕" };
+        let delete_btn_text = if is_deleting { "Delete?" } else { ICON_CLOSE };
         let delete_btn = button(
             container(text(delete_btn_text).size(TYPO_XS))
                 .center_x(Length::Fill)
@@ -12989,7 +13313,7 @@ impl IcedChat {
 
         let has_friends = !dep.friends.is_empty();
         for friend in &dep.friends {
-            let status_dot = if friend.online { "●" } else { "○" };
+            let status_dot = if friend.online { ICON_ONLINE } else { ICON_OFFLINE };
             let row_el = Row::new()
                 .push(Self::peer_avatar_block(friend.avatar.clone(), friend.peer))
                 .push(
@@ -13206,14 +13530,17 @@ impl IcedChat {
         let theme = self.theme();
         let narrow = self.window_width < 640.0;
 
-        // ── Counts ──
+        // ── Counts (from shared presence state) ──
         let online_friend_count = self
             .friends
             .iter()
             .filter(|(fid, _)| {
                 fid.parse_public_key()
                     .ok()
-                    .map(|pk| self.friend_online_cache.contains(&pk))
+                    .map(|pk| {
+                        self.friend_online_cache.contains(&pk)
+                            && self.names.contains_key(&pk)
+                    })
                     .unwrap_or(false)
             })
             .count();
@@ -13223,288 +13550,213 @@ impl IcedChat {
             .filter(|(_, r)| r.relationship.can_message())
             .count();
 
-        // ── Status cards ──
+        // ── Connection state (single source of truth) ──
         let is_connected = !self.neighbors.is_empty()
             || self.relayed_peers > 0
             || self.direct_peers > 0;
+        let is_offline = matches!(self.mesh_health, MeshHealth::Offline(_));
 
-        let connection_indicator: iced::Element<'_, AppMessage> = if is_connected {
+        // ── Greeting ──
+        let display_name = if self.local_label.is_empty() {
+            "there"
+        } else {
+            &self.local_label
+        };
+        let greeting = text(format!("Good {}, {display_name}", self.time_of_day_greeting()))
+            .size(TYPO_LG)
+            .width(Length::Fill);
+
+        // ── Connection status bar ──
+        let conn_status: iced::Element<'_, AppMessage> = if is_connected {
             row![
-                text("●").size(TYPO_MD).color(accent_green(&theme)),
-                text("Connected").size(TYPO_SM).color(accent_green(&theme)),
+                text(ICON_ONLINE).size(TYPO_SM).color(accent_green(&theme)),
+                text("Boru is connected and ready.")
+                    .size(TYPO_SM)
+                    .color(text_muted(&theme)),
+            ]
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center)
+            .into()
+        } else if is_offline {
+            let relay_text = fmt_relay_mode(&self.relay_mode);
+            row![
+                text(ICON_OFFLINE).size(TYPO_SM).color(color_error(&theme)),
+                text("Boru could not reach the relay.")
+                    .size(TYPO_SM)
+                    .color(color_error(&theme)),
+                Space::new().width(Length::Fixed(SPACE_8)),
+                button(text("Retry").size(TYPO_SM))
+                    .on_press(AppMessage::RetryConnection)
+                    .padding([SPACE_4, SPACE_12])
+                    .style(BUTTON_PRIMARY),
+                button(text("Details").size(TYPO_SM))
+                    .on_press(AppMessage::OpenConnectionDetails)
+                    .padding([SPACE_4, SPACE_12])
+                    .style(BUTTON_OUTLINE),
             ]
             .spacing(SPACE_4)
             .align_y(Alignment::Center)
             .into()
         } else {
+            // Reconnecting / degraded
             row![
-                text("●").size(TYPO_MD).color(color_error(&theme)),
-                text("Disconnected")
+                text(ICON_RETRY).size(TYPO_SM).color(color_warning(&theme)),
+                text("Reconnecting to the relay…")
                     .size(TYPO_SM)
-                    .color(color_error(&theme)),
+                    .color(color_warning(&theme)),
+                Space::new().width(Length::Fixed(SPACE_8)),
+                button(text("Details").size(TYPO_SM))
+                    .on_press(AppMessage::OpenConnectionDetails)
+                    .padding([SPACE_4, SPACE_12])
+                    .style(BUTTON_OUTLINE),
             ]
             .spacing(SPACE_4)
             .align_y(Alignment::Center)
             .into()
         };
 
-        let network_label = match &self.relay_mode {
-            RelayMode::Disabled => "Direct".to_string(),
-            _ => {
-                let full = fmt_relay_mode(&self.relay_mode);
-                let short = full
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://");
-                if short.len() > 28 {
-                    format!("{}…", &short[..25])
-                } else {
-                    short.to_string()
-                }
-            }
-        };
-
-        let relay_text = fmt_relay_mode(&self.relay_mode);
-
-        // Build status cards row (2 cards: Connection + Network)
-        let status_cards = iced::widget::Row::new()
-            .push(
-                container(
-                    Column::new()
-                        .push(text("🔌").size(TYPO_LG))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Connection").size(TYPO_XS).color(text_muted(&theme)))
-                        .push(Space::new().height(Length::Fixed(SPACE_4)))
-                        .push(connection_indicator)
-                        .spacing(SPACE_2)
-                        .align_x(Alignment::Center),
-                )
-                .padding([SPACE_12, SPACE_8])
-                .width(Length::Fill)
-                .style(container_card),
-            )
-            .push(
-                container(
-                    Column::new()
-                        .push(text("🌐").size(TYPO_LG))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Network").size(TYPO_XS).color(text_muted(&theme)))
-                        .push(Space::new().height(Length::Fixed(SPACE_4)))
-                        .push(
-                            text(network_label)
-                                .size(TYPO_SM)
-                                .color(text_system(&theme)),
-                        )
-                        .spacing(SPACE_2)
-                        .align_x(Alignment::Center),
-                )
-                .padding([SPACE_12, SPACE_8])
-                .width(Length::Fill)
-                .style(container_card),
-            )
-            .spacing(SPACE_8)
-            .width(Length::Fill);
-
-        // ── Action cards ──
-        let action_cards = iced::widget::Row::new()
-            .push(
-                button(
-                    Column::new()
-                        .push(text("💬").size(TYPO_XL))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Start Chat").size(TYPO_SM))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Start a new conversation or join by ticket").size(TYPO_XS).color(text_muted(&theme)))
-                        .spacing(SPACE_2)
-                        .align_x(Alignment::Center),
-                )
-                .on_press(AppMessage::ToggleAddMenu)
-                .padding([SPACE_12, SPACE_8])
-                .width(Length::Fill)
-                .style(BUTTON_CARD),
-            )
-            .push(
-                button(
-                    Column::new()
-                        .push(text("👤").size(TYPO_XL))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Add Friend").size(TYPO_SM))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Add a friend by key or file").size(TYPO_XS).color(text_muted(&theme)))
-                        .spacing(SPACE_2)
-                        .align_x(Alignment::Center),
-                )
-                .on_press(AppMessage::OpenFriendRequests)
-                .padding([SPACE_12, SPACE_8])
-                .width(Length::Fill)
-                .style(BUTTON_CARD),
-            )
-            .push(
-                button(
-                    Column::new()
-                        .push(text("📁").size(TYPO_XL))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Browse Files").size(TYPO_SM))
-                        .push(Space::new().height(Length::Fixed(SPACE_2)))
-                        .push(text("Browse shared files").size(TYPO_XS).color(text_muted(&theme)))
-                        .spacing(SPACE_2)
-                        .align_x(Alignment::Center),
-                )
-                .on_press(AppMessage::OpenSettings)
-                .padding([SPACE_12, SPACE_8])
-                .width(Length::Fill)
-                .style(BUTTON_CARD),
-            )
-            .spacing(SPACE_8)
-            .width(Length::Fill);
-
-        // ── Advanced Features card ──
-        let advanced_relay_info = Row::new()
-            .push(
-                Column::new()
-                    .push(text("Relay").size(TYPO_MD))
-                    .push(
-                        text(relay_text.clone())
-                            .size(TYPO_XS)
-                            .color(text_muted(&theme)),
-                    )
-                    .spacing(SPACE_2)
-                    .width(Length::Fill)
-                    .align_x(Alignment::Start),
-            )
-            .push(
-                button(text("Advanced details").size(TYPO_SM))
-                    .on_press(AppMessage::OpenConnectionDetails)
-                    .style(BUTTON_OUTLINE)
-                    .padding([SPACE_6, SPACE_12]),
-            )
-            .spacing(SPACE_12)
-            .align_y(Alignment::Center);
-
-        let advanced_card = container(
+        // ── Welcome card (greeting + status) ──
+        let welcome_card = container(
             Column::new()
-                .push(
-                    text("ADVANCED")
-                        .size(TYPO_XS)
-                        .color(text_muted(&theme)),
-                )
+                .push(greeting)
                 .push(Space::new().height(Length::Fixed(SPACE_6)))
-                .push(advanced_relay_info),
+                .push(conn_status)
+                .spacing(0)
+                .width(Length::Fill),
         )
-        .padding([SPACE_12, SPACE_16])
+        .padding([SPACE_16, (SPACE_24 - SPACE_4)])
         .width(Length::Fill)
         .style(container_card);
 
-        // ── Left column: status + action cards ──
-        let left_col = Column::new()
-            .push(status_cards)
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
-            .push(action_cards)
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
+        // ── Primary action cards: Start Chat, Add Friend ──
+        let primary_actions = Row::new()
             .push(
-                // ── File-drop area card ──
-                container(
+                button(
                     Column::new()
                         .push(
-                            text("📁")
-                                .size(TYPO_XL * 1.5)
-                                .width(Length::Fill),
+                            text(ICON_CHAT)
+                                .size(TYPO_XL)
+                                .color(accent_primary(&theme)),
                         )
+                        .push(Space::new().height(Length::Fixed(SPACE_8)))
+                        .push(text("Start Chat").size(TYPO_MD))
+                        .push(Space::new().height(Length::Fixed(SPACE_4)))
                         .push(
-                            text("Drop files to share")
-                                .size(TYPO_MD)
-                                .width(Length::Fill),
+                            text("Start a conversation or join by ticket")
+                                .size(TYPO_SM)
+                                .color(text_muted(&theme)),
                         )
-                        .push(
-                            text("Drag & drop files here to share them with friends")
-                                .size(TYPO_XS)
-                                .color(text_muted(&theme))
-                                .width(Length::Fill),
-                        )
-                        .spacing(SPACE_6)
-                        .align_x(Alignment::Center)
-                        .width(Length::Fill),
+                        .spacing(0)
+                        .align_x(Alignment::Center),
                 )
-                .padding([SPACE_16, SPACE_12])
+                .on_press(AppMessage::ToggleAddMenu)
+                .padding([(SPACE_24 - SPACE_4), SPACE_16])
                 .width(Length::Fill)
-                .style(move |t: &iced::Theme| {
-                    let base = container_card(t);
-                    let is_dark = matches!(t, iced::Theme::Dark);
-                    iced::widget::container::Style {
-                        background: Some(iced::Background::Color({
-                            let mut c = base
-                                .background
-                                .as_ref()
-                                .and_then(|b| {
-                                    if let iced::Background::Color(c) = b {
-                                        Some(*c)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or(iced::Color::TRANSPARENT);
-                            c.a = 0.5;
-                            c
-                        })),
-                        border: iced::Border {
-                            color: if matches!(t, iced::Theme::Dark) {
-                                iced::Color::from_rgb(0.4, 0.4, 0.8)
-                            } else {
-                                iced::Color::from_rgb(0.3, 0.3, 0.7)
-                            },
-                            width: 2.0,
-                            radius: 12.0.into(),
-                            ..Default::default()
-                        },
-                        ..base
-                    }
-                }),
+                .style(BUTTON_CARD),
             )
+            .push(
+                button(
+                    Column::new()
+                        .push(
+                            text(ICON_FRIEND)
+                                .size(TYPO_XL)
+                                .color(accent_primary(&theme)),
+                        )
+                        .push(Space::new().height(Length::Fixed(SPACE_8)))
+                        .push(text("Add Friend").size(TYPO_MD))
+                        .push(Space::new().height(Length::Fixed(SPACE_4)))
+                        .push(
+                            text("Add a friend by key or invite file")
+                                .size(TYPO_SM)
+                                .color(text_muted(&theme)),
+                        )
+                        .spacing(0)
+                        .align_x(Alignment::Center),
+                )
+                .on_press(AppMessage::OpenFriendRequests)
+                .padding([(SPACE_24 - SPACE_4), SPACE_16])
+                .width(Length::Fill)
+                .style(BUTTON_CARD),
+            )
+            .spacing(SPACE_12)
+            .width(Length::Fill);
+
+        // ── Secondary action: Share Files ──
+        let share_files_btn = button(
+            row![
+                text(ICON_FILES).size(TYPO_SM).color(accent_primary(&theme)),
+                text("Share files").size(TYPO_SM),
+                Space::new().width(Length::Fill),
+                text("Drop files here or choose files")
+                    .size(TYPO_XS)
+                    .color(text_muted(&theme)),
+            ]
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::OpenSettings) // Opens settings where file browser is
+        .padding([SPACE_10, SPACE_16])
+        .width(Length::Fill)
+        .style(BUTTON_CARD);
+
+        // ── Left column assembly ──
+        let left_col = Column::new()
+            .push(welcome_card)
+            .push(Space::new().height(Length::Fixed(SPACE_16)))
+            .push(primary_actions)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
-            .push(advanced_card)
+            .push(share_files_btn)
             .spacing(0)
             .width(Length::Fill);
 
-            // ── Right column: friends online list + recent activity ──
-        let friends_online_label = if total_friend_count == 0 {
-            "Friends Online".to_string()
+        // ── Right column: Online Now ──
+        let online_label = if total_friend_count == 0 {
+            "ONLINE NOW".to_string()
         } else {
-            format!("Friends Online ({online_friend_count} / {total_friend_count})")
+            format!("ONLINE NOW ({online_friend_count})")
         };
-        let friends_header = text(friends_online_label.clone())
+        let online_header = text(online_label)
             .size(TYPO_XS)
             .color(text_muted(&theme));
 
-        let friends_online_items: Vec<iced::Element<'_, AppMessage>> = {
-            let online_friends: Vec<String> = self
+        let online_items: Vec<iced::Element<'_, AppMessage>> = {
+            let online_friends: Vec<(PublicKey, String)> = self
                 .friends
                 .iter()
                 .filter_map(|(fid, _)| {
-                    fid.parse_public_key()
-                        .ok()
-                        .filter(|pk| self.friend_online_cache.contains(pk))
-                        .and_then(|pk| self.names.get(&pk).cloned())
+                    let pk = fid.parse_public_key().ok()?;
+                    if self.friend_online_cache.contains(&pk) {
+                        self.names.get(&pk).cloned().map(|n| (pk, n))
+                    } else {
+                        None
+                    }
                 })
                 .collect();
             if online_friends.is_empty() {
                 vec![Self::empty_state_block(
                     &theme,
-                    "No friends online right now.",
+                    "No friends are online.",
                     None,
-                    [SPACE_4, 0.0],
+                    [SPACE_6, 0.0],
                 )]
             } else {
                 online_friends
                     .into_iter()
-                    .map(|name| {
+                    .map(|(pk, name)| {
                         container(
                             row![
-                                text("●").size(TYPO_SM).color(accent_green(&theme)),
+                                text(ICON_ONLINE).size(TYPO_SM).color(accent_green(&theme)),
                                 text(name).size(TYPO_SM).color(text_system(&theme)),
+                                Space::new().width(Length::Fill),
+                                button(text("Msg").size(TYPO_XXS))
+                                    .on_press(AppMessage::OpenConversation(pk))
+                                    .padding([SPACE_2, SPACE_6])
+                                    .style(BUTTON_GHOST),
                             ]
                             .spacing(SPACE_6)
                             .align_y(Alignment::Center),
                         )
-                        .padding([SPACE_2, 0.0])
+                        .padding([SPACE_4, 0.0])
                         .width(Length::Fill)
                         .into()
                     })
@@ -13512,26 +13764,26 @@ impl IcedChat {
             }
         };
 
-        let friends_feed = Column::new()
-            .push(friends_header)
+        let online_feed = Column::new()
+            .push(online_header)
             .push(Space::new().height(Length::Fixed(SPACE_6)))
             .push(
                 scrollable(
-                    Column::with_children(friends_online_items)
+                    Column::with_children(online_items)
                         .spacing(SPACE_2)
                         .width(Length::Fill),
                 )
-                .height(Length::Fixed(120.0))
+                .height(Length::Fixed(140.0))
                 .width(Length::Fill),
             );
 
-        let friends_card = container(friends_feed)
+        let online_card = container(online_feed)
             .padding([SPACE_12, SPACE_16])
             .width(Length::Fill)
             .style(container_card);
 
-        // ── Recent activity (same as before) ──
-        let activity_header = text("Recent Activity")
+        // ── Right column: Recent Activity ──
+        let activity_header = text("RECENT ACTIVITY")
             .size(TYPO_XS)
             .color(text_muted(&theme));
 
@@ -13539,14 +13791,14 @@ impl IcedChat {
         {
             vec![Self::empty_state_block(
                 &theme,
-                "No recent activity yet. Activity will appear here as friends connect and share files.",
+                "No recent activity.",
                 None,
-                [SPACE_4, 0.0],
+                [SPACE_6, 0.0],
             )]
         } else {
             self.recent_activity
                 .iter()
-                .take(20)
+                .take(15)
                 .map(|event| {
                     let ago = event
                         .timestamp
@@ -13563,7 +13815,9 @@ impl IcedChat {
                         .unwrap_or_else(|_| "recently".to_string());
                     container(
                         row![
-                            text("•").size(TYPO_SM).color(text_muted(&theme)),
+                            text(ICON_ACTIVITY)
+                                .size(TYPO_SM)
+                                .color(text_muted(&theme)),
                             text(&event.description)
                                 .size(TYPO_SM)
                                 .color(text_system(&theme)),
@@ -13589,7 +13843,7 @@ impl IcedChat {
                         .spacing(SPACE_2)
                         .width(Length::Fill),
                 )
-                .height(Length::Fixed(200.0))
+                .height(Length::Fixed(180.0))
                 .width(Length::Fill),
             );
 
@@ -13600,31 +13854,35 @@ impl IcedChat {
 
         // ── Right column assembly ──
         let right_col = Column::new()
-            .push(friends_card)
+            .push(online_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(activity_card)
             .spacing(0)
             .width(Length::Fill);
 
-        // ── Header row ──
-        let header = boru_logo(LogoSize::Small)
-            .color(accent_primary(&theme))
-            .into_element();
+        // ── Page header: "Home" ──
+        let page_header = row![
+            text("Home").size(TYPO_LG).width(Length::Fill),
+            // Connection indicator dot (compact)
+            if is_connected {
+                text(ICON_ONLINE)
+                    .size(TYPO_SM)
+                    .color(accent_green(&theme))
+            } else if is_offline {
+                text(ICON_OFFLINE)
+                    .size(TYPO_SM)
+                    .color(color_error(&theme))
+            } else {
+                text(ICON_RETRY)
+                    .size(TYPO_SM)
+                    .color(color_warning(&theme))
+            },
+        ]
+        .spacing(SPACE_8)
+        .align_y(Alignment::Center);
 
-        // ── Divider line ──
-        let divider = container(Space::new().height(Length::Fixed(0.0)))
-            .width(Length::Fill)
-            .height(Length::Fixed(1.0))
-            .style(move |t: &iced::Theme| {
-                iced::widget::container::Style {
-                    background: Some(iced::Background::Color(border_muted(t))),
-                    ..Default::default()
-                }
-            });
-
-        // ── Main content area: two columns side-by-side or stacked ──
+        // ── Main content: two columns or stacked ──
         let main_content: iced::Element<'_, AppMessage> = if narrow {
-            // Stack vertically on narrow screens
             Column::new()
                 .push(left_col)
                 .push(Space::new().height(Length::Fixed(SPACE_16)))
@@ -13633,17 +13891,10 @@ impl IcedChat {
                 .width(Length::Fill)
                 .into()
         } else {
-            // Side-by-side on wide screens: left (3/5) + right (2/5)
             Row::new()
-                .push(
-                    container(left_col)
-                        .width(Length::FillPortion(3)),
-                )
-                .push(Space::new().width(Length::Fixed(SPACE_12)))
-                .push(
-                    container(right_col)
-                        .width(Length::FillPortion(2)),
-                )
+                .push(container(left_col).width(Length::FillPortion(3)))
+                .push(Space::new().width(Length::Fixed(SPACE_16)))
+                .push(container(right_col).width(Length::FillPortion(2)))
                 .spacing(0)
                 .width(Length::Fill)
                 .into()
@@ -13651,14 +13902,12 @@ impl IcedChat {
 
         // ── Assemble ──
         let col = Column::new()
-            .push(Space::new().height(Length::Fixed(SPACE_16)))
-            .push(header)
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(divider)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(page_header)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(main_content)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
-            .align_x(Alignment::Center)
+            .spacing(0)
             .width(Length::Fill);
 
         scrollable(
@@ -13993,11 +14242,50 @@ impl IcedChat {
                 text(label_text).size(TYPO_XS).color(label_color).into()
             };
 
-            let body_el = text(&entry.body)
-                .size(self.chat_text_size)
-                .wrapping(Wrapping::Word)
-                .width(Length::Fill)
-                .color(body_color);
+            // ── Clickable URL-aware body ──
+            let segments = link_preview::parse_url_segments(&entry.body);
+            let body_el: iced::Element<'_, AppMessage> = if segments.len() == 1
+                && matches!(&segments[0], link_preview::TextSegment::Text(_))
+            {
+                // No URLs — simple text element
+                text(&entry.body)
+                    .size(self.chat_text_size)
+                    .wrapping(Wrapping::Word)
+                    .width(Length::Fill)
+                    .color(body_color)
+                    .into()
+            } else {
+                // Mixed text and URLs — build a segmented row
+                let mut row = Row::new().spacing(0).width(Length::Fill);
+                for seg in segments {
+                    match seg {
+                        link_preview::TextSegment::Text(t) => {
+                            row = row.push(
+                                text(t)
+                                    .size(self.chat_text_size)
+                                    .wrapping(Wrapping::Word)
+                                    .color(body_color),
+                            );
+                        }
+                        link_preview::TextSegment::Url(u) => {
+                            let display = link_preview::truncate_url(&u, 80);
+                            let url_for_click = u.clone();
+                            row = row.push(
+                                button(
+                                    text(display)
+                                        .size(self.chat_text_size)
+                                        .wrapping(Wrapping::Word)
+                                        .color(accent_primary(&theme)),
+                                )
+                                .on_press(AppMessage::OpenUrl(url_for_click))
+                                .padding(0)
+                                .style(|_t, _s| iced::widget::button::Style::default()),
+                            );
+                        }
+                    }
+                }
+                row.into()
+            };
 
             let bubble =
                 container(body_el)
@@ -14019,12 +14307,76 @@ impl IcedChat {
             let ts_text = entry.formatted_time.as_deref().unwrap_or("");
             let ts_el = text(ts_text).size(TYPO_XXS).color(text_muted(&theme));
 
-            let bubble_col = Column::new()
+            let mut bubble_col = Column::new()
                 .push(label_el)
                 .push(bubble)
                 .push(ts_el)
                 .spacing(SPACE_2)
                 .max_width(480.0);
+
+            // ── Link preview card ──
+            if let Some(ref preview) = entry.link_preview {
+                let mut preview_children: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+                if let Some(ref title) = preview.title {
+                    preview_children.push(
+                        text(title)
+                            .size(TYPO_SM)
+                            .wrapping(Wrapping::Word)
+                            .color(accent_primary(&theme))
+                            .into(),
+                    );
+                }
+                if let Some(ref desc) = preview.description {
+                    preview_children.push(
+                        text(desc)
+                            .size(TYPO_XS)
+                            .wrapping(Wrapping::Word)
+                            .color(text_muted(&theme))
+                            .into(),
+                    );
+                }
+                if let Some(ref img_url) = preview.image_url {
+                    let display_url = link_preview::truncate_url(img_url, 60);
+                    preview_children.push(
+                        text(display_url)
+                            .size(TYPO_XXS)
+                            .wrapping(Wrapping::Word)
+                            .color(text_muted(&theme))
+                            .into(),
+                    );
+                }
+                if !preview_children.is_empty() {
+                    let prv_url = preview.url.clone();
+                    let preview_card = button(
+                        container(
+                            Column::new()
+                                .push(
+                                    text(link_preview::truncate_url(&preview.url, 60))
+                                        .size(TYPO_XXS)
+                                        .color(text_muted(&theme)),
+                                )
+                                .push(
+                                    Column::with_children(preview_children)
+                                        .spacing(SPACE_2),
+                                )
+                                .spacing(SPACE_2),
+                        )
+                        .padding([SPACE_6, SPACE_8])
+                        .width(Length::Fill)
+                        .style(container_card),
+                    )
+                    .on_press(AppMessage::OpenUrl(prv_url))
+                    .padding(0)
+                    .style(|_t, _s| iced::widget::button::Style::default());
+                    bubble_col = bubble_col.push(preview_card);
+                }
+            } else if entry.link_preview_loading {
+                bubble_col = bubble_col.push(
+                    text("🔍 Loading preview…")
+                        .size(TYPO_XS)
+                        .color(text_muted(&theme)),
+                );
+            }
 
             let msg_row = match entry.kind {
                 ChatKind::Remote => {
@@ -14070,11 +14422,17 @@ impl IcedChat {
 
             // ── Image (cached handle — decoded once at construction) ──
             if let Some(handle) = self.image_handle_for_entry(entry) {
+                let is_enlarged = self.enlarged_images.contains(&i);
+                let img_width = if is_enlarged {
+                    Length::Fixed(480.0)
+                } else {
+                    Length::Fixed(200.0)
+                };
                 let img = iced::widget::image(handle)
                     .content_fit(iced::ContentFit::ScaleDown)
-                    .width(Length::Fixed(200.0));
+                    .width(img_width);
                 let thumbnail = iced::widget::button(img)
-                    .on_press(AppMessage::OpenImagePreview(i))
+                    .on_press(AppMessage::ToggleImageEnlarge(i))
                     .padding(0)
                     .style(|_t, _s| iced::widget::button::Style::default());
                 col = col.push(thumbnail);
@@ -14280,77 +14638,6 @@ impl IcedChat {
                 })),
                 ..Default::default()
             })
-            .into()
-    }
-
-    /// Full-panel image preview: renders the image at full panel width with a
-    /// "Back" button at the top. The sidebar remains visible — only the main
-    /// panel content switches to the preview.
-    fn view_image_preview(&self, entry_index: usize) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, text, Column};
-        use iced::{Alignment, Length};
-
-        let theme = self.theme();
-        let back_btn = button(text("← Back").size(TYPO_MD))
-            .on_press(AppMessage::CloseImagePreview)
-            .padding([SPACE_6, SPACE_12])
-            .style(|_t, _s| iced::widget::button::Style::default());
-
-        let image_element: iced::Element<'_, AppMessage> =
-            if let Some(entry) = self.entries.get(entry_index) {
-                if let Some(handle) = self.image_handle_for_entry(entry) {
-                    iced::widget::image(handle)
-                        .content_fit(iced::ContentFit::Contain)
-                        .width(Length::FillPortion(1))
-                        .height(Length::FillPortion(1))
-                        .into()
-                } else if entry.image_error.is_some() {
-                    let error_text = entry
-                        .image_error
-                        .as_deref()
-                        .unwrap_or("Image preview unavailable");
-                    column![
-                        text("🖼 Image unavailable")
-                            .size(TYPO_SM)
-                            .color(text_system(&theme)),
-                        text(error_text).size(TYPO_XS).color(text_system(&theme)),
-                    ]
-                    .spacing(SPACE_4)
-                    .align_x(Alignment::Center)
-                    .into()
-                } else {
-                    text("Image not available")
-                        .size(TYPO_MD)
-                        .color(text_system(&theme))
-                        .into()
-                }
-            } else {
-                text("Image not found")
-                    .size(TYPO_MD)
-                    .color(text_system(&theme))
-                    .into()
-            };
-
-        let content = Column::new()
-            .push(
-                container(back_btn)
-                    .width(Length::Fill)
-                    .padding([SPACE_4, SPACE_8]),
-            )
-            .push(
-                container(image_element)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill);
-
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(container_primary)
             .into()
     }
 
@@ -15516,7 +15803,7 @@ impl IcedChat {
         let header = Row::new()
             .push(text(display_name.clone()).size(TYPO_LG).width(Length::Fill))
             .push(
-                button(text("✕").size(TYPO_MD))
+                button(text(ICON_CLOSE).size(TYPO_MD))
                     .on_press(AppMessage::ClosePeerProfile)
                     .padding([SPACE_4, SPACE_8])
                     .style(move |t, _status| iced::widget::button::Style {
@@ -15579,7 +15866,7 @@ impl IcedChat {
                     .width(Length::Fill),
             )
             .push(
-                button(text("✕").size(TYPO_MD))
+                button(text(ICON_CLOSE).size(TYPO_MD))
                     .on_press(AppMessage::ClosePeerProfile)
                     .padding([SPACE_4, SPACE_8])
                     .style(move |t, _status| iced::widget::button::Style {
@@ -15801,7 +16088,7 @@ impl IcedChat {
                         }),
                 )
                 .push(
-                    button(text("✕").size(TYPO_SM))
+                    button(text(ICON_CLOSE).size(TYPO_SM))
                         .on_press(AppMessage::FriendRenameConfirm)
                         .padding([SPACE_4, SPACE_8])
                         .style(move |t, _status| iced::widget::button::Style {
@@ -15836,7 +16123,7 @@ impl IcedChat {
                     }),
             )
             .push(
-                button(text("✕").size(TYPO_MD))
+                button(text(ICON_CLOSE).size(TYPO_MD))
                     .on_press(AppMessage::CloseFriendProfile)
                     .padding([SPACE_4, SPACE_8])
                     .style(move |t, _status| iced::widget::button::Style {
@@ -15857,7 +16144,7 @@ impl IcedChat {
             });
 
         // ── Status section ──
-        let status_dot = if is_online { "●" } else { "○" };
+        let status_dot = if is_online { ICON_ONLINE } else { ICON_OFFLINE };
         let status_color = if is_online {
             Color::from_rgb(0.2, 0.8, 0.2)
         } else {
@@ -16896,6 +17183,9 @@ mod tests {
                 label_text: None,
                 reactions_text: None,
                 formatted_time: None,
+                link_preview: None,
+                link_preview_loading: false,
+                link_preview_error: false,
             })
             .collect();
         let total: usize = entries
@@ -16947,6 +17237,9 @@ mod tests {
             label_text: None,
             reactions_text: None,
             formatted_time: None,
+            link_preview: None,
+            link_preview_loading: false,
+            link_preview_error: false,
         };
         assert_eq!(e.body, "hello");
         assert_eq!(e.label, "peer");

@@ -22,7 +22,7 @@ SUBTLE = "#64748b"
 class SplashScreen:
     def __init__(self, logfile=None):
         self.root = tk.Tk()
-        self.root.title("Boru Chat")
+        self.root.title("Boru")
         self.root.geometry("440x340+%d+%d" % self._center(440, 340))
         self.root.overrideredirect(True)
         self.root.configure(bg=BG)
@@ -33,7 +33,7 @@ class SplashScreen:
         inner = tk.Frame(outer, bg=BG)
         inner.pack(fill=tk.BOTH, expand=True)
 
-        tk.Label(inner, text="Boru Chat", font=("sans-serif", 22, "bold"),
+        tk.Label(inner, text="BORU", font=("sans-serif", 28, "bold"),
                  fg=ACCENT, bg=BG).pack(pady=(20, 2))
         tk.Label(inner, text="v0.101.1", font=("sans-serif", 9),
                  fg=SUBTLE, bg=BG).pack()

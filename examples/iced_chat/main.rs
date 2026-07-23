@@ -15,6 +15,7 @@ mod mcp_server;
 mod notification;
 mod perf_tracker;
 mod presentation;
+mod link_preview;
 
 use mimalloc::MiMalloc;
 

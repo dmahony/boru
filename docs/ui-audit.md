@@ -49,8 +49,7 @@ Four collapsible sections tracked by `sidebar_section_collapsed: [bool; 4]`.
 | `PeerProfile(pk)` | `view_peer_profile()` (line 14268) | Peer's public profile with shared files + download |
 | `PeerCatalogue(pk)` | `view_peer_catalogue()` (line 14326) | Remote peer's file catalogue table |
 | `FriendProfile(pk)` | `view_friend_profile()` (line 14476) | Full friend profile with context menu, rename, block, shared files |
-| `ImagePreview { topic, entry_index }` | `view_image_preview()` (line 13068) | Full-screen image within chat panel |
-
+| Chat (chat panel) | `view_chat_panel()` (line ~13807) | Header (room metadata, menu button) + message log (virtualized) + composer; system/remote/local messages with date separators and emoji reactions |
 ### 1.4 Chat panel structure (`view_chat_panel()` at line 12558)
 
 ```
@@ -81,7 +80,7 @@ Dialogs are rendered as `stack![]` overlays: backdrop -> base content -> dialog.
 
 ~50 fields organized by category:
 
-**Navigation (4 fields):** `screen: Screen`, `previous_screen`, `pending_topic`, `settings_return_to`
+**Navigation (3 fields):** `screen: Screen`, `pending_topic`, `settings_return_to`
 
 **Multi-conversation (1 field):** `conversations: HashMap<TopicId, ConversationLive>`
 
