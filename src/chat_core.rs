@@ -1769,11 +1769,9 @@ pub fn handle_net_event_for_topic(
                         },
                     );
                 }
-                Message::ReadReceipt { message_hash } => {
-                    if from != cb.local_public() && cb.has_message(&message_hash) {
-                        let name = cb.resolve_name(&from);
-                        cb.push_system(format!("{name} read a message"));
-                    }
+                Message::ReadReceipt { message_hash: _ } => {
+                    // Read receipts update delivery state icons only —
+                    // no system message needed since the 👁 icon is visible.
                 }
                 Message::Edit {
                     original_hash,
