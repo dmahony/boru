@@ -3358,15 +3358,16 @@ impl IcedChat {
         }
         let first_run = room_history.is_empty() && friends.is_empty();
         let app_settings = AppSettings::load(&data_dir);
-        // Restore the persisted display name if the user set one previously.
-        // The CLI --name flag takes priority when provided; persisted name is
-        // a fallback so the user's choice survives restarts even without --name.
-        let local_label = if !local_label.is_empty() {
-            local_label
+        // Restore the persisted display name.  The CLI --name flag always
+        // takes priority; when no --name was given the constructor receives
+        // the public-key short form (which looks like "90af827f0d").  If a
+        // persisted name exists we prefer it over that auto-generated default.
+        let local_label = if local_label != local_public.fmt_short() {
+            local_label  // user explicitly passed --name, use it
         } else if let Some(ref saved) = app_settings.display_name {
-            saved.clone()
+            saved.clone()  // use persisted name
         } else {
-            local_label
+            local_label  // no --name and no persisted, use default
         };
         // Derive a stable mailbox encryption key from the node identity key.
         // This allows friends to encrypt offline messages to us.
