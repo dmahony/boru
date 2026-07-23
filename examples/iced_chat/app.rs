@@ -1811,6 +1811,10 @@ pub struct IcedChat {
     /// ImageStore identifier for the locally selected profile image.
     /// Saved so the profile image can be reloaded from the per-user store on restart.
     profile_image_identifier: Option<String>,
+    /// Local mailbox public key derived from the node identity key.
+    /// Advertised to friends via whisper control so they can encrypt
+    /// offline messages to us.
+    local_mailbox_key: Option<MailboxPublicKey>,
     /// Cached profile image handles for remote peers, keyed by PublicKey.
     /// `None` means the peer announced a ticket but the blob hasn't been downloaded yet.
     friend_image_handles: HashMap<PublicKey, Option<iced::widget::image::Handle>>,
@@ -3364,6 +3368,9 @@ impl IcedChat {
         } else {
             local_label
         };
+        // Derive a stable mailbox encryption key from the node identity key.
+        // This allows friends to encrypt offline messages to us.
+        let local_mailbox_key = Some(MailboxIdentity::from_secret(&secret_key).public_key());
         // Load shared files from storage for the settings GUI.
         let shared_files = storage
             .as_ref()
@@ -3465,6 +3472,7 @@ impl IcedChat {
             profile_image_handle,
             profile_image_ticket,
             profile_image_identifier,
+            local_mailbox_key,
             friend_image_handles: HashMap::new(),
             friend_image_tickets: HashMap::new(),
             pending_profile_image_tickets: std::collections::VecDeque::new(),
@@ -6303,7 +6311,7 @@ impl IcedChat {
                         addrs: vec![local_addr],
                     };
                     if let Ok(payload) = SignedContactMessage::sign(&secret_key, &action) {
-                        iced::Task::batch(vec![
+                        let mut tasks: Vec<iced::Task<AppMessage>> = vec![
                             iced::Task::perform(
                                 async move {
                                     let _ = whisper_handle.send_control(peer, payload.into()).await;
@@ -6311,7 +6319,20 @@ impl IcedChat {
                                 |_| AppMessage::Noop,
                             ),
                             iced::Task::done(AppMessage::OpenRoom(topic)),
-                        ])
+                        ];
+                        // Also advertise our mailbox key so the friend can
+                        // encrypt offline messages to us.
+                        if let Some(mailbox) = self.local_mailbox_key {
+                            let mb_action = ContactAction::MailboxAdvertise { mailbox };
+                            if let Ok(mb_payload) = SignedContactMessage::sign(&secret_key, &mb_action) {
+                                let wh = whisper_handle.clone();
+                                tasks.push(iced::Task::perform(
+                                    async move { let _ = wh.send_control(peer, mb_payload.into()).await; },
+                                    |_| AppMessage::Noop,
+                                ));
+                            }
+                        }
+                        iced::Task::batch(tasks)
                     } else {
                         iced::Task::done(AppMessage::OpenRoom(topic))
                     }
@@ -6356,7 +6377,26 @@ impl IcedChat {
                     }
                 };
                 let whisper_handle = self.whisper_handle.clone();
-                iced::Task::batch(vec![
+                // Advertise our mailbox key alongside the chat invite so
+                // the peer can encrypt offline messages to us.
+                let mailbox_task: Option<iced::Task<AppMessage>> =
+                    self.local_mailbox_key.map(|mailbox| {
+                        let mailbox_action = ContactAction::MailboxAdvertise { mailbox };
+                        match SignedContactMessage::sign(&self.secret_key, &mailbox_action) {
+                            Ok(mailbox_payload) => {
+                                let wh = whisper_handle.clone();
+                                iced::Task::perform(
+                                    async move { wh.send_control(peer, mailbox_payload.into()).await },
+                                    |r| match r {
+                                        Ok(()) => AppMessage::Noop,
+                                        Err(_) => AppMessage::Noop,
+                                    },
+                                )
+                            }
+                            Err(_) => iced::Task::none(),
+                        }
+                    });
+                let mut tasks: Vec<iced::Task<AppMessage>> = vec![
                     iced::Task::perform(
                         async move { whisper_handle.send_control(peer, payload.into()).await },
                         |result| match result {
@@ -6367,7 +6407,11 @@ impl IcedChat {
                         },
                     ),
                     iced::Task::done(AppMessage::OpenRoom(topic)),
-                ])
+                ];
+                if let Some(t) = mailbox_task {
+                    tasks.push(t);
+                }
+                iced::Task::batch(tasks)
             }
 
             AppMessage::RoomSelected(topic) => iced::Task::done(AppMessage::OpenRoom(topic)),
@@ -7432,6 +7476,12 @@ impl IcedChat {
                                     .friends
                                     .ensure_friend(FriendId::from_public_key(sender));
                                 record.record_addrs(addrs);
+                                self.try_save_friends();
+                            }
+                            Ok((sender, ContactAction::MailboxAdvertise { mailbox })) => {
+                                let fid = FriendId::from_public_key(sender);
+                                let record = self.friends.ensure_friend(fid);
+                                record.set_mailbox_public_key(mailbox);
                                 self.try_save_friends();
                             }
                             Ok((_sender, _action)) => {
