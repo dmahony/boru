@@ -1993,6 +1993,9 @@ pub struct IcedChat {
     window_width: f32,
     /// Timestamp when the splash screen first appeared (used for minimum-display timing).
     pub splash_start_time: std::time::Instant,
+    /// Set to true after the first SplashTick so the minimum-display timer starts
+    /// counting from GUI render, not from the heavyweight async init in main().
+    splash_has_rendered: bool,
     /// Animation frame counter for the splash screen spinner.
     splash_spinner_frame: usize,
 }
@@ -3357,6 +3360,7 @@ impl IcedChat {
         Self {
             screen: Screen::Splash,
             splash_start_time: std::time::Instant::now(),
+            splash_has_rendered: false,
             splash_spinner_frame: 0,
             previous_screen: None,
             pending_topic: None,
@@ -9223,7 +9227,15 @@ impl IcedChat {
             AppMessage::SplashTick => {
                 // Advance the spinner animation.
                 self.splash_spinner_frame = (self.splash_spinner_frame + 1) % 10;
-                // Transition to ChatList after at least 500ms.
+                // Start the minimum-display timer only when the GUI
+                // actually renders.  The async init in main() can take
+                // seconds; starting the timer from IcedChat::new() made
+                // the splash expire before the window ever appeared.
+                if !self.splash_has_rendered {
+                    self.splash_has_rendered = true;
+                    self.splash_start_time = std::time::Instant::now();
+                }
+                // Transition to ChatList after at least 500ms of visible splash.
                 if self.splash_start_time.elapsed() >= std::time::Duration::from_millis(500) {
                     self.screen = Screen::ChatList;
                 }
@@ -16965,6 +16977,7 @@ mod tests {
 
         assert_eq!(app.screen, Screen::Splash);
         // Advance past the splash screen.
+        app.splash_has_rendered = true;
         app.splash_start_time = std::time::Instant::now() - std::time::Duration::from_secs(1);
         let _ = app.update(AppMessage::SplashTick);
         assert_eq!(app.screen, Screen::ChatList);
