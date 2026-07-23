@@ -7359,8 +7359,14 @@ impl IcedChat {
                     .or_insert_with(|| ConversationLive::new(topic));
                 if is_inactive {
                     conversation.pending_events.push_back(event);
-                    conversation.unread = conversation.unread.saturating_add(1);
-                    tracing::info!(topic=%topic, unread=conversation.unread, "queued event for inactive room");
+                    // Only count user-visible messages as unread.  Gossip
+                    // protocol events (AboutMe, Presence, Heartbeat,
+                    // NeighborUp/Down) are filtered from the chat log and
+                    // should not increment the badge counter.
+                    if Self::_is_user_visible_event(&event) {
+                        conversation.unread = conversation.unread.saturating_add(1);
+                        tracing::info!(topic=%topic, unread=conversation.unread, "queued event for inactive room");
+                    }
                     return iced::Task::none();
                 }
                 conversation.unread = 0;
@@ -10639,6 +10645,22 @@ impl IcedChat {
     /// This is the shared kernel used both by the single-event handler
     /// and by the batch-replay during room switch, ensuring consistent
     /// logic across both paths.
+    /// Returns true if the event should increment the unread counter —
+    /// only actual user messages (text, file, image, whisper), not
+    /// gossip protocol events like AboutMe/Presence/Heartbeat.
+    fn _is_user_visible_event(event: &NetEvent) -> bool {
+        match event {
+            NetEvent::Message { message, .. } => matches!(
+                message,
+                crate::Message::Message { .. }
+                    | crate::Message::FileShare { .. }
+                    | crate::Message::ImageShare { .. }
+            ),
+            // NeighborUp/Down, Closed, Error are never user messages.
+            _ => false,
+        }
+    }
+
     fn process_net_event_sync(
         &mut self,
         topic: &TopicId,
