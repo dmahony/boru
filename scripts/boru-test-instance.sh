@@ -132,6 +132,11 @@ run_desktop() {
     fi
     trap 'kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 143' TERM INT
     export DISPLAY=:0
+    # Force software rendering — VNC/tigervnc virtual desktops often lack
+    # GPU acceleration, which can cause invisible or garbled windows with
+    # GPU-backed compositors (tiny-skia, wgpu, etc.).
+    export WINIT_UNIX_BACKEND=x11
+    export LIBGL_ALWAYS_SOFTWARE=1
     [[ -n "$xauth" ]] && export XAUTHORITY="$xauth"
     "$binary" "${app_args[@]}" &
     child=$!
