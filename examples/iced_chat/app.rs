@@ -1628,7 +1628,7 @@ pub struct IcedChat {
     pending_topic: Option<TopicId>,
     /// True while the async gossip subscription for a room is in flight.
     /// Shows a spinner in the chat view instead of an empty panel.
-    room_loading: bool,
+    pub room_loading: bool,
     /// Screen to return to when closing the settings page.
     settings_return_to: Option<Screen>,
 
@@ -13469,10 +13469,11 @@ impl IcedChat {
         if self.room_loading {
             const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let spinner = SPINNER_FRAMES[self.splash_spinner_frame % SPINNER_FRAMES.len()];
-            let dark_mode = self.theme_prefers_dark();
+            let theme = self.theme();
+            let dark_mode = self.theme() == iced::Theme::Dark;
             return widget::container(
                 widget::column![
-                    widget::text(spinner).size(40.0).color(Self::accent_color(dark_mode)),
+                    widget::text(spinner).size(40.0).color(Self::accent_primary(&theme)),
                     widget::text("Loading conversation…")
                         .size(14.0)
                         .color(Self::muted_color(dark_mode)),
