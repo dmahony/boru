@@ -3380,6 +3380,18 @@ impl IcedChat {
             .as_ref()
             .and_then(|stg| stg.list_shared_files(&local_public.to_string(), true).ok())
             .unwrap_or_default();
+        // Hydrate friend profile images from stored tickets on startup.
+        // Friend images are downloaded as blobs and cached locally, but
+        // the in-memory handles are lost on restart.  Re-queue downloads
+        // so images appear even when the friend is currently offline.
+        let mut pending_friend_tickets: std::collections::VecDeque<(PublicKey, String)> =
+            friends.iter().filter_map(|(fid, record)| {
+                let ticket = record.last_announced_profile_image_ticket.as_ref()?;
+                if ticket.is_empty() { return None; }
+                let pk = fid.parse_public_key().ok()?;
+                Some((pk, ticket.clone()))
+            }).collect::<Vec<_>>().into();
+
         Self {
             screen: Screen::Splash,
             splash_start_time: std::time::Instant::now(),
@@ -3480,7 +3492,7 @@ impl IcedChat {
             local_mailbox_key,
             friend_image_handles: HashMap::new(),
             friend_image_tickets: HashMap::new(),
-            pending_profile_image_tickets: std::collections::VecDeque::new(),
+            pending_profile_image_tickets: pending_friend_tickets,
             friend_profile_versions: HashMap::new(),
             perf: std::cell::RefCell::new(PerfMetrics::default()),
             first_run,
