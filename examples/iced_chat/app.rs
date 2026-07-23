@@ -1457,15 +1457,7 @@ impl ChatEntry {
     /// Recompute cached display strings used by the renderer.
     /// Call whenever label, delivery_state, or reactions change.
     fn update_cache(&mut self) {
-        self.label_text = if matches!(self.kind, ChatKind::Local) && self.event_id > 0 {
-            Some(format!(
-                "[{} {}]",
-                self.label,
-                self.delivery_state.display_icon()
-            ))
-        } else {
-            Some(format!("[{}]", self.label))
-        };
+        self.label_text = Some(format!("[{}]", self.label));
         self.reactions_text = if self.reactions.is_empty() {
             None
         } else {
