@@ -8,6 +8,7 @@
 mod app;
 mod connection_details;
 mod download_progress_view;
+mod fonts;
 mod gui_test_actions;
 mod log_viewer;
 mod mcp_server;
@@ -1085,6 +1086,9 @@ fn main() -> Result<()> {
             } else {
                 iced::Task::none()
             };
+            // Load bundled fonts at startup (non-fatal — falls back to
+            // system default sans-serif on failure).
+            let task = task.chain(fonts::load_fonts());
             (state, task)
         },
         IcedChat::update,

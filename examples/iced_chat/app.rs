@@ -214,6 +214,99 @@ pub(crate) const TYPO_SM: f32 = 13.0; // Secondary body, previews, entry labels
 pub(crate) const TYPO_XS: f32 = 11.0; // Metadata, identity info, secondary labels
 pub(crate) const TYPO_XXS: f32 = 10.0; // Fine print, ticket, instruction text
 
+// ── Brand typography tokens ───────────────────────────────────────
+/// Brand wordmark font family.  Must match the internal font name
+/// registered by `fonts::load_fonts()` at startup.
+pub(crate) const BRAND_LOGO_FONT: &str = "Montserrat Black";
+/// Brand wordmark font weight (900 = Black).
+pub(crate) const BRAND_LOGO_WEIGHT: u16 = 900;
+/// Brand heading font family (less forceful than the wordmark).
+pub(crate) const BRAND_HEADING_FONT: &str = "Montserrat Bold";
+/// Brand heading font weight (700 = Bold).
+pub(crate) const BRAND_HEADING_WEIGHT: u16 = 700;
+
+// ── BoruLogo component ────────────────────────────────────────────
+
+/// Size preset for the `BoruLogo` component.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LogoSize {
+    /// Compact header — ~16 px.
+    Small,
+    /// Authentication / onboarding screens — ~28 px.
+    Medium,
+    /// Splash screen — ~44 px.
+    Large,
+}
+
+impl LogoSize {
+    /// Return the font size in logical pixels.
+    fn pt(&self) -> f32 {
+        match self {
+            LogoSize::Small => 16.0,
+            LogoSize::Medium => 28.0,
+            LogoSize::Large => 44.0,
+        }
+    }
+}
+
+/// Reusable "BORU" wordmark rendered in Montserrat Black 900.
+///
+/// Uses uppercase letters and the brand weight.  Colour and size are
+/// configurable through parameters.
+///
+/// ```ignore
+/// // Splash screen
+/// let logo = BoruLogo::new(LogoSize::Large)
+///     .color(text_color);
+/// // Compact header
+/// let logo = BoruLogo::new(LogoSize::Small)
+///     .color(accent_primary(&theme));
+/// ```
+pub(crate) fn boru_logo<'a>(size: LogoSize) -> BoruLogo<'a> {
+    BoruLogo {
+        size,
+        color: None,
+        _phantom: std::marker::PhantomData,
+    }
+}
+
+/// Builder for the "BORU" brand wordmark.
+#[derive(Debug, Clone)]
+pub(crate) struct BoruLogo<'a> {
+    size: LogoSize,
+    color: Option<iced::Color>,
+    _phantom: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> BoruLogo<'a> {
+    /// Set the text colour.  If not called, inherits the ambient text
+    /// colour from the theme.
+    pub fn color(mut self, color: iced::Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// Convert the logo into an `iced::Element`, consuming the builder.
+    pub fn into_element(self) -> iced::Element<'a, AppMessage> {
+        self.into()
+    }
+}
+
+impl<'a> From<BoruLogo<'a>> for iced::Element<'a, AppMessage> {
+    fn from(logo: BoruLogo<'a>) -> iced::Element<'a, AppMessage> {
+        use iced::widget::text;
+        use iced::Font;
+
+        let font_size = logo.size.pt();
+        let font = Font::with_name(BRAND_LOGO_FONT);
+        let mut t = text("BORU").font(font).size(font_size);
+        if let Some(c) = logo.color {
+            t = t.style(move |_t| text::Style { color: Some(c) });
+        }
+        t.into()
+    }
+}
+
 // ── Memory budget limits ─────────────────────────────────────────
 /// Maximum total decoded image bytes across all `ChatEntry.image_bytes`
 /// (not including `image_handle` which shares the same Arc'd data via Iced).
@@ -11572,10 +11665,10 @@ impl IcedChat {
             // App icon placeholder (large emoji or icon)
             text("🗣️").size(72),
             Space::new().height(Length::Fixed(20.0)),
-            // App name
-            text("Boru")
-                .size(36)
-                .style(move |_t| text::Style { color: Some(text_color) }),
+            // App name — Montserrat Black wordmark
+            boru_logo(LogoSize::Large)
+                .color(text_color)
+                .into_element(),
             // Version or tagline
             text("private peer-to-peer chat")
                 .size(14)
@@ -12024,7 +12117,7 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let header = Row::new()
-            .push(text("Boru").size(TYPO_LG).width(Length::Fill))
+            .push(boru_logo(LogoSize::Small).into_element())
             .push(
                 iced::widget::button(iced::widget::text("＋").size(TYPO_MD))
                     .on_press(AppMessage::ToggleAddMenu)
@@ -13506,10 +13599,9 @@ impl IcedChat {
             .width(Length::Fill);
 
         // ── Header row ──
-        let header = text("Boru")
-            .size(TYPO_LG)
+        let header = boru_logo(LogoSize::Small)
             .color(accent_primary(&theme))
-            .width(Length::Fill);
+            .into_element();
 
         // ── Divider line ──
         let divider = container(Space::new().height(Length::Fixed(0.0)))
