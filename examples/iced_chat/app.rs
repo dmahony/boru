@@ -13754,22 +13754,8 @@ impl IcedChat {
         for i in first_idx..=last_idx {
             let entry = &self.entries[i];
 
-            // ── Date separator ──
-            let entry_day = entry.timestamp.map(|ts| ts / 86400000);
-            if let Some(day) = entry_day {
-                if prev_day != Some(day) {
-                    let date_label = format_message_time(day * 86400000);
-                    let sep_text = format!(" — {date_label} — ");
-                    let sep = Row::new()
-                        .push(space::horizontal())
-                        .push(text(sep_text).size(TYPO_XS).color(text_system(&theme)))
-                        .push(space::horizontal())
-                        .width(Length::Fill)
-                        .padding([SPACE_8, 0.0]);
-                    col = col.push(sep);
-                    prev_day = Some(day);
-                }
-            }
+            // ── Date separator (suppressed) ──
+            // Keep prev_day tracking but don't render a separator line.
 
             // ── System messages: centered, no bubble ──
             if matches!(entry.kind, ChatKind::System) {

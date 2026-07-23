@@ -925,6 +925,9 @@ fn main() -> Result<()> {
 
     // Close the native splash window — the Iced window opens next.
     splash_send("Starting UI...");
+    // Give the Iced window a moment to open before closing the splash,
+    // avoiding a visual gap where neither window is visible.
+    std::thread::sleep(std::time::Duration::from_millis(300));
     splash_send("DONE");
     drop(splash_stdin);
     if let Some(mut child) = splash_child.take() {
