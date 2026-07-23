@@ -1660,6 +1660,10 @@ pub struct IcedChat {
     pending_image_upload: Option<String>,
     /// Animation frame for the inline image-processing spinner.
     image_upload_spinner_frame: usize,
+    /// File selected by the user and being uploaded/shared.
+    pending_file_upload: Option<(String, u64)>,
+    /// Animation frame for the file-upload spinner.
+    file_upload_spinner_frame: usize,
     /// Index of the chat entry that owns the current download attachment.
     download_entry_index: Option<usize>,
     /// Transfer ID for the active download, used to keep updates attached to
@@ -2571,6 +2575,8 @@ pub enum AppMessage {
     CloseImagePreview,
     /// Image processing failed after the user selected it.
     ImageUploadFailed(String),
+    /// File upload/sharing failed after the user selected it.
+    FileUploadFailed(String),
     FileDownloaded {
         name: String,
         ticket: String,
@@ -3341,6 +3347,8 @@ impl IcedChat {
             pending_image: VecDeque::new(),
             pending_image_upload: None,
             image_upload_spinner_frame: 0,
+            pending_file_upload: None,
+            file_upload_spinner_frame: 0,
             download_entry_index: None,
             active_download_transfer_id: None,
             transfer_id_to_index: HashMap::new(),
@@ -4258,6 +4266,7 @@ impl IcedChat {
             AppMessage::OpenImagePreview(..) => "OpenImagePreview",
             AppMessage::CloseImagePreview => "CloseImagePreview",
             AppMessage::ImageUploadFailed(_) => "ImageUploadFailed",
+            AppMessage::FileUploadFailed(_) => "FileUploadFailed",
             AppMessage::FileDownloaded { .. } => "FileDownloaded",
             AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
             AppMessage::ImageDownloaded { .. } => "ImageDownloaded",
@@ -7792,6 +7801,14 @@ impl IcedChat {
                 }
                 let filename = parts[0].to_string();
                 let abs_path = parts[1].to_string();
+                // Show spinner immediately while the file is uploading.
+                let abs_path_buf = std::path::PathBuf::from(&abs_path);
+                let file_size = std::fs::metadata(&abs_path_buf)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                self.pending_file_upload = Some((filename.clone(), file_size));
+                self.file_upload_spinner_frame = 0;
+
                 let blob_store = self.blob_store.clone();
                 let sender = self.sender.clone();
                 let secret_key = self.secret_key.clone();
@@ -7831,7 +7848,7 @@ impl IcedChat {
                     },
                     |r: Result<(String, String), String>| match r {
                         Ok((name, ticket)) => AppMessage::FileDownloaded { name, ticket },
-                        Err(e) => AppMessage::ErrorMsg(e),
+                        Err(e) => AppMessage::FileUploadFailed(e),
                     },
                 )
             }
@@ -8296,7 +8313,13 @@ impl IcedChat {
                 self.push_system(format!("Image upload failed: {error}"));
                 iced::Task::none()
             }
+            AppMessage::FileUploadFailed(error) => {
+                self.pending_file_upload = None;
+                self.push_system(format!("File upload failed: {error}"));
+                iced::Task::none()
+            }
             AppMessage::FileDownloaded { name, ticket } => {
+                self.pending_file_upload = None;
                 self.set_pending_file(name, ticket);
                 iced::Task::none()
             }
@@ -9131,6 +9154,9 @@ impl IcedChat {
             AppMessage::ConnMonitorTick => {
                 if self.pending_image_upload.is_some() {
                     self.image_upload_spinner_frame = (self.image_upload_spinner_frame + 1) % 10;
+                }
+                if self.pending_file_upload.is_some() {
+                    self.file_upload_spinner_frame = (self.file_upload_spinner_frame + 1) % 10;
                 }
                 // Flush debounced neighbor status changes — batch rapid
                 // online/offline transitions into one visible update per tick.
@@ -13515,6 +13541,41 @@ impl IcedChat {
                         .push(text(spinner).size(TYPO_LG).color(text_muted(&theme)))
                         .push(
                             text(format!("Processing {filename}…"))
+                                .size(TYPO_SM)
+                                .color(text_muted(&theme)),
+                        )
+                        .spacing(SPACE_8)
+                        .align_y(iced::Alignment::Center),
+                )
+                .padding([SPACE_8, SPACE_10])
+                .style(container_card),
+            );
+        }
+
+        if let Some((filename, file_size)) = &self.pending_file_upload {
+            const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let spinner = SPINNER_FRAMES[self.file_upload_spinner_frame % SPINNER_FRAMES.len()];
+            let size_label = {
+                let bytes = *file_size;
+                const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+                let mut value = bytes as f64;
+                let mut unit_idx = 0usize;
+                while value >= 1024.0 && unit_idx < UNITS.len() - 1 {
+                    value /= 1024.0;
+                    unit_idx += 1;
+                }
+                if unit_idx == 0 {
+                    format!("{bytes} {} ", UNITS[unit_idx])
+                } else {
+                    format!("{value:.1} {} ", UNITS[unit_idx])
+                }
+            };
+            col = col.push(
+                container(
+                    Row::new()
+                        .push(text(spinner).size(TYPO_LG).color(text_muted(&theme)))
+                        .push(
+                            text(format!("Uploading {filename} ({size_label})…"))
                                 .size(TYPO_SM)
                                 .color(text_muted(&theme)),
                         )
