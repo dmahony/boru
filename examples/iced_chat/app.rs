@@ -559,20 +559,35 @@ pub(crate) fn color_warning(theme: &iced::Theme) -> Color {
     }
 }
 
-// ── Icon constants (Unicode geometric — no emoji) ────────────────────
-pub(crate) const ICON_CHAT: &str = "◇";
-pub(crate) const ICON_FRIEND: &str = "⊕";
-pub(crate) const ICON_FILES: &str = "⊞";
-pub(crate) const ICON_RETRY: &str = "↻";
-pub(crate) const ICON_SETTINGS: &str = "⚙";
-pub(crate) const ICON_CLOSE: &str = "×";
-pub(crate) const ICON_PLUS: &str = "+";
-pub(crate) const ICON_SEARCH: &str = "⌕";
-pub(crate) const ICON_MORE: &str = "⋯";
-pub(crate) const ICON_ACTIVITY: &str = "·";
-pub(crate) const ICON_NOTIFICATION: &str = "◉";
-pub(crate) const ICON_ONLINE: &str = "●";
-pub(crate) const ICON_OFFLINE: &str = "○";
+// ── Lucide SVG icons (embedded as byte data at compile time) ───────
+// Source: https://github.com/lucide-icons/lucide (MIT licence)
+pub(crate) const ICON_CHAT: &[u8] = include_bytes!("../../assets/icons/lucide/message-circle.svg");
+pub(crate) const ICON_FRIEND: &[u8] = include_bytes!("../../assets/icons/lucide/user-plus.svg");
+pub(crate) const ICON_FILES: &[u8] = include_bytes!("../../assets/icons/lucide/files.svg");
+pub(crate) const ICON_RETRY: &[u8] = include_bytes!("../../assets/icons/lucide/refresh-cw.svg");
+pub(crate) const ICON_SETTINGS: &[u8] = include_bytes!("../../assets/icons/lucide/settings.svg");
+pub(crate) const ICON_CLOSE: &[u8] = include_bytes!("../../assets/icons/lucide/x.svg");
+pub(crate) const ICON_PLUS: &[u8] = include_bytes!("../../assets/icons/lucide/plus.svg");
+pub(crate) const ICON_SEARCH: &[u8] = include_bytes!("../../assets/icons/lucide/search.svg");
+pub(crate) const ICON_MORE: &[u8] = include_bytes!("../../assets/icons/lucide/ellipsis.svg");
+pub(crate) const ICON_ACTIVITY: &[u8] = include_bytes!("../../assets/icons/lucide/activity.svg");
+pub(crate) const ICON_NOTIFICATION: &[u8] = include_bytes!("../../assets/icons/lucide/bell.svg");
+pub(crate) const ICON_ONLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle-filled.svg");
+pub(crate) const ICON_OFFLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle.svg");
+pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
+
+// ── SVG icon helper ──────────────────────────────────────────────────
+/// Create an SVG icon widget from embedded Lucide icon bytes.
+/// Use `.style(|t, _| svg::Style { color: Some(accent_primary(t)) })` to colour.
+pub(crate) fn icon_svg<'a>(
+    svg_bytes: &'static [u8],
+    size: f32,
+) -> iced::widget::svg::Svg<'a, iced::Theme> {
+    iced::widget::svg(iced::widget::svg::Handle::from_memory(svg_bytes))
+        .width(iced::Length::Fixed(size))
+        .height(iced::Length::Fixed(size))
+        .style(|_t, _s| iced::widget::svg::Style { color: None })
+}
 
 // ── Container style helpers ──────────────────────────────────────────────
 /// Container style for the primary window background.
@@ -1867,6 +1882,11 @@ pub struct IcedChat {
     mesh_health: MeshHealth,
     /// Previous mesh health state, used to detect transitions.
     last_mesh_health: Option<MeshHealth>,
+    /// True until the first time the gossip mesh is confirmed ready,
+    /// at which point stored conversations are subscribed.
+    pending_startup_subscription: bool,
+    /// Scrolling log of mesh connection progress events.
+    mesh_event_log: std::collections::VecDeque<String>,
     /// Counter for periodic presence broadcast (decremented per ConnMonitorTick,
     /// broadcasts Message::Presence when it hits 0, resets to 5).
     presence_counter: u32,
@@ -2787,6 +2807,9 @@ pub enum AppMessage {
     OpenUrl(String),
     /// A link preview was fetched for the chat entry at the given index.
     LinkPreviewLoaded(usize, link_preview::LinkPreviewResult),
+    /// Subscribe to all stored conversations at startup so messages can be
+    /// received even before the user opens each chat.
+    SubscribeStoredConversations,
 }
 
 /// Map semantic GUI navigation commands to the same application messages used
@@ -3274,7 +3297,7 @@ fn view_local_profile_block(
         .align_x(Alignment::Start);
 
     // ── Settings gear button ──
-    let settings_btn = button(text(ICON_SETTINGS).size(TYPO_MD))
+    let settings_btn = button(icon_svg(ICON_SETTINGS, TYPO_MD))
         .on_press(AppMessage::OpenSettings)
         .padding([SPACE_6, SPACE_8])
         .style(BUTTON_ICON);
@@ -3612,6 +3635,8 @@ impl IcedChat {
             conn_refresh_counter: 0,
             mesh_health: MeshHealth::Good,
             last_mesh_health: None,
+            pending_startup_subscription: true,
+            mesh_event_log: std::collections::VecDeque::new(),
             presence_counter: 5,
             heartbeat_counter: 2,
             conn_refresh_in_flight: false,
@@ -4625,6 +4650,7 @@ impl IcedChat {
             AppMessage::ToggleAddMenu => "ToggleAddMenu",
             AppMessage::ImportFriendFromFile => "ImportFriendFromFile",
             AppMessage::ImportFriendFromFilePicked(_) => "ImportFriendFromFilePicked",
+            AppMessage::SubscribeStoredConversations => "SubscribeStoredConversations",
         }
     }
 }
@@ -8899,6 +8925,30 @@ impl IcedChat {
                 info!("Manual retry requested from dashboard");
                 iced::Task::none()
             }
+            AppMessage::SubscribeStoredConversations => {
+                // Subscribe to all stored conversations at startup so messages
+                // can be received even before the user opens each chat.
+                let store_topics: Vec<TopicId> = self
+                    .conversation_store
+                    .active_iter()
+                    .into_iter()
+                    .map(|e| e.topic)
+                    .filter(|t| !self.conversations.contains_key(t))
+                    .collect();
+                if store_topics.is_empty() {
+                    return iced::Task::none();
+                }
+                info!(
+                    count = store_topics.len(),
+                    "startup: subscribing to stored conversations"
+                );
+                iced::Task::batch(
+                    store_topics
+                        .into_iter()
+                        .map(AppMessage::BackgroundSubscribe)
+                        .map(iced::Task::done),
+                )
+            }
             AppMessage::BackgroundSubscribe(topic) => {
                 // Already subscribed — skip.
                 if self.conversations.contains_key(&topic)
@@ -9687,6 +9737,25 @@ impl IcedChat {
                 // online/offline transitions into one visible update per tick.
                 self.flush_pending_neighbor_status();
 
+                // ── Deferred startup: subscribe to stored conversations once
+                //    the gossip mesh has at least one peer or a relay connection.
+                if self.pending_startup_subscription {
+                    // Wait a few ticks for the gossip layer to initialize, then
+                    // subscribe to stored conversations regardless of mesh state.
+                    // The mesh-health indicators can lag behind actual connectivity,
+                    // but gossip.subscribe works once the endpoint is alive.
+                    self.pending_startup_subscription = false;
+                    let count = self.conversation_store.active_iter().into_iter().count();
+                    info!(count, "deferred startup: subscribing to stored conversations");
+                    if count > 0 {
+                        self.mesh_event_log.push_back(format!(
+                            "Subscribing to {} stored conversation(s)…",
+                            count,
+                        ));
+                        return iced::Task::done(AppMessage::SubscribeStoredConversations);
+                    }
+                }
+
                 // Auto-dismiss toast after ~2 seconds (120 ticks at 60fps → ~120 frames,
                 // but ConnMonitorTick fires at 1 Hz, so effectively ~120 seconds would be too
                 // long. We tick at 1 Hz here, so ~2 ticks = ~2 seconds for a 120-counter toast.
@@ -10069,8 +10138,15 @@ impl IcedChat {
                 self.mesh_health = new_health;
                 self.last_mesh_health = Some(self.mesh_health.clone());
 
-                if let Some(msg) = notification {
-                    self.push_system(msg);
+                if let Some(ref msg) = notification {
+                    self.push_system(msg.clone());
+                }
+                // Log mesh health transitions to the event log (capacity 50).
+                if let Some(log_msg) = &notification {
+                    if self.mesh_event_log.len() > 50 {
+                        self.mesh_event_log.pop_front();
+                    }
+                    self.mesh_event_log.push_back(log_msg.clone());
                 }
 
                 iced::Task::none()
@@ -12139,7 +12215,7 @@ impl IcedChat {
 
         // Build the dropdown panel
         struct MenuItem {
-            icon: &'static str,
+            icon: &'static [u8],
             label: &'static str,
             action: Option<AppMessage>,
             disabled: bool,
@@ -12159,7 +12235,7 @@ impl IcedChat {
                 disabled: false,
             },
             MenuItem {
-                icon: "—",
+                icon: include_bytes!("../../assets/icons/lucide/minus.svg"),
                 label: "Scan QR Code",
                 action: None,
                 disabled: true,
@@ -12174,13 +12250,13 @@ impl IcedChat {
 
         let future_items = vec![
             MenuItem {
-                icon: "—",
+                icon: include_bytes!("../../assets/icons/lucide/minus.svg"),
                 label: "Create Group Chat",
                 action: None,
                 disabled: true,
             },
             MenuItem {
-                icon: "📱",
+                icon: include_bytes!("../../assets/icons/lucide/smartphone.svg"),
                 label: "Pair Device",
                 action: None,
                 disabled: true,
@@ -12192,7 +12268,7 @@ impl IcedChat {
         // Header
         menu_col = menu_col.push(
             container(
-                row![text("＋").size(TYPO_SM), text(" Add").size(TYPO_SM),]
+                row![iced::Element::from(icon_svg(ICON_PLUS, TYPO_SM)), text(" Add").size(TYPO_SM),]
                     .spacing(SPACE_4)
                     .align_y(Alignment::Center),
             )
@@ -12212,7 +12288,7 @@ impl IcedChat {
 
             let mut btn = button(
                 row![
-                    text(item.icon).size(TYPO_SM),
+                    icon_svg(item.icon, TYPO_SM),
                     text(item.label).size(TYPO_SM).color(label_color),
                 ]
                 .spacing(SPACE_8)
@@ -12264,7 +12340,7 @@ impl IcedChat {
         for item in &future_items {
             let btn = button(
                 row![
-                    text(item.icon).size(TYPO_SM),
+                    icon_svg(item.icon, TYPO_SM),
                     text(item.label).size(TYPO_SM).color(future_label_color),
                 ]
                 .spacing(SPACE_8)
@@ -12451,7 +12527,7 @@ impl IcedChat {
         let header = Row::new()
             .push(boru_logo(LogoSize::Small).into_element())
             .push(
-                iced::widget::button(iced::widget::text(ICON_PLUS).size(TYPO_MD))
+                iced::widget::button(icon_svg(ICON_PLUS, TYPO_MD))
                     .on_press(AppMessage::ToggleAddMenu)
                     .padding([SPACE_6, SPACE_8])
                     .style(BUTTON_ICON),
@@ -12934,9 +13010,14 @@ impl IcedChat {
         // ── Build the content row ─────────────────────────────────
         // ── Delete button ────────────────
         let is_deleting = delete_confirm_topic == Some(topic);
-        let delete_btn_text = if is_deleting { "Delete?" } else { ICON_CLOSE };
         let delete_btn = button(
-            container(text(delete_btn_text).size(TYPO_XS))
+            container(
+                if is_deleting {
+                    iced::Element::<'_, AppMessage>::from(text("Delete?").size(TYPO_XS))
+                } else {
+                    iced::Element::<'_, AppMessage>::from(icon_svg(ICON_CLOSE, TYPO_XS))
+                }
+            )
                 .center_x(Length::Fill)
                 .center_y(Length::Fill)
                 .width(Length::Fixed(24.0))
@@ -13129,9 +13210,14 @@ impl IcedChat {
             let mut row_el = Row::new()
                 .push(Self::peer_avatar_block(peer.avatar.clone(), peer.peer))
                 .push(
-                    text(format!("● {}", peer.display_name))
-                        .size(TYPO_SM)
-                        .color(text_remote_body(&Self::theme_from_dark(dep.dark_mode)))
+                    Row::new()
+                        .push(icon_svg(ICON_ONLINE, TYPO_SM).style(|t,_| iced::widget::svg::Style { color: Some(text_remote_body(t)) }))
+                        .push(text(peer.display_name.clone())
+                            .size(TYPO_SM)
+                            .color(text_remote_body(&Self::theme_from_dark(dep.dark_mode)))
+                            .width(Length::Fill))
+                        .spacing(SPACE_4)
+                        .align_y(Alignment::Center)
                         .width(Length::Fill),
                 )
                 .spacing(SPACE_4)
@@ -13313,17 +13399,25 @@ impl IcedChat {
 
         let has_friends = !dep.friends.is_empty();
         for friend in &dep.friends {
-            let status_dot = if friend.online { ICON_ONLINE } else { ICON_OFFLINE };
+            let is_online = friend.online;
             let row_el = Row::new()
                 .push(Self::peer_avatar_block(friend.avatar.clone(), friend.peer))
                 .push(
-                    text(format!("{} {}", status_dot, friend.label))
-                        .size(TYPO_SM)
-                        .color(if friend.online {
-                            text_remote_body(&theme)
-                        } else {
-                            Self::muted_color(dep.dark_mode)
-                        })
+                    Row::new()
+                        .push(icon_svg(if is_online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_SM).style({
+                            let dm = dep.dark_mode;
+                            move |t,_| iced::widget::svg::Style { color: Some(if is_online { accent_green(t) } else { Self::muted_color(dm) }) }
+                        }))
+                        .push(text(friend.label.clone())
+                            .size(TYPO_SM)
+                            .color(if is_online {
+                                text_remote_body(&theme)
+                            } else {
+                                Self::muted_color(dep.dark_mode)
+                            })
+                            .width(Length::Fill))
+                        .spacing(SPACE_4)
+                        .align_y(Alignment::Center)
                         .width(Length::Fill),
                 )
                 .push(
@@ -13569,7 +13663,7 @@ impl IcedChat {
         // ── Connection status bar ──
         let conn_status: iced::Element<'_, AppMessage> = if is_connected {
             row![
-                text(ICON_ONLINE).size(TYPO_SM).color(accent_green(&theme)),
+                icon_svg(ICON_ONLINE, TYPO_SM).style(|t,_| iced::widget::svg::Style { color: Some(accent_green(t)) }),
                 text("Boru is connected and ready.")
                     .size(TYPO_SM)
                     .color(text_muted(&theme)),
@@ -13580,7 +13674,7 @@ impl IcedChat {
         } else if is_offline {
             let relay_text = fmt_relay_mode(&self.relay_mode);
             row![
-                text(ICON_OFFLINE).size(TYPO_SM).color(color_error(&theme)),
+                icon_svg(ICON_OFFLINE, TYPO_SM).style(|t,_| iced::widget::svg::Style { color: Some(color_error(t)) }),
                 text("Boru could not reach the relay.")
                     .size(TYPO_SM)
                     .color(color_error(&theme)),
@@ -13600,7 +13694,7 @@ impl IcedChat {
         } else {
             // Reconnecting / degraded
             row![
-                text(ICON_RETRY).size(TYPO_SM).color(color_warning(&theme)),
+                icon_svg(ICON_RETRY, TYPO_SM).style(|t,_| iced::widget::svg::Style { color: Some(color_warning(t)) }),
                 text("Reconnecting to the relay…")
                     .size(TYPO_SM)
                     .color(color_warning(&theme)),
@@ -13616,14 +13710,58 @@ impl IcedChat {
         };
 
         // ── Welcome card (greeting + status) ──
-        let welcome_card = container(
-            Column::new()
-                .push(greeting)
-                .push(Space::new().height(Length::Fixed(SPACE_6)))
-                .push(conn_status)
-                .spacing(0)
-                .width(Length::Fill),
-        )
+        let mut welcome_col = Column::new()
+            .push(greeting)
+            .push(Space::new().height(Length::Fixed(SPACE_6)))
+            .push(conn_status)
+            .spacing(0)
+            .width(Length::Fill);
+
+        // ── Mesh status + event log (only shown when there's activity) ──
+        if !self.mesh_event_log.is_empty() {
+            let mesh_label = match &self.mesh_health {
+                MeshHealth::Good => "Mesh: healthy",
+                MeshHealth::Degraded(_) => "Mesh: degraded",
+                MeshHealth::Offline(_) => "Mesh: offline",
+            };
+            let detail = format!(
+                "{}  {}N · {}R {}D",
+                mesh_label,
+                self.neighbors.len(),
+                self.relayed_peers,
+                self.direct_peers,
+            );
+            let log_lines: Vec<iced::Element<'_, AppMessage>> = self
+                .mesh_event_log
+                .iter()
+                .rev()
+                .take(4)
+                .map(|line| {
+                    text(line)
+                        .size(10)
+                        .color(text_muted(&theme))
+                        .into()
+                })
+                .collect();
+            welcome_col = welcome_col.push(
+                column![
+                    Space::new().height(Length::Fixed(SPACE_6)),
+                    row![
+                        icon_svg(ICON_MESH, TYPO_SM).style(|t,_| iced::widget::svg::Style { color: Some(text_muted(t)) }),
+                        text(detail).size(TYPO_SM).color(text_muted(&theme)),
+                    ]
+                    .spacing(SPACE_4)
+                    .align_y(Alignment::Center),
+                    container(
+                        Column::with_children(log_lines)
+                            .spacing(1)
+                    )
+                    .padding([SPACE_2, SPACE_8]),
+                ]
+            );
+        }
+
+        let welcome_card = container(welcome_col)
         .padding([SPACE_16, (SPACE_24 - SPACE_4)])
         .width(Length::Fill)
         .style(container_card);
@@ -13634,9 +13772,7 @@ impl IcedChat {
                 button(
                     Column::new()
                         .push(
-                            text(ICON_CHAT)
-                                .size(TYPO_XL)
-                                .color(accent_primary(&theme)),
+                            icon_svg(ICON_CHAT, TYPO_XL).style(|t,_| iced::widget::svg::Style { color: Some(accent_primary(t)) }),
                         )
                         .push(Space::new().height(Length::Fixed(SPACE_8)))
                         .push(text("Start Chat").size(TYPO_MD))
@@ -13658,9 +13794,7 @@ impl IcedChat {
                 button(
                     Column::new()
                         .push(
-                            text(ICON_FRIEND)
-                                .size(TYPO_XL)
-                                .color(accent_primary(&theme)),
+                            icon_svg(ICON_FRIEND, TYPO_XL).style(|t,_| iced::widget::svg::Style { color: Some(accent_primary(t)) }),
                         )
                         .push(Space::new().height(Length::Fixed(SPACE_8)))
                         .push(text("Add Friend").size(TYPO_MD))
@@ -13684,7 +13818,7 @@ impl IcedChat {
         // ── Secondary action: Share Files ──
         let share_files_btn = button(
             row![
-                text(ICON_FILES).size(TYPO_SM).color(accent_primary(&theme)),
+                icon_svg(ICON_FILES, TYPO_SM).style(|t,_| iced::widget::svg::Style { color: Some(accent_primary(t)) }),
                 text("Share files").size(TYPO_SM),
                 Space::new().width(Length::Fill),
                 text("Drop files here or choose files")
@@ -13745,7 +13879,7 @@ impl IcedChat {
                     .map(|(pk, name)| {
                         container(
                             row![
-                                text(ICON_ONLINE).size(TYPO_SM).color(accent_green(&theme)),
+                                icon_svg(ICON_ONLINE, TYPO_SM).style(|t,_| iced::widget::svg::Style { color: Some(accent_green(t)) }),
                                 text(name).size(TYPO_SM).color(text_system(&theme)),
                                 Space::new().width(Length::Fill),
                                 button(text("Msg").size(TYPO_XXS))
@@ -13815,9 +13949,7 @@ impl IcedChat {
                         .unwrap_or_else(|_| "recently".to_string());
                     container(
                         row![
-                            text(ICON_ACTIVITY)
-                                .size(TYPO_SM)
-                                .color(text_muted(&theme)),
+                            icon_svg(ICON_ACTIVITY, TYPO_SM).style(|t,_| iced::widget::svg::Style { color: Some(text_muted(t)) }),
                             text(&event.description)
                                 .size(TYPO_SM)
                                 .color(text_system(&theme)),
@@ -13865,17 +13997,11 @@ impl IcedChat {
             text("Home").size(TYPO_LG).width(Length::Fill),
             // Connection indicator dot (compact)
             if is_connected {
-                text(ICON_ONLINE)
-                    .size(TYPO_SM)
-                    .color(accent_green(&theme))
+                icon_svg(ICON_ONLINE, TYPO_SM).style(|t,_| iced::widget::svg::Style { color: Some(accent_green(t)) })
             } else if is_offline {
-                text(ICON_OFFLINE)
-                    .size(TYPO_SM)
-                    .color(color_error(&theme))
+                icon_svg(ICON_OFFLINE, TYPO_SM).style(|t,_| iced::widget::svg::Style { color: Some(color_error(t)) })
             } else {
-                text(ICON_RETRY)
-                    .size(TYPO_SM)
-                    .color(color_warning(&theme))
+                icon_svg(ICON_RETRY, TYPO_SM).style(|t,_| iced::widget::svg::Style { color: Some(color_warning(t)) })
             },
         ]
         .spacing(SPACE_8)
@@ -15803,7 +15929,7 @@ impl IcedChat {
         let header = Row::new()
             .push(text(display_name.clone()).size(TYPO_LG).width(Length::Fill))
             .push(
-                button(text(ICON_CLOSE).size(TYPO_MD))
+                button(icon_svg(ICON_CLOSE, TYPO_MD))
                     .on_press(AppMessage::ClosePeerProfile)
                     .padding([SPACE_4, SPACE_8])
                     .style(move |t, _status| iced::widget::button::Style {
@@ -15866,7 +15992,7 @@ impl IcedChat {
                     .width(Length::Fill),
             )
             .push(
-                button(text(ICON_CLOSE).size(TYPO_MD))
+                button(icon_svg(ICON_CLOSE, TYPO_MD))
                     .on_press(AppMessage::ClosePeerProfile)
                     .padding([SPACE_4, SPACE_8])
                     .style(move |t, _status| iced::widget::button::Style {
@@ -16088,7 +16214,7 @@ impl IcedChat {
                         }),
                 )
                 .push(
-                    button(text(ICON_CLOSE).size(TYPO_SM))
+                    button(icon_svg(ICON_CLOSE, TYPO_SM))
                         .on_press(AppMessage::FriendRenameConfirm)
                         .padding([SPACE_4, SPACE_8])
                         .style(move |t, _status| iced::widget::button::Style {
@@ -16123,7 +16249,7 @@ impl IcedChat {
                     }),
             )
             .push(
-                button(text(ICON_CLOSE).size(TYPO_MD))
+                button(icon_svg(ICON_CLOSE, TYPO_MD))
                     .on_press(AppMessage::CloseFriendProfile)
                     .padding([SPACE_4, SPACE_8])
                     .style(move |t, _status| iced::widget::button::Style {
@@ -16144,14 +16270,14 @@ impl IcedChat {
             });
 
         // ── Status section ──
-        let status_dot = if is_online { ICON_ONLINE } else { ICON_OFFLINE };
+        let is_online_status = is_online;
         let status_color = if is_online {
             Color::from_rgb(0.2, 0.8, 0.2)
         } else {
             Self::muted_color(dark_mode)
         };
         let status_row = row![]
-            .push(text(status_dot).size(TYPO_SM).color(status_color))
+            .push(icon_svg(if is_online_status { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_SM).style(move |_t, _s| iced::widget::svg::Style { color: Some(status_color) }))
             .push(
                 text(last_seen_str.clone())
                     .size(TYPO_SM)
