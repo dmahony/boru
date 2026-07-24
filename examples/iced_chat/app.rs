@@ -11886,12 +11886,51 @@ impl ChatCallbacks for IcedChat {
         // If we deferred a backfill request waiting for a gossip neighbor,
         // fire it now (spawns in background via tokio).
         if let Some(topic) = self.pending_backfill_topic.take() {
-            self.spawn_backfill_request(topic, peer);
+            IcedChat::spawn_backfill_request(self, topic, peer);
         }
     }
 
+    fn on_neighbor_down(&mut self, peer: PublicKey) {
+        self.neighbors.remove(&peer);
+        self.friend_online_cache.remove(&peer);
+        self.needs_conn_refresh = true;
+    }
+
+    fn record_activity(&mut self, peer: PublicKey) {
+        // Update mesh health timestamp for this peer so the mesh
+        // watchdog doesn't falsely flag them as stale.
+        self.friend_online_cache.insert(peer);
+        self.neighbors.insert(peer);
+    }
+
+    fn record_presence(&mut self, peer: PublicKey) {
+        // A Presence heartbeat proves the peer is still alive and
+        // connected.  Update the online cache so the friend list
+        // shows them as online, and ensure they're tracked as a
+        // neighbor for mesh health purposes.
+        self.friend_online_cache.insert(peer);
+        self.neighbors.insert(peer);
+    }
+
+    fn store_peer_ticket(&mut self, peer: PublicKey, ticket: Ticket) -> bool {
+        let fid = FriendId::from_public_key(peer);
+        let record = self.friends.ensure_friend(fid);
+        record.record_addrs(ticket.peers.clone());
+        record.record_room(ticket.topic, ticket);
+        true
+    }
+
+    fn request_quit(&mut self) {
+        // IcedChat handles window close through the iced framework.
+    }
+}
+
+// ── View ──────────────────────────────────────────────────────────────
+
+#[expect(dead_code)]
+impl IcedChat {
     /// Spawn a background task to request history backfill from a peer.
-    fn spawn_backfill_request(&self, topic: TopicId, peer: PublicKey) {
+    pub(crate) fn spawn_backfill_request(&self, topic: TopicId, peer: PublicKey) {
         let bf_handle = self.backfill_handle.clone();
         let endpoint = self.endpoint.clone();
         let net_tx = self.net_tx.clone();
@@ -11947,45 +11986,6 @@ impl ChatCallbacks for IcedChat {
         });
     }
 
-    fn on_neighbor_down(&mut self, peer: PublicKey) {
-        self.neighbors.remove(&peer);
-        self.friend_online_cache.remove(&peer);
-        self.needs_conn_refresh = true;
-    }
-
-    fn record_activity(&mut self, peer: PublicKey) {
-        // Update mesh health timestamp for this peer so the mesh
-        // watchdog doesn't falsely flag them as stale.
-        self.friend_online_cache.insert(peer);
-        self.neighbors.insert(peer);
-    }
-
-    fn record_presence(&mut self, peer: PublicKey) {
-        // A Presence heartbeat proves the peer is still alive and
-        // connected.  Update the online cache so the friend list
-        // shows them as online, and ensure they're tracked as a
-        // neighbor for mesh health purposes.
-        self.friend_online_cache.insert(peer);
-        self.neighbors.insert(peer);
-    }
-
-    fn store_peer_ticket(&mut self, peer: PublicKey, ticket: Ticket) -> bool {
-        let fid = FriendId::from_public_key(peer);
-        let record = self.friends.ensure_friend(fid);
-        record.record_addrs(ticket.peers.clone());
-        record.record_room(ticket.topic, ticket);
-        true
-    }
-
-    fn request_quit(&mut self) {
-        // IcedChat handles window close through the iced framework.
-    }
-}
-
-// ── View ──────────────────────────────────────────────────────────────
-
-#[expect(dead_code)]
-impl IcedChat {
     /// Muted secondary text color, adapted to current theme.
     fn color_muted(&self) -> Color {
         if self.dark_mode {
