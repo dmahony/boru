@@ -54,6 +54,7 @@ const BACKFILL_TIMEOUT_MSG: &str = "backfill timed out";
 
 use crate::chat_core::{filter_net_event_with_safety, NetEvent, SignedMessage};
 use crate::chat_history::ChatHistoryStore;
+use crate::proto::TopicId;
 use crate::public_room_safety::PublicRoomSafety;
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -109,6 +110,9 @@ pub struct BackfillRequest {
     pub since_ms: u64,
     /// Maximum number of messages to return.
     pub max_messages: u32,
+    /// If set, only return messages for this topic.
+    #[serde(default)]
+    pub topic: Option<TopicId>,
 }
 
 /// Response containing backfilled message bytes — sent by the responder.
@@ -121,6 +125,12 @@ pub struct BackfillResponse {
     pub messages: Vec<Bytes>,
     /// How many older messages were omitted due to `max_messages`.
     pub skipped: u32,
+    /// Whether the response was truncated by the byte cap
+    /// ([`SERVER_BACKFILL_BYTE_CAP`]).  When true, the client should
+    /// issue a follow-up request with a higher `since_ms` to get the
+    /// remaining messages.
+    #[serde(default)]
+    pub truncated_by_bytes: bool,
 }
 
 // ── Per-peer rate-limiting state (server side) ─────────────────────────────────
@@ -293,18 +303,45 @@ async fn serve_backfill(connection: Connection, store: &Mutex<ChatHistoryStore>)
         );
 
         // Query history store for recent messages.
+        let topic_filter = request.topic;
         let (resp_bytes, count) = {
             let store = store.lock().unwrap();
-            let recent_entries = store.get_recent_messages(max_messages as usize);
-            let mut messages: Vec<Bytes> = recent_entries
+
+            // Determine the total available count for accurate `skipped`.
+            let total_available = match topic_filter.as_ref() {
+                Some(t) => store.count_for_topic(t),
+                None => store.len(),
+            };
+
+            // Collect entries — use bounded queries where possible.
+            let entries: Vec<_> = match topic_filter {
+                Some(ref t) => store
+                    .get_recent_messages_for_topic(t, max_messages as usize)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+                None => store
+                    .get_recent_messages(max_messages as usize)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+            };
+
+            // Apply since_ms filter and cap at max_messages (newest-first
+            // for relevance, then oldest-first in the response).
+            let mut filtered: Vec<Bytes> = entries
                 .into_iter()
                 .filter(|entry| request.since_ms == 0 || entry.timestamp >= request.since_ms)
-                .map(|entry| Bytes::from(entry.signed_bytes.clone()))
+                .rev() // newest-first so we keep the most recent within the cap
+                .take(max_messages as usize)
+                .map(|entry| Bytes::from(entry.signed_bytes)) // entry is owned — move
                 .collect();
+            filtered.reverse(); // back to chronological order
 
             // Enforce byte cap — truncate messages if total raw bytes exceed limit.
             let mut raw_bytes = 0usize;
-            messages.retain(|msg| {
+            let pre_byte_count = filtered.len();
+            filtered.retain(|msg| {
                 if raw_bytes + msg.len() <= SERVER_BACKFILL_BYTE_CAP {
                     raw_bytes += msg.len();
                     true
@@ -312,13 +349,20 @@ async fn serve_backfill(connection: Connection, store: &Mutex<ChatHistoryStore>)
                     false
                 }
             });
+            let truncated_by_bytes = filtered.len() < pre_byte_count;
 
-            let skipped = store.len().saturating_sub(messages.len()) as u32;
-            let count = messages.len();
+            // skipped: how many messages in the store were not returned.
+            // Uses total_available (topic-aware) minus what we're sending.
+            let skipped = total_available.saturating_sub(filtered.len()) as u32;
+            let count = filtered.len();
 
-            trace!(count, skipped, "backfill: sending response");
+            trace!(count, skipped, truncated_by_bytes, "backfill: sending response");
 
-            let response = BackfillResponse { messages, skipped };
+            let response = BackfillResponse {
+                messages: filtered,
+                skipped,
+                truncated_by_bytes,
+            };
             let resp_bytes = postcard::to_stdvec(&response)
                 .map_err(|e| n0_error::anyerr!("encode response: {e}"))?;
             (resp_bytes, count)
@@ -355,6 +399,7 @@ enum Cmd {
         addr: EndpointAddr,
         since_ms: u64,
         max_messages: u32,
+        topic: Option<TopicId>,
         net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
         safety: Option<Arc<PublicRoomSafety>>,
         reply: tokio::sync::oneshot::Sender<Result<u32>>,
@@ -387,6 +432,7 @@ impl BackfillHandle {
     /// * `since_ms` — UNIX-epoch milliseconds; only messages at or after this
     ///   timestamp are returned.  Pass `0` for all recent messages.
     /// * `max_messages` — Cap on how many messages to request.
+    /// * `topic` — If set, only request messages for this topic.
     /// * `net_tx` — Channel to inject decoded [`NetEvent::Message`] items into.
     ///
     /// Returns the number of messages that were decoded and injected, or an
@@ -396,6 +442,7 @@ impl BackfillHandle {
         addr: EndpointAddr,
         since_ms: u64,
         max_messages: u32,
+        topic: Option<TopicId>,
         net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
         safety: Option<Arc<PublicRoomSafety>>,
     ) -> Result<u32> {
@@ -405,6 +452,7 @@ impl BackfillHandle {
                 addr,
                 since_ms,
                 max_messages,
+                topic,
                 net_tx,
                 safety,
                 reply,
@@ -421,12 +469,15 @@ impl BackfillHandle {
     /// Looks up the peer's [`EndpointAddr`] from the [`Endpoint`], requests up to
     /// `DEFAULT_MAX_BACKFILL` messages, and injects them into `net_tx`.
     ///
+    /// `topic` — If set, only messages for this topic are requested.
+    ///
     /// Returns `Ok(Some(count))` on success, `Ok(None)` if not needed, or `Err` on failure.
     pub async fn try_backfill_from_peer(
         &self,
         endpoint: &Endpoint,
         peer: PublicKey,
         local_history_count: usize,
+        topic: Option<TopicId>,
         net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
         safety: Option<Arc<PublicRoomSafety>>,
     ) -> Result<Option<u32>> {
@@ -439,7 +490,7 @@ impl BackfillHandle {
         };
         let addr = EndpointAddr::from_parts(peer, info.into_addrs().map(|addr| addr.into_addr()));
         let count = self
-            .request_history(addr, 0, DEFAULT_MAX_BACKFILL, net_tx, safety)
+            .request_history(addr, 0, DEFAULT_MAX_BACKFILL, topic, net_tx, safety)
             .await?;
         Ok(Some(count))
     }
@@ -453,12 +504,13 @@ async fn backfill_actor(endpoint: Endpoint, mut cmd_rx: mpsc::Receiver<Cmd>) {
                 addr,
                 since_ms,
                 max_messages,
+                topic,
                 net_tx,
                 safety,
                 reply,
             } => {
                 let result =
-                    do_backfill_request(&endpoint, addr, since_ms, max_messages, net_tx, safety)
+                    do_backfill_request(&endpoint, addr, since_ms, max_messages, topic, net_tx, safety)
                         .await;
                 let _ = reply.send(result);
             }
@@ -476,6 +528,7 @@ async fn do_backfill_request(
     addr: EndpointAddr,
     since_ms: u64,
     max_messages: u32,
+    topic: Option<TopicId>,
     net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
     safety: Option<Arc<PublicRoomSafety>>,
 ) -> Result<u32> {
@@ -502,6 +555,7 @@ async fn do_backfill_request(
         let request = BackfillRequest {
             since_ms,
             max_messages,
+            topic,
         };
         let req_bytes =
             postcard::to_stdvec(&request).map_err(|e| n0_error::anyerr!("encode request: {e}"))?;
@@ -614,6 +668,7 @@ mod tests {
         let req = BackfillRequest {
             since_ms: 1000,
             max_messages: 50,
+            topic: None,
         };
         let bytes = postcard::to_stdvec(&req).unwrap();
         let decoded: BackfillRequest = postcard::from_bytes(&bytes).unwrap();
@@ -626,11 +681,13 @@ mod tests {
         let resp = BackfillResponse {
             messages: vec![Bytes::from(vec![1u8; 64]), Bytes::from(vec![2u8; 64])],
             skipped: 10,
+            truncated_by_bytes: false,
         };
         let bytes = postcard::to_stdvec(&resp).unwrap();
         let decoded: BackfillResponse = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.messages.len(), 2);
         assert_eq!(decoded.skipped, 10);
+        assert_eq!(decoded.truncated_by_bytes, false);
         assert_eq!(decoded.messages[0].as_ref(), &[1u8; 64]);
     }
 
@@ -749,12 +806,19 @@ mod tests {
 
         let (net_tx, _) = tokio::sync::mpsc::unbounded_channel();
 
-        // Advance time past the timeout so the client's deadline fires.
-        // We need to advance by at least BACKFILL_REQUEST_TIMEOUT + some margin.
+        // Spawn the backfill request in a background task so we can
+        // advance time while it blocks waiting for the slow responder.
+        // Clone the endpoint so the spawned task owns its own reference.
+        let ep_for_task = ep_requester.clone();
+        let handle = tokio::spawn(async move {
+            do_backfill_request(&ep_for_task, addr, 0, 10, None, net_tx, None).await
+        });
+
+        // Advance time past the client's 5s timeout.  The server's 7s
+        // delay hasn't expired yet, so the client's timeout fires first.
         tokio::time::advance(BACKFILL_REQUEST_TIMEOUT + Duration::from_secs(1)).await;
 
-        let result = do_backfill_request(&ep_requester, addr, 0, 10, net_tx, None).await;
-
+        let result = handle.await.expect("backfill task panicked");
         let err = result.expect_err("slow backfill should time out");
         let err_msg = err.to_string();
         assert!(
@@ -777,7 +841,7 @@ mod tests {
             .await
             .expect("bind responder endpoint");
 
-        // Set up a history store with a few messages.
+        // Set up an empty history store.
         let data_dir = temp_store_path("normal_success");
         let store = Arc::new(Mutex::new(ChatHistoryStore::empty_at(data_dir.clone())));
 
@@ -801,7 +865,7 @@ mod tests {
 
         let (net_tx, _) = tokio::sync::mpsc::unbounded_channel();
 
-        let result = do_backfill_request(&ep_requester, addr, 0, 10, net_tx, None).await;
+        let result = do_backfill_request(&ep_requester, addr, 0, 10, None, net_tx, None).await;
 
         // Even with an empty store, the backfill should succeed (returning 0 messages).
         assert!(

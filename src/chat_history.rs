@@ -469,6 +469,38 @@ impl ChatHistoryStore {
         self.entries.iter().filter(|e| e.topic == *topic).collect()
     }
 
+    /// Return up to `count` of the most recent entries for a given topic,
+    /// oldest-first.
+    ///
+    /// Unlike [`for_topic`], this scans backwards from newest to oldest
+    /// and stops once `count` matching entries have been found, making it
+    /// suitable for backfill queries against large topic histories.
+    pub fn get_recent_messages_for_topic(
+        &self,
+        topic: &TopicId,
+        count: usize,
+    ) -> Vec<&HistoryEntry> {
+        if count == 0 {
+            return Vec::new();
+        }
+        let mut result = Vec::with_capacity(count);
+        for entry in self.entries.iter().rev() {
+            if entry.topic == *topic {
+                result.push(entry);
+                if result.len() >= count {
+                    break;
+                }
+            }
+        }
+        result.reverse(); // restore chronological order
+        result
+    }
+
+    /// Count the total number of entries for a given topic.
+    pub fn count_for_topic(&self, topic: &TopicId) -> usize {
+        self.entries.iter().filter(|e| e.topic == *topic).count()
+    }
+
     /// Return up to `count` of the most recent entries, oldest-first.
     pub fn get_recent_messages(&self, count: usize) -> Vec<&HistoryEntry> {
         if count == 0 {

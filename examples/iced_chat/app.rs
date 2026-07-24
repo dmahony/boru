@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use boru_core::api::{GossipSender, GossipTopic};
-use boru_core::backfill::BackfillHandle;
+use boru_core::backfill::{BackfillHandle, BACKFILL_TRIGGER_THRESHOLD};
 pub(crate) use boru_core::chat_callbacks::TransferKind;
 use crate::link_preview;
 use boru_core::chat_callbacks::{ChatCallbacks, TransferId, TransferProgress};
@@ -1864,7 +1864,6 @@ pub struct IcedChat {
     runtime_handle: tokio::runtime::Handle,
     pub net_rx: Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>,
     net_tx: UnboundedSender<ConversationNetEvent>,
-    #[expect(dead_code)]
     backfill_handle: boru_core::backfill::BackfillHandle,
     friends: FriendsStore,
     friends_dirty: bool,
@@ -5918,6 +5917,8 @@ impl IcedChat {
 
                 // Auto-subscribe to all stored conversations so messages
                 // can be received even before the user opens each chat.
+                // Dispatch BackgroundSubscribe so the sender is properly
+                // stored in self.conversations via BackgroundSubscribed.
                 let store_topics: Vec<TopicId> = self
                     .conversation_store
                     .active_iter()
@@ -5925,6 +5926,7 @@ impl IcedChat {
                     .map(|e| e.topic)
                     .filter(|t| *t != topic && !self.conversations.contains_key(t))
                     .collect();
+                let mut bg_tasks: Vec<iced::Task<AppMessage>> = Vec::new();
                 if !store_topics.is_empty() {
                     let bootstrap_peers: Vec<PublicKey> = self.discovered_peers.clone();
                     info!(
@@ -5932,53 +5934,15 @@ impl IcedChat {
                         bootstrap = bootstrap_peers.len(),
                         "auto-subscribing to stored conversations"
                     );
-                    for bg_topic in store_topics {
-                        let gossip = self.gossip.clone();
-                        let net_tx = self.net_tx.clone();
-                        let sk = self.secret_key.clone();
-                        let label = self.local_label.clone();
-                        let profile_image_ticket = self.profile_image_ticket.clone();
-                        let topic = bg_topic;
-                        let peers = bootstrap_peers.clone();
-                        tokio::spawn(async move {
-                            if let Ok(sub) = gossip.subscribe(topic, peers).await {
-                                let (sender, receiver) = sub.split();
-                                if let (Ok(md), Ok(rd)) = (
-                                    boru_core::room_docs::create_metadata_doc(
-                                        topic,
-                                        &sender,
-                                        boru_core::room_docs::RoomMetadata {
-                                            name: Some("boru-chat".to_string()),
-                                            description: None,
-                                            rules: None,
-                                        },
-                                    )
-                                    .await,
-                                    boru_core::room_docs::create_roster_doc(
-                                        topic,
-                                        &sender,
-                                        sk.public().to_string(),
-                                        label.clone(),
-                                    )
-                                    .await,
-                                ) {
-                                    let _fh = spawn_conversation_forwarder(
-                                        topic, md, rd, receiver, net_tx, None,
-                                    );
-                                    if let Ok(msg) = crate::SignedMessage::sign_and_encode(
-                                        &sk,
-                                        &crate::Message::AboutMe {
-                                            name: label,
-                                            profile_image_ticket,
-                                        },
-                                    ) {
-                                        let _ = sender.broadcast(msg).await;
-                                    }
-                                    info!("background subscribed to {topic}");
-                                }
-                            }
-                        });
-                    }
+                    bg_tasks = store_topics
+                        .into_iter()
+                        .map(|bg_topic| {
+                            iced::Task::done(AppMessage::BackgroundSubscribe(
+                                bg_topic,
+                                bootstrap_peers.clone(),
+                            ))
+                        })
+                        .collect();
                 }
                 self.push_system("Chat joined.");
                 self.push_system("Type a message and press Enter to send.  /help for commands.");
@@ -6057,6 +6021,63 @@ impl IcedChat {
                     });
                 }
 
+                // ── Backfill: request missed messages from a connected peer ──
+                // If we have very few history entries for this topic, it's likely
+                // we missed messages sent while we were offline or before we
+                // joined the gossip mesh.  Request them from a neighbour via the
+                // backfill QUIC protocol.
+                if self.entries.len() < BACKFILL_TRIGGER_THRESHOLD {
+                    let peers_to_try: Vec<PublicKey> = self.neighbors.iter().copied().collect();
+                    if !peers_to_try.is_empty() {
+                        let bf_handle = self.backfill_handle.clone();
+                        let endpoint = self.endpoint.clone();
+                        let net_tx = self.net_tx.clone();
+                        let topic = topic;
+                        tokio::task::spawn(async move {
+                            let (bf_tx, mut bf_rx) =
+                                tokio::sync::mpsc::unbounded_channel::<
+                                    crate::chat_core::NetEvent,
+                                >();
+                            match bf_handle
+                                .try_backfill_from_peer(
+                                    &endpoint,
+                                    peers_to_try[0],
+                                    0, // count already checked above
+                                    Some(topic),
+                                    bf_tx,
+                                    None,
+                                )
+                                .await
+                            {
+                                Ok(Some(count)) => {
+                                    tracing::debug!(
+                                        ?count,
+                                        topic = %topic,
+                                        "backfill: received history"
+                                    );
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    tracing::debug!(%e, "backfill: request failed");
+                                }
+                            }
+                            // Forward backfill messages into the conversation
+                            // event channel so the app processes them as if they
+                            // arrived over gossip.
+                            drop(bf_handle);
+                            while let Some(event) = bf_rx.recv().await {
+                                let conv_event =
+                                    boru_core::conversations::ConversationNetEvent::new(
+                                        topic, event,
+                                    );
+                                if net_tx.send(conv_event).is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                }
+
                 // Update room history
                 self.room_history.upsert(topic, &self.local_label, true);
                 self.room_history_dirty = true;
@@ -6118,10 +6139,20 @@ impl IcedChat {
 
                 if self.return_to_chat_list_after_open {
                     self.return_to_chat_list_after_open = false;
-                    return iced::Task::done(AppMessage::GoToChatList);
+                    let task = iced::Task::done(AppMessage::GoToChatList);
+                    if bg_tasks.is_empty() {
+                        return task;
+                    }
+                    let mut all: Vec<iced::Task<AppMessage>> = bg_tasks;
+                    all.push(task);
+                    return iced::Task::batch(all);
                 }
 
-                iced::Task::none()
+                if bg_tasks.is_empty() {
+                    iced::Task::none()
+                } else {
+                    iced::Task::batch(bg_tasks)
+                }
             }
 
             AppMessage::RoomJoinFailed(e) => {
@@ -7289,17 +7320,26 @@ impl IcedChat {
                         .set_state(&action_id, GuiActionState::Completed);
                 }
                 if let Some(sender) = self.sender.clone() {
-                    let main_task = iced::Task::perform(
-                        async move {
-                            sender.broadcast(encoded).await.ok();
-                            (text, event_id, msg_hash)
-                        },
-                        |(t, eid, mh)| AppMessage::MessageSent(t, eid, mh),
-                    );
-                    if let Some(pt) = preview_task {
-                        iced::Task::batch([main_task, pt])
+                    if !self.neighbors.is_empty() {
+                        let main_task = iced::Task::perform(
+                            async move {
+                                sender.broadcast(encoded).await.ok();
+                                (text, event_id, msg_hash)
+                            },
+                            |(t, eid, mh)| AppMessage::MessageSent(t, eid, mh),
+                        );
+                        if let Some(pt) = preview_task {
+                            iced::Task::batch([main_task, pt])
+                        } else {
+                            main_task
+                        }
                     } else {
-                        main_task
+                        // No gossip neighbors yet — broadcast would go to an
+                        // empty mesh and be silently lost.  Keep the message
+                        // as Queued in the outbox; the periodic retry loop
+                        // (ConnMonitorTick) will re-broadcast when neighbors
+                        // appear.
+                        preview_task.unwrap_or(iced::Task::none())
                     }
                 } else {
                     preview_task.unwrap_or(iced::Task::none())
