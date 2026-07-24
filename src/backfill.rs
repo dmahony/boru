@@ -518,11 +518,97 @@ async fn backfill_actor(endpoint: Endpoint, mut cmd_rx: mpsc::Receiver<Cmd>) {
     }
 }
 
-/// Perform a single backfill request: connect, send request, read response,
-/// decode messages, and inject them into the net_tx channel.
+/// Perform a backfill request against a peer, following up when the
+/// response is truncated by the server-side byte cap.
 ///
-/// The entire exchange is bounded by [`BACKFILL_REQUEST_TIMEOUT`] — a slow
-/// or unresponsive peer cannot hold resources indefinitely.
+/// Each round is a connect → request → response cycle bounded by
+/// [`BACKFILL_REQUEST_TIMEOUT`].  When [`BackfillResponse::truncated_by_bytes`]
+/// is true and messages were received, a follow-up request is issued with
+/// `since_ms` set to the highest timestamp seen so far (duplicates are
+/// handled by the dedup layer in `handle_net_event_for_topic`).
+///
+/// Total messages across all rounds are capped at
+/// [`CLIENT_MAX_BACKFILL_MESSAGES`] for defense-in-depth.
+
+/// Single backfill round: connect to peer, send request, read and return
+/// the response.  Has an explicit return type so it can be wrapped in
+/// `tokio::time::timeout` without type-inference issues.
+async fn backfill_round(
+    endpoint: &Endpoint,
+    addr: &EndpointAddr,
+    since_ms: u64,
+    max_messages: u32,
+    topic: Option<TopicId>,
+    peer_id: PublicKey,
+    round: u32,
+) -> Result<(BackfillResponse, u32)> {
+    debug!(
+        peer = %peer_id.fmt_short(),
+        round,
+        since_ms,
+        "backfill: connecting to peer for history"
+    );
+
+    let conn = endpoint
+        .connect(addr.clone(), BACKFILL_ALPN)
+        .await
+        .map_err(|e| n0_error::anyerr!("backfill connect: {e}"))?;
+
+    let (mut writer, mut reader) = conn
+        .open_bi()
+        .await
+        .map_err(|e| n0_error::anyerr!("backfill: open_bi: {e}"))?;
+
+    let request = BackfillRequest {
+        since_ms,
+        max_messages,
+        topic,
+    };
+    let req_bytes =
+        postcard::to_stdvec(&request).map_err(|e| n0_error::anyerr!("encode request: {e}"))?;
+    let req_len = req_bytes.len() as u32;
+
+    writer
+        .write_u32_le(req_len)
+        .await
+        .map_err(|e| n0_error::anyerr!("backfill: write req_len: {e}"))?;
+    writer
+        .write_all(&req_bytes)
+        .await
+        .map_err(|e| n0_error::anyerr!("backfill: write request body: {e}"))?;
+    writer
+        .finish()
+        .map_err(|e| n0_error::anyerr!("backfill: finish writer: {e}"))?;
+
+    let resp_len = reader
+        .read_u32_le()
+        .await
+        .map_err(|e| n0_error::anyerr!("backfill: read resp_len: {e}"))?;
+    if resp_len > 10 * 1024 * 1024 {
+        bail_any!("backfill response too large: {resp_len} bytes");
+    }
+    let mut resp_buf = vec![0u8; resp_len as usize];
+    reader
+        .read_exact(&mut resp_buf)
+        .await
+        .map_err(|e| n0_error::anyerr!("backfill: read response body: {e}"))?;
+
+    let response: BackfillResponse =
+        postcard::from_bytes(&resp_buf).map_err(|e| n0_error::anyerr!("decode response: {e}"))?;
+
+    let msg_count = response.messages.len() as u32;
+    debug!(
+        peer = %peer_id.fmt_short(),
+        round,
+        count = msg_count,
+        skipped = response.skipped,
+        truncated_by_bytes = response.truncated_by_bytes,
+        "backfill: received response, decoding and injecting"
+    );
+
+    Ok((response, msg_count))
+}
+
 async fn do_backfill_request(
     endpoint: &Endpoint,
     addr: EndpointAddr,
@@ -532,77 +618,51 @@ async fn do_backfill_request(
     net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
     safety: Option<Arc<PublicRoomSafety>>,
 ) -> Result<u32> {
-    // Enforce a hard timeout on the entire backfill exchange.
-    tokio::time::timeout(BACKFILL_REQUEST_TIMEOUT, async {
-        let peer_id = addr.id;
-        debug!(
-            peer = %peer_id.fmt_short(),
-            "backfill: connecting to peer for history"
-        );
+    let peer_id = addr.id;
+    let mut total_injected = 0u32;
+    let mut current_since_ms = since_ms;
+    // Safety: cap the number of follow-up rounds so a malicious server
+    // claiming truncation forever can't pin us in an infinite loop.
+    const MAX_FOLLOW_UP_ROUNDS: u32 = 10;
 
-        let conn = endpoint
-            .connect(addr, BACKFILL_ALPN)
-            .await
-            .map_err(|e| n0_error::anyerr!("backfill connect: {e}"))?;
-
-        // open_bi() returns (SendStream, RecvStream)
-        let (mut writer, mut reader) = conn
-            .open_bi()
-            .await
-            .map_err(|e| n0_error::anyerr!("backfill: open_bi: {e}"))?;
-
-        // Send request on SendStream
-        let request = BackfillRequest {
-            since_ms,
-            max_messages,
-            topic,
-        };
-        let req_bytes =
-            postcard::to_stdvec(&request).map_err(|e| n0_error::anyerr!("encode request: {e}"))?;
-        let req_len = req_bytes.len() as u32;
-
-        writer
-            .write_u32_le(req_len)
-            .await
-            .map_err(|e| n0_error::anyerr!("backfill: write req_len: {e}"))?;
-        writer
-            .write_all(&req_bytes)
-            .await
-            .map_err(|e| n0_error::anyerr!("backfill: write request body: {e}"))?;
-        writer
-            .finish()
-            .map_err(|e| n0_error::anyerr!("backfill: finish writer: {e}"))?;
-
-        // Read response from RecvStream
-        let resp_len = reader
-            .read_u32_le()
-            .await
-            .map_err(|e| n0_error::anyerr!("backfill: read resp_len: {e}"))?;
-        if resp_len > 10 * 1024 * 1024 {
-            bail_any!("backfill response too large: {resp_len} bytes");
+    for round in 0..=MAX_FOLLOW_UP_ROUNDS {
+        let remaining_cap = CLIENT_MAX_BACKFILL_MESSAGES.saturating_sub(total_injected);
+        if remaining_cap == 0 {
+            debug!(
+                peer = %peer_id.fmt_short(),
+                total_injected,
+                "backfill: client message cap reached, stopping follow-ups"
+            );
+            break;
         }
-        let mut resp_buf = vec![0u8; resp_len as usize];
-        reader
-            .read_exact(&mut resp_buf)
-            .await
-            .map_err(|e| n0_error::anyerr!("backfill: read response body: {e}"))?;
 
-        let response: BackfillResponse = postcard::from_bytes(&resp_buf)
-            .map_err(|e| n0_error::anyerr!("decode response: {e}"))?;
+        let (response, msg_count) = tokio::time::timeout(
+            BACKFILL_REQUEST_TIMEOUT,
+            backfill_round(
+                endpoint,
+                &addr,
+                current_since_ms,
+                max_messages.min(remaining_cap),
+                topic,
+                peer_id,
+                round,
+            ),
+        )
+        .await
+        .map_err(|_elapsed| n0_error::anyerr!("{BACKFILL_TIMEOUT_MSG}"))??;
 
-        let count = response.messages.len() as u32;
-        debug!(
-            peer = %peer_id.fmt_short(),
-            count,
-            skipped = response.skipped,
-            "backfill: received response, decoding and injecting"
-        );
+        if msg_count == 0 {
+            // No messages in this round — nothing more to fetch.
+            break;
+        }
 
-        // Decode each signed message and inject into net_tx
-        // Capped at CLIENT_MAX_BACKFILL_MESSAGES for defense-in-depth.
-        let mut injected = 0u32;
+        // Track the highest timestamp seen in this round for the follow-up.
+        let mut max_ts = current_since_ms;
+
+        // Decode and inject each message.
+        let mut round_injected = 0u32;
         for raw in &response.messages {
-            if injected >= CLIENT_MAX_BACKFILL_MESSAGES {
+            if total_injected >= CLIENT_MAX_BACKFILL_MESSAGES {
                 debug!(
                     peer = %peer_id.fmt_short(),
                     cap = CLIENT_MAX_BACKFILL_MESSAGES,
@@ -612,7 +672,7 @@ async fn do_backfill_request(
             }
             match SignedMessage::verify_and_decode(raw) {
                 Ok((from, message, sent_at)) => {
-                    // Apply public-room safety filter for backfill messages.
+                    max_ts = max_ts.max(sent_at);
                     let net_event = NetEvent::Message {
                         from,
                         message,
@@ -635,7 +695,8 @@ async fn do_backfill_request(
                         warn!("backfill: net_tx closed, stopping injection");
                         break;
                     }
-                    injected += 1;
+                    total_injected += 1;
+                    round_injected += 1;
                 }
                 Err(e) => {
                     trace!("backfill: decode error for one message: {e}");
@@ -643,16 +704,32 @@ async fn do_backfill_request(
             }
         }
 
+        if !response.truncated_by_bytes {
+            break;
+        }
+
+        // Prepare the next round's since_ms.  Use the max timestamp seen
+        // so the server applies the same filter; duplicates are harmless
+        // because handle_net_event_for_topic deduplicates by
+        // (from, hash, sent_at).
+        current_since_ms = max_ts;
         debug!(
             peer = %peer_id.fmt_short(),
-            injected,
-            "backfill: complete"
+            round,
+            round_injected,
+            total_injected,
+            next_since_ms = current_since_ms,
+            "backfill: response truncated, issuing follow-up"
         );
+    }
 
-        Ok(injected)
-    })
-    .await
-    .map_err(|_elapsed| n0_error::anyerr!("{BACKFILL_TIMEOUT_MSG}"))?
+    debug!(
+        peer = %peer_id.fmt_short(),
+        total_injected,
+        "backfill: complete"
+    );
+
+    Ok(total_injected)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────

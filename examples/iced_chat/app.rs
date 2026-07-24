@@ -2055,11 +2055,12 @@ pub struct IcedChat {
     /// Debounce buffer for NeighborUp/NeighborDown events.
     /// Maps `PublicKey -> is_online`. Flushed on every ConnMonitorTick (~1s).
     pending_neighbor_status: HashMap<PublicKey, bool>,
-    /// When set, the app will attempt a history backfill for this topic
-    /// as soon as a gossip neighbor becomes available.  Set during
+    /// When non-empty, the app will attempt a history backfill for each
+    /// topic as soon as a gossip neighbor becomes available.  Set during
     /// RoomOpened when local history is below the trigger threshold but
-    /// no neighbors are connected yet.
-    pending_backfill_topic: Option<TopicId>,
+    /// no neighbors are connected yet.  Topics are removed when a
+    /// backfill succeeds (history count reaches the threshold).
+    pending_backfill_topics: Vec<TopicId>,
 
     // ── Invite menu state ──
     /// Whether the "Copied!" feedback is shown for the friend ID.
@@ -3707,7 +3708,7 @@ impl IcedChat {
             continuous_tracker,
             discovered_peers_rx,
             pending_neighbor_status: HashMap::new(),
-            pending_backfill_topic: None,
+            pending_backfill_topics: Vec::new(),
             friend_id_copied: false,
             show_invite_menu: false,
             invite_whisper_input: String::new(),
@@ -6035,7 +6036,9 @@ impl IcedChat {
                 // been processed through the iced event loop — checking
                 // self.neighbors here would race and usually find it empty.
                 if self.entries.len() < BACKFILL_TRIGGER_THRESHOLD {
-                    self.pending_backfill_topic = Some(topic);
+                    if !self.pending_backfill_topics.contains(&topic) {
+                        self.pending_backfill_topics.push(topic);
+                    }
                     debug!(
                         topic = %topic,
                         entries = self.entries.len(),
@@ -11883,10 +11886,24 @@ impl ChatCallbacks for IcedChat {
         self.friend_online_cache.insert(peer);
         self.needs_conn_refresh = true;
 
-        // If we deferred a backfill request waiting for a gossip neighbor,
-        // fire it now (spawns in background via tokio).
-        if let Some(topic) = self.pending_backfill_topic.take() {
-            IcedChat::spawn_backfill_request(self, topic, peer);
+        // For each pending backfill topic, check if we still need history
+        // (the count may have been satisfied by a previous backfill) and
+        // spawn a request if not.  Retain topics that still need backfill
+        // so the next neighbor-up event can retry with a different peer.
+        let mut i = 0;
+        while i < self.pending_backfill_topics.len() {
+            let topic = self.pending_backfill_topics[i];
+            let count = {
+                let store = self.chat_history.lock().unwrap();
+                store.count_for_topic(&topic)
+            };
+            if count >= BACKFILL_TRIGGER_THRESHOLD {
+                // Already satisfied — remove from pending.
+                self.pending_backfill_topics.remove(i);
+                continue;
+            }
+            IcedChat::spawn_backfill_request(self, topic, peer, count);
+            i += 1;
         }
     }
 
@@ -11930,7 +11947,7 @@ impl ChatCallbacks for IcedChat {
 #[expect(dead_code)]
 impl IcedChat {
     /// Spawn a background task to request history backfill from a peer.
-    pub(crate) fn spawn_backfill_request(&self, topic: TopicId, peer: PublicKey) {
+    pub(crate) fn spawn_backfill_request(&self, topic: TopicId, peer: PublicKey, local_count: usize) {
         let bf_handle = self.backfill_handle.clone();
         let endpoint = self.endpoint.clone();
         let net_tx = self.net_tx.clone();
@@ -11941,7 +11958,7 @@ impl IcedChat {
                 .try_backfill_from_peer(
                     &endpoint,
                     peer,
-                    0, // count already checked when deferring
+                    local_count,
                     Some(topic),
                     bf_tx,
                     None,
