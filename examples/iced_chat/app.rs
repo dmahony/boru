@@ -1882,9 +1882,9 @@ pub struct IcedChat {
     mesh_health: MeshHealth,
     /// Previous mesh health state, used to detect transitions.
     last_mesh_health: Option<MeshHealth>,
-    /// True until the first time the gossip mesh is confirmed ready,
-    /// at which point stored conversations are subscribed.
-    pending_startup_subscription: bool,
+    /// True until stored conversations have been subscribed after the mesh
+    /// first establishes peer connectivity.
+    conversation_subscription_pending: bool,
     /// Scrolling log of mesh connection progress events.
     mesh_event_log: std::collections::VecDeque<String>,
     /// Counter for periodic presence broadcast (decremented per ConnMonitorTick,
@@ -2798,7 +2798,7 @@ pub enum AppMessage {
     /// Retry connecting to the relay (manual retry from the dashboard).
     RetryConnection,
     /// Subscribe to a conversation topic in the background (no UI switch).
-    BackgroundSubscribe(TopicId),
+    BackgroundSubscribe(TopicId, Vec<PublicKey>),
     /// Background subscription completed.
     BackgroundSubscribed(TopicId, Option<GossipSender>),
 
@@ -3635,7 +3635,7 @@ impl IcedChat {
             conn_refresh_counter: 0,
             mesh_health: MeshHealth::Good,
             last_mesh_health: None,
-            pending_startup_subscription: true,
+            conversation_subscription_pending: true,
             mesh_event_log: std::collections::VecDeque::new(),
             presence_counter: 5,
             heartbeat_counter: 2,
@@ -4550,7 +4550,7 @@ impl IcedChat {
             AppMessage::ConfirmBlockFriend => "ConfirmBlockFriend",
             AppMessage::ToggleImageEnlarge(..) => "ToggleImageEnlarge",
             AppMessage::RetryConnection => "RetryConnection",
-            AppMessage::BackgroundSubscribe(_) => "BackgroundSubscribe",
+            AppMessage::BackgroundSubscribe(..) => "BackgroundSubscribe",
             AppMessage::BackgroundSubscribed(..) => "BackgroundSubscribed",
             AppMessage::ImageUploadFailed(_) => "ImageUploadFailed",
             AppMessage::FileUploadFailed(_) => "FileUploadFailed",
@@ -5926,8 +5926,10 @@ impl IcedChat {
                     .filter(|t| *t != topic && !self.conversations.contains_key(t))
                     .collect();
                 if !store_topics.is_empty() {
+                    let bootstrap_peers: Vec<PublicKey> = self.discovered_peers.clone();
                     info!(
                         count = store_topics.len(),
+                        bootstrap = bootstrap_peers.len(),
                         "auto-subscribing to stored conversations"
                     );
                     for bg_topic in store_topics {
@@ -5937,8 +5939,9 @@ impl IcedChat {
                         let label = self.local_label.clone();
                         let profile_image_ticket = self.profile_image_ticket.clone();
                         let topic = bg_topic;
+                        let peers = bootstrap_peers.clone();
                         tokio::spawn(async move {
-                            if let Ok(sub) = gossip.subscribe(topic, vec![]).await {
+                            if let Ok(sub) = gossip.subscribe(topic, peers).await {
                                 let (sender, receiver) = sub.split();
                                 if let (Ok(md), Ok(rd)) = (
                                     boru_core::room_docs::create_metadata_doc(
@@ -8938,18 +8941,25 @@ impl IcedChat {
                 if store_topics.is_empty() {
                     return iced::Task::none();
                 }
+                // Include discovered peers as bootstrap so the gossip mesh has
+                // neighbors for the direct topic. Without this, background
+                // subscriptions have zero peers and broadcasts go nowhere.
+                let bootstrap_peers: Vec<PublicKey> = self.discovered_peers.clone();
                 info!(
                     count = store_topics.len(),
+                    bootstrap = bootstrap_peers.len(),
                     "startup: subscribing to stored conversations"
                 );
                 iced::Task::batch(
                     store_topics
                         .into_iter()
-                        .map(AppMessage::BackgroundSubscribe)
+                        .map(|topic| {
+                            AppMessage::BackgroundSubscribe(topic, bootstrap_peers.clone())
+                        })
                         .map(iced::Task::done),
                 )
             }
-            AppMessage::BackgroundSubscribe(topic) => {
+            AppMessage::BackgroundSubscribe(topic, bootstrap_peers) => {
                 // Already subscribed — skip.
                 if self.conversations.contains_key(&topic)
                     && self.conversations[&topic].sender.is_some()
@@ -8962,9 +8972,11 @@ impl IcedChat {
                 let label = self.local_label.clone();
                 let endpoint = self.endpoint.clone();
                 let profile_image_ticket = self.profile_image_ticket.clone();
+                let peers_count = bootstrap_peers.len();
                 iced::Task::perform(
                     async move {
-                        let sub = gossip.subscribe(topic, vec![]).await.map_err(|e| e.to_string())?;
+                        info!(topic=%topic, peers=peers_count, "BackgroundSubscribe: subscribing with bootstrap peers");
+                        let sub = gossip.subscribe(topic, bootstrap_peers).await.map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
                         let metadata_doc = boru_core::room_docs::create_metadata_doc(
                             topic,
@@ -9737,25 +9749,6 @@ impl IcedChat {
                 // online/offline transitions into one visible update per tick.
                 self.flush_pending_neighbor_status();
 
-                // ── Deferred startup: subscribe to stored conversations once
-                //    the gossip mesh has at least one peer or a relay connection.
-                if self.pending_startup_subscription {
-                    // Wait a few ticks for the gossip layer to initialize, then
-                    // subscribe to stored conversations regardless of mesh state.
-                    // The mesh-health indicators can lag behind actual connectivity,
-                    // but gossip.subscribe works once the endpoint is alive.
-                    self.pending_startup_subscription = false;
-                    let count = self.conversation_store.active_iter().into_iter().count();
-                    info!(count, "deferred startup: subscribing to stored conversations");
-                    if count > 0 {
-                        self.mesh_event_log.push_back(format!(
-                            "Subscribing to {} stored conversation(s)…",
-                            count,
-                        ));
-                        return iced::Task::done(AppMessage::SubscribeStoredConversations);
-                    }
-                }
-
                 // Auto-dismiss toast after ~2 seconds (120 ticks at 60fps → ~120 frames,
                 // but ConnMonitorTick fires at 1 Hz, so effectively ~120 seconds would be too
                 // long. We tick at 1 Hz here, so ~2 ticks = ~2 seconds for a 120-counter toast.
@@ -9783,39 +9776,65 @@ impl IcedChat {
 
                 let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
 
-                // Retry durable gossip outbox entries for the active room. Entries
-                // stay Queued until broadcast succeeds, so a transient disconnect
-                // cannot lose a message or falsely advance its UI state.
-                if let Some(sender) = self.sender.clone() {
-                    let pending: Vec<(u64, Vec<u8>)> = {
-                        let outbox = self.outbox.lock().unwrap();
-                        outbox
-                            .pending()
-                            .into_iter()
-                            .filter(|entry| entry.topic == self.topic)
-                            .map(|entry| (entry.event_id, entry.signed_bytes.clone()))
-                            .collect()
-                    };
-                    if !pending.is_empty() {
-                        let outbox = self.outbox.clone();
-                        let history = self.chat_history.clone();
-                        tasks.push(iced::Task::perform(
-                            async move {
-                                let mut results = Vec::with_capacity(pending.len());
-                                for (event_id, bytes) in pending {
-                                    let delivered = sender.broadcast(bytes.into()).await.is_ok();
-                                    results.push((event_id, delivered));
-                                }
-                                (results, outbox, history)
-                            },
-                            |(results, outbox, history)| {
-                                // The stores are updated in the message handler; carrying
-                                // the Arcs here keeps the async task independent of UI state.
-                                let _ = (outbox, history);
-                                AppMessage::OutboxRetryResult(results)
-                            },
-                        ));
+                // Retry durable gossip outbox entries for ALL subscribed
+                // conversations — not just the active room. Background
+                // conversations also accumulate outbox entries (e.g. from
+                // MCP-triggered sends) and must retry when the peer reconnects.
+                let all_retries: Vec<(TopicId, Vec<(u64, Vec<u8>)>)> = {
+                    let outbox = self.outbox.lock().unwrap();
+                    let pending = outbox.pending();
+                    // Group pending entries by topic
+                    let mut by_topic: std::collections::BTreeMap<TopicId, Vec<(u64, Vec<u8>)>> =
+                        std::collections::BTreeMap::new();
+                    for entry in &pending {
+                        by_topic
+                            .entry(entry.topic)
+                            .or_default()
+                            .push((entry.event_id, entry.signed_bytes.clone()));
                     }
+                    by_topic.into_iter().collect()
+                };
+                if !all_retries.is_empty() {
+                    // Collect senders for all subscribed conversations
+                    let topic_senders: Vec<(TopicId, GossipSender)> = {
+                        let mut pairs = Vec::new();
+                        if let Some(ref sender) = self.sender {
+                            pairs.push((self.topic, sender.clone()));
+                        }
+                        for (topic, conv) in &self.conversations {
+                            if topic != &self.topic {
+                                if let Some(ref sender) = conv.sender {
+                                    pairs.push((*topic, sender.clone()));
+                                }
+                            }
+                        }
+                        pairs
+                    };
+                    let outbox = self.outbox.clone();
+                    let history = self.chat_history.clone();
+                    tasks.push(iced::Task::perform(
+                        async move {
+                            let mut results = Vec::new();
+                            for (topic, entries) in all_retries {
+                                let sender = topic_senders
+                                    .iter()
+                                    .find(|(t, _)| *t == topic)
+                                    .map(|(_, s)| s.clone());
+                                if let Some(sender) = sender {
+                                    for (event_id, bytes) in entries {
+                                        let delivered =
+                                            sender.broadcast(bytes.into()).await.is_ok();
+                                        results.push((event_id, delivered));
+                                    }
+                                }
+                            }
+                            (results, outbox, history)
+                        },
+                        |(results, outbox, history)| {
+                            let _ = (outbox, history);
+                            AppMessage::OutboxRetryResult(results)
+                        },
+                    ));
                 }
 
                 // Retry mailbox delivery for offline peers that just came online.
@@ -10116,7 +10135,23 @@ impl IcedChat {
                 } else {
                     MeshHealth::Good
                 };
-
+                // ── Auto-subscribe to stored conversations once the mesh has peers ──
+                if self.conversation_subscription_pending
+                    && (!self.neighbors.is_empty()
+                        || self.relayed_peers > 0
+                        || self.direct_peers > 0)
+                {
+                    self.conversation_subscription_pending = false;
+                    let count = self.conversation_store.active_iter().into_iter().count();
+                    info!(count, "mesh ready: subscribing to stored conversations");
+                    self.mesh_event_log.push_back(format!(
+                        "Subscribing to {count} stored conversation(s)…",
+                    ));
+                    if count > 0 {
+                        self.mesh_health = new_health;
+                        return iced::Task::done(AppMessage::SubscribeStoredConversations);
+                    }
+                }
                 // Detect transitions and push system notifications.
                 let notification = match (&self.last_mesh_health, &new_health) {
                     (Some(MeshHealth::Good), MeshHealth::Degraded(reason)) => {
