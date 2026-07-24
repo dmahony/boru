@@ -6036,7 +6036,7 @@ impl IcedChat {
                         tokio::task::spawn(async move {
                             let (bf_tx, mut bf_rx) =
                                 tokio::sync::mpsc::unbounded_channel::<
-                                    crate::chat_core::NetEvent,
+                                    crate::NetEvent,
                                 >();
                             match bf_handle
                                 .try_backfill_from_peer(
