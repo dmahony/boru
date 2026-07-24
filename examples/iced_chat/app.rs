@@ -2055,6 +2055,11 @@ pub struct IcedChat {
     /// Debounce buffer for NeighborUp/NeighborDown events.
     /// Maps `PublicKey -> is_online`. Flushed on every ConnMonitorTick (~1s).
     pending_neighbor_status: HashMap<PublicKey, bool>,
+    /// When set, the app will attempt a history backfill for this topic
+    /// as soon as a gossip neighbor becomes available.  Set during
+    /// RoomOpened when local history is below the trigger threshold but
+    /// no neighbors are connected yet.
+    pending_backfill_topic: Option<TopicId>,
 
     // ── Invite menu state ──
     /// Whether the "Copied!" feedback is shown for the friend ID.
@@ -3702,6 +3707,7 @@ impl IcedChat {
             continuous_tracker,
             discovered_peers_rx,
             pending_neighbor_status: HashMap::new(),
+            pending_backfill_topic: None,
             friend_id_copied: false,
             show_invite_menu: false,
             invite_whisper_input: String::new(),
@@ -6021,61 +6027,20 @@ impl IcedChat {
                     });
                 }
 
-                // ── Backfill: request missed messages from a connected peer ──
-                // If we have very few history entries for this topic, it's likely
-                // we missed messages sent while we were offline or before we
-                // joined the gossip mesh.  Request them from a neighbour via the
-                // backfill QUIC protocol.
+                // ── Backfill: defer request until a gossip neighbor connects ──
+                // If we have very few history entries for this topic, we likely
+                // missed messages sent while offline.  Request them from a neighbor
+                // via the backfill QUIC protocol once the gossip mesh has formed.
+                // We defer because RoomOpened fires before NeighborUp events have
+                // been processed through the iced event loop — checking
+                // self.neighbors here would race and usually find it empty.
                 if self.entries.len() < BACKFILL_TRIGGER_THRESHOLD {
-                    let peers_to_try: Vec<PublicKey> = self.neighbors.iter().copied().collect();
-                    if !peers_to_try.is_empty() {
-                        let bf_handle = self.backfill_handle.clone();
-                        let endpoint = self.endpoint.clone();
-                        let net_tx = self.net_tx.clone();
-                        let topic = topic;
-                        tokio::task::spawn(async move {
-                            let (bf_tx, mut bf_rx) =
-                                tokio::sync::mpsc::unbounded_channel::<
-                                    crate::NetEvent,
-                                >();
-                            match bf_handle
-                                .try_backfill_from_peer(
-                                    &endpoint,
-                                    peers_to_try[0],
-                                    0, // count already checked above
-                                    Some(topic),
-                                    bf_tx,
-                                    None,
-                                )
-                                .await
-                            {
-                                Ok(Some(count)) => {
-                                    tracing::debug!(
-                                        ?count,
-                                        topic = %topic,
-                                        "backfill: received history"
-                                    );
-                                }
-                                Ok(None) => {}
-                                Err(e) => {
-                                    tracing::debug!(%e, "backfill: request failed");
-                                }
-                            }
-                            // Forward backfill messages into the conversation
-                            // event channel so the app processes them as if they
-                            // arrived over gossip.
-                            drop(bf_handle);
-                            while let Some(event) = bf_rx.recv().await {
-                                let conv_event =
-                                    boru_core::conversations::ConversationNetEvent::new(
-                                        topic, event,
-                                    );
-                                if net_tx.send(conv_event).is_err() {
-                                    break;
-                                }
-                            }
-                        });
-                    }
+                    self.pending_backfill_topic = Some(topic);
+                    debug!(
+                        topic = %topic,
+                        entries = self.entries.len(),
+                        "backfill: deferred — waiting for gossip neighbor"
+                    );
                 }
 
                 // Update room history
@@ -11917,6 +11882,69 @@ impl ChatCallbacks for IcedChat {
         self.neighbors.insert(peer);
         self.friend_online_cache.insert(peer);
         self.needs_conn_refresh = true;
+
+        // If we deferred a backfill request waiting for a gossip neighbor,
+        // fire it now (spawns in background via tokio).
+        if let Some(topic) = self.pending_backfill_topic.take() {
+            self.spawn_backfill_request(topic, peer);
+        }
+    }
+
+    /// Spawn a background task to request history backfill from a peer.
+    fn spawn_backfill_request(&self, topic: TopicId, peer: PublicKey) {
+        let bf_handle = self.backfill_handle.clone();
+        let endpoint = self.endpoint.clone();
+        let net_tx = self.net_tx.clone();
+        tokio::task::spawn(async move {
+            let (bf_tx, mut bf_rx) =
+                tokio::sync::mpsc::unbounded_channel::<crate::NetEvent>();
+            match bf_handle
+                .try_backfill_from_peer(
+                    &endpoint,
+                    peer,
+                    0, // count already checked when deferring
+                    Some(topic),
+                    bf_tx,
+                    None,
+                )
+                .await
+            {
+                Ok(Some(count)) => {
+                    tracing::debug!(
+                        ?count,
+                        topic = %topic,
+                        peer = %peer.fmt_short(),
+                        "backfill: received history"
+                    );
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        topic = %topic,
+                        peer = %peer.fmt_short(),
+                        "backfill: peer had no remote_info or not needed"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        %e,
+                        topic = %topic,
+                        peer = %peer.fmt_short(),
+                        "backfill: request failed"
+                    );
+                }
+            }
+            // Forward backfill messages into the conversation event
+            // channel so the app processes them as if they arrived over
+            // gossip.
+            drop(bf_handle);
+            while let Some(event) = bf_rx.recv().await {
+                let conv_event =
+                    boru_core::conversations::ConversationNetEvent::new(topic, event);
+                if net_tx.send(conv_event).is_err() {
+                    break;
+                }
+            }
+        });
     }
 
     fn on_neighbor_down(&mut self, peer: PublicKey) {
