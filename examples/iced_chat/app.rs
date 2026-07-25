@@ -15587,21 +15587,24 @@ impl IcedChat {
             // ── Date separator (suppressed) ──
             // Keep prev_day tracking but don't render a separator line.
 
-            // ── System/status messages: hidden ──
-            if matches!(entry.kind, ChatKind::System) {
+            // ── System/status messages: hidden, except entries with a
+            // download attachment (file upload progress / received-file
+            // download cards) which are user-actionable and must remain
+            // visible.
+            if matches!(entry.kind, ChatKind::System) && entry.download.is_none() {
                 continue;
             }
 
-            // ── Local / Remote messages ──
+            // ── Local / Remote / System-with-download messages ──
             let label_color = match entry.kind {
                 ChatKind::Local => text_local_label(&theme),
                 ChatKind::Remote => text_remote_label(&theme),
-                _ => unreachable!(),
+                ChatKind::System => text_muted(&theme),
             };
             let body_color = match entry.kind {
                 ChatKind::Local => text_local_body(&theme),
                 ChatKind::Remote => text_remote_body(&theme),
-                _ => unreachable!(),
+                ChatKind::System => text_muted(&theme),
             };
 
             let label_text = entry.label_text.as_deref().unwrap_or(&entry.label);
@@ -15804,7 +15807,21 @@ impl IcedChat {
                         .align_y(iced::Alignment::Center)
                         .spacing(SPACE_8)
                 }
-                _ => unreachable!(),
+                // System entries with a download attachment render the
+                // download card directly (upload progress, received file).
+                ChatKind::System => {
+                    let download = entry.download.as_ref().map(|dl| {
+                        self.view_download_attachment(i, dl)
+                    });
+                    let inner = if let Some(dl_el) = download {
+                        dl_el
+                    } else {
+                        bubble_col.into()
+                    };
+                    Row::new()
+                        .push(inner)
+                        .width(Length::Fill)
+                }
             }
             .width(Length::Fill);
 
