@@ -139,7 +139,7 @@ fn action_button<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a
 
 /// A subtle text-only button (borderless, uses muted/destructive colour).
 fn text_button<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a, AppMessage> {
-    let lbl = text(label).font(crate::fonts::source_sans(Weight::Regular)).size(TYPO_XS);
+    let lbl = text(label).font(crate::fonts::source_sans(Weight::Normal)).size(TYPO_XS);
     button(lbl)
         .on_press(msg)
         .padding([SPACE_4, SPACE_8])
@@ -218,7 +218,7 @@ pub fn view_download_progress(
         )
         .push(
             text(size_text)
-                .font(crate::fonts::source_sans(Weight::Regular))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_XXS)
                 .color(muted)
                 .width(Length::Shrink),
@@ -249,12 +249,12 @@ pub fn view_download_progress(
                 Row::new()
                     .push(
                         text(source_label)
-                            .font(crate::fonts::source_sans(Weight::Regular))
+                            .font(crate::fonts::source_sans(Weight::Normal))
                             .size(TYPO_XS)
                             .color(muted)
                             .width(Length::Fill),
                     )
-                    .push(text(speed_label).font(crate::fonts::source_sans(Weight::Regular)).size(TYPO_XS).color(tone))
+                    .push(text(speed_label).font(crate::fonts::source_sans(Weight::Normal)).size(TYPO_XS).color(tone))
                     .align_y(Alignment::Center)
                     .spacing(SPACE_8),
             )
@@ -274,7 +274,7 @@ pub fn view_download_progress(
                 .unwrap_or_default();
             Some(
                 text(format!("{detail}{speed}"))
-                    .font(crate::fonts::source_sans(Weight::Regular))
+                    .font(crate::fonts::source_sans(Weight::Normal))
                     .size(TYPO_XS)
                     .color(accent_primary(&theme)),
             )
@@ -292,21 +292,21 @@ pub fn view_download_progress(
                 .push(
                     row![
                         text(failure.title()).font(crate::fonts::source_sans(Weight::Medium)).size(TYPO_XS).color(error_color),
-                        text(failure.stability_label()).font(crate::fonts::source_sans(Weight::Regular)).size(TYPO_XXS).color(tone),
+                        text(failure.stability_label()).font(crate::fonts::source_sans(Weight::Normal)).size(TYPO_XXS).color(tone),
                     ]
                     .spacing(SPACE_8)
                     .align_y(Alignment::Center),
                 )
                 .push(
                     text(failure.message())
-                        .font(crate::fonts::source_sans(Weight::Regular))
+                        .font(crate::fonts::source_sans(Weight::Normal))
                         .size(TYPO_XS)
                         .color(muted)
                         .width(Length::Fill),
                 )
                 .push(
                     text(format!("Recovery: {}", failure.recovery_action()))
-                        .font(crate::fonts::source_sans(Weight::Regular))
+                        .font(crate::fonts::source_sans(Weight::Normal))
                         .size(TYPO_XS)
                         .color(tone)
                         .width(Length::Fill),
@@ -315,7 +315,7 @@ pub fn view_download_progress(
             if let Some(detail) = failure.diagnostics() {
                 if !detail.is_empty() {
                     column =
-                        column.push(text(detail).font(crate::fonts::jetbrains_mono(Weight::Regular)).size(TYPO_XXS).color(muted).width(Length::Fill));
+                        column.push(text(detail).font(crate::fonts::jetbrains_mono(Weight::Normal)).size(TYPO_XXS).color(muted).width(Length::Fill));
                 }
             }
 

@@ -284,7 +284,7 @@ where
             state,
             announcement,
             vec![text(message.as_str())
-                .font(crate::fonts::source_sans(Weight::Regular))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_SM).into()],
             on_action,
             on_value_edit,
@@ -293,7 +293,7 @@ where
             state,
             announcement,
             vec![text(message.as_str())
-                .font(crate::fonts::source_sans(Weight::Regular))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_SM)
                 .style(text_muted_style)
                 .into()],
@@ -304,7 +304,7 @@ where
             state,
             announcement,
             vec![text(message.as_str())
-                .font(crate::fonts::source_sans(Weight::Regular))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_SM)
                 .style(|theme| iced::widget::text::Style {
                     color: Some(color_error(theme)),
@@ -403,14 +403,14 @@ where
 
     let value_input = if focus_target {
         text_input("", value)
-            .font(crate::fonts::jetbrains_mono(Weight::Regular))
+            .font(crate::fonts::jetbrains_mono(Weight::Normal))
             .id(FIRST_VALUE_INPUT_ID)
             .on_input(on_value_edit)
             .padding([SPACE_6, SPACE_8])
             .width(Length::Fill)
     } else {
         text_input("", value)
-            .font(crate::fonts::jetbrains_mono(Weight::Regular))
+            .font(crate::fonts::jetbrains_mono(Weight::Normal))
             .on_input(on_value_edit)
             .padding([SPACE_6, SPACE_8])
             .width(Length::Fill)
@@ -466,7 +466,7 @@ where
     if let Some(message) = announcement {
         header = header.push(
             text(message)
-                .font(crate::fonts::source_sans(Weight::Regular))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_XS)
                 .style(text_muted_style)
                 .width(Length::Fill),

@@ -71,7 +71,7 @@ fn window_icon() -> Option<iced::window::Icon> {
     iced::window::icon::from_file_data(WINDOW_ICON_PNG, Some(image::ImageFormat::Png)).ok()
 }
 
-use tokio::sync::{watch, Mutex};
+use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -520,6 +520,7 @@ fn main() -> Result<()> {
             std::path::PathBuf::from("/home/dan/iroh-gossip-chat/scripts/splash.py")
         });
     let splash_log_path = data_dir.join("instance.log");
+    let mut splash_child: Option<std::process::Child> = None;
     let splash_stdin: Arc<Mutex<Option<std::process::ChildStdin>>> = if splash_script.exists() {
         match std::process::Command::new("python3")
             .arg(&splash_script)
@@ -530,7 +531,11 @@ fn main() -> Result<()> {
             .stderr(std::process::Stdio::null())
             .spawn()
         {
-            Ok(child) => Arc::new(Mutex::new(child.stdin)),
+            Ok(mut child) => {
+                let stdin = child.stdin.take();
+                splash_child = Some(child);
+                Arc::new(Mutex::new(stdin))
+            },
             Err(_) => Arc::new(Mutex::new(None)),
         }
     } else {
@@ -802,7 +807,7 @@ fn main() -> Result<()> {
             })))
             .await;
         let inbox_protocol = InboxProtocol::new(inbox_handle.inner()).with_secret_key(secret_key.clone());
-        let inbox_events_rx = Arc::new(Mutex::new(inbox_events_rx_tmp));
+        let inbox_events_rx = Arc::new(tokio::sync::Mutex::new(inbox_events_rx_tmp));
         splash_send("Inbox protocol ready");
 
         // ── Friends list (needed before router for CatalogueHandler) ───
@@ -955,25 +960,25 @@ fn main() -> Result<()> {
             info!("directory topic: relay disabled, skipping subscription");
         }
 
-        let discovered_peers_rx = Arc::new(Mutex::new(discovered_peers_rx_tmp));
-        let directory_room_rx = Arc::new(Mutex::new(directory_room_rx_tmp));
+        let discovered_peers_rx = Arc::new(tokio::sync::Mutex::new(discovered_peers_rx_tmp));
+        let directory_room_rx = Arc::new(tokio::sync::Mutex::new(directory_room_rx_tmp));
 
         // ── Directory room update channel ──
         let (directory_room_tx, directory_room_rx_tmp) =
             tokio::sync::mpsc::channel::<app::DirectoryRoomUpdate>(64);
-        let directory_room_rx = Arc::new(Mutex::new(directory_room_rx_tmp));
+        let directory_room_rx = Arc::new(tokio::sync::Mutex::new(directory_room_rx_tmp));
 
         // Spawn the backfill background actor for requesting history
         let backfill_handle = BackfillHandle::spawn(endpoint.clone());
         splash_send("Backfill service ready");
 
-        let whisper_events_rx = Arc::new(Mutex::new(whisper_events_rx_tmp));
+        let whisper_events_rx = Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
 
         // Create the network event channel (shared across rooms, tagged by topic)
         let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel::<
             boru_core::conversations::ConversationNetEvent,
         >();
-        let net_rx = Arc::new(Mutex::new(net_rx));
+        let net_rx = Arc::new(tokio::sync::Mutex::new(net_rx));
 
         // ── Friend ping manager ──────────────────────────────────────
         let _guard = runtime.handle().enter();
@@ -983,7 +988,7 @@ fn main() -> Result<()> {
             DEFAULT_CONNECT_TIMEOUT,
         );
         drop(_guard);
-        let friend_events_rx = Arc::new(Mutex::new(friend_events_rx_tmp));
+        let friend_events_rx = Arc::new(tokio::sync::Mutex::new(friend_events_rx_tmp));
         splash_send("Friend ping manager ready");
 
         // Register existing friends with the ping manager
@@ -1062,10 +1067,7 @@ fn main() -> Result<()> {
     // avoiding a visual gap where neither window is visible.
     std::thread::sleep(std::time::Duration::from_millis(300));
     splash_send("DONE");
-    drop(splash_stdin);
-    if let Some(mut child) = splash_child.take() {
-        let _ = child.wait();
-    }
+    drop(splash_child);
 
     // ── Start MCP diagnostic server if requested ────────────────────────
     // Create the Iced message journal shared between MCP and the GUI.

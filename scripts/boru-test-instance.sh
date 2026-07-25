@@ -27,7 +27,7 @@ cleanup_legacy_xvfb() {
         sleep 0.2
         [[ -z "$(pgrep -u "$(id -u)" -f '^Xvfb :(9[89]|1[01][0-9]|12[0-7]) ' 2>/dev/null || true)" ]] && break
     done
-    pkill -u "$(id -u)" -f 'xvfb-run.*iced_chat' 2>/dev/null || true
+    pkill -u "$(id -u)" -f 'xvfb-run.*boru' 2>/dev/null || true
 }
 
 stop_instance() {
@@ -51,22 +51,22 @@ stop_instance() {
         fi
     done
 
-    # ── Aggressively kill ALL iced_chat-x86_64-linux processes ──────
+    # ── Aggressively kill ALL boru-x86_64-linux processes ──────
     # This catches instances launched from any path, with any flags,
     # including ones that predate the supervisor or were started manually.
     local stale
-    for stale_pid in $(pgrep -u "$(id -u)" -f 'iced_chat-x86_64-linux' 2>/dev/null || true); do
+    for stale_pid in $(pgrep -u "$(id -u)" -f 'boru-x86_64-linux' 2>/dev/null || true); do
         [[ "$stale_pid" == "$$" ]] && continue
         kill -TERM "$stale_pid" 2>/dev/null || true
     done
     # Also kill any bare 'iced_chat' debug binary or other-named variants
-    for stale_pid in $(pgrep -u "$(id -u)" -x 'iced_chat' 2>/dev/null || true); do
+    for stale_pid in $(pgrep -u "$(id -u)" -x 'boru' 2>/dev/null || true); do
         [[ "$stale_pid" == "$$" ]] && continue
         kill -TERM "$stale_pid" 2>/dev/null || true
     done
     # Give them a moment to exit gracefully, then SIGKILL survivors
     sleep 0.5
-    for stale_pid in $(pgrep -u "$(id -u)" -f 'iced_chat' 2>/dev/null || true); do
+    for stale_pid in $(pgrep -u "$(id -u)" -f 'boru' 2>/dev/null || true); do
         [[ "$stale_pid" == "$$" ]] && continue
         kill -KILL "$stale_pid" 2>/dev/null || true
     done
@@ -142,9 +142,9 @@ run_desktop() {
     child=$!
     # Bring window to front after it appears
     for _ in $(seq 1 20); do
-        if DISPLAY=:0 xdotool search --name 'boru' > /dev/null 2>&1; then
-            DISPLAY=:0 wmctrl -a 'boru-test' 2>/dev/null || true
-            DISPLAY=:0 xdotool windowactivate "$(DISPLAY=:0 xdotool search --name 'boru')" 2>/dev/null || true
+        if DISPLAY=:0 xdotool search --name 'Boru' > /dev/null 2>&1; then
+            DISPLAY=:0 wmctrl -a 'Boru' 2>/dev/null || true
+            DISPLAY=:0 xdotool windowactivate "$(DISPLAY=:0 xdotool search --name 'Boru')" 2>/dev/null || true
             break
         fi
         sleep 0.2
@@ -171,10 +171,10 @@ status_instance() {
     [[ -s "$PID_FILE" ]] && cat "$PID_FILE" || echo none
     printf 'desktop_pidfile: '
     [[ -s "$DESKTOP_PID_FILE" ]] && cat "$DESKTOP_PID_FILE" || echo none
-    printf 'iced_chat: '
-    pgrep -u "$(id -u)" -af "iced_chat.*--mcp" || true
-    printf 'iced_chat_binary_count: '
-    ps -u "$(id -u)" -o args= | awk '$0 ~ /iced_chat-x86_64-linux/ && $0 !~ /xvfb-run/ && $0 !~ /awk/ {n++} END {print n+0}'
+    printf 'boru: '
+    pgrep -u "$(id -u)" -af "boru.*--mcp" || true
+    printf 'boru_binary_count: '
+    ps -u "$(id -u)" -o args= | awk '$0 ~ /boru-x86_64-linux/ && $0 !~ /xvfb-run/ && $0 !~ /awk/ {n++} END {print n+0}'
     printf 'xvfb_reserved: '
     pgrep -u "$(id -u)" -af '^Xvfb :(9[89]|1[01][0-9]|12[0-7]) ' || true
     printf 'mcp_port_%s: ' "$port"

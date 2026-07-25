@@ -93,6 +93,8 @@ use boru_core::diagnostics::GuiTestCommand;
 use boru_core::diagnostics::IcedMessageJournal;
 use boru_core::diagnostics::IcedStateSnapshot;
 use boru_core::diagnostics::DEFAULT_ACTION_STATE_TIMEOUT_MS;
+use boru_core::file_access_client::{request_download_permission, FileAccessRequestError};
+use boru_core::file_access_protocol::{FileAccessRequest, FileAccessResponse, SignedDownloadDescriptor};
 use iced::Color;
 
 // ── Shared ContinuousTracker wrapper ─────────────────────────────────
@@ -209,7 +211,7 @@ const CONNECTION_DETAILS_FIRST_VALUE_INPUT: &str = "connection-details-first-val
 const CONNECTION_DETAILS_TRIGGER_INPUT: &str = "connection-details-trigger";
 
 // ── Typography scale (re-exported from typography system) ────────────
-pub(crate) use crate::fonts::{TYPO_XL, TYPO_LG, TYPO_MD, TYPO_SM, TYPO_XS, TYPO_XXS};
+pub(crate) use crate::fonts::{XL as TYPO_XL, LG as TYPO_LG, MD as TYPO_MD, SM as TYPO_SM, XS as TYPO_XS, XXS as TYPO_XXS};
 
 /// Brand wordmark font family.  Re-exported from the typography module.
 pub(crate) use crate::fonts::RALEWAY as BRAND_LOGO_FONT;
@@ -1169,6 +1171,31 @@ pub(crate) enum DownloadState {
     Cancelled,
 }
 
+/// Download state tracked per file in the peer catalogue view.
+#[derive(Clone, Debug)]
+pub(crate) enum CatalogueDownloadState {
+    /// Awaiting the async download task to start.
+    Pending,
+    /// Actively downloading with progress.
+    Downloading {
+        /// Bytes received so far.
+        bytes: u64,
+        /// Total expected bytes, if known.
+        total: Option<u64>,
+        /// Transfer speed in bytes/sec, updated periodically.
+        speed: u64,
+    },
+    /// Download completed successfully — file is on disk.
+    Completed {
+        /// Filesystem path to the saved file.
+        path: PathBuf,
+    },
+    /// Download failed with an error message.
+    Failed(String),
+    /// Download was cancelled.
+    Cancelled,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct DownloadAttachment {
     pub(crate) kind: TransferKind,
@@ -2098,6 +2125,9 @@ pub struct IcedChat {
     /// initiation in flight.  Used to disable the button and show a spinner
     /// while the async operation is pending.
     pending_downloads: HashSet<(String, PublicKey)>,
+    /// Per-file download state for the peer catalogue view.
+    /// Keyed by the file's display name.
+    catalogue_downloads: HashMap<String, CatalogueDownloadState>,
     /// Persistent profile store (display name, bio, sharing controls).
     profile_store: UserProfileStore,
     /// Bio text input for the profile settings page.
@@ -3772,6 +3802,7 @@ impl IcedChat {
             blocked_sharers: HashSet::new(),
             profile_cache: HashMap::new(),
             pending_downloads: HashSet::new(),
+            catalogue_downloads: HashMap::new(),
             profile_store: UserProfileStore::empty_at(&data_dir, local_public),
             profile_bio_input: String::new(),
             shared_folder_enabled: false,
@@ -4076,6 +4107,15 @@ impl IcedChat {
                             invalidate_from = Some(idx);
                         }
                     }
+                } else if self.catalogue_downloads.contains_key(&name) {
+                    self.catalogue_downloads.insert(
+                        name,
+                        CatalogueDownloadState::Downloading {
+                            bytes: 0,
+                            total,
+                            speed: 0,
+                        },
+                    );
                 }
             }
             TransferProgress::Progress {
@@ -4083,6 +4123,7 @@ impl IcedChat {
                 kind: TransferKind::File,
                 bytes,
                 total,
+                name,
                 ..
             } => {
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
@@ -4093,19 +4134,36 @@ impl IcedChat {
                             }
                             // Compute transfer speed if we have a previous timestamp.
                             let now = std::time::Instant::now();
-                            if let Some(last_at) = self.last_download_progress_at {
+                            let speed = if let Some(last_at) = self.last_download_progress_at {
                                 let elapsed = now.duration_since(last_at).as_secs_f64().max(0.001);
                                 let delta = bytes.saturating_sub(self.last_download_progress_bytes);
-                                let speed = (delta as f64 / elapsed) as u64;
-                                download.speed_bytes_per_sec = Some(speed);
-                            }
+                                (delta as f64 / elapsed) as u64
+                            } else {
+                                0
+                            };
                             self.last_download_progress_at = Some(now);
                             self.last_download_progress_bytes = bytes;
                             download.state = DownloadState::Active { bytes, total };
+                            download.speed_bytes_per_sec = Some(speed);
                             self.transfer_id_to_index.insert(id, idx);
                             invalidate_from = Some(idx);
                         }
                     }
+                } else if self.catalogue_downloads.contains_key(&name) {
+                    let now = std::time::Instant::now();
+                    let speed = if let Some(last_at) = self.last_download_progress_at {
+                        let elapsed = now.duration_since(last_at).as_secs_f64().max(0.001);
+                        let delta = bytes.saturating_sub(self.last_download_progress_bytes);
+                        (delta as f64 / elapsed) as u64
+                    } else {
+                        0
+                    };
+                    self.last_download_progress_at = Some(now);
+                    self.last_download_progress_bytes = bytes;
+                    self.catalogue_downloads.insert(
+                        name,
+                        CatalogueDownloadState::Downloading { bytes, total, speed },
+                    );
                 }
             }
             TransferProgress::Completed {
@@ -4133,10 +4191,18 @@ impl IcedChat {
                             invalidate_from = Some(idx);
                         }
                     }
+                } else if self.catalogue_downloads.contains_key(&name) {
+                    // Path will be populated later by DownloadDonePeerFile
+                    self.catalogue_downloads.insert(
+                        name,
+                        CatalogueDownloadState::Completed {
+                            path: PathBuf::new(),
+                        },
+                    );
                 }
                 clear_active_transfer = true;
             }
-            TransferProgress::Failed { id, error, .. } => {
+            TransferProgress::Failed { id, error, name, .. } => {
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -4144,12 +4210,15 @@ impl IcedChat {
                                 download.transfer_id = Some(id);
                             }
                             download.state = DownloadState::Failed {
-                                failure: DownloadFailure::from_error(error),
+                                failure: DownloadFailure::from_error(error.clone()),
                             };
                             self.transfer_id_to_index.insert(id, idx);
                             invalidate_from = Some(idx);
                         }
                     }
+                } else if self.catalogue_downloads.contains_key(&name) {
+                    self.catalogue_downloads
+                        .insert(name, CatalogueDownloadState::Failed(error));
                 }
                 clear_active_transfer = true;
             }
@@ -7553,6 +7622,7 @@ impl IcedChat {
 
             AppMessage::ToggleHelp => {
                 self.help_visible = !self.help_visible;
+                iced::Task::none()
             }
             AppMessage::ToggleChatOptions => {
                 self.show_chat_options = !self.show_chat_options;
@@ -8833,6 +8903,8 @@ impl IcedChat {
             }
             AppMessage::DownloadDonePeerFile(name, path) => {
                 self.push_system(format!("*{name}* is complete"));
+                self.catalogue_downloads
+                    .insert(name.clone(), CatalogueDownloadState::Completed { path: path.clone() });
                 if let Some(idx) = self.download_entry_index {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -8853,6 +8925,17 @@ impl IcedChat {
             }
             AppMessage::DownloadFailed(error) => {
                 self.push_system(format!("Download failed: {error}"));
+                // If the error carries a catalogue file name (format "name : error"),
+                // mark it as failed in the catalogue view.
+                if let Some(name_end) = error.find(" : ") {
+                    let cat_name = error[..name_end].to_string();
+                    if self.catalogue_downloads.contains_key(&cat_name) {
+                        self.catalogue_downloads.insert(
+                            cat_name,
+                            CatalogueDownloadState::Failed(error.clone()),
+                        );
+                    }
+                }
                 let mut updated = false;
                 if let Some(idx) =
                     self.current_download_entry_index(self.active_download_transfer_id)
@@ -9480,38 +9563,85 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::RequestFileDownload { peer, file } => {
-                let peer_str = peer.to_string();
-                let content_hash = file.content_hash.clone();
                 let display_name = file.display_name.clone();
+                let name = display_name.clone();
+                self.catalogue_downloads
+                    .insert(name.clone(), CatalogueDownloadState::Pending);
+                // Clone the shared state needed for the async download task.
+                let endpoint = self.endpoint.clone();
+                let blob_store = self.blob_store.clone();
+                let neighbors = self.neighbors.clone();
+                let dl_dir = self.boru_downloads_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
+                let dn_for_err = display_name.clone();
+                let shared_file_id = file.shared_file_id.clone();
+                let content_hash = file.content_hash.clone();
                 let size_bytes = file.size_bytes;
-                if let Some(ref storage) = self.storage {
-                    match storage.create_download(&content_hash, &peer_str, size_bytes) {
-                        Ok(download_id) => {
-                            self.push_system(format!(
-                                "Download queued: {display_name} from {} (id={download_id})",
-                                peer.fmt_short(),
-                            ));
-                            iced::Task::done(AppMessage::DownloadInitiated {
-                                content_hash,
-                                peer,
-                                download_id,
-                            })
-                        }
-                        Err(e) => {
-                            self.push_system(format!("Download failed for {display_name}: {e}"));
-                            iced::Task::done(AppMessage::DownloadInitiationFailed {
-                                content_hash,
-                                peer,
-                                error: e.to_string(),
-                            })
-                        }
-                    }
-                } else {
-                    self.push_system(format!(
-                        "Cannot download: storage not available for {display_name}"
-                    ));
-                    iced::Task::none()
-                }
+                let version = file.version_number as u64;
+                iced::Task::perform(
+                    async move {
+                        let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                        // Step 1: Request download permission from the peer.
+                        let raw_hash: [u8; 32] = hex::decode(&content_hash)
+                            .map_err(|e| format!("Invalid content hash hex: {e}"))?
+                            .try_into()
+                            .map_err(|_| "Content hash wrong length".to_string())?;
+                        let request = FileAccessRequest::new(
+                            &shared_file_id, raw_hash, version,
+                        );
+                        let response = request_download_permission(
+                            &endpoint, peer, &request,
+                        )
+                        .await
+                        .map_err(|e| format!("Permission request failed: {e}"))?;
+                        let descriptor = match response {
+                            FileAccessResponse::Granted(desc) => *desc,
+                            FileAccessResponse::PermissionDenied => {
+                                return Err("Permission denied by peer".to_string())
+                            }
+                            FileAccessResponse::NotFound => {
+                                return Err("File not found on peer".to_string())
+                            }
+                            other => {
+                                return Err(format!("File access denied: {other:?}"))
+                            }
+                        };
+                        // Step 2: Extract the BlobTicket from the descriptor.
+                        let blob_ticket: BlobTicket = postcard::from_bytes(&descriptor.blob_ticket)
+                            .map_err(|e| format!("Invalid blob ticket: {e}"))?;
+                        let (addr, hash, _format) = blob_ticket.into_parts();
+                        let node_id = addr.id;
+                        let candidates =
+                            crate::app::download_candidates(node_id, &neighbors);
+                        let save_path = dl_dir.join(&display_name);
+                        let kind = boru_core::chat_callbacks::TransferKind::File;
+                        download_blob_to_file(
+                            &blob_store,
+                            &endpoint,
+                            hash,
+                            candidates,
+                            display_name.clone(),
+                            kind,
+                            &save_path,
+                            {
+                                let queue = progress_queue.clone();
+                                move |ev| {
+                                    if let Ok(mut q) = queue.lock() {
+                                        q.push_back(ev);
+                                    }
+                                }
+                            },
+                            Some(size_bytes),
+                        )
+                        .await
+                        .map_err(|e| format!("Download failed: {e}"))?;
+                        Ok::<_, String>((display_name, save_path))
+                    },
+                    move |r| match r {
+                        Ok((name, path)) => AppMessage::DownloadDonePeerFile(name, path),
+                        Err(e) => AppMessage::DownloadFailed(format!("{} : {}", dn_for_err, e)),
+                    },
+                )
             }
             AppMessage::ToggleImageEnlarge(entry_index) => {
                 // Toggle the image between enlarged and normal size
@@ -14967,7 +15097,7 @@ impl IcedChat {
 
         let content = column![
             // ── Room name ──
-            text(&room_name).size(TYPO_LG).font(crate::fonts::source_sans(iced::font::Weight::Bold)),
+            text(room_name.clone()).size(TYPO_LG).font(crate::fonts::source_sans(iced::font::Weight::Bold)),
             // ── Back button ──
             button(text("← Back to chats").size(TYPO_SM))
                 .on_press(AppMessage::GoToChatList)
@@ -14979,11 +15109,11 @@ impl IcedChat {
             // ── Room info ──
             row![
                 text("Topic: ").size(TYPO_XS).color(self.color_muted()),
-                text(&topic_hex).size(TYPO_XS).font(crate::fonts::jetbrains_mono(iced::font::Weight::Regular)),
+                text(topic_hex.clone()).size(TYPO_XS).font(crate::fonts::jetbrains_mono(iced::font::Weight::Normal)),
             ].spacing(SPACE_4),
             row![
                 text("Ticket: ").size(TYPO_XS).color(self.color_muted()),
-                button(text(&ticket_short).size(TYPO_XS).color(self.color_muted()))
+                button(text(ticket_short.clone()).size(TYPO_XS).color(self.color_muted()))
                     .on_press(AppMessage::CopyToClipboard(self.ticket_str.clone()))
                     .style(BUTTON_GHOST_BG)
                     .padding([SPACE_2, SPACE_6]),
@@ -14993,7 +15123,7 @@ impl IcedChat {
                 text(format!("{}", online_peers)).size(TYPO_XS),
             ].spacing(SPACE_4),
             // ── Advertise toggle ──
-            button(text(if is_advertised { "✓ Advertised" else "Advertise in Directory" }).size(TYPO_XS))
+            button(text(if is_advertised { "✓ Advertised" } else { "Advertise in Directory" }).size(TYPO_XS))
                 .on_press(AppMessage::ToggleAdvertiseRoom(self.topic))
                 .style(BUTTON_GHOST_BG)
                 .padding([SPACE_4, SPACE_10])
@@ -16824,10 +16954,11 @@ impl IcedChat {
     /// Placeholder view for the room directory / Discover screen.
     /// Renders a simple "coming soon" message until the full room
     /// browser UI is implemented.
-    /// View a remote peer's shared file catalogue with Download buttons.
+    /// View a remote peer's shared file catalogue with Download buttons,
+    /// rich progress, and quick actions.
     fn view_peer_catalogue(&self, peer: PublicKey) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, container, scrollable, text, Column, Row, Space};
-        use iced::{Alignment, Length};
+        use iced::{Alignment, Color, Length};
 
         let display_name = self
             .names
@@ -16855,6 +16986,40 @@ impl IcedChat {
 
         let mut body = Column::new().spacing(SPACE_4);
 
+        // ── Open Downloads Folder button ──
+        let dl_dir = self.boru_downloads_dir.clone();
+        body = body.push(
+            container(
+                button(
+                    Row::new()
+                        .push(text("📁 ").size(TYPO_SM))
+                        .push(text("Open Downloads Folder").size(TYPO_SM))
+                        .spacing(SPACE_4)
+                        .align_y(Alignment::Center),
+                )
+                .on_press(AppMessage::OpenDownloadsFolder)
+                .padding([SPACE_6, SPACE_12])
+                .style(move |theme, status| {
+                    let base = match status {
+                        iced::widget::button::Status::Hovered => accent_primary(theme),
+                        _ => Color::from_rgb(0.4, 0.4, 0.4),
+                    };
+                    iced::widget::button::Style {
+                        text_color: base,
+                        background: None,
+                        border: iced::Border {
+                            color: border_muted(theme),
+                            width: 1.0,
+                            radius: SPACE_6.into(),
+                        },
+                        ..Default::default()
+                    }
+                }),
+            )
+            .width(Length::Shrink)
+            .padding([SPACE_4, SPACE_12]),
+        );
+
         if self.catalogue_loading {
             body = body.push(
                 container(
@@ -16879,68 +17044,158 @@ impl IcedChat {
                     .style(container_surface),
                 );
             } else {
-                // Table header
-                let header_row = Row::new()
-                    .push(
-                        text("Filename")
-                            .size(TYPO_XS)
-                            .style(text_muted_style)
-                            .width(Length::Fill),
-                    )
-                    .push(
-                        text("Size")
-                            .size(TYPO_XS)
-                            .style(text_muted_style)
-                            .width(Length::Fixed(80.0)),
-                    )
-                    .push(
-                        text("Type")
-                            .size(TYPO_XS)
-                            .style(text_muted_style)
-                            .width(Length::Fixed(100.0)),
-                    )
-                    .push(Space::new().width(Length::Fixed(80.0)))
-                    .spacing(SPACE_8)
-                    .padding([SPACE_4, SPACE_8]);
-                body = body.push(header_row);
-
                 for file in files {
-                    let is_pending = self
-                        .pending_downloads
-                        .contains(&(file.content_hash.clone(), peer));
                     let size_str = format_file_size(file.size_bytes);
-
-                    // Truncate mime type for display
                     let mime_display = if file.mime_type.len() > 20 {
                         format!("{}…", &file.mime_type[..18])
                     } else {
                         file.mime_type.clone()
                     };
+                    let dl_state = self.catalogue_downloads.get(&file.display_name);
+
+                    // ── Build file info column ──
+                    let info_col = Column::new()
+                        .push(
+                            text(&file.display_name)
+                                .size(TYPO_SM)
+                                .width(Length::Fill),
+                        )
+                        .push(
+                            text(format!("{} · {}", size_str, mime_display))
+                                .size(TYPO_XS)
+                                .style(text_muted_style),
+                        )
+                        .spacing(SPACE_2);
+
+                    // ── Action button based on download state ──
+                    let action: iced::Element<'_, AppMessage> = match dl_state {
+                        Some(CatalogueDownloadState::Pending) => {
+                            button(text("…").size(TYPO_XS))
+                                .padding([SPACE_2, SPACE_6])
+                                .into()
+                        }
+                        Some(CatalogueDownloadState::Downloading {
+                            bytes,
+                            total,
+                            speed,
+                        }) => {
+                            let pct = total
+                                .filter(|t| *t > 0)
+                                .map(|t| ((*bytes as f64 / t as f64) * 100.0) as u8)
+                                .unwrap_or(0);
+                            let speed_str = if *speed > 0 {
+                                format!("{}/s", format_file_size(*speed))
+                            } else {
+                                String::new()
+                            };
+                            Column::new()
+                                .push(
+                                    Row::new()
+                                        .push(
+                                            iced::widget::progress_bar(0.0..=1.0, pct as f32 / 100.0)
+                                                .length(Length::Fixed(80.0))
+                                                .girth(Length::Fixed(6.0)),
+                                        )
+                                        .push(
+                                            text(format!("{}%", pct))
+                                                .size(TYPO_XXS)
+                                                .color(accent_primary(&iced::Theme::Dark)),
+                                        )
+                                        .align_y(Alignment::Center)
+                                        .spacing(SPACE_4),
+                                )
+                                .push(
+                                    text(format!(
+                                        "{}{}",
+                                        format_file_size(*bytes),
+                                        speed_str
+                                    ))
+                                    .size(TYPO_XXS)
+                                    .style(text_muted_style),
+                                )
+                                .spacing(SPACE_2)
+                                .align_x(Alignment::End)
+                                .into()
+                        }
+                        Some(CatalogueDownloadState::Completed { path: _ }) => {
+                            Row::new()
+                                .push(
+                                    button(text("Open").size(TYPO_XS))
+                                        .on_press(AppMessage::OpenDownloadedFile(
+                                            file.display_name.clone(),
+                                        ))
+                                        .padding([SPACE_2, SPACE_6]),
+                                )
+                                .push(
+                                    text("✓").size(TYPO_XS).color(
+                                        accent_green(&iced::Theme::Dark),
+                                    ),
+                                )
+                                .spacing(SPACE_4)
+                                .align_y(Alignment::Center)
+                                .into()
+                        }
+                        Some(CatalogueDownloadState::Failed(err)) => {
+                            Column::new()
+                                .push(
+                                    text("Failed")
+                                        .size(TYPO_XXS)
+                                        .color(color_error(&iced::Theme::Dark)),
+                                )
+                                .push(
+                                    button(text("Retry").size(TYPO_XS))
+                                        .on_press(AppMessage::RequestFileDownload {
+                                            peer,
+                                            file: file.clone(),
+                                        })
+                                        .padding([SPACE_2, SPACE_6]),
+                                )
+                                .spacing(SPACE_2)
+                                .align_x(Alignment::End)
+                                .into()
+                        }
+                        Some(CatalogueDownloadState::Cancelled) => {
+                            Column::new()
+                                .push(
+                                    text("Cancelled")
+                                        .size(TYPO_XXS)
+                                        .style(text_muted_style),
+                                )
+                                .push(
+                                    button(text("Retry").size(TYPO_XS))
+                                        .on_press(AppMessage::RequestFileDownload {
+                                            peer,
+                                            file: file.clone(),
+                                        })
+                                        .padding([SPACE_2, SPACE_6]),
+                                )
+                                .spacing(SPACE_2)
+                                .align_x(Alignment::End)
+                                .into()
+                        }
+                        None => {
+                            let is_pending = self
+                                .pending_downloads
+                                .contains(&(file.content_hash.clone(), peer));
+                            if is_pending {
+                                button(text("…").size(TYPO_XS))
+                                    .padding([SPACE_2, SPACE_6])
+                                    .into()
+                            } else {
+                                button(text("Download").size(TYPO_XS))
+                                    .on_press(AppMessage::RequestFileDownload {
+                                        peer,
+                                        file: file.clone(),
+                                    })
+                                    .padding([SPACE_2, SPACE_6])
+                                    .into()
+                            }
+                        }
+                    };
 
                     let file_row = Row::new()
-                        .push(text(&file.display_name).size(TYPO_SM).width(Length::Fill))
-                        .push(
-                            text(size_str)
-                                .size(TYPO_XS)
-                                .style(text_muted_style)
-                                .width(Length::Fixed(80.0)),
-                        )
-                        .push(
-                            text(mime_display)
-                                .size(TYPO_XS)
-                                .style(text_muted_style)
-                                .width(Length::Fixed(100.0)),
-                        )
-                        .push(if is_pending {
-                            button(text("…").size(TYPO_XS)).padding([SPACE_2, SPACE_6])
-                        } else {
-                            button(text("Download").size(TYPO_XS))
-                                .on_press(AppMessage::RequestFileDownload {
-                                    peer,
-                                    file: file.clone(),
-                                })
-                                .padding([SPACE_2, SPACE_6])
-                        })
+                        .push(info_col.width(Length::Fill))
+                        .push(action)
                         .spacing(SPACE_8)
                         .align_y(Alignment::Center)
                         .padding([SPACE_4, SPACE_8]);

@@ -9,8 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 MANIFEST="${BORU_TEST_MANIFEST:-$PROJECT_DIR/config/test-machines.toml}"
 SUPERVISOR="$PROJECT_DIR/scripts/boru-test-instance.sh"
-LOCAL_BINARY="${BORU_TEST_BINARY:-$PROJECT_DIR/target/debug/examples/iced_chat}"
-REMOTE_BINARY_NAME="iced_chat-x86_64-linux"
+LOCAL_BINARY="${BORU_TEST_BINARY:-$PROJECT_DIR/target/debug/examples/boru}"
+REMOTE_BINARY_NAME="boru-x86_64-linux"
 SSH_OPTIONS=()
 
 usage() {

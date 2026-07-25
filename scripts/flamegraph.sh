@@ -17,7 +17,7 @@
 set -euo pipefail
 
 FEATURES="${FLAMEGRAPH_FEATURES:-gui}"
-EXAMPLE="${FLAMEGRAPH_EXAMPLE:-iced_chat}"
+EXAMPLE="${FLAMEGRAPH_EXAMPLE:-boru}"
 OUTPUT="${1:-flamegraph.svg}"
 
 # If arguments contain --output or --features, forward them

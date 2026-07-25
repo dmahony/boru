@@ -187,8 +187,8 @@ impl Typography {
                 Weight::Medium
             }
             Self::BoruWordmark => Weight::ExtraBold,
-            Self::TechnicalValue => Weight::Regular,
-            _ => Weight::Regular,
+            Self::TechnicalValue => Weight::Normal,
+            _ => Weight::Normal,
         }
     }
 
@@ -214,7 +214,7 @@ impl Typography {
             Self::DisplayLarge => manrope(Weight::Bold),
             Self::DisplayMedium => manrope(Weight::Semibold),
             Self::BoruWordmark => raleway_extra_bold(),
-            Self::TechnicalValue => jetbrains_mono(Weight::Regular),
+            Self::TechnicalValue => jetbrains_mono(Weight::Normal),
             _ => source_sans(self.weight()),
         }
     }
@@ -224,29 +224,29 @@ impl Typography {
 
 /// Build an `Element` with the correct typography applied.
 /// Shorthand for `.font(font).size(px)`.
-pub fn typo_text<'a, Message: 'a>(
+pub fn typo_text<'a>(
     token: Typography,
-    content: impl Into<iced::widget::text::Fragment<'a>>,
-) -> text::Text<'a, Message, iced::Theme> {
+    content: impl text::IntoFragment<'a>,
+) -> text::Text<'a, iced::Theme, iced::Renderer> {
     text(content)
         .font(token.font())
         .size(token.size_px())
 }
 
 /// Apply a typography token to an existing text widget.
-pub fn with_typo<'a, Message: 'a>(
-    widget: text::Text<'a, Message, iced::Theme>,
+pub fn with_typo<'a>(
+    widget: text::Text<'a, iced::Theme, iced::Renderer>,
     token: Typography,
-) -> text::Text<'a, Message, iced::Theme> {
+) -> text::Text<'a, iced::Theme, iced::Renderer> {
     widget.font(token.font()).size(token.size_px())
 }
 
 /// Like `typo_text` but with a custom `Pixels` size override
 /// (for accessibility scaling).
-pub fn typo_text_scaled<'a, Message: 'a>(
+pub fn typo_text_scaled<'a>(
     token: Typography,
-    content: impl Into<iced::widget::text::Fragment<'a>>,
-) -> text::Text<'a, Message, iced::Theme> {
+    content: impl text::IntoFragment<'a>,
+) -> text::Text<'a, iced::Theme, iced::Renderer> {
     text(content)
         .font(token.font())
         .size(Pixels(token.size_px()))

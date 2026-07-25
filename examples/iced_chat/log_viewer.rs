@@ -44,7 +44,7 @@ impl LogViewer {
                 .font(crate::fonts::source_sans(Weight::Bold))
                 .size(TYPO_LG),
             text(format!(" {}", app::version_tag()))
-                .font(crate::fonts::source_sans(Weight::Regular))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_XXS)
                 .style(text_muted_style)
         ]
@@ -63,11 +63,11 @@ impl LogViewer {
                 "No log output yet.\n\nThe log file is:\n{}",
                 self.log_path.display()
             ))
-            .font(crate::fonts::source_sans(Weight::Regular))
+            .font(crate::fonts::source_sans(Weight::Normal))
             .size(TYPO_SM)
         } else {
             text(&self.contents)
-                .font(crate::fonts::jetbrains_mono(Weight::Regular))
+                .font(crate::fonts::jetbrains_mono(Weight::Normal))
                 .size(TYPO_SM)
                 .width(Length::Fill)
         };
@@ -75,7 +75,7 @@ impl LogViewer {
         column![
             header,
             text(self.log_path.display().to_string())
-                .font(crate::fonts::source_sans(Weight::Regular))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_XS)
                 .style(text_muted_style),
             scrollable(container(body).width(Length::Fill)).height(Length::Fill),
