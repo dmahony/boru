@@ -434,6 +434,16 @@ fn main() -> Result<()> {
     };
     info!("> relay: {}", fmt_relay_mode(&relay_mode));
 
+    // Extract the relay URL for directory topic derivation.
+    // We do this outside the runtime.block_on block to avoid capturing
+    // relay_mode by reference in the async closure.
+    let relay_url_for_directory: Option<String> = match &relay_mode {
+        RelayMode::Disabled => None,
+        RelayMode::Custom(map) => map.urls::<Vec<_>>().first().map(|u| u.to_string()),
+        RelayMode::Default => Some(VPS_RELAY_URL.to_string()),
+        RelayMode::Staging => Some(VPS_RELAY_URL.to_string()),
+    };
+
     // ── Incompatible-option checks ──────────────────────────────────────
     if args.publish_direct_addresses && args.no_dht {
         bail_any!(
@@ -496,11 +506,13 @@ fn main() -> Result<()> {
         room_history,
         notice,
         chat_history,
+        message_store,
         backfill_handle,
         whisper_events_rx,
         whisper_handle,
         inbox_events_rx,
         discovered_peers_rx,
+        directory_room_rx,
         dht_for_private,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
@@ -650,9 +662,9 @@ fn main() -> Result<()> {
             };
             if migrated > 0 {
                 info!("migrated {migrated} entries from chat_history.json to SQLite");
-                // Clear and save the JSON file so we don't migrate again.
-                chat_history.lock().unwrap().clear();
-                let _ = chat_history.lock().unwrap().save();
+                // Keep the JSON store intact — it remains the live persistence
+                // mechanism until the SQLite path is fully wired for reads and
+                // writes.  INSERT OR IGNORE prevents duplicate migrations.
             }
         }
 
@@ -759,6 +771,9 @@ fn main() -> Result<()> {
         // Also create the discovered-peers channel for UI display.
         let (discovered_peers_tx, discovered_peers_rx_tmp) =
             tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(64);
+        // Create the directory room channel for UI display.
+        let (directory_room_tx, directory_room_rx_tmp) =
+            tokio::sync::mpsc::channel::<app::DirectoryRoomUpdate>(64);
         let lobby_topic = app::IcedChat::default_lobby_topic();
         splash_send("Joining lobby...");
         if let Ok(sub) = gossip.subscribe(lobby_topic, Vec::new()).await {
@@ -833,7 +848,54 @@ fn main() -> Result<()> {
         } else {
             warn!("failed to subscribe to lobby topic");
         }
+
+        // ── Directory topic subscription ──────────────────────────────────
+        // Subscribe to the directory gossip topic for public-room discovery.
+        // The directory topic is derived from the relay URL so all peers on
+        // the same relay share one directory mesh.
+        if let Some(ref relay_url) = relay_url_for_directory {
+            let dir_topic = boru_core::directory::directory_topic(relay_url);
+            if let Ok(sub) = gossip.subscribe(dir_topic, Vec::new()).await {
+                splash_send("Joining directory...");
+                let (_sender, mut receiver) = sub.split();
+                let dir_tx = directory_room_tx.clone();
+                tokio::spawn(async move {
+                    use n0_future::StreamExt;
+                    while let Some(event) = receiver.next().await {
+                        let Ok(boru_core::api::Event::Received(msg)) = event else {
+                            continue;
+                        };
+                        // Skip room-doc markers (metadata 0xFE, roster 0xFF)
+                        if let Some(&marker) = msg.content.first() {
+                            if marker == 0xFE || marker == 0xFF {
+                                continue;
+                            }
+                        }
+                        if let Ok((from, message, _sent_at)) =
+                            SignedMessage::verify_and_decode(&msg.content)
+                        {
+                            if let Message::RoomAdvertisement { ad, .. } = message {
+                                let _ = dir_tx.try_send(app::DirectoryRoomUpdate(ad, from));
+                            }
+                        }
+                    }
+                });
+                info!("subscribed to directory topic");
+                splash_send("Directory joined");
+            } else {
+                warn!("failed to subscribe to directory topic");
+            }
+        } else {
+            info!("directory topic: relay disabled, skipping subscription");
+        }
+
         let discovered_peers_rx = Arc::new(Mutex::new(discovered_peers_rx_tmp));
+        let directory_room_rx = Arc::new(Mutex::new(directory_room_rx_tmp));
+
+        // ── Directory room update channel ──
+        let (directory_room_tx, directory_room_rx_tmp) =
+            tokio::sync::mpsc::channel::<app::DirectoryRoomUpdate>(64);
+        let directory_room_rx = Arc::new(Mutex::new(directory_room_rx_tmp));
 
         // Spawn the backfill background actor for requesting history
         let backfill_handle = BackfillHandle::spawn(endpoint.clone());
@@ -917,11 +979,13 @@ fn main() -> Result<()> {
             room_history,
             notice,
             chat_history,
+            message_store,
             backfill_handle,
             whisper_events_rx,
             whisper_handle,
             inbox_events_rx,
             discovered_peers_rx,
+            directory_room_rx,
             dht_for_private,
         ))
     })?;
@@ -1060,10 +1124,12 @@ fn main() -> Result<()> {
             initial_room,
             notice,
             chat_history,
+            message_store,
             backfill_handle,
             initial_topic.is_some() && args.command.is_none(),
             None,
             Arc::clone(&discovered_peers_rx),
+            directory_room_rx,
             dht_for_private,
             args.no_dht,
             iced_diagnostics,

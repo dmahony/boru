@@ -922,6 +922,15 @@ pub enum Message {
         /// Blob hash for the image content, for blob-store lookup and download.
         hash: MessageHash,
     },
+    /// Broadcast a public room advertisement into the directory topic.
+    RoomAdvertisement {
+        /// The room advertisement payload.
+        ad: RoomAdvertisement,
+        /// Ed25519 signature over postcard-serialized RoomAdvertisement bytes
+        /// by the room creator's node key, so receivers can verify authenticity.
+        #[serde(default)]
+        signature: Vec<u8>,
+    },
     /// Invisible keepalive heartbeat — keeps connections warm and updates
     /// mesh health timestamps without producing any chat log entry or UI
     /// notification.
@@ -944,6 +953,26 @@ pub enum Message {
     },
     /// Publish the sender's profile and metadata over gossip.
     ProfileUpdate(UserProfile),
+}
+
+/// A room advertisement broadcast into the directory topic.
+///
+/// Peers can use this to discover public rooms without needing an
+/// out-of-band invitation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomAdvertisement {
+    /// Human-readable room name.
+    pub room_name: String,
+    /// Short description (max 200 chars).
+    pub description: String,
+    /// The room's gossip topic.
+    pub topic: TopicId,
+    /// Serialized room ticket for joining.
+    pub ticket: String,
+    /// Approximate member count.
+    pub member_count: u32,
+    /// Unix ms timestamp of last activity.
+    pub last_activity: u64,
 }
 
 /// Metadata for a file advertised by a peer in [`Message::ProfileUpdate`].
@@ -973,6 +1002,29 @@ pub type MessageHash = Hash;
 pub fn message_hash(message: &Message) -> MessageHash {
     let bytes = postcard::to_stdvec(message).expect("postcard::to_stdvec is infallible");
     *blake3::hash(&bytes).as_bytes()
+}
+
+/// Sign a [`RoomAdvertisement`] with the room creator's secret key.
+///
+/// Returns the Ed25519 signature bytes that [`verify_advertisement`] can check.
+pub fn sign_advertisement(ad: &RoomAdvertisement, sk: &SecretKey) -> Vec<u8> {
+    let bytes = postcard::to_stdvec(ad).expect("postcard::to_stdvec is infallible");
+    sk.sign(&bytes).to_bytes().to_vec()
+}
+
+/// Verify an Ed25519 signature over a [`RoomAdvertisement`].
+///
+/// Returns `true` if the signature is valid for the given author's public key.
+pub fn verify_advertisement(ad: &RoomAdvertisement, signature: &[u8], author: PublicKey) -> bool {
+    let bytes = match postcard::to_stdvec(ad) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let sig_bytes: [u8; iroh::Signature::LENGTH] = match signature.try_into() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    author.verify(&bytes, &iroh::Signature::from_bytes(&sig_bytes)).is_ok()
 }
 
 const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;
@@ -1796,6 +1848,9 @@ pub fn handle_net_event_for_topic(
                 }
                 Message::ContactControl { .. } => {
                     // Handled at the frontend layer.
+                }
+                Message::RoomAdvertisement { .. } => {
+                    // Room advertisements are handled at the frontend layer.
                 }
             }
         }

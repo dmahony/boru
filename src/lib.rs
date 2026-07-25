@@ -45,6 +45,11 @@ pub mod public_room_config;
 #[cfg(feature = "net")]
 pub mod public_room_continuous;
 
+/// Public-room directory — topic derivation, advertisement store, and
+/// gossip subscription for discovering public rooms on the same relay.
+#[cfg(feature = "net")]
+pub mod directory;
+
 /// Bounded dynamic peer joiner — joins discovered peers into the gossip mesh
 /// with dedup, backoff, retries, and concurrency limits.
 #[cfg(feature = "net")]

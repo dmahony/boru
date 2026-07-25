@@ -71,7 +71,7 @@ use n0_future::task;
 use n0_future::Stream;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::connection_details::{
     self, ConnectionDetailsDialogAction, ConnectionDetailsDialogState, ConnectionDetailsViewModel,
@@ -79,7 +79,8 @@ use crate::connection_details::{
 use crate::notification::service::{NotificationService, WindowFocusState};
 use crate::perf_tracker::PerfTracker;
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
-use boru_core::chat_core::{RoomInvitation, DIAGNOSTICS};
+use boru_core::chat_core::{RoomAdvertisement, RoomInvitation, verify_advertisement, DIAGNOSTICS};
+use boru_core::directory::DirectoryStore;
 use boru_core::diagnostics::DiagnosticEventKind;
 use boru_core::diagnostics::FailureLayer;
 use boru_core::diagnostics::GuiActionError;
@@ -1662,6 +1663,8 @@ pub enum Screen {
     PeerCatalogue(PublicKey),
     /// Redesigned friend profile view with context menu and action buttons.
     FriendProfile(PublicKey),
+    /// Public room directory — browse advertised rooms from the current relay.
+    Discover,
 }
 
 // ── Per-conversation runtime state ─────────────────────────────────────
@@ -1947,6 +1950,10 @@ pub struct IcedChat {
     download_manager: Option<Arc<std::sync::Mutex<DownloadManager>>>,
     /// Whether chat history has unsaved changes.
     chat_history_dirty: bool,
+    /// Persistent SQLite message store for chat history.
+    /// Used for loading old migrated data on restart and for redundant
+    /// persistence alongside the JSON store.
+    message_store: Arc<MessageStore>,
     /// Number of entries that have already been saved to chat_history
     /// for the current room. Used to avoid re-saving the same entries
     /// on every room-navigation event.
@@ -2187,6 +2194,26 @@ pub struct IcedChat {
     /// Entry index whose link preview is currently being fetched.
     /// Used to prevent duplicate concurrent fetches for the same entry.
     link_preview_fetch_index: Option<usize>,
+
+    // ── Room advertisement (public directory) ──
+    /// Which rooms are being advertised into the directory topic.
+    advertised_rooms: HashSet<TopicId>,
+    /// Counter for periodic room-advertisement broadcast (decremented per
+    /// ConnMonitorTick; broadcasts when it hits 0, resets to 60).
+    advertise_counter: u32,
+    /// Stable gossip topic used to discover public rooms on this relay.
+    directory_topic: TopicId,
+    /// Gossip sender for the directory topic (subscribed lazily when the
+    /// first room is enabled for advertising).
+    directory_sender: Option<GossipSender>,
+    /// Whether the \"Advertise in Directory\" checkbox is checked in the
+    /// create-room dialog.
+    create_room_advertise: bool,
+    /// Received room advertisements from the directory gossip topic.
+    directory_store: Arc<StdMutex<DirectoryStore>>,
+    /// Channel for receiving room advertisements from the background directory
+    /// subscription task.
+    directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>,
 }
 
 /// Cached profile data received from a peer via ProfileUpdate gossip.
@@ -2384,6 +2411,12 @@ pub struct DiscoveredPeersUpdate {
     pub removed: Vec<PublicKey>,
 }
 
+/// A room advertisement received from the directory gossip topic.
+///
+/// Paired with the author's [`PublicKey`] so the receiver can verify the
+/// signature before storing in the [`DirectoryStore`].
+pub struct DirectoryRoomUpdate(pub RoomAdvertisement, pub PublicKey);
+
 fn apply_discovered_peers_update(peers: &mut Vec<PublicKey>, update: DiscoveredPeersUpdate) {
     peers.retain(|peer| !update.removed.contains(peer));
     for peer in update.added {
@@ -2421,8 +2454,10 @@ pub enum AppMessage {
     ConfirmCreateNewRoom,
     /// Cancel the create-room dialog.
     CancelCreateRoom,
-    /// Toggle the "Enable DHT discovery" checkbox in the create-room dialog.
+    /// Toggle whether DHT discovery is enabled when creating a new room.
     CreateNewRoomDhtToggled(bool),
+    /// Toggle whether the new room is advertised in the directory.
+    CreateNewRoomAdvertiseToggled(bool),
     /// Join a room from a ticket string.
     JoinFromTicket,
     /// The room switch / join failed.
@@ -2815,6 +2850,20 @@ pub enum AppMessage {
     /// Subscribe to all stored conversations at startup so messages can be
     /// received even before the user opens each chat.
     SubscribeStoredConversations,
+
+    // ── Room advertisement ──
+    /// Toggle whether a room appears in the public directory.
+    ToggleAdvertiseRoom(TopicId),
+    /// Subscribe to the directory gossip topic.
+    SubscribeDirectoryTopic,
+    /// The directory topic subscription completed.
+    DirectorySubscribed(Option<GossipSender>),
+    /// Open the public room directory (Discover screen).
+    OpenDirectory,
+    /// Join a room from the directory.
+    DirectoryRoomJoin(RoomAdvertisement),
+    /// A room advertisement was received from the directory gossip topic.
+    DirectoryRoomUpdate(RoomAdvertisement, PublicKey),
 }
 
 /// Map semantic GUI navigation commands to the same application messages used
@@ -3449,10 +3498,12 @@ impl IcedChat {
         initial_room: Option<(TopicId, Vec<EndpointAddr>)>,
         notice: String,
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
+        message_store: Arc<MessageStore>,
         backfill_handle: BackfillHandle,
         return_to_chat_list_after_open: bool,
         continuous_tracker: Option<ContinuousTracker>,
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
+        directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>,
         dht: Option<distributed_topic_tracker::Dht>,
         private_dht_disabled: bool,
         iced_diagnostics: IcedMessageJournal,
@@ -3623,7 +3674,7 @@ impl IcedChat {
             memory_lookup,
             local_label,
             local_public,
-            relay_mode,
+            relay_mode: relay_mode.clone(),
             runtime_handle,
             net_rx,
             net_tx,
@@ -3670,6 +3721,7 @@ impl IcedChat {
             storage,
             download_manager,
             chat_history_dirty: false,
+            message_store,
             history_saved_count: 0,
             friend_online_cache,
             friends_sidebar_revision: 0,
@@ -3761,10 +3813,21 @@ impl IcedChat {
             gui_state_tx,
             recent_activity: VecDeque::with_capacity(50),
             window_width: 1200.0,
-            link_preview_cache: std::sync::Arc::new(std::sync::Mutex::new(
-                link_preview::LinkPreviewCache::new(),
-            )),
+            link_preview_cache: Arc::new(StdMutex::new(link_preview::LinkPreviewCache::new())),
             link_preview_fetch_index: None,
+
+            // ── Room advertisement ──
+            advertised_rooms: HashSet::new(),
+            advertise_counter: 60,
+            // Derive directory topic from the relay URL — all peers on the
+            // same relay share the same directory topic.
+            directory_topic: Self::derive_directory_topic_from_relay(
+                fmt_relay_mode(&relay_mode).as_str(),
+            ),
+            directory_sender: None,
+            create_room_advertise: false,
+            directory_store: Arc::new(StdMutex::new(DirectoryStore::new())),
+            directory_room_rx,
         }
     }
 
@@ -3796,6 +3859,18 @@ impl IcedChat {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"iroh-gossip-chat/personal-room/v1");
         hasher.update(self.local_public.as_bytes());
+        TopicId::from_bytes(*hasher.finalize().as_bytes())
+    }
+
+    /// Derive a stable directory topic from the relay URL.
+    ///
+    /// All peers on the same relay server derive the same topic ID,
+    /// enabling discovery of advertised public rooms without an
+    /// out-of-band rendezvous point.
+    fn derive_directory_topic_from_relay(relay_url: &str) -> TopicId {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"iroh-gossip-chat/directory/v1");
+        hasher.update(relay_url.as_bytes());
         TopicId::from_bytes(*hasher.finalize().as_bytes())
     }
 
@@ -4330,6 +4405,73 @@ impl IcedChat {
         }
     }
 
+    /// Convert a SQLite `ChatMessageRow` to a `ChatEntry` for in-memory replay.
+    fn chat_message_row_to_chat_entry(
+        row: &boru_core::store::ChatMessageRow,
+        local_hex: &str,
+    ) -> Option<ChatEntry> {
+        use std::str::FromStr;
+        let kind = match row.kind.as_str() {
+            "system" => ChatKind::System,
+            "text" | "image" => {
+                let sender_hex = hex::encode(row.sender);
+                if sender_hex == local_hex || sender_hex.is_empty() {
+                    ChatKind::Local
+                } else {
+                    ChatKind::Remote
+                }
+            }
+            _ => return None,
+        };
+        let label = match kind {
+            ChatKind::System => "System".to_string(),
+            ChatKind::Local => "You".to_string(),
+            ChatKind::Remote => {
+                let sender_hex = hex::encode(row.sender);
+                sender_hex[..sender_hex.len().min(16)].to_string()
+            }
+        };
+        let sender_key = match kind {
+            ChatKind::Remote => PublicKey::from_str(&hex::encode(row.sender)).ok(),
+            ChatKind::Local => PublicKey::from_str(local_hex).ok(),
+            ChatKind::System => None,
+        };
+        let delivery_state = match row.delivery_state.as_str() {
+            "queued" => DeliveryState::Queued,
+            "sent" => DeliveryState::Sent,
+            "delivered" => DeliveryState::Delivered,
+            "seen" => DeliveryState::Seen,
+            "failed" => DeliveryState::Failed,
+            _ => DeliveryState::Queued,
+        };
+        let is_image = row.kind == "image";
+        Some(ChatEntry {
+            kind,
+            label: sanitize_single_line(&label),
+            body: sanitize_display_text(&row.body, DEFAULT_MAX_DISPLAY_LENGTH),
+            message_hash: Some(row.msg_hash),
+            edited: false,
+            reactions: Vec::new(),
+            label_text: None,
+            reactions_text: None,
+            formatted_time: None,
+            image_handle: None,
+            avatar_handle: None,
+            image_bytes: None,
+            image_identifier: row.image_identifier.clone(),
+            image_error: None,
+            timestamp: Some(row.timestamp_ms),
+            event_id: row.id as u64,
+            delivery_state,
+            sender_key,
+            download: None,
+            widget_gen: 0,
+            link_preview: None,
+            link_preview_loading: false,
+            link_preview_error: false,
+        })
+    }
+
     fn push_system(&mut self, text: impl Into<String>) {
         let entry = ChatEntry::system(text);
         self.entries_push(entry);
@@ -4499,7 +4641,8 @@ impl IcedChat {
             AppMessage::CreateNewRoom => "CreateNewRoom",
             AppMessage::ConfirmCreateNewRoom => "ConfirmCreateNewRoom",
             AppMessage::CancelCreateRoom => "CancelCreateRoom",
-            AppMessage::CreateNewRoomDhtToggled(_) => "CreateNewRoomDhtToggled",
+            AppMessage::CreateNewRoomDhtToggled(..) => "CreateNewRoomDhtToggled",
+            AppMessage::CreateNewRoomAdvertiseToggled(..) => "CreateNewRoomAdvertiseToggled",
             AppMessage::JoinFromTicket => "JoinFromTicket",
             AppMessage::RoomJoinFailed(_) => "RoomJoinFailed",
             AppMessage::JoinTicketInputChanged(_) => "JoinTicketInputChanged",
@@ -4657,6 +4800,12 @@ impl IcedChat {
             AppMessage::ImportFriendFromFile => "ImportFriendFromFile",
             AppMessage::ImportFriendFromFilePicked(_) => "ImportFriendFromFilePicked",
             AppMessage::SubscribeStoredConversations => "SubscribeStoredConversations",
+            AppMessage::ToggleAdvertiseRoom(..) => "ToggleAdvertiseRoom",
+            AppMessage::SubscribeDirectoryTopic => "SubscribeDirectoryTopic",
+            AppMessage::DirectorySubscribed(..) => "DirectorySubscribed",
+            AppMessage::OpenDirectory => "OpenDirectory",
+            AppMessage::DirectoryRoomJoin(..) => "DirectoryRoomJoin",
+            AppMessage::DirectoryRoomUpdate(..) => "DirectoryRoomUpdate",
         }
     }
 }
@@ -4825,6 +4974,7 @@ impl IcedChat {
             self.chat_history.lock().unwrap().push(history_entry);
         }
         self.history_saved_count = current_count;
+        self.chat_history_dirty = true;
         self.try_save_chat_history();
     }
 }
@@ -4996,6 +5146,7 @@ impl IcedChat {
             Screen::Settings => "Settings open".to_string(),
             Screen::ChatList => "Chat list open".to_string(),
             Screen::Splash => "Splash screen".to_string(),
+            Screen::Discover => "Discover".to_string(),
         };
 
         let mesh_state = match &self.mesh_health {
@@ -5204,6 +5355,7 @@ impl IcedChat {
             Screen::PeerCatalogue(_) => ("PeerCatalogue", None),
             Screen::FriendProfile(_) => ("FriendProfile", None),
             Screen::Splash => ("Splash", None),
+            Screen::Discover => ("Discover", None),
         };
         let _ = self.gui_state_tx.send(IcedStateSnapshot {
             node_id: self.local_public.to_string(),
@@ -5341,6 +5493,11 @@ impl IcedChat {
 
             AppMessage::CreateNewRoomDhtToggled(enabled) => {
                 self.create_room_dht_enabled = enabled;
+                iced::Task::none()
+            }
+
+            AppMessage::CreateNewRoomAdvertiseToggled(enabled) => {
+                self.create_room_advertise = enabled;
                 iced::Task::none()
             }
 
@@ -5909,6 +6066,17 @@ impl IcedChat {
                     self.room_trackers.insert(topic, tracker);
                 }
 
+                // Auto-advertise the room if the "Advertise in Directory" checkbox
+                // was checked in the create-room dialog.
+                if self.create_room_advertise {
+                    self.advertised_rooms.insert(topic);
+                    info!(%topic, "auto-advertising new room in directory");
+                    self.create_room_advertise = false;
+                    if self.directory_sender.is_none() {
+                        return iced::Task::done(AppMessage::SubscribeDirectoryTopic);
+                    }
+                }
+
                 // Record RoomJoined diagnostic event so diagnostic evidence
                 // and MCP room-membership checks reflect the active subscription.
                 DIAGNOSTICS.record(Some(topic), DiagnosticEventKind::RoomJoined);
@@ -5951,6 +6119,30 @@ impl IcedChat {
                         })
                         .collect();
                 }
+                // Also auto-subscribe to deterministic direct-chat topics
+                // for all friends with active conversations.  This ensures
+                // both peers are on the same gossip topic even when a
+                // whisper ConversationInvite fails to deliver.
+                {
+                    let local_pk = self.local_public;
+                    let bootstrap_peers: Vec<PublicKey> = self.discovered_peers.clone();
+                    for (fid, record) in self.friends.iter() {
+                        if record.direct_conversation().is_some_and(|dc| {
+                            dc.state == boru_core::friends::DirectConversationState::Active
+                        }) {
+                            if let Some(peer_pk) = fid.parse_public_key().ok() {
+                                let direct_topic = direct_topic(&local_pk, &peer_pk);
+                                if direct_topic != topic && !self.conversations.contains_key(&direct_topic) {
+                                    let peers = bootstrap_peers.clone();
+                                    bg_tasks.push(iced::Task::done(AppMessage::BackgroundSubscribe(
+                                        direct_topic,
+                                        peers,
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
                 self.push_system("Chat joined.");
                 self.push_system("Type a message and press Enter to send.  /help for commands.");
 
@@ -5969,21 +6161,51 @@ impl IcedChat {
                 // Load persisted history and replay it into the UI.
                 // Entries are prepended (oldest first) so they appear before
                 // any current-session system messages.
+                // We load from the SQLite message_store (which has migrated
+                // data and correctly-signed bytes) AND from the in-memory
+                // JSON store (which has recent session entries), deduplicating
+                // by message hash and (body, sender, timestamp) fingerprint.
                 {
                     let local_hex = self.local_public.to_string();
-                    let history_entries: Vec<HistoryEntry> = {
+                    let mut seen_hashes: HashSet<MessageHash> = HashSet::new();
+                    // Load from SQLite first (has old migrated data)
+                    if let Ok(rows) = self
+                        .message_store
+                        .get_messages_for_topic(topic.as_bytes(), 10000, 0)
+                    {
+                        for row in &rows {
+                            seen_hashes.insert(row.msg_hash);
+                            if let Some(chat_entry) =
+                                Self::chat_message_row_to_chat_entry(row, &local_hex)
+                            {
+                                self.entries_push(chat_entry);
+                            }
+                        }
+                    }
+                    // Then load from JSON store for recent entries not yet in SQLite
+                    {
                         let chat_history = self.chat_history.lock().unwrap();
-                        chat_history
+                        let json_entries: Vec<HistoryEntry> = chat_history
                             .for_topic(&topic)
                             .into_iter()
                             .cloned()
-                            .collect()
-                    };
-                    for hist_entry in &history_entries {
-                        if let Some(chat_entry) =
-                            Self::history_entry_to_chat_entry(hist_entry, &topic, &local_hex)
-                        {
-                            self.entries_push(chat_entry);
+                            .collect();
+                        drop(chat_history);
+                        for hist_entry in &json_entries {
+                            // Skip if this entry's hash was already loaded from SQLite
+                            // (the hash in HistoryEntry is the blake3 hex of signed_bytes,
+                            //  which may be empty for entries created via save_room_to_history;
+                            //  in that case we cannot dedup by hash alone)
+                            if !hist_entry.hash.is_empty()
+                                && seen_hashes.iter().any(|h| hex::encode(h) == hist_entry.hash)
+                            {
+                                continue;
+                            }
+                            if let Some(chat_entry) =
+                                Self::history_entry_to_chat_entry(hist_entry, &topic, &local_hex)
+                            {
+                                self.entries_push(chat_entry);
+                            }
                         }
                     }
                     // Entries replayed from persisted history are already
@@ -7739,6 +7961,17 @@ impl IcedChat {
                                 self.friend_online_cache.insert(sender);
                                 self.mark_friends_sidebar_dirty();
                                 self.try_save_friends();
+                                // Auto-subscribe to the deterministic direct-chat topic
+                                // so both peers are on the same gossip topic without
+                                // waiting for a whisper ConversationInvite.
+                                let friend_topic = direct_topic(&self.local_public, &sender);
+                                if !self.conversations.contains_key(&friend_topic) {
+                                    let bootstrap = self.discovered_peers.clone();
+                                    return iced::Task::done(AppMessage::BackgroundSubscribe(
+                                        friend_topic,
+                                        bootstrap,
+                                    ));
+                                }
                             }
                             Ok((sender, ContactAction::FriendRequestRejected)) => {
                                 self.outgoing_request_states
@@ -9050,6 +9283,131 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            AppMessage::ToggleAdvertiseRoom(topic) => {
+                // Toggle advertising for this room.
+                if self.advertised_rooms.contains(&topic) {
+                    self.advertised_rooms.remove(&topic);
+                    info!(%topic, "room advertising disabled");
+                    iced::Task::none()
+                } else {
+                    self.advertised_rooms.insert(topic);
+                    info!(%topic, "room advertising enabled");
+                    // Broadcast an immediate RoomAdvertisement so the room
+                    // appears in the directory without waiting for the next
+                    // ~60s periodic tick.
+                    if let Some(ref dir_sender) = self.directory_sender {
+                        let sk = self.secret_key.clone();
+                        let s = dir_sender.clone();
+                        let room_name = self
+                            .conversation_store
+                            .find(&topic)
+                            .map(|e| {
+                                if e.name.is_empty() {
+                                    topic.to_string()
+                                } else {
+                                    e.name.clone()
+                                }
+                            })
+                            .unwrap_or_else(|| topic.to_string());
+                        let neighbor_count = self.neighbors.len() as u32;
+                        let ticket = self.room_ticket(topic).to_string();
+                        iced::Task::perform(
+                            async move {
+                                let ad = boru_core::chat_core::RoomAdvertisement {
+                                    room_name,
+                                    description: String::new(),
+                                    topic,
+                                    ticket,
+                                    member_count: neighbor_count,
+                                    last_activity: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as u64,
+                                };
+                                let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
+                                let signature = sk.sign(&ad_bytes);
+                                let msg = crate::Message::RoomAdvertisement {
+                                    ad,
+                                    signature: signature.to_bytes().to_vec(),
+                                };
+                                let ok = match SignedMessage::sign_and_encode(&sk, &msg) {
+                                    Ok(encoded) => s.broadcast(encoded).await.is_ok(),
+                                    Err(_) => false,
+                                };
+                                ok
+                            },
+                            |ok| {
+                                if ok {
+                                    tracing::debug!("immediate room advertisement broadcast");
+                                } else {
+                                    tracing::warn!(
+                                        "immediate room advertisement broadcast failed"
+                                    );
+                                }
+                                AppMessage::Noop
+                            },
+                        )
+                    } else {
+                        iced::Task::done(AppMessage::SubscribeDirectoryTopic)
+                    }
+                }
+            }
+            AppMessage::SubscribeDirectoryTopic => {
+                let gossip = self.gossip.clone();
+                let topic = self.directory_topic;
+                info!(%topic, "subscribing to directory topic");
+                iced::Task::perform(
+                    async move {
+                        let sub = gossip
+                            .subscribe(topic, vec![])
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let (sender, _receiver) = sub.split();
+                        Ok::<_, String>(sender)
+                    },
+                    |result| match result {
+                        Ok(sender) => AppMessage::DirectorySubscribed(Some(sender)),
+                        Err(e) => {
+                            warn!("SubscribeDirectoryTopic failed: {e}");
+                            AppMessage::DirectorySubscribed(None)
+                        }
+                    },
+                )
+            }
+            AppMessage::DirectorySubscribed(sender) => {
+                self.directory_sender = sender;
+                if self.directory_sender.is_some() {
+                    info!("directory topic subscribed");
+                } else {
+                    warn!("directory topic subscription failed");
+                }
+                iced::Task::none()
+            }
+            // ── Room advertisement / Directory ──────────────────────────
+            AppMessage::OpenDirectory => {
+                self.screen = Screen::Discover;
+                iced::Task::none()
+            }
+            AppMessage::DirectoryRoomJoin(ad) => {
+                // Parse the ticket from the advertisement and open the room.
+                match Ticket::from_str(&ad.ticket) {
+                    Ok(ticket) => {
+                        let topic = ticket.topic;
+                        info!(topic = %topic, "joining room from directory");
+                        iced::Task::done(AppMessage::OpenRoom(topic))
+                    }
+                    Err(e) => {
+                        warn!("failed to parse directory room ticket: {e}");
+                        self.push_system("Failed to join room: invalid ticket");
+                        iced::Task::none()
+                    }
+                }
+            }
+            AppMessage::DirectoryRoomUpdate(..) => {
+                // Room advertisements from the directory topic are drained
+                // directly from directory_room_rx on ConnMonitorTick.
+                iced::Task::none()
+            }
             AppMessage::CloseConnectionDetails => self.close_connection_details_dialog(),
             AppMessage::CopyConnectionDetails => {
                 if self.connection_details_dialog.is_some() {
@@ -10009,6 +10367,98 @@ impl IcedChat {
                     self.heartbeat_counter -= 1;
                 }
 
+                // ── Periodic room-advertisement broadcast (~60s) ──
+                // For each room the user has enabled for directory advertising,
+                // sign and broadcast a RoomAdvertisement into the directory
+                // topic.  The advertisement carries the room's name,
+                // description, member count, and a join ticket.
+                if self.advertise_counter == 0 {
+                    self.advertise_counter = 60;
+                    if let Some(ref dir_sender) = self.directory_sender {
+                        if !self.advertised_rooms.is_empty() {
+                            let advertised: Vec<TopicId> =
+                                self.advertised_rooms.iter().copied().collect();
+                            let sk = self.secret_key.clone();
+                            let s = dir_sender.clone();
+                            // Collect room details for all advertised rooms, using
+                            // the conversation/room-history store to get names,
+                            // and the endpoint for ticket generation.
+                            let room_info: Vec<(TopicId, String, TopicId, String, u32)> =
+                                advertised
+                                    .into_iter()
+                                    .filter_map(|topic| {
+                                        // Look up the room's name from conversation_store
+                                        let name = self
+                                            .conversation_store
+                                            .find(&topic)
+                                            .map(|e| {
+                                                if e.name.is_empty() {
+                                                    topic.to_string()
+                                                } else {
+                                                    e.name.clone()
+                                                }
+                                            })
+                                            .unwrap_or_else(|| topic.to_string());
+                                        // Count neighbors in this room — use the
+                                        // overall neighbor count as an approximation.
+                                        let neighbor_count = self.neighbors.len() as u32;
+                                        // Build a join ticket for the room
+                                        let ticket = self.room_ticket(topic).to_string();
+                                        Some((topic, name, topic, ticket, neighbor_count))
+                                    })
+                                    .collect();
+                            tasks.push(iced::Task::perform(
+                                async move {
+                                    let mut results = Vec::new();
+                                    for (topic, room_name, _topic_id, ticket_str, member_count) in
+                                        room_info
+                                    {
+                                        let ad = boru_core::chat_core::RoomAdvertisement {
+                                            room_name,
+                            description: String::new(),
+                            topic,
+                            ticket: ticket_str,
+                            member_count,
+                            last_activity: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
+                                        };
+                                        // Sign the advertisement bytes with the node key
+                                        let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
+                                        let signature = sk.sign(&ad_bytes);
+                                        let msg = crate::Message::RoomAdvertisement {
+                                            ad,
+                                            signature: signature.to_bytes().to_vec(),
+                                        };
+                                        if let Ok(encoded) =
+                                            SignedMessage::sign_and_encode(&sk, &msg)
+                                        {
+                                            let delivered = s.broadcast(encoded).await.is_ok();
+                                            results.push((topic, delivered));
+                                        } else {
+                                            results.push((topic, false));
+                                        }
+                                    }
+                                    results
+                                },
+                                |results| {
+                                    for (topic, ok) in &results {
+                                        if *ok {
+                                            tracing::debug!(%topic, "room advertisement broadcast");
+                                        } else {
+                                            tracing::warn!(%topic, "room advertisement broadcast failed");
+                                        }
+                                    }
+                                    AppMessage::Noop
+                                },
+                            ));
+                        }
+                    }
+                } else {
+                    self.advertise_counter -= 1;
+                }
+
                 // ── Profile cache eviction + ProfileUpdate broadcast ──
                 // Evict stale entries for peers whose cached profile data is
                 // older than 1 hour (i.e. they've been offline that long).
@@ -10016,6 +10466,20 @@ impl IcedChat {
                 // Periodically broadcast our own profile metadata via gossip
                 // (rate-limited internally to at most once per 30 seconds).
                 tasks.push(self.broadcast_profile_update());
+
+                // ── Drain directory room channel ──────────────────────
+                // Poll the directory gossip channel for new room advertisements
+                // received from other peers.  Each ad is verified and stored.
+                {
+                    let mut dir_guard = self.directory_room_rx.try_lock();
+                    if let Ok(ref mut rx) = dir_guard {
+                        while let Ok(DirectoryRoomUpdate(ad, from)) = rx.try_recv() {
+                            info!(from = %from, topic = %ad.topic, "received room advertisement");
+                            let mut store = self.directory_store.lock().unwrap();
+                            store.upsert(ad, from);
+                        }
+                    }
+                }
 
                 // ── Profile image download: drain pending queue ─────────
                 // Processed here (on ConnMonitorTick) as a fallback path in
@@ -10112,6 +10576,13 @@ impl IcedChat {
                 self.retry_stale_profile_images();
                 self.enforce_image_budget();
                 self.enforce_entry_cap();
+
+                // ── Directory advertisement eviction ──
+                // Remove ads that haven't been refreshed in 2 minutes.
+                {
+                    let mut store = self.directory_store.lock().unwrap();
+                    store.evict_stale(Duration::from_secs(120));
+                }
 
                 if tasks.is_empty() {
                     iced::Task::none()
@@ -11062,6 +11533,7 @@ impl IcedChat {
                 // already happened as part of SaveProfile handling.
                 iced::Task::none()
             }
+
         };
         // Publish after applying the message so diagnostics observe the
         // resulting state (not the state that existed before the update).
@@ -11198,6 +11670,23 @@ impl IcedChat {
                 ));
             }
         }
+        // ── RoomAdvertisement handling ──
+        if let NetEvent::Message {
+            from,
+            message: Message::RoomAdvertisement { ad, signature },
+            ..
+        } = event
+        {
+            if verify_advertisement(ad, signature, *from) {
+                let mut store = self.directory_store.lock().unwrap();
+                store.upsert(ad.clone(), *from);
+                trace!("upserted RoomAdvertisement from {} for room {}", from.fmt_short(), ad.room_name);
+            } else {
+                trace!("RoomAdvertisement signature verification failed from {}", from.fmt_short());
+            }
+            return None;
+        }
+
         self.conversation_store.touch_and_bump(topic);
         self.update_room_preview(topic, event);
         let _ = self.conversation_store.save();
@@ -12259,6 +12748,7 @@ impl IcedChat {
             Screen::PeerProfile(peer) => self.view_peer_profile(*peer),
             Screen::PeerCatalogue(peer) => self.view_peer_catalogue(*peer),
             Screen::FriendProfile(peer) => self.view_friend_profile(*peer),
+            Screen::Discover => self.view_discover(),
         };
 
         let content = row![
@@ -12541,6 +13031,11 @@ impl IcedChat {
                     .on_toggle(AppMessage::CreateNewRoomDhtToggled),
             )
             .push(
+                checkbox(self.create_room_advertise)
+                    .label("Advertise in Directory")
+                    .on_toggle(AppMessage::CreateNewRoomAdvertiseToggled),
+            )
+            .push(
                 iced::widget::row![]
                     .push(
                         button(text("Cancel"))
@@ -12708,6 +13203,30 @@ impl IcedChat {
                 bottom: SPACE_8,
                 left: SPACE_12,
             }));
+
+        // ── Discover navigation button ──
+        let discover_btn = button(
+            Row::new()
+                .push(icon_svg(ICON_ACTIVITY, TYPO_SM))
+                .push(text("Discover").size(TYPO_SM))
+                .spacing(SPACE_8)
+                .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::OpenDirectory)
+        .width(Length::Fill)
+        .padding(iced::Padding {
+            top: SPACE_6,
+            right: SPACE_12,
+            bottom: SPACE_6,
+            left: SPACE_12,
+        })
+        .style(move |_t, _status| iced::widget::button::Style {
+            background: None,
+            border: iced::Border::default(),
+            text_color: iced::Color::TRANSPARENT,
+            ..Default::default()
+        });
+        content = content.push(container(discover_btn).width(Length::Fill));
 
         // CHATS section
         content = content.push(Self::sidebar_collapsible_section_header(
@@ -14268,7 +14787,7 @@ impl IcedChat {
 
     fn view_chat_header(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::text::Wrapping;
-        use iced::widget::{button, column, container, row, text};
+        use iced::widget::{button, checkbox, column, container, row, text};
         use iced::{Alignment, Length};
 
         let topic_hex = self.topic.to_string();
@@ -14356,7 +14875,15 @@ impl IcedChat {
         .spacing(SPACE_4)
         .align_y(Alignment::Center);
 
-        let full_header = column![header, info_row].spacing(SPACE_2);
+        let is_advertised = self.advertised_rooms.contains(&self.topic);
+        let advertise_row = row![
+            checkbox(is_advertised)
+                .label("Advertise in Directory")
+                .on_toggle(|_| AppMessage::ToggleAdvertiseRoom(self.topic)),
+        ]
+        .spacing(SPACE_4);
+
+        let full_header = column![header, info_row, advertise_row].spacing(SPACE_2);
 
         container(full_header)
             .width(Length::Fill)
@@ -15786,6 +16313,15 @@ impl std::hash::Hash for DiscoveredPeersRxHandle {
     }
 }
 
+/// Wrapper for the directory room channel (bounded mpsc).
+struct DirectoryRoomRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>);
+
+impl std::hash::Hash for DirectoryRoomRxHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
 /// Wrapper for the GUI test-actions channel.
 /// Uses a bounded mpsc receiver wrapped in Arc<Mutex<>>.
 struct GuiActionHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>);
@@ -16094,6 +16630,9 @@ impl IcedChat {
             .into()
     }
 
+    /// Placeholder view for the room directory / Discover screen.
+    /// Renders a simple "coming soon" message until the full room
+    /// browser UI is implemented.
     /// View a remote peer's shared file catalogue with Download buttons.
     fn view_peer_catalogue(&self, peer: PublicKey) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, container, scrollable, text, Column, Row, Space};
@@ -16239,6 +16778,114 @@ impl IcedChat {
             .push(Space::new().height(Length::Fill));
 
         container(scrollable(content))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(container_primary)
+            .into()
+    }
+    /// Public room directory (Discover) screen.
+    fn view_discover(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::{Alignment, Background, Length};
+
+        let header = Row::new()
+            .push(
+                button(Row::new()
+                    .push(icon_svg(ICON_CHAT, TYPO_SM))
+                    .push(text(" Back").size(TYPO_SM))
+                    .spacing(SPACE_4)
+                    .align_y(Alignment::Center))
+                .on_press(AppMessage::GoToChatList)
+                .padding([SPACE_6, SPACE_12])
+                .style(BUTTON_GHOST_BG))
+            .push(text("Public Rooms").size(TYPO_LG))
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center);
+
+        let mut main_content = Column::new().spacing(SPACE_8).padding(SPACE_16);
+
+        let ads: Vec<(RoomAdvertisement, PublicKey)> = {
+            let store = self.directory_store.lock().unwrap();
+            let mut list = store.list_active();
+            list.sort_by(|(a, _), (b, _)| b.last_activity.cmp(&a.last_activity));
+            list
+        };
+
+        if ads.is_empty() {
+            main_content = main_content.push(
+                container(
+                    Column::new()
+                        .push(text("No public rooms discovered yet.")
+                            .size(TYPO_MD)
+                            .style(text_muted_style))
+                        .push(Space::new().height(SPACE_8))
+                        .push(text("Rooms advertised on your relay will appear here.")
+                            .size(TYPO_SM)
+                            .style(text_muted_style))
+                        .spacing(SPACE_4)
+                        .align_x(Alignment::Center))
+                    .width(Length::Fill)
+                    .center_x(Length::Fill)
+                    .padding(SPACE_16));
+        } else {
+            let theme = Self::theme_from_dark(self.dark_mode);
+            for (ad, _author) in ads.into_iter() {
+                let theme = theme.clone();
+                let ad_for_join = ad.clone();
+                let room_name = ad.room_name.clone();
+                let member_count = ad.member_count;
+                let desc = if ad.description.len() > 100 {
+                    format!("{}…", &ad.description[..100])
+                } else {
+                    ad.description.clone()
+                };
+                let last_active = crate::presentation::relative_time(ad.last_activity);
+
+                let room_card = container(
+                    Row::new()
+                        .push(
+                            Column::new()
+                                .push(text(room_name).size(TYPO_MD))
+                                .push(text(desc).size(TYPO_SM).style(text_muted_style))
+                                .push(
+                                    Row::new()
+                                        .push(text(format!("{} members", member_count))
+                                            .size(TYPO_XS)
+                                            .style(text_muted_style))
+                                        .push(text(last_active)
+                                            .size(TYPO_XS)
+                                            .style(text_muted_style))
+                                        .spacing(SPACE_12))
+                                .spacing(SPACE_4)
+                                .width(Length::Fill))
+                        .push(
+                            button(text("Join").size(TYPO_SM))
+                                .on_press(AppMessage::DirectoryRoomJoin(ad_for_join))
+                                .padding([SPACE_6, SPACE_12])
+                                .style(BUTTON_PRIMARY))
+                        .spacing(SPACE_12)
+                        .align_y(Alignment::Center))
+                    .padding(SPACE_12)
+                    .width(Length::Fill)
+                    .style(move |t| container::Style {
+                        background: Some(Background::Color(bg_surface(t))),
+                        border: iced::Border {
+                            radius: SPACE_8.into(),
+                            color: border_muted(&theme),
+                            width: 1.0,
+                        },
+                        ..Default::default()
+                    });
+                main_content = main_content.push(room_card);
+            }
+        }
+
+        let body = Column::new()
+            .push(header)
+            .push(scrollable(main_content).height(Length::Fill).width(Length::Fill))
+            .spacing(SPACE_8);
+
+        container(body)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(container_primary)
@@ -18943,6 +19590,10 @@ mod tests {
             let chat_history = std::sync::Arc::new(std::sync::Mutex::new(
                 boru_core::chat_history::ChatHistoryStore::empty_at(&data_dir),
             ));
+            let message_store = std::sync::Arc::new(
+                boru_core::store::MessageStore::open(data_dir.join("boru.db"))
+                    .expect("test message store"),
+            );
             let backfill_handle = boru_core::backfill::BackfillHandle::spawn(endpoint.clone());
             let whisper_builder =
                 boru_core::whisper::WhisperBuilder::new(endpoint.clone(), local_sk.clone());
@@ -19013,6 +19664,7 @@ mod tests {
             None,
             "join-request test".to_string(),
             chat_history,
+            message_store,
             backfill_handle,
             false,
             None,
