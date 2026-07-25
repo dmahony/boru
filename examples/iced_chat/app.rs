@@ -13899,6 +13899,7 @@ impl IcedChat {
                     profile_version: self.friend_profile_versions.get(peer).copied().unwrap_or(0),
                 })
             })
+            .filter(|p| p.online)
             .collect();
         peers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
         SidebarDiscoveredPeersDependency {
