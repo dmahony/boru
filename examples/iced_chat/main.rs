@@ -47,7 +47,7 @@ use boru_core::storage::Storage;
 use boru_core::store::MessageStore;
 use clap::Parser;
 use iroh::{
-    address_lookup::{memory::MemoryLookup, AddrFilter},
+    address_lookup::{memory::MemoryLookup, AddrFilter, DnsAddressLookup, PkarrResolver},
     endpoint::presets,
     Endpoint, EndpointAddr, RelayMode, RelayUrl, SecretKey,
 };
@@ -525,13 +525,22 @@ fn main() -> Result<()> {
         let endpoint = {
             {
                 let ep_builder = if matches!(relay_mode, RelayMode::Disabled) {
-                    Endpoint::builder(presets::N0DisableRelay)
+                    // Minimal + manual lookups and no relay (PkarrPublisher skipped).
+                    Endpoint::builder(presets::Minimal)
+                        .address_lookup(PkarrResolver::n0_dns())
+                        .address_lookup(DnsAddressLookup::n0_dns())
                 } else {
-                    Endpoint::builder(presets::N0)
+                    // Use Minimal preset instead of N0 to skip the PkarrPublisher
+                    // (HTTP PUT to dns.iroh.link) which hangs on Windows where the
+                    // DNS server may be unreachable. Manually add read-only address
+                    // lookups (PkarrResolver + DnsAddressLookup) below.
+                    Endpoint::builder(presets::Minimal)
                 };
                 let endpoint = ep_builder
                     .secret_key(secret_key.clone())
                     .address_lookup(mdns)
+                    .address_lookup(PkarrResolver::n0_dns())
+                    .address_lookup(DnsAddressLookup::n0_dns())
                     .relay_mode(relay_mode.clone())
                     .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))?
                     .bind()
