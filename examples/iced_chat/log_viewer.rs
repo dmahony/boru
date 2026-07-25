@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use iced::font::Weight;
 use iced::{
     widget::{button, column, container, row, scrollable, text},
     Element, Length,
@@ -39,30 +40,44 @@ impl LogViewer {
         use crate::app::{SPACE_12, TYPO_LG, TYPO_SM, TYPO_XS};
 
         let header = row![
-            text("Boru logs").size(TYPO_LG),
+            text("Boru logs")
+                .font(crate::fonts::source_sans(Weight::Bold))
+                .size(TYPO_LG),
             text(format!(" {}", app::version_tag()))
+                .font(crate::fonts::source_sans(Weight::Regular))
                 .size(TYPO_XXS)
                 .style(text_muted_style)
         ]
         .spacing(SPACE_12)
-        .push(button("Reload").on_press(Message::Refresh));
+        .push(
+            button(
+                text("Reload")
+                    .font(crate::fonts::source_sans(Weight::Medium))
+                    .size(TYPO_SM),
+            )
+            .on_press(Message::Refresh),
+        );
 
         let body = if self.contents.is_empty() {
             text(format!(
                 "No log output yet.\n\nThe log file is:\n{}",
                 self.log_path.display()
             ))
+            .font(crate::fonts::source_sans(Weight::Regular))
             .size(TYPO_SM)
         } else {
             text(&self.contents)
-                .font(iced::Font::MONOSPACE)
+                .font(crate::fonts::jetbrains_mono(Weight::Regular))
                 .size(TYPO_SM)
                 .width(Length::Fill)
         };
 
         column![
             header,
-            text(self.log_path.display().to_string()).size(TYPO_XS),
+            text(self.log_path.display().to_string())
+                .font(crate::fonts::source_sans(Weight::Regular))
+                .size(TYPO_XS)
+                .style(text_muted_style),
             scrollable(container(body).width(Length::Fill)).height(Length::Fill),
         ]
         .spacing(SPACE_12)

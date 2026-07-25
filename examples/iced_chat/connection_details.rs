@@ -9,7 +9,7 @@
 //! Fields that are not available from the current frontend state should be
 //! surfaced through the loading / empty / error dialog states and are reported
 //! as unavailable in the support summary.
-
+use iced::font::Weight;
 use iced::widget::{button, container, scrollable, text, text_input, Column, Row, Space};
 use iced::{Alignment, Length};
 
@@ -283,7 +283,9 @@ where
         ConnectionDetailsDialogState::Loading { message } => dialog_body(
             state,
             announcement,
-            vec![text(message.as_str()).size(TYPO_SM).into()],
+            vec![text(message.as_str())
+                .font(crate::fonts::source_sans(Weight::Regular))
+                .size(TYPO_SM).into()],
             on_action,
             on_value_edit,
         ),
@@ -291,6 +293,7 @@ where
             state,
             announcement,
             vec![text(message.as_str())
+                .font(crate::fonts::source_sans(Weight::Regular))
                 .size(TYPO_SM)
                 .style(text_muted_style)
                 .into()],
@@ -301,6 +304,7 @@ where
             state,
             announcement,
             vec![text(message.as_str())
+                .font(crate::fonts::source_sans(Weight::Regular))
                 .size(TYPO_SM)
                 .style(|theme| iced::widget::text::Style {
                     color: Some(color_error(theme)),
@@ -390,7 +394,8 @@ where
     Message: 'a + Clone,
 {
     let label_widget = text(label)
-        .size(TYPO_MD)
+        .font(crate::fonts::source_sans(Weight::Semibold))
+        .size(TYPO_SM)
         .width(Length::Fill)
         .style(|theme| iced::widget::text::Style {
             color: Some(accent_primary(theme)),
@@ -398,12 +403,14 @@ where
 
     let value_input = if focus_target {
         text_input("", value)
+            .font(crate::fonts::jetbrains_mono(Weight::Regular))
             .id(FIRST_VALUE_INPUT_ID)
             .on_input(on_value_edit)
             .padding([SPACE_6, SPACE_8])
             .width(Length::Fill)
     } else {
         text_input("", value)
+            .font(crate::fonts::jetbrains_mono(Weight::Regular))
             .on_input(on_value_edit)
             .padding([SPACE_6, SPACE_8])
             .width(Length::Fill)
@@ -423,7 +430,9 @@ where
 
     if let Some(copy_text) = copy_text {
         line = line.push(
-            button(text("Copy").size(TYPO_SM))
+            button(text("Copy")
+                .font(crate::fonts::source_sans(Weight::Medium))
+                .size(TYPO_SM))
                 .on_press(on_action(ConnectionDetailsDialogAction::CopyValue {
                     label,
                     value: copy_text.to_string(),
@@ -449,12 +458,15 @@ fn dialog_body<'a, Message>(
 where
     Message: 'a + Clone,
 {
-    let title = text(state.title()).size(TYPO_XL).width(Length::Fill);
+    let title = text(state.title())
+        .font(crate::fonts::source_sans(Weight::Bold))
+        .size(TYPO_XL).width(Length::Fill);
 
     let mut header = Column::new().push(title).spacing(SPACE_4);
     if let Some(message) = announcement {
         header = header.push(
             text(message)
+                .font(crate::fonts::source_sans(Weight::Regular))
                 .size(TYPO_XS)
                 .style(text_muted_style)
                 .width(Length::Fill),
@@ -477,17 +489,25 @@ where
     let mut footer = Row::new().spacing(SPACE_8).align_y(Alignment::Center);
     if state.can_copy_details() {
         footer = footer.push(
-            button(text("Copy details").size(TYPO_SM))
-                .on_press(on_action(ConnectionDetailsDialogAction::CopyDetails))
-                .style(BUTTON_OUTLINE)
-                .padding([SPACE_6, SPACE_12]),
+            button(
+                text("Copy details")
+                    .font(crate::fonts::source_sans(Weight::Medium))
+                    .size(TYPO_SM),
+            )
+            .on_press(on_action(ConnectionDetailsDialogAction::CopyDetails))
+            .style(BUTTON_OUTLINE)
+            .padding([SPACE_6, SPACE_12]),
         );
     }
     footer = footer.push(
-        button(text("Close").size(TYPO_SM))
-            .on_press(on_action(ConnectionDetailsDialogAction::Close))
-            .style(BUTTON_OUTLINE)
-            .padding([SPACE_6, SPACE_12]),
+        button(
+            text("Close")
+                .font(crate::fonts::source_sans(Weight::Medium))
+                .size(TYPO_SM),
+        )
+        .on_press(on_action(ConnectionDetailsDialogAction::Close))
+        .style(BUTTON_OUTLINE)
+        .padding([SPACE_6, SPACE_12]),
     );
 
     let dialog = Column::new()

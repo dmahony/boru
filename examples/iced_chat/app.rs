@@ -208,24 +208,13 @@ const CONNECTION_DETAILS_FIRST_VALUE_INPUT: &str = "connection-details-first-val
 /// Stable widget ID used to restore focus to the settings-page details trigger.
 const CONNECTION_DETAILS_TRIGGER_INPUT: &str = "connection-details-trigger";
 
-// ── Typography scale (minor-second ratio ~1.125) ─────────────────────
-pub(crate) const TYPO_XL: f32 = 24.0; // Primary heading (chat list title)
-pub(crate) const TYPO_LG: f32 = 18.0; // Secondary heading (room name, help title)
-pub(crate) const TYPO_MD: f32 = 15.0; // Body / section headers / button labels
-pub(crate) const TYPO_SM: f32 = 13.0; // Secondary body, previews, entry labels
-pub(crate) const TYPO_XS: f32 = 11.0; // Metadata, identity info, secondary labels
-pub(crate) const TYPO_XXS: f32 = 10.0; // Fine print, ticket, instruction text
+// ── Typography scale (re-exported from typography system) ────────────
+pub(crate) use crate::fonts::{TYPO_XL, TYPO_LG, TYPO_MD, TYPO_SM, TYPO_XS, TYPO_XXS};
 
-// ── Brand typography tokens ───────────────────────────────────────
-/// Brand wordmark font family.  Must match the internal font name
-/// registered by `fonts::load_fonts()` at startup.
-pub(crate) const BRAND_LOGO_FONT: &str = "Raleway ExtraBold";
+/// Brand wordmark font family.  Re-exported from the typography module.
+pub(crate) use crate::fonts::RALEWAY as BRAND_LOGO_FONT;
 /// Brand wordmark font weight (800 = ExtraBold).
 pub(crate) const BRAND_LOGO_WEIGHT: u16 = 800;
-/// Brand heading font family (less forceful than the wordmark).
-pub(crate) const BRAND_HEADING_FONT: &str = "Montserrat Bold";
-/// Brand heading font weight (700 = Bold).
-pub(crate) const BRAND_HEADING_WEIGHT: u16 = 700;
 
 // ── BoruLogo component ────────────────────────────────────────────
 
@@ -297,18 +286,9 @@ impl<'a> BoruLogo<'a> {
 impl<'a> From<BoruLogo<'a>> for iced::Element<'a, AppMessage> {
     fn from(logo: BoruLogo<'a>) -> iced::Element<'a, AppMessage> {
         use iced::widget::text;
-        use iced::Font;
 
         let font_size = logo.size.pt();
-        // Use the typographic family "Raleway" with weight 800 (ExtraBold)
-        // instead of the display family "Raleway ExtraBold" so the font
-        // system matches by family + weight.
-        let font = Font {
-            family: iced::font::Family::Name("Raleway"),
-            weight: iced::font::Weight::ExtraBold,
-            stretch: iced::font::Stretch::Normal,
-            style: iced::font::Style::Normal,
-        };
+        let font = crate::fonts::raleway_extra_bold();
         let mut t = text("BORU").font(font).size(font_size);
         if let Some(c) = logo.color {
             t = t.style(move |_t| text::Style { color: Some(c) });
@@ -1844,7 +1824,7 @@ pub struct IcedChat {
     transfer_id_to_index: HashMap<TransferId, usize>,
     names: HashMap<PublicKey, String>,
     /// Active conversation gossip sender.
-    sender: Option<GossipSender>,
+    pub sender: Option<GossipSender>,
     /// JoinHandle for the active conversation's event forwarder.
     forward_handle: Option<task::JoinHandle<()>>,
     /// Pending forwarder handle slot for async transitions.
