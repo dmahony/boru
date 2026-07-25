@@ -1,0 +1,77 @@
+name: Apply Version
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  apply-version:
+    name: Apply Version Bump
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check .version-state.json
+        id: check_state
+        run: |
+          if [ ! -f .version-state.json ]; then
+            echo "state_exists=false" >> "$GITHUB_OUTPUT"
+            echo "ERROR: .version-state.json not found." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "state_exists=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check proposed version
+        if: steps.check_state.outputs.state_exists == 'true'
+        run: |
+          echo "### Proposed Version Change" >> "$GITHUB_STEP_SUMMARY"
+          python scripts/version.py check >> "$GITHUB_STEP_SUMMARY" 2>&1
+
+      - name: Apply version bump
+        if: steps.check_state.outputs.state_exists == 'true'
+        id: apply
+        run: |
+          python scripts/version.py apply 2>&1 | tee apply_output.txt
+          NEW_VER=$(grep -oP 'Version updated from [\d.]+ to \K[\d.]+' apply_output.txt || true)
+          if [ -n "$NEW_VER" ]; then
+            echo "new_version=$NEW_VER" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create branch and PR
+        if: steps.apply.outputs.new_version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.apply.outputs.new_version }}
+        run: |
+          BRANCH="chore/version-bump-${NEW_VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add Cargo.toml .version-state.json
+          git commit -m "chore: bump Boru version to ${NEW_VERSION}"
+          git push origin "$BRANCH"
+
+          BODY="Auto-generated version bump PR."
+          BODY="$BODY"$'\n'""
+          BODY="$BODY"$'\n'"Updates Cargo.toml and .version-state.json."
+          BODY="$BODY"$'\n'""
+          BODY="$BODY"$'\n'"**Review before merging.** Does not create releases, tags, or artefacts."
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: bump Boru version to ${NEW_VERSION}" \
+            --body "$BODY" \
+            || echo "PR creation requires GITHUB_TOKEN with write permissions."
+
+      - name: No change summary
+        if: steps.apply.outputs.new_version == ''
+        run: echo "No version change needed." >> "$GITHUB_STEP_SUMMARY"

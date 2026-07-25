@@ -1,0 +1,199 @@
+# Contributing to Boru
+
+## Commit message conventions
+
+Boru uses **conventional commits** for version management.
+
+### Format
+
+```
+<type>(<optional scope>): <description>
+```
+
+Types that trigger a version bump:
+
+| Type       | Version bump | Description                     |
+|------------|-------------|---------------------------------|
+| `feat`     | minor       | A new feature                   |
+| `fix`      | patch       | A bug fix                       |
+| `perf`     | patch       | Performance improvement         |
+| `refactor` | patch       | Code restructuring              |
+| `revert`   | patch       | Reverting a previous change     |
+
+Types that do **not** trigger a version bump:
+
+| Type     | Description                           |
+|----------|---------------------------------------|
+| `docs`   | Documentation only                    |
+| `style`  | Formatting, missing semicolons, etc.  |
+| `test`   | Adding or fixing tests                |
+| `ci`     | CI configuration or scripts           |
+| `chore`  | Build process, dependencies, tooling  |
+| `build`  | Changes affecting the build system    |
+
+### Breaking changes
+
+Add a `!` before the `:` to mark a breaking change:
+
+```
+feat!: replace the local storage format
+```
+
+or with a scope:
+
+```
+feat(storage)!: replace the local storage format
+```
+
+You can also use `BREAKING CHANGE:` in the commit body:
+
+```
+feat(storage): replace storage format
+
+BREAKING CHANGE: Existing databases require migration.
+```
+
+Breaking changes below `1.0.0` result in a **minor** version bump.
+
+### Useful scopes (optional)
+
+```
+chat
+notifications
+delivery
+contacts
+network
+storage
+ui
+android
+desktop
+security
+```
+
+### Examples
+
+```
+fix(chat): prevent duplicate messages
+feat(notifications): add local notifications
+docs: update installation instructions
+test(delivery): add retry tests
+refactor(contacts): simplify contact storage
+perf(network): reduce gossip message overhead
+ci: update workflow configuration
+chore: update development dependencies
+```
+
+### Version bumps below 1.0.0
+
+Because Boru is below `1.0.0`:
+
+| Change      | Bump       |
+|-------------|------------|
+| `fix:`      | `0.N.0 → 0.N.1` (patch)    |
+| `feat:`     | `0.N.0 → 0.N+1.0` (minor)  |
+| breaking    | `0.N.0 → 0.N+1.0` (minor)  |
+
+After reaching `1.0.0`:
+
+| Change      | Bump       |
+|-------------|------------|
+| `fix:`      | `1.N.0 → 1.N.1` (patch)    |
+| `feat:`     | `1.N.0 → 1.N+1.0` (minor)  |
+| breaking    | `1.N.0 → 2.0.0` (major)    |
+
+## Pull request titles
+
+Since the project uses **squash merging**, the pull request title is the
+authoritative versioning input.
+
+PR titles must follow the conventional commit format:
+
+```
+<type>(<optional scope>): <description>
+```
+
+The PR title is validated by CI (`commit.yaml`).
+
+### How to fix an invalid PR title
+
+If CI rejects your PR title, edit it through the GitHub UI (not by pushing
+more commits). Use the correct type prefix from the table above.
+
+## Squash merging
+
+Boru uses squash merging to keep the git history linear.
+
+### Required GitHub settings
+
+These must be configured in the repository settings:
+
+1. Open the repository **Settings**.
+2. Open **General**.
+3. Find **Pull Requests**.
+4. Enable **Allow squash merging**.
+5. Set **Default commit message** to **Pull request title** (so the
+   squash commit uses the PR title, which is the authoritative versioning
+   input).
+
+## Version management
+
+Boru uses a `.version-state.json` file to track which commit the current
+version corresponds to. The authoritative application version is in
+`Cargo.toml` (`[package] version`).
+
+### Version calculation
+
+`scripts/version.py` inspects conventional commits since the last recorded
+version change and determines the next semantic version.
+
+### Initialise version state
+
+After cloning or when adding the system to an existing repo:
+
+```bash
+python scripts/version.py initialise
+```
+
+This records the current version and commit without incrementing.
+
+### Check proposed version
+
+```bash
+python scripts/version.py check
+```
+
+Reports the proposed version without modifying files.
+
+### Apply a version locally
+
+```bash
+python scripts/version.py apply --dry-run   # preview
+python scripts/version.py apply             # update Cargo.toml and state
+```
+
+After applying, review the diff and commit:
+
+```bash
+git diff
+git add Cargo.toml .version-state.json
+git commit -m "chore: bump Boru version to X.Y.Z"
+```
+
+### GitHub Actions workflows
+
+| Workflow | Trigger | Effect |
+|----------|---------|--------|
+| `version-check.yml` | PRs to main, manual | Read-only check, shows proposed version in workflow summary |
+| `apply-version.yml` | Manual (`workflow_dispatch`) | Creates a version-bump branch and PR for review |
+| `commit.yaml` | PRs to main | Validates PR title format |
+
+### What the workflows do NOT do
+
+- No GitHub Releases are automatically created.
+- No Git tags are automatically created.
+- No packages, crates, binaries, or installers are published.
+- No automatic commits are pushed to the default branch.
+
+## Development setup
+
+See `docs/build-release.md` for build and release instructions.

@@ -314,8 +314,8 @@ const MAX_ENTRIES: usize = 2000;
 /// arrives.
 const MAX_PROFILE_IMAGE_HANDLES: usize = 500;
 
-/// Version string: the next SemVer version calculated from conventional
-/// commits since the latest version tag, with the current git hash appended.
+/// Version string: the current application version from Cargo.toml,
+/// with the current git hash appended when available.
 pub fn version_tag() -> String {
     let version = option_env!("BORU_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
     match option_env!("GIT_HASH") {
@@ -2087,6 +2087,8 @@ pub struct IcedChat {
     /// Whether the \"Enable DHT discovery\" checkbox is checked in the
     /// create-room dialog.  Default: off (no DHT discovery).
     create_room_dht_enabled: bool,
+    /// Name for the new room entered in the create-room dialog.
+    create_room_name: String,
     /// Per-room continuous DHT trackers for private rooms with discovery enabled.
     /// Started when creating/joining a DHT-enabled room; shut down when
     /// leaving or deleting the room.
@@ -2484,6 +2486,8 @@ pub enum AppMessage {
     CancelCreateRoom,
     /// Toggle whether DHT discovery is enabled when creating a new room.
     CreateNewRoomDhtToggled(bool),
+    /// Update the room name text input in the create-room dialog.
+    CreateNewRoomNameChanged(String),
     /// Toggle whether the new room is advertised in the directory.
     CreateNewRoomAdvertiseToggled(bool),
     /// Join a room from a ticket string.
@@ -3380,9 +3384,13 @@ fn view_local_profile_block(
         .spacing(SPACE_2)
         .align_x(Alignment::Start);
 
-    // ── Settings gear button ──
+    // ── Settings gear and add button ──
     let settings_btn = button(icon_svg(ICON_SETTINGS, TYPO_MD))
         .on_press(AppMessage::OpenSettings)
+        .padding([SPACE_6, SPACE_8])
+        .style(BUTTON_ICON);
+    let add_btn = button(icon_svg(ICON_PLUS, TYPO_MD))
+        .on_press(AppMessage::ToggleAddMenu)
         .padding([SPACE_6, SPACE_8])
         .style(BUTTON_ICON);
 
@@ -3391,6 +3399,7 @@ fn view_local_profile_block(
         .push(name_col)
         .push(Space::new().width(Length::Fill))
         .push(settings_btn)
+        .push(add_btn)
         .spacing(SPACE_8)
         .align_y(Alignment::Center)
         .into()
@@ -3799,6 +3808,7 @@ impl IcedChat {
             dht,
             private_dht_disabled,
             create_room_dht_enabled: false,
+            create_room_name: String::new(),
             room_trackers: HashMap::new(),
             show_create_room_dialog: false,
             show_add_menu: false,
@@ -4713,6 +4723,7 @@ impl IcedChat {
             AppMessage::ConfirmCreateNewRoom => "ConfirmCreateNewRoom",
             AppMessage::CancelCreateRoom => "CancelCreateRoom",
             AppMessage::CreateNewRoomDhtToggled(..) => "CreateNewRoomDhtToggled",
+            AppMessage::CreateNewRoomNameChanged(..) => "CreateNewRoomNameChanged",
             AppMessage::CreateNewRoomAdvertiseToggled(..) => "CreateNewRoomAdvertiseToggled",
             AppMessage::JoinFromTicket => "JoinFromTicket",
             AppMessage::RoomJoinFailed(_) => "RoomJoinFailed",
@@ -5507,6 +5518,7 @@ impl IcedChat {
             AppMessage::CreateNewRoom => {
                 self.show_create_room_dialog = true;
                 self.create_room_dht_enabled = false;
+                self.create_room_name = String::new();
                 iced::Task::none()
             }
 
@@ -5566,6 +5578,11 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::CreateNewRoomNameChanged(name) => {
+                self.create_room_name = name;
+                iced::Task::none()
+            }
+
             AppMessage::CreateNewRoomAdvertiseToggled(enabled) => {
                 self.create_room_advertise = enabled;
                 iced::Task::none()
@@ -5574,6 +5591,7 @@ impl IcedChat {
             AppMessage::ConfirmCreateNewRoom => {
                 self.show_create_room_dialog = false;
                 let dht_enabled = self.create_room_dht_enabled && !self.private_dht_disabled;
+                let room_name = std::mem::take(&mut self.create_room_name);
                 // Leave the current room first — abort forward_handle, clear
                 // sender + entries — so we don't have a zombie forward_handle
                 // or broadcast to the wrong topic during the async gap.
@@ -5690,7 +5708,7 @@ impl IcedChat {
                             topic,
                             &sender,
                             RoomMetadata {
-                                name: Some("boru-chat".to_string()),
+                                name: if room_name.is_empty() { None } else { Some(room_name) },
                                 description: None,
                                 rules: None,
                             },
@@ -9405,6 +9423,25 @@ impl IcedChat {
                     .conversations
                     .entry(topic)
                     .or_insert_with(|| ConversationLive::new(topic));
+                if let Some(ref s) = sender {
+                    // Retroactively join any discovered peers that were not part
+                    // of the bootstrap list at subscription time (e.g. peers that
+                    // were discovered via mDNS while the async subscribe was
+                    // in-flight, or peers discovered after a background subscribe
+                    // that ran before the peer was on any LAN).
+                    let pending: Vec<PublicKey> = self.discovered_peers.clone();
+                    if !pending.is_empty() {
+                        let s = s.clone();
+                        tokio::spawn(async move {
+                            for peer in pending {
+                                if let Err(e) = s.join_peers(vec![peer]).await {
+                                    warn!(peer = %peer, error = %e,
+                                        "retroactive join_peers after bg subscribe failed");
+                                }
+                            }
+                        });
+                    }
+                }
                 conv.sender = sender;
                 if conv.sender.is_some() {
                     info!("background subscribed to {topic}");
@@ -11153,7 +11190,36 @@ impl IcedChat {
             }
 
             AppMessage::NewDiscoveredPeers(peers) => {
+                // Capture newly-added peers before the update consumes `peers`.
+                let added = peers.added.clone();
                 apply_discovered_peers_update(&mut self.discovered_peers, peers);
+                // Retroactively join newly discovered peers to all background
+                // conversation subscriptions. Without this, a peer discovered
+                // after SubscribeStoredConversations ran will never be added
+                // to the direct-conversation gossip mesh, and messages will
+                // silently queue in the outbox.
+                if !added.is_empty() {
+                    let pending: Vec<PublicKey> = added
+                        .into_iter()
+                        .filter(|p| self.discovered_peers.contains(p))
+                        .collect();
+                    if !pending.is_empty() {
+                        for (_, conv) in &self.conversations {
+                            if let Some(ref sender) = conv.sender {
+                                let s = sender.clone();
+                                let peers = pending.clone();
+                                tokio::spawn(async move {
+                                    for peer in peers {
+                                        if let Err(e) = s.join_peers(vec![peer]).await {
+                                            warn!(peer = %peer, error = %e,
+                                                "new-discovered join_peers failed");
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
                 iced::Task::none()
             }
 
@@ -12971,6 +13037,12 @@ impl IcedChat {
 
         let items = vec![
             MenuItem {
+                icon: ICON_CHAT,
+                label: "Create Public Room",
+                action: Some(AppMessage::CreateNewRoom),
+                disabled: false,
+            },
+            MenuItem {
                 icon: ICON_FRIEND,
                 label: "Add Friend",
                 action: Some(AppMessage::OpenFriendRequests),
@@ -13158,11 +13230,16 @@ impl IcedChat {
         &self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, checkbox, column, container, text};
+        use iced::widget::{button, checkbox, column, container, text, text_input};
         use iced::{Alignment, Length};
 
         let dialog = column![]
             .push(text("Create New Room").size(18))
+            .push(
+                text_input("Room name…", &self.create_room_name)
+                    .on_input(AppMessage::CreateNewRoomNameChanged)
+                    .width(Length::Fill),
+            )
             .push(
                 checkbox(self.create_room_dht_enabled)
                     .label("Enable DHT discovery")
@@ -13279,12 +13356,6 @@ impl IcedChat {
 
         let header = Row::new()
             .push(boru_logo(LogoSize::Small).into_element())
-            .push(
-                iced::widget::button(icon_svg(ICON_PLUS, TYPO_MD))
-                    .on_press(AppMessage::ToggleAddMenu)
-                    .padding([SPACE_6, SPACE_8])
-                    .style(BUTTON_ICON),
-            )
             .spacing(SPACE_4)
             .align_y(Alignment::Center);
 
@@ -13342,30 +13413,6 @@ impl IcedChat {
                 bottom: SPACE_8,
                 left: SPACE_12,
             }));
-
-        // ── Discover navigation button ──
-        let discover_btn = button(
-            Row::new()
-                .push(icon_svg(ICON_ACTIVITY, TYPO_SM))
-                .push(text("Discover").size(TYPO_SM))
-                .spacing(SPACE_8)
-                .align_y(Alignment::Center),
-        )
-        .on_press(AppMessage::OpenDirectory)
-        .width(Length::Fill)
-        .padding(iced::Padding {
-            top: SPACE_6,
-            right: SPACE_12,
-            bottom: SPACE_6,
-            left: SPACE_12,
-        })
-        .style(move |_t, _status| iced::widget::button::Style {
-            background: None,
-            border: iced::Border::default(),
-            text_color: iced::Color::TRANSPARENT,
-            ..Default::default()
-        });
-        content = content.push(container(discover_btn).width(Length::Fill));
 
         // CHATS section
         content = content.push(Self::sidebar_collapsible_section_header(
@@ -13746,7 +13793,7 @@ impl IcedChat {
             format_preview(&preview)
         };
 
-        // ── Name color: brighter/bolder if unread ─────────────────
+        // ── Name color and preview color: brighter/bolder if selected or unread ──
         let name_color_value = selected_topic.clone();
         let name_color = move |theme: &iced::Theme| -> Color {
             let is_selected = name_color_value.get() == Some(topic);
@@ -13758,13 +13805,31 @@ impl IcedChat {
                 text_muted(theme) // muted for already-read
             }
         };
+        let preview_color_value = selected_topic.clone();
+        let preview_color = move |_theme: &iced::Theme| -> Color {
+            if preview_color_value.get() == Some(topic) {
+                Color::WHITE
+            } else {
+                Self::muted_color(dark_mode)
+            }
+        };
+        let time_color_value = selected_topic.clone();
+        let time_color = move |_theme: &iced::Theme| -> Color {
+            if time_color_value.get() == Some(topic) {
+                Color::WHITE
+            } else {
+                Self::muted_color(dark_mode)
+            }
+        };
 
         // ── Preview row with optional unread badge ─────────────────
         let mut preview_row = Row::new()
             .push(
                 text(preview_text.clone())
                     .size(TYPO_XS)
-                    .color(Self::muted_color(dark_mode))
+                    .style(move |t| iced::widget::text::Style {
+                        color: Some(preview_color(t)),
+                    })
                     .width(Length::Fill),
             )
             .spacing(SPACE_6)
@@ -13775,34 +13840,28 @@ impl IcedChat {
             } else {
                 unread.to_string()
             };
-            // ── Filled bubble icon + count pill ───────────────────
-            preview_row = preview_row
-                .push(
-                    icon_svg(ICON_UNREAD, TYPO_SM)
-                        .style(move |t, _| iced::widget::svg::Style {
-                            color: Some(accent_primary(t)),
-                        }),
+            // ── Circular count badge (centered) ───────────────────
+            preview_row = preview_row.push(
+                container(
+                    text(count_str)
+                        .size(TYPO_XXS)
+                        .color(Color::WHITE)
+                        .width(Length::Shrink)
+                        .height(Length::Shrink),
                 )
-                .push(
-                    container(
-                        text(count_str)
-                            .size(TYPO_XXS)
-                            .color(Color::WHITE)
-                            .width(Length::Fill),
-                    )
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill)
-                    .width(18.0)
-                    .height(18.0)
-                    .style(move |t| container::Style {
-                        background: Some(Background::Color(color_error(t))),
-                        border: Border {
-                            radius: 9.0.into(),
-                            ..Default::default()
-                        },
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .width(20.0)
+                .height(20.0)
+                .style(move |t| container::Style {
+                    background: Some(Background::Color(color_error(t))),
+                    border: Border {
+                        radius: 10.0.into(),
                         ..Default::default()
-                    }),
-                );
+                    },
+                    ..Default::default()
+                }),
+            );
         }
 
         // ── Build the content row ─────────────────────────────────
@@ -13875,7 +13934,9 @@ impl IcedChat {
                             .push(
                                 text(time_label_str.clone())
                                     .size(TYPO_XXS)
-                                    .color(Self::muted_color(dark_mode)),
+                                    .style(move |t| iced::widget::text::Style {
+                                        color: Some(time_color(t)),
+                                    }),
                             )
                             .spacing(SPACE_4)
                             .align_y(Alignment::Center),
@@ -15422,22 +15483,8 @@ impl IcedChat {
             // ── Date separator (suppressed) ──
             // Keep prev_day tracking but don't render a separator line.
 
-            // ── System messages: centered, no bubble ──
+            // ── System/status messages: hidden ──
             if matches!(entry.kind, ChatKind::System) {
-                let system_row = Row::new()
-                    .push(space::horizontal())
-                    .push(
-                        text(&entry.body)
-                            .size(TYPO_SM)
-                            .wrapping(Wrapping::Word)
-                            .color(text_system(&theme)),
-                    )
-                    .push(space::horizontal())
-                    .width(Length::Fill);
-                col = col.push(system_row);
-                if let Some(download) = &entry.download {
-                    col = col.push(self.view_download_attachment(i, download));
-                }
                 continue;
             }
 

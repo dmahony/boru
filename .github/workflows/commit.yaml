@@ -1,19 +1,25 @@
-name: Commits
+name: Conventional Commit Check
 
 on:
   pull_request:
     branches: [main]
     types: [opened, edited, synchronize]
 
-env:
-  IROH_FORCE_STAGING_RELAYS: "1"
-
 jobs:
-  check-for-cc:
+  check-pr-title:
     runs-on: ubuntu-latest
     steps:
-      - name: check-for-cc
-        id: check-for-cc
+      - name: Check PR title
         uses: agenthunt/conventional-commit-checker-action@v2.0.1
         with:
-          pr-title-regex: "^(.+)(?:(([^)s]+)))?!?: (.+)"
+          pr-title-regex: "^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\\([a-zA-Z0-9_.\\-]+\\))?(!)?: .+"
+          # Accepted types:
+          #   build, chore, ci, docs, feat, fix, perf, refactor, revert, style, test
+          # Breaking changes use "!" before ":"
+          #   e.g. feat!: replace storage
+          #        feat(storage)!: replace storage
+          # Scopes are optional: feat(chat):, fix(notifications):, etc.
+          # Invalid title examples:
+          #   add new feature     → missing type prefix
+          #   refactor:           → missing description after ":"
+          #   Feat: add feature   → lowercase type required
