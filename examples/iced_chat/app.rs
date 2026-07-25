@@ -1647,8 +1647,6 @@ impl ChatEntry {
 /// of the active screen — only the right-hand main panel changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {
-    /// Splash screen shown at startup with a loading spinner.
-    Splash,
     /// No chat selected — empty state shown in the main panel.
     ChatList,
     /// An individual chat room with a given topic.
@@ -2187,8 +2185,11 @@ pub struct IcedChat {
     /// Set to true after the first SplashTick so the minimum-display timer starts
     /// counting from GUI render, not from the heavyweight async init in main().
     splash_has_rendered: bool,
-    /// Animation frame counter for the splash screen spinner.
+    /// Animation frame counter for the room-loading and connecting spinners.
     splash_spinner_frame: usize,
+    /// Animation frame counter for the connecting-to-peer spinner shown in
+    /// the chat view when the gossip sender isn't ready yet.
+    connecting_spinner_frame: usize,
     /// Cached link previews (title, description, image) keyed by URL.
     link_preview_cache: std::sync::Arc<std::sync::Mutex<link_preview::LinkPreviewCache>>,
     /// Entry index whose link preview is currently being fetched.
@@ -3637,10 +3638,11 @@ impl IcedChat {
             }).collect::<Vec<_>>().into();
 
         Self {
-            screen: Screen::Splash,
+            screen: Screen::ChatList,
             splash_start_time: std::time::Instant::now(),
             splash_has_rendered: false,
             splash_spinner_frame: 0,
+            connecting_spinner_frame: 0,
             enlarged_images: HashSet::new(),
             pending_topic: None,
             room_loading: false,
@@ -5145,7 +5147,6 @@ impl IcedChat {
             Screen::FriendRequests => "Friend requests open".to_string(),
             Screen::Settings => "Settings open".to_string(),
             Screen::ChatList => "Chat list open".to_string(),
-            Screen::Splash => "Splash screen".to_string(),
             Screen::Discover => "Discover".to_string(),
         };
 
@@ -5354,7 +5355,6 @@ impl IcedChat {
             Screen::PeerProfile(_) => ("PeerProfile", None),
             Screen::PeerCatalogue(_) => ("PeerCatalogue", None),
             Screen::FriendProfile(_) => ("FriendProfile", None),
-            Screen::Splash => ("Splash", None),
             Screen::Discover => ("Discover", None),
         };
         let _ = self.gui_state_tx.send(IcedStateSnapshot {
@@ -10087,19 +10087,12 @@ impl IcedChat {
             }
 
             AppMessage::SplashTick => {
-                // Advance the spinner animation.
+                // Advance spinner animations.
                 self.splash_spinner_frame = (self.splash_spinner_frame + 1) % 10;
-                // Start the minimum-display timer only when the GUI
-                // actually renders.  The async init in main() can take
-                // seconds; starting the timer from IcedChat::new() made
-                // the splash expire before the window ever appeared.
-                if !self.splash_has_rendered {
-                    self.splash_has_rendered = true;
-                    self.splash_start_time = std::time::Instant::now();
-                }
-                // Transition to ChatList after at least 500ms of visible splash.
-                if self.splash_start_time.elapsed() >= std::time::Duration::from_millis(500) {
-                    self.screen = Screen::ChatList;
+                // Advance the connecting animation while the gossip sender
+                // hasn't arrived yet (conversation opened but peer not connected).
+                if self.sender.is_none() && matches!(self.screen, Screen::Chat { .. }) {
+                    self.connecting_spinner_frame = (self.connecting_spinner_frame + 1) % 10;
                 }
                 iced::Task::none()
             }
@@ -12662,7 +12655,7 @@ impl IcedChat {
         PublicKey::from_str(&item.target_user).ok()
     }
 
-    /// Render the splash screen: centered app name with a spinning indicator.
+    /// Render the splash-style empty state: centered app name.
     fn view_splash(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{column, container, row, text, Space};
         use iced::{Alignment, Length};
@@ -12740,7 +12733,6 @@ impl IcedChat {
 
         // Main panel depends on the active screen.
         let main_panel: iced::Element<'_, AppMessage> = match &self.screen {
-            Screen::Splash => self.view_splash(),
             Screen::ChatList => self.view_main_empty_state(),
             Screen::Chat { .. } => self.view_chat_panel(),
             Screen::FriendRequests => self.view_friend_requests(),
@@ -14716,6 +14708,33 @@ impl IcedChat {
             .into();
         }
 
+        // Show a connecting animation when the subscription completed but the
+        // gossip sender isn't available yet — the mesh peer hasn't connected.
+        if self.sender.is_none() {
+            const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let spinner = SPINNER_FRAMES[self.connecting_spinner_frame % SPINNER_FRAMES.len()];
+            let theme = self.theme();
+            let dark_mode = self.theme() == iced::Theme::Dark;
+            return widget::container(
+                widget::column![
+                    widget::text(spinner).size(40.0).color(accent_primary(&theme)),
+                    widget::text("Connecting…")
+                        .size(14.0)
+                        .color(Self::muted_color(dark_mode)),
+                    widget::text("The conversation will be ready shortly")
+                        .size(TYPO_XS)
+                        .color(Self::muted_color(dark_mode)),
+                ]
+                .spacing(SPACE_8)
+                .align_x(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
+        }
+
         let content = widget::column![
             self.view_chat_header(),
             self.view_chat_log(),
@@ -14913,11 +14932,40 @@ impl IcedChat {
 
         // ── Empty state ──
         if self.entries.is_empty() {
-            let col = Column::new().push(
-                container(text("No messages yet.").color(self.color_muted()))
+            let col = if self.sender.is_none() {
+                // Still connecting — the subscription completed but the
+                // gossip sender isn't ready. Show an inline spinner.
+                const SPINNER_FRAMES: [&str; 10] =
+                    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                let spinner =
+                    SPINNER_FRAMES[self.connecting_spinner_frame % SPINNER_FRAMES.len()];
+                Column::new().push(
+                    container(
+                        Column::new()
+                            .push(
+                                text(spinner)
+                                    .size(28.0)
+                                    .color(accent_primary(&theme)),
+                            )
+                            .push(
+                                text("Connecting…")
+                                    .size(TYPO_MD)
+                                    .color(self.color_muted()),
+                            )
+                            .spacing(SPACE_8)
+                            .align_x(iced::Alignment::Center),
+                    )
                     .padding([0.0, SPACE_8])
-                    .width(Length::Fill),
-            );
+                    .width(Length::Fill)
+                    .center_x(Length::Fill),
+                )
+            } else {
+                Column::new().push(
+                    container(text("No messages yet.").color(self.color_muted()))
+                        .padding([0.0, SPACE_8])
+                        .width(Length::Fill),
+                )
+            };
             self.total_content_height.set(0.0);
             // Empty-state render — record perf snapshot
             self.perf.replace(PerfMetrics {
@@ -18520,11 +18568,6 @@ mod tests {
     fn open_friend_requests_navigates_to_dedicated_screen() {
         let (_runtime, mut app, _local_public, _peer_public) = build_join_request_test_app();
 
-        assert_eq!(app.screen, Screen::Splash);
-        // Advance past the splash screen.
-        app.splash_has_rendered = true;
-        app.splash_start_time = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let _ = app.update(AppMessage::SplashTick);
         assert_eq!(app.screen, Screen::ChatList);
 
         let _ = app.update(AppMessage::OpenFriendRequests);

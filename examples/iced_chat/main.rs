@@ -401,9 +401,11 @@ fn main() -> Result<()> {
             }
             Some(Command::Logs) => None,
             None => {
-                // Lobby mesh is set up inside runtime.block_on — no
-                // OpenRoom task needed here.
-                None
+                // Open the public lobby room so the user can start typing
+                // immediately. The lobby gossip subscribe is also done here
+                // inside runtime.block_on.
+                let lobby_topic = app::IcedChat::default_lobby_topic();
+                Some((lobby_topic, Vec::new()))
             }
         }
     });
@@ -1169,8 +1171,11 @@ fn main() -> Result<()> {
     .subscription(|state: &IcedChat| {
         let mut subs: Vec<iced::Subscription<app::AppMessage>> = vec![];
 
-        // Splash tick at 100ms while showing the splash screen or loading a room
-        if state.screen == app::Screen::Splash || state.room_loading {
+        // Splash tick at 100ms while loading a room
+        // or connecting to a peer in a chat conversation.
+        let connecting = state.sender.is_none()
+            && matches!(state.screen, app::Screen::Chat { .. });
+        if state.room_loading || connecting {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(100))
                     .map(|_| app::AppMessage::SplashTick),
