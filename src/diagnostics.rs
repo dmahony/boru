@@ -2900,6 +2900,20 @@ pub enum GuiTestCommand {
         /// Content hash (blake3) of the file to download.
         content_hash: String,
     },
+    /// Open the create-room dialog.
+    CreateNewRoom,
+    /// Set the room name in the create-room dialog.
+    SetCreateRoomName {
+        /// Room name text (max [`GUI_TEST_COMMAND_MAX_STRING_LEN`] chars).
+        name: String,
+    },
+    /// Toggle the "Advertise in Directory" checkbox in the create-room dialog.
+    SetCreateRoomAdvertise {
+        /// `true` to check (public), `false` to uncheck (private).
+        enabled: bool,
+    },
+    /// Confirm and create the room from the dialog's current settings.
+    ConfirmCreateNewRoom,
     /// Wait for a GUI condition to be satisfied.
     Wait {
         /// The condition to evaluate.
@@ -2969,6 +2983,10 @@ impl GuiTestCommand {
             GuiTestCommand::FocusComposer => Ok(()),
             GuiTestCommand::OpenSettings => Ok(()),
             GuiTestCommand::CloseDialog => Ok(()),
+            GuiTestCommand::CreateNewRoom => Ok(()),
+            GuiTestCommand::SetCreateRoomName { name } => validate_gui_text(name, "Room name"),
+            GuiTestCommand::SetCreateRoomAdvertise { .. } => Ok(()),
+            GuiTestCommand::ConfirmCreateNewRoom => Ok(()),
             GuiTestCommand::BrowseCatalogue { peer_id } => {
                 validate_gui_identifier(peer_id, "peer_id")
             }
@@ -3081,6 +3099,12 @@ impl GuiTestCommand {
             GuiTestCommand::DownloadFile { .. } => {
                 Some(ExpectedState::Generic("download_initiated".into()))
             }
+            GuiTestCommand::CreateNewRoom => {
+                Some(ExpectedState::Generic("create_room_dialog_open".into()))
+            }
+            GuiTestCommand::SetCreateRoomName { .. } => None,
+            GuiTestCommand::SetCreateRoomAdvertise { .. } => None,
+            GuiTestCommand::ConfirmCreateNewRoom => Some(ExpectedState::MessageSent),
         }
     }
 }

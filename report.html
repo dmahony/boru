@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Boru Semantic Versioning — Completion Report</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 2em auto; padding: 0 1em; line-height: 1.6; color: #1a1a1a; }
+  h1 { border-bottom: 2px solid #e0e0e0; padding-bottom: 0.3em; }
+  h2 { margin-top: 1.5em; border-bottom: 1px solid #eee; padding-bottom: 0.2em; }
+  h3 { margin-top: 1.2em; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+  th, td { border: 1px solid #ccc; padding: 0.4em 0.6em; text-align: left; }
+  th { background: #f5f5f5; }
+  code { background: #f0f0f0; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f5f5f5; padding: 0.8em; border-radius: 4px; overflow-x: auto; }
+  .section { margin: 0.8em 0; }
+  .label { font-weight: 600; color: #555; }
+  .ok { color: #2e7d32; }
+  .fail { color: #c62828; }
+</style>
+</head>
+<body>
+
+<h1>Boru Semantic Versioning — Completion Report</h1>
+
+<h2>1. Current version found</h2>
+<p><strong>0.101.0</strong> (package <code>boru-core</code>)</p>
+
+<h2>2. Authoritative version file</h2>
+<p><code>Cargo.toml</code> — the <code>[package] version</code> field is the single source of truth.</p>
+
+<h2>3. Files created (6)</h2>
+<table>
+  <tr><th>File</th><th>Purpose</th></tr>
+  <tr><td><code>scripts/version.py</code></td><td>Version calculation script (check, apply, apply --dry-run, initialise)</td></tr>
+  <tr><td><code>.version-state.json</code></td><td>Tracks the last versioned commit (committed to the repo)</td></tr>
+  <tr><td><code>.github/workflows/version-check.yml</code></td><td>Read-only PR check showing proposed version in workflow summary</td></tr>
+  <tr><td><code>.github/workflows/apply-version.yml</code></td><td>Manual workflow_dispatch that creates a version-bump PR</td></tr>
+  <tr><td><code>CHANGELOG.md</code></td><td>Initial changelog with update instructions</td></tr>
+  <tr><td><code>CONTRIBUTING.md</code></td><td>Commit conventions, version management, squash merging docs</td></tr>
+</table>
+
+<h2>Files modified (4)</h2>
+<table>
+  <tr><th>File</th><th>Change</th></tr>
+  <tr><td><code>build.rs</code></td><td>Removed dynamic tag-based version calculation; sets BORU_APP_VERSION = CARGO_PKG_VERSION directly</td></tr>
+  <tr><td><code>examples/iced_chat/app.rs</code></td><td>Updated doc comment on version_tag() to reflect new system</td></tr>
+  <tr><td><code>.github/workflows/commit.yaml</code></td><td>Stricter PR title regex — accepts only the 11 allowed types</td></tr>
+  <tr><td><code>docs/build-release.md</code></td><td>Updated release process to use scripts/version.py and .version-state.json</td></tr>
+</table>
+
+<h2>4. How version changes are calculated</h2>
+<p><code>scripts/version.py</code> inspects conventional commits between the commit stored in <code>.version-state.json</code> and <code>HEAD</code>. It classifies each commit:</p>
+<ul>
+  <li><code>fix</code>, <code>perf</code>, <code>refactor</code>, <code>revert</code> to patch level</li>
+  <li><code>feat</code> to minor level</li>
+  <li><code>!</code> or <code>BREAKING CHANGE:</code> to breaking level</li>
+  <li><code>docs</code>, <code>style</code>, <code>test</code>, <code>ci</code>, <code>chore</code>, <code>build</code> to no bump</li>
+</ul>
+<p>The highest-impact change wins (breaking &gt; feature &gt; fix &gt; none).</p>
+<p>For versions below <code>1.0.0</code>: breaking to minor. For <code>1.0.0+</code>: breaking to major.</p>
+
+<h2>5. How the commit range is tracked</h2>
+<p><code>.version-state.json</code> stores the current version and the full SHA:</p>
+<pre>{"version": "0.101.0", "commit": "e3d8435edab8ce527d62db70f551fa44c17fd652"}</pre>
+<p>Each run inspects commits after this stored commit.</p>
+
+<h2>6. How to initialise the version state</h2>
+<pre>python scripts/version.py initialise</pre>
+<p>Records the current version and commit without incrementing.</p>
+
+<h2>7. How to check the proposed version locally</h2>
+<pre>python scripts/version.py check</pre>
+<p>Shows current version, proposed next version, bump type, and triggering commits.</p>
+
+<h2>8. How to apply a version locally</h2>
+<pre>python scripts/version.py apply --dry-run   # preview
+python scripts/version.py apply             # update Cargo.toml and .version-state.json
+git diff
+git add Cargo.toml .version-state.json
+git commit -m "chore: bump Boru version to X.Y.Z"</pre>
+
+<h2>9. How to trigger the manual GitHub workflow</h2>
+<p>Go to <strong>Actions</strong> to <strong>Apply Version</strong> to <strong>Run workflow</strong>. Creates a branch and PR for review.</p>
+<p>The <strong>Version Check</strong> workflow runs automatically on PRs to main — read-only, never modifies the repo.</p>
+
+<h2>10. Manual GitHub settings still required</h2>
+<p>Repository Settings to General to Pull Requests:</p>
+<ul>
+  <li>Enable <strong>Allow squash merging</strong></li>
+  <li>Set <strong>Default commit message</strong> to <strong>Pull request title</strong></li>
+</ul>
+
+<h2>11. Tests run</h2>
+<ul>
+  <li><span class="ok">26 version script unit tests</span> — all passed</li>
+  <li><code>cargo fmt --check</code> — passed</li>
+</ul>
+
+<h2>12. Test failures or limitations</h2>
+<p>Pre-existing compilation errors (feature flag mismatches with <code>iroh-blobs::store::fs</code>) are unrelated to this change.</p>
+
+<h2>13. No GitHub Release automation added</h2>
+<p>Existing <code>release.yaml</code> is left unchanged and not invoked by any new workflow.</p>
+
+<h2>14. No automatic Git tags added</h2>
+<p>Tags remain a manual operation.</p>
+
+<h2>15. No packages, crates, binaries, or installers published</h2>
+<p>The new system only updates <code>Cargo.toml</code> and <code>.version-state.json</code>.</p>
+
+</body>
+</html>

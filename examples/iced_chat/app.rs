@@ -2183,6 +2183,10 @@ pub struct IcedChat {
     pending_close_dialog_action: Option<GuiActionId>,
     /// SelectPeer action waiting for the normal peer-profile navigation path.
     pending_select_peer_action: Option<(GuiActionId, PublicKey)>,
+    /// CreateNewRoom action waiting for the create-room dialog to open.
+    pending_create_room_action: Option<GuiActionId>,
+    /// ConfirmCreateNewRoom action waiting for the room to be created.
+    pending_confirm_create_room_action: Option<GuiActionId>,
     /// Sender for GUI state snapshots — publishes an [`IcedStateSnapshot`] after
     /// each `update()` so the MCP server can watch for condition changes.
     pub gui_state_tx: tokio::sync::watch::Sender<IcedStateSnapshot>,
@@ -3853,6 +3857,8 @@ impl IcedChat {
             pending_open_settings_action: None,
             pending_close_dialog_action: None,
             pending_select_peer_action: None,
+            pending_create_room_action: None,
+            pending_confirm_create_room_action: None,
             gui_state_tx,
             recent_activity: VecDeque::with_capacity(50),
             window_width: 1200.0,
@@ -5519,6 +5525,14 @@ impl IcedChat {
                 self.show_create_room_dialog = true;
                 self.create_room_dht_enabled = false;
                 self.create_room_name = String::new();
+                if let Some(action_id) = self.pending_create_room_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
                 iced::Task::none()
             }
 
@@ -5596,6 +5610,14 @@ impl IcedChat {
                 // sender + entries — so we don't have a zombie forward_handle
                 // or broadcast to the wrong topic during the async gap.
                 self.leave_current_room();
+                if let Some(action_id) = self.pending_confirm_create_room_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
 
                 let topic = TopicId::from_bytes(rand::random());
                 let gossip = self.gossip.clone();
@@ -7938,9 +7960,13 @@ impl IcedChat {
                 let _timer = PerfTracker::timer("net_event", format!("topic={}", conv_event.topic));
                 let topic = conv_event.topic;
                 let event = conv_event.event;
-                // Bump conversation's last-seen timestamp so it moves to the
-                // top of the sorted chat list on any network activity.
-                self.conversation_store.touch_and_bump(&topic);
+                // Only bump conversation to the top of the sidebar when there
+                // is an actual user-visible message (text, file, image).
+                // NeighborUp/Down, Presence, AboutMe, Closed, and Error events
+                // are network/gossip noise and should not reorder the list.
+                if Self::_is_user_visible_event(&event) {
+                    self.conversation_store.touch_and_bump(&topic);
+                }
                 // Update the sidebar preview BEFORE taking the mutable borrow
                 // on self.conversations (avoids borrow conflict).
                 let is_inactive =
@@ -9956,6 +9982,42 @@ impl IcedChat {
                     return iced::Task::done(AppMessage::SendPressed);
                 }
 
+                if matches!(command, GuiTestCommand::CreateNewRoom) {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_create_room_action = Some(action_id);
+                    return iced::Task::done(AppMessage::CreateNewRoom);
+                }
+
+                if let GuiTestCommand::SetCreateRoomName { name } = &command {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::done(AppMessage::CreateNewRoomNameChanged(name.clone()));
+                }
+
+                if let GuiTestCommand::SetCreateRoomAdvertise { enabled } = &command {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::done(AppMessage::CreateNewRoomAdvertiseToggled(*enabled));
+                }
+
+                if matches!(command, GuiTestCommand::ConfirmCreateNewRoom) {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_confirm_create_room_action = Some(action_id);
+                    return iced::Task::done(AppMessage::ConfirmCreateNewRoom);
+                }
+
                 if let Some(AppMessage::ToggleDark(enabled)) = gui_dark_mode_message(&command) {
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
@@ -11917,7 +11979,11 @@ impl IcedChat {
             return None;
         }
 
-        self.conversation_store.touch_and_bump(topic);
+        // Only bump conversation ordering for user-visible messages, not
+        // protocol noise (NeighborUp/Down, Presence, AboutMe, etc.).
+        if Self::_is_user_visible_event(event) {
+            self.conversation_store.touch_and_bump(topic);
+        }
         self.update_room_preview(topic, event);
         let _ = self.conversation_store.save();
         let safety = self.public_room_safety.clone();

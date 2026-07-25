@@ -284,6 +284,7 @@ debug = true
 [patch.crates-io]
 iroh-dns = { path = "patched/iroh-dns" }
 mainline = { path = "patched/mainline" }
+n0-mainline = { path = "patched/n0-mainline" }
 
 
 [[test]]

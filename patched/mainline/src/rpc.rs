@@ -40,11 +40,24 @@ pub use put_query::{ConcurrencyError, PutError, PutOutcome, PutQueryError};
 pub use socket::DEFAULT_REQUEST_TIMEOUT;
 
 /// Default bootstrap nodes used to discover peers when no custom bootstrap list is configured.
-pub const DEFAULT_BOOTSTRAP_NODES: [&str; 4] = [
+///
+/// ## Platform notes
+/// - **Windows**: Port 6881 BitTorrent tracker nodes (`router.bittorrent.com`,
+///   `dht.transmissionbt.com`) are commonly blocked by corporate/ISP firewalls
+///   at the protocol level. Nodes on non-standard ports (`dht.libtorrent.org:25401`,
+///   `relay.pkarr.org:6881`) are more likely to succeed on restrictive networks.
+/// - The array is kept intentionally broad so at least one node is reachable from
+///   any given network. The DHT bootstrap merely seeds the routing table — even a
+///   single successful response lets the library populate its routing table via
+///   iterative lookups from that seed.
+pub const DEFAULT_BOOTSTRAP_NODES: [&str; 7] = [
     "router.bittorrent.com:6881",
     "dht.transmissionbt.com:6881",
     "dht.libtorrent.org:25401",
     "relay.pkarr.org:6881",
+    "router.utorrent.com:6881",
+    "dht.aelitis.com:6881",
+    "router.bittorrent.org:6881",
 ];
 
 const REFRESH_TABLE_INTERVAL: Duration = Duration::from_secs(15 * 60);
