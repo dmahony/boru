@@ -2175,6 +2175,8 @@ pub struct IcedChat {
     /// Entry index whose link preview is currently being fetched.
     /// Used to prevent duplicate concurrent fetches for the same entry.
     link_preview_fetch_index: Option<usize>,
+    /// Whether the chat options popover is open.
+    show_chat_options: bool,
 
     // ── Room advertisement (public directory) ──
     /// Which rooms are being advertised into the directory topic.
@@ -2461,6 +2463,8 @@ pub enum AppMessage {
     SendPressed,
     AttachPressed,
     ToggleHelp,
+    /// Toggle the chat options popover (room info, delete, settings).
+    ToggleChatOptions,
     OpenSettings,
     CloseSettings,
     /// Open the friend requests management screen.
@@ -3634,6 +3638,7 @@ impl IcedChat {
             entries: Vec::new(),
             composer_text: String::new(),
             help_visible: false,
+            show_chat_options: false,
             pending_file: None,
             pending_offline_ids: HashMap::new(),
             pending_image: VecDeque::new(),
@@ -4634,6 +4639,7 @@ impl IcedChat {
             AppMessage::SendPressed => "SendPressed",
             AppMessage::AttachPressed => "AttachPressed",
             AppMessage::ToggleHelp => "ToggleHelp",
+            AppMessage::ToggleChatOptions => "ToggleChatOptions",
             AppMessage::OpenSettings => "OpenSettings",
             AppMessage::CloseSettings => "CloseSettings",
             AppMessage::NetEvent(_) => "NetEvent",
@@ -7547,6 +7553,9 @@ impl IcedChat {
 
             AppMessage::ToggleHelp => {
                 self.help_visible = !self.help_visible;
+            }
+            AppMessage::ToggleChatOptions => {
+                self.show_chat_options = !self.show_chat_options;
                 iced::Task::none()
             }
 
@@ -14716,7 +14725,6 @@ impl IcedChat {
         }
 
         let content = widget::column![
-            self.view_chat_header(),
             self.view_chat_log(),
             self.view_composer(),
         ]
@@ -14727,7 +14735,40 @@ impl IcedChat {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        if self.help_visible {
+        // ── Chat options popover overlay ────────────────────────────
+        if self.show_chat_options {
+            use iced::widget::Stack;
+            use iced::Color;
+
+            let backdrop = widget::button(widget::Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .on_press(AppMessage::ToggleChatOptions)
+                .style(move |t, _status| iced::widget::button::Style {
+                    background: Some(iced::Background::Color(if matches!(t, iced::Theme::Dark) {
+                        Color::from_rgba(0.0, 0.0, 0.0, 0.45)
+                    } else {
+                        Color::from_rgba(0.0, 0.0, 0.0, 0.25)
+                    })),
+                    ..Default::default()
+                });
+
+            let options_panel = self.view_chat_options_popover();
+
+            Stack::new()
+                .push(inner)
+                .push(backdrop)
+                .push(
+                    widget::container(options_panel)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else if self.help_visible {
             use iced::widget::Stack;
             use iced::Color;
             let chat_layer = inner;
@@ -14888,6 +14929,121 @@ impl IcedChat {
             .width(Length::Fill)
             .padding(SPACE_12)
             .style(container_surface)
+            .into()
+    }
+
+    /// Build the chat options popover — a compact card with room info,
+    /// navigation, and management actions.
+    fn view_chat_options_popover(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text};
+        use iced::{Alignment, Length};
+
+        let topic_hex = self.topic.to_string();
+        let short_topic = if topic_hex.len() > 8 {
+            format!("{}…", &topic_hex[..8])
+        } else {
+            topic_hex.clone()
+        };
+
+        let room_name = self
+            .room_history
+            .find(&self.topic)
+            .map(|r| r.display_name())
+            .unwrap_or_else(|| format!("Room {}", short_topic));
+
+        let is_deleting = self.room_delete_confirm_topic == Some(self.topic);
+        let delete_label = if is_deleting { "Delete?" } else { "Delete Chat" };
+
+        let ticket_short = if self.ticket_str.len() > 12 {
+            format!("{}…{}", &self.ticket_str[..6], &self.ticket_str[self.ticket_str.len()-6..])
+        } else if !self.ticket_str.is_empty() {
+            self.ticket_str.clone()
+        } else {
+            "—".to_string()
+        };
+
+        let online_peers = self.friend_online_cache.len();
+        let is_advertised = self.advertised_rooms.contains(&self.topic);
+
+        let content = column![
+            // ── Room name ──
+            text(&room_name).size(TYPO_LG).font(crate::fonts::source_sans(iced::font::Weight::Bold)),
+            // ── Back button ──
+            button(text("← Back to chats").size(TYPO_SM))
+                .on_press(AppMessage::GoToChatList)
+                .style(BUTTON_GHOST_BG)
+                .padding([SPACE_6, SPACE_12])
+                .width(Length::Fill),
+            // ── Separator ──
+            text("───").size(TYPO_XXS).color(self.color_muted()),
+            // ── Room info ──
+            row![
+                text("Topic: ").size(TYPO_XS).color(self.color_muted()),
+                text(&topic_hex).size(TYPO_XS).font(crate::fonts::jetbrains_mono(iced::font::Weight::Regular)),
+            ].spacing(SPACE_4),
+            row![
+                text("Ticket: ").size(TYPO_XS).color(self.color_muted()),
+                button(text(&ticket_short).size(TYPO_XS).color(self.color_muted()))
+                    .on_press(AppMessage::CopyToClipboard(self.ticket_str.clone()))
+                    .style(BUTTON_GHOST_BG)
+                    .padding([SPACE_2, SPACE_6]),
+            ].spacing(SPACE_4),
+            row![
+                text("Online: ").size(TYPO_XS).color(self.color_muted()),
+                text(format!("{}", online_peers)).size(TYPO_XS),
+            ].spacing(SPACE_4),
+            // ── Advertise toggle ──
+            button(text(if is_advertised { "✓ Advertised" else "Advertise in Directory" }).size(TYPO_XS))
+                .on_press(AppMessage::ToggleAdvertiseRoom(self.topic))
+                .style(BUTTON_GHOST_BG)
+                .padding([SPACE_4, SPACE_10])
+                .width(Length::Fill),
+            // ── Separator ──
+            text("───").size(TYPO_XXS).color(self.color_muted()),
+            // ── Actions ──
+            button(text(delete_label).size(TYPO_SM))
+                .on_press(if is_deleting {
+                    AppMessage::ConfirmDeleteRoom(self.topic)
+                } else {
+                    AppMessage::DeleteRoomRequested(self.topic)
+                })
+                .style(if is_deleting {
+                    |t: &iced::Theme, _s: iced::widget::button::Status| iced::widget::button::Style {
+                        background: Some(iced::Background::Color(color_error(t))),
+                        text_color: iced::Color::WHITE,
+                        border: iced::Border { radius: SPACE_6.into(), ..Default::default() },
+                        ..Default::default()
+                    }
+                } else { BUTTON_GHOST_BG })
+                .padding([SPACE_6, SPACE_12])
+                .width(Length::Fill),
+            button(text("Settings").size(TYPO_SM))
+                .on_press(AppMessage::OpenSettings)
+                .style(BUTTON_GHOST_BG)
+                .padding([SPACE_6, SPACE_12])
+                .width(Length::Fill),
+        ]
+        .spacing(SPACE_6)
+        .align_x(Alignment::Start)
+        .padding(SPACE_16)
+        .max_width(360.0);
+
+        container(content)
+            .style(|t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: 1.0,
+                    radius: SPACE_12.into(),
+                },
+                shadow: iced::Shadow {
+                    color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                    offset: iced::Vector::new(0.0, 4.0),
+                    blur_radius: 24.0,
+                },
+                ..Default::default()
+            })
+            .width(Length::Shrink)
             .into()
     }
     fn view_chat_log(&self) -> iced::widget::Scrollable<'_, AppMessage> {
@@ -15373,6 +15529,12 @@ impl IcedChat {
         use iced::{Alignment, Color, Length};
         let has_text = !self.composer_text.is_empty();
 
+        // ── Options menu button ── opens chat options popover
+        let options_btn = button(text("⋮").size(TYPO_LG))
+            .on_press(AppMessage::ToggleChatOptions)
+            .style(BUTTON_MUTED)
+            .padding([SPACE_4, SPACE_6]);
+
         // ── Tertiary: help button ── smallest, subdued, sits at the edge
         let help_btn = button(text("?").size(TYPO_XS))
             .on_press(AppMessage::ToggleHelp)
@@ -15407,6 +15569,7 @@ impl IcedChat {
 
         // ── Main composer row ──
         let composer = row![
+            options_btn,
             text_input("Type a message…", &self.composer_text)
                 .id(COMPOSER_INPUT)
                 .on_input(AppMessage::InputChanged)
