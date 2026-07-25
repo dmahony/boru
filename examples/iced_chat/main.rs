@@ -1253,6 +1253,12 @@ fn main() -> Result<()> {
         icon: window_icon(),
         ..Default::default()
     })
+    .default_font(iced::Font {
+        family: iced::font::Family::Name(crate::fonts::SOURCE_SANS_3),
+        weight: iced::font::Weight::Normal,
+        stretch: iced::font::Stretch::Normal,
+        style: iced::font::Style::Normal,
+    })
     .subscription(|state: &IcedChat| {
         let mut subs: Vec<iced::Subscription<app::AppMessage>> = vec![];
 
