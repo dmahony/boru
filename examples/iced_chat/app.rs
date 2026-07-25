@@ -10585,6 +10585,7 @@ impl IcedChat {
                                         Some((topic, name, topic, ticket, neighbor_count))
                                     })
                                     .collect();
+                            let room_info_for_upsert = room_info.clone();
                             tasks.push(iced::Task::perform(
                                 async move {
                                     let mut results = Vec::new();
@@ -10631,6 +10632,28 @@ impl IcedChat {
                                     AppMessage::Noop
                                 },
                             ));
+
+                            // Also upsert local rooms into directory_store so the
+                            // creator sees their own advertised rooms in the PUBLIC
+                            // ROOMS sidebar (the gossip mesh does not echo our own
+                            // broadcasts back to us).
+                            let local_pk = self.endpoint.id();
+                            let mut store = self.directory_store.lock().unwrap();
+                            for (topic, room_name, _t2, ticket_str, member_count) in room_info_for_upsert {
+                                let ad = RoomAdvertisement {
+                                    room_name,
+                                    description: String::new(),
+                                    topic,
+                                    ticket: ticket_str,
+                                    member_count,
+                                    last_activity: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as u64,
+                                };
+                                store.upsert(ad, local_pk);
+                            }
+                            drop(store);
                         }
                     }
                 } else {
