@@ -2399,19 +2399,37 @@ pub async fn download_blob_to_file(
     }
     cancel_guard.disarm();
 
-    // Phase 2: stream from the local store to the output file
-    use tokio::io::AsyncReadExt;
-    let mut reader = blob_store.blobs().reader(hash);
-    let mut file = tokio::fs::File::create(save_path).await?;
-    let mut buf = vec![0u8; 256 * 1024];
-    loop {
-        let n = reader.read(&mut buf).await?;
-        if n == 0 {
-            break;
+    // Phase 2: export from blob store to file using the native export
+    // API, which is much more efficient than the manual 256KB read loop.
+    // On CoW-capable filesystems the copy is instantaneous; on others the
+    // store handles optimal buffering internally and emits CopyProgress
+    // events for real-time UI feedback.
+    {
+        use iroh_blobs::api::proto::ExportProgressItem;
+        let export = blob_store.blobs().export(hash, save_path);
+        let mut export_stream = export.stream().await;
+        let mut total = None;
+        while let Some(item) = export_stream.next().await {
+            match item {
+                ExportProgressItem::Size(s) => {
+                    total = Some(s);
+                }
+                ExportProgressItem::CopyProgress(offset) => {
+                    emit(TransferProgress::Progress {
+                        id,
+                        kind,
+                        name: name.clone(),
+                        bytes: offset,
+                        total,
+                    });
+                }
+                ExportProgressItem::Done => break,
+                ExportProgressItem::Error(cause) => {
+                    return Err(n0_error::anyerr!("Export failed: {cause}"));
+                }
+            }
         }
-        tokio::io::AsyncWriteExt::write_all(&mut file, &buf[..n]).await?;
     }
-    tokio::io::AsyncWriteExt::flush(&mut file).await?;
 
     emit(TransferProgress::Completed { id, kind, name });
     Ok(())
