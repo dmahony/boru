@@ -5943,9 +5943,13 @@ impl IcedChat {
                     // topic.  Discovered peers are ID-only (no transport info
                     // needed — the endpoint's address lookup chain handles
                     // resolution), so we wrap them in a bare EndpointAddr.
+                    // Filter out our own identity — discovered_peers may
+                    // transiently include it from a discovery source that
+                    // doesn't self-filter (e.g. lobby bootstrap exchange).
                     let discovered_bootstrap_addrs: Vec<EndpointAddr> = self
                         .discovered_peers
                         .iter()
+                        .filter(|&&pk| pk != self.local_public)
                         .map(|&pk| EndpointAddr::new(pk))
                         .collect();
                     // Merge discovered peers into the bootstrap list so they are
@@ -6158,7 +6162,12 @@ impl IcedChat {
                 // Retroactively join any pending discovered peers now that the lobby sender is available
                 let lobby_topic = Self::default_lobby_topic();
                 if topic == lobby_topic {
-                    let pending: Vec<PublicKey> = self.discovered_peers.to_vec();
+                    let pending: Vec<PublicKey> = self
+                        .discovered_peers
+                        .iter()
+                        .filter(|&&pk| pk != self.local_public)
+                        .copied()
+                        .collect();
                     if !pending.is_empty() {
                         let s = sender.clone();
                         info!(

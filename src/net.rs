@@ -1261,7 +1261,12 @@ impl Dialer {
         self.pending_dials.insert(endpoint_id, cancel.clone());
         let endpoint = self.endpoint.clone();
         self.pending.spawn(
+            // Wrap the entire dial in a tokio timeout so a hung
+            // endpoint.connect doesn't block the JoinSet forever.
             async move {
+                let dial_result = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    async move {
                 let selected = select_transport(&endpoint_addr);
                 debug!(
                     peer = %endpoint_id.fmt_short(),
@@ -1310,6 +1315,16 @@ impl Dialer {
                     } => Some(res),
                 };
                 (endpoint_id, res)
+                    }
+                )
+                .await;
+                match dial_result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!(peer = %endpoint_id.fmt_short(), "dial timed out after 20s");
+                        (endpoint_id, None)
+                    }
+                }
             }
             .instrument(tracing::Span::current()),
         );
@@ -1331,18 +1346,36 @@ impl Dialer {
         match self.pending_dials.is_empty() {
             false => {
                 let (endpoint_id, res) = loop {
-                    match self.pending.join_next().await {
-                        Some(Ok((endpoint_id, res))) => {
+                    // Timeout join_next so a hung dial task doesn't block the
+                    // gossip actor's event loop forever.  Stale dials are
+                    // abandoned; the caller will re-join on rediscovery.
+                    let timed_out = match n0_future::time::timeout(
+                        Duration::from_secs(20),
+                        self.pending.join_next(),
+                    )
+                    .await
+                    {
+                        Ok(Some(Ok((endpoint_id, res)))) => {
                             self.pending_dials.remove(&endpoint_id);
                             break (endpoint_id, res);
                         }
-                        Some(Err(e)) => {
+                        Ok(Some(Err(e))) => {
                             error!("next conn error: {:?}", e);
+                            continue;
                         }
-                        None => {
+                        Ok(None) => {
                             error!("no more pending conns available");
                             std::future::pending().await
                         }
+                        Err(_) => {
+                            warn!("dial join_next timed out, abandoning stale dials");
+                            self.pending.abort_all();
+                            self.pending_dials.clear();
+                            true
+                        }
+                    };
+                    if timed_out {
+                        std::future::pending().await
                     }
                 };
 
