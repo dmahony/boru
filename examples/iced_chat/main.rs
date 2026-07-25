@@ -1172,7 +1172,7 @@ fn main() -> Result<()> {
         IcedChat::update,
         IcedChat::view,
     )
-    .title(|_: &IcedChat| "Boru".to_string())
+    .title(|_: &IcedChat| format!("Boru — {}", app::version_tag()))
     .window(iced::window::Settings {
         icon: window_icon(),
         ..Default::default()
