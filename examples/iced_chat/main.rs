@@ -48,6 +48,7 @@ use boru_core::room::RoomStore;
 use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::Storage;
 use boru_core::store::MessageStore;
+use boru_core::file_access_handler::{FileAccessHandler, NonceStore};
 use clap::Parser;
 use iroh::{
     address_lookup::{memory::MemoryLookup, AddrFilter, DnsAddressLookup, PkarrResolver},
@@ -825,6 +826,17 @@ fn main() -> Result<()> {
             friends.clone(),
         );
 
+        // ── File access handler (issues signed download tickets) ────────
+        let nonce_store = Arc::new(NonceStore::new());
+        let file_access_handler = FileAccessHandler::new(
+            storage.clone(),
+            secret_key.clone(),
+            local_public.to_string(),
+            friends.clone(),
+            nonce_store,
+            Arc::new(blob_store.clone()),
+        );
+
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol.clone())
@@ -833,6 +845,7 @@ fn main() -> Result<()> {
             .accept(WHISPER_ALPN, whisper_handler)
             .accept(INBOX_ALPN, inbox_protocol)
             .accept(CATALOGUE_ALPN, catalogue_handler)
+            .accept(boru_core::net::FILE_ACCESS_ALPN, file_access_handler)
             .spawn();
         splash_send("Protocol router ready");
 

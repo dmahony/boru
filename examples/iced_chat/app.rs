@@ -93,6 +93,8 @@ use boru_core::diagnostics::GuiTestCommand;
 use boru_core::diagnostics::IcedMessageJournal;
 use boru_core::diagnostics::IcedStateSnapshot;
 use boru_core::diagnostics::DEFAULT_ACTION_STATE_TIMEOUT_MS;
+use boru_core::file_access_client::{request_download_permission, FileAccessRequestError};
+use boru_core::file_access_protocol::{FileAccessRequest, FileAccessResponse, SignedDownloadDescriptor};
 use iced::Color;
 
 // ── Shared ContinuousTracker wrapper ─────────────────────────────────
@@ -9572,16 +9574,45 @@ impl IcedChat {
                 let dl_dir = self.boru_downloads_dir.clone();
                 let progress_queue = self.download_progress_queue.clone();
                 let dn_for_err = display_name.clone();
+                let shared_file_id = file.shared_file_id.clone();
                 let content_hash = file.content_hash.clone();
                 let size_bytes = file.size_bytes;
+                let version = file.version_number as u64;
                 iced::Task::perform(
                     async move {
                         let _ = tokio::fs::create_dir_all(&dl_dir).await;
-                        let hash: iroh_blobs::Hash = content_hash
-                            .parse()
-                            .map_err(|e| format!("Invalid content hash: {e}"))?;
+                        // Step 1: Request download permission from the peer.
+                        let raw_hash: [u8; 32] = hex::decode(&content_hash)
+                            .map_err(|e| format!("Invalid content hash hex: {e}"))?
+                            .try_into()
+                            .map_err(|_| "Content hash wrong length".to_string())?;
+                        let request = FileAccessRequest::new(
+                            &shared_file_id, raw_hash, version,
+                        );
+                        let response = request_download_permission(
+                            &endpoint, peer, &request,
+                        )
+                        .await
+                        .map_err(|e| format!("Permission request failed: {e}"))?;
+                        let descriptor = match response {
+                            FileAccessResponse::Granted(desc) => *desc,
+                            FileAccessResponse::PermissionDenied => {
+                                return Err("Permission denied by peer".to_string())
+                            }
+                            FileAccessResponse::NotFound => {
+                                return Err("File not found on peer".to_string())
+                            }
+                            other => {
+                                return Err(format!("File access denied: {other:?}"))
+                            }
+                        };
+                        // Step 2: Extract the BlobTicket from the descriptor.
+                        let blob_ticket: BlobTicket = postcard::from_bytes(&descriptor.blob_ticket)
+                            .map_err(|e| format!("Invalid blob ticket: {e}"))?;
+                        let (addr, hash, _format) = blob_ticket.into_parts();
+                        let node_id = addr.id;
                         let candidates =
-                            boru_core::chat_core::download_candidates(peer, &neighbors);
+                            crate::app::download_candidates(node_id, &neighbors);
                         let save_path = dl_dir.join(&display_name);
                         let kind = boru_core::chat_callbacks::TransferKind::File;
                         download_blob_to_file(

@@ -34,6 +34,7 @@ use crate::file_access_protocol::{
 use crate::friends::{FriendId, FriendRelationship, FriendsStore};
 use crate::storage::Storage;
 
+use iroh_blobs::store::fs::FsStore;
 use rusqlite::params;
 
 /// Outcome of checking a nonce against the [`NonceStore`].
@@ -616,7 +617,7 @@ pub struct FileAccessHandler {
     /// Shared nonce store for single-use descriptor enforcement.
     nonce_store: Arc<NonceStore>,
     /// iroh-blobs store — used to verify imported file availability.
-    blob_store: Arc<iroh_blobs::api::Store>,
+    blob_store: Arc<FsStore>,
     /// Preparation bounds — concurrency, size, and timeout limits.
     prepare_limiter: Arc<PrepareLimiter>,
     /// Upload (file-access request) admission limits.
@@ -634,7 +635,7 @@ impl FileAccessHandler {
         profile_user_id: String,
         friends: FriendsStore,
         nonce_store: Arc<NonceStore>,
-        blob_store: Arc<iroh_blobs::api::Store>,
+        blob_store: Arc<FsStore>,
     ) -> Self {
         Self {
             storage,
@@ -657,7 +658,7 @@ impl FileAccessHandler {
         profile_user_id: String,
         friends: FriendsStore,
         nonce_store: Arc<NonceStore>,
-        blob_store: Arc<iroh_blobs::api::Store>,
+        blob_store: Arc<FsStore>,
         prepare_limiter: Arc<PrepareLimiter>,
         upload_limiter: Arc<UploadLimiter>,
     ) -> Self {
