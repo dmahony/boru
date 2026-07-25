@@ -4956,10 +4956,12 @@ impl IcedChat {
     fn switch_to_conversation(&mut self, topic: TopicId) -> bool {
         tracing::info!(topic=%topic, "switch_to_conversation called");
         if let Some(mut conversation) = self.conversations.remove(&topic) {
-            // Save current room entries before overwriting them
-            self.save_room_to_history();
+            // Save the current active conversation's runtime state into
+            // self.conversations before overwriting it with the target.
+            // Without this, switching away and back triggers a full slow-path
+            // subscribe every time (30s subscribe_and_join timeout).
 
-            // Update room-list preview for the previous room
+            // Capture preview before leave_current_room clears entries.
             let preview = self
                 .entries
                 .last()
@@ -4972,6 +4974,10 @@ impl IcedChat {
                     }
                 })
                 .unwrap_or_default();
+
+            self.save_room_to_history();
+            self.leave_current_room();
+
             if !preview.is_empty() {
                 self.room_history.update_preview(&self.topic, &preview);
             }
