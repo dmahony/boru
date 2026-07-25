@@ -91,7 +91,7 @@ fn ensure_graphical_session() {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "iced_chat")]
+#[command(name = "boru")]
 struct Args {
     #[clap(long)]
     secret_key: Option<String>,

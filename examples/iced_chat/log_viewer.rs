@@ -72,7 +72,7 @@ impl LogViewer {
 }
 
 pub fn log_file_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("logs").join("iced_chat.log")
+    data_dir.join("logs").join("boru.log")
 }
 
 #[expect(dead_code)]

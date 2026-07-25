@@ -207,8 +207,9 @@ name = "setup"
 required-features = ["examples"]
 
 [[example]]
-name = "iced_chat"
+name = "boru"
 required-features = ["gui"]
+path = "examples/iced_chat/main.rs"
 
 [[example]]
 name = "doctor"
