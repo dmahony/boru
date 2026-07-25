@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Splash window for Boru Chat. Shows spinner + startup messages.
+"""Splash window for Boru Chat. Shows spinner + status messages.
+Acts as a runtime watchdog: detects hangs (heartbeat timeout)
+and crashes (pipe close).
+
 Usage: python3 splash.py [--log LOGFILE]
-Stdin: lines become status messages, "DONE" exits.
+Stdin: lines become status messages.
+  "hb"        → heartbeat tick (resets timeout)
+  "DONE"      → close splash
+  other text  → shown as status messages
 If --log is given, the log file is tailed and lines shown as messages."""
 
 import tkinter as tk
@@ -17,13 +23,15 @@ FADE_COLORS = [
 BG = "#0f0f1a"
 ACCENT = "#4a9eff"
 SUBTLE = "#64748b"
+WARN_FG = "#f2a626"  # amber for not-responding
+CRASH_FG = "#e64040"  # red for crash
 
 
 class SplashScreen:
     def __init__(self, logfile=None):
         self.root = tk.Tk()
         self.root.title("Boru")
-        self.root.geometry("440x340+%d+%d" % self._center(440, 340))
+        self.root.geometry("440x360+%d+%d" % self._center(440, 360))
         self.root.overrideredirect(True)
         self.root.configure(bg=BG)
         self.root.attributes('-topmost', True)
@@ -45,16 +53,31 @@ class SplashScreen:
             font=("monospace", 14), fg=ACCENT, bg=BG)
         self.spinner_label.pack(pady=(12, 8))
 
+        # Status indicator label (crash, not-responding, etc.)
+        self.status_label = tk.Label(
+            inner, text="", font=("sans-serif", 10, "bold"),
+            fg=WARN_FG, bg=BG)
+        self.status_label.pack(pady=(0, 4))
+
         self.msg_frame = tk.Frame(inner, bg=BG)
         self.msg_frame.pack(pady=(0, 16), padx=24, fill=tk.BOTH, expand=True)
 
         self.messages = []
         self._running = True
         self._anim_start = time.time()
+
+        # ── Heartbeat watchdog ───────────────────────────────────────
+        self._last_heartbeat = time.time()
+        self._hb_timeout = 6.0       # seconds before "not responding"
+        self._hb_warned = False       # avoid repeat warn flicker
+        self._pipe_closed = False     # stdin EOF = crash
+        # ──────────────────────────────────────────────────────────────
+
         self._animate()
         self._read_stdin()
         if logfile:
             self._tail_log(logfile)
+        self._watchdog_tick()
 
     def _center(self, w, h):
         sw = self.root.winfo_screenwidth()
@@ -72,8 +95,29 @@ class SplashScreen:
                 widget._msg_age = min(age + 1, len(FADE_COLORS) - 1)
             self.root.after(250, self._animate)
 
+    def _watchdog_tick(self):
+        """Check heartbeat every 500ms for hang detection."""
+        if not self._running:
+            return
+        if self._pipe_closed:
+            # Process is gone — show crash, close shortly
+            self.status_label.config(text="⚠ Process exited unexpectedly", fg=CRASH_FG)
+            self._running = False
+            self.root.after(2000, self.root.destroy)
+            return
+        elapsed = time.time() - self._last_heartbeat
+        if elapsed > self._hb_timeout and not self._hb_warned:
+            self.status_label.config(
+                text="⚠ Not responding — may be hung", fg=WARN_FG)
+            self._hb_warned = True
+        elif elapsed <= self._hb_timeout and self._hb_warned:
+            # Recovered
+            self.status_label.config(text="")
+            self._hb_warned = False
+        self.root.after(500, self._watchdog_tick)
+
     def add_message(self, text):
-        # Skip empty lines, strip ANSI escapes, truncate
+        # Skip empty lines
         text = text.strip()
         if not text:
             return
@@ -109,8 +153,13 @@ class SplashScreen:
                     self._running = False
                     self.root.after(300, self.root.destroy)
                     return
+                if line == "hb":
+                    self._last_heartbeat = time.time()
+                    continue
                 if line:
                     self.root.after(0, self.add_message, line)
+            # EOF on stdin — process exited or crashed
+            self._pipe_closed = True
         t = threading.Thread(target=reader, daemon=True)
         t.start()
 

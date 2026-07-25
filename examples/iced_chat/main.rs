@@ -24,9 +24,12 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 use std::collections::HashSet;
 use std::io::IsTerminal;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use boru_core::backfill::{BackfillHandle, BackfillProtocolHandler, BACKFILL_ALPN};
 use boru_core::catalogue_handler::CatalogueHandler;
@@ -354,6 +357,51 @@ fn main() -> Result<()> {
     init_logging(&data_dir)?;
     info!(data_dir = %data_dir.display(), "starting iced chat");
 
+    // ── Panic hook: catch Rust panics and write crash info to instance.log
+    //     (which the splash window is tailing) plus a crash report file.
+    {
+        let crash_dir = data_dir.join("crash_reports");
+        let splash_log = data_dir.join("instance.log");
+        std::panic::set_hook(Box::new(move |info| {
+            let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+            let msg = match info.payload().downcast_ref::<&str>() {
+                Some(s) => s.to_string(),
+                None => match info.payload().downcast_ref::<String>() {
+                    Some(s) => s.clone(),
+                    None => "unknown panic".to_string(),
+                },
+            };
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "unknown location".to_string());
+            let crash_msg = format!(
+                "BORU CRASH at {timestamp}\nLocation: {location}\nMessage: {msg}"
+            );
+            // Write to instance.log so the splash window displays it
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&splash_log)
+            {
+                let _ = writeln!(f, "{}", crash_msg);
+            }
+            // Write a dedicated crash report
+            let _ = std::fs::create_dir_all(&crash_dir);
+            let report_path = crash_dir.join(format!("crash-{timestamp}.txt"));
+            if let Ok(mut f) = std::fs::File::create(&report_path) {
+                let _ = writeln!(f, "{crash_msg}");
+                let _ = writeln!(
+                    f,
+                    "RUST_BACKTRACE: {}",
+                    std::env::var("RUST_BACKTRACE").unwrap_or_else(|_| "unset".to_string())
+                );
+            }
+            // Also log via tracing
+            tracing::error!("{crash_msg}");
+        }));
+    }
+
     let runtime = tokio::runtime::Runtime::new().std_context("failed to create tokio runtime")?;
     let _tokio_timer = PerfTracker::timer("app_startup", "tokio-runtime");
 
@@ -460,8 +508,10 @@ fn main() -> Result<()> {
 
     // ── Start a native splash window so the user sees feedback immediately ─
     // The splash shows a spinner and startup progress messages while the
-    // heavy network initialization runs.  It is closed just before the
-    // Iced window opens.
+    // heavy network initialization runs.  After the Iced window opens it
+    // stays alive as a runtime watchdog: a background thread sends "hb"
+    // heartbeat ticks every 1s.  If the heartbeat stops (hang) or the pipe
+    // closes (crash), the splash shows "not responding" or "exited".
     // Look for splash.py next to the binary first, then in the source tree.
     let splash_script = std::env::current_exe()
         .ok()
@@ -470,8 +520,8 @@ fn main() -> Result<()> {
             std::path::PathBuf::from("/home/dan/iroh-gossip-chat/scripts/splash.py")
         });
     let splash_log_path = data_dir.join("instance.log");
-    let mut splash_child = if splash_script.exists() {
-        std::process::Command::new("python3")
+    let splash_stdin: Arc<Mutex<Option<std::process::ChildStdin>>> = if splash_script.exists() {
+        match std::process::Command::new("python3")
             .arg(&splash_script)
             .arg("--log")
             .arg(&splash_log_path)
@@ -479,15 +529,20 @@ fn main() -> Result<()> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .ok()
+        {
+            Ok(child) => Arc::new(Mutex::new(child.stdin)),
+            Err(_) => Arc::new(Mutex::new(None)),
+        }
     } else {
-        None
+        Arc::new(Mutex::new(None))
     };
-    let mut splash_stdin = splash_child.as_mut().and_then(|c| c.stdin.take());
-    let mut splash_send = |msg: &str| {
-        if let Some(ref mut stdin) = splash_stdin {
-            use std::io::Write;
-            let _ = writeln!(stdin, "{}", msg);
+
+    // Helper to send a line to the splash window.
+    let splash_send = |msg: &str| {
+        if let Ok(mut guard) = splash_stdin.lock() {
+            if let Some(ref mut stdin) = *guard {
+                let _ = writeln!(stdin, "{}", msg);
+            }
         }
     };
     splash_send("Starting network...");
@@ -1152,6 +1207,27 @@ fn main() -> Result<()> {
         initial_topic,
     )));
 
+    // ── Heartbeat thread: sends "hb" to splash every 1s ────────────
+    // This runs on a separate OS thread so it keeps ticking even if
+    // the Iced event loop hangs.  The splash shows "not responding"
+    // if no "hb" line arrives within 6 seconds.
+    let hb_stdin = Arc::clone(&splash_stdin);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        if let Ok(mut guard) = hb_stdin.lock() {
+            if let Some(ref mut stdin) = *guard {
+                if writeln!(stdin, "hb").is_err() {
+                    // Pipe closed — process is exiting
+                    break;
+                }
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    });
+
     iced::application(
         move || {
             let (state, opt_topic) = app_cell
@@ -1216,6 +1292,13 @@ fn main() -> Result<()> {
         warn!("Failed to launch iced GUI: {err}");
         std::process::exit(1);
     });
+
+    // Close the splash (the heartbeat thread will break on pipe error)
+    if let Ok(mut guard) = splash_stdin.lock() {
+        if let Some(ref mut stdin) = *guard {
+            let _ = writeln!(stdin, "DONE");
+        }
+    }
 
     // Print performance baseline report if --perf was active
     if args.perf {
