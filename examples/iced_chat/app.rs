@@ -556,6 +556,7 @@ pub(crate) const ICON_NOTIFICATION: &[u8] = include_bytes!("../../assets/icons/l
 pub(crate) const ICON_ONLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle-filled.svg");
 pub(crate) const ICON_OFFLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle.svg");
 pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
+pub(crate) const ICON_UNREAD: &[u8] = include_bytes!("../../assets/icons/lucide/message-circle-fill.svg");
 
 // ── SVG icon helper ──────────────────────────────────────────────────
 /// Create an SVG icon widget from embedded Lucide icon bytes.
@@ -1629,12 +1630,12 @@ impl ChatEntry {
     fn update_cache(&mut self) {
         self.label_text = if matches!(self.kind, ChatKind::Local) && self.event_id > 0 {
             Some(format!(
-                "[{} {}]",
+                "{} {}",
                 self.label,
                 self.delivery_state.display_icon()
             ))
         } else {
-            Some(format!("[{}]", self.label))
+            Some(self.label.clone())
         };
         self.reactions_text = if self.reactions.is_empty() {
             None
@@ -1815,8 +1816,8 @@ pub struct IcedChat {
     /// Currently selected chat list topic, used by cached sidebar rows to
     /// update selection styling without rebuilding row contents.
     sidebar_selected_topic: Rc<Cell<Option<TopicId>>>,
-    /// Track sidebar section collapsed state: [chats, friends, discover, requests]
-    sidebar_section_collapsed: [bool; 4],
+    /// Track sidebar section collapsed state: [chats, friends, discover, requests, public_rooms]
+    sidebar_section_collapsed: [bool; 5],
 
     // ── Chat state (active room — display cache) ──
     /// Active conversation topic (display cache).
@@ -2321,6 +2322,21 @@ struct SidebarDiscoveredPeersDependency {
     peers: Vec<SidebarDiscoveredPeerRow>,
 }
 
+/// A single public room advertisement shown in the sidebar.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct SidebarPublicRoomRow {
+    room_name: String,
+    member_count: u32,
+    advertisement: RoomAdvertisement,
+}
+
+/// Cached dependency for the sidebar's Public Rooms section.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct SidebarPublicRoomsDependency {
+    dark_mode: bool,
+    rooms: Vec<SidebarPublicRoomRow>,
+}
+
 /// Cached dependency for the sidebar's Friends section.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct SidebarFriendRow {
@@ -2334,6 +2350,7 @@ struct SidebarFriendRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct SidebarFriendsDependency {
     dark_mode: bool,
+    sidebar_revision: u64,
     friend_request_search_input: String,
 }
 
@@ -2497,7 +2514,7 @@ pub enum AppMessage {
     CloseSettings,
     /// Open the friend requests management screen.
     OpenFriendRequests,
-    /// Toggle a sidebar section's collapsed state by index (0=chats, 1=friends, 2=discover, 3=requests).
+    /// Toggle a sidebar section's collapsed state by index (0=chats, 1=friends, 2=discover, 3=requests, 4=public_rooms).
     ToggleSidebarSectionCollapsed(usize),
     CloseFriendRequests,
     FriendRequestSearchChanged(String),
@@ -3742,7 +3759,7 @@ impl IcedChat {
             friends_sidebar_revision: 0,
             requests_sidebar_revision: 0,
             sidebar_selected_topic: Rc::new(Cell::new(None)),
-            sidebar_section_collapsed: [false; 4],
+            sidebar_section_collapsed: [false; 5],
             initial_bootstrap_peers: initial_bootstrap,
             return_to_chat_list_after_open,
             whisper_handle,
@@ -8546,6 +8563,29 @@ impl IcedChat {
                 self.pending_file_upload = Some((filename.clone(), file_size));
                 self.file_upload_spinner_frame = 0;
 
+                // Create a download card immediately showing upload progress,
+                // rather than waiting for the upload to finish.
+                let local_label = self.local_label.clone();
+                self.download_entry_index = Some(self.entries.len());
+                self.entries_push(ChatEntry::system_download(
+                    String::new(),
+                    TransferKind::File,
+                    filename.clone(),
+                    String::new(),
+                    &local_label,
+                ));
+                if let Some(idx) = self.download_entry_index {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(dl) = entry.download.as_mut() {
+                            dl.state = DownloadState::Active {
+                                bytes: 0,
+                                total: Some(file_size),
+                            };
+                        }
+                        entry.body = format!("Uploading: {filename}");
+                    }
+                }
+
                 let blob_store = self.blob_store.clone();
                 let sender = self.sender.clone();
                 let secret_key = self.secret_key.clone();
@@ -9005,11 +9045,15 @@ impl IcedChat {
                 if self.has_message(&message_hash) {
                     return self.start_next_pending_image_download();
                 }
-                let sender_name = self
+                let sender_name = if sender == self.local_public {
+                    self.local_label.clone()
+                } else {
+                    self
                     .names
                     .get(&sender)
                     .cloned()
-                    .unwrap_or_else(|| sender.fmt_short().to_string());
+                    .unwrap_or_else(|| sender.fmt_short().to_string())
+                };
                 // The image was already saved to the per-user store by the
                 // async download task. Use the pre-saved identifier.
                 let image_error = match &image_identifier {
@@ -9020,7 +9064,7 @@ impl IcedChat {
                 let mut entry = ChatEntry::image(
                     kind,
                     &sender_name,
-                    format!("[Image: {display_name}]"),
+                    String::new(),
                     image_bytes,
                     Some(message_hash),
                     None,
@@ -9088,7 +9132,23 @@ impl IcedChat {
             }
             AppMessage::FileDownloaded { name, ticket } => {
                 self.pending_file_upload = None;
-                self.set_pending_file(name, ticket);
+                // Update the upload-progress entry to Completed.
+                if let Some(idx) = self.download_entry_index {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(dl) = entry.download.as_mut() {
+                            dl.ticket = ticket.clone();
+                            dl.state = DownloadState::Completed {
+                                saved_name: name.clone(),
+                                saved_path: None,
+                                total_size: None,
+                            };
+                        }
+                        entry.body = format!("Shared: {name} ✓");
+                        self.layout_cache.borrow_mut().invalidate_from(idx);
+                    }
+                }
+                // Also set pending_file so the file can be re-downloaded.
+                self.pending_file = Some((name, ticket));
                 iced::Task::none()
             }
             AppMessage::ErrorMsg(msg) => {
@@ -12066,10 +12126,8 @@ impl IcedChat {
             }
             let name = self.resolve_name(peer);
             if *online {
-                self.push_system(format!("{name} joined the chat"));
                 self.push_activity(format!("{name} came online"));
             } else {
-                self.push_system(format!("{name} left the chat"));
                 self.push_activity(format!("{name} went offline"));
             }
         }
@@ -13262,6 +13320,7 @@ impl IcedChat {
             .filter(|(_, r)| r.relationship.can_message())
             .count();
         let discover_count = self.discovered_peers.len();
+        let public_room_count = self.directory_store.lock().unwrap().len();
         let request_count = self
             .friend_request_store
             .list_incoming_by_status(
@@ -13342,6 +13401,18 @@ impl IcedChat {
         ));
         if !self.sidebar_section_collapsed[2] {
             content = content.push(self.view_sidebar_discovered_peers());
+        }
+
+        // PUBLIC ROOMS section
+        content = content.push(Self::sidebar_collapsible_section_header(
+            "PUBLIC ROOMS",
+            public_room_count,
+            4,
+            self.sidebar_section_collapsed[4],
+            self.dark_mode,
+        ));
+        if !self.sidebar_section_collapsed[4] {
+            content = content.push(self.view_sidebar_public_rooms());
         }
 
         // REQUESTS section
@@ -13704,26 +13775,34 @@ impl IcedChat {
             } else {
                 unread.to_string()
             };
-            preview_row = preview_row.push(
-                container(
-                    text(count_str)
-                        .size(TYPO_XXS)
-                        .color(Color::WHITE)
-                        .width(Length::Fill),
+            // ── Filled bubble icon + count pill ───────────────────
+            preview_row = preview_row
+                .push(
+                    icon_svg(ICON_UNREAD, TYPO_SM)
+                        .style(move |t, _| iced::widget::svg::Style {
+                            color: Some(accent_primary(t)),
+                        }),
                 )
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-                .width(18.0)
-                .height(18.0)
-                .style(move |t| container::Style {
-                    background: Some(Background::Color(color_error(t))),
-                    border: Border {
-                        radius: 9.0.into(),
+                .push(
+                    container(
+                        text(count_str)
+                            .size(TYPO_XXS)
+                            .color(Color::WHITE)
+                            .width(Length::Fill),
+                    )
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .width(18.0)
+                    .height(18.0)
+                    .style(move |t| container::Style {
+                        background: Some(Background::Color(color_error(t))),
+                        border: Border {
+                            radius: 9.0.into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-            );
+                    }),
+                );
         }
 
         // ── Build the content row ─────────────────────────────────
@@ -13977,6 +14056,96 @@ impl IcedChat {
         section.into()
     }
 
+    /// Cached dependency for the sidebar's Public Rooms section.
+    fn sidebar_public_rooms_dependency(&self) -> SidebarPublicRoomsDependency {
+        let rooms: Vec<SidebarPublicRoomRow> = {
+            let store = self.directory_store.lock().unwrap();
+            let mut list = store.list_active();
+            // Sort by member count descending, then by room name.
+            list.sort_by(|(a, _), (b, _)| {
+                b.member_count
+                    .cmp(&a.member_count)
+                    .then_with(|| a.room_name.cmp(&b.room_name))
+            });
+            list.into_iter()
+                .map(|(ad, _author)| SidebarPublicRoomRow {
+                    room_name: ad.room_name.clone(),
+                    member_count: ad.member_count,
+                    advertisement: ad,
+                })
+                .collect()
+        };
+        SidebarPublicRoomsDependency {
+            dark_mode: self.dark_mode,
+            rooms,
+        }
+    }
+
+    /// \"Public Rooms\" section of the sidebar — rooms advertised on the directory topic.
+    fn view_sidebar_public_rooms(&self) -> iced::Element<'_, AppMessage> {
+        iced::widget::lazy(
+            self.sidebar_public_rooms_dependency(),
+            Self::view_sidebar_public_rooms_content,
+        )
+        .into()
+    }
+
+    fn view_sidebar_public_rooms_content(
+        dep: &SidebarPublicRoomsDependency,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, container, text, Column, Row};
+        use iced::{Alignment, Length};
+
+        let mut section = Column::new().spacing(SPACE_2);
+
+        for room in &dep.rooms {
+            let room_name = room.room_name.clone();
+            let member_info = if room.member_count > 0 {
+                format!("{} members", room.member_count)
+            } else {
+                String::new()
+            };
+            let ad_for_join = room.advertisement.clone();
+
+            let row_el = Row::new()
+                .push(
+                    Column::new()
+                        .push(text(room_name).size(TYPO_SM))
+                        .push(
+                            text(member_info)
+                                .size(TYPO_XXS)
+                                .style(text_muted_style),
+                        )
+                        .spacing(SPACE_2)
+                        .width(Length::Fill),
+                )
+                .push(
+                    button(text("Join").size(TYPO_XS))
+                        .on_press(AppMessage::DirectoryRoomJoin(ad_for_join))
+                        .style(BUTTON_GHOST_BG)
+                        .padding([SPACE_4, SPACE_8]),
+                )
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center)
+                .padding([SPACE_4, SPACE_12])
+                .width(Length::Fill);
+
+            section = section.push(container(row_el).width(Length::Fill));
+        }
+
+        if dep.rooms.is_empty() {
+            let theme = Self::theme_from_dark(dep.dark_mode);
+            section = section.push(Self::empty_state_block(
+                &theme,
+                "No public rooms discovered yet.",
+                None,
+                [SPACE_4, SPACE_12],
+            ));
+        }
+
+        section.into()
+    }
+
     /// Generate a small colored avatar block from a peer's public key bytes.
     fn peer_avatar_block(
         avatar: SidebarAvatarHandle,
@@ -14024,6 +14193,7 @@ impl IcedChat {
     fn sidebar_friends_dependency(&self) -> SidebarFriendsDependency {
         SidebarFriendsDependency {
             dark_mode: self.dark_mode,
+            sidebar_revision: self.friends_sidebar_revision,
             friend_request_search_input: self.friend_request_search_input.clone(),
         }
     }
@@ -15150,7 +15320,7 @@ impl IcedChat {
         use iced::widget::space;
         use iced::widget::text::Wrapping;
         use iced::widget::{button, container, scrollable, text, Column, Row};
-        use iced::Length;
+        use iced::{Alignment, Length};
 
         let _start = std::time::Instant::now();
 
@@ -15284,19 +15454,32 @@ impl IcedChat {
             };
 
             let label_text = entry.label_text.as_deref().unwrap_or(&entry.label);
+            let is_friend_online = entry
+                .sender_key
+                .map_or(false, |k| self.friend_online_cache.contains(&k));
             let label_el: iced::Element<'_, AppMessage> = if matches!(entry.kind, ChatKind::Remote)
             {
                 if let Some(sender_key) = entry.sender_key {
-                    button(text(label_text).size(TYPO_XS).color(label_color))
-                        .on_press(AppMessage::OpenPeerProfile(sender_key))
-                        .padding(0)
-                        .style(|_t, _s| iced::widget::button::Style::default())
-                        .into()
+                    let status_icon = icon_svg(if is_friend_online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_XXS)
+                        .style(move |t, _| iced::widget::svg::Style {
+                            color: Some(if is_friend_online { accent_green(t) } else { Self::muted_color(false) }),
+                        });
+                    button(
+                        Row::new()
+                            .push(status_icon)
+                            .push(text(label_text).size(TYPO_XS).font(crate::fonts::source_sans(iced::font::Weight::Semibold)).color(label_color))
+                            .spacing(SPACE_4)
+                            .align_y(Alignment::Center),
+                    )
+                    .on_press(AppMessage::OpenPeerProfile(sender_key))
+                    .padding(0)
+                    .style(|_t, _s| iced::widget::button::Style::default())
+                    .into()
                 } else {
-                    text(label_text).size(TYPO_XS).color(label_color).into()
+                    text(label_text).size(TYPO_XS).font(crate::fonts::source_sans(iced::font::Weight::Semibold)).color(label_color).into()
                 }
             } else {
-                text(label_text).size(TYPO_XS).color(label_color).into()
+                text(label_text).size(TYPO_XS).font(crate::fonts::source_sans(iced::font::Weight::Semibold)).color(label_color).into()
             };
 
             // ── Clickable URL-aware body ──
@@ -15365,7 +15548,6 @@ impl IcedChat {
             let ts_el = text(ts_text).size(TYPO_XXS).color(text_muted(&theme));
 
             let mut bubble_col = Column::new()
-                .push(label_el)
                 .push(bubble)
                 .push(ts_el)
                 .spacing(SPACE_2)
@@ -15475,7 +15657,12 @@ impl IcedChat {
             }
             .width(Length::Fill);
 
-            col = col.push(msg_row);
+            col = col.push(
+                Column::new()
+                    .push(label_el)
+                    .push(msg_row)
+                    .spacing(SPACE_2)
+            );
 
             // ── Image (cached handle — decoded once at construction) ──
             if let Some(handle) = self.image_handle_for_entry(entry) {

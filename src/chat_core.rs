@@ -959,7 +959,7 @@ pub enum Message {
 ///
 /// Peers can use this to discover public rooms without needing an
 /// out-of-band invitation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomAdvertisement {
     /// Human-readable room name.
     pub room_name: String,
@@ -1746,11 +1746,6 @@ pub fn handle_net_event_for_topic(
                         if cb.is_friend(&from) {
                             cb.friend_mark_online(fid);
                             if !is_muted {
-                                let sender_name = cb.resolve_name(&from);
-                                cb.push_system(format!(
-                                    "{} shared an image: {}",
-                                    sender_name, name
-                                ));
                                 cb.set_pending_image(name, hash, from);
                             }
                         }

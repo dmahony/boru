@@ -171,7 +171,10 @@ pub fn resolve_peer_name<'a>(
     if let Some(name) = session_name.filter(|n| !n.trim().is_empty()) {
         return name.to_string();
     }
-    generate_friendly_name(peer)
+    // Fallback: last 5 hex characters of the peer's public key.
+    let full = peer.to_string();
+    let suffix: String = full.chars().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect();
+    suffix
 }
 
 /// Convenience wrapper: returns `(primary, secondary)` where primary is the
