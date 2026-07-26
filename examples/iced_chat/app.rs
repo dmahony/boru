@@ -1717,6 +1717,9 @@ pub struct ConversationLive {
     pub names: HashMap<PublicKey, String>,
     /// Maps content hash to stable event id for self-sent messages.
     pub self_sent_events: HashMap<MessageHash, u64>,
+    /// Maintained indexes into this conversation's entries.
+    pub event_id_to_index: HashMap<u64, usize>,
+    pub message_hash_to_index: HashMap<MessageHash, usize>,
     /// Number of entries already saved to ChatHistoryStore.
     pub history_saved_count: usize,
     /// Cached layout for the chat log.
@@ -1772,6 +1775,8 @@ impl ConversationLive {
             follow_latest: true,
             names: HashMap::new(),
             self_sent_events: HashMap::new(),
+            event_id_to_index: HashMap::new(),
+            message_hash_to_index: HashMap::new(),
             history_saved_count: 0,
             layout_cache: std::cell::RefCell::new(LayoutCache::new(TYPO_SM)),
             scroll_offset: 0.0,
@@ -1917,6 +1922,9 @@ pub struct IcedChat {
     needs_conn_refresh: bool,
     /// Maps protocol message hashes to event_ids for delivery state resolution.
     self_sent_events: HashMap<MessageHash, u64>,
+    /// Maintained indexes into the active conversation's entries.
+    event_id_to_index: HashMap<u64, usize>,
+    message_hash_to_index: HashMap<MessageHash, usize>,
 
     /// Maps offline mail envelope message_ids to ChatEntry indices for
     /// updating delivery status when an AckReceived or MailboxReplayed event
@@ -3775,6 +3783,8 @@ impl IcedChat {
             conn_refresh_in_flight: false,
             needs_conn_refresh: false,
             self_sent_events: HashMap::new(),
+            event_id_to_index: HashMap::new(),
+            message_hash_to_index: HashMap::new(),
 
             follow_latest: true,
             total_content_height: std::cell::Cell::new(0.0),
@@ -4681,6 +4691,40 @@ impl IcedChat {
             .push_front(RecentActivityEvent::new(description));
     }
 
+    /// Rebuild both entry indexes after bulk mutations (room switch, load, eviction).
+    fn rebuild_entry_indexes(&mut self) {
+        self.event_id_to_index.clear();
+        self.message_hash_to_index.clear();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if entry.event_id != 0 {
+                self.event_id_to_index.insert(entry.event_id, index);
+            }
+            if let Some(hash) = entry.message_hash {
+                self.message_hash_to_index.insert(hash, index);
+            }
+        }
+        debug_assert!(self.entry_indexes_consistent());
+    }
+
+    fn entry_indexes_consistent(&self) -> bool {
+        self.event_id_to_index.iter().all(|(id, &index)| {
+            self.entries.get(index).is_some_and(|entry| entry.event_id == *id)
+        }) && self.message_hash_to_index.iter().all(|(hash, &index)| {
+            self.entries.get(index).and_then(|entry| entry.message_hash.as_ref()) == Some(hash)
+        })
+    }
+
+    fn index_entry(&mut self, index: usize) {
+        let Some(entry) = self.entries.get(index) else { return };
+        if entry.event_id != 0 {
+            self.event_id_to_index.insert(entry.event_id, index);
+        }
+        if let Some(hash) = entry.message_hash {
+            self.message_hash_to_index.insert(hash, index);
+        }
+        debug_assert!(self.entry_indexes_consistent());
+    }
+
     /// Push an entry and update the incremental layout cache atomically.
     /// Must be the *only* way entries are added to `self.entries`.
     /// Returns the index of the pushed entry.
@@ -4731,10 +4775,12 @@ impl IcedChat {
             .borrow_mut()
             .append(&entry, prev_day, self.chat_text_size);
         self.entries.push(entry);
+        let index = self.entries.len() - 1;
+        self.index_entry(index);
         self.keep_latest_visible();
         self.enforce_image_budget();
         self.enforce_entry_cap();
-        self.entries.len() - 1
+        index
     }
 
     /// Evict `image_bytes` from the oldest entries that have an
@@ -4800,6 +4846,7 @@ impl IcedChat {
         let drain_count = self.entries.len() - MAX_ENTRIES;
         self.entries.drain(..drain_count);
         self.history_saved_count = self.history_saved_count.saturating_sub(drain_count);
+        self.rebuild_entry_indexes();
         self.layout_cache.borrow_mut().invalidate_all();
     }
 
@@ -5023,6 +5070,8 @@ impl IcedChat {
         conversation.composer_text = std::mem::take(&mut self.composer_text);
         conversation.names = std::mem::take(&mut self.names);
         conversation.self_sent_events = std::mem::take(&mut self.self_sent_events);
+        conversation.event_id_to_index = std::mem::take(&mut self.event_id_to_index);
+        conversation.message_hash_to_index = std::mem::take(&mut self.message_hash_to_index);
         conversation.neighbors = std::mem::take(&mut self.neighbors);
         conversation.history_saved_count = self.history_saved_count;
         conversation.pending_file = self.pending_file.take();
@@ -5035,6 +5084,8 @@ impl IcedChat {
         conversation.viewport_height = self.viewport_height;
         self.conversations.insert(topic, conversation);
         self.entries.clear();
+        self.event_id_to_index.clear();
+        self.message_hash_to_index.clear();
         self.layout_cache.borrow_mut().invalidate_all();
         self.names.clear();
         self.pending_file = None;
@@ -5100,6 +5151,8 @@ impl IcedChat {
             self.composer_text = std::mem::take(&mut conversation.composer_text);
             self.names = std::mem::take(&mut conversation.names);
             self.self_sent_events = std::mem::take(&mut conversation.self_sent_events);
+            self.event_id_to_index = std::mem::take(&mut conversation.event_id_to_index);
+            self.message_hash_to_index = std::mem::take(&mut conversation.message_hash_to_index);
             self.neighbors = conversation.neighbors;
             self.history_saved_count = conversation.history_saved_count;
             self.pending_file = conversation.pending_file.take();
@@ -6367,6 +6420,8 @@ impl IcedChat {
                 self.topic = topic;
                 self.ticket_str = ticket.clone();
                 self.entries.clear();
+                self.event_id_to_index.clear();
+                self.message_hash_to_index.clear();
                 self.layout_cache.borrow_mut().clear();
                 self.names.clear();
                 self.composer_text.clear();
@@ -8708,14 +8763,12 @@ impl IcedChat {
                                 .is_ok()
                         {
                             let _ = history.update_delivery_state(event_id, DeliveryState::Sent);
-                            if let Some(entry) = self
-                                .entries
-                                .iter_mut()
-                                .find(|entry| entry.event_id == event_id)
-                            {
-                                entry.delivery_state = DeliveryState::Sent;
-                                entry.bump_gen();
-                                changed = true;
+                            if let Some(&index) = self.event_id_to_index.get(&event_id) {
+                                if let Some(entry) = self.entries.get_mut(index) {
+                                    entry.delivery_state = DeliveryState::Sent;
+                                    entry.bump_gen();
+                                    changed = true;
+                                }
                             }
                         }
                     }
@@ -8729,10 +8782,13 @@ impl IcedChat {
             }
 
             AppMessage::MessageSent(_text, event_id, msg_hash) => {
-                if let Some(entry) = self.entries.iter_mut().find(|e| e.event_id == event_id) {
-                    entry.delivery_state = DeliveryState::Sent;
-                    entry.message_hash = Some(msg_hash);
-                    entry.bump_gen();
+                if let Some(&index) = self.event_id_to_index.get(&event_id) {
+                    if let Some(entry) = self.entries.get_mut(index) {
+                        entry.delivery_state = DeliveryState::Sent;
+                        entry.message_hash = Some(msg_hash);
+                        entry.bump_gen();
+                    }
+                    self.message_hash_to_index.insert(msg_hash, index);
                 }
                 // Persist delivery state update in background so the UI thread
                 // is not blocked by disk I/O.
@@ -12159,14 +12215,13 @@ impl IcedChat {
             if *from == self.local_public {
                 let msg_hash = message_hash(message);
                 if let Some(&event_id) = self.self_sent_events.get(&msg_hash) {
-                    if let Some(entry) = self.entries.iter_mut().find(|e| e.event_id == event_id) {
-                        if entry.delivery_state == DeliveryState::Sent {
-                            entry.delivery_state = DeliveryState::Delivered;
-                            entry.bump_gen();
-                            {
+                    if let Some(&index) = self.event_id_to_index.get(&event_id) {
+                        if let Some(entry) = self.entries.get_mut(index) {
+                            if entry.delivery_state == DeliveryState::Sent {
+                                entry.delivery_state = DeliveryState::Delivered;
+                                entry.bump_gen();
                                 let mut store = self.chat_history.lock().unwrap();
                                 let _ = store.update_delivery_state(event_id, DeliveryState::Delivered);
-                            }
                             self.send_save_chat_history();
                             {
                                 let mut outbox = self.outbox.lock().unwrap();
@@ -12174,6 +12229,7 @@ impl IcedChat {
                                     outbox.update_delivery_state(event_id, DeliveryState::Delivered);
                             }
                             self.send_save_outbox();
+                            }
                         }
                     }
                 }
@@ -12230,13 +12286,13 @@ impl IcedChat {
         } = event
         {
             if *receipt_from != self.local_public {
-                if let Some(&event_id) = self.self_sent_events.get(receipt_hash) {
-                    if let Some(entry) = self.entries.iter_mut().find(|e| e.event_id == event_id) {
+                if let Some(&index) = self.message_hash_to_index.get(receipt_hash) {
+                    if let Some(entry) = self.entries.get_mut(index) {
                         if entry.delivery_state.can_transition_to(&DeliveryState::Seen) {
                             entry.delivery_state = DeliveryState::Seen;
                             entry.bump_gen();
                             let mut store = self.chat_history.lock().unwrap();
-                            let _ = store.update_delivery_state(event_id, DeliveryState::Seen);
+                            let _ = store.update_delivery_state(entry.event_id, DeliveryState::Seen);
                         }
                     }
                 }
@@ -12775,51 +12831,42 @@ impl ChatCallbacks for IcedChat {
     }
 
     fn has_message(&self, hash: &MessageHash) -> bool {
-        self.entries
-            .iter()
-            .any(|e| e.message_hash.as_ref() == Some(hash))
+        self.message_hash_to_index.contains_key(hash)
     }
 
     fn edit_message(&mut self, hash: &MessageHash, new_text: String) {
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .find(|e| e.message_hash.as_ref() == Some(hash))
-        {
-            entry.body = new_text.clone();
-            entry.edited = true;
-            entry.bump_gen();
-            // No height change on edit, but mark dirty for safety
-            self.layout_cache.borrow_mut().invalidate_all();
+        if let Some(&index) = self.message_hash_to_index.get(hash) {
+            if let Some(entry) = self.entries.get_mut(index) {
+                entry.body = new_text.clone();
+                entry.edited = true;
+                entry.bump_gen();
+                self.layout_cache.borrow_mut().invalidate_all();
+            }
         }
     }
 
     fn delete_message(&mut self, hash: &MessageHash) {
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .find(|e| e.message_hash.as_ref() == Some(hash))
-        {
-            entry.body = "[message deleted]".to_string();
-            entry.edited = false;
-            entry.reactions.clear();
-            entry.bump_gen();
-            // Reactions cleared → height changes. Invalidating the whole
-            // cache is fine since this is a rare user action.
-            self.layout_cache.borrow_mut().invalidate_all();
+        if let Some(&index) = self.message_hash_to_index.get(hash) {
+            if let Some(entry) = self.entries.get_mut(index) {
+                entry.body = "[message deleted]".to_string();
+                entry.edited = false;
+                entry.reactions.clear();
+                entry.bump_gen();
+                // Reactions cleared → height changes. Invalidating the whole
+                // cache is fine since this is a rare user action.
+                self.layout_cache.borrow_mut().invalidate_all();
+            }
         }
     }
 
     fn add_reaction(&mut self, hash: &MessageHash, emoji: String) {
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .find(|e| e.message_hash.as_ref() == Some(hash))
-        {
-            entry.reactions.push(emoji);
-            entry.bump_gen();
-            // Reaction added → height may change (REACTION_EXTRA).
-            self.layout_cache.borrow_mut().invalidate_all();
+        if let Some(&index) = self.message_hash_to_index.get(hash) {
+            if let Some(entry) = self.entries.get_mut(index) {
+                entry.reactions.push(emoji);
+                entry.bump_gen();
+                // Reaction added → height may change (REACTION_EXTRA).
+                self.layout_cache.borrow_mut().invalidate_all();
+            }
         }
     }
 
