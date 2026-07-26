@@ -5,13 +5,14 @@
 //! chat log grows.  They serve as early-warning detectors for O(n²) regressions
 //! in message processing, image handling, and the virtual-scrolling render pass.
 //!
-//! Each benchmark runs several iterations and takes the minimum to reduce noise.
-//! Assert thresholds are generous — the goal is to catch order-of-magnitude
-//! regressions, not micro-benchmark deltas.
+//! Each benchmark runs several iterations and reports median, mean, standard
+//! deviation, p95, and p99. Assertions use the median and generous scaling
+//! thresholds: the goal is to catch order-of-magnitude regressions, not
+//! micro-benchmark deltas.
 //!
 //! # Expected Performance Ranges (deterministic fixtures, debug build)
 //!
-//! All times are **minimum of N iterations** on a commodity x86-64 machine
+//! All times are **median of N iterations** on a commodity x86-64 machine
 //! (Intel i7-13700K, 64 GB DDR5).  Timings on slower/faster hardware or in
 //! release mode will differ — the assertions only check **scaling ratios**,
 //! not absolute times.
@@ -124,18 +125,32 @@ fn height_estimation_pass(entries: &[ChatEntry]) -> (Vec<f32>, Vec<f32>, f32) {
     (heights, cum, running)
 }
 
-/// Run `f` repeatedly and return the minimum duration.
-fn bench_min<F: FnMut()>(mut f: F, iterations: usize) -> Duration {
-    let mut best = Duration::MAX;
+/// Run `f` repeatedly and return the median duration.
+///
+/// Keep the full sample distribution visible: minimum-only reporting hides
+/// scheduler pauses and makes results irreproducible. The regression tests use
+/// the median for scaling assertions while printing the other quantiles for
+/// diagnosis.
+fn bench_stats<F: FnMut()>(mut f: F, iterations: usize) -> Duration {
+    let mut samples = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let start = Instant::now();
-        f();
-        let elapsed = start.elapsed();
-        if elapsed < best {
-            best = elapsed;
-        }
+        std::hint::black_box(&mut f)();
+        samples.push(start.elapsed());
     }
-    best
+    samples.sort_unstable();
+    let nanos: Vec<f64> = samples.iter().map(|d| d.as_nanos() as f64).collect();
+    let mean = nanos.iter().sum::<f64>() / nanos.len() as f64;
+    let variance = nanos.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nanos.len() as f64;
+    let quantile = |q: f64| -> f64 {
+        let index = ((nanos.len() - 1) as f64 * q).round() as usize;
+        nanos[index]
+    };
+    eprintln!(
+        "  samples={} median={:.0}ns mean={:.0}ns stddev={:.0}ns p95={:.0}ns p99={:.0}ns",
+        samples.len(), quantile(0.50), mean, variance.sqrt(), quantile(0.95), quantile(0.99)
+    );
+    Duration::from_nanos(quantile(0.50).max(1.0) as u64)
 }
 
 /// Assert that the ratio `large / small` is below a quadratic scaling factor.
@@ -179,7 +194,7 @@ fn test_chat_entry_iteration_scaling() {
     let large = make_entries(5_000);
 
     // Benchmark iterating the full list (like view_chat_log's image_bytes scan)
-    let small_time = bench_min(
+    let small_time = bench_stats(
         || {
             let mut bytes = 0_usize;
             let mut count = 0_usize;
@@ -194,7 +209,7 @@ fn test_chat_entry_iteration_scaling() {
         100,
     );
 
-    let medium_time = bench_min(
+    let medium_time = bench_stats(
         || {
             let mut bytes = 0_usize;
             let mut count = 0_usize;
@@ -209,7 +224,7 @@ fn test_chat_entry_iteration_scaling() {
         100,
     );
 
-    let large_time = bench_min(
+    let large_time = bench_stats(
         || {
             let mut bytes = 0_usize;
             let mut count = 0_usize;
@@ -241,19 +256,19 @@ fn test_height_estimation_scaling() {
     let medium = make_entries(1_000);
     let large = make_entries(10_000);
 
-    let small_time = bench_min(
+    let small_time = bench_stats(
         || {
             let _ = height_estimation_pass(&small);
         },
         200,
     );
-    let medium_time = bench_min(
+    let medium_time = bench_stats(
         || {
             let _ = height_estimation_pass(&medium);
         },
         200,
     );
-    let large_time = bench_min(
+    let large_time = bench_stats(
         || {
             let _ = height_estimation_pass(&large);
         },
@@ -292,7 +307,7 @@ fn test_signed_message_encode_decode_scaling() {
 
     let _ = rng;
 
-    let small_enc_time = bench_min(
+    let small_enc_time = bench_stats(
         || {
             for msg in &small_msgs {
                 let _ = SignedMessage::sign_and_encode(&sk, msg).unwrap();
@@ -301,7 +316,7 @@ fn test_signed_message_encode_decode_scaling() {
         10,
     );
 
-    let large_enc_time = bench_min(
+    let large_enc_time = bench_stats(
         || {
             for msg in &large_msgs {
                 let _ = SignedMessage::sign_and_encode(&sk, msg).unwrap();
@@ -333,7 +348,7 @@ fn test_signed_message_encode_decode_scaling() {
         .map(|msg| SignedMessage::sign_and_encode(&sk, msg).unwrap().to_vec())
         .collect();
 
-    let small_dec_time = bench_min(
+    let small_dec_time = bench_stats(
         || {
             for bytes in &all_bytes {
                 let _ = SignedMessage::verify_and_decode(bytes).unwrap();
@@ -342,7 +357,7 @@ fn test_signed_message_encode_decode_scaling() {
         5,
     );
 
-    let large_dec_time = bench_min(
+    let large_dec_time = bench_stats(
         || {
             for bytes in &all_bytes_large {
                 let _ = SignedMessage::verify_and_decode(bytes).unwrap();
@@ -830,7 +845,7 @@ fn test_imageshare_processing_no_degradation() {
 
     // Benchmark: find and verify image message in small vs large entry list
     // This simulates the verify_and_decode + hash search that happens on image receipt
-    let small_search_time = bench_min(
+    let small_search_time = bench_stats(
         || {
             // Decode all entries and look for ImageShare
             for bytes in &small_entries {
@@ -842,7 +857,7 @@ fn test_imageshare_processing_no_degradation() {
         2,
     );
 
-    let large_search_time = bench_min(
+    let large_search_time = bench_stats(
         || {
             for bytes in &large_entries {
                 let _ = SM::verify_and_decode(bytes).unwrap();
@@ -886,7 +901,7 @@ fn test_incremental_append_cost() {
     let small_count = 100;
     let large_count = 10_000;
 
-    let small_time = bench_min(
+    let small_time = bench_stats(
         || {
             let mut total = 0.0_f32;
             for i in 0..small_count {
@@ -898,7 +913,7 @@ fn test_incremental_append_cost() {
         500,
     );
 
-    let large_time = bench_min(
+    let large_time = bench_stats(
         || {
             let mut total = 0.0_f32;
             for i in 0..large_count {
@@ -981,14 +996,14 @@ fn test_cumulative_window_lookup_cost() {
     let large_height =
         large_cum.last().copied().unwrap_or(0.0) + ((9_999_usize % 76) as f32 + 32.0);
 
-    let small_time = bench_min(
+    let small_time = bench_stats(
         || {
             let _ = window_lookup(&small_cum, small_height, 0.0, 600.0);
         },
         2000,
     );
 
-    let large_time = bench_min(
+    let large_time = bench_stats(
         || {
             let _ = window_lookup(&large_cum, large_height, 0.0, 600.0);
         },
@@ -1060,7 +1075,7 @@ fn test_friends_store_iteration_scaling() {
     let large = build_friends(500);
 
     // Iterate all friends + look up label + check online status
-    let small_time = bench_min(
+    let small_time = bench_stats(
         || {
             let mut online = 0usize;
             let mut with_label = 0usize;
@@ -1077,7 +1092,7 @@ fn test_friends_store_iteration_scaling() {
         500,
     );
 
-    let large_time = bench_min(
+    let large_time = bench_stats(
         || {
             let mut online = 0usize;
             let mut with_label = 0usize;
@@ -1119,7 +1134,7 @@ fn test_chat_history_push_scaling() {
     let large_count = 1_000;
 
     // Benchmark push at small scale
-    let small_time = bench_min(
+    let small_time = bench_stats(
         || {
             let tmp = tempfile::tempdir().unwrap();
             let mut store = ChatHistoryStore::empty_at(tmp.path());
@@ -1143,7 +1158,7 @@ fn test_chat_history_push_scaling() {
     );
 
     // Benchmark push at large scale
-    let large_time = bench_min(
+    let large_time = bench_stats(
         || {
             let tmp = tempfile::tempdir().unwrap();
             let mut store = ChatHistoryStore::empty_at(tmp.path());
@@ -1240,14 +1255,14 @@ fn test_serialization_scaling() {
     let large = build_friends(500);
 
     // Serialize to JSON string
-    let small_ser_time = bench_min(
+    let small_ser_time = bench_stats(
         || {
             let _ = serde_json::to_string(&small).unwrap();
         },
         200,
     );
 
-    let large_ser_time = bench_min(
+    let large_ser_time = bench_stats(
         || {
             let _ = serde_json::to_string(&large).unwrap();
         },
@@ -1271,14 +1286,14 @@ fn test_serialization_scaling() {
     let small_json = serde_json::to_string(&small).unwrap();
     let large_json = serde_json::to_string(&large).unwrap();
 
-    let small_deser_time = bench_min(
+    let small_deser_time = bench_stats(
         || {
             let _: FriendsStore = serde_json::from_str(&small_json).unwrap();
         },
         200,
     );
 
-    let large_deser_time = bench_min(
+    let large_deser_time = bench_stats(
         || {
             let _: FriendsStore = serde_json::from_str(&large_json).unwrap();
         },
@@ -1330,7 +1345,7 @@ fn test_avatar_handle_map_scaling() {
     }
 
     // Build map at small scale
-    let small_build_time = bench_min(
+    let small_build_time = bench_stats(
         || {
             let _ = build_avatar_handles(small_count);
         },
@@ -1338,7 +1353,7 @@ fn test_avatar_handle_map_scaling() {
     );
 
     // Build map at large scale
-    let large_build_time = bench_min(
+    let large_build_time = bench_stats(
         || {
             let _ = build_avatar_handles(large_count);
         },
@@ -1363,7 +1378,7 @@ fn test_avatar_handle_map_scaling() {
     let keys: Vec<PublicKey> = large_map.keys().copied().take(large_count).collect();
 
     // Single key lookup (like opening a profile)
-    let lookup_time = bench_min(
+    let lookup_time = bench_stats(
         || {
             for k in &keys {
                 let _ = large_map.get(k);
