@@ -8,6 +8,12 @@ and versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 The authoritative version source is `Cargo.toml`. For full change history,
 see the [git log](https://github.com/dmahony/boru/commits/main/).
 
+## 0.102.0
+
+Performance and transfer improvements from Phase 25, including improved file
+indexing, hashing, outbox delivery, image optimization, persistence, and
+release build profiles.
+
 ## 0.101.0
 
 Latest release. See the git log for the full commit history.
