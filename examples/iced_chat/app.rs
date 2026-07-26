@@ -12005,8 +12005,20 @@ impl IcedChat {
 
             AppMessage::ConfirmClearHistory => {
                 self.history_confirm_clear = false;
-                self.chat_history.lock().unwrap().clear();
-                self.chat_history_dirty = true;
+                if let Screen::Chat { topic } = self.screen.clone() {
+                    if let Err(err) = self.purge_room_history(topic) {
+                        self.push_system(format!("Could not clear chat history: {err}"));
+                    } else {
+                        self.entries.clear();
+                        self.event_id_to_index.clear();
+                        self.message_hash_to_index.clear();
+                        self.layout_cache.borrow_mut().clear();
+                        self.push_system("Chat history cleared.");
+                    }
+                } else {
+                    self.chat_history.lock().unwrap().clear();
+                    self.chat_history_dirty = true;
+                }
                 iced::Task::none()
             }
 
@@ -12049,9 +12061,9 @@ impl IcedChat {
                             if let Err(err) = store.delete_messages_for_topic(topic_bytes) {
                                 warn!("failed to delete messages for topic: {err}");
                             }
-                            // Soft-delete the conversation meta row so it
-                            // stays tombstoned across backfill/restart.
-                            if let Err(err) = store.delete_conversation(topic_bytes) {
+                            // Remove conversation metadata so it cannot
+                            // resurrect after a backfill or restart.
+                            if let Err(err) = store.hard_delete_conversation(topic_bytes) {
                                 warn!("failed to delete conversation meta: {err}");
                             }
                         }
@@ -12283,6 +12295,20 @@ impl IcedChat {
     /// removing only the visible room-list entry leaves chat history, queued
     /// messages, friend room metadata, or the active-room file behind.
     fn purge_room_history(&mut self, topic: TopicId) -> Result<(), String> {
+        let event_ids: Vec<u64> = self
+            .chat_history
+            .lock()
+            .unwrap()
+            .for_topic(&topic)
+            .into_iter()
+            .map(|entry| entry.event_id)
+            .collect();
+        if let Some(storage) = &self.storage {
+            storage
+                .delete_chat_history(topic.as_bytes(), &event_ids)
+                .map_err(|err| err.to_string())?;
+        }
+
         let report = {
             let mut chat_history = self.chat_history.lock().unwrap();
             let mut outbox = self.outbox.lock().unwrap();

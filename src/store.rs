@@ -862,9 +862,8 @@ impl MessageStore {
         Ok(removed)
     }
 
-    /// Hard-delete a conversation: removes inbox messages AND pending
-    /// outgoing messages for this conversation, and removes the metadata
-    /// row entirely.
+    /// Hard-delete a conversation: removes every message-related row for
+    /// this conversation and removes the metadata row entirely.
     ///
     /// This is the explicit "delete everything" path.  Only use this when
     /// the user explicitly confirms they want to discard pending outgoing
@@ -875,10 +874,14 @@ impl MessageStore {
             .transaction()
             .std_context("begin hard delete conversation transaction")?;
 
-        // Capture the msg_ids before deleting, so we can also remove
-        // corresponding outbox rows.
+        // Capture ids before deleting.  These ids are shared by inbox,
+        // tombstones, replay bookkeeping, and the delivery outbox.
         let mut stmt = tx
-            .prepare("SELECT msg_id FROM inbox WHERE conversation_id = ?1")
+            .prepare(
+                "SELECT msg_id FROM inbox WHERE conversation_id = ?1
+                 UNION
+                 SELECT msg_id FROM message_tombstones WHERE conversation_id = ?1",
+            )
             .std_context("prepare select msg_ids for hard delete")?;
         let msg_ids: Vec<Vec<u8>> = stmt
             .query_map([conversation_id.as_slice()], |row| row.get(0))
@@ -887,7 +890,7 @@ impl MessageStore {
             .std_context("collect msg_ids")?;
         drop(stmt);
 
-        // Delete inbox messages for this conversation
+        // Delete all durable message projections for this conversation.
         let removed_inbox = tx
             .execute(
                 "DELETE FROM inbox WHERE conversation_id = ?1",
@@ -895,11 +898,27 @@ impl MessageStore {
             )
             .std_context("hard delete inbox messages")?;
 
+        tx.execute(
+            "DELETE FROM message_tombstones WHERE conversation_id = ?1",
+            [conversation_id.as_slice()],
+        )
+        .std_context("hard delete message tombstones")?;
+        tx.execute(
+            "DELETE FROM messages WHERE topic = ?1",
+            [conversation_id.as_slice()],
+        )
+        .std_context("hard delete chat history messages")?;
+
         // Delete corresponding outbox rows
         let mut delete_outbox = tx
             .prepare("DELETE FROM outbox WHERE msg_id = ?1")
             .std_context("prepare hard delete outbox")?;
         for msg_blob in &msg_ids {
+            tx.execute(
+                "DELETE FROM incoming_replay WHERE msg_id = ?1",
+                [msg_blob.as_slice()],
+            )
+            .std_context("hard delete incoming replay row")?;
             delete_outbox
                 .execute([msg_blob.as_slice()])
                 .std_context("hard delete outbox row")?;
