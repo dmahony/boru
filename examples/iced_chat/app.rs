@@ -16199,7 +16199,7 @@ impl IcedChat {
                     .into()
             } else {
                 // Mixed text and URLs — build a segmented row
-                let mut row = Row::new().spacing(0).width(Length::Fill);
+                let mut row = Row::new().spacing(0);
                 for seg in segments {
                     match seg {
                         link_preview::TextSegment::Text(t) => {
@@ -16227,7 +16227,10 @@ impl IcedChat {
                         }
                     }
                 }
-                row.into()
+                // Keep URL segments clickable while allowing the row to
+                // create additional lines when the bubble reaches its
+                // available width.
+                row.wrap().into()
             };
 
             let bubble =
