@@ -32,6 +32,30 @@ pub struct RoomHistoryDeletionReport {
     pub legacy_room_history_file_removed: bool,
 }
 
+/// Summary of clearing chat history for the active room without deleting the room itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomHistoryClearReport {
+    /// The room topic whose history was cleared.
+    pub topic: TopicId,
+    /// Whether the room existed in the transient room-history list.
+    pub room_history_updated: bool,
+    /// Number of chat history entries removed for this topic.
+    pub chat_entries_removed: usize,
+    /// Number of outbox entries removed for this topic.
+    pub outbox_entries_removed: usize,
+}
+
+impl RoomHistoryClearReport {
+    fn new(topic: TopicId) -> Self {
+        Self {
+            topic,
+            room_history_updated: false,
+            chat_entries_removed: 0,
+            outbox_entries_removed: 0,
+        }
+    }
+}
+
 impl RoomHistoryDeletionReport {
     fn new(topic: TopicId) -> Self {
         Self {
@@ -71,6 +95,30 @@ pub fn delete_room_history(
         Some(room) if room.topic == topic => RoomStore::delete(data_dir)?,
         _ => false,
     };
+
+    Ok(report)
+}
+
+/// Clear the stored chat history for a room while keeping the room itself.
+///
+/// This removes the chat history and queued outbox entries for the given topic,
+/// then resets the transient room preview so the room remains in the list
+/// without showing stale text.
+pub fn clear_room_history(
+    topic: TopicId,
+    room_history: &mut RoomHistoryStore,
+    chat_history: &mut ChatHistoryStore,
+    outbox: Option<&mut OutboxStore>,
+) -> Result<RoomHistoryClearReport> {
+    let mut report = RoomHistoryClearReport::new(topic);
+
+    if let Some(entry) = room_history.find_mut(&topic) {
+        entry.last_preview.clear();
+        report.room_history_updated = true;
+    }
+
+    report.chat_entries_removed = chat_history.remove_topic(&topic);
+    report.outbox_entries_removed = outbox.map_or(0, |store| store.remove_topic(&topic));
 
     Ok(report)
 }
@@ -253,6 +301,65 @@ mod tests {
             .is_some());
         assert!(!dir.join(ROOM_FILE_NAME).exists());
         assert!(!dir.join(ROOM_HISTORY_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn clear_room_history_keeps_room_and_clears_preview() {
+        let dir = temp_dir("clear_history");
+        fs::create_dir_all(&dir).unwrap();
+
+        let target = topic(0xDD);
+        let other = topic(0xEE);
+
+        let mut room_history = RoomHistoryStore::empty_at(&dir);
+        room_history.upsert(target, "Target", true);
+        room_history.upsert(other, "Other", false);
+        room_history.update_preview(&target, "old preview");
+
+        let mut chat_history = ChatHistoryStore::empty_at(&dir);
+        chat_history.push(history_entry(target, "target-1"));
+        chat_history.push(history_entry(other, "other-1"));
+        chat_history.push(history_entry(target, "target-2"));
+
+        let mut outbox = OutboxStore::empty_at(&dir);
+        outbox.push(outbox_entry(1, target)).unwrap();
+        outbox.push(outbox_entry(2, other)).unwrap();
+
+        let report = clear_room_history(target, &mut room_history, &mut chat_history, Some(&mut outbox))
+            .unwrap();
+
+        assert_eq!(report.topic, target);
+        assert!(report.room_history_updated);
+        assert_eq!(report.chat_entries_removed, 2);
+        assert_eq!(report.outbox_entries_removed, 1);
+        assert_eq!(room_history.find(&target).unwrap().last_preview, "");
+        assert!(room_history.find(&other).is_some());
+        assert_eq!(chat_history.count_for_topic(&target), 0);
+        assert_eq!(chat_history.count_for_topic(&other), 1);
+    }
+
+    #[test]
+    fn clear_room_history_is_noop_for_missing_topic() {
+        let dir = temp_dir("clear_history_missing");
+        fs::create_dir_all(&dir).unwrap();
+
+        let target = topic(0xAB);
+        let other = topic(0xBC);
+
+        let mut room_history = RoomHistoryStore::empty_at(&dir);
+        room_history.upsert(other, "Other", false);
+
+        let mut chat_history = ChatHistoryStore::empty_at(&dir);
+        chat_history.push(history_entry(other, "other-1"));
+
+        let report = clear_room_history(target, &mut room_history, &mut chat_history, None).unwrap();
+
+        assert_eq!(report.topic, target);
+        assert!(!report.room_history_updated);
+        assert_eq!(report.chat_entries_removed, 0);
+        assert_eq!(report.outbox_entries_removed, 0);
+        assert!(room_history.find(&other).is_some());
+        assert_eq!(chat_history.count_for_topic(&other), 1);
     }
 
     #[test]

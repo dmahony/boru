@@ -57,7 +57,7 @@ use boru_core::proto::TopicId;
 use boru_core::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
 use boru_core::public_room_safety::PublicRoomSafety;
 use boru_core::room::RoomStore;
-use boru_core::room_cleanup::delete_room_history;
+use boru_core::room_cleanup::{clear_room_history, delete_room_history, RoomHistoryClearReport};
 use boru_core::room_docs::{self, RoomMetadata};
 use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::{SharedFileRow, Storage};
@@ -1924,6 +1924,12 @@ pub struct IcedChat {
     chat_text_size: f32,
     /// Whether the "clear history" confirmation is shown.
     history_confirm_clear: bool,
+    /// Whether an async clear-history request is in flight.
+    history_clear_pending: bool,
+    /// Feedback shown after the last clear-history attempt.
+    history_clear_feedback: Option<String>,
+    /// Whether the feedback message is an error message.
+    history_clear_feedback_is_error: bool,
     /// Topic awaiting delete confirmation (None = no confirm pending).
     room_delete_confirm_topic: Option<TopicId>,
     /// Transport notice displayed in the header (e.g. "Direct iroh transport is operational").
@@ -2785,6 +2791,14 @@ pub enum AppMessage {
     ClearHistoryRequested,
     /// User confirmed the clear history action.
     ConfirmClearHistory,
+    /// Clear-history request completed successfully for a room.
+    ClearHistoryFinished {
+        topic: TopicId,
+        room_history: RoomHistoryStore,
+        report: RoomHistoryClearReport,
+    },
+    /// Clear-history request failed.
+    ClearHistoryFailed { topic: TopicId, error: String },
     /// User requested to delete a room — show confirmation.
     DeleteRoomRequested(TopicId),
     /// User confirmed deletion of a room.
@@ -3346,6 +3360,9 @@ struct SettingsCachedKey {
     mesh_health_label: String,
     relay_mode_label: String,
     history_confirm_clear: bool,
+    history_clear_pending: bool,
+    history_clear_feedback: Option<String>,
+    history_clear_feedback_is_error: bool,
     local_public_key: String,
 }
 
@@ -3821,7 +3838,6 @@ impl IcedChat {
             sound_enabled: app_settings.sound_enabled,
             share_direct_addresses: app_settings.share_direct_addresses,
             chat_text_size: app_settings.chat_text_size,
-            history_confirm_clear: false,
             room_delete_confirm_topic: None,
             notice,
             data_dir: data_dir.clone(),
@@ -3835,6 +3851,10 @@ impl IcedChat {
             download_manager,
             chat_history_dirty: false,
             history_saved_count: 0,
+            history_confirm_clear: false,
+            history_clear_pending: false,
+            history_clear_feedback: None,
+            history_clear_feedback_is_error: false,
             friend_online_cache,
             friends_sidebar_revision: 0,
             chats_sidebar_revision: 0,
@@ -5066,6 +5086,8 @@ impl IcedChat {
             AppMessage::ImageHydrated { .. } => "ImageHydrated",
             AppMessage::ClearHistoryRequested => "ClearHistoryRequested",
             AppMessage::ConfirmClearHistory => "ConfirmClearHistory",
+            AppMessage::ClearHistoryFinished { .. } => "ClearHistoryFinished",
+            AppMessage::ClearHistoryFailed { .. } => "ClearHistoryFailed",
             AppMessage::DeleteRoomRequested(_) => "DeleteRoomRequested",
             AppMessage::ConfirmDeleteRoom(_) => "ConfirmDeleteRoom",
             AppMessage::MailboxReplayed { .. } => "MailboxReplayed",
@@ -5183,6 +5205,40 @@ impl IcedChat {
         // neighbors preserved across room switches so discovered-peers and
         // friend-online caches don't appear empty after switching rooms.
         self.history_saved_count = 0;
+    }
+
+    fn clear_current_room_history_runtime(&mut self, topic: TopicId, report: &RoomHistoryClearReport) {
+        if self.topic == topic {
+            self.entries.clear();
+            self.event_id_to_index.clear();
+            self.message_hash_to_index.clear();
+            self.layout_cache.borrow_mut().invalidate_all();
+            self.pending_file = None;
+            self.pending_image.clear();
+            self.download_entry_index = None;
+            self.active_download_transfer_id = None;
+            self.transfer_id_to_index.clear();
+            self.history_saved_count = 0;
+            self.chat_history_dirty = false;
+            if report.room_history_updated {
+                self.room_history_dirty = false;
+            }
+        }
+
+        if let Some(conversation) = self.conversations.get_mut(&topic) {
+            conversation.entries.clear();
+            conversation.event_id_to_index.clear();
+            conversation.message_hash_to_index.clear();
+            conversation.self_sent_events.clear();
+            conversation.pending_file = None;
+            conversation.pending_image.clear();
+            conversation.download_entry_index = None;
+            conversation.active_download_transfer_id = None;
+            conversation.transfer_id_to_index.clear();
+            conversation.history_saved_count = 0;
+        }
+
+        self.room_history.update_preview(&topic, "");
     }
 
     /// Switch the display to a conversation whose runtime state is already in
@@ -11996,6 +12052,11 @@ impl IcedChat {
             }
 
             AppMessage::ClearHistoryRequested => {
+                if self.history_clear_pending {
+                    return iced::Task::none();
+                }
+                self.history_clear_feedback = None;
+                self.history_clear_feedback_is_error = false;
                 self.history_confirm_clear = !self.history_confirm_clear;
                 if !self.history_confirm_clear {
                     self.complete_close_dialog_action();
@@ -12004,21 +12065,58 @@ impl IcedChat {
             }
 
             AppMessage::ConfirmClearHistory => {
-                self.history_confirm_clear = false;
-                if let Screen::Chat { topic } = self.screen.clone() {
-                    if let Err(err) = self.purge_room_history(topic) {
-                        self.push_system(format!("Could not clear chat history: {err}"));
-                    } else {
-                        self.entries.clear();
-                        self.event_id_to_index.clear();
-                        self.message_hash_to_index.clear();
-                        self.layout_cache.borrow_mut().clear();
-                        self.push_system("Chat history cleared.");
-                    }
-                } else {
-                    self.chat_history.lock().unwrap().clear();
-                    self.chat_history_dirty = true;
+                if self.history_clear_pending {
+                    return iced::Task::none();
                 }
+                self.history_clear_pending = true;
+                self.history_clear_feedback = None;
+                self.history_clear_feedback_is_error = false;
+                let topic = self.topic;
+                let room_history = self.room_history.clone();
+                let chat_history = self.chat_history.clone();
+                let outbox = self.outbox.clone();
+                iced::Task::perform(
+                    async move {
+                        let mut room_history = room_history;
+                        let mut chat_history = chat_history.lock().unwrap();
+                        let mut outbox = outbox.lock().unwrap();
+                        let report = clear_room_history(
+                            topic,
+                            &mut room_history,
+                            &mut chat_history,
+                            Some(&mut outbox),
+                        )
+                        .map_err(|err| err.to_string())?;
+                        Ok::<_, String>((topic, room_history, report))
+                    },
+                    move |result| match result {
+                        Ok((topic, room_history, report)) => {
+                            AppMessage::ClearHistoryFinished {
+                                topic,
+                                room_history,
+                                report,
+                            }
+                        }
+                        Err(error) => AppMessage::ClearHistoryFailed { topic, error },
+                    },
+                )
+            }
+
+            AppMessage::ClearHistoryFinished {
+                topic,
+                room_history,
+                report,
+            } => {
+                self.history_clear_pending = false;
+                self.history_confirm_clear = false;
+                iced::Task::none()
+            }
+
+            AppMessage::ClearHistoryFailed { topic: _, error } => {
+                self.history_clear_pending = false;
+                self.history_confirm_clear = true;
+                self.history_clear_feedback_is_error = true;
+                self.history_clear_feedback = Some(error.clone());
                 iced::Task::none()
             }
 
@@ -16737,6 +16835,9 @@ impl IcedChat {
             mesh_health_label,
             relay_mode_label: fmt_relay_mode(&self.relay_mode),
             history_confirm_clear: self.history_confirm_clear,
+            history_clear_pending: self.history_clear_pending,
+            history_clear_feedback: self.history_clear_feedback.clone(),
+            history_clear_feedback_is_error: self.history_clear_feedback_is_error,
             local_public_key: self.local_public.to_string(),
         }
     }
@@ -17110,59 +17211,88 @@ impl IcedChat {
 
         // ── Logs & Diagnostics section removed per user request ──
         // ── Data Management section ──
-        let clear_history_row = if key.history_confirm_clear {
-            Row::new()
-                .push(
-                    Column::new()
-                        .push(text("Clear all history?").size(TYPO_MD).style(|t| {
-                            iced::widget::text::Style {
-                                color: Some(if matches!(t, iced::Theme::Dark) {
-                                    Color::from_rgb(0.9, 0.3, 0.3)
-                                } else {
-                                    Color::from_rgb(0.8, 0.2, 0.2)
-                                }),
-                            }
-                        }))
-                        .push(
-                            text("This will delete all stored chat messages permanently.")
-                                .size(TYPO_XS)
-                                .style(text_muted_style),
-                        )
-                        .spacing(SPACE_2)
-                        .width(Length::Fill)
-                        .align_x(Alignment::Start),
+        let clear_history_feedback = key.history_clear_feedback.clone().map(|message| {
+            (message, key.history_clear_feedback_is_error)
+        });
+        let clear_history_row = {
+            let title = if key.history_confirm_clear {
+                "Clear chat history?"
+            } else {
+                "Clear chat history"
+            };
+            let description = if key.history_clear_pending {
+                "Clearing the active chat's stored messages…"
+            } else if key.history_confirm_clear {
+                "This will delete the active chat's stored messages permanently."
+            } else {
+                "Delete all stored messages for the active chat permanently."
+            };
+            let status_line = clear_history_feedback.as_ref().map(|(message, is_error)| {
+                let color = if *is_error {
+                    Color::from_rgb(0.8, 0.2, 0.2)
+                } else {
+                    Color::from_rgb(0.15, 0.55, 0.2)
+                };
+                text(message.clone()).size(TYPO_XS).style(move |_| iced::widget::text::Style {
+                    color: Some(color),
+                })
+            });
+
+            let action_buttons = if key.history_clear_pending {
+                Row::new().push(
+                    button(text("Clearing…").size(TYPO_SM)).padding([SPACE_6, SPACE_12]),
                 )
-                .push(
-                    button(text("Confirm").size(TYPO_SM))
-                        .on_press(AppMessage::ConfirmClearHistory)
-                        .padding([SPACE_6, SPACE_12]),
-                )
-                .push(
-                    button(text("Cancel").size(TYPO_SM))
-                        .on_press(AppMessage::ClearHistoryRequested)
-                        .padding([SPACE_6, SPACE_12]),
-                )
-                .spacing(SPACE_8)
-                .align_y(Alignment::Center)
-        } else {
-            Row::new()
-                .push(
-                    Column::new()
-                        .push(text("Clear history").size(TYPO_MD))
-                        .push(
-                            text("Delete all stored chat messages permanently.")
-                                .size(TYPO_XS)
-                                .style(text_muted_style),
-                        )
-                        .spacing(SPACE_2)
-                        .width(Length::Fill)
-                        .align_x(Alignment::Start),
-                )
-                .push(
+            } else if key.history_confirm_clear {
+                Row::new()
+                    .push(
+                        button(text("Confirm").size(TYPO_SM))
+                            .on_press(AppMessage::ConfirmClearHistory)
+                            .padding([SPACE_6, SPACE_12]),
+                    )
+                    .push(
+                        button(text("Cancel").size(TYPO_SM))
+                            .on_press(AppMessage::ClearHistoryRequested)
+                            .padding([SPACE_6, SPACE_12]),
+                    )
+                    .spacing(SPACE_8)
+            } else {
+                Row::new().push(
                     button(text("Clear").size(TYPO_SM))
                         .on_press(AppMessage::ClearHistoryRequested)
                         .padding([SPACE_6, SPACE_12]),
                 )
+            };
+
+            let is_danger_state = key.history_confirm_clear || key.history_clear_pending;
+
+            let mut column = Column::new()
+                .push(text(title).size(TYPO_MD).style(move |t| iced::widget::text::Style {
+                    color: Some(if is_danger_state {
+                        if matches!(t, iced::Theme::Dark) {
+                            Color::from_rgb(0.9, 0.3, 0.3)
+                        } else {
+                            Color::from_rgb(0.8, 0.2, 0.2)
+                        }
+                    } else {
+                        accent_primary(t)
+                    }),
+                }))
+                .push(
+                    text(description)
+                        .size(TYPO_XS)
+                        .style(text_muted_style),
+                )
+                .spacing(SPACE_2)
+                .width(Length::Fill)
+                .align_x(Alignment::Start);
+
+            if let Some(status_line) = status_line {
+                column = column.push(status_line);
+            }
+
+            Row::new()
+                .push(column)
+                .push(action_buttons)
                 .spacing(SPACE_12)
                 .align_y(Alignment::Center)
         };
@@ -19074,6 +19204,73 @@ mod tests {
             .expect_err("CloseDialog must reject when no dialog is open");
         assert_eq!(error.code, GuiActionErrorCode::NoDialog);
         assert_eq!(error.message, "No application dialog is currently open");
+    }
+
+    #[test]
+    fn clear_history_request_toggles_confirmation_and_confirmation_flow_updates_state() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        assert!(!app.history_confirm_clear);
+        assert!(!app.history_clear_pending);
+        app.history_clear_feedback = Some("stale".to_string());
+        app.history_clear_feedback_is_error = true;
+
+        let task = app.update(AppMessage::ClearHistoryRequested);
+        drop(task);
+
+        assert!(app.history_confirm_clear, "confirmation opens on first click");
+        assert!(app.history_clear_feedback.is_none(), "old feedback cleared when opening");
+        assert!(!app.history_clear_feedback_is_error);
+
+        let task = app.update(AppMessage::ConfirmClearHistory);
+        drop(task);
+
+        assert!(app.history_clear_pending, "clear operation starts in pending state");
+        assert!(app.history_confirm_clear, "confirmation stays open while pending");
+
+        let topic = app.topic;
+        let room_history = app.room_history.clone();
+        let finished = AppMessage::ClearHistoryFinished {
+            topic,
+            room_history,
+            report: RoomHistoryClearReport {
+                topic,
+                room_history_updated: true,
+                chat_entries_removed: 3,
+                outbox_entries_removed: 1,
+            },
+        };
+        let task = app.update(finished);
+        drop(task);
+
+        assert!(!app.history_clear_pending, "pending state cleared after success");
+        assert!(!app.history_confirm_clear, "confirmation closes after success");
+        assert_eq!(
+            app.history_clear_feedback.as_deref(),
+            Some("Cleared 3 messages from this chat.")
+        );
+        assert!(!app.history_clear_feedback_is_error);
+    }
+
+    #[test]
+    fn clear_history_failure_keeps_confirmation_open_and_shows_error() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        app.history_confirm_clear = true;
+        app.history_clear_pending = true;
+        let task = app.update(AppMessage::ClearHistoryFailed {
+            topic: app.topic,
+            error: "backend unavailable".to_string(),
+        });
+        drop(task);
+
+        assert!(!app.history_clear_pending, "pending state cleared after failure");
+        assert!(app.history_confirm_clear, "confirmation remains open after failure");
+        assert!(app.history_clear_feedback_is_error);
+        assert_eq!(
+            app.history_clear_feedback.as_deref(),
+            Some("backend unavailable")
+        );
     }
 
     #[test]
