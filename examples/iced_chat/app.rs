@@ -16170,7 +16170,7 @@ impl IcedChat {
                     button(
                         Row::new()
                             .push(status_icon)
-                            .push(text(label_text).size(TYPO_XS).font(crate::fonts::source_sans(iced::font::Weight::Semibold)).color(label_color))
+                            .push(text(label_text).size(TYPO_SM).font(crate::fonts::source_sans(iced::font::Weight::Semibold)).color(label_color))
                             .spacing(SPACE_4)
                             .align_y(Alignment::Center),
                     )
@@ -16179,10 +16179,10 @@ impl IcedChat {
                     .style(|_t, _s| iced::widget::button::Style::default())
                     .into()
                 } else {
-                    text(label_text).size(TYPO_XS).font(crate::fonts::source_sans(iced::font::Weight::Semibold)).color(label_color).into()
+                    text(label_text).size(TYPO_SM).font(crate::fonts::source_sans(iced::font::Weight::Semibold)).color(label_color).into()
                 }
             } else {
-                text(label_text).size(TYPO_XS).font(crate::fonts::source_sans(iced::font::Weight::Semibold)).color(label_color).into()
+                text(label_text).size(TYPO_SM).font(crate::fonts::source_sans(iced::font::Weight::Semibold)).color(label_color).into()
             };
 
             // ── Clickable URL-aware body ──
