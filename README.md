@@ -1,7 +1,43 @@
 # Boru
 
-Gossip messages over broadcast trees — a peer-to-peer chat application built on
-[iroh](https://github.com/n0-computer/iroh).
+## Unite your clan
+
+**boru is a chat app built on a simple belief: the companies and institutions
+controlling today's internet and messaging systems should not be trusted with
+our private conversations.**
+
+Centralised messaging services place one company between you and everyone you
+speak to. That company controls the infrastructure, stores the data, sets the
+rules, and can monitor, restrict, analyse, monetise, or surrender access to your
+communications. Even when messages are encrypted, users are still expected to
+trust a central authority with their accounts, identities, metadata, contacts,
+and access to the network.
+
+**boru removes that central point of control.**
+
+You connect directly with other users, join shared rooms, and exchange messages
+across a peer-to-peer network. The system is designed around the people taking
+part in the conversation - not a corporation sitting in the middle.
+
+Use rooms for group conversations, send direct messages even when a contact is
+temporarily offline, and share files only with explicit permission. Direct
+messages use encrypted inbox delivery. Files are transferred by content address
+and are made available only when you authorise access.
+
+Your conversations belong to you. Your files remain under your control. Your
+data stays on your own devices.
+
+No central messaging server. No company watching from the middle. No platform
+owner deciding who may communicate.
+
+**Just people communicating directly, on a network they control.**
+
+**Why "boru"?** The project is named after **Brian Boru** (Brian Bóruma mac
+Cennétig, c. 941-1014), the High King of Ireland. Brian Boru is a fitting
+namesake because he is remembered for bringing many Irish kingdoms together
+under a shared cause. boru applies that idea to communication: people can meet
+and exchange messages as peers, without relying on one central authority to
+connect everyone.
 
 ## Architecture
 
