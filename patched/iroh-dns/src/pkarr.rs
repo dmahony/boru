@@ -96,7 +96,11 @@ impl SignedPacket {
             return Err(e!(SignedPacketVerifyError::TooLarge { len: bytes.len() }));
         }
 
-        let public_key = PublicKey::try_from(&bytes[..32])
+        let public_key = PublicKey::try_from(
+            bytes
+                .get(..32)
+                .ok_or_else(|| e!(SignedPacketVerifyError::TooShort { len: bytes.len() }))?,
+        )
             .map_err(|e| e!(SignedPacketVerifyError::InvalidKey, e))?;
         let signature =
             Signature::from_bytes(bytes[32..96].try_into().expect("64 bytes for signature"));
@@ -151,35 +155,43 @@ impl SignedPacket {
 
     /// Return the relay payload (everything after the public key).
     pub fn to_relay_payload(&self) -> Vec<u8> {
-        self.bytes[32..].to_vec()
+        self.bytes.get(32..).unwrap_or_default().to_vec()
     }
 
     /// Return the public key.
     pub fn public_key(&self) -> PublicKey {
-        PublicKey::try_from(&self.bytes[..32]).expect("valid public key in SignedPacket")
+        // A malformed relay/DHT response must never panic diagnostics or
+        // logging. Valid packets are constructed only through the checked
+        // parsers; the fallback keeps Debug/Display total for corrupted data.
+        let mut key_bytes = [0u8; 32];
+        if let Some(bytes) = self.bytes.get(..32) {
+            key_bytes.copy_from_slice(bytes);
+        }
+        PublicKey::from_bytes(&key_bytes)
+            .unwrap_or_else(|_| PublicKey::from_bytes(&[0u8; 32]).expect("zero key is valid"))
     }
 
     /// Return the signature.
     pub fn signature(&self) -> Signature {
-        Signature::from_bytes(
-            self.bytes[32..96]
-                .try_into()
-                .expect("64 bytes for signature"),
-        )
+        let mut bytes = [0u8; 64];
+        if let Some(signature) = self.bytes.get(32..96) {
+            bytes.copy_from_slice(signature);
+        }
+        Signature::from_bytes(&bytes)
     }
 
     /// Return the timestamp.
     pub fn timestamp(&self) -> Timestamp {
-        Timestamp::from_be_bytes(
-            self.bytes[96..104]
-                .try_into()
-                .expect("8 bytes for timestamp"),
-        )
+        let mut bytes = [0u8; 8];
+        if let Some(timestamp) = self.bytes.get(96..104) {
+            bytes.copy_from_slice(timestamp);
+        }
+        Timestamp::from_be_bytes(bytes)
     }
 
     /// Return the encoded DNS packet bytes.
     pub fn encoded_packet(&self) -> &[u8] {
-        &self.bytes[104..]
+        self.bytes.get(104..).unwrap_or_default()
     }
 
     /// Iterate over TXT records under a specific DNS name.

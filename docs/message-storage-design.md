@@ -25,7 +25,7 @@ permissions: `0o700` for the directory, `0o600` for the database file.
 ```
 <data_dir>/
 ├── boru.db               # SQLite relational storage (V2, current)
-├── chat_history.json      # Per-room chat history (legacy JSON, still active)
+├── chat_history.json      # Per-room chat history (JSON, authoritative)
 ├── outbox.json            # Outgoing message delivery state (legacy JSON, still active)
 ├── conversations.json     # Conversation metadata (JSON)
 ├── rooms.json             # Room history / topic registry (JSON)
@@ -36,7 +36,7 @@ permissions: `0o700` for the directory, `0o600` for the database file.
 ├── user_profile.json      # Profile settings + shared file metadata (JSON)
 ├── secret_key.txt         # Node identity secret key (hex-encoded)
 │
-├── message_store.db       # Legacy SQLite store (migration source, read-only)
+├── message_store.db       # SQLite inbox/outbox store (envelope storage)
 │
 └── files/                 # Per-user image store
     ├── <user-hash1>/

@@ -29,7 +29,7 @@ pub const HISTORY_FILE_NAME: &str = "chat_history.json";
 /// a directed acyclic graph of transitions:
 ///
 /// ```text
-/// Queued ──→ Sent ──→ Delivered ──→ Seen
+/// Queued ──→ Sent (broadcast accepted) ──→ Delivered ──→ Seen
 ///   │                    │
 ///   └──→ Failed          │
 ///                        └──→ Failed  (delivery explicitly failed)
@@ -45,7 +45,9 @@ pub enum DeliveryState {
     /// Message has been composed and queued for sending.
     #[default]
     Queued,
-    /// Message was handed off to the transport layer (gossip / QUIC).
+    /// Local transport accepted the broadcast request. This does **not** prove
+    /// that any remote peer received the message; `Delivered` requires the
+    /// message to be observed back through the gossip receive path.
     Sent,
     /// Peer confirmed receipt of the message payload.
     Delivered,

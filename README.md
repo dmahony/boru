@@ -88,7 +88,7 @@ File Layout
 | Layer | Store | Backend | Purpose |
 |---|---|---|---|
 | **Primary relational** | `Storage` (SQLite) | `boru.db` | Inbox/outbox, contacts, file objects, attachments, shared files, permissions, downloads |
-| **Chat history** | `ChatHistoryStore` | `chat_history.json` | Per-room message history (JSON, still active in GUI) |
+| **Chat history** | `ChatHistoryStore` | `chat_history.json` | Per-room message history (JSON, authoritative) |
 | **Outgoing queue** | `OutboxStore` | `outbox.json` | Delivery state tracking (JSON, still active in GUI) |
 | **Conversations** | `ConversationStore` | `conversations.json` | Conversation metadata (JSON) |
 | **Friends** | `FriendsStore` | `friends.json` | Friend list (JSON) |
@@ -233,6 +233,43 @@ cargo run --example iced_chat --features gui -- --name <nickname> --show-connect
 # All CLI options
 cargo run --example iced_chat --features gui -- --help
 ```
+
+### Reliability-gate startup and persistence notes
+
+For a two-instance DHT/relay verification, start both instances with distinct
+`--data-dir` values, the same room/ticket, and the same relay URL. Leave DHT
+enabled (do not pass `--no-dht`) when validating DHT discovery. The instance is
+ready for chat only after the room is joined and the peer/mesh status reports a
+connected gossip neighbour; a process being bound to its MCP or GUI port is
+not sufficient readiness evidence.
+
+The GUI's active conversation and outgoing-queue source of truth remains the
+JSON-backed `ChatHistoryStore` and `OutboxStore`. The SQLite `Storage` database
+is the durable core store for inbox/outbox envelopes, files, profiles, and
+crash recovery, and is independently validated by the storage integration
+tests. Do not treat the JSON and SQLite files as two independently writable
+authorities: compare them only through the documented import/migration and
+integration paths. A queue entry must be persisted before acknowledging a
+send, and a restart must reload it before retry delivery.
+
+Recommended local gate commands (run from the repository root):
+
+```sh
+cargo fmt --all -- --check
+cargo check --features gui --example boru
+cargo test --features 'net test-utils' --test test_storage_integration \
+  --test test_crash_recovery --test test_message_lifecycle \
+  --test test_offline_delivery_integration
+cargo test --test test_two_instance_dht_chat -- --nocapture
+```
+
+The final DHT test must show ordinary `Message::Message` traffic in both
+directions, then continue after room reopen and a peer process restart.
+Diagnostic probes alone do not prove chat delivery. If the gate fails, capture
+the first missing stage in this order: room join, peer discovery, transport
+connection, topic membership, normal message broadcast, message persistence,
+and post-restart replay. Also inspect the instance log for `BORU CRASH` and
+verify that no send was attempted after the room became inactive.
 
 ## GUI User Guide
 

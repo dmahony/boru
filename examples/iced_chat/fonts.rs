@@ -9,7 +9,7 @@
 //! | Family          | Weights loaded               | Scope                          |
 //! |-----------------|------------------------------|--------------------------------|
 //! | Source Sans 3   | 400 (Regular) · 500 (Medium) · 600 (Semibold) · 700 (Bold) | Primary app font (85-90% of UI) |
-//! | Manrope         | 600 (Semibold) · 700 (Bold)  | Display & feature headings      |
+//! | Manrope        | 600 (Semibold) · 700 (Bold)  | Legacy export (not used by UI)  |
 //! | Raleway         | 800 (ExtraBold)              | Boru wordmark / branding only   |
 //! | JetBrains Mono  | 400 (Regular) · 500 (Medium) | Technical/code values           |
 //!
@@ -168,7 +168,7 @@ impl Typography {
     /// Return the font family name for this token.
     pub fn family_name(self) -> &'static str {
         match self {
-            Self::DisplayLarge | Self::DisplayMedium => MANROPE,
+            Self::DisplayLarge | Self::DisplayMedium => SOURCE_SANS_3,
             Self::BoruWordmark => RALEWAY,
             Self::TechnicalValue => JETBRAINS_MONO,
             _ => SOURCE_SANS_3,
@@ -211,8 +211,8 @@ impl Typography {
     /// Return an `iced::Font` for this token.
     pub fn font(self) -> Font {
         match self {
-            Self::DisplayLarge => manrope(Weight::Bold),
-            Self::DisplayMedium => manrope(Weight::Semibold),
+            Self::DisplayLarge => source_sans(Weight::Bold),
+            Self::DisplayMedium => source_sans(Weight::Semibold),
             Self::BoruWordmark => raleway_extra_bold(),
             Self::TechnicalValue => jetbrains_mono(Weight::Normal),
             _ => source_sans(self.weight()),

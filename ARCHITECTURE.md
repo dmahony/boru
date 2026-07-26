@@ -173,14 +173,14 @@ and operator guidance.
 
 | Module | Backend | Purpose |
 |--------|---------|---------|
-| `storage` | SQLite (`boru.db`) | Primary relational store: inbox, outbox, file objects, profiles (V4 schema) |
-| `store` | SQLite (`message_store.db`, legacy) | Legacy store — migration source, read-only |
+| `storage` | SQLite (`boru.db`) | Durable core store: inbox/outbox envelopes, file objects, profiles (V4 schema); independently authoritative for those records |
+| `store` | SQLite (`message_store.db`, inbox) | Inbox/outbox envelope storage, message tombstones |
 | `chat_history` | JSON | Per-room chat message history (active frontend) |
 | `conversations` | JSON | Conversation metadata (unread, mute, archive) |
 | `friends` | JSON | Friend contact list |
 | `friend_request` | JSON | Pending/accepted/declined/cancelled friend requests |
 | `mailbox` | Protocol types | Encrypted offline-message envelopes and signed ACKs; `mailbox.json` is legacy migration input |
-| `outbox` | JSON | Outgoing message queue (active frontend) |
+| `outbox` | JSON | GUI outgoing message queue (active frontend source of truth; SQLite outbox is the core delivery store) |
 | `room` | JSON | Room topic + bootstrap peer persistence |
 | `room_history` | In-memory | Transient room list for navigation |
 | `user_profile` | JSON | Display name, sharing settings, shared file metadata |

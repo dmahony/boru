@@ -15,9 +15,10 @@
 
 use iced::font::Weight;
 use iced::widget::{self, button, container, row, text, Column, Row};
+use iced::widget::text::Wrapping;
 use iced::{Alignment, Color, Length};
 
-use super::app::{AppMessage, DownloadAttachment, DownloadState};
+use super::app::{icon_svg, AppMessage, DownloadAttachment, DownloadState, ICON_ACTIVITY, ICON_FILES};
 
 // Re-import the design-token helpers and constants from app.rs.
 use super::app::{
@@ -182,6 +183,10 @@ pub fn view_download_progress(
     let muted = text_system(&theme);
     let name_str = attachment.name.clone();
     let error_color = color_error(&theme);
+    let attachment_icon = match attachment.kind {
+        super::app::TransferKind::Image => ICON_ACTIVITY,
+        super::app::TransferKind::File => ICON_FILES,
+    };
 
     // ── Row 1: State badge + filename + total size ──────────────────────
     let size_text = match &state {
@@ -208,12 +213,18 @@ pub fn view_download_progress(
     };
 
     let title_row = Row::new()
+        .push(
+            icon_svg(attachment_icon, TYPO_SM).style(move |_t, _s| iced::widget::svg::Style {
+                color: Some(tone),
+            }),
+        )
         .push(state_badge(state, tone))
         .push(
             text(attachment.name.clone())
                 .font(crate::fonts::source_sans(Weight::Semibold))
                 .size(TYPO_SM)
                 .color(tone)
+                .wrapping(Wrapping::Word)
                 .width(Length::Fill),
         )
         .push(

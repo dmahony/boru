@@ -137,7 +137,7 @@ impl FriendRequestStatus {
 }
 
 /// A persisted friend request between two peers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FriendRequest {
     /// Unique identifier for this request.
     pub id: String,
@@ -246,6 +246,10 @@ pub struct FriendRequestStore {
     /// Friend requests indexed by their unique id.
     #[serde(default)]
     requests: BTreeMap<String, FriendRequest>,
+    /// Signed contact messages queued for retry after a transient delivery
+    /// failure. The request id is the stable key used by the pairing flow.
+    #[serde(default)]
+    pending_signed_messages: BTreeMap<String, Vec<u8>>,
     /// Two-way index: `(requester, recipient) → request_id` for fast duplicate
     /// detection and pair lookup. Only indexes non-terminal (Pending) requests.
     #[serde(skip)]
@@ -260,6 +264,7 @@ impl Default for FriendRequestStore {
         Self {
             schema_version: SCHEMA_VERSION,
             requests: BTreeMap::new(),
+            pending_signed_messages: BTreeMap::new(),
             pair_index: BTreeMap::new(),
             data_dir: PathBuf::new(),
         }
@@ -363,6 +368,21 @@ impl FriendRequestStore {
     /// Get a request by its unique id.
     pub fn get(&self, id: &str) -> Option<&FriendRequest> {
         self.requests.get(id)
+    }
+
+    /// Store a signed contact message for retry delivery.
+    pub fn store_pending_signed_message(&mut self, request_id: impl Into<String>, message: Vec<u8>) {
+        self.pending_signed_messages.insert(request_id.into(), message);
+    }
+
+    /// Return whether a signed contact message is queued for a request.
+    pub fn has_pending_signed_message(&self, request_id: &str) -> bool {
+        self.pending_signed_messages.contains_key(request_id)
+    }
+
+    /// Remove and return a queued signed contact message.
+    pub fn take_pending_signed_message(&mut self, request_id: &str) -> Option<Vec<u8>> {
+        self.pending_signed_messages.remove(request_id)
     }
 
     // ── Two-way index helpers ───────────────────────────────────────────

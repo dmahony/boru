@@ -13,14 +13,14 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use boru_chat::friend_request::{FriendRequestStatus, FriendRequestStore};
-use boru_chat::friends::{FriendId, FriendsStore};
-use boru_chat::pairing_service::{
+use boru_core::friend_request::{FriendRequestStatus, FriendRequestStore};
+use boru_core::friends::{FriendId, FriendsStore};
+use boru_core::pairing_service::{
     accept_peer_invitation, load_pending_pairings, resolve_pending_pairings, save_pending_pairing,
     PendingPairing, ResolvedPairing,
 };
-use boru_chat::pairing_service::{PairingContext, PairingOutcome};
-use boru_chat::peer_invitation::PeerInvitation;
+use boru_core::pairing_service::{PairingContext, PairingOutcome};
+use boru_core::peer_invitation::PeerInvitation;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, RelayMode, SecretKey};
 

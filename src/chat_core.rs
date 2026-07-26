@@ -1893,6 +1893,13 @@ pub fn handle_net_event_for_topic(
                 Some(peer.to_string()),
                 DiagnosticEventKind::PeerLeftRoom,
             );
+            DIAGNOSTICS.record_with_peer(
+                topic,
+                Some(peer.to_string()),
+                DiagnosticEventKind::PeerRemovedFromTopic {
+                    reason: Some("neighbor_down".to_string()),
+                },
+            );
             cb.on_neighbor_status_change(peer, false);
         }
         NetEvent::Closed => {

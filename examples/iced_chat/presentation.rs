@@ -7,6 +7,78 @@
 use iced::Color;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Messages from the same sender stay in one visual group for this long.
+/// Keeping this rule in the presentation layer means replayed history and live
+/// delivery get identical grouping without changing the stored message data.
+pub(crate) const MESSAGE_GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MessageKind {
+    System,
+    Local,
+    Remote,
+}
+
+/// Whether two adjacent entries can share a sender/avatar treatment.
+pub(crate) fn continues_message_group(
+    previous_kind: MessageKind,
+    current_kind: MessageKind,
+    previous_sender: Option<&str>,
+    current_sender: Option<&str>,
+    previous_timestamp_ms: Option<i64>,
+    current_timestamp_ms: Option<i64>,
+) -> bool {
+    if matches!(previous_kind, MessageKind::System)
+        || matches!(current_kind, MessageKind::System)
+        || previous_kind != current_kind
+    {
+        return false;
+    }
+    if previous_kind == MessageKind::Local {
+        // Local entries belong to the current user, even when older data has
+        // no sender key attached.
+        if previous_sender != current_sender && previous_sender.is_some() && current_sender.is_some() {
+            return false;
+        }
+    } else if previous_sender != current_sender {
+        return false;
+    }
+    let (Some(previous), Some(current)) = (previous_timestamp_ms, current_timestamp_ms) else {
+        return false;
+    };
+    current.abs_diff(previous) <= MESSAGE_GROUP_WINDOW_MS as u64
+}
+
+/// Return a stable day key for date-divider comparisons.
+pub(crate) fn day_key(timestamp_ms: Option<i64>) -> Option<i64> {
+    timestamp_ms.map(|timestamp| timestamp.div_euclid(86_400_000))
+}
+
+/// Format the label used by date dividers in the chat log.
+pub(crate) fn date_divider_label(timestamp_ms: i64, today_day: i64) -> String {
+    let day = timestamp_ms.div_euclid(86_400_000);
+    match today_day.saturating_sub(day) {
+        0 => "Today".to_string(),
+        1 => "Yesterday".to_string(),
+        _ => chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms)
+            .map(|date| date.format("%A, %B %-d, %Y").to_string())
+            .unwrap_or_else(|| "Earlier".to_string()),
+    }
+}
+
+/// Accessible delivery copy for the metadata row.  These labels intentionally
+/// avoid exposing protocol-specific state names such as `Queued` or `Seen`.
+pub(crate) fn delivery_label(state: &boru_core::chat_history::DeliveryState) -> &'static str {
+    use boru_core::chat_history::DeliveryState;
+    match state {
+        DeliveryState::Queued => "Sending",
+        DeliveryState::Sent => "Sent",
+        DeliveryState::Delivered => "Delivered",
+        DeliveryState::Seen => "Read",
+        DeliveryState::Failed => "Failed",
+    }
+}
+
 /// Generate up-to-two-letter initials from a display name.
 ///
 /// Empty names and names without alphabetic characters return an empty string;
@@ -109,6 +181,60 @@ pub(crate) fn count_label(count: usize, singular: &str, plural: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_groups_require_kind_sender_and_time_window() {
+        assert!(continues_message_group(
+            MessageKind::Remote,
+            MessageKind::Remote,
+            Some("alice"),
+            Some("alice"),
+            Some(1_000),
+            Some(301_000),
+        ));
+        assert!(!continues_message_group(
+            MessageKind::Remote,
+            MessageKind::Remote,
+            Some("alice"),
+            Some("bob"),
+            Some(1_000),
+            Some(2_000),
+        ));
+        assert!(!continues_message_group(
+            MessageKind::Remote,
+            MessageKind::Remote,
+            Some("alice"),
+            Some("alice"),
+            Some(1_000),
+            Some(301_001),
+        ));
+        assert!(!continues_message_group(
+            MessageKind::System,
+            MessageKind::System,
+            None,
+            None,
+            Some(1_000),
+            Some(2_000),
+        ));
+    }
+
+    #[test]
+    fn date_dividers_handle_day_boundaries_and_relative_labels() {
+        assert_eq!(day_key(Some(-1)), Some(-1));
+        assert_eq!(date_divider_label(2 * 86_400_000, 2), "Today");
+        assert_eq!(date_divider_label(86_400_000, 2), "Yesterday");
+        assert!(date_divider_label(0, 2).contains("1970"));
+    }
+
+    #[test]
+    fn delivery_labels_preserve_user_facing_truth() {
+        use boru_core::chat_history::DeliveryState;
+        assert_eq!(delivery_label(&DeliveryState::Queued), "Sending");
+        assert_eq!(delivery_label(&DeliveryState::Sent), "Sent");
+        assert_eq!(delivery_label(&DeliveryState::Delivered), "Delivered");
+        assert_eq!(delivery_label(&DeliveryState::Seen), "Read");
+        assert_eq!(delivery_label(&DeliveryState::Failed), "Failed");
+    }
 
     #[test]
     fn initials_cover_empty_single_and_multiple_words() {

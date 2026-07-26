@@ -7,6 +7,7 @@
 
 mod app;
 mod connection_details;
+mod design_tokens;
 mod download_progress_view;
 mod fonts;
 mod gui_test_actions;
@@ -48,7 +49,6 @@ use boru_core::protocol_version::CATALOGUE_ALPN;
 use boru_core::room::RoomStore;
 use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::Storage;
-use boru_core::store::MessageStore;
 use boru_core::file_access_handler::{FileAccessHandler, NonceStore};
 use clap::Parser;
 use iroh::{
@@ -460,6 +460,7 @@ fn main() -> Result<()> {
             let crash_msg = format!(
                 "BORU CRASH at {timestamp}\nLocation: {location}\nMessage: {msg}"
             );
+            let backtrace = std::backtrace::Backtrace::force_capture();
             // Write to instance.log so the splash window displays it
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
@@ -473,6 +474,7 @@ fn main() -> Result<()> {
             let report_path = crash_dir.join(format!("crash-{timestamp}.txt"));
             if let Ok(mut f) = std::fs::File::create(&report_path) {
                 let _ = writeln!(f, "{crash_msg}");
+                let _ = writeln!(f, "Backtrace:\n{backtrace}");
                 let _ = writeln!(
                     f,
                     "RUST_BACKTRACE: {}",
@@ -650,7 +652,6 @@ fn main() -> Result<()> {
         room_history,
         notice,
         chat_history,
-        message_store,
         backfill_handle,
         whisper_events_rx,
         whisper_handle,
@@ -663,7 +664,12 @@ fn main() -> Result<()> {
         use std::net::{Ipv4Addr, SocketAddrV4};
 
         let mdns = MdnsAddressLookup::builder().build(secret_key.public())?;
-        let mdns_for_events = mdns.clone();
+        // Register the discovery subscriber before binding the endpoint. The
+        // mDNS service caches advertisements but does not replay already-seen
+        // endpoints to subscribers created later. Subscribing after endpoint
+        // setup and lobby initialization can therefore miss both peers'
+        // initial announcements indefinitely.
+        let mdns_events = mdns.subscribe().await;
         let endpoint = {
             {
                 let ep_builder = if matches!(relay_mode, RelayMode::Disabled) {
@@ -771,55 +777,6 @@ fn main() -> Result<()> {
         let chat_history = Arc::new(std::sync::Mutex::new(
             ChatHistoryStore::load_or_default(&data_dir),
         ));
-        // Open the shared SQLite message store (same boru.db as download storage).
-        let message_store = Arc::new(
-            MessageStore::open(data_dir.join("boru.db"))
-                .expect("open message store for chat history"),
-        );
-
-        // ── One-time migration: JSON chat_history.json → SQLite messages table
-        if chat_history.lock().unwrap().len() > 0 {
-            let migrated = {
-                let history = chat_history.lock().unwrap();
-                let mut count = 0;
-                for entry in &history.entries {
-                    let topic = *entry.topic.as_bytes();
-                    let sender: [u8; 32] = match hex::decode(&entry.sender) {
-                        Ok(v) => match <[u8; 32]>::try_from(v) {
-                            Ok(arr) => arr,
-                            Err(_) => continue,
-                        },
-                        Err(_) => continue,
-                    };
-                    let hash: [u8; 32] = match hex::decode(&entry.hash) {
-                        Ok(v) => match <[u8; 32]>::try_from(v) {
-                            Ok(arr) => arr,
-                            Err(_) => continue,
-                        },
-                        Err(_) => continue,
-                    };
-                    let _ = message_store.insert_chat_message(
-                            &hash,
-                            &topic,
-                            &sender,
-                            entry.timestamp,
-                            &entry.kind,
-                            &entry.text_preview,
-                            if entry.signed_bytes.is_empty() { None } else { Some(&entry.signed_bytes[..]) },
-                            entry.image_identifier.as_deref(),
-                            local_public.as_bytes(),
-                        );
-                        count += 1;
-                }
-                count
-            };
-            if migrated > 0 {
-                info!("migrated {migrated} entries from chat_history.json to SQLite");
-                // Keep the JSON store intact — it remains the live persistence
-                // mechanism until the SQLite path is fully wired for reads and
-                // writes.  INSERT OR IGNORE prevents duplicate migrations.
-            }
-        }
 
         // ── Backfill handler ──────────────────────────────────────────
         let backfill_handler = BackfillProtocolHandler::new(chat_history.clone());
@@ -952,14 +909,13 @@ fn main() -> Result<()> {
             // join them to the lobby gossip mesh directly, and forward the
             // peer ID to the UI for sidebar display.
             {
-                let mdns = mdns_for_events;
                 let memory_lookup_for_events = memory_lookup.clone();
                 let tx = discovered_peers_tx.clone();
                 let my_id = endpoint.id();
                 tokio::spawn(async move {
                     use n0_future::StreamExt;
                     let mut joined_peers = std::collections::HashSet::new();
-                    let mut events = mdns.subscribe().await;
+                    let mut events = mdns_events;
                     while let Some(event) = events.next().await {
                         match event {
                             DiscoveryEvent::Discovered { endpoint_info, .. } => {
@@ -1144,7 +1100,6 @@ fn main() -> Result<()> {
             room_history,
             notice,
             chat_history,
-            message_store,
             backfill_handle,
             whisper_events_rx,
             whisper_handle,
@@ -1291,7 +1246,6 @@ fn main() -> Result<()> {
                 initial_room,
                 notice,
                 chat_history,
-                message_store,
                 backfill_handle,
                 initial_topic.is_some() && args.command.is_none(),
                 None,

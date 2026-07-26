@@ -148,6 +148,14 @@ pub mod chat_history;
 #[cfg(feature = "net")]
 pub mod friend_request;
 
+/// Versioned peer invitations used to initiate pairing.
+#[cfg(feature = "net")]
+pub mod peer_invitation;
+
+/// Pairing flow orchestration and restart recovery.
+#[cfg(feature = "net")]
+pub mod pairing_service;
+
 /// Durable encrypted outbox storage for outgoing messages.
 ///
 /// Persists signed (encrypted) outgoing messages before sending so they

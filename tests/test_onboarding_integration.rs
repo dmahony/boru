@@ -17,7 +17,7 @@
 //! 7. App startup simulation (full sequence)
 //! 8. Onboarding failure/dismissal does not prevent normal operation
 
-use boru_chat::user_profile::UserProfileStore;
+use boru_core::user_profile::UserProfileStore;
 use iroh::{PublicKey, SecretKey};
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -512,6 +512,12 @@ pub struct UserProfileStore {
     #[serde(default = "default_schema_version")]
     schema_version: u32,
 
+    /// Whether first-launch onboarding has been completed or explicitly
+    /// dismissed. Kept at store level so legacy profile data can be inferred
+    /// without mutating the user's profile fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    onboarding_completed: Option<bool>,
+
     /// The user's profile.
     profile: UserProfile,
 
@@ -528,6 +534,7 @@ impl Default for UserProfileStore {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            onboarding_completed: None,
             profile: UserProfile::default(),
             shared_files: Vec::new(),
             data_dir: PathBuf::new(),
@@ -569,6 +576,29 @@ impl UserProfileStore {
     /// Replace the current profile with a new one.
     pub fn set_profile(&mut self, profile: UserProfile) {
         self.profile = profile;
+    }
+
+    /// Return whether onboarding has been completed or dismissed.
+    pub fn onboarding_completed(&self) -> bool {
+        self.onboarding_completed.unwrap_or(false)
+    }
+
+    /// Set the persisted onboarding completion state.
+    pub fn set_onboarding_completed(&mut self, completed: bool) {
+        self.onboarding_completed = Some(completed);
+    }
+
+    /// Infer completion from pre-existing external application data.
+    ///
+    /// Returns `true` only when this call changes an incomplete store. An
+    /// explicit completion state is never overridden.
+    pub fn infer_onboarding_from_external(&mut self, has_existing_data: bool) -> bool {
+        if has_existing_data && !self.onboarding_completed() {
+            self.onboarding_completed = Some(true);
+            true
+        } else {
+            false
+        }
     }
 
     /// Return an immutable iterator over shared files.
@@ -633,6 +663,26 @@ impl UserProfileStore {
         // Validate the loaded profile — if it fails, bail so the caller
         // can decide what to do (e.g. fall back to an empty store).
         store.profile.validate()?;
+
+        // Legacy profile files predate the store-level onboarding flag. Infer
+        // completion only when the field is absent; an explicit false is a
+        // user's request to show onboarding again and must be preserved.
+        let has_onboarding_field = serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|value| {
+                value
+                    .as_object()
+                    .map(|object| object.contains_key("onboarding_completed"))
+            })
+            .unwrap_or(true);
+        if !has_onboarding_field
+            && (!store.profile.display_name.is_empty()
+                || !store.profile.bio.is_empty()
+                || store.profile.avatar_identifier.is_some()
+                || !store.shared_files.is_empty())
+        {
+            store.onboarding_completed = Some(true);
+        }
 
         Ok(store)
     }

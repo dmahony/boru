@@ -892,16 +892,32 @@ fn bytes_to_signed_peer<T: AsRef<[u8]>>(
 ) -> Result<([u8; 32], u64, [u8; 64]), DecodeMessageError> {
     let bytes = bytes.as_ref();
 
-    if !bytes.len().is_multiple_of(104) {
+    if bytes.len() != 104 {
         return Err(DecodeMessageError::InvalidSignedPeersEncodingLength);
     }
 
-    let t: [u8; 8] = bytes[32..40].try_into().expect("infallible");
+    let peer_bytes = bytes
+        .get(0..32)
+        .ok_or(DecodeMessageError::InvalidSignedPeersEncodingLength)?;
+    let timestamp_bytes = bytes
+        .get(32..40)
+        .ok_or(DecodeMessageError::InvalidSignedPeersEncodingLength)?;
+    let signature_bytes = bytes
+        .get(40..104)
+        .ok_or(DecodeMessageError::InvalidSignedPeersEncodingLength)?;
+
+    let t: [u8; 8] = timestamp_bytes
+        .try_into()
+        .map_err(|_| DecodeMessageError::InvalidSignedPeersEncodingLength)?;
 
     Ok((
-        bytes[0..32].try_into().expect("infallible"),
+        peer_bytes
+            .try_into()
+            .map_err(|_| DecodeMessageError::InvalidSignedPeersEncodingLength)?,
         u64::from_be_bytes(t),
-        bytes[40..104].try_into().expect("infallible"),
+        signature_bytes
+            .try_into()
+            .map_err(|_| DecodeMessageError::InvalidSignedPeersEncodingLength)?,
     ))
 }
 

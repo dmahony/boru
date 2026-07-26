@@ -34,6 +34,8 @@ use self::{
 };
 use crate::{
     api::{self, Command, Event, GossipApi, RpcMessage},
+    diagnostics::{DiagnosticEventKind, DiscoverySource},
+    chat_core::DIAGNOSTICS,
     friends::FriendsStore,
     metrics::Metrics,
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
@@ -747,6 +749,13 @@ impl Actor {
             };
             match event {
                 OutEvent::SendMessage(peer_id, message) => {
+                    // A malformed discovery record must never make us dial
+                    // ourselves. This also prevents a self NeighborUp from
+                    // falsely making a room appear ready.
+                    if peer_id == self.endpoint.id() {
+                        debug!(peer = %peer_id.fmt_short(), "ignoring self peer in gossip dial");
+                        continue;
+                    }
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
                         PeerState::Active { active_send_tx, .. } => {
@@ -762,6 +771,13 @@ impl Actor {
                         PeerState::Pending { queue } => {
                             if queue.is_empty() {
                                 info!(peer = %peer_id.fmt_short(), "start to dial");
+                                DIAGNOSTICS.record_with_peer(
+                                    None,
+                                    Some(peer_id.to_string()),
+                                    DiagnosticEventKind::AddressLookupStarted {
+                                        source: DiscoverySource::Gossip,
+                                    },
+                                );
                                 let endpoint_addr = match self.address_lookup.endpoint_addr(peer_id)
                                 {
                                     Some(addr) => {
@@ -820,6 +836,24 @@ impl Actor {
                                         found
                                     }
                                 };
+                                DIAGNOSTICS.record_with_peer(
+                                    None,
+                                    Some(peer_id.to_string()),
+                                    DiagnosticEventKind::AddressResolved {
+                                        source: DiscoverySource::Gossip,
+                                        // Do not persist relay URLs or IPs in
+                                        // diagnostics; the transition itself
+                                        // is sufficient to classify failures.
+                                        addresses: Vec::new(),
+                                    },
+                                );
+                                DIAGNOSTICS.record_with_peer(
+                                    None,
+                                    Some(peer_id.to_string()),
+                                    DiagnosticEventKind::ConnectionAttemptStarted {
+                                        addresses: Vec::new(),
+                                    },
+                                );
                                 self.dialer.queue_dial(endpoint_addr, self.alpn.clone());
                             }
                             queue.push(message);
