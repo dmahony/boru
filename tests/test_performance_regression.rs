@@ -148,7 +148,12 @@ fn bench_stats<F: FnMut()>(mut f: F, iterations: usize) -> Duration {
     };
     eprintln!(
         "  samples={} median={:.0}ns mean={:.0}ns stddev={:.0}ns p95={:.0}ns p99={:.0}ns",
-        samples.len(), quantile(0.50), mean, variance.sqrt(), quantile(0.95), quantile(0.99)
+        samples.len(),
+        quantile(0.50),
+        mean,
+        variance.sqrt(),
+        quantile(0.95),
+        quantile(0.99)
     );
     Duration::from_nanos(quantile(0.50).max(1.0) as u64)
 }
@@ -611,7 +616,7 @@ async fn test_many_messages_handle_net_event_scaling() -> n0_error::Result<()> {
     // Subscribe peers
     let sub_a = gossip_a.subscribe(topic, vec![]).await?;
     let (sender_a, receiver_a) = sub_a.split();
-    let (net_tx_a, net_rx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (net_tx_a, net_rx_a) = tokio::sync::mpsc::channel(64);
     let _net_rx_a = Arc::new(Mutex::new(net_rx_a));
     task::spawn(forward_gossip_events(receiver_a, net_tx_a));
 
@@ -638,7 +643,7 @@ async fn test_many_messages_handle_net_event_scaling() -> n0_error::Result<()> {
     memory_lookup.set_endpoint_info(ep_a.addr());
     let sub_b = gossip_b.subscribe(topic, vec![pk_a]).await?;
     let (sender_b, receiver_b) = sub_b.split();
-    let (net_tx_b, net_rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let (net_tx_b, net_rx_b) = tokio::sync::mpsc::channel(64);
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
     task::spawn(forward_gossip_events(receiver_b, net_tx_b));
 

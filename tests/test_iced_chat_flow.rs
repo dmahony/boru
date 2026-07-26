@@ -160,7 +160,7 @@ async fn test_iced_chat_exact_flow() -> Result<()> {
     let sub_a = gossip_a.subscribe(topic, vec![]).await?;
     let (sender_a, receiver_a) = sub_a.split();
 
-    let (net_tx_a, net_rx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (net_tx_a, net_rx_a) = tokio::sync::mpsc::channel(64);
     let net_rx_a = Arc::new(tokio::sync::Mutex::new(net_rx_a));
 
     task::spawn(forward_gossip_events(receiver_a, net_tx_a));
@@ -182,7 +182,7 @@ async fn test_iced_chat_exact_flow() -> Result<()> {
     let sub_b = gossip_b.subscribe(topic, vec![pk_a]).await?;
     let (sender_b, receiver_b) = sub_b.split();
 
-    let (net_tx_b, net_rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let (net_tx_b, net_rx_b) = tokio::sync::mpsc::channel(64);
     let net_rx_b = Arc::new(tokio::sync::Mutex::new(net_rx_b));
 
     task::spawn(forward_gossip_events(receiver_b, net_tx_b));
@@ -223,7 +223,7 @@ async fn test_iced_chat_exact_flow() -> Result<()> {
 
     // Wait for gossip to connect
     let drain_net =
-        |rx: &Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<NetEvent>>>,
+        |rx: &Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<NetEvent>>>,
          _label: &str,
          sim: &mut SimChat| {
             let mut count = 0;

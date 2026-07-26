@@ -348,3 +348,12 @@ pub mod transfer_telemetry;
 /// BORU_CHAT_DATA_DIR → legacy auto-detection → new XDG default →
 /// new CWD fallback).  Always available (no feature gate).
 pub mod data_dir;
+
+/// Bounded blocking file hasher — wraps blake3 hashing in
+/// [`tokio::task::spawn_blocking`] with configurable concurrency.
+///
+/// Always available (no feature gate).  Used by [`file_indexer`] and
+/// [`file_access_handler`] to avoid blocking the async runtime with
+/// synchronous file I/O and CPU-bound blake3 computation.
+#[cfg(feature = "net")]
+pub mod file_hasher;

@@ -33,8 +33,6 @@ use crate::file_access_protocol::{
 };
 use crate::friends::{FriendId, FriendRelationship, FriendsStore};
 use crate::storage::Storage;
-
-use iroh_blobs::store::fs::FsStore;
 use rusqlite::params;
 
 /// Outcome of checking a nonce against the [`NonceStore`].
@@ -617,7 +615,7 @@ pub struct FileAccessHandler {
     /// Shared nonce store for single-use descriptor enforcement.
     nonce_store: Arc<NonceStore>,
     /// iroh-blobs store — used to verify imported file availability.
-    blob_store: Arc<FsStore>,
+    blob_store: Arc<iroh_blobs::api::Store>,
     /// Preparation bounds — concurrency, size, and timeout limits.
     prepare_limiter: Arc<PrepareLimiter>,
     /// Upload (file-access request) admission limits.
@@ -635,7 +633,7 @@ impl FileAccessHandler {
         profile_user_id: String,
         friends: FriendsStore,
         nonce_store: Arc<NonceStore>,
-        blob_store: Arc<FsStore>,
+        blob_store: Arc<iroh_blobs::api::Store>,
     ) -> Self {
         Self {
             storage,
@@ -658,7 +656,7 @@ impl FileAccessHandler {
         profile_user_id: String,
         friends: FriendsStore,
         nonce_store: Arc<NonceStore>,
-        blob_store: Arc<FsStore>,
+        blob_store: Arc<iroh_blobs::api::Store>,
         prepare_limiter: Arc<PrepareLimiter>,
         upload_limiter: Arc<UploadLimiter>,
     ) -> Self {
@@ -1634,19 +1632,31 @@ pub async fn prepare_referenced_file(
         }
     }
 
-    // ── 4. Read and hash the file content ────────────────────────────
-    let file_data = fs::read(path).map_err(|e| {
-        if e.kind() == io::ErrorKind::PermissionDenied {
-            anyhow::anyhow!("permission denied reading referenced source: {src}")
-        } else {
-            anyhow::anyhow!("failed to read referenced source {src}: {e:#}")
-        }
-    })?;
+    // ── 4. Read and hash the file content on a blocking worker ───────
+    // `fs::read` and `blake3::hash` are CPU-bound file I/O; run them
+    // on a blocking thread so they don't block the async runtime.
+    let src_for_worker = src.clone();
+    let (file_data, file_blake3_bytes) = tokio::task::spawn_blocking(move || {
+        let data = fs::read(&src_for_worker).map_err(|e| {
+            if e.kind() == io::ErrorKind::PermissionDenied {
+                anyhow::anyhow!(
+                    "permission denied reading referenced source: {src_for_worker}"
+                )
+            } else {
+                anyhow::anyhow!(
+                    "failed to read referenced source {src_for_worker}: {e:#}"
+                )
+            }
+        })?;
+        let hash = blake3::hash(&data);
+        Ok::<_, anyhow::Error>((data, *hash.as_bytes()))
+    })
+    .await
+    .map_err(|join_err| anyhow::anyhow!("referenced-file read task panicked: {join_err}"))??;
 
     // Optional hash verification.
     if let Some(expected_hash) = verify_hash {
-        let actual_hash = blake3::hash(&file_data);
-        let actual_hex = hex::encode(actual_hash.as_bytes());
+        let actual_hex = hex::encode(file_blake3_bytes);
         let expected = expected_hash.to_ascii_lowercase();
         if actual_hex != expected {
             return Err(anyhow::anyhow!(
@@ -1657,8 +1667,7 @@ pub async fn prepare_referenced_file(
 
     // ── 5. Import into iroh-blobs store ─────────────────────────────
     // Check if already present to avoid re-import.
-    let file_blake3 = blake3::hash(&file_data);
-    let blob_hash = iroh_blobs::Hash::from(file_blake3);
+    let blob_hash = iroh_blobs::Hash::from(file_blake3_bytes);
     let already_present = blob_store
         .blobs()
         .has(blob_hash)

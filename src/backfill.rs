@@ -400,7 +400,7 @@ enum Cmd {
         since_ms: u64,
         max_messages: u32,
         topic: Option<TopicId>,
-        net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+        net_tx: mpsc::Sender<NetEvent>,
         safety: Option<Arc<PublicRoomSafety>>,
         reply: tokio::sync::oneshot::Sender<Result<u32>>,
     },
@@ -443,7 +443,7 @@ impl BackfillHandle {
         since_ms: u64,
         max_messages: u32,
         topic: Option<TopicId>,
-        net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+        net_tx: mpsc::Sender<NetEvent>,
         safety: Option<Arc<PublicRoomSafety>>,
     ) -> Result<u32> {
         let (reply, rx) = tokio::sync::oneshot::channel();
@@ -478,7 +478,7 @@ impl BackfillHandle {
         peer: PublicKey,
         local_history_count: usize,
         topic: Option<TopicId>,
-        net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+        net_tx: mpsc::Sender<NetEvent>,
         safety: Option<Arc<PublicRoomSafety>>,
     ) -> Result<Option<u32>> {
         if local_history_count >= BACKFILL_TRIGGER_THRESHOLD {
@@ -615,7 +615,7 @@ async fn do_backfill_request(
     since_ms: u64,
     max_messages: u32,
     topic: Option<TopicId>,
-    net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+    net_tx: mpsc::Sender<NetEvent>,
     safety: Option<Arc<PublicRoomSafety>>,
 ) -> Result<u32> {
     let peer_id = addr.id;
@@ -691,7 +691,7 @@ async fn do_backfill_request(
                         },
                         None => net_event,
                     };
-                    if net_tx.send(net_event).is_err() {
+                    if net_tx.send(net_event).await.is_err() {
                         warn!("backfill: net_tx closed, stopping injection");
                         break;
                     }
@@ -881,7 +881,7 @@ mod tests {
         let addr =
             EndpointAddr::from_parts(sk_responder.public(), ep_responder.addr().addrs.clone());
 
-        let (net_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (net_tx, _) = tokio::sync::mpsc::channel(64);
 
         // Spawn the backfill request in a background task so we can
         // advance time while it blocks waiting for the slow responder.
@@ -940,7 +940,7 @@ mod tests {
         let addr =
             EndpointAddr::from_parts(sk_responder.public(), ep_responder.addr().addrs.clone());
 
-        let (net_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (net_tx, _) = tokio::sync::mpsc::channel(64);
 
         let result = do_backfill_request(&ep_requester, addr, 0, 10, None, net_tx, None).await;
 

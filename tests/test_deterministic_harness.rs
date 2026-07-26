@@ -243,9 +243,9 @@ pub struct PeerNode {
     pub router: Option<Router>,
     pub whisper_handle: Option<WhisperHandle>,
     pub whisper_event_rx:
-        Option<Arc<TokioMutex<tokio::sync::mpsc::UnboundedReceiver<WhisperEvent>>>>,
+        Option<Arc<TokioMutex<tokio::sync::mpsc::Receiver<WhisperEvent>>>>,
     pub sender: Option<boru_core::api::GossipSender>,
-    pub net_event_tx: Option<tokio::sync::mpsc::UnboundedSender<NetEvent>>,
+    pub net_event_tx: Option<tokio::sync::mpsc::Sender<NetEvent>>,
 }
 
 impl fmt::Debug for PeerNode {
@@ -475,7 +475,7 @@ impl TestHarness {
         let (sender, receiver) = sub.split();
 
         // Forward gossip events to NetEvent -> TestPeer callback
-        let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (net_tx, mut net_rx) = tokio::sync::mpsc::channel(64);
         let fwd = forward_gossip_events(receiver, net_tx.clone());
         task::spawn(fwd);
 

@@ -11,20 +11,42 @@
 ### Building
 
 ```sh
-# Build the library
+# Build the library (debug profile; fastest iteration and full debug info)
 cargo build
 
-# Build the GUI example
+# Build the GUI example (debug profile)
 cargo build --features gui --example iced_chat
 
-# Build release
+# Check compilation (faster than a full build)
+cargo check --features gui --example iced_chat
+
+# Build a production GUI binary (optimized, LTO, one codegen unit, stripped)
 cargo build --release --features gui --example iced_chat
 
-# Check compilation (faster than full build)
-cargo check --features gui --example iced_chat
+# Build a profiling binary (same release optimizations, with DWARF symbols)
+cargo build --profile profiling --features gui --example iced_chat
+
+# Run the profiling binary under a profiler, for example:
+# samply record target/profiling/examples/iced_chat
+# (Use the corresponding target/profiling path for other binaries.)
 ```
 
-### Feature Flags
+### Build Profiles
+
+Cargo's profiles are deliberately explicit:
+
+| Profile | Use | Diagnostics |
+|---------|-----|------------|
+| `dev` (default) | Fast local iteration | Full debug information |
+| `release` | Production deployment | Symbols stripped; use logs for runtime diagnostics |
+| `profiling` | CPU/memory profiling and optimized troubleshooting | Inherits `release` optimization, keeps DWARF symbols and disables stripping |
+
+The profiling profile is the preferred choice when a stack trace or profiler
+symbolization is needed. Production builds have no embedded debug symbols by
+design; preserve the matching profiling artifact when investigating a release
+issue.
+
+## Feature Flags
 
 | Feature | Dependencies | Description |
 |---------|--------------|-------------|
@@ -85,6 +107,20 @@ Alternative task runner using `just`.
 | `lint-gui` | Clippy for GUI feature |
 | `test-gui` | Run GUI tests |
 | `ci-gui` | Full GUI CI pipeline (check + lint + test) |
+
+## Verifying Profiles
+
+Inspect the resolved profile settings before a release or profiling run:
+
+```sh
+cargo metadata --no-deps --format-version 1 > /tmp/boru-metadata.json
+cargo build --profile profiling --features gui --example iced_chat
+```
+
+The release and profiling builds use the same dependency graph and optimized
+code paths. The profiling build is larger and slower to link because it keeps
+symbols; compare `target/release/` and `target/profiling/` artifacts with
+`stat` or `du` when measuring deployment size.
 
 ## Testing
 

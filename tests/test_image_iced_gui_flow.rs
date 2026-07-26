@@ -132,7 +132,7 @@ async fn spawn_peer_with_blobs(
 /// Drain all available NetEvents from rx, processing each through
 /// handle_net_event (like the Iced GUI does one at a time in update()).
 fn drain_events(
-    rx: &Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<NetEvent>>>,
+    rx: &Arc<Mutex<tokio::sync::mpsc::Receiver<NetEvent>>>,
     sim: &mut ImageTestPeer,
 ) -> usize {
     let mut count = 0;
@@ -158,7 +158,7 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
     // ── Peer A: subscribe ──
     let sub_a = gossip_a.subscribe(topic, vec![]).await?;
     let (sender_a, receiver_a) = sub_a.split();
-    let (net_tx_a, net_rx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (net_tx_a, net_rx_a) = tokio::sync::mpsc::channel(64);
     let net_rx_a = Arc::new(Mutex::new(net_rx_a));
     // Use room_docs forwarder to match Iced GUI exactly
     let metadata_doc_a = room_docs::create_metadata_doc(
@@ -206,7 +206,7 @@ async fn test_iced_gui_image_flow_exact() -> Result<()> {
     memory_lookup.set_endpoint_info(ep_a.addr());
     let sub_b = gossip_b.subscribe(topic, vec![pk_a]).await?;
     let (sender_b, receiver_b) = sub_b.split();
-    let (net_tx_b, net_rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let (net_tx_b, net_rx_b) = tokio::sync::mpsc::channel(64);
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
     let (metadata_doc_b, roster_doc_b) = {
         let md = room_docs::create_metadata_doc(

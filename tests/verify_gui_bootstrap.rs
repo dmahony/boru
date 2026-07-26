@@ -128,7 +128,7 @@ async fn spawn_peer(
     Ok((router, ep.clone(), pk, gossip))
 }
 
-fn drain_net(rx: &Arc<Mutex<mpsc::UnboundedReceiver<NetEvent>>>, sim: &mut SimChat) {
+fn drain_net(rx: &Arc<Mutex<mpsc::Receiver<NetEvent>>>, sim: &mut SimChat) {
     loop {
         let item = rx.try_lock().unwrap().try_recv();
         match item {
@@ -202,11 +202,11 @@ async fn test_gui_bootstrap_plumbing() -> Result<()> {
     let (sender_b, rx_b) = topic_b.split();
 
     // ── Bridge gossip events to NetEvent channels ──
-    let (net_tx_a, net_rx_a) = mpsc::unbounded_channel();
+    let (net_tx_a, net_rx_a) = mpsc::channel(64);
     let net_rx_a = Arc::new(Mutex::new(net_rx_a));
     task::spawn(forward_gossip_events(rx_a, net_tx_a));
 
-    let (net_tx_b, net_rx_b) = mpsc::unbounded_channel();
+    let (net_tx_b, net_rx_b) = mpsc::channel(64);
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
     task::spawn(forward_gossip_events(rx_b, net_tx_b));
 

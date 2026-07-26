@@ -473,11 +473,11 @@ pub fn spawn_conversation_forwarder(
     metadata_doc: crate::room_docs::RoomMetadataDoc,
     roster_doc: crate::room_docs::RosterDoc,
     receiver: crate::api::GossipReceiver,
-    net_tx: tokio::sync::mpsc::UnboundedSender<ConversationNetEvent>,
+    net_tx: tokio::sync::mpsc::Sender<ConversationNetEvent>,
     safety: Option<std::sync::Arc<crate::public_room_safety::PublicRoomSafety>>,
 ) -> n0_future::task::JoinHandle<()> {
     n0_future::task::spawn(async move {
-        let (inner_tx, mut inner_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (inner_tx, mut inner_rx) = tokio::sync::mpsc::channel(256);
         // Spawn the room-doc-aware forwarder to push raw NetEvents to inner_tx
         let forward_handle =
             n0_future::task::spawn(crate::room_docs::forward_room_events_for_chat(
@@ -491,6 +491,7 @@ pub fn spawn_conversation_forwarder(
         while let Some(event) = inner_rx.recv().await {
             if net_tx
                 .send(ConversationNetEvent::new(topic, event))
+                .await
                 .is_err()
             {
                 break;

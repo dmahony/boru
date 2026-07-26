@@ -1985,7 +1985,7 @@ pub fn broadcast_diagnostic_probe(
 /// callers should use [`forward_gossip_events_with_safety`] instead.
 pub async fn forward_gossip_events(
     receiver: GossipReceiver,
-    net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+    net_tx: tokio::sync::mpsc::Sender<NetEvent>,
 ) {
     forward_gossip_events_with_safety(receiver, net_tx, None).await
 }
@@ -1999,7 +1999,7 @@ pub async fn forward_gossip_events(
 /// the room's size, rate, or announcement limits.
 pub async fn forward_gossip_events_with_safety(
     mut receiver: GossipReceiver,
-    net_tx: tokio::sync::mpsc::UnboundedSender<NetEvent>,
+    net_tx: tokio::sync::mpsc::Sender<NetEvent>,
     safety: Option<Arc<PublicRoomSafety>>,
 ) {
     while let Ok(Some(event)) = receiver.try_next().await {
@@ -2029,7 +2029,7 @@ pub async fn forward_gossip_events_with_safety(
                             },
                             None => net_event,
                         };
-                        if net_tx.send(net_event).is_err() {
+                        if net_tx.send(net_event).await.is_err() {
                             return;
                         }
                     }
@@ -2042,12 +2042,12 @@ pub async fn forward_gossip_events_with_safety(
                 }
             }
             Event::NeighborUp(id) => {
-                if net_tx.send(NetEvent::NeighborUp { peer: id }).is_err() {
+                if net_tx.send(NetEvent::NeighborUp { peer: id }).await.is_err() {
                     return;
                 }
             }
             Event::NeighborDown(id) => {
-                if net_tx.send(NetEvent::NeighborDown { peer: id }).is_err() {
+                if net_tx.send(NetEvent::NeighborDown { peer: id }).await.is_err() {
                     return;
                 }
             }
@@ -2057,7 +2057,7 @@ pub async fn forward_gossip_events_with_safety(
             }
         }
     }
-    let _ = net_tx.send(NetEvent::Closed);
+    let _ = net_tx.send(NetEvent::Closed).await;
 }
 
 /// Update `StatusContext.direct_peers` and `.relayed_peers` by querying the

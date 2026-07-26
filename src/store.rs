@@ -870,11 +870,14 @@ impl MessageStore {
     /// the user explicitly confirms they want to discard pending outgoing
     /// messages as well.
     pub fn hard_delete_conversation(&self, conversation_id: &[u8; 32]) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction()
+            .std_context("begin hard delete conversation transaction")?;
 
         // Capture the msg_ids before deleting, so we can also remove
         // corresponding outbox rows.
-        let mut stmt = conn
+        let mut stmt = tx
             .prepare("SELECT msg_id FROM inbox WHERE conversation_id = ?1")
             .std_context("prepare select msg_ids for hard delete")?;
         let msg_ids: Vec<Vec<u8>> = stmt
@@ -882,9 +885,10 @@ impl MessageStore {
             .std_context("query msg_ids for hard delete")?
             .collect::<std::result::Result<Vec<_>, _>>()
             .std_context("collect msg_ids")?;
+        drop(stmt);
 
         // Delete inbox messages for this conversation
-        let removed_inbox = conn
+        let removed_inbox = tx
             .execute(
                 "DELETE FROM inbox WHERE conversation_id = ?1",
                 [conversation_id.as_slice()],
@@ -892,21 +896,25 @@ impl MessageStore {
             .std_context("hard delete inbox messages")?;
 
         // Delete corresponding outbox rows
+        let mut delete_outbox = tx
+            .prepare("DELETE FROM outbox WHERE msg_id = ?1")
+            .std_context("prepare hard delete outbox")?;
         for msg_blob in &msg_ids {
-            conn.execute(
-                "DELETE FROM outbox WHERE msg_id = ?1",
-                [msg_blob.as_slice()],
-            )
-            .std_context("hard delete outbox row")?;
+            delete_outbox
+                .execute([msg_blob.as_slice()])
+                .std_context("hard delete outbox row")?;
         }
+        drop(delete_outbox);
 
         // Remove metadata row entirely
-        conn.execute(
+        tx.execute(
             "DELETE FROM conversation_meta WHERE conversation_id = ?1",
             [conversation_id.as_slice()],
         )
         .std_context("delete conversation meta row")?;
 
+        tx.commit()
+            .std_context("commit hard delete conversation transaction")?;
         Ok(removed_inbox)
     }
 

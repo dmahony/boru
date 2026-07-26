@@ -265,7 +265,7 @@ pub struct InboxInner {
     /// Deduplication: message ids seen within the replay window.
     pub seen_message_ids: HashMap<InboxMessageId, u64>,
     /// Channel to forward received envelopes to the frontend.
-    pub envelope_tx: mpsc::UnboundedSender<InboxEvent>,
+    pub envelope_tx: mpsc::Sender<InboxEvent>,
     /// Optional provider that returns pending envelopes for a SyncRequest.
     /// The function receives (requester_public_key, since_ms) and returns
     /// (envelopes, has_more). The protocol handler derives last_created_at_ms
@@ -337,8 +337,8 @@ pub struct InboxHandle {
 
 impl InboxHandle {
     /// Create a new inbox handle.
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<InboxEvent>) {
-        let (envelope_tx, envelope_rx) = mpsc::unbounded_channel();
+    pub fn new() -> (Self, mpsc::Receiver<InboxEvent>) {
+        let (envelope_tx, envelope_rx) = mpsc::channel(1024);
         let inner = Arc::new(Mutex::new(InboxInner {
             allowed_senders: HashSet::new(),
             authorization_fn: None,
@@ -625,7 +625,7 @@ impl InboxProtocol {
                     // its durable state and re-acknowledge it.  This is
                     // essential when the original acknowledgement was lost
                     // after the recipient committed the message.
-                    let _ = guard.envelope_tx.send(InboxEvent::EnvelopeReceived {
+                    let _ = guard.envelope_tx.try_send(InboxEvent::EnvelopeReceived {
                         from: verified_sender,
                         envelope,
                     });
@@ -646,7 +646,7 @@ impl InboxProtocol {
                         .as_secs(),
                 );
 
-                let _ = guard.envelope_tx.send(InboxEvent::EnvelopeReceived {
+                let _ = guard.envelope_tx.try_send(InboxEvent::EnvelopeReceived {
                     from: verified_sender,
                     envelope,
                 });
@@ -657,7 +657,7 @@ impl InboxProtocol {
                 ack.verify(verified_sender).map_err(|e| {
                     n0_error::anyerr!("inbox: rejecting ack with invalid signature: {e}")
                 })?;
-                let _ = guard.envelope_tx.send(InboxEvent::AckReceived {
+                let _ = guard.envelope_tx.try_send(InboxEvent::AckReceived {
                     from: verified_sender,
                     ack,
                 });

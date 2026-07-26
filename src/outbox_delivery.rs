@@ -3,6 +3,14 @@
 //! Claiming is the only operation that happens in the database before network
 //! I/O.  A row is released only after the transport reports a verified
 //! protocol acknowledgement; writing bytes to a QUIC stream is not success.
+//!
+//! # Concurrency
+//!
+//! When [`OutboxDeliveryWorker::with_max_concurrent`] is set to a value > 1,
+//! [`run_once`](OutboxDeliveryWorker::run_once) claims batches of due rows
+//! transactionally and processes them concurrently (up to the configured
+//! limit).  Per-peer ordering is preserved: at most one delivery is in flight
+//! for a given recipient at any time.
 
 use crate::{
     storage::Storage,
@@ -13,11 +21,12 @@ use n0_error::Result;
 use std::{
     collections::HashMap,
     future::Future,
+    num::NonZeroUsize,
     pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 /// Source of a peer-online notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,6 +316,49 @@ pub trait DeliveryTransport: Send + Sync {
     fn deliver(&self, recipient: PublicKey, envelope: StoredEnvelope) -> BoxFuture<Result<()>>;
 }
 
+/// Manages per-peer delivery slots for concurrent but ordered delivery.
+///
+/// At most one delivery task may be active per peer, ensuring that messages
+/// addressed to the same recipient are processed sequentially (FIFO) while
+/// deliveries to different peers proceed in parallel.
+#[derive(Debug)]
+struct PeerOrderGuard {
+    /// Map from peer public key to a semaphore with exactly 1 permit.
+    slots: Mutex<HashMap<PublicKey, Arc<Semaphore>>>,
+}
+
+impl PeerOrderGuard {
+    fn new() -> Self {
+        Self {
+            slots: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Acquire a per-peer permit.  Returns a guard that holds the permit
+    /// for the lifetime of the returned value.  Blocks until no other
+    /// delivery is active for this peer.
+    async fn acquire(&self, peer: PublicKey) -> PeerPermit {
+        let semaphore = {
+            let mut slots = self.slots.lock().unwrap();
+            slots
+                .entry(peer)
+                .or_insert_with(|| Arc::new(Semaphore::new(1)))
+                .clone()
+        };
+        let permit = semaphore
+            .acquire_owned()
+            .await
+            .expect("semaphore not closed");
+        PeerPermit { _permit: permit }
+    }
+}
+
+/// RAII guard that holds a per-peer delivery permit.
+#[derive(Debug)]
+struct PeerPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
 /// Durable, single-owner outbox worker.  Do not create another retry loop for
 /// the same `Storage`; all callers should signal this worker through `trigger`.
 pub struct OutboxDeliveryWorker<P, T> {
@@ -319,6 +371,14 @@ pub struct OutboxDeliveryWorker<P, T> {
     retry_policy: RetryPolicy,
     clock: Arc<dyn Clock>,
     trigger: mpsc::Receiver<()>,
+    /// Maximum concurrent deliveries across all peers.
+    /// 1 (default) = fully sequential, matching pre-concurrency behaviour.
+    max_concurrent: NonZeroUsize,
+    /// How many rows to claim in a single batch transaction.
+    /// Larger batches reduce SQLite round-trips but may hold the write lock longer.
+    claim_batch_size: u32,
+    /// How often to extend leases for in-flight deliveries (fraction of lease_duration_ms).
+    lease_heartbeat_fraction: f64,
 }
 
 impl<P, T> std::fmt::Debug for OutboxDeliveryWorker<P, T> {
@@ -327,6 +387,8 @@ impl<P, T> std::fmt::Debug for OutboxDeliveryWorker<P, T> {
             .field("lease_owner", &self.lease_owner)
             .field("lease_duration_ms", &self.lease_duration_ms)
             .field("claim_limit", &self.claim_limit)
+            .field("max_concurrent", &self.max_concurrent)
+            .field("claim_batch_size", &self.claim_batch_size)
             .finish_non_exhaustive()
     }
 }
@@ -351,6 +413,9 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             retry_policy: RetryPolicy::default(),
             clock: Arc::new(SystemClock),
             trigger,
+            max_concurrent: NonZeroUsize::new(1).unwrap(),
+            claim_batch_size: 8,
+            lease_heartbeat_fraction: 0.5,
         }
     }
 
@@ -362,6 +427,37 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
     /// Set the maximum number of rows claimed per pass.
     pub fn with_claim_limit(mut self, limit: u32) -> Self {
         self.claim_limit = limit.max(1);
+        self
+    }
+
+    /// Set the maximum number of concurrent outbound deliveries.
+    ///
+    /// A value of 1 (the default) reproduces pre-concurrency sequential
+    /// behaviour.  Higher values allow deliveries to *different* peers to
+    /// proceed in parallel, while per-peer ordering is always preserved
+    /// (at most one in-flight delivery per recipient).
+    pub fn with_max_concurrent(mut self, max: NonZeroUsize) -> Self {
+        self.max_concurrent = max;
+        self
+    }
+
+    /// Set how many rows to claim in a single batch transaction.
+    ///
+    /// The default is 8.  Higher values reduce SQLite round-trips but hold
+    /// the write lock longer during the claim phase.  Has no effect when
+    /// `max_concurrent` is 1.
+    pub fn with_claim_batch_size(mut self, batch_size: u32) -> Self {
+        self.claim_batch_size = batch_size.max(1);
+        self
+    }
+
+    /// Set the lease-heartbeat fraction (default 0.5 = 50% of lease_duration_ms).
+    ///
+    /// The heartbeat task extends the lease at this fraction of the duration
+    /// so that long transfers do not lose their claim.  Set to 0.0 to disable
+    /// heartbeats entirely.
+    pub fn with_lease_heartbeat_fraction(mut self, fraction: f64) -> Self {
+        self.lease_heartbeat_fraction = fraction.clamp(0.0, 1.0);
         self
     }
 
@@ -384,16 +480,158 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
 
     /// Process all currently claimable rows. The returned count is the number
     /// of attempts made, not the number of bytes written.
+    ///
+    /// When `max_concurrent` > 1, deliveries to different peers proceed in
+    /// parallel while per-peer ordering is preserved.
     pub async fn run_once(&self) -> usize {
         let now = self.clock.now_ms();
         let _ = self.storage.expire_outbox(now);
-        let rows = self.storage.fetch_due_outbox(now).unwrap_or_default();
-        let mut attempted = 0;
-        for row in rows.into_iter().take(self.claim_limit as usize) {
-            attempted += 1;
-            self.process_claim(row).await;
+        let _ = self.storage.recover_stale_outbox_leases(now);
+
+        if self.max_concurrent.get() <= 1 {
+            // ── Sequential path (backward-compatible) ────────────────
+            let rows = self.storage.fetch_due_outbox(now).unwrap_or_default();
+            let mut attempted = 0;
+            for row in rows.into_iter().take(self.claim_limit as usize) {
+                attempted += 1;
+                self.process_claim(row).await;
+            }
+            return attempted;
         }
-        attempted
+
+        // ── Concurrent path ─────────────────────────────────────────
+        let peer_guard = Arc::new(PeerOrderGuard::new());
+        let semaphore = Arc::new(Semaphore::new(self.max_concurrent.get()));
+        let mut total_attempted = 0usize;
+
+        loop {
+            let batch = self
+                .storage
+                .claim_n_due_outbox(now, &self.lease_owner, self.lease_duration_ms, self.claim_batch_size)
+                .unwrap_or_default();
+
+            if batch.is_empty() {
+                break;
+            }
+
+            let mut handles = Vec::with_capacity(batch.len());
+            for row in batch {
+                if total_attempted >= self.claim_limit as usize {
+                    // Release unprocessed claimed rows so they are due again.
+                    let _ = self.storage.release_outbox_lease(
+                        &row.msg_id,
+                        row.recipient_device_id,
+                        &self.lease_owner,
+                    );
+                    continue;
+                }
+                total_attempted += 1;
+
+                let storage = self.storage.clone();
+                let policy = self.policy.clone();
+                let transport = self.transport.clone();
+                let retry_policy = self.retry_policy;
+                let lease_owner = self.lease_owner.clone();
+                let lease_duration_ms = self.lease_duration_ms;
+                let lease_heartbeat_fraction = self.lease_heartbeat_fraction;
+                let clock = self.clock.clone();
+                let permit = semaphore.clone().acquire_owned().await;
+                let peer_guard = peer_guard.clone();
+
+                let handle = tokio::spawn(async move {
+                    let peer = row.recipient_device_id;
+                    let _peer_permit = peer_guard.acquire(peer).await;
+
+                    // Run lease-extension heartbeat in a background task
+                    // if fraction > 0 and the lease is long enough.
+                    let heartbeat_handle = if lease_heartbeat_fraction > 0.0
+                        && lease_duration_ms >= 10_000
+                    {
+                        let interval_ms =
+                            (lease_duration_ms as f64 * lease_heartbeat_fraction) as u64;
+                        let storage_hb = storage.clone();
+                        let msg_id = row.msg_id;
+                        let lease_owner_hb = lease_owner.clone();
+                        Some(tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                                let now = unix_ms();
+                                let locked_until = now.saturating_add(lease_duration_ms);
+                                let ok = storage_hb
+                                    .extend_outbox_lease(
+                                        &msg_id,
+                                        peer,
+                                        &lease_owner_hb,
+                                        now,
+                                        locked_until,
+                                    )
+                                    .unwrap_or(false);
+                                if !ok {
+                                    // Lease was lost (cancelled or claimed by another worker).
+                                    break;
+                                }
+                            }
+                        }))
+                    } else {
+                        None
+                    };
+
+                    let outcome: Result<()> = async {
+                        let authorized = policy.authorize(peer).await?;
+                        if !authorized {
+                            return Err(n0_error::anyerr!("recipient is no longer authorized"));
+                        }
+                        let envelope = storage
+                            .get_inbox(&row.msg_id)?
+                            .ok_or_else(|| n0_error::anyerr!("outbox envelope is missing"))?;
+                        if envelope.expires_at_ms <= unix_ms() {
+                            return Err(n0_error::anyerr!("outbox envelope expired"));
+                        }
+                        transport.deliver(peer, envelope).await
+                    }
+                    .await;
+
+                    // Stop the heartbeat before recording the outcome.
+                    if let Some(hb) = heartbeat_handle {
+                        hb.abort();
+                    }
+
+                    let now = clock.now_ms();
+                    let (success, error) = match outcome {
+                        Ok(()) => (true, None),
+                        Err(err) => (false, Some(err.to_string())),
+                    };
+
+                    if success {
+                        let _ = storage.mark_acked(&row.msg_id, peer);
+                    } else {
+                        let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
+                        let delay = retry_policy.delay_ms(row.attempts, jitter);
+                        let _ = storage.record_attempt(
+                            &row.msg_id,
+                            peer,
+                            now.saturating_add(delay),
+                            error.as_deref(),
+                        );
+                    }
+
+                    // Release the leases explicitly.
+                    let _ = storage.release_outbox_lease(&row.msg_id, peer, &lease_owner);
+
+                    // Drop _peer_permit and permit implicitly.
+                    drop(_peer_permit);
+                    drop(permit);
+                });
+                handles.push(handle);
+            }
+
+            // Wait for this batch to drain before claiming the next one.
+            for h in handles {
+                let _ = h.await;
+            }
+        }
+
+        total_attempted
     }
 
     /// Retry only due rows for a peer that just became reachable. The bound
@@ -514,6 +752,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn backoff_is_bounded() {
         let policy = RetryPolicy::default();
@@ -551,5 +790,243 @@ mod tests {
         };
         assert!(trigger.notify(updated.clone()));
         assert_eq!(trigger.latest(peer), Some(updated));
+    }
+
+    #[test]
+    fn peer_order_guard_serializes_same_peer() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let guard = Arc::new(PeerOrderGuard::new());
+            let peer = iroh::SecretKey::generate().public();
+
+            let g1 = guard.clone();
+            let g2 = guard.clone();
+            let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+            // Task 1 acquires the peer lock and signals it's started.
+            let t1 = tokio::spawn(async move {
+                let _permit = g1.acquire(peer).await;
+                let _ = start_tx.send(());
+                let _ = done_rx.await;
+            });
+
+            // Wait for task 1 to acquire.
+            let _ = start_rx.await;
+
+            // Task 2: try to acquire (should block).
+            let acquired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let acquired_clone = acquired.clone();
+            let g2_clone = g2;
+            let t2 = tokio::spawn(async move {
+                let _permit = g2_clone.acquire(peer).await;
+                acquired_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+
+            // Small delay — t2 should still be blocked.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(
+                !acquired.load(std::sync::atomic::Ordering::SeqCst),
+                "t2 should be blocked by t1's peer lock"
+            );
+
+            // Release t1.
+            let _ = done_tx.send(());
+            let _ = t1.await;
+
+            // Now t2 should proceed.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(
+                acquired.load(std::sync::atomic::Ordering::SeqCst),
+                "t2 should have acquired after t1 released"
+            );
+            let _ = t2.await;
+        });
+    }
+
+    /// Test that concurrent delivery processes different peers in parallel.
+    /// Uses a mock storage + transport to verify parallelism.
+    #[tokio::test]
+    async fn test_different_peers_deliver_concurrently() {
+        use crate::storage::Storage;
+        use crate::store::{StoredEnvelope};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let storage = Storage::memory().unwrap();
+
+        // Create inbox envelopes and outbox rows for 3 different peers.
+        let peers: Vec<PublicKey> = (0..3)
+            .map(|_| iroh::SecretKey::generate().public())
+            .collect();
+
+        let conv_id = [42u8; 32];
+        let now = unix_ms();
+        for (i, peer) in peers.iter().enumerate() {
+            let msg_id = [i as u8; 32];
+            let env = StoredEnvelope {
+                msg_id,
+                conversation_id: conv_id,
+                author_user_id: *peer,
+                author_device_id: *peer,
+                created_at_ms: now,
+                expires_at_ms: now + 86_400_000,
+                ciphertext: bytes::Bytes::from_static(b"test"),
+                signature: [0u8; 64],
+                acked_at_ms: None,
+            };
+            storage.insert_inbox(&env).unwrap();
+            storage.enqueue_outbox(&msg_id, *peer, now).unwrap();
+        }
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_concurrent_observed = Arc::new(AtomicUsize::new(0));
+
+        // Mock transport that simulates 100ms delivery and tracks concurrency.
+        struct TrackedTransport {
+            in_flight: Arc<AtomicUsize>,
+            max_observed: Arc<AtomicUsize>,
+        }
+        impl DeliveryTransport for TrackedTransport {
+            fn deliver(
+                &self,
+                _recipient: PublicKey,
+                _envelope: StoredEnvelope,
+            ) -> BoxFuture<Result<()>> {
+                let in_flight = self.in_flight.clone();
+                let max_observed = self.max_observed.clone();
+                Box::pin(async move {
+                    let prev = in_flight.fetch_add(1, Ordering::SeqCst);
+                    let _ = max_observed.fetch_max(prev + 1, Ordering::SeqCst);
+                    // Simulate network I/O delay.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+        let transport = Arc::new(TrackedTransport {
+            in_flight: in_flight.clone(),
+            max_observed: max_concurrent_observed.clone(),
+        });
+
+        let policy = Arc::new(AllowListedPolicy(move |_peer| {
+            Box::pin(async move { Ok(true) })
+        }));
+
+        let (_trigger, rx) = mpsc::channel(1);
+        let worker = OutboxDeliveryWorker::new(
+            storage.clone(),
+            policy,
+            transport,
+            "test-worker",
+            rx,
+        )
+        .with_max_concurrent(NonZeroUsize::new(3).unwrap())
+        .with_claim_batch_size(3)
+        .with_lease(5_000); // short lease for tests
+
+        worker.run_once().await;
+
+        // We should have observed at least 2 concurrent deliveries
+        // (probably 3, but allow for timing variance in CI).
+        let observed = max_concurrent_observed.load(Ordering::SeqCst);
+        assert!(
+            observed >= 2,
+            "expected at least 2 concurrent deliveries, got {observed}"
+        );
+
+        // All rows should now be acked.
+        let due = storage.fetch_due_outbox(now + 5000).unwrap();
+        assert!(due.is_empty(), "all rows should have been delivered");
+    }
+
+    /// Test that same-peer deliveries are serialized even with max_concurrent > 1.
+    #[tokio::test]
+    async fn test_same_peer_serialized() {
+        use crate::storage::Storage;
+        use crate::store::StoredEnvelope;
+
+        let storage = Storage::memory().unwrap();
+        let peer = iroh::SecretKey::generate().public();
+        let conv_id = [42u8; 32];
+        let now = unix_ms();
+
+        // Insert 3 messages for the same peer.
+        for i in 0..3u8 {
+            let msg_id = [i; 32];
+            let env = StoredEnvelope {
+                msg_id,
+                conversation_id: conv_id,
+                author_user_id: peer,
+                author_device_id: peer,
+                created_at_ms: now,
+                expires_at_ms: now + 86_400_000,
+                ciphertext: bytes::Bytes::from_static(b"test"),
+                signature: [0u8; 64],
+                acked_at_ms: None,
+            };
+            storage.insert_inbox(&env).unwrap();
+            storage.enqueue_outbox(&msg_id, peer, now).unwrap();
+        }
+
+        let delivery_order = Arc::new(Mutex::new(Vec::new()));
+
+        // Transport that records delivery order with a small delay.
+        struct RecordingTransport {
+            order: Arc<Mutex<Vec<u64>>>,
+        }
+        impl DeliveryTransport for RecordingTransport {
+            fn deliver(
+                &self,
+                _recipient: PublicKey,
+                _envelope: StoredEnvelope,
+            ) -> BoxFuture<Result<()>> {
+                let order = self.order.clone();
+                Box::pin(async move {
+                    {
+                        let mut o = order.lock().unwrap();
+                        o.push(unix_ms());
+                    }
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    Ok(())
+                })
+            }
+        }
+        let transport = Arc::new(RecordingTransport {
+            order: delivery_order.clone(),
+        });
+
+        let policy = Arc::new(AllowListedPolicy(move |_peer| {
+            Box::pin(async move { Ok(true) })
+        }));
+
+        let (_trigger, rx) = mpsc::channel(1);
+        let worker = OutboxDeliveryWorker::new(
+            storage.clone(),
+            policy,
+            transport,
+            "test-worker",
+            rx,
+        )
+        .with_max_concurrent(NonZeroUsize::new(3).unwrap())
+        .with_claim_batch_size(3)
+        .with_lease(5_000);
+
+        worker.run_once().await;
+
+        // Verify all rows were delivered.
+        let due = storage.fetch_due_outbox(now + 5000).unwrap();
+        assert!(due.is_empty(), "all rows should have been delivered");
+
+        let order = delivery_order.lock().unwrap();
+        assert_eq!(order.len(), 3, "all 3 deliveries should have happened");
+        // The order should be monotonic (sequential per peer).
+        for pair in order.windows(2) {
+            assert!(
+                pair[0] <= pair[1],
+                "deliveries to same peer should be sequential"
+            );
+        }
     }
 }

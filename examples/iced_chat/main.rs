@@ -76,6 +76,11 @@ fn window_icon() -> Option<iced::window::Icon> {
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
+
+const LOG_QUEUE_CAPACITY: usize = 8192;
+const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const LOG_ROTATED_FILES: usize = 3;
 
 use app::{DiscoveredPeersUpdate, IcedChat, Screen};
 
@@ -199,7 +204,7 @@ fn load_or_generate_secret_key_at(data_dir: &Path) -> Result<(SecretKey, PathBuf
     }
 }
 
-fn init_logging(data_dir: &Path) -> Result<()> {
+fn init_logging(data_dir: &Path) -> Result<WorkerGuard> {
     let log_path = log_viewer::log_file_path(data_dir);
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent).std_context("failed to create log directory")?;
@@ -210,39 +215,13 @@ fn init_logging(data_dir: &Path) -> Result<()> {
         }
     }
 
-    use std::fs::OpenOptions;
-    use std::sync::{Arc, Mutex};
-
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
+    let writer = RotatingFileWriter::open(&log_path, LOG_MAX_BYTES, LOG_ROTATED_FILES)
         .std_context("failed to open log file")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
-    }
-
-    struct FileMakeWriter(Arc<Mutex<std::fs::File>>);
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FileMakeWriter {
-        type Writer = FileWriterGuard<'a>;
-        fn make_writer(&'a self) -> Self::Writer {
-            FileWriterGuard(self.0.lock().expect("log file mutex poisoned"))
-        }
-    }
-    struct FileWriterGuard<'a>(std::sync::MutexGuard<'a, std::fs::File>);
-    impl std::io::Write for FileWriterGuard<'_> {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            std::io::Write::write(&mut *self.0, buf)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            std::io::Write::flush(&mut *self.0)
-        }
-    }
-
-    let writer = FileMakeWriter(Arc::new(Mutex::new(file)));
+    let (writer, log_guard) = NonBlockingBuilder::default()
+        .buffered_lines_limit(LOG_QUEUE_CAPACITY)
+        .lossy(true)
+        .thread_name("boru-log-writer")
+        .finish(writer);
     // Keep the persistent log useful by default.  The iroh endpoint emits
     // very high-volume discovery and DNS diagnostics at DEBUG; leaving that
     // level enabled made a single GUI session grow iced_chat.log to tens of
@@ -260,7 +239,108 @@ fn init_logging(data_dir: &Path) -> Result<()> {
         terminal_filter,
     );
     let _ = tracing::subscriber::set_global_default(subscriber);
-    Ok(())
+    Ok(log_guard)
+}
+
+struct RotatingFileWriter {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    size: u64,
+    max_bytes: u64,
+    rotated_files: usize,
+}
+
+impl RotatingFileWriter {
+    fn open(path: &Path, max_bytes: u64, rotated_files: usize) -> std::io::Result<Self> {
+        use std::fs::OpenOptions;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let size = file.metadata()?.len();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            file: Some(file),
+            size,
+            max_bytes,
+            rotated_files,
+        })
+    }
+
+    fn rotate(&mut self) -> std::io::Result<()> {
+        self.file
+            .as_ref()
+            .expect("rotating log writer has no active file")
+            .sync_data()?;
+        // Windows does not allow renaming a file while an open handle still
+        // refers to it. Close the active handle before touching any rotation
+        // paths; the replacement handle is opened only after all renames pass.
+        drop(self.file.take());
+        for index in (1..=self.rotated_files).rev() {
+            let from = if index == 1 {
+                self.path.clone()
+            } else {
+                self.rotated_path(index - 1)
+            };
+            let to = self.rotated_path(index);
+            if from.exists() {
+                std::fs::rename(&from, &to).map_err(|error| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "failed to rotate {} to {}: {error}",
+                            from.display(),
+                            to.display()
+                        ),
+                    )
+                })?;
+            }
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to reopen active log file {}: {error}",
+                        self.path.display()
+                    ),
+                )
+            })?;
+        self.file = Some(file);
+        self.size = 0;
+        Ok(())
+    }
+
+    fn rotated_path(&self, index: usize) -> PathBuf {
+        PathBuf::from(format!("{}.{}", self.path.display(), index))
+    }
+}
+
+impl std::io::Write for RotatingFileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.size > 0 && self.size.saturating_add(buf.len() as u64) > self.max_bytes {
+            self.rotate()?;
+        }
+        let written = self
+            .file
+            .as_mut()
+            .expect("rotating log writer has no active file")
+            .write(buf)?;
+        self.size = self.size.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file
+            .as_mut()
+            .expect("rotating log writer has no active file")
+            .flush()
+    }
 }
 
 struct ConditionalMakeWriter<W> {
@@ -356,7 +436,7 @@ fn main() -> Result<()> {
         return log_viewer::run(log_viewer::log_file_path(&data_dir));
     }
 
-    init_logging(&data_dir)?;
+    let _log_guard = init_logging(&data_dir)?;
     info!(data_dir = %data_dir.display(), "starting iced chat");
 
     // ── Panic hook: catch Rust panics and write crash info to instance.log
@@ -989,9 +1069,9 @@ fn main() -> Result<()> {
         let whisper_events_rx = Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
 
         // Create the network event channel (shared across rooms, tagged by topic)
-        let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel::<
+        let (net_tx, net_rx) = tokio::sync::mpsc::channel::<
             boru_core::conversations::ConversationNetEvent,
-        >();
+        >(256);
         let net_rx = Arc::new(tokio::sync::Mutex::new(net_rx));
 
         // ── Friend ping manager ──────────────────────────────────────
@@ -1760,5 +1840,43 @@ mod tests {
         let check_passed = config.bind_addr.ip().is_loopback();
         let ok = !(config.enable_gui_test_actions && !check_passed);
         assert!(ok); // Should pass — no GuiActions
+    }
+    #[test]
+    fn rotating_log_writer_keeps_bounded_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("iced_chat.log");
+        let mut writer = RotatingFileWriter::open(&path, 8, 2).unwrap();
+        writer.write_all(b"12345678").unwrap();
+        writer.write_all(b"abcdefgh").unwrap();
+        writer.write_all(b"ijklmnop").unwrap();
+        writer.flush().unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"ijklmnop");
+        assert_eq!(
+            std::fs::read(path.with_extension("log.1")).unwrap(),
+            b"abcdefgh"
+        );
+        assert_eq!(
+            std::fs::read(path.with_extension("log.2")).unwrap(),
+            b"12345678"
+        );
+    }
+
+    #[test]
+    fn rotating_log_writer_reports_rotation_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("iced_chat.log");
+        let mut writer = RotatingFileWriter::open(&path, 8, 2).unwrap();
+        writer.write_all(b"12345678").unwrap();
+
+        // Make the oldest destination an occupied directory. The checked
+        // rename must surface the failure instead of silently dropping it.
+        let blocked_destination = path.with_extension("log.2");
+        std::fs::create_dir(&blocked_destination).unwrap();
+        std::fs::write(blocked_destination.join("occupied"), b"x").unwrap();
+        std::fs::write(path.with_extension("log.1"), b"old history").unwrap();
+
+        let error = writer.write(b"abcdefgh").unwrap_err();
+        assert!(error.to_string().contains("failed to rotate"));
     }
 }

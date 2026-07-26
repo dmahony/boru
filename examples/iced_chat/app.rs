@@ -70,7 +70,7 @@ use iroh::{
 use iroh_blobs::{store::fs::FsStore, ticket::BlobTicket};
 use n0_future::task;
 use n0_future::Stream;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 use tracing::{debug, info, trace, warn};
 
@@ -1885,13 +1885,13 @@ pub struct IcedChat {
     local_public: PublicKey,
     relay_mode: RelayMode,
     runtime_handle: tokio::runtime::Handle,
-    pub net_rx: Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>,
-    net_tx: UnboundedSender<ConversationNetEvent>,
+    pub net_rx: Arc<Mutex<Receiver<ConversationNetEvent>>>,
+    net_tx: Sender<ConversationNetEvent>,
     backfill_handle: boru_core::backfill::BackfillHandle,
     friends: FriendsStore,
     friends_dirty: bool,
     friend_mgr: FriendPingManager,
-    pub friend_events_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
+    pub friend_events_rx: Arc<Mutex<Receiver<FriendEvent>>>,
     /// Set of peer PublicKeys currently connected as gossip neighbors.
     neighbors: HashSet<PublicKey>,
     /// Number of peers reachable via a direct (hole-punched) connection.
@@ -1992,9 +1992,40 @@ pub struct IcedChat {
     friend_online_cache: HashSet<PublicKey>,
     /// Revision counter for the friends sidebar cache.
     friends_sidebar_revision: u64,
+    /// Revision counter for the chats sidebar cache.
+    chats_sidebar_revision: u64,
+    /// Revision counter for the discovered-peers sidebar cache.
+    discovered_sidebar_revision: u64,
+    /// Revision counter for the public-rooms sidebar cache.
+    public_rooms_sidebar_revision: u64,
     /// Revision counter for the incoming friend-requests sidebar cache.
     /// Receiving a request does not necessarily change the friends list.
     requests_sidebar_revision: u64,
+
+    // ── Cached sidebar counts (recalculated on revision change) ──
+    cached_chat_count: usize,
+    cached_friend_count: usize,
+    cached_discover_count: usize,
+    cached_public_room_count: usize,
+    cached_request_count: usize,
+
+    // ── Cached sidebar dependencies (rebuilt only when revision changes) ──
+    /// Cached chats section dependency — rebuilt when `chats_sidebar_revision` changes.
+    cached_chats_revision: Cell<u64>,
+    cached_chats_dep: std::cell::RefCell<Option<SidebarChatsDependency>>,
+    /// Cached discovered-peers section dependency.
+    cached_discovered_revision: Cell<u64>,
+    cached_discovered_dep: std::cell::RefCell<Option<SidebarDiscoveredPeersDependency>>,
+    /// Cached public-rooms section dependency.
+    cached_public_rooms_revision: Cell<u64>,
+    cached_public_rooms_dep: std::cell::RefCell<Option<SidebarPublicRoomsDependency>>,
+    /// Cached friends-rows section dependency.
+    cached_friends_rows_revision: Cell<u64>,
+    cached_friends_rows_dep: std::cell::RefCell<Option<SidebarFriendsRowsDependency>>,
+    /// Cached requests section dependency.
+    cached_requests_revision: Cell<u64>,
+    cached_requests_dep: std::cell::RefCell<Option<SidebarRequestsDependency>>,
+
     /// Bootstrap peer addresses from the initial join ticket (if any).
     /// Used only for the first room subscription; cleared after use.
     initial_bootstrap_peers: Vec<EndpointAddr>,
@@ -2003,9 +2034,9 @@ pub struct IcedChat {
     /// Handle for sending whisper/private messages.
     whisper_handle: WhisperHandle,
     /// Receiver for incoming inbox events.
-    pub inbox_events_rx: Arc<Mutex<UnboundedReceiver<InboxEvent>>>,
+    pub inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
-    pub whisper_events_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
+    pub whisper_events_rx: Arc<Mutex<Receiver<WhisperEvent>>>,
     /// Locally selected profile image, persisted below the application data directory.
     profile_image_handle: Option<iced::widget::image::Handle>,
     /// Ticket for the locally selected profile image, for broadcasting to peers.
@@ -2149,7 +2180,7 @@ pub struct IcedChat {
     /// while the async operation is pending.
     pending_downloads: HashSet<(String, PublicKey)>,
     /// Per-file download state for the peer catalogue view.
-    /// Keyed by the file's display name.
+    /// Keyed by the file's content_hash (stable row identifier).
     catalogue_downloads: HashMap<String, CatalogueDownloadState>,
     /// Persistent profile store (display name, bio, sharing controls).
     profile_store: UserProfileStore,
@@ -2177,6 +2208,10 @@ pub struct IcedChat {
     peer_catalogue_view: Option<(PublicKey, Vec<RemoteSharedFile>)>,
     /// Whether a catalogue fetch is in progress.
     catalogue_loading: bool,
+    /// Vertical scroll offset for the windowed catalogue view.
+    catalogue_scroll_offset: f32,
+    /// Viewport height (px) for the windowed catalogue view.
+    catalogue_viewport_height: f32,
 
     // ── GUI test actions (MCP-driven) ──
     /// Iced message journal for diagnostics (shared with the MCP server).
@@ -2871,6 +2906,8 @@ pub enum AppMessage {
     },
     /// The remote catalogue fetch failed.
     PeerCatalogueFailed(String),
+    /// Scroll position changed in the windowed catalogue view.
+    CatalogueScrolled(f32, f32),
     /// Request a file download from a peer's catalogue.
     RequestFileDownload {
         /// The peer hosting the file.
@@ -3569,14 +3606,14 @@ impl IcedChat {
         data_dir: std::path::PathBuf,
         persist_tx: std::sync::mpsc::Sender<PersistenceCommand>,
         runtime_handle: tokio::runtime::Handle,
-        net_rx: Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>,
-        net_tx: UnboundedSender<ConversationNetEvent>,
+        net_rx: Arc<Mutex<Receiver<ConversationNetEvent>>>,
+        net_tx: Sender<ConversationNetEvent>,
         room_history: RoomHistoryStore,
         friends: FriendsStore,
         friend_mgr: FriendPingManager,
-        friend_events_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
-        whisper_events_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
-        inbox_events_rx: Arc<Mutex<UnboundedReceiver<InboxEvent>>>,
+        friend_events_rx: Arc<Mutex<Receiver<FriendEvent>>>,
+        whisper_events_rx: Arc<Mutex<Receiver<WhisperEvent>>>,
+        inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
         whisper_handle: WhisperHandle,
         initial_room: Option<(TopicId, Vec<EndpointAddr>)>,
         notice: String,
@@ -3813,7 +3850,25 @@ impl IcedChat {
             history_saved_count: 0,
             friend_online_cache,
             friends_sidebar_revision: 0,
+            chats_sidebar_revision: 0,
+            discovered_sidebar_revision: 0,
+            public_rooms_sidebar_revision: 0,
             requests_sidebar_revision: 0,
+            cached_chat_count: 0, // Recalculated on first ConnMonitorTick
+            cached_friend_count: 0, // Will be set below after friends init
+            cached_discover_count: 0,
+            cached_public_room_count: 0,
+            cached_request_count: 0,
+            cached_chats_revision: Cell::new(0),
+            cached_chats_dep: std::cell::RefCell::new(None),
+            cached_discovered_revision: Cell::new(0),
+            cached_discovered_dep: std::cell::RefCell::new(None),
+            cached_public_rooms_revision: Cell::new(0),
+            cached_public_rooms_dep: std::cell::RefCell::new(None),
+            cached_friends_rows_revision: Cell::new(0),
+            cached_friends_rows_dep: std::cell::RefCell::new(None),
+            cached_requests_revision: Cell::new(0),
+            cached_requests_dep: std::cell::RefCell::new(None),
             sidebar_selected_topic: Rc::new(Cell::new(None)),
             sidebar_section_collapsed: [false; 5],
             initial_bootstrap_peers: initial_bootstrap,
@@ -3888,6 +3943,8 @@ impl IcedChat {
             shared_files,
             peer_catalogue_view: None,
             catalogue_loading: false,
+            catalogue_scroll_offset: 0.0,
+            catalogue_viewport_height: 0.0,
             iced_diagnostics,
             gui_action_rx,
             gui_action_history,
@@ -4248,9 +4305,9 @@ impl IcedChat {
                             invalidate_from = Some(idx);
                         }
                     }
-                } else if self.catalogue_downloads.contains_key(&name) {
+                } else if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
                     self.catalogue_downloads.insert(
-                        name,
+                        content_hash,
                         CatalogueDownloadState::Downloading {
                             bytes: 0,
                             total,
@@ -4290,7 +4347,7 @@ impl IcedChat {
                             invalidate_from = Some(idx);
                         }
                     }
-                } else if self.catalogue_downloads.contains_key(&name) {
+                } else if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
                     let now = std::time::Instant::now();
                     let speed = if let Some(last_at) = self.last_download_progress_at {
                         let elapsed = now.duration_since(last_at).as_secs_f64().max(0.001);
@@ -4302,7 +4359,7 @@ impl IcedChat {
                     self.last_download_progress_at = Some(now);
                     self.last_download_progress_bytes = bytes;
                     self.catalogue_downloads.insert(
-                        name,
+                        content_hash,
                         CatalogueDownloadState::Downloading { bytes, total, speed },
                     );
                 }
@@ -4332,10 +4389,10 @@ impl IcedChat {
                             invalidate_from = Some(idx);
                         }
                     }
-                } else if self.catalogue_downloads.contains_key(&name) {
+                } else if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
                     // Path will be populated later by DownloadDonePeerFile
                     self.catalogue_downloads.insert(
-                        name,
+                        content_hash,
                         CatalogueDownloadState::Completed {
                             path: PathBuf::new(),
                         },
@@ -4357,9 +4414,9 @@ impl IcedChat {
                             invalidate_from = Some(idx);
                         }
                     }
-                } else if self.catalogue_downloads.contains_key(&name) {
+                } else if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
                     self.catalogue_downloads
-                        .insert(name, CatalogueDownloadState::Failed(error));
+                        .insert(content_hash, CatalogueDownloadState::Failed(error));
                 }
                 clear_active_transfer = true;
             }
@@ -4997,6 +5054,7 @@ impl IcedChat {
             AppMessage::BrowsePeerCatalogue(_) => "BrowsePeerCatalogue",
             AppMessage::PeerCatalogueReceived { .. } => "PeerCatalogueReceived",
             AppMessage::PeerCatalogueFailed(_) => "PeerCatalogueFailed",
+            AppMessage::CatalogueScrolled(..) => "CatalogueScrolled",
             AppMessage::RequestFileDownload { .. } => "RequestFileDownload",
             AppMessage::IncomingFriendRequestAccept { .. } => "IncomingFriendRequestAccept",
             AppMessage::IncomingFriendRequestDecline { .. } => "IncomingFriendRequestDecline",
@@ -7144,6 +7202,7 @@ impl IcedChat {
 
                     // Show the accepted friend immediately in the sidebar.
                     self.friend_online_cache.insert(peer);
+                    self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                     self.mark_friends_sidebar_dirty();
 
                     // Send a ConversationInvite back to the original requester
@@ -7207,6 +7266,7 @@ impl IcedChat {
                     peer.to_string(),
                     record.display_label(&fid, &peer),
                 ));
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                 let _ = self.send_save_conversations();
                 let room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                 let _ = room.save();
@@ -8182,6 +8242,7 @@ impl IcedChat {
                 // are network/gossip noise and should not reorder the list.
                 if Self::_is_user_visible_event(&event) {
                     self.conversation_store.touch_and_bump(&topic);
+                    self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                 }
                 // Update the sidebar preview BEFORE taking the mutable borrow
                 // on self.conversations (avoids borrow conflict).
@@ -8291,6 +8352,7 @@ impl IcedChat {
                                 }
                                 // Show the accepted friend immediately in the sidebar.
                                 self.friend_online_cache.insert(sender);
+                                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                                 self.mark_friends_sidebar_dirty();
                                 self.try_save_friends();
                                 // Auto-subscribe to the deterministic direct-chat topic
@@ -8344,12 +8406,14 @@ impl IcedChat {
                                     sender.to_string(),
                                     label,
                                 ));
+                                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                                 let _ = self.send_save_conversations();
                                 let room =
                                     RoomStore::with_peers(&self.data_dir, topic, persisted_addrs);
                                 let _ = room.save();
                                 self.try_save_friends();
                                 self.friend_online_cache.insert(sender);
+                                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                                 self.mark_friends_sidebar_dirty();
                                 self.outgoing_request_states
                                     .insert(sender, OutgoingRequestState::Accepted);
@@ -9200,8 +9264,10 @@ impl IcedChat {
             }
             AppMessage::DownloadDonePeerFile(name, path) => {
                 self.push_system(format!("*{name}* is complete"));
-                self.catalogue_downloads
-                    .insert(name.clone(), CatalogueDownloadState::Completed { path: path.clone() });
+                if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
+                    self.catalogue_downloads
+                        .insert(content_hash, CatalogueDownloadState::Completed { path: path.clone() });
+                }
                 if let Some(idx) = self.download_entry_index {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -9226,9 +9292,9 @@ impl IcedChat {
                 // mark it as failed in the catalogue view.
                 if let Some(name_end) = error.find(" : ") {
                     let cat_name = error[..name_end].to_string();
-                    if self.catalogue_downloads.contains_key(&cat_name) {
+                    if let Some(content_hash) = self.catalogue_name_to_hash(&cat_name) {
                         self.catalogue_downloads.insert(
-                            cat_name,
+                            content_hash,
                             CatalogueDownloadState::Failed(error.clone()),
                         );
                     }
@@ -9487,6 +9553,11 @@ impl IcedChat {
             AppMessage::PeerCatalogueFailed(error) => {
                 self.catalogue_loading = false;
                 self.push_system(format!("Catalogue fetch failed: {error}"));
+                iced::Task::none()
+            }
+            AppMessage::CatalogueScrolled(offset, vp_h) => {
+                self.catalogue_scroll_offset = offset;
+                self.catalogue_viewport_height = vp_h;
                 iced::Task::none()
             }
 
@@ -9900,9 +9971,9 @@ impl IcedChat {
             }
             AppMessage::RequestFileDownload { peer, file } => {
                 let display_name = file.display_name.clone();
-                let name = display_name.clone();
+                let content_hash = file.content_hash.clone();
                 self.catalogue_downloads
-                    .insert(name.clone(), CatalogueDownloadState::Pending);
+                    .insert(content_hash.clone(), CatalogueDownloadState::Pending);
                 // Clone the shared state needed for the async download task.
                 let endpoint = self.endpoint.clone();
                 let blob_store = self.blob_store.clone();
@@ -10594,6 +10665,8 @@ impl IcedChat {
                     }
                 }
                 self.discovered_online_cache = self.neighbors.clone();
+                self.discovered_sidebar_revision = self.discovered_sidebar_revision.wrapping_add(1);
+                self.refresh_sidebar_counts();
 
                 let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
 
@@ -11858,7 +11931,9 @@ impl IcedChat {
                 // survives a restart.
                 self.conversations.remove(&topic);
                 self.conversation_store.remove(&topic);
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                 self.send_save_conversations();
+                self.refresh_sidebar_counts();
                 // Also remove from the SQLite message store so the chat
                 // messages and conversation metadata don't linger on disk.
                 let store_path = self.data_dir.join("message_store.db");
@@ -11946,6 +12021,7 @@ impl IcedChat {
                 // Archive in conversation store
                 if let Some(entry) = self.conversation_store.find_mut(&topic) {
                     entry.archived = true;
+                    self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                 }
                 let _ = self.send_save_conversations();
                 // If this was the displayed conversation, go back to chat list
@@ -12173,6 +12249,7 @@ impl IcedChat {
                     from.to_string(),
                     label,
                 ));
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
             }
         }
         // ── RoomAdvertisement handling ──
@@ -12196,6 +12273,7 @@ impl IcedChat {
         // protocol noise (NeighborUp/Down, Presence, AboutMe, etc.).
         if Self::_is_user_visible_event(event) {
             self.conversation_store.touch_and_bump(topic);
+            self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         }
         self.update_room_preview(topic, event);
         self.send_save_conversations();
@@ -12487,6 +12565,10 @@ impl IcedChat {
         if pending.is_empty() {
             return;
         }
+        // Neighbor status changes affect friend online state, which the chats
+        // and friends sidebars display — bump both revisions.
+        self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+        self.friends_sidebar_revision = self.friends_sidebar_revision.wrapping_add(1);
         for (peer, online) in &pending {
             let fid = FriendId::from_public_key(*peer);
             if self.is_friend(peer) {
@@ -12578,6 +12660,7 @@ impl IcedChat {
                         self.friends.mark_online(fid);
                         self.mark_friends_sidebar_dirty();
                         self.friend_online_cache.insert(peer);
+                        self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                         if has_been_seen {
                             self.push_system(format!("Friend {label} is now ONLINE"));
                             self.push_activity(format!("{label} came online"));
@@ -12587,6 +12670,7 @@ impl IcedChat {
                         self.friends.mark_offline(fid);
                         self.mark_friends_sidebar_dirty();
                         self.friend_online_cache.remove(&peer);
+                        self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                         if has_been_seen {
                             self.push_system(format!("Friend {label} is now offline"));
                             self.push_activity(format!("{label} went offline"));
@@ -12873,6 +12957,7 @@ impl ChatCallbacks for IcedChat {
     fn on_neighbor_up(&mut self, peer: PublicKey) {
         self.neighbors.insert(peer);
         self.friend_online_cache.insert(peer);
+        self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.needs_conn_refresh = true;
 
         // For each pending backfill topic, check if we still need history
@@ -12899,6 +12984,7 @@ impl ChatCallbacks for IcedChat {
     fn on_neighbor_down(&mut self, peer: PublicKey) {
         self.neighbors.remove(&peer);
         self.friend_online_cache.remove(&peer);
+        self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.needs_conn_refresh = true;
     }
 
@@ -12906,6 +12992,7 @@ impl ChatCallbacks for IcedChat {
         // Update mesh health timestamp for this peer so the mesh
         // watchdog doesn't falsely flag them as stale.
         self.friend_online_cache.insert(peer);
+        self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.neighbors.insert(peer);
     }
 
@@ -12915,6 +13002,7 @@ impl ChatCallbacks for IcedChat {
         // shows them as online, and ensure they're tracked as a
         // neighbor for mesh health purposes.
         self.friend_online_cache.insert(peer);
+        self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.neighbors.insert(peer);
     }
 
@@ -12931,6 +13019,29 @@ impl ChatCallbacks for IcedChat {
     }
 }
 
+impl IcedChat {
+    /// Recompute all cached sidebar counts from the underlying store data.
+    /// Call this when a sidebar revision counter changes so the next
+    /// `view_sidebar()` render uses up-to-date cached values.
+    fn refresh_sidebar_counts(&mut self) {
+        self.cached_chat_count = self.conversation_store.len();
+        self.cached_friend_count = self
+            .friends
+            .iter()
+            .filter(|(_, r)| r.relationship.can_message())
+            .count();
+        self.cached_discover_count = self.discovered_peers.len();
+        self.cached_public_room_count = self.directory_store.lock().unwrap().len();
+        self.cached_request_count = self
+            .friend_request_store
+            .list_incoming_by_status(
+                &self.local_public.to_string(),
+                boru_core::friend_request::FriendRequestStatus::Pending,
+            )
+            .len();
+    }
+}
+
 // ── View ──────────────────────────────────────────────────────────────
 
 #[expect(dead_code)]
@@ -12942,7 +13053,7 @@ impl IcedChat {
         let net_tx = self.net_tx.clone();
         tokio::task::spawn(async move {
             let (bf_tx, mut bf_rx) =
-                tokio::sync::mpsc::unbounded_channel::<crate::NetEvent>();
+                tokio::sync::mpsc::channel::<crate::NetEvent>(256);
             match bf_handle
                 .try_backfill_from_peer(
                     &endpoint,
@@ -12985,7 +13096,7 @@ impl IcedChat {
             while let Some(event) = bf_rx.recv().await {
                 let conv_event =
                     boru_core::conversations::ConversationNetEvent::new(topic, event);
-                if net_tx.send(conv_event).is_err() {
+                if net_tx.send(conv_event).await.is_err() {
                     break;
                 }
             }
@@ -13678,22 +13789,13 @@ impl IcedChat {
             })
             .into();
 
-        // Count for each section
-        let chat_count = self.conversation_store.len();
-        let friend_count = self
-            .friends
-            .iter()
-            .filter(|(_, r)| r.relationship.can_message())
-            .count();
-        let discover_count = self.discovered_peers.len();
-        let public_room_count = self.directory_store.lock().unwrap().len();
-        let request_count = self
-            .friend_request_store
-            .list_incoming_by_status(
-                &self.local_public.to_string(),
-                boru_core::friend_request::FriendRequestStatus::Pending,
-            )
-            .len();
+        // Use cached counts (recomputed via refresh_sidebar_counts when
+        // the corresponding revision counter changes).
+        let chat_count = self.cached_chat_count;
+        let friend_count = self.cached_friend_count;
+        let discover_count = self.cached_discover_count;
+        let public_room_count = self.cached_public_room_count;
+        let request_count = self.cached_request_count;
 
         let mut content = Column::new()
             .push(container(header).padding(iced::Padding {
@@ -13778,6 +13880,14 @@ impl IcedChat {
     }
 
     fn sidebar_chats_dependency(&self) -> SidebarChatsDependency {
+        // Return cached dependency if revision hasn't changed.
+        let cur_revision = self.chats_sidebar_revision;
+        if self.cached_chats_revision.get() == cur_revision {
+            if let Some(ref dep) = *self.cached_chats_dep.borrow() {
+                return dep.clone();
+            }
+        }
+
         let mut conversations: Vec<SidebarChatsRow> = self
             .conversation_store
             .active_iter()
@@ -13840,12 +13950,15 @@ impl IcedChat {
             }
         });
 
-        SidebarChatsDependency {
+        let dep = SidebarChatsDependency {
             dark_mode: self.dark_mode,
             conversations,
             is_empty: self.conversation_store.is_empty(),
             room_delete_confirm_topic: self.room_delete_confirm_topic,
-        }
+        };
+        self.cached_chats_revision.set(cur_revision);
+        *self.cached_chats_dep.borrow_mut() = Some(dep.clone());
+        dep
     }
 
     /// "Chats" section of the sidebar — public room pinned at top, then
@@ -14306,6 +14419,14 @@ impl IcedChat {
     }
 
     fn sidebar_discovered_peers_dependency(&self) -> SidebarDiscoveredPeersDependency {
+        // Return cached dependency if revision hasn't changed.
+        let cur_revision = self.discovered_sidebar_revision;
+        if self.cached_discovered_revision.get() == cur_revision {
+            if let Some(ref dep) = *self.cached_discovered_dep.borrow() {
+                return dep.clone();
+            }
+        }
+
         let mut peers: Vec<SidebarDiscoveredPeerRow> = self
             .discovered_peers
             .iter()
@@ -14337,10 +14458,13 @@ impl IcedChat {
             .filter(|p| p.online)
             .collect();
         peers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
-        SidebarDiscoveredPeersDependency {
+        let dep = SidebarDiscoveredPeersDependency {
             dark_mode: self.dark_mode,
             peers,
-        }
+        };
+        self.cached_discovered_revision.set(cur_revision);
+        *self.cached_discovered_dep.borrow_mut() = Some(dep.clone());
+        dep
     }
 
     /// "Discovered Peers" section of the sidebar - gossip-connected peers.
@@ -14414,6 +14538,15 @@ impl IcedChat {
 
     /// Cached dependency for the sidebar's Public Rooms section.
     fn sidebar_public_rooms_dependency(&self) -> SidebarPublicRoomsDependency {
+        // Return cached dependency if revision hasn't changed — avoids the
+        // directory_store lock on every render when public rooms haven't changed.
+        let cur_revision = self.public_rooms_sidebar_revision;
+        if self.cached_public_rooms_revision.get() == cur_revision {
+            if let Some(ref dep) = *self.cached_public_rooms_dep.borrow() {
+                return dep.clone();
+            }
+        }
+
         let rooms: Vec<SidebarPublicRoomRow> = {
             let store = self.directory_store.lock().unwrap();
             let mut list = store.list_active();
@@ -14431,10 +14564,13 @@ impl IcedChat {
                 })
                 .collect()
         };
-        SidebarPublicRoomsDependency {
+        let dep = SidebarPublicRoomsDependency {
             dark_mode: self.dark_mode,
             rooms,
-        }
+        };
+        self.cached_public_rooms_revision.set(cur_revision);
+        *self.cached_public_rooms_dep.borrow_mut() = Some(dep.clone());
+        dep
     }
 
     /// \"Public Rooms\" section of the sidebar — rooms advertised on the directory topic.
@@ -14564,6 +14700,14 @@ impl IcedChat {
     }
 
     fn sidebar_friends_rows_dependency(&self) -> SidebarFriendsRowsDependency {
+        // Return cached dependency if revision hasn't changed.
+        let cur_revision = self.friends_sidebar_revision;
+        if self.cached_friends_rows_revision.get() == cur_revision {
+            if let Some(ref dep) = *self.cached_friends_rows_dep.borrow() {
+                return dep.clone();
+            }
+        }
+
         let mut friends: Vec<SidebarFriendRow> = self
             .friends
             .iter()
@@ -14590,11 +14734,14 @@ impl IcedChat {
             })
             .collect();
         friends.sort_by(|a, b| a.label.cmp(&b.label));
-        SidebarFriendsRowsDependency {
+        let dep = SidebarFriendsRowsDependency {
             dark_mode: self.dark_mode,
             sidebar_revision: self.friends_sidebar_revision,
             friends,
-        }
+        };
+        self.cached_friends_rows_revision.set(cur_revision);
+        *self.cached_friends_rows_dep.borrow_mut() = Some(dep.clone());
+        dep
     }
 
     fn view_sidebar_friends_content(
@@ -14713,6 +14860,14 @@ impl IcedChat {
     }
 
     fn sidebar_requests_dependency(&self) -> SidebarRequestsDependency {
+        // Return cached dependency if revision hasn't changed.
+        let cur_revision = self.requests_sidebar_revision;
+        if self.cached_requests_revision.get() == cur_revision {
+            if let Some(ref dep) = *self.cached_requests_dep.borrow() {
+                return dep.clone();
+            }
+        }
+
         let local_pk_str = self.local_public.to_string();
         let mut incoming: Vec<SidebarRequestRow> = self
             .friend_request_store
@@ -14731,12 +14886,15 @@ impl IcedChat {
             })
             .collect();
         incoming.sort_by(|a, b| a.label.cmp(&b.label));
-        SidebarRequestsDependency {
+        let dep = SidebarRequestsDependency {
             dark_mode: self.dark_mode,
             requests_revision: self.requests_sidebar_revision,
             incoming,
             friend_request_error: self.friend_request_error.clone(),
-        }
+        };
+        self.cached_requests_revision.set(cur_revision);
+        *self.cached_requests_dep.borrow_mut() = Some(dep.clone());
+        dep
     }
 
     /// "Friend Requests" section of the sidebar — incoming pending requests.
@@ -17114,7 +17272,7 @@ pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
 
 // ── Subscription ──────────────────────────────────────────────────────
 
-struct RxHandle(Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>);
+struct RxHandle(Arc<Mutex<Receiver<ConversationNetEvent>>>);
 
 impl std::hash::Hash for RxHandle {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -17122,7 +17280,7 @@ impl std::hash::Hash for RxHandle {
     }
 }
 
-struct FriendRxHandle(Arc<Mutex<UnboundedReceiver<FriendEvent>>>);
+struct FriendRxHandle(Arc<Mutex<Receiver<FriendEvent>>>);
 
 impl std::hash::Hash for FriendRxHandle {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -17130,7 +17288,7 @@ impl std::hash::Hash for FriendRxHandle {
     }
 }
 
-struct WhisperRxHandle(Arc<Mutex<UnboundedReceiver<WhisperEvent>>>);
+struct WhisperRxHandle(Arc<Mutex<Receiver<WhisperEvent>>>);
 
 impl std::hash::Hash for WhisperRxHandle {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -17138,7 +17296,7 @@ impl std::hash::Hash for WhisperRxHandle {
     }
 }
 
-struct InboxRxHandle(Arc<Mutex<UnboundedReceiver<InboxEvent>>>);
+struct InboxRxHandle(Arc<Mutex<Receiver<InboxEvent>>>);
 
 impl std::hash::Hash for InboxRxHandle {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -17320,10 +17478,10 @@ fn subscription_stream(
 
 impl IcedChat {
     pub fn subscription(
-        rx: Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>,
-        friend_rx: Arc<Mutex<UnboundedReceiver<FriendEvent>>>,
-        whisper_rx: Arc<Mutex<UnboundedReceiver<WhisperEvent>>>,
-        inbox_rx: Arc<Mutex<UnboundedReceiver<InboxEvent>>>,
+        rx: Arc<Mutex<Receiver<ConversationNetEvent>>>,
+        friend_rx: Arc<Mutex<Receiver<FriendEvent>>>,
+        whisper_rx: Arc<Mutex<Receiver<WhisperEvent>>>,
+        inbox_rx: Arc<Mutex<Receiver<InboxEvent>>>,
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
         gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
     ) -> iced::Subscription<AppMessage> {
@@ -17478,9 +17636,20 @@ impl IcedChat {
     /// browser UI is implemented.
     /// View a remote peer's shared file catalogue with Download buttons,
     /// rich progress, and quick actions.
+    /// Look up a content_hash by display_name in the current peer catalogue view.
+    fn catalogue_name_to_hash(&self, name: &str) -> Option<String> {
+        self.peer_catalogue_view
+            .as_ref()
+            .and_then(|(_, files)| files.iter().find(|f| f.display_name == name))
+            .map(|f| f.content_hash.clone())
+    }
+
     fn view_peer_catalogue(&self, peer: PublicKey) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, scrollable, space, text, Column, Row, Space};
         use iced::{Alignment, Color, Length};
+
+        const CATALOGUE_ROW_HEIGHT: f32 = 52.0;
+        const OVERSCAN: f32 = 800.0;
 
         let display_name = self
             .names
@@ -17506,11 +17675,11 @@ impl IcedChat {
             .align_y(Alignment::Center)
             .spacing(SPACE_12);
 
-        let mut body = Column::new().spacing(SPACE_4);
+        let mut file_rows = Column::new().spacing(SPACE_4);
 
         // ── Open Downloads Folder button ──
         let dl_dir = self.boru_downloads_dir.clone();
-        body = body.push(
+        file_rows = file_rows.push(
             container(
                 button(
                     Row::new()
@@ -17543,7 +17712,7 @@ impl IcedChat {
         );
 
         if self.catalogue_loading {
-            body = body.push(
+            file_rows = file_rows.push(
                 container(
                     text("Loading catalogue…")
                         .size(TYPO_SM)
@@ -17555,7 +17724,7 @@ impl IcedChat {
             );
         } else if let Some((_, files)) = &self.peer_catalogue_view {
             if files.is_empty() {
-                body = body.push(
+                file_rows = file_rows.push(
                     container(
                         text("No shared files.")
                             .size(TYPO_SM)
@@ -17566,167 +17735,67 @@ impl IcedChat {
                     .style(container_surface),
                 );
             } else {
-                for file in files {
-                    let size_str = format_file_size(file.size_bytes);
-                    let mime_display = if file.mime_type.len() > 20 {
-                        format!("{}…", &file.mime_type[..18])
-                    } else {
-                        file.mime_type.clone()
-                    };
-                    let dl_state = self.catalogue_downloads.get(&file.display_name);
+                let total_h = files.len() as f32 * CATALOGUE_ROW_HEIGHT;
 
-                    // ── Build file info column ──
-                    let info_col = Column::new()
-                        .push(
-                            text(&file.display_name)
-                                .size(TYPO_SM)
+                // ── Window calculation (only when viewport is known) ──
+                if self.catalogue_viewport_height > 0.0 && total_h > 0.0 {
+                    let so = self.catalogue_scroll_offset.max(0.0);
+                    let view_top = so;
+                    let view_bot = so + self.catalogue_viewport_height.max(200.0);
+
+                    let range_top = (view_top - OVERSCAN).max(0.0);
+                    let range_bot = (view_bot + OVERSCAN).min(total_h);
+
+                    let first_idx = (range_top / CATALOGUE_ROW_HEIGHT) as usize;
+                    let mut last_idx = (range_bot / CATALOGUE_ROW_HEIGHT) as usize;
+                    if last_idx >= files.len() {
+                        last_idx = files.len().saturating_sub(1);
+                    }
+                    if last_idx < first_idx {
+                        last_idx = first_idx;
+                    }
+
+                    let top_space_h = first_idx as f32 * CATALOGUE_ROW_HEIGHT;
+                    let bottom_start = (last_idx + 1) as f32 * CATALOGUE_ROW_HEIGHT;
+                    let bottom_h = (total_h - bottom_start).max(0.0);
+
+                    // Top spacer
+                    if top_space_h > 0.0 {
+                        file_rows = file_rows.push(
+                            container(space::Space::new().height(Length::Fixed(top_space_h)))
                                 .width(Length::Fill),
-                        )
-                        .push(
-                            text(format!("{} · {}", size_str, mime_display))
-                                .size(TYPO_XS)
-                                .style(text_muted_style),
-                        )
-                        .spacing(SPACE_2);
+                        );
+                    }
 
-                    // ── Action button based on download state ──
-                    let action: iced::Element<'_, AppMessage> = match dl_state {
-                        Some(CatalogueDownloadState::Pending) => {
-                            button(text("…").size(TYPO_XS))
-                                .padding([SPACE_2, SPACE_6])
-                                .into()
-                        }
-                        Some(CatalogueDownloadState::Downloading {
-                            bytes,
-                            total,
-                            speed,
-                        }) => {
-                            let pct = total
-                                .filter(|t| *t > 0)
-                                .map(|t| ((*bytes as f64 / t as f64) * 100.0) as u8)
-                                .unwrap_or(0);
-                            let speed_str = if *speed > 0 {
-                                format!("{}/s", format_file_size(*speed))
-                            } else {
-                                String::new()
-                            };
-                            Column::new()
-                                .push(
-                                    Row::new()
-                                        .push(
-                                            iced::widget::progress_bar(0.0..=1.0, pct as f32 / 100.0)
-                                                .length(Length::Fixed(80.0))
-                                                .girth(Length::Fixed(6.0)),
-                                        )
-                                        .push(
-                                            text(format!("{}%", pct))
-                                                .size(TYPO_XXS)
-                                                .color(accent_primary(&iced::Theme::Dark)),
-                                        )
-                                        .align_y(Alignment::Center)
-                                        .spacing(SPACE_4),
-                                )
-                                .push(
-                                    text(format!(
-                                        "{}{}",
-                                        format_file_size(*bytes),
-                                        speed_str
-                                    ))
-                                    .size(TYPO_XXS)
-                                    .style(text_muted_style),
-                                )
-                                .spacing(SPACE_2)
-                                .align_x(Alignment::End)
-                                .into()
-                        }
-                        Some(CatalogueDownloadState::Completed { path: _ }) => {
-                            Row::new()
-                                .push(
-                                    button(text("Open").size(TYPO_XS))
-                                        .on_press(AppMessage::OpenDownloadedFile(
-                                            file.display_name.clone(),
-                                        ))
-                                        .padding([SPACE_2, SPACE_6]),
-                                )
-                                .push(
-                                    text("✓").size(TYPO_XS).color(
-                                        accent_green(&iced::Theme::Dark),
-                                    ),
-                                )
-                                .spacing(SPACE_4)
-                                .align_y(Alignment::Center)
-                                .into()
-                        }
-                        Some(CatalogueDownloadState::Failed(err)) => {
-                            Column::new()
-                                .push(
-                                    text("Failed")
-                                        .size(TYPO_XXS)
-                                        .color(color_error(&iced::Theme::Dark)),
-                                )
-                                .push(
-                                    button(text("Retry").size(TYPO_XS))
-                                        .on_press(AppMessage::RequestFileDownload {
-                                            peer,
-                                            file: file.clone(),
-                                        })
-                                        .padding([SPACE_2, SPACE_6]),
-                                )
-                                .spacing(SPACE_2)
-                                .align_x(Alignment::End)
-                                .into()
-                        }
-                        Some(CatalogueDownloadState::Cancelled) => {
-                            Column::new()
-                                .push(
-                                    text("Cancelled")
-                                        .size(TYPO_XXS)
-                                        .style(text_muted_style),
-                                )
-                                .push(
-                                    button(text("Retry").size(TYPO_XS))
-                                        .on_press(AppMessage::RequestFileDownload {
-                                            peer,
-                                            file: file.clone(),
-                                        })
-                                        .padding([SPACE_2, SPACE_6]),
-                                )
-                                .spacing(SPACE_2)
-                                .align_x(Alignment::End)
-                                .into()
-                        }
-                        None => {
-                            let is_pending = self
-                                .pending_downloads
-                                .contains(&(file.content_hash.clone(), peer));
-                            if is_pending {
-                                button(text("…").size(TYPO_XS))
-                                    .padding([SPACE_2, SPACE_6])
-                                    .into()
-                            } else {
-                                button(text("Download").size(TYPO_XS))
-                                    .on_press(AppMessage::RequestFileDownload {
-                                        peer,
-                                        file: file.clone(),
-                                    })
-                                    .padding([SPACE_2, SPACE_6])
-                                    .into()
-                            }
-                        }
-                    };
+                    // Visible file rows
+                    for file in &files[first_idx..=last_idx] {
+                        let dl_state = self.catalogue_downloads.get(&file.content_hash);
+                        file_rows = file_rows.push(Self::render_catalogue_row(file, self.dark_mode, dl_state, peer, &self.pending_downloads));
+                    }
 
-                    let file_row = Row::new()
-                        .push(info_col.width(Length::Fill))
-                        .push(action)
-                        .spacing(SPACE_8)
-                        .align_y(Alignment::Center)
-                        .padding([SPACE_4, SPACE_8]);
+                    // Bottom spacer
+                    if bottom_h > 0.0 {
+                        file_rows = file_rows.push(
+                            container(space::Space::new().height(Length::Fixed(bottom_h)))
+                                .width(Length::Fill),
+                        );
+                    }
+                } else {
+                    // Initial render before any viewport event — render first screenful
+                    let initial_count = 20.min(files.len());
+                    let top_space_h = 0.0;
+                    let bottom_h = (total_h - initial_count as f32 * CATALOGUE_ROW_HEIGHT).max(0.0);
 
-                    body = body.push(
-                        container(file_row)
-                            .width(Length::Fill)
-                            .style(container_surface),
-                    );
+                    for file in &files[..initial_count] {
+                        let dl_state = self.catalogue_downloads.get(&file.content_hash);
+                        file_rows = file_rows.push(Self::render_catalogue_row(file, self.dark_mode, dl_state, peer, &self.pending_downloads));
+                    }
+                    if bottom_h > 0.0 {
+                        file_rows = file_rows.push(
+                            container(space::Space::new().height(Length::Fixed(bottom_h)))
+                                .width(Length::Fill),
+                        );
+                    }
                 }
             }
         }
@@ -17742,13 +17811,189 @@ impl IcedChat {
                         left: SPACE_12,
                     }),
             )
-            .push(body)
+            .push(file_rows)
             .push(Space::new().height(Length::Fill));
 
-        container(scrollable(content))
+        container(
+            scrollable(content)
+                .on_scroll(|v: scrollable::Viewport| {
+                    AppMessage::CatalogueScrolled(v.absolute_offset().y, v.bounds().height)
+                }),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(container_primary)
+        .into()
+    }
+
+    /// Render one file row in the peer catalogue view.
+    #[allow(clippy::too_many_lines)]
+    fn render_catalogue_row<'a>(
+        file: &'a RemoteSharedFile,
+        dark_mode: bool,
+        dl_state: Option<&'a CatalogueDownloadState>,
+        peer: PublicKey,
+        pending_downloads: &'a HashSet<(String, PublicKey)>,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, container, text, Column, Row};
+        use iced::{Alignment, Length};
+
+        let size_str = format_file_size(file.size_bytes);
+        let mime_display = if file.mime_type.len() > 20 {
+            format!("{}…", &file.mime_type[..18])
+        } else {
+            file.mime_type.clone()
+        };
+
+        // ── Build file info column ──
+        let info_col = Column::new()
+            .push(
+                text(&file.display_name)
+                    .size(TYPO_SM)
+                    .width(Length::Fill),
+            )
+            .push(
+                text(format!("{} · {}", size_str, mime_display))
+                    .size(TYPO_XS)
+                    .style(if dark_mode { text_muted_style } else { text_muted_style }),
+            )
+            .spacing(SPACE_2);
+
+        // ── Action button based on download state ──
+        let action: iced::Element<'_, AppMessage> = match dl_state {
+            Some(CatalogueDownloadState::Pending) => {
+                button(text("…").size(TYPO_XS))
+                    .padding([SPACE_2, SPACE_6])
+                    .into()
+            }
+            Some(CatalogueDownloadState::Downloading {
+                bytes,
+                total,
+                speed,
+            }) => {
+                let pct = total
+                    .filter(|t| *t > 0)
+                    .map(|t| ((*bytes as f64 / t as f64) * 100.0) as u8)
+                    .unwrap_or(0);
+                let speed_str = if *speed > 0 {
+                    format!("{}/s", format_file_size(*speed))
+                } else {
+                    String::new()
+                };
+                Column::new()
+                    .push(
+                        Row::new()
+                            .push(
+                                iced::widget::progress_bar(0.0..=1.0, pct as f32 / 100.0)
+                                    .length(Length::Fixed(80.0))
+                                    .girth(Length::Fixed(6.0)),
+                            )
+                            .push(
+                                text(format!("{}%", pct))
+                                    .size(TYPO_XXS)
+                                    .color(accent_primary(&iced::Theme::Dark)),
+                            )
+                            .align_y(Alignment::Center)
+                            .spacing(SPACE_4),
+                    )
+                    .push(
+                        text(format!(
+                            "{}{}",
+                            format_file_size(*bytes),
+                            speed_str
+                        ))
+                        .size(TYPO_XXS)
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .align_x(Alignment::End)
+                    .into()
+            }
+            Some(CatalogueDownloadState::Completed { path: _ }) => {
+                Row::new()
+                    .push(
+                        button(text("Open").size(TYPO_XS))
+                            .on_press(AppMessage::OpenDownloadedFile(
+                                file.display_name.clone(),
+                            ))
+                            .padding([SPACE_2, SPACE_6]),
+                    )
+                    .push(
+                        text("✓").size(TYPO_XS).color(
+                            accent_green(&iced::Theme::Dark),
+                        ),
+                    )
+                    .spacing(SPACE_4)
+                    .align_y(Alignment::Center)
+                    .into()
+            }
+            Some(CatalogueDownloadState::Failed(err)) => {
+                Column::new()
+                    .push(
+                        text("Failed")
+                            .size(TYPO_XXS)
+                            .color(color_error(&iced::Theme::Dark)),
+                    )
+                    .push(
+                        button(text("Retry").size(TYPO_XS))
+                            .on_press(AppMessage::RequestFileDownload {
+                                peer,
+                                file: file.clone(),
+                            })
+                            .padding([SPACE_2, SPACE_6]),
+                    )
+                    .spacing(SPACE_2)
+                    .align_x(Alignment::End)
+                    .into()
+            }
+            Some(CatalogueDownloadState::Cancelled) => {
+                Column::new()
+                    .push(
+                        text("Cancelled")
+                            .size(TYPO_XXS)
+                            .style(text_muted_style),
+                    )
+                    .push(
+                        button(text("Retry").size(TYPO_XS))
+                            .on_press(AppMessage::RequestFileDownload {
+                                peer,
+                                file: file.clone(),
+                            })
+                            .padding([SPACE_2, SPACE_6]),
+                    )
+                    .spacing(SPACE_2)
+                    .align_x(Alignment::End)
+                    .into()
+            }
+            None => {
+                let is_pending = pending_downloads
+                    .contains(&(file.content_hash.clone(), peer));
+                if is_pending {
+                    button(text("…").size(TYPO_XS))
+                        .padding([SPACE_2, SPACE_6])
+                        .into()
+                } else {
+                    button(text("Download").size(TYPO_XS))
+                        .on_press(AppMessage::RequestFileDownload {
+                            peer,
+                            file: file.clone(),
+                        })
+                        .padding([SPACE_2, SPACE_6])
+                        .into()
+                }
+            }
+        };
+
+        let file_row = Row::new()
+            .push(info_col.width(Length::Fill))
+            .push(action)
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center)
+            .padding([SPACE_4, SPACE_8]);
+
+        container(file_row)
             .width(Length::Fill)
-            .height(Length::Fill)
-            .style(container_primary)
+            .style(container_surface)
             .into()
     }
     /// Public room directory (Discover) screen.
@@ -20578,7 +20823,7 @@ mod tests {
                 );
             let friend_events_rx =
                 std::sync::Arc::new(tokio::sync::Mutex::new(friend_events_rx_tmp));
-            let (net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (net_tx, net_rx) = tokio::sync::mpsc::channel(256);
             let net_rx = std::sync::Arc::new(tokio::sync::Mutex::new(net_rx));
 
             (
@@ -21893,10 +22138,10 @@ mod tests {
     fn gui_action_subscription_delivers_queued_request_to_app_message() {
         use boru_core::diagnostics::{GuiActionId, GuiActionRequest, GuiTestCommand};
         use n0_future::StreamExt;
-        let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_friend_tx, friend_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_whisper_tx, whisper_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_net_tx, net_rx) = tokio::sync::mpsc::channel(64);
+        let (_friend_tx, friend_rx) = tokio::sync::mpsc::channel(64);
+        let (_whisper_tx, whisper_rx) = tokio::sync::mpsc::channel(64);
+        let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::channel(64);
         let (_peers_tx, peers_rx) = tokio::sync::mpsc::channel(1);
         let (gui_tx, gui_rx) = tokio::sync::mpsc::channel(1);
         let request = GuiActionRequest {
@@ -21937,10 +22182,10 @@ mod tests {
 
         const PRODUCERS: usize = 4;
         const PER_PRODUCER: usize = 8;
-        let (_net_tx, net_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_friend_tx, friend_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_whisper_tx, whisper_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_net_tx, net_rx) = tokio::sync::mpsc::channel(64);
+        let (_friend_tx, friend_rx) = tokio::sync::mpsc::channel(64);
+        let (_whisper_tx, whisper_rx) = tokio::sync::mpsc::channel(64);
+        let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::channel(64);
         let (_discovered_tx, discovered_rx) = tokio::sync::mpsc::channel(1);
         let (handle, gui_rx) =
             boru_core::diagnostics::GuiTestHandle::channel(PRODUCERS * PER_PRODUCER);
@@ -22691,5 +22936,81 @@ mod tests {
         // Bytes should be within budget
         assert!(state.total_image_bytes <= small_max,
             "total_image_bytes must be within budget after eviction");
+    }
+
+    #[test]
+    fn catalogue_downloads_keyed_by_content_hash() {
+        let content_hash = "stable_hash_123".to_string();
+        let mut downloads: HashMap<String, CatalogueDownloadState> = HashMap::new();
+        downloads.insert(content_hash.clone(), CatalogueDownloadState::Pending);
+        assert!(downloads.contains_key(&content_hash));
+        assert!(!downloads.contains_key("display_name.txt"));
+    }
+
+    #[test]
+    fn catalogue_window_calculation_chooses_visible_range() {
+        const ROW_HEIGHT: f32 = 52.0;
+        const OVERSCAN: f32 = 800.0;
+        let total_files = 10_000usize;
+        let scroll_offset = 500.0f32;
+        let viewport_height = 600.0f32;
+
+        let total_h = total_files as f32 * ROW_HEIGHT;
+        let so = scroll_offset.max(0.0);
+        let view_top = so;
+        let view_bot = so + viewport_height.max(200.0);
+        let range_top = (view_top - OVERSCAN).max(0.0);
+        let range_bot = (view_bot + OVERSCAN).min(total_h);
+
+        let first_idx = (range_top / ROW_HEIGHT) as usize;
+        let mut last_idx = (range_bot / ROW_HEIGHT) as usize;
+        if last_idx >= total_files {
+            last_idx = total_files.saturating_sub(1);
+        }
+
+        assert_eq!(first_idx, 0);
+        assert_eq!(last_idx, 36);
+        assert!(last_idx.gt(&first_idx));
+    }
+
+    #[test]
+    fn catalogue_window_bottom_scroll_shows_last_files() {
+        const ROW_HEIGHT: f32 = 52.0;
+        const OVERSCAN: f32 = 800.0;
+        let total_files = 10_000usize;
+        let viewport_height = 600.0f32;
+        let total_h = total_files as f32 * ROW_HEIGHT;
+
+        let so = (total_h - viewport_height.max(200.0)).max(0.0);
+        let view_top = so;
+        let view_bot = so + viewport_height.max(200.0);
+        let range_top = (view_top - OVERSCAN).max(0.0);
+        let range_bot = (view_bot + OVERSCAN).min(total_h);
+
+        let first_idx = (range_top / ROW_HEIGHT) as usize;
+        let mut last_idx = (range_bot / ROW_HEIGHT) as usize;
+        if last_idx >= total_files {
+            last_idx = total_files.saturating_sub(1);
+        }
+
+        assert!(first_idx > 9_000);
+        assert_eq!(last_idx, total_files - 1);
+    }
+
+    #[test]
+    fn catalogue_content_hash_lookup_works_on_large_catalogue() {
+        let mut downloads: HashMap<String, CatalogueDownloadState> = HashMap::new();
+        let target_hash = "hash_5000".to_string();
+        downloads.insert(target_hash.clone(), CatalogueDownloadState::Downloading {
+            bytes: 500,
+            total: Some(1000),
+            speed: 100,
+        });
+
+        assert!(matches!(
+            downloads.get(&target_hash),
+            Some(CatalogueDownloadState::Downloading { bytes: 500, .. })
+        ));
+        assert!(downloads.get("nonexistent_hash").is_none());
     }
 }

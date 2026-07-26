@@ -360,7 +360,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
     let sub_a = gossip_a.subscribe(topic, vec![]).await?;
     let (sender_a, receiver_a) = sub_a.split();
     use boru_core::chat_core::forward_gossip_events;
-    let (net_tx_a, net_rx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (net_tx_a, net_rx_a) = tokio::sync::mpsc::channel(64);
     let net_rx_a = Arc::new(Mutex::new(net_rx_a));
     task::spawn(forward_gossip_events(receiver_a, net_tx_a));
 
@@ -380,7 +380,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
     sleep(Duration::from_millis(500)).await;
     let sub_b = gossip_b.subscribe(topic, vec![ep_a.id()]).await?;
     let (sender_b, receiver_b) = sub_b.split();
-    let (net_tx_b, net_rx_b) = tokio::sync::mpsc::unbounded_channel();
+    let (net_tx_b, net_rx_b) = tokio::sync::mpsc::channel(64);
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
     task::spawn(forward_gossip_events(receiver_b, net_tx_b));
 
@@ -462,7 +462,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
     };
 
     fn drain_net(
-        rx: &Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<boru_core::chat_core::NetEvent>>>,
+        rx: &Arc<Mutex<tokio::sync::mpsc::Receiver<boru_core::chat_core::NetEvent>>>,
         sim: &mut TestChat,
     ) {
         while let Ok(event) = rx.try_lock().unwrap().try_recv() {

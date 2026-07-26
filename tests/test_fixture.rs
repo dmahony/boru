@@ -147,7 +147,7 @@ pub struct FixturePeer {
     pub sender: Option<boru_core::api::GossipSender>,
     /// Channel for forwarding gossip events into the callback
     /// infrastructure.
-    pub net_event_tx: Option<tokio::sync::mpsc::UnboundedSender<NetEvent>>,
+    pub net_event_tx: Option<tokio::sync::mpsc::Sender<NetEvent>>,
     /// Prose event log — messages received through the callback.
     pub event_log: Vec<String>,
 }
@@ -379,7 +379,7 @@ impl TwoPeerFixture {
         let (sender, receiver) = sub.split();
 
         // ── Forward gossip events → callback thread ──────────
-        let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (net_tx, mut net_rx) = tokio::sync::mpsc::channel(64);
         let fwd = forward_gossip_events(receiver, net_tx.clone());
         task::spawn(fwd);
 

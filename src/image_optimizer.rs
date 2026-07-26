@@ -41,6 +41,28 @@ pub const INLINE_IMAGE_QUALITY: u8 = 80;
 /// quality — images that still exceed the cap at this quality are rejected.
 pub const OPTIMIZE_QUALITY_STEPS: &[u8] = &[80, 72, 64, 56];
 
+/// High-quality filter reserved for sender-side wire optimization.
+const SEND_RESIZE_FILTER: image::imageops::FilterType = image::imageops::FilterType::Lanczos3;
+
+/// Faster filter for receiver-side display thumbnails.
+const THUMBNAIL_RESIZE_FILTER: image::imageops::FilterType = image::imageops::FilterType::Triangle;
+
+/// Convert an RGBA image into an RGB image without allocating a temporary
+/// `Vec` for every pixel.
+fn rgba_to_rgb(rgba: &RgbaImage) -> Result<image::RgbImage, String> {
+    let (width, height) = rgba.dimensions();
+    let capacity = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| "Image dimensions are too large.".to_string())?;
+    let mut pixels = Vec::with_capacity(capacity);
+    for pixel in rgba.pixels() {
+        pixels.extend_from_slice(&pixel.0[..3]);
+    }
+    image::RgbImage::from_raw(width, height, pixels)
+        .ok_or_else(|| "Failed to construct RGB buffer.".to_string())
+}
+
 // ── Public API ────────────────────────────────────────────────────────
 
 /// Validate, resize, re-encode, and size-cap an image for the chat wire format.
@@ -117,12 +139,7 @@ pub fn optimize_chat_image(raw: &[u8]) -> Result<Vec<u8>, String> {
         image::imageops::overlay(&mut white_bg, &rgba, 0, 0);
         // After overlay the pixels are visually composited but still carry
         // (now-irrelevant) alpha values.  Collapse to RGB.
-        let pixels: Vec<u8> = white_bg
-            .pixels()
-            .flat_map(|p| vec![p[0], p[1], p[2]])
-            .collect();
-        image::RgbImage::from_raw(w, h, pixels)
-            .ok_or_else(|| "Failed to construct RGB buffer.".to_string())?
+        rgba_to_rgb(&white_bg)?
     } else {
         img.to_rgb8()
     };
@@ -140,12 +157,7 @@ pub fn optimize_chat_image(raw: &[u8]) -> Result<Vec<u8>, String> {
     };
 
     let resized = if new_w != w || new_h != h {
-        image::imageops::resize(
-            &rgb_pixels,
-            new_w,
-            new_h,
-            image::imageops::FilterType::Lanczos3,
-        )
+        image::imageops::resize(&rgb_pixels, new_w, new_h, SEND_RESIZE_FILTER)
     } else {
         rgb_pixels
     };
@@ -189,7 +201,41 @@ pub fn optimize_chat_image(raw: &[u8]) -> Result<Vec<u8>, String> {
 /// receiver's inline preview rather than causing a download failure.
 #[cfg(feature = "gui")]
 pub fn compress_image(raw: &[u8]) -> Vec<u8> {
-    optimize_chat_image(raw).unwrap_or_else(|_| raw.to_vec())
+    // Display thumbnails deliberately use the faster Triangle filter. The
+    // sender path above remains Lanczos3 so wire images retain fine detail.
+    let result = (|| -> Result<Vec<u8>, String> {
+        if raw.is_empty() {
+            return Err("Image is empty.".to_string());
+        }
+        let img = image::load_from_memory(raw)
+            .map_err(|_| "Unsupported or corrupt image format.".to_string())?;
+        let (w, h) = img.dimensions();
+        if w == 0 || h == 0 {
+            return Err("Image has zero dimensions.".to_string());
+        }
+        let rgb = img.to_rgb8();
+        let max_edge = w.max(h);
+        let thumbnail = if max_edge > INLINE_IMAGE_MAX_DIM {
+            let ratio = INLINE_IMAGE_MAX_DIM as f64 / max_edge as f64;
+            let new_w = (w as f64 * ratio).round().max(1.0) as u32;
+            let new_h = (h as f64 * ratio).round().max(1.0) as u32;
+            image::imageops::resize(&rgb, new_w, new_h, THUMBNAIL_RESIZE_FILTER)
+        } else {
+            rgb
+        };
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let encoder = JpegEncoder::new_with_quality(&mut buf, INLINE_IMAGE_QUALITY);
+        encoder
+            .write_image(
+                thumbnail.as_raw(),
+                thumbnail.width(),
+                thumbnail.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .map_err(|_| "JPEG encoding failed.".to_string())?;
+        Ok(buf.into_inner())
+    })();
+    result.unwrap_or_else(|_| raw.to_vec())
 }
 
 /// Validate, resize, and re-encode an image as lossless WebP for chat wire transport.
@@ -249,12 +295,7 @@ pub fn optimize_chat_image_to_webp(raw: &[u8]) -> Result<(Vec<u8>, usize, usize)
         let rgba = img.to_rgba8();
         let mut white_bg = RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
         image::imageops::overlay(&mut white_bg, &rgba, 0, 0);
-        let pixels: Vec<u8> = white_bg
-            .pixels()
-            .flat_map(|p| vec![p[0], p[1], p[2]])
-            .collect();
-        image::RgbImage::from_raw(w, h, pixels)
-            .ok_or_else(|| "Failed to construct RGB buffer.".to_string())?
+        rgba_to_rgb(&white_bg)?
     } else {
         img.to_rgb8()
     };
@@ -272,12 +313,7 @@ pub fn optimize_chat_image_to_webp(raw: &[u8]) -> Result<(Vec<u8>, usize, usize)
     };
 
     let resized = if new_w != w || new_h != h {
-        image::imageops::resize(
-            &rgb_pixels,
-            new_w,
-            new_h,
-            image::imageops::FilterType::Lanczos3,
-        )
+        image::imageops::resize(&rgb_pixels, new_w, new_h, SEND_RESIZE_FILTER)
     } else {
         rgb_pixels
     };
@@ -368,6 +404,20 @@ mod tests {
         buf.into_inner()
     }
 
+    #[test]
+    fn test_rgba_to_rgb_preserves_dimensions_and_rgb_values() {
+        let mut rgba = image::RgbaImage::new(2, 2);
+        rgba.put_pixel(0, 0, image::Rgba([1, 2, 3, 4]));
+        rgba.put_pixel(1, 0, image::Rgba([5, 6, 7, 8]));
+        rgba.put_pixel(0, 1, image::Rgba([9, 10, 11, 12]));
+        rgba.put_pixel(1, 1, image::Rgba([13, 14, 15, 16]));
+
+        let rgb = rgba_to_rgb(&rgba).unwrap();
+
+        assert_eq!(rgb.dimensions(), (2, 2));
+        assert_eq!(rgb.as_raw(), &[1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15]);
+    }
+
     /// Construct minimal raw bytes that look like an animated PNG (has acTL chunk).
     fn animated_png_bytes() -> Vec<u8> {
         let mut buf = Vec::new();
@@ -408,6 +458,26 @@ mod tests {
             }
         }
         diff_sum / total / 255.0
+    }
+
+    #[test]
+    fn benchmark_resize_filters() {
+        use std::time::Instant;
+
+        // Keep this deterministic and small enough for normal CI while still
+        // exercising the expensive downscale path used by chat images.
+        let source = make_test_rgb(2400, 1600);
+        for (name, filter) in [
+            ("Triangle", image::imageops::FilterType::Triangle),
+            ("CatmullRom", image::imageops::FilterType::CatmullRom),
+            ("Lanczos3", image::imageops::FilterType::Lanczos3),
+        ] {
+            let start = Instant::now();
+            let resized = image::imageops::resize(&source, 1280, 853, filter);
+            let elapsed = start.elapsed();
+            std::hint::black_box(resized);
+            println!("resize filter {name}: {elapsed:?}");
+        }
     }
 
     // ── Acceptance test: valid JPEG ───────────────────────────────

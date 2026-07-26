@@ -116,13 +116,13 @@ impl PeerSession {
     fn set_state(
         &mut self,
         state: SessionState,
-        event_tx: &mpsc::UnboundedSender<SessionEvent>,
+        event_tx: &mpsc::Sender<SessionEvent>,
         peer: PublicKey,
     ) {
         if self.state != state {
             debug!(%peer, old = ?self.state, new = ?state, "session state transition");
             self.state = state;
-            let _ = event_tx.send(SessionEvent::StatusChanged { peer, state });
+            let _ = event_tx.try_send(SessionEvent::StatusChanged { peer, state });
         }
     }
 
@@ -180,8 +180,8 @@ impl SessionManager {
     pub fn spawn(
         whisper_handle: WhisperHandle,
         local_public: PublicKey,
-    ) -> (Self, mpsc::UnboundedReceiver<SessionEvent>) {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+    ) -> (Self, mpsc::Receiver<SessionEvent>) {
+        let (event_tx, event_rx) = mpsc::channel(256);
         let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CHANNEL_CAP);
 
         let actor = SessionManagerActor {
@@ -204,7 +204,7 @@ struct SessionManagerActor {
     whisper_handle: WhisperHandle,
     local_public: PublicKey,
     cmd_rx: mpsc::Receiver<Cmd>,
-    event_tx: mpsc::UnboundedSender<SessionEvent>,
+    event_tx: mpsc::Sender<SessionEvent>,
     sessions: HashMap<PublicKey, PeerSession>,
 }
 
@@ -264,7 +264,7 @@ impl SessionManagerActor {
                                 }
                                 Err(e) => {
                                     warn!(%peer_send, "session connect failed: {e:#}");
-                                    let _ = event_tx.send(SessionEvent::StatusChanged {
+                                    let _ = event_tx.try_send(SessionEvent::StatusChanged {
                                         peer: peer_send,
                                         state: SessionState::Disconnected,
                                     });
@@ -379,7 +379,7 @@ impl SessionManagerActor {
                                                         attempts += 1;
                                                         if attempts >= remaining_attempts {
                                                             warn!(peer = %peer.fmt_short(), attempts, "reconnect exhausted");
-                                                            let _ = event_tx.send(
+                                                            let _ = event_tx.try_send(
                                                                 SessionEvent::StatusChanged {
                                                                     peer,
                                                                     state:
@@ -745,7 +745,7 @@ mod tests {
     /// Drain all initial session events (Connecting, then Disconnected from
     /// the failed send_dm spawn). Returns once no more events are immediately
     /// available.
-    async fn drain_session_events(rx: &mut mpsc::UnboundedReceiver<SessionEvent>) {
+    async fn drain_session_events(rx: &mut mpsc::Receiver<SessionEvent>) {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             match rx.try_recv() {
@@ -758,7 +758,7 @@ mod tests {
     /// Create a WhisperHandle that won't actually connect anywhere.
     /// Tests that exercise the session manager's state machine don't need
     /// real transport — they just need a handle whose channel doesn't drop.
-    async fn create_dummy_whisper_handle() -> (WhisperHandle, mpsc::UnboundedReceiver<WhisperEvent>)
+    async fn create_dummy_whisper_handle() -> (WhisperHandle, mpsc::Receiver<WhisperEvent>)
     {
         use crate::whisper::WhisperBuilder;
         use iroh::endpoint::presets;

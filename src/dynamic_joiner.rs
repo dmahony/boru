@@ -509,12 +509,12 @@ mod tests {
     /// Create a pair consisting of a mock GossipSender and a receiver
     /// that captures all `JoinPeers` commands.
     #[allow(dead_code)]
-    fn mock_gossip_sender() -> (GossipSender, tokio_mpsc::UnboundedReceiver<Command>) {
-        let (tx, rx) = tokio_mpsc::unbounded_channel();
+    fn mock_gossip_sender() -> (GossipSender, tokio_mpsc::Receiver<Command>) {
+        let (tx, rx) = tokio_mpsc::channel(64);
         let (cmd_tx, mut cmd_rx) = tokio_mpsc::channel::<Command>(64);
         tokio::task::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
-                if tx.send(cmd).is_err() {
+                if tx.send(cmd).await.is_err() {
                     break;
                 }
             }
@@ -946,12 +946,12 @@ mod tests {
 
         // Consumer that records JoinPeers commands as they arrive.
         // We won't consume all — we'll check the rate.
-        let (seen_tx, mut seen_rx) = tokio_mpsc::unbounded_channel::<EndpointId>();
+        let (seen_tx, mut seen_rx) = tokio_mpsc::channel::<EndpointId>(64);
         tokio::task::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
                 if let Command::JoinPeers(peers) = cmd {
                     for p in peers {
-                        let _ = seen_tx.send(p);
+                        let _ = seen_tx.send(p).await;
                     }
                 }
             }

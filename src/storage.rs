@@ -1460,16 +1460,23 @@ impl Storage {
         recipient: &PublicKey,
         message_ids: &[[u8; 32]],
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         let now = now_ms() as i64;
-        for msg_id in message_ids {
-            conn.execute(
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .std_context("begin sync_dedup transaction")?;
+        let mut stmt = tx
+            .prepare(
                 "INSERT OR IGNORE INTO sync_dedup (message_id, recipient_id, served_at_ms)
                  VALUES (?1, ?2, ?3)",
-                params![msg_id.as_slice(), recipient.as_bytes(), now],
             )
-            .std_context("insert sync_dedup")?;
+            .std_context("prepare sync_dedup insert")?;
+        for msg_id in message_ids {
+            stmt.execute(params![msg_id.as_slice(), recipient.as_bytes(), now])
+                .std_context("insert sync_dedup")?;
         }
+        drop(stmt);
+        tx.commit().std_context("commit sync_dedup transaction")?;
         Ok(())
     }
 
@@ -1778,6 +1785,101 @@ impl Storage {
         drop(stmt);
         tx.commit().std_context("commit outbox claim")?;
         Ok(Some(row))
+    }
+
+    /// Atomically claim up to `limit` due outbox rows in a single transaction.
+    ///
+    /// Each row is set with `lease_owner` and `locked_until_ms`. Rows are
+    /// returned in their natural order (oldest `next_attempt_at_ms` first,
+    /// then rowid).  An empty vec means no claimable rows were found.
+    pub fn claim_n_due_outbox(
+        &self,
+        now_ms: u64,
+        lease_owner: &str,
+        lease_duration_ms: u64,
+        limit: u32,
+    ) -> Result<Vec<OutboxRow>> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn
+            .unchecked_transaction()
+            .std_context("begin batch outbox claim")?;
+        let limit = limit.clamp(1, MAX_OUTBOX_CLAIM_LIMIT) as i64;
+        let locked_until = now_ms.saturating_add(lease_duration_ms);
+
+        // Select candidates first.
+        let mut candidates: Vec<(MessageId, Vec<u8>)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT msg_id, recipient_device_id FROM outbox
+                     WHERE status != ?1 AND status != ?2 AND next_attempt_at_ms <= ?3
+                       AND (locked_until_ms IS NULL OR locked_until_ms <= ?3)
+                     ORDER BY next_attempt_at_ms, rowid LIMIT ?4",
+                )
+                .std_context("prepare batch claim select")?;
+            let mut rows = stmt
+                .query(params![
+                    DeliveryStatus::Acked as u8,
+                    DeliveryStatus::Expired as u8,
+                    now_ms as i64,
+                    limit
+                ])
+                .std_context("query batch claim candidates")?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().std_context("next batch claim row")? {
+                let msg_id: MessageId = row.get(0).std_context("get msg_id")?;
+                let recipient: Vec<u8> = row.get(1).std_context("get recipient")?;
+                out.push((msg_id, recipient));
+            }
+            out
+        };
+
+        if candidates.is_empty() {
+            tx.commit().std_context("commit empty batch outbox claim")?;
+            return Ok(Vec::new());
+        }
+
+        // Lock each candidate — UPDATE returns changed=1 for each success.
+        candidates.retain(|(msg_id, recipient)| {
+            let changed = tx
+                .execute(
+                    "UPDATE outbox SET lease_owner = ?1, locked_until_ms = ?2
+                     WHERE msg_id = ?3 AND recipient_device_id = ?4
+                       AND (locked_until_ms IS NULL OR locked_until_ms <= ?5)",
+                    params![
+                        lease_owner,
+                        locked_until as i64,
+                        msg_id.as_slice(),
+                        recipient,
+                        now_ms as i64
+                    ],
+                )
+                .unwrap_or(0);
+            changed == 1
+        });
+
+        // Fetch full row data for the locked entries.
+        let mut results = Vec::with_capacity(candidates.len());
+        for (msg_id, recipient) in &candidates {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT msg_id, recipient_device_id, status, attempts,
+                            next_attempt_at_ms, last_error_code, last_attempt_at_ms,
+                            lease_owner, locked_until_ms, expires_at_ms
+                     FROM outbox WHERE msg_id = ?1 AND recipient_device_id = ?2",
+                )
+                .std_context("prepare batch claimed row")?;
+            let mut rows = stmt
+                .query(params![msg_id.as_slice(), recipient])
+                .std_context("query batch claimed row")?;
+            if let Some(row_ref) = rows.next().std_context("next batch claimed row")? {
+                if let Ok(row) = row_to_outbox(row_ref) {
+                    results.push(row);
+                }
+            }
+        }
+
+        tx.commit().std_context("commit batch outbox claim")?;
+        Ok(results)
     }
 
     /// Atomically claim the oldest due row addressed to one peer.
@@ -3688,13 +3790,16 @@ impl Storage {
     /// collection entries so they can be queried later via the
     /// `get_remote_*` methods.
     pub fn replace_remote_catalogue(&self, catalogue: &SignedFileCatalogue) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
         let peer = catalogue.owner_id.to_string();
         let now = now_ms() as i64;
+        let tx = conn
+            .transaction()
+            .std_context("begin remote catalogue transaction")?;
 
         // Store catalogue meta in profile_manifest_state (reused as
         // remote-catalogue meta store for the stub implementation).
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO profile_manifest_state
                 (user_id, revision, manifest_hash, created_at_ms)
              VALUES (?1, ?2, ?3, ?4)",
@@ -3710,12 +3815,12 @@ impl Storage {
         // A catalogue is a complete snapshot. Remove entries from the
         // previous revision before inserting the current one so deleted
         // offers do not remain visible in the remote cache.
-        conn.execute(
+        tx.execute(
             "DELETE FROM shared_files WHERE profile_user_id = ?1",
             params![peer],
         )
         .std_context("clear remote catalogue files")?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM file_collections WHERE profile_user_id = ?1",
             params![peer],
         )
@@ -3724,7 +3829,7 @@ impl Storage {
         // Store each file from the catalogue.
         for file in &catalogue.files {
             // Satisfy FK: ensure a file_objects row exists.
-            conn.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO file_objects
                     (content_hash, size, mime_type, filename, created_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -3739,7 +3844,7 @@ impl Storage {
             .std_context("store remote catalogue file object")?;
 
             // Upsert into shared_files keyed by remote peer.
-            conn.execute(
+            tx.execute(
                 "INSERT OR REPLACE INTO shared_files
                     (content_hash, profile_user_id, metadata_id, display_filename,
                      description, offered, created_at_ms, updated_at_ms)
@@ -3758,7 +3863,7 @@ impl Storage {
 
         // Store each collection from the catalogue.
         for collection in &catalogue.collections {
-            conn.execute(
+            tx.execute(
                 "INSERT OR REPLACE INTO file_collections
                     (profile_user_id, name, description, created_at_ms, updated_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?4)",
@@ -3767,6 +3872,8 @@ impl Storage {
             .std_context("store remote catalogue collection")?;
         }
 
+        tx.commit()
+            .std_context("commit remote catalogue transaction")?;
         Ok(())
     }
 

@@ -14,7 +14,7 @@
 //! 3. It calls [`Endpoint::connect_with_opts`] with the gossip ALPN and a short
 //!    per-ping timeout (wrapped via `tokio::time::timeout`).
 //! 4. Success → mark Online; failure → mark Offline.
-//! 5. Transitions are emitted on an `UnboundedReceiver<FriendEvent>` that the frontend
+//! 5. Transitions are emitted on an `mpsc::Receiver<FriendEvent>` (capacity 128) that the frontend
 //!    polls alongside other event streams.
 
 use std::{
@@ -137,7 +137,7 @@ impl iroh::protocol::ProtocolHandler for PingHandler {
 /// Clone this freely — all clones share the same background task.
 #[derive(Debug, Clone)]
 pub struct FriendPingManager {
-    cmd_tx: mpsc::UnboundedSender<Cmd>,
+    cmd_tx: mpsc::Sender<Cmd>,
 }
 
 impl FriendPingManager {
@@ -150,9 +150,9 @@ impl FriendPingManager {
         endpoint: Endpoint,
         ping_interval: Duration,
         connect_timeout: Duration,
-    ) -> (Self, mpsc::UnboundedReceiver<FriendEvent>) {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+    ) -> (Self, mpsc::Receiver<FriendEvent>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
+        let (event_tx, event_rx) = mpsc::channel(128);
 
         let actor = FriendPingActor {
             endpoint,
@@ -180,6 +180,7 @@ impl FriendPingManager {
         if self
             .cmd_tx
             .send(Cmd::AddFriend { peer, addr, reply })
+            .await
             .is_err()
         {
             bail_any!("friend ping actor stopped");
@@ -197,6 +198,7 @@ impl FriendPingManager {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(Cmd::AddFriendAddrs { peer, addrs, reply })
+            .await
             .map_err(|_| n0_error::anyerr!("friend ping actor stopped"))?;
         rx.await
             .map_err(|_| n0_error::anyerr!("friend ping actor dropped reply channel"))
@@ -210,6 +212,7 @@ impl FriendPingManager {
         if self
             .cmd_tx
             .send(Cmd::RemoveFriend { peer: *peer, reply })
+            .await
             .is_err()
         {
             bail_any!("friend ping actor stopped");
@@ -226,6 +229,7 @@ impl FriendPingManager {
         if self
             .cmd_tx
             .send(Cmd::QueryStatus { peer: *peer, reply })
+            .await
             .is_err()
         {
             bail_any!("friend ping actor stopped");
@@ -237,7 +241,7 @@ impl FriendPingManager {
     /// List all tracked friends and their current status.
     pub async fn list_friends(&self) -> Result<Vec<(PublicKey, FriendStatus)>> {
         let (reply, rx) = oneshot::channel();
-        if self.cmd_tx.send(Cmd::ListFriends { reply }).is_err() {
+        if self.cmd_tx.send(Cmd::ListFriends { reply }).await.is_err() {
             bail_any!("friend ping actor stopped");
         }
         rx.await
@@ -267,8 +271,8 @@ impl FriendState {
 #[derive(Debug)]
 struct FriendPingActor {
     endpoint: Endpoint,
-    cmd_rx: mpsc::UnboundedReceiver<Cmd>,
-    event_tx: mpsc::UnboundedSender<FriendEvent>,
+    cmd_rx: mpsc::Receiver<Cmd>,
+    event_tx: mpsc::Sender<FriendEvent>,
     ping_interval: Duration,
     connect_timeout: Duration,
     friends: HashMap<PublicKey, FriendState>,
@@ -365,7 +369,7 @@ impl FriendPingActor {
                 let _ = self.event_tx.send(FriendEvent::StatusChanged {
                     peer,
                     status: new_status,
-                });
+                }).await;
             }
             state.status = new_status;
             if let Some(addr) = successful_addr.filter(|addr| !addr.addrs.is_empty()) {
@@ -375,7 +379,8 @@ impl FriendPingActor {
                 if changed {
                     let _ = self
                         .event_tx
-                        .send(FriendEvent::AddressUpdated { peer, addr });
+                        .send(FriendEvent::AddressUpdated { peer, addr })
+                        .await;
                 }
             }
         }

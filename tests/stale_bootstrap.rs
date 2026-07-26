@@ -102,7 +102,7 @@ impl ChatCallbacks for SimChat {
     fn request_quit(&mut self) {}
 }
 
-fn drain_net(rx: &Arc<Mutex<mpsc::UnboundedReceiver<NetEvent>>>, sim: &mut SimChat) {
+fn drain_net(rx: &Arc<Mutex<mpsc::Receiver<NetEvent>>>, sim: &mut SimChat) {
     loop {
         let item = rx.try_lock().unwrap().try_recv();
         match item {
@@ -213,7 +213,7 @@ async fn test_stale_bootstrap_does_not_block_rejoin() -> Result<()> {
     // Forward C's events to a sink so the gossip actor's event channel doesn't fill up
     let _c_drain = task::spawn(async move { while recv_c.next().await.is_some() {} });
 
-    let (net_tx_b, net_rx_b) = mpsc::unbounded_channel();
+    let (net_tx_b, net_rx_b) = mpsc::channel(64);
     let net_rx_b = Arc::new(Mutex::new(net_rx_b));
     task::spawn(forward_gossip_events(recv_b, net_tx_b));
 

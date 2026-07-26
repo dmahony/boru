@@ -327,7 +327,7 @@ pub struct RoomMetadataDoc {
     state: Arc<RwLock<RoomMetadata>>,
     /// Channel via which metadata updates (from remote peers) are
     /// forwarded to the consumer of this handle.
-    event_tx: mpsc::UnboundedSender<RoomMetadataEvent>,
+    event_tx: mpsc::Sender<RoomMetadataEvent>,
 }
 
 impl RoomMetadataDoc {
@@ -342,8 +342,8 @@ impl RoomMetadataDoc {
     }
 
     /// Subscribe to metadata update events from remote peers.
-    pub fn events(&self) -> mpsc::UnboundedReceiver<RoomMetadataEvent> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    pub fn events(&self) -> mpsc::Receiver<RoomMetadataEvent> {
+        let (tx, rx) = mpsc::channel(64);
         // Forward future events to the new channel by keeping a clone
         // of the existing sender.  The old sender stays alive so existing
         // receivers still get events.
@@ -385,7 +385,7 @@ pub async fn create_metadata_doc(
     )
     .await;
 
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = mpsc::channel(64);
 
     Ok(RoomMetadataDoc {
         topic,
@@ -478,7 +478,8 @@ pub async fn process_gossip_event(
             // Notify downstream.
             let _ = doc
                 .event_tx
-                .send(RoomMetadataEvent::MetadataUpdated(payload));
+                .send(RoomMetadataEvent::MetadataUpdated(payload))
+                .await;
 
             Ok(true)
         }
@@ -816,7 +817,7 @@ pub fn spawn_room_event_forwarder(
     metadata_doc: RoomMetadataDoc,
     roster_doc: RosterDoc,
     gossip_receiver: GossipReceiver,
-    non_room_tx: tokio::sync::mpsc::UnboundedSender<Result<GossipEvent, crate::api::ApiError>>,
+    non_room_tx: tokio::sync::mpsc::Sender<Result<GossipEvent, crate::api::ApiError>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn(async move {
         let mut receiver = gossip_receiver;
@@ -842,7 +843,7 @@ pub fn spawn_room_event_forwarder(
             }
 
             // Not a room-doc message — forward for chat/neighbor processing.
-            if non_room_tx.send(event_result).is_err() {
+            if non_room_tx.send(event_result).await.is_err() {
                 break;
             }
         }
@@ -865,7 +866,7 @@ pub async fn forward_room_events_for_chat(
     metadata_doc: RoomMetadataDoc,
     roster_doc: RosterDoc,
     mut receiver: GossipReceiver,
-    net_tx: tokio::sync::mpsc::UnboundedSender<crate::chat_core::NetEvent>,
+    net_tx: mpsc::Sender<crate::chat_core::NetEvent>,
     safety: Option<Arc<PublicRoomSafety>>,
 ) {
     use crate::chat_core::{NetEvent, SignedMessage};
@@ -918,7 +919,7 @@ pub async fn forward_room_events_for_chat(
                         },
                         None => net_event,
                     };
-                    if net_tx.send(net_event).is_err() {
+                    if net_tx.send(net_event).await.is_err() {
                         return;
                     }
                 }
@@ -938,12 +939,12 @@ pub async fn forward_room_events_for_chat(
                 }
             },
             GossipEvent::NeighborUp(id) => {
-                if net_tx.send(NetEvent::NeighborUp { peer: id }).is_err() {
+                if net_tx.send(NetEvent::NeighborUp { peer: id }).await.is_err() {
                     return;
                 }
             }
             GossipEvent::NeighborDown(id) => {
-                if net_tx.send(NetEvent::NeighborDown { peer: id }).is_err() {
+                if net_tx.send(NetEvent::NeighborDown { peer: id }).await.is_err() {
                     return;
                 }
             }
@@ -953,7 +954,7 @@ pub async fn forward_room_events_for_chat(
         }
     }
 
-    let _ = net_tx.send(crate::chat_core::NetEvent::Closed);
+    let _ = net_tx.send(crate::chat_core::NetEvent::Closed).await;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

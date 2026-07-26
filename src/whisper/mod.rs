@@ -368,8 +368,8 @@ impl WhisperBuilder {
     }
 
     /// Spawn the whisper actor and return a handle + event receiver.
-    pub fn spawn(mut self) -> (WhisperHandle, mpsc::UnboundedReceiver<WhisperEvent>) {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+    pub fn spawn(mut self) -> (WhisperHandle, mpsc::Receiver<WhisperEvent>) {
+        let (event_tx, event_rx) = mpsc::channel(1024);
         let connected: Arc<Mutex<HashMap<PublicKey, Connection>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
@@ -395,10 +395,10 @@ async fn run_actor(
     endpoint: Endpoint,
     secret_key: SecretKey,
     mut cmd_rx: mpsc::Receiver<Cmd>,
-    event_tx: mpsc::UnboundedSender<WhisperEvent>,
+    event_tx: mpsc::Sender<WhisperEvent>,
     connected: Arc<Mutex<HashMap<PublicKey, Connection>>>,
 ) {
-    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<ConnectionEvent>();
+    let (msg_tx, mut msg_rx) = mpsc::channel::<ConnectionEvent>(4096);
 
     loop {
         tokio::select! {
@@ -533,8 +533,8 @@ async fn get_or_connect(
     endpoint: &Endpoint,
     peer: &PublicKey,
     connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
-    event_tx: &mpsc::UnboundedSender<WhisperEvent>,
-    msg_tx: &mpsc::UnboundedSender<ConnectionEvent>,
+    event_tx: &mpsc::Sender<WhisperEvent>,
+    msg_tx: &mpsc::Sender<ConnectionEvent>,
 ) -> Result<Connection> {
     // Check if we already have a connection.
     {
@@ -577,8 +577,8 @@ async fn connect_to_peer(
     peer: PublicKey,
     addr: EndpointAddr,
     connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
-    event_tx: &mpsc::UnboundedSender<WhisperEvent>,
-    msg_tx: &mpsc::UnboundedSender<ConnectionEvent>,
+    event_tx: &mpsc::Sender<WhisperEvent>,
+    msg_tx: &mpsc::Sender<ConnectionEvent>,
 ) -> Result<Connection> {
     let conn = endpoint.connect(addr, WHISPER_ALPN).await?;
     let remote_id = conn.remote_id();
@@ -642,10 +642,10 @@ async fn send_text_message(
     peer: &PublicKey,
     text: String,
     connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
-    msg_tx: &mpsc::UnboundedSender<ConnectionEvent>,
+    msg_tx: &mpsc::Sender<ConnectionEvent>,
 ) -> Result<()> {
     // Create a dummy event_tx for get_or_connect to borrow.
-    let (dummy_tx, _) = mpsc::unbounded_channel();
+    let (dummy_tx, _) = mpsc::channel(1);
 
     let conn = get_or_connect(endpoint, peer, connected, &dummy_tx, msg_tx).await?;
 
@@ -663,9 +663,9 @@ async fn send_control_message(
     peer: &PublicKey,
     payload: Bytes,
     connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
-    msg_tx: &mpsc::UnboundedSender<ConnectionEvent>,
+    msg_tx: &mpsc::Sender<ConnectionEvent>,
 ) -> Result<()> {
-    let (dummy_tx, _) = mpsc::unbounded_channel();
+    let (dummy_tx, _) = mpsc::channel(1);
     let conn = get_or_connect(endpoint, peer, connected, &dummy_tx, msg_tx).await?;
     write_framed_message(
         &conn,
@@ -681,9 +681,9 @@ async fn send_mailbox_envelope(
     peer: &PublicKey,
     envelope: MailboxEnvelope,
     connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
-    msg_tx: &mpsc::UnboundedSender<ConnectionEvent>,
+    msg_tx: &mpsc::Sender<ConnectionEvent>,
 ) -> Result<()> {
-    let (dummy_tx, _) = mpsc::unbounded_channel();
+    let (dummy_tx, _) = mpsc::channel(1);
     let conn = get_or_connect(endpoint, peer, connected, &dummy_tx, msg_tx).await?;
     write_framed_message(&conn, &WhisperWireMessage::MailboxEnvelope { envelope }).await
 }
@@ -693,9 +693,9 @@ async fn send_mailbox_ack(
     peer: &PublicKey,
     ack: MailboxAck,
     connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
-    msg_tx: &mpsc::UnboundedSender<ConnectionEvent>,
+    msg_tx: &mpsc::Sender<ConnectionEvent>,
 ) -> Result<()> {
-    let (dummy_tx, _) = mpsc::unbounded_channel();
+    let (dummy_tx, _) = mpsc::channel(1);
     let conn = get_or_connect(endpoint, peer, connected, &dummy_tx, msg_tx).await?;
     write_framed_message(&conn, &WhisperWireMessage::MailboxAck { ack }).await
 }
@@ -706,7 +706,7 @@ async fn send_mailbox_ack(
 async fn read_connection_loop(
     remote_id: PublicKey,
     conn: Connection,
-    msg_tx: mpsc::UnboundedSender<ConnectionEvent>,
+    msg_tx: mpsc::Sender<ConnectionEvent>,
 ) {
     loop {
         match conn.accept_bi().await {
@@ -740,6 +740,7 @@ async fn read_connection_loop(
                         from: remote_id,
                         content: payload.into(),
                     })
+                    .await
                     .is_err()
                 {
                     break;
@@ -773,7 +774,7 @@ mod tests {
         Endpoint,
         SecretKey,
         WhisperHandle,
-        mpsc::UnboundedReceiver<WhisperEvent>,
+        mpsc::Receiver<WhisperEvent>,
     )> {
         let secret_key = SecretKey::generate();
         let endpoint = Endpoint::builder(presets::N0)

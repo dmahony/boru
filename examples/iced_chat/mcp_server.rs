@@ -291,7 +291,7 @@ pub struct McpAppState {
     pub version: String,
     /// Channel to send gossip messages through the mesh.
     #[expect(dead_code)]
-    pub gossip_tx: tokio::sync::mpsc::UnboundedSender<ConversationNetEvent>,
+    pub gossip_tx: tokio::sync::mpsc::Sender<ConversationNetEvent>,
     /// Secret key for signing outgoing messages (probes, etc.).
     pub secret_key: SecretKey,
     /// Gossip handle for broadcasting messages through the mesh.
@@ -4827,7 +4827,7 @@ mod tests {
         has_tx: bool,
     ) -> (
         McpAppState,
-        tokio::sync::mpsc::UnboundedReceiver<ConversationNetEvent>,
+        tokio::sync::mpsc::Receiver<ConversationNetEvent>,
     ) {
         use iroh::address_lookup::memory::MemoryLookup;
         use iroh::endpoint::presets;
@@ -4844,7 +4844,7 @@ mod tests {
             .await
             .expect("test endpoint bind");
         let gossip = boru_core::net::Gossip::builder().spawn(endpoint.clone());
-        let (gossip_tx, gossip_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (gossip_tx, gossip_rx) = tokio::sync::mpsc::channel(64);
 
         let state = McpAppState {
             diagnostics: Diagnostics::new(),
@@ -5498,7 +5498,7 @@ mod tests {
             .await
             .expect("test endpoint bind");
         let gossip = boru_core::net::Gossip::builder().spawn(endpoint.clone());
-        let (gossip_tx, _gossip_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (gossip_tx, _gossip_rx) = tokio::sync::mpsc::channel(64);
 
         let state = McpAppState {
             diagnostics: Diagnostics::new(),
@@ -5557,7 +5557,7 @@ mod tests {
             .await
             .expect("test endpoint bind");
         let gossip = boru_core::net::Gossip::builder().spawn(endpoint.clone());
-        let (gossip_tx, _gossip_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (gossip_tx, _gossip_rx) = tokio::sync::mpsc::channel(64);
 
         let state = McpAppState {
             diagnostics: Diagnostics::new(),

@@ -131,7 +131,7 @@ async fn spawn_peer(
 }
 
 async fn drain_events(
-    rx: &Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<NetEvent>>>,
+    rx: &Arc<Mutex<tokio::sync::mpsc::Receiver<NetEvent>>>,
     peer: &mut BurstPeer,
 ) -> usize {
     let mut count = 0;
@@ -174,7 +174,7 @@ async fn test_three_remote_image_burst() -> Result<()> {
     // Subscribe A
     let sub_a = gossip_a.subscribe(topic, vec![]).await?;
     let (sender_a, receiver_a) = sub_a.split();
-    let (ntx_a, _nrx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (ntx_a, _nrx_a) = tokio::sync::mpsc::channel(64);
     task::spawn(forward_gossip_events(receiver_a, ntx_a));
     let about_a = SignedMessage::sign_and_encode(
         &sk_a,
@@ -195,7 +195,7 @@ async fn test_three_remote_image_burst() -> Result<()> {
     memlook.set_endpoint_info(ep_a.addr());
     let sub_b = gossip_b.subscribe(topic, vec![pk_a]).await?;
     let (_sender_b, receiver_b) = sub_b.split();
-    let (ntx_b, nrx_b) = tokio::sync::mpsc::unbounded_channel();
+    let (ntx_b, nrx_b) = tokio::sync::mpsc::channel(64);
     let nrx_b = Arc::new(Mutex::new(nrx_b));
     task::spawn(forward_gossip_events(receiver_b, ntx_b));
     let about_b = SignedMessage::sign_and_encode(
