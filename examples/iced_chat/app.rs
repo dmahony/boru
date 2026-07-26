@@ -20609,6 +20609,7 @@ mod tests {
         let (_, dummy_directory_rx) =
             tokio::sync::mpsc::channel::<DirectoryRoomUpdate>(1);
         let dummy_directory_rx = Arc::new(Mutex::new(dummy_directory_rx));
+        let (persist_tx, _persist_rx) = std::sync::mpsc::channel();
 
         let app = IcedChat::new(
             secret_key,
@@ -20621,6 +20622,7 @@ mod tests {
             local_public,
             iroh::RelayMode::Default,
             data_dir,
+            persist_tx,
             runtime.handle().clone(),
             net_rx,
             net_tx,
