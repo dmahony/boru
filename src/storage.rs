@@ -2368,6 +2368,62 @@ impl Storage {
         Ok(n > 0)
     }
 
+    /// Atomically remove chat-owned records for a conversation.
+    ///
+    /// Attachment rows are keyed by the local chat-history event ids. File
+    /// objects are retained because they may also be referenced by shared-file
+    /// offers or another conversation. Repeating this operation is safe.
+    pub fn delete_chat_history(
+        &self,
+        conversation_id: &[u8; 32],
+        event_ids: &[u64],
+    ) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .std_context("begin chat history deletion")?;
+
+        let mut removed = 0usize;
+        for event_id in event_ids {
+            removed += tx
+                .execute(
+                    "DELETE FROM message_attachments WHERE event_id = ?1",
+                    params![*event_id as i64],
+                )
+                .std_context("delete message attachment")?;
+        }
+
+        tx.execute(
+            "DELETE FROM dm_acknowledgements WHERE message_id IN
+             (SELECT message_id FROM dm_messages WHERE conversation_id = ?1)",
+            params![conversation_id.as_slice()],
+        )
+        .std_context("delete dm acknowledgements")?;
+        tx.execute(
+            "DELETE FROM dm_outbox WHERE message_id IN
+             (SELECT message_id FROM dm_messages WHERE conversation_id = ?1)",
+            params![conversation_id.as_slice()],
+        )
+        .std_context("delete dm outbox")?;
+        tx.execute(
+            "DELETE FROM dm_messages WHERE conversation_id = ?1",
+            params![conversation_id.as_slice()],
+        )
+        .std_context("delete dm messages")?;
+        tx.execute(
+            "DELETE FROM dm_sender_sequences WHERE conversation_id = ?1",
+            params![conversation_id.as_slice()],
+        )
+        .std_context("delete dm sender sequences")?;
+        tx.execute(
+            "DELETE FROM dm_conversations WHERE conversation_id = ?1",
+            params![conversation_id.as_slice()],
+        )
+        .std_context("delete dm conversation")?;
+        tx.commit().std_context("commit chat history deletion")?;
+        Ok(removed)
+    }
+
     // ── Message attachments (v2) ──────────────────────────────────────
 
     /// Attach a file object to a chat message.
@@ -4648,6 +4704,32 @@ mod tests {
         // Remove.
         assert!(storage.remove_message_attachment(att_id).unwrap());
         assert!(storage.get_message_attachments(42).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_chat_history_removes_target_attachments_only() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object("target-file", 10, "text/plain", "target.txt", b"target")
+            .unwrap();
+        storage
+            .put_file_object("other-file", 10, "text/plain", "other.txt", b"other")
+            .unwrap();
+        storage
+            .attach_file_to_message(10, "target-file", "target.txt", 0)
+            .unwrap();
+        storage
+            .attach_file_to_message(20, "other-file", "other.txt", 0)
+            .unwrap();
+
+        let topic = [7u8; 32];
+        assert_eq!(storage.delete_chat_history(&topic, &[10]).unwrap(), 1);
+        assert!(storage.get_message_attachments(10).unwrap().is_empty());
+        assert_eq!(storage.get_message_attachments(20).unwrap().len(), 1);
+        // Content-addressed objects remain available to unrelated ownership.
+        assert!(storage.file_object_exists("target-file").unwrap());
+        assert!(storage.file_object_exists("other-file").unwrap());
+        assert_eq!(storage.delete_chat_history(&topic, &[10]).unwrap(), 0);
     }
 
     #[test]
