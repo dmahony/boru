@@ -835,7 +835,7 @@ fn main() -> Result<()> {
             local_public.to_string(),
             friends.clone(),
             nonce_store,
-            Arc::new(blob_store.clone()),
+            Arc::new(blob_store.clone().into()),
         );
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
