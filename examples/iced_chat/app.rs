@@ -22,6 +22,7 @@ use boru_core::api::{GossipSender, GossipTopic};
 use boru_core::backfill::{BackfillHandle, BACKFILL_TRIGGER_THRESHOLD};
 pub(crate) use boru_core::chat_callbacks::TransferKind;
 use crate::link_preview;
+use crate::persistence_coordinator::PersistenceCommand;
 use boru_core::chat_callbacks::{ChatCallbacks, TransferId, TransferProgress};
 use boru_core::chat_core::{
     collect_bootstrap_peers, download_blob_to_file, download_blob_with_safety, download_candidates,
@@ -1436,6 +1437,10 @@ pub struct ChatEntry {
     link_preview_loading: bool,
     /// Whether a link preview fetch for this entry failed.
     link_preview_error: bool,
+    /// Cached URL segments parsed from the message body.
+    /// Computed once when the entry is created or body changes.
+    /// Avoids calling `link_preview::parse_url_segments` on every render frame.
+    parsed_segments: Option<Vec<link_preview::TextSegment>>,
 }
 
 impl ChatEntry {
@@ -1464,6 +1469,7 @@ impl ChatEntry {
             link_preview: None,
             link_preview_loading: false,
             link_preview_error: false,
+            parsed_segments: None,
         };
         s.update_cache();
         s
@@ -1495,6 +1501,7 @@ impl ChatEntry {
             link_preview: None,
             link_preview_loading: false,
             link_preview_error: false,
+            parsed_segments: None,
         }
     }
     fn remote(
@@ -1528,6 +1535,7 @@ impl ChatEntry {
             link_preview: None,
             link_preview_loading: false,
             link_preview_error: false,
+            parsed_segments: None,
         }
     }
 
@@ -1567,6 +1575,7 @@ impl ChatEntry {
             link_preview: None,
             link_preview_loading: false,
             link_preview_error: false,
+            parsed_segments: None,
         }
     }
 
@@ -1601,6 +1610,7 @@ impl ChatEntry {
             link_preview: None,
             link_preview_loading: false,
             link_preview_error: false,
+            parsed_segments: None,
         }
     }
 
@@ -1642,6 +1652,7 @@ impl ChatEntry {
         } else {
             Some(self.reactions.join("  "))
         };
+        self.parsed_segments = Some(link_preview::parse_url_segments(&self.body));
     }
 }
 
@@ -1937,6 +1948,9 @@ pub struct IcedChat {
     #[expect(dead_code)]
     pub notice: String,
     data_dir: PathBuf,
+    /// Sender to the background persistence worker for offloading
+    /// synchronous JSON writes from the UI event loop.
+    persist_tx: std::sync::mpsc::Sender<PersistenceCommand>,
     /// Per-user image storage, backed by `<data_dir>/files/` (or `BORU_CHAT_FILES_DIR`).
     image_store: ImageStore,
     /// Persistent chat message history (loaded on startup, saved on each message).
@@ -2190,6 +2204,21 @@ pub struct IcedChat {
     /// Sender for GUI state snapshots — publishes an [`IcedStateSnapshot`] after
     /// each `update()` so the MCP server can watch for condition changes.
     pub gui_state_tx: tokio::sync::watch::Sender<IcedStateSnapshot>,
+    /// When false, `publish_gui_state()` is a no-op.  Set true by default;
+    /// disabled in headless/test scenarios where nobody reads the watch channel.
+    gui_state_enabled: bool,
+    /// Last snapshot that was successfully sent, for dirty-state comparison.
+    /// `None` means no snapshot has been published yet — always send.
+    last_snapshot: Option<Box<IcedStateSnapshot>>,
+    /// Monotonic clock timestamp of the last successfully published snapshot.
+    /// Used for rate limiting.
+    last_snapshot_at: std::time::Instant,
+    /// Minimum interval (ms) between snapshot publishes.  `0` disables throttling.
+    /// Production value: 125 (≈ 8 updates/sec).  Tests set `0`.
+    pub gui_snapshot_throttle_ms: u64,
+    /// When true, a state change was detected but the last publish was throttled.
+    /// The next call to `publish_gui_state()` that is not throttled will flush it.
+    gui_snapshot_pending: bool,
     /// Recent activity feed shown on the landing page (ring buffer, newest first).
     recent_activity: VecDeque<RecentActivityEvent>,
     /// Current window width, updated by resize events.
@@ -2207,8 +2236,10 @@ pub struct IcedChat {
     connecting_spinner_frame: usize,
     /// Cached link previews (title, description, image) keyed by URL.
     link_preview_cache: std::sync::Arc<std::sync::Mutex<link_preview::LinkPreviewCache>>,
-    /// Entry index whose link preview is currently being fetched.
-    /// Used to prevent duplicate concurrent fetches for the same entry.
+    /// Entry index whose link preview is currently being fetched (deprecated in
+    /// favour of in-flight dedup inside `link_preview::fetch_link_preview`).
+    /// Retained for compatibility but no longer gates concurrent fetches.
+    #[allow(dead_code)]
     link_preview_fetch_index: Option<usize>,
     /// Whether the chat options popover is open.
     show_chat_options: bool,
@@ -3528,6 +3559,7 @@ impl IcedChat {
         local_public: PublicKey,
         relay_mode: RelayMode,
         data_dir: std::path::PathBuf,
+        persist_tx: std::sync::mpsc::Sender<PersistenceCommand>,
         runtime_handle: tokio::runtime::Handle,
         net_rx: Arc<Mutex<UnboundedReceiver<ConversationNetEvent>>>,
         net_tx: UnboundedSender<ConversationNetEvent>,
@@ -3758,6 +3790,7 @@ impl IcedChat {
             room_delete_confirm_topic: None,
             notice,
             data_dir: data_dir.clone(),
+            persist_tx,
             image_store,
             chat_history,
             outbox: Arc::new(std::sync::Mutex::new(OutboxStore::load_or_default(
@@ -3860,6 +3893,11 @@ impl IcedChat {
             pending_create_room_action: None,
             pending_confirm_create_room_action: None,
             gui_state_tx,
+            gui_state_enabled: true,
+            last_snapshot: None,
+            last_snapshot_at: std::time::Instant::now(),
+            gui_snapshot_throttle_ms: 0, // no throttle by default; main.rs sets 125ms
+            gui_snapshot_pending: false,
             recent_activity: VecDeque::with_capacity(50),
             window_width: 1200.0,
             link_preview_cache: Arc::new(StdMutex::new(link_preview::LinkPreviewCache::new())),
@@ -3955,6 +3993,68 @@ impl IcedChat {
             display_name: Some(self.local_label.clone()),
         };
         settings.save(&self.data_dir);
+    }
+
+    // ── Background persistence helpers ────────────────────────────────
+    // These send typed commands to the PersistenceCoordinator worker,
+    // offloading synchronous JSON writes from the UI event loop.
+
+    /// Queue a save of the conversation store.  Coalesced — only the
+    /// newest unsaved version is written to disk.
+    fn send_save_conversations(&self) {
+        let store = self.conversation_store.clone();
+        let _ = self.persist_tx.send(PersistenceCommand::SaveConversations(store));
+    }
+
+    /// Queue a save of the chat-history store.  The worker locks the
+    /// Arc<Mutex> and clones the data before writing, so the save is
+    /// fully offloaded.
+    fn send_save_chat_history(&self) {
+        let _ = self
+            .persist_tx
+            .send(PersistenceCommand::SaveChatHistory(self.chat_history.clone()));
+    }
+
+    /// Queue a save of the outbox store.
+    fn send_save_outbox(&self) {
+        let _ = self
+            .persist_tx
+            .send(PersistenceCommand::SaveOutbox(self.outbox.clone()));
+    }
+
+    /// Queue a save of the friends store.  Coalesced.
+    fn send_save_friends(&self) {
+        let store = self.friends.clone();
+        let _ = self.persist_tx.send(PersistenceCommand::SaveFriends(store));
+    }
+
+    /// Queue a save of the settings.  Coalesced + debounced.
+    fn send_save_settings(&self) {
+        let settings = AppSettings {
+            dark_mode: self.dark_mode,
+            sound_enabled: self.sound_enabled,
+            share_direct_addresses: self.share_direct_addresses,
+            chat_text_size: self.chat_text_size,
+            display_name: Some(self.local_label.clone()),
+        };
+        let data_dir = self.data_dir.clone();
+        let _ = self
+            .persist_tx
+            .send(PersistenceCommand::SaveSettings { settings, data_dir });
+    }
+
+    /// Queue a save of the user profile store.  Coalesced + debounced.
+    fn send_save_profile(&self) {
+        let store = self.profile_store.clone();
+        let _ = self.persist_tx.send(PersistenceCommand::SaveProfile(store));
+    }
+
+    /// Queue a save of the friend-request store.  Coalesced + debounced.
+    fn send_save_friend_requests(&self) {
+        let store = self.friend_request_store.clone();
+        let _ = self
+            .persist_tx
+            .send(PersistenceCommand::SaveFriendRequests(store));
     }
 
     /// Keep the virtualized chat log anchored to the latest entry when the
@@ -4462,6 +4562,7 @@ impl IcedChat {
             link_preview: None,
             link_preview_loading: false,
             link_preview_error: false,
+            parsed_segments: None,
             })
             } else {
             Some(ChatEntry {
@@ -4488,6 +4589,7 @@ impl IcedChat {
             link_preview: None,
             link_preview_loading: false,
             link_preview_error: false,
+            parsed_segments: None,
             })
         }
     }
@@ -4556,6 +4658,7 @@ impl IcedChat {
             link_preview: None,
             link_preview_loading: false,
             link_preview_error: false,
+            parsed_segments: None,
         })
     }
 
@@ -5439,7 +5542,18 @@ impl IcedChat {
 // ── Update ────────────────────────────────────────────────────────────
 
 impl IcedChat {
-    fn publish_gui_state(&self) {
+    fn publish_gui_state(&mut self) {
+        // Step 1: Quick exit if diagnostics are disabled.
+        if !self.gui_state_enabled {
+            return;
+        }
+
+        // Step 2: No consumers listening — skip building the snapshot.
+        if self.gui_state_tx.receiver_count() == 0 {
+            return;
+        }
+
+        // Step 3: Build the snapshot from current state.
         let (active_screen, active_room) = match &self.screen {
             Screen::Chat { topic } => ("Chat", Some(topic.to_string())),
             Screen::ChatList => ("ChatList", None),
@@ -5450,7 +5564,7 @@ impl IcedChat {
             Screen::FriendProfile(_) => ("FriendProfile", None),
             Screen::Discover => ("Discover", None),
         };
-        let _ = self.gui_state_tx.send(IcedStateSnapshot {
+        let snapshot = IcedStateSnapshot {
             node_id: self.local_public.to_string(),
             version: version_tag(),
             active_screen: active_screen.to_string(),
@@ -5471,7 +5585,50 @@ impl IcedChat {
                 || self.room_delete_confirm_topic.is_some(),
             unread_count: 0,
             timestamp: chrono::Utc::now(),
-        });
+        };
+
+        // Step 4: Dirty check — skip if no meaningful state change.
+        if let Some(ref last) = self.last_snapshot {
+            if last.node_id == snapshot.node_id
+                && last.version == snapshot.version
+                && last.active_screen == snapshot.active_screen
+                && last.active_room == snapshot.active_room
+                && last.conversation_count == snapshot.conversation_count
+                && last.neighbor_count == snapshot.neighbor_count
+                && last.direct_peer_count == snapshot.direct_peer_count
+                && last.relayed_peer_count == snapshot.relayed_peer_count
+                && last.mesh_health == snapshot.mesh_health
+                && last.online_friend_count == snapshot.online_friend_count
+                && last.friend_count == snapshot.friend_count
+                && last.total_entry_count == snapshot.total_entry_count
+                && last.dark_mode == snapshot.dark_mode
+                && last.composer_text == snapshot.composer_text
+                && last.dialog_open == snapshot.dialog_open
+                && last.unread_count == snapshot.unread_count
+            {
+                return; // No meaningful change — skip publish.
+            }
+        }
+
+        // Step 5: Rate-limit — throttle to 4-10 updates/sec.
+        let now = std::time::Instant::now();
+        if self.gui_snapshot_throttle_ms > 0 {
+            let elapsed_ms = now
+                .duration_since(self.last_snapshot_at)
+                .as_millis() as u64;
+            if elapsed_ms < self.gui_snapshot_throttle_ms {
+                // Within throttle window — mark pending and skip.
+                self.gui_snapshot_pending = true;
+                return;
+            }
+        }
+
+        // Step 6: Flush any accumulated pending flag and send.
+        self.gui_snapshot_pending = false;
+        self.last_snapshot_at = now;
+        let boxed = Box::new(snapshot.clone());
+        let _ = self.gui_state_tx.send(snapshot);
+        self.last_snapshot = Some(boxed);
     }
 
     pub fn update(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
@@ -6366,8 +6523,9 @@ impl IcedChat {
                             .unwrap()
                             .update_delivery_state(*id, DeliveryState::Sent);
                     }
-                    let _ = self.outbox.lock().unwrap().save();
-                    let _ = self.chat_history.lock().unwrap().save();
+                    self.send_save_outbox();
+                    self.send_save_chat_history();
+                    // After delivering, try the next pending
                     task::spawn(async move {
                         for (_, bytes) in replay {
                             let _ = sender.broadcast(bytes.into()).await;
@@ -6776,9 +6934,7 @@ impl IcedChat {
                             RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                         let _ = room.save();
                         self.try_save_friends();
-                        if let Err(err) = self.friend_request_store.save() {
-                            debug!(error = %err, "failed to save friend request store");
-                        }
+                        self.send_save_friend_requests();
 
                         let secret_key = self.secret_key.clone();
                         let whisper_handle = self.whisper_handle.clone();
@@ -6875,9 +7031,7 @@ impl IcedChat {
                     Ok(_) => {
                         self.requests_sidebar_revision =
                             self.requests_sidebar_revision.wrapping_add(1);
-                        if let Err(err) = self.friend_request_store.save() {
-                            debug!(error = %err, "failed to save friend request store after accept");
-                        }
+                        self.send_save_friend_requests();
                         iced::Task::done(AppMessage::IncomingFriendRequestProcessed {
                             request_id,
                             peer,
@@ -6899,9 +7053,7 @@ impl IcedChat {
                     Ok(_) => {
                         self.requests_sidebar_revision =
                             self.requests_sidebar_revision.wrapping_add(1);
-                        if let Err(err) = self.friend_request_store.save() {
-                            debug!(error = %err, "failed to save friend request store after decline");
-                        }
+                        self.send_save_friend_requests();
                         iced::Task::done(AppMessage::IncomingFriendRequestProcessed {
                             request_id,
                             peer,
@@ -7000,7 +7152,7 @@ impl IcedChat {
                     peer.to_string(),
                     record.display_label(&fid, &peer),
                 ));
-                let _ = self.conversation_store.save();
+                let _ = self.send_save_conversations();
                 let room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                 let _ = room.save();
                 self.try_save_friends();
@@ -7612,13 +7764,15 @@ impl IcedChat {
                         text.clone(),
                     );
                     let id = store.push_with_id(entry);
-                    let _ = store.save();
+                    drop(store);
+                    self.send_save_chat_history();
                     id
                 };
                 {
                     let mut outbox = self.outbox.lock().unwrap();
                     let _ = outbox.push(OutboxEntry::new(event_id, self.topic, encoded.to_vec()));
-                    let _ = outbox.save();
+                    drop(outbox);
+                    self.send_save_outbox();
                 }
                 self.self_sent_events.insert(msg_hash, event_id);
                 let mut local_entry = ChatEntry::local(&self.local_label, &text);
@@ -7859,9 +8013,7 @@ impl IcedChat {
                             Ok(_) => {
                                 self.requests_sidebar_revision =
                                     self.requests_sidebar_revision.wrapping_add(1);
-                                if let Err(err) = self.friend_request_store.save() {
-                                    debug!(error = %err, "failed to save friend request store after accept");
-                                }
+                                self.send_save_friend_requests();
                                 if let Ok(peer) = PublicKey::from_str(&req.requester) {
                                     iced::Task::done(AppMessage::IncomingFriendRequestProcessed {
                                         request_id: req_id,
@@ -7901,9 +8053,7 @@ impl IcedChat {
                             Ok(_) => {
                                 self.requests_sidebar_revision =
                                     self.requests_sidebar_revision.wrapping_add(1);
-                                if let Err(err) = self.friend_request_store.save() {
-                                    debug!(error = %err, "failed to save friend request store after decline");
-                                }
+                                self.send_save_friend_requests();
                                 if let Ok(peer) = PublicKey::from_str(&req.requester) {
                                     iced::Task::done(AppMessage::IncomingFriendRequestProcessed {
                                         request_id: req_id,
@@ -7932,9 +8082,7 @@ impl IcedChat {
                     .cancel_request(&request_id, &local_pk)
                 {
                     Ok(_) => {
-                        if let Err(err) = self.friend_request_store.save() {
-                            debug!(error = %err, "failed to save friend request store after cancel");
-                        }
+                        self.send_save_friend_requests();
                         iced::Task::none()
                     }
                     Err(err) => iced::Task::done(AppMessage::ErrorMsg(format!(
@@ -7952,9 +8100,7 @@ impl IcedChat {
                             self.outgoing_request_states
                                 .insert(peer, OutgoingRequestState::Pending);
                         }
-                        if let Err(err) = self.friend_request_store.save() {
-                            debug!(error = %err, "failed to save friend request store");
-                        }
+                        self.send_save_friend_requests();
                         self.rebuild_join_request_list();
                     }
                     Err(error) => {
@@ -8070,9 +8216,7 @@ impl IcedChat {
                                     Ok(_) => {
                                         self.requests_sidebar_revision =
                                             self.requests_sidebar_revision.wrapping_add(1);
-                                        if let Err(err) = self.friend_request_store.save() {
-                                            debug!(error = %err, "failed to save incoming friend request");
-                                        }
+                                        self.send_save_friend_requests();
                                     }
                                     Err(FriendRequestError::DuplicatePending { .. }) => {}
                                     Err(err) => {
@@ -8145,7 +8289,7 @@ impl IcedChat {
                                     sender.to_string(),
                                     label,
                                 ));
-                                let _ = self.conversation_store.save();
+                                let _ = self.send_save_conversations();
                                 let room =
                                     RoomStore::with_peers(&self.data_dir, topic, persisted_addrs);
                                 let _ = room.save();
@@ -8575,8 +8719,8 @@ impl IcedChat {
                             }
                         }
                     }
-                    let _ = outbox.save();
-                    let _ = history.save();
+                    self.send_save_outbox();
+                    self.send_save_chat_history();
                 }
                 if changed {
                     self.layout_cache.borrow_mut().clear();
@@ -9099,9 +9243,9 @@ impl IcedChat {
                         .shared_files_mut()
                         .retain(|file| file.id != profile_file.id);
                     self.profile_store.add_shared_file(profile_file);
-                    let _ = self.profile_store.save();
-                }
-                if self.has_message(&message_hash) {
+                    self.send_save_profile();
+                    }
+                    if self.has_message(&message_hash) {
                     return self.start_next_pending_image_download();
                 }
                 let sender_name = if sender == self.local_public {
@@ -11122,6 +11266,12 @@ impl IcedChat {
                         entry.link_preview_loading = false;
                         entry.link_preview_error = true;
                     }
+                    link_preview::LinkPreviewResult::Pending => {
+                        // Another task is already fetching this URL.
+                        // The first fetch will populate the cache and send
+                        // its own `LinkPreviewLoaded` message.
+                        return iced::Task::none();
+                    }
                 }
                 entry.bump_gen();
                 self.link_preview_fetch_index = None;
@@ -11652,9 +11802,7 @@ impl IcedChat {
                 // survives a restart.
                 self.conversations.remove(&topic);
                 self.conversation_store.remove(&topic);
-                if let Err(err) = self.conversation_store.save() {
-                    warn!("failed to save conversation store after delete: {err}");
-                }
+                self.send_save_conversations();
                 // Also remove from the SQLite message store so the chat
                 // messages and conversation metadata don't linger on disk.
                 let store_path = self.data_dir.join("message_store.db");
@@ -11721,7 +11869,7 @@ impl IcedChat {
                         peer.to_string(),
                         peer.fmt_short().to_string(),
                     ));
-                let _ = self.conversation_store.save();
+                let _ = self.send_save_conversations();
                 self.try_save_friends();
                 iced::Task::done(AppMessage::OpenRoom(topic))
             }
@@ -11743,7 +11891,7 @@ impl IcedChat {
                 if let Some(entry) = self.conversation_store.find_mut(&topic) {
                     entry.archived = true;
                 }
-                let _ = self.conversation_store.save();
+                let _ = self.send_save_conversations();
                 // If this was the displayed conversation, go back to chat list
                 if topic == self.topic {
                     self.screen = Screen::ChatList;
@@ -11788,14 +11936,16 @@ impl IcedChat {
                             text.clone(),
                         );
                         let id = store.push_with_id(entry);
-                        let _ = store.save();
+                        drop(store);
+                        self.send_save_chat_history();
                         id
                     };
                     {
                         let mut outbox = self.outbox.lock().unwrap();
                         let _ =
                             outbox.push(OutboxEntry::new(event_id, self.topic, encoded.to_vec()));
-                        let _ = outbox.save();
+                        drop(outbox);
+                        self.send_save_outbox();
                     }
                     self.self_sent_events.insert(msg_hash, event_id);
                     let mut local_entry = ChatEntry::local(&self.local_label, &text);
@@ -11876,23 +12026,15 @@ impl IcedChat {
         // contents changed so a restart cannot resurrect the deleted room data.
         if report.chat_entries_removed > 0 {
             self.chat_history_dirty = true;
-            self.chat_history
-                .lock()
-                .unwrap()
-                .save()
-                .map_err(|err| err.to_string())?;
+            self.send_save_chat_history();
             self.chat_history_dirty = false;
         }
         if report.outbox_entries_removed > 0 {
-            self.outbox
-                .lock()
-                .unwrap()
-                .save()
-                .map_err(|err| err.to_string())?;
+            self.send_save_outbox();
         }
         if report.friend_records_updated > 0 {
             self.mark_friends_sidebar_dirty();
-            self.friends.save().map_err(|err| err.to_string())?;
+            self.send_save_friends();
             self.friends_dirty = false;
         }
 
@@ -12000,7 +12142,7 @@ impl IcedChat {
             self.conversation_store.touch_and_bump(topic);
         }
         self.update_room_preview(topic, event);
-        let _ = self.conversation_store.save();
+        self.send_save_conversations();
         let safety = self.public_room_safety.clone();
         if let Err(err) = handle_net_event_with_safety_for_topic(
             event.clone(),
@@ -12021,13 +12163,17 @@ impl IcedChat {
                         if entry.delivery_state == DeliveryState::Sent {
                             entry.delivery_state = DeliveryState::Delivered;
                             entry.bump_gen();
-                            let mut store = self.chat_history.lock().unwrap();
-                            let _ = store.update_delivery_state(event_id, DeliveryState::Delivered);
-                            let _ = store.save();
-                            let mut outbox = self.outbox.lock().unwrap();
-                            let _ =
-                                outbox.update_delivery_state(event_id, DeliveryState::Delivered);
-                            let _ = outbox.save();
+                            {
+                                let mut store = self.chat_history.lock().unwrap();
+                                let _ = store.update_delivery_state(event_id, DeliveryState::Delivered);
+                            }
+                            self.send_save_chat_history();
+                            {
+                                let mut outbox = self.outbox.lock().unwrap();
+                                let _ =
+                                    outbox.update_delivery_state(event_id, DeliveryState::Delivered);
+                            }
+                            self.send_save_outbox();
                         }
                     }
                 }
@@ -12128,10 +12274,6 @@ impl IcedChat {
         if entry_index >= self.entries.len() {
             return None;
         }
-        // Don't start a new fetch if one is already in-flight
-        if self.link_preview_fetch_index.is_some() {
-            return None;
-        }
         let body = self.entries[entry_index].body.clone();
         let first_url = link_preview::find_first_url(&body)?;
 
@@ -12146,7 +12288,11 @@ impl IcedChat {
             return None;
         }
 
-        self.link_preview_fetch_index = Some(entry_index);
+        // In-flight dedup and concurrency limiting are handled inside
+        // `fetch_link_preview` — it registers the URL in a shared static set
+        // and acquires a semaphore permit. If the URL is already being fetched,
+        // it returns `LinkPreviewResult::Pending`, which the message handler
+        // treats as a no-op (the first fetch will populate the cache).
         self.entries[entry_index].link_preview_loading = true;
 
         let cache = self.link_preview_cache.clone();
@@ -12154,7 +12300,8 @@ impl IcedChat {
             async move {
                 let url_to_fetch = first_url.clone();
                 let result = link_preview::fetch_link_preview(&url_to_fetch).await;
-                // Cache the result regardless of success/failure
+                // Cache the result regardless of success/failure.
+                // `Pending` results are not stored (cache internals filter them).
                 cache.lock().ok()?.insert(&url_to_fetch, result.clone());
                 Some(AppMessage::LinkPreviewLoaded(entry_index, result))
             },
@@ -12270,7 +12417,7 @@ impl IcedChat {
             // the event loop.  An async snapshot can race an incoming
             // message and leave a newly accepted contact unauthorized.
             self.friends_dirty = false;
-            let _ = self.friends.save();
+            self.send_save_friends();
         }
     }
 
@@ -12305,18 +12452,15 @@ impl IcedChat {
 
     fn try_save_chat_history(&mut self) {
         if self.chat_history_dirty {
-            let _ = self.chat_history.lock().unwrap().save();
             self.chat_history_dirty = false;
+            self.send_save_chat_history();
         }
     }
 
     /// Persist the conversation store if it has changes.
     #[expect(dead_code)]
     fn try_save_conversation_store(&mut self) {
-        let store = self.conversation_store.clone();
-        let _ = std::thread::spawn(move || {
-            let _ = store.save();
-        });
+        self.send_save_conversations();
     }
 }
 
@@ -15637,7 +15781,7 @@ impl IcedChat {
             };
 
             // ── Clickable URL-aware body ──
-            let segments = link_preview::parse_url_segments(&entry.body);
+            let segments = entry.parsed_segments.as_deref().unwrap_or(&[]);
             let body_el: iced::Element<'_, AppMessage> = if segments.len() == 1
                 && matches!(&segments[0], link_preview::TextSegment::Text(_))
             {
@@ -16890,27 +17034,33 @@ impl IcedChat {
 // ── Global keyboard shortcuts subscription ─────────────────────────────
 
 /// Subscribe to global keyboard shortcuts (Escape, Ctrl+N, Ctrl+Backspace, /).
+///
+/// Uses `filter_map` so non-matching key events are silently dropped without
+/// producing `AppMessage::Noop`, avoiding unnecessary event-loop wakeups
+/// while the user is typing in the chat input field.
 pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
     use iced::keyboard::{self, key};
-    keyboard::listen().map(|event: keyboard::Event| -> AppMessage {
+    keyboard::listen().filter_map(|event: keyboard::Event| -> Option<AppMessage> {
         match event {
             keyboard::Event::KeyPressed { key, modifiers, .. } => {
                 let ctrl = modifiers.control();
                 match key {
-                    key::Key::Named(key::Named::Escape) => AppMessage::Shortcut(Shortcut::Escape),
+                    key::Key::Named(key::Named::Escape) => {
+                        Some(AppMessage::Shortcut(Shortcut::Escape))
+                    }
                     key::Key::Named(key::Named::Backspace) if ctrl => {
-                        AppMessage::Shortcut(Shortcut::BackToChatList)
+                        Some(AppMessage::Shortcut(Shortcut::BackToChatList))
                     }
                     key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => {
-                        AppMessage::Shortcut(Shortcut::NewChat)
+                        Some(AppMessage::Shortcut(Shortcut::NewChat))
                     }
                     key::Key::Character(c) if c == "/" => {
-                        AppMessage::Shortcut(Shortcut::QuickCommand)
+                        Some(AppMessage::Shortcut(Shortcut::QuickCommand))
                     }
-                    _ => AppMessage::Noop,
+                    _ => None,
                 }
             }
-            _ => AppMessage::Noop,
+            _ => None,
         }
     })
 }
@@ -18850,6 +19000,7 @@ mod tests {
                 link_preview: None,
                 link_preview_loading: false,
                 link_preview_error: false,
+                parsed_segments: None,
             })
             .collect();
         let total: usize = entries
@@ -18904,6 +19055,7 @@ mod tests {
             link_preview: None,
             link_preview_loading: false,
             link_preview_error: false,
+            parsed_segments: None,
         };
         assert_eq!(e.body, "hello");
         assert_eq!(e.label, "peer");
@@ -20321,6 +20473,7 @@ mod tests {
             whisper_handle,
             backfill_handle,
             chat_history,
+            message_store,
             net_rx,
             net_tx,
             room_history,
@@ -20397,6 +20550,7 @@ mod tests {
                 whisper_handle,
                 backfill_handle,
                 chat_history,
+                message_store,
                 net_rx,
                 net_tx,
                 room_history,
@@ -20405,6 +20559,9 @@ mod tests {
 
         let (dummy_discovered_tx, dummy_discovered_rx) =
             tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(1);
+        let (_, dummy_directory_rx) =
+            tokio::sync::mpsc::channel::<DirectoryRoomUpdate>(1);
+        let dummy_directory_rx = Arc::new(Mutex::new(dummy_directory_rx));
 
         let app = IcedChat::new(
             secret_key,
@@ -20435,7 +20592,8 @@ mod tests {
             false,
             None,
             Arc::new(Mutex::new(dummy_discovered_rx)),
-            None,
+            dummy_directory_rx,
+            None, // dht (private-room discovery disabled by default in tests)
             false,
             boru_core::diagnostics::IcedMessageJournal::default(),
             None,

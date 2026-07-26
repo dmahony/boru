@@ -506,7 +506,7 @@ where
 /// Persistent user profile and shared file metadata store.
 ///
 /// Serialised to `profile.json` in the configured data directory.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserProfileStore {
     /// Format version for future migrations.
     #[serde(default = "default_schema_version")]

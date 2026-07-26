@@ -14,6 +14,7 @@ mod log_viewer;
 mod mcp_server;
 mod notification;
 mod perf_tracker;
+mod persistence_coordinator;
 mod presentation;
 mod link_preview;
 
@@ -1180,45 +1181,56 @@ fn main() -> Result<()> {
 
     let initial_topic = initial_room.as_ref().map(|r| r.0);
 
+    let persist_coordinator = persistence_coordinator::PersistenceCoordinator::spawn();
+    let persist_tx = persist_coordinator.sender();
+
     let app_cell = std::sync::Mutex::new(Some((
-        IcedChat::new(
-            secret_key,
-            gossip,
-            router,
-            blob_store,
-            endpoint.clone(),
-            memory_lookup,
-            local_label,
-            local_public,
-            relay_mode,
-            data_dir,
-            runtime.handle().clone(),
-            Arc::clone(&net_rx),
-            net_tx,
-            room_history,
-            friends,
-            friend_mgr,
-            Arc::clone(&friend_events_rx),
-            Arc::clone(&whisper_events_rx),
-            inbox_events_rx,
-            whisper_handle.clone(),
-            initial_room,
-            notice,
-            chat_history,
-            message_store,
-            backfill_handle,
-            initial_topic.is_some() && args.command.is_none(),
-            None,
-            Arc::clone(&discovered_peers_rx),
-            directory_room_rx,
-            dht_for_private,
-            args.no_dht,
-            iced_diagnostics,
-            Some(Arc::new(tokio::sync::Mutex::new(gui_action_rx))),
-            gui_state_tx,
-            gui_action_history,
-            Some((*storage).clone()),
-        ),
+        {
+            let mut app = IcedChat::new(
+                secret_key,
+                gossip,
+                router,
+                blob_store,
+                endpoint.clone(),
+                memory_lookup,
+                local_label,
+                local_public,
+                relay_mode,
+                data_dir,
+                persist_tx,
+                runtime.handle().clone(),
+                Arc::clone(&net_rx),
+                net_tx,
+                room_history,
+                friends,
+                friend_mgr,
+                Arc::clone(&friend_events_rx),
+                Arc::clone(&whisper_events_rx),
+                inbox_events_rx,
+                whisper_handle.clone(),
+                initial_room,
+                notice,
+                chat_history,
+                message_store,
+                backfill_handle,
+                initial_topic.is_some() && args.command.is_none(),
+                None,
+                Arc::clone(&discovered_peers_rx),
+                directory_room_rx,
+                dht_for_private,
+                args.no_dht,
+                iced_diagnostics,
+                Some(Arc::new(tokio::sync::Mutex::new(gui_action_rx))),
+                gui_state_tx,
+                gui_action_history,
+                Some((*storage).clone()),
+            );
+            // Enable snapshot throttle: max ~8 updates/sec (125ms gap)
+            // so rapidly changing GUI state (composer text, unread counts)
+            // doesn't flood the watch channel and MCP consumers.
+            app.gui_snapshot_throttle_ms = 125;
+            app
+        },
         initial_topic,
     )));
 
