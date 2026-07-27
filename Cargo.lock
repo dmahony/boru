@@ -3581,8 +3581,6 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "460de6bc52163b41b1646931f2897e5ab986f0966ade444467fec25024751a72"
 dependencies = [
  "axum",
  "backon",
@@ -3800,8 +3798,6 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24bd586cf927f7b700f56ec3639b53cb5fa901ce284784051ff71092bfbf8193"
 dependencies = [
  "blake3",
  "bytes",
@@ -3886,8 +3882,6 @@ dependencies = [
 [[package]]
 name = "irpc"
 version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3623d6ff582b415904b29bbe6ebcb4a4f9a262ccdee05a45fdd003ef0950c386"
 dependencies = [
  "futures-util",
  "irpc-derive",
@@ -9716,3 +9710,7 @@ dependencies = [
  "syn 2.0.119",
  "winnow",
 ]
+
+[[patch.unused]]
+name = "irpc-iroh"
+version = "0.17.0"

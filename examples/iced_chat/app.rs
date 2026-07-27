@@ -365,7 +365,6 @@ pub(crate) const SPACE_10: f32 = 10.0;
 // Keep previews useful without allowing a single attachment to take over the
 // conversation canvas. ContentFit::Contain preserves the source aspect ratio.
 const IMAGE_PREVIEW_MAX_WIDTH: f32 = 360.0;
-const IMAGE_PREVIEW_ENLARGED_WIDTH: f32 = 420.0;
 const IMAGE_PREVIEW_MAX_HEIGHT: f32 = 400.0;
 const ATTACHMENT_RADIUS: f32 = 10.0;
 
@@ -388,6 +387,88 @@ fn save_profile_image(data_dir: &std::path::Path, bytes: &[u8]) -> std::io::Resu
     let temporary = data_dir.join(format!("{PROFILE_IMAGE_FILE}.tmp"));
     fs::write(&temporary, bytes)?;
     fs::rename(temporary, data_dir.join(PROFILE_IMAGE_FILE))
+}
+
+/// The subdirectory under data_dir where cached friend profile images are stored.
+const FRIEND_PROFILE_IMAGES_DIR: &str = "profile_images";
+
+/// Return the path to the on-disk cache for a peer's profile image.
+fn friend_profile_image_path(data_dir: &std::path::Path, peer: &PublicKey) -> PathBuf {
+    data_dir
+        .join(FRIEND_PROFILE_IMAGES_DIR)
+        .join(peer.fmt_short().to_string())
+}
+
+/// Save a friend's profile image bytes to the on-disk cache.
+fn save_friend_profile_image(data_dir: &std::path::Path, peer: &PublicKey, bytes: &[u8]) {
+    let dir = data_dir.join(FRIEND_PROFILE_IMAGES_DIR);
+    if let Err(e) = fs::create_dir_all(&dir) {
+        tracing::warn!("create profile_images dir: {e}");
+        return;
+    }
+    let target = friend_profile_image_path(data_dir, peer);
+    let tmp = target.with_extension("tmp");
+    if let Err(e) = fs::write(&tmp, bytes) {
+        tracing::warn!("write friend profile image {peer}: {e}");
+        let _ = fs::remove_file(&tmp);
+        return;
+    }
+    if let Err(e) = fs::rename(&tmp, &target) {
+        tracing::warn!("rename friend profile image {peer}: {e}");
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+/// Load all cached friend profile images from disk into the in-memory handle map.
+fn load_cached_friend_profile_images(
+    data_dir: &std::path::Path,
+) -> HashMap<PublicKey, Option<iced::widget::image::Handle>> {
+    let dir = data_dir.join(FRIEND_PROFILE_IMAGES_DIR);
+    let mut handles = HashMap::new();
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return handles,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        // Skip temp files left behind by interrupted writes.
+        if path.extension().is_some_and(|e| e == "tmp") {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Parse the filename as a hex-encoded 32-byte public key.
+        let Ok(bytes) = hex::decode(name) else {
+            continue;
+        };
+        if bytes.len() != 32 {
+            continue;
+        }
+        let arr: [u8; 32] = match bytes.try_into() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let Ok(peer) = PublicKey::from_bytes(&arr) else {
+            continue;
+        };
+        match fs::read(&path) {
+            Ok(data) if !data.is_empty() && data.len() <= PROFILE_IMAGE_MAX_BYTES => {
+                let handle = iced::widget::image::Handle::from_bytes(data);
+                handles.insert(peer, Some(handle));
+            }
+            Ok(_) => {
+                // Empty or oversized — clean up.
+                let _ = fs::remove_file(&path);
+            }
+            Err(_) => {}
+        }
+    }
+    handles
 }
 
 /// Load an image from the per-user store without exposing filesystem paths.
@@ -1783,8 +1864,8 @@ impl ConversationLive {
 pub struct IcedChat {
     // ── Navigation ──
     pub screen: Screen,
-    /// Track which images (by entry index) are currently enlarged in the chat log.
-    enlarged_images: HashSet<usize>,
+    /// Track which image is currently shown in the full-screen lightbox overlay.
+    lightbox_image: Option<usize>,
     /// Pending topic we're connecting to (used during the async handoff
     /// from clicking a room to actually subscribing).
     pending_topic: Option<TopicId>,
@@ -2924,8 +3005,10 @@ pub enum AppMessage {
     InviteWhisperInputChanged(String),
     /// Send a room invite via whisper to the entered peer key.
     InviteSendWhisper,
-    /// Toggle the image at the given entry index between enlarged and normal size in the chat log.
-    ToggleImageEnlarge(usize),
+    /// Open the full-screen image lightbox for the given entry index.
+    OpenImageLightbox(usize),
+    /// Close the full-screen image lightbox.
+    CloseImageLightbox,
     /// Image processing failed after the user selected it.
     ImageUploadFailed(String),
     /// File upload/sharing failed after the user selected it.
@@ -3480,22 +3563,14 @@ fn view_local_profile_block(
         .align_x(Alignment::Start);
 
     // ── Settings gear and add button ──
-    let settings_btn = iced::widget::tooltip(
-        button(icon_svg(ICON_SETTINGS, TYPO_MD))
-            .on_press(AppMessage::OpenSettings)
-            .padding([SPACE_6, SPACE_8])
-            .style(BUTTON_ICON),
-        text("Open settings"),
-        iced::widget::tooltip::Position::Bottom,
-    );
-    let add_btn = iced::widget::tooltip(
-        button(icon_svg(ICON_PLUS, TYPO_MD))
-            .on_press(AppMessage::ToggleAddMenu)
-            .padding([SPACE_6, SPACE_8])
-            .style(BUTTON_ICON),
-        text("Add conversation or friend"),
-        iced::widget::tooltip::Position::Bottom,
-    );
+    let settings_btn = button(icon_svg(ICON_SETTINGS, TYPO_MD))
+        .on_press(AppMessage::OpenSettings)
+        .padding([SPACE_6, SPACE_8])
+        .style(BUTTON_ICON);
+    let add_btn = button(icon_svg(ICON_PLUS, TYPO_MD))
+        .on_press(AppMessage::ToggleAddMenu)
+        .padding([SPACE_6, SPACE_8])
+        .style(BUTTON_ICON);
 
     Row::new()
         .push(avatar)
@@ -3789,7 +3864,7 @@ impl IcedChat {
             splash_has_rendered: false,
             splash_spinner_frame: 0,
             connecting_spinner_frame: 0,
-            enlarged_images: HashSet::new(),
+            lightbox_image: None,
             pending_topic: None,
             room_loading: false,
             room_history,
@@ -3842,7 +3917,11 @@ impl IcedChat {
             mesh_health: MeshHealth::Good,
             last_mesh_health: None,
             conversation_subscription_pending: true,
-            mesh_event_log: std::collections::VecDeque::new(),
+            mesh_event_log: {
+                let mut log = std::collections::VecDeque::new();
+                log.push_back("Starting up...".to_string());
+                log
+            },
             presence_counter: 5,
             heartbeat_counter: 2,
             conn_refresh_in_flight: false,
@@ -3910,7 +3989,7 @@ impl IcedChat {
             profile_image_ticket,
             profile_image_identifier,
             local_mailbox_key,
-            friend_image_handles: HashMap::new(),
+            friend_image_handles: load_cached_friend_profile_images(&data_dir),
             friend_image_tickets: HashMap::new(),
             pending_profile_image_tickets: pending_friend_tickets,
             friend_profile_versions: HashMap::new(),
@@ -4777,6 +4856,14 @@ impl IcedChat {
         let entry = ChatEntry::system(text);
         self.entries_push(entry);
     }
+
+    /// Push a message to the mesh event log shown on the home screen (capacity 50).
+    fn push_mesh_event(&mut self, text: impl Into<String>) {
+        if self.mesh_event_log.len() >= 50 {
+            self.mesh_event_log.pop_front();
+        }
+        self.mesh_event_log.push_back(text.into());
+    }
     #[expect(dead_code)]
     fn push_local(&mut self, text: impl Into<String>) {
         let entry = ChatEntry::local(&self.local_label, text);
@@ -4975,6 +5062,10 @@ impl IcedChat {
         for k in &keys {
             self.friend_image_handles.remove(k);
             self.friend_image_tickets.remove(k);
+            // Also evict the on-disk cache so stale images don't survive.
+            let path = friend_profile_image_path(&self.data_dir, k);
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(path.with_extension("tmp"));
         }
     }
 
@@ -5085,7 +5176,8 @@ impl IcedChat {
             AppMessage::ShowRenameFriendInput => "ShowRenameFriendInput",
             AppMessage::CancelBlockFriend => "CancelBlockFriend",
             AppMessage::ConfirmBlockFriend => "ConfirmBlockFriend",
-            AppMessage::ToggleImageEnlarge(..) => "ToggleImageEnlarge",
+            AppMessage::OpenImageLightbox(..) => "OpenImageLightbox",
+            AppMessage::CloseImageLightbox => "CloseImageLightbox",
             AppMessage::RetryConnection => "RetryConnection",
             AppMessage::BackgroundSubscribe(..) => "BackgroundSubscribe",
             AppMessage::BackgroundSubscribed(..) => "BackgroundSubscribed",
@@ -5600,11 +5692,15 @@ impl IcedChat {
     /// blocking dialog. GUI test actions use the same messages as visible
     /// Cancel buttons rather than mutating dialog state directly.
     fn close_dialog_message(
+        image_lightbox: bool,
         show_create_room_dialog: bool,
         connection_details_dialog: bool,
         history_confirm_clear: bool,
         room_delete_confirm_topic: Option<TopicId>,
     ) -> Result<AppMessage, GuiActionError> {
+        if image_lightbox {
+            return Ok(AppMessage::CloseImageLightbox);
+        }
         if connection_details_dialog {
             return Ok(AppMessage::CloseConnectionDetails);
         }
@@ -5625,6 +5721,7 @@ impl IcedChat {
 
     fn close_current_dialog(&self) -> Result<AppMessage, GuiActionError> {
         Self::close_dialog_message(
+            self.lightbox_image.is_some(),
             self.show_create_room_dialog,
             self.connection_details_dialog.is_some(),
             self.history_confirm_clear,
@@ -6061,6 +6158,110 @@ impl IcedChat {
                 self.show_create_room_dialog = false;
                 let dht_enabled = self.create_room_dht_enabled && !self.private_dht_disabled;
                 let room_name = std::mem::take(&mut self.create_room_name);
+                let advertise = self.create_room_advertise;
+
+                // ── Public room: advertise without auto-joining ──────
+                if advertise {
+                    let topic = TopicId::from_bytes(rand::random());
+                    let ticket = self.room_ticket(topic);
+                    let ticket_str = ticket.to_string();
+                    // Persist a minimal RoomStore entry so the room and its
+                    // ticket survive restarts (needed for periodic re-advertise).
+                    let mut room = RoomStore::with_peers(
+                        &self.data_dir,
+                        topic,
+                        vec![invitation_endpoint_addr(
+                            self.endpoint.watch_addr().get(),
+                            self.share_direct_addresses,
+                        )],
+                    );
+                    let _ = room.save();
+                    // Mark as advertised so the periodic tick broadcasts it.
+                    self.advertised_rooms.insert(topic);
+                    let display_name = if room_name.is_empty() {
+                        topic.to_string()
+                    } else {
+                        room_name
+                    };
+                    // Create an archived conversation entry so the room name
+                    // is available for the periodic advertisement tick and
+                    // the room can be unarchived into the CHATS sidebar later.
+                    let mut entry = ConversationEntry::new(topic, "", &display_name);
+                    entry.archived = true;
+                    self.conversation_store.upsert(entry);
+                    self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                    let _ = self.send_save_conversations();
+                    // Upsert into the local directory store so the creator
+                    // sees their own room in the PUBLIC ROOMS sidebar.
+                    {
+                        let local_pk = self.endpoint.id();
+                        let mut store = self.directory_store.lock().unwrap();
+                        let ad = RoomAdvertisement {
+                            room_name: display_name.clone(),
+                            description: String::new(),
+                            topic,
+                            ticket: ticket_str.clone(),
+                            member_count: 0,
+                            last_activity: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
+                        };
+                        store.upsert(ad, local_pk);
+                    }
+                    // Broadcast an immediate advertisement on the directory
+                    // topic so other peers see it without waiting for the
+                    // ~60 s periodic tick.  If the directory sender is not
+                    // yet available the periodic tick will pick it up.
+                    let advert_task = if let Some(ref dir_sender) = self.directory_sender {
+                        let sk = self.secret_key.clone();
+                        let s = dir_sender.clone();
+                        let ad_ticket = ticket_str.clone();
+                        Some(iced::Task::perform(
+                            async move {
+                                let ad = RoomAdvertisement {
+                                    room_name: display_name,
+                                    description: String::new(),
+                                    topic,
+                                    ticket: ad_ticket,
+                                    member_count: 0,
+                                    last_activity: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as u64,
+                                };
+                                let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
+                                let signature = sk.sign(&ad_bytes);
+                                let msg = crate::Message::RoomAdvertisement {
+                                    ad,
+                                    signature: signature.to_bytes().to_vec(),
+                                };
+                                match SignedMessage::sign_and_encode(&sk, &msg) {
+                                    Ok(encoded) => {
+                                        let _ = s.broadcast(encoded).await;
+                                    }
+                                    Err(_) => {}
+                                }
+                            },
+                            |_| AppMessage::Noop,
+                        ))
+                    } else {
+                        None
+                    };
+                    // Show success feedback and stay on the chat list.
+                    self.push_system(format!(
+                        "Public room created. Share the ticket to invite others:\n{ticket_str}"
+                    ));
+                    self.screen = Screen::ChatList;
+                    if let Some(action_id) = self.pending_confirm_create_room_action.take() {
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Completed);
+                    }
+                    return advert_task.unwrap_or_else(iced::Task::none);
+                }
+
+                // ── Private room: subscribe and join immediately ────
                 // Leave the current room first — abort forward_handle, clear
                 // sender + entries — so we don't have a zombie forward_handle
                 // or broadcast to the wrong topic during the async gap.
@@ -6418,6 +6619,7 @@ impl IcedChat {
                 let share_direct_addresses = self.share_direct_addresses;
                 // Show a loading spinner while the gossip subscription is in flight.
                 self.room_loading = true;
+                self.push_mesh_event("Connecting to lobby...");
 
                 iced::Task::perform(
                     async move {
@@ -6605,6 +6807,14 @@ impl IcedChat {
                 self.pending_topic = None;
                 self.room_loading = false;
                 self.sender = Some(sender.clone());
+                if neighbor_count > 0 {
+                    self.push_mesh_event(format!(
+                        "Connected to lobby — {neighbor_count} peer{} online",
+                        if neighbor_count == 1 { "" } else { "s" },
+                    ));
+                } else {
+                    self.push_mesh_event("Connected to lobby — waiting for peers...");
+                }
                 // Subscription creation is not proof that the room has a
                 // usable route.  However, the gossip protocol may have already
                 // discovered neighbors before the forwarder was spawned (common
@@ -6645,13 +6855,27 @@ impl IcedChat {
                 }
 
                 // Auto-advertise the room if the "Advertise in Directory" checkbox
-                // was checked in the create-room dialog.
+                // was checked in the create-room dialog.  This path is only
+                // reached for *private* rooms; public rooms are handled in the
+                // ConfirmCreateNewRoom advertise branch.
                 if self.create_room_advertise {
                     self.advertised_rooms.insert(topic);
                     info!(%topic, "auto-advertising new room in directory");
                     self.create_room_advertise = false;
                     if self.directory_sender.is_none() {
                         return iced::Task::done(AppMessage::SubscribeDirectoryTopic);
+                    }
+                }
+
+                // Unarchive or create the conversation entry so the room
+                // appears in the CHATS sidebar after joining.  Public rooms
+                // created via "Advertise in Directory" start archived and
+                // need to be surfaced here.
+                if let Some(entry) = self.conversation_store.find_mut(&topic) {
+                    if entry.archived {
+                        entry.archived = false;
+                        self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                        let _ = self.send_save_conversations();
                     }
                 }
 
@@ -9639,6 +9863,9 @@ impl IcedChat {
                     self.friend_image_tickets.remove(&peer);
                     return iced::Task::none();
                 }
+                // Persist to disk cache so the image survives restarts and is
+                // available even when the peer is offline.
+                save_friend_profile_image(&self.data_dir, &peer, &image_bytes);
                 let handle = iced::widget::image::Handle::from_bytes(image_bytes);
                 self.friend_image_handles.insert(peer, Some(handle));
                 self.enforce_profile_image_cap();
@@ -10272,11 +10499,12 @@ impl IcedChat {
                     },
                 )
             }
-            AppMessage::ToggleImageEnlarge(entry_index) => {
-                // Toggle the image between enlarged and normal size
-                if !self.enlarged_images.insert(entry_index) {
-                    self.enlarged_images.remove(&entry_index);
-                }
+            AppMessage::OpenImageLightbox(entry_index) => {
+                self.lightbox_image = Some(entry_index);
+                iced::Task::none()
+            }
+            AppMessage::CloseImageLightbox => {
+                self.lightbox_image = None;
                 iced::Task::none()
             }
 
@@ -11409,8 +11637,16 @@ impl IcedChat {
             }
 
             AppMessage::ConnCountsResult { direct, relayed } => {
+                let had_peers = self.direct_peers > 0 || self.relayed_peers > 0;
                 self.direct_peers = direct;
                 self.relayed_peers = relayed;
+                let now_has_peers = direct > 0 || relayed > 0;
+                if !had_peers && now_has_peers {
+                    self.push_mesh_event(format!(
+                        "Discovered {direct} direct, {relayed} relayed peer{}",
+                        if direct + relayed == 1 { "" } else { "s" },
+                    ));
+                }
                 self.conn_refresh_in_flight = false;
                 iced::Task::none()
             }
@@ -12625,13 +12861,27 @@ impl IcedChat {
                     .get(&fid)
                     .map(|record| record.display_label(&fid, from))
                     .unwrap_or_else(|| from.fmt_short().to_string());
-                self.friends.ensure_friend(fid);
-                self.conversation_store.upsert(ConversationEntry::new(
-                    *topic,
-                    from.to_string(),
-                    label,
-                ));
-                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                self.friends.ensure_friend(fid.clone());
+                // Only auto-create / bump the conversation entry when the
+                // direct conversation is still Active.  Archived means the
+                // user explicitly deleted the chat and we must not resurrect
+                // it on the next incoming message.
+                let is_active = self
+                    .friends
+                    .get(&fid)
+                    .and_then(|r| r.direct_conversation())
+                    .is_some_and(|conv| {
+                        conv.topic == *topic
+                            && conv.state == DirectConversationState::Active
+                    });
+                if is_active {
+                    self.conversation_store.upsert(ConversationEntry::new(
+                        *topic,
+                        from.to_string(),
+                        label,
+                    ));
+                    self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                }
             }
         }
         // ── RoomAdvertisement handling ──
@@ -13223,6 +13473,10 @@ impl ChatCallbacks for IcedChat {
         self.friend_profile_versions.remove(&peer);
         self.pending_profile_image_tickets
             .retain(|(queued_peer, _)| *queued_peer != peer);
+        // Remove the cached file so the stale image doesn't reappear on restart.
+        let path = friend_profile_image_path(&self.data_dir, &peer);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("tmp"));
     }
 
     fn on_profile_update(&mut self, peer: PublicKey, profile: UserProfile) {
@@ -13518,16 +13772,8 @@ impl IcedChat {
 
     /// Return a time-of-day greeting ("morning", "afternoon", "evening").
     fn time_of_day_greeting(&self) -> &'static str {
-        // Use std::time to avoid chrono dependency issues
-        let hour = {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            // UTC hour, converted to approximate local by offset guess
-            // This is a rough heuristic — exact local time not critical for a greeting
-            ((now % 86400) / 3600) as u32
-        };
+        use chrono::Timelike;
+        let hour = chrono::Local::now().hour();
         if hour < 12 {
             "morning"
         } else if hour < 17 {
@@ -13766,6 +14012,8 @@ impl IcedChat {
             self.view_create_room_dialog(base)
         } else if self.show_add_menu {
             self.view_sidebar_add_menu(base)
+        } else if let Some(entry_index) = self.lightbox_image {
+            self.view_image_lightbox(base, entry_index)
         } else {
             base.into()
         }
@@ -13797,6 +14045,54 @@ impl IcedChat {
         );
 
         iced::widget::stack![base, dialog].into()
+    }
+
+    /// Full-screen image lightbox overlay.
+    /// Shows the image at a large size on a dark backdrop.
+    /// Click anywhere to dismiss.
+    fn view_image_lightbox<'a>(
+        &'a self,
+        base: iced::widget::Container<'a, AppMessage>,
+        entry_index: usize,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, container, image, mouse_area, stack};
+        use iced::{Alignment, Color, Length};
+
+        let Some(handle) = self
+            .entries
+            .get(entry_index)
+            .and_then(|e| self.image_handle_for_entry(e))
+        else {
+            return base.into();
+        };
+
+        let dark_mode = self.dark_mode;
+        let theme = Self::theme_from_dark(dark_mode);
+
+        // Dark backdrop that dismisses on click
+        let backdrop = mouse_area(
+            container(image(handle)
+                .content_fit(iced::ContentFit::Contain)
+                .width(Length::FillPortion(3))
+                .height(Length::FillPortion(3)))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        )
+        .on_press(AppMessage::CloseImageLightbox);
+
+        let overlay = container(backdrop)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    0.0, 0.0, 0.0, 0.9,
+                ))),
+                ..Default::default()
+            });
+
+        stack![base, overlay].into()
     }
 
     /// Wrap the base layout in an overlay showing the \"Add\" menu dropdown.
@@ -15569,40 +15865,46 @@ impl IcedChat {
             .spacing(0)
             .width(Length::Fill);
 
-        // ── Mesh status + event log (only shown when there's activity) ──
-        if !self.mesh_event_log.is_empty() {
-            let mesh_label = match &self.mesh_health {
-                MeshHealth::Good => "Mesh: healthy",
-                MeshHealth::Degraded(_) => "Mesh: degraded",
-                MeshHealth::Offline(_) => "Mesh: offline",
+        // ── Mesh status + progress log ──
+        let mesh_status_text = if is_connected {
+            let n = self.neighbors.len();
+            let d = self.direct_peers;
+            let r = self.relayed_peers;
+            let health = match &self.mesh_health {
+                MeshHealth::Good => "healthy",
+                MeshHealth::Degraded(_) => "degraded",
+                MeshHealth::Offline(_) => "offline",
             };
-            let detail = format!(
-                "{}  {}N · {}R {}D",
-                mesh_label,
+            format!("Mesh: {health} — {n} neighbor{}, {d} direct, {r} relayed",
+                if n == 1 { "" } else { "s" })
+        } else if self.room_loading || self.sender.is_none() {
+            "Connecting to relay — joining lobby...".to_string()
+        } else if self.neighbors.is_empty() {
+            "Connected to lobby — waiting for peers...".to_string()
+        } else {
+            format!("Connecting — {} peer{} found",
                 self.neighbors.len(),
-                self.relayed_peers,
-                self.direct_peers,
-            );
-            let log_lines: Vec<iced::Element<'_, AppMessage>> = self
-                .mesh_event_log
+                if self.neighbors.len() == 1 { "" } else { "s" })
+        };
+        let log_lines: Vec<iced::Element<'_, AppMessage>> = self
+            .mesh_event_log
                 .iter()
                 .rev()
                 .take(4)
                 .map(|line| text(line).size(10).color(text_muted(&theme)).into())
                 .collect();
-            welcome_col = welcome_col.push(column![
-                Space::new().height(Length::Fixed(SPACE_6)),
-                row![
-                    icon_svg(ICON_MESH, TYPO_SM).style(|t, _| iced::widget::svg::Style {
-                        color: Some(text_muted(t))
-                    }),
-                    text(detail).size(TYPO_SM).color(text_muted(&theme)),
-                ]
-                .spacing(SPACE_4)
-                .align_y(Alignment::Center),
-                container(Column::with_children(log_lines).spacing(1)).padding([SPACE_2, SPACE_8]),
-            ]);
-        }
+        welcome_col = welcome_col.push(column![
+            Space::new().height(Length::Fixed(SPACE_6)),
+            row![
+                icon_svg(ICON_MESH, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                    color: Some(text_muted(t))
+                }),
+                text(mesh_status_text).size(TYPO_SM).color(text_muted(&theme)),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center),
+            container(Column::with_children(log_lines).spacing(1)).padding([SPACE_2, SPACE_8]),
+        ]);
 
         let welcome_card = container(welcome_col)
             .padding([SPACE_16, (SPACE_24 - SPACE_4)])
@@ -16142,17 +16444,12 @@ impl IcedChat {
         ]
         .spacing(SPACE_2)
         .width(Length::Fill);
-        let search = iced::widget::tooltip(
-            button(
+        let search = button(
                 row![icon_svg(ICON_SEARCH, TYPO_SM), text("Search").size(TYPO_XS)].spacing(SPACE_4),
             )
             .padding([SPACE_6, SPACE_8])
-            .style(BUTTON_ICON),
-            text("Search this conversation"),
-            iced::widget::tooltip::Position::Bottom,
-        );
-        let shared = iced::widget::tooltip(
-            button(
+            .style(BUTTON_ICON);
+        let shared = button(
                 row![
                     icon_svg(ICON_FILES, TYPO_SM),
                     text("Shared files").size(TYPO_XS)
@@ -16160,18 +16457,11 @@ impl IcedChat {
                 .spacing(SPACE_4),
             )
             .padding([SPACE_6, SPACE_8])
-            .style(BUTTON_ICON),
-            text("Shared files"),
-            iced::widget::tooltip::Position::Bottom,
-        );
-        let more = iced::widget::tooltip(
-            button(icon_svg(ICON_MORE, TYPO_MD))
+            .style(BUTTON_ICON);
+        let more = button(icon_svg(ICON_MORE, TYPO_MD))
                 .on_press(AppMessage::ToggleChatOptions)
                 .padding([SPACE_6, SPACE_8])
-                .style(BUTTON_ICON),
-            text("Conversation options"),
-            iced::widget::tooltip::Position::Bottom,
-        );
+                .style(BUTTON_ICON);
 
         container(
             row![
@@ -16552,7 +16842,6 @@ impl IcedChat {
                 text(&entry.body)
                     .size(self.chat_text_size)
                     .wrapping(Wrapping::Word)
-                    .width(Length::Fill)
                     .color(body_color)
                     .into()
             } else {
@@ -16594,7 +16883,6 @@ impl IcedChat {
             let bubble =
                 container(body_el)
                     .padding([SPACE_10, SPACE_16])
-                    .width(Length::Fill)
                     .style(move |t: &iced::Theme| {
                         let mut s = iced::widget::container::Style {
                             border: iced::Border {
@@ -16756,20 +17044,13 @@ impl IcedChat {
 
             // ── Image (cached handle — decoded once at construction) ──
             if let Some(handle) = self.image_handle_for_entry(entry) {
-                let is_enlarged = self.enlarged_images.contains(&i);
-                let img_width = if is_enlarged {
-                    IMAGE_PREVIEW_ENLARGED_WIDTH
-                } else {
-                    IMAGE_PREVIEW_MAX_WIDTH
-                };
                 let img = iced::widget::image(handle)
                     .content_fit(iced::ContentFit::Contain)
-                    .width(Length::Fixed(img_width))
+                    .width(Length::Fixed(IMAGE_PREVIEW_MAX_WIDTH))
                     .height(Length::Fixed(IMAGE_PREVIEW_MAX_HEIGHT));
-                // Keep the preview edge consistent while preserving the
-                // existing click-to-enlarge behavior on the whole frame.
+                // Keep the preview edge consistent.
                 let framed = container(img)
-                    .width(Length::Fixed(img_width))
+                    .width(Length::Fixed(IMAGE_PREVIEW_MAX_WIDTH))
                     .height(Length::Fixed(IMAGE_PREVIEW_MAX_HEIGHT))
                     .style(|t| iced::widget::container::Style {
                         border: iced::Border {
@@ -16780,7 +17061,7 @@ impl IcedChat {
                         ..Default::default()
                     });
                 let thumbnail = iced::widget::button(framed)
-                    .on_press(AppMessage::ToggleImageEnlarge(i))
+                    .on_press(AppMessage::OpenImageLightbox(i))
                     .padding(0)
                     .style(|_t, _s| iced::widget::button::Style::default());
                 col = col.push(thumbnail);
@@ -19431,28 +19712,33 @@ mod tests {
 
     #[test]
     fn close_dialog_uses_the_normal_cancel_message_in_priority_order() {
+        // Image lightbox has highest priority
         assert!(matches!(
-            IcedChat::close_dialog_message(true, false, true, None),
+            IcedChat::close_dialog_message(true, true, true, true, None),
+            Ok(AppMessage::CloseImageLightbox)
+        ));
+        assert!(matches!(
+            IcedChat::close_dialog_message(false, true, false, true, None),
             Ok(AppMessage::CancelCreateRoom)
         ));
         assert!(matches!(
-            IcedChat::close_dialog_message(false, true, true, None),
+            IcedChat::close_dialog_message(false, false, true, true, None),
             Ok(AppMessage::CloseConnectionDetails)
         ));
         assert!(matches!(
-            IcedChat::close_dialog_message(false, false, true, None),
+            IcedChat::close_dialog_message(false, false, false, true, None),
             Ok(AppMessage::ClearHistoryRequested)
         ));
         let topic = TopicId::from_bytes([9; 32]);
         assert!(matches!(
-            IcedChat::close_dialog_message(false, false, false, Some(topic)),
+            IcedChat::close_dialog_message(false, false, false, false, Some(topic)),
             Ok(AppMessage::DeleteRoomRequested(actual)) if actual == topic
         ));
     }
 
     #[test]
     fn close_dialog_without_an_open_dialog_returns_structured_error() {
-        let error = IcedChat::close_dialog_message(false, false, false, None)
+        let error = IcedChat::close_dialog_message(false, false, false, false, None)
             .expect_err("CloseDialog must reject when no dialog is open");
         assert_eq!(error.code, GuiActionErrorCode::NoDialog);
         assert_eq!(error.message, "No application dialog is currently open");

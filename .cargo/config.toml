@@ -31,3 +31,7 @@ iced-chat = "run --features gui --example iced_chat --"
 # aarch64-unknown-linux-gnu (dragon — Radxa Dragon Q6A, Ubuntu arm64)
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
+
+# x86_64-pc-windows-gnullvm — use llvm-mingw clang (avoids MinGW export ordinal)
+[target.x86_64-pc-windows-gnullvm]
+linker = "/tmp/llvm-mingw-20260616-msvcrt-ubuntu-22.04-x86_64/bin/x86_64-w64-mingw32-clang"

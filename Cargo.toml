@@ -27,7 +27,7 @@ resolver = "2"
 rust-version = "1.91"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [lints.rust]
 missing_debug_implementations = "warn"
@@ -301,7 +301,11 @@ strip = false
 # WouldBlock silently, so Windows logs spurious "IO error" warnings every
 # ~50ms.  See patched/mainline/src/rpc/socket.rs for the fix.
 [patch.crates-io]
+iroh = { path = "patched/iroh" }
 iroh-dns = { path = "patched/iroh-dns" }
+iroh-relay = { path = "patched/iroh-relay" }
+irpc = { path = "patched/irpc" }
+irpc-iroh = { path = "patched/irpc-iroh" }
 mainline = { path = "patched/mainline" }
 n0-mainline = { path = "patched/n0-mainline" }
 

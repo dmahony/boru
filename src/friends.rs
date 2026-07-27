@@ -281,7 +281,14 @@ impl FriendRecord {
             .as_ref()
             .is_some_and(|conversation| conversation.topic == *topic)
         {
-            self.direct_conversation = None;
+            // Mark as Archived rather than clearing entirely so the
+            // net event handler can distinguish "deleted by user"
+            // from "never had a conversation" and won't auto-recreate
+            // the sidebar entry on the next incoming message.
+            self.direct_conversation = Some(DirectConversation {
+                topic: *topic,
+                state: DirectConversationState::Archived,
+            });
             changed = true;
         }
         changed
