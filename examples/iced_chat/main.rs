@@ -987,7 +987,13 @@ fn main() -> Result<()> {
             // gossip neighbour lifecycle events to the dynamic joiner so a
             // `NeighborDown` lets it remove the peer from its known set and
             // retry it after a later DHT discovery.
+            //
+            // NeighborUp events are also forwarded to the UI's discovered-peers
+            // channel so that DHT-discovered peers (joined via the
+            // DynamicPeerJoiner) appear in the sidebar Discover section —
+            // not only mDNS-discovered peers.
             let neighbor_events_tx = lobby_neighbor_events_tx;
+            let ui_discovered_tx = discovered_peers_tx.clone();
             tokio::spawn(async move {
                 use n0_future::StreamExt;
                 use boru_core::api::Event;
@@ -1004,6 +1010,12 @@ fn main() -> Result<()> {
                                     .try_send(NeighborEvent::Up(*peer))
                                     .await;
                             }
+                            let _ = ui_discovered_tx.try_send(
+                                DiscoveredPeersUpdate {
+                                    added: vec![*peer],
+                                    removed: Vec::new(),
+                                },
+                            );
                         }
                         Event::NeighborDown(peer) => {
                             if let Some(tx) = neighbor_events_tx.as_ref() {
@@ -1011,6 +1023,12 @@ fn main() -> Result<()> {
                                     .try_send(NeighborEvent::Down(*peer))
                                     .await;
                             }
+                            let _ = ui_discovered_tx.try_send(
+                                DiscoveredPeersUpdate {
+                                    added: Vec::new(),
+                                    removed: vec![*peer],
+                                },
+                            );
                         }
                         _ => {}
                     }
