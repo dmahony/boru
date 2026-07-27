@@ -8504,14 +8504,30 @@ impl IcedChat {
                                     local_str,
                                     None,
                                 ) {
-                                    Ok(_) => {
+                                    Ok(req) => {
+                                        info!(
+                                            request_id = %req.id,
+                                            from = %sender.fmt_short(),
+                                            "incoming friend request stored"
+                                        );
                                         self.requests_sidebar_revision =
                                             self.requests_sidebar_revision.wrapping_add(1);
+                                        self.refresh_sidebar_counts();
                                         self.send_save_friend_requests();
                                     }
-                                    Err(FriendRequestError::DuplicatePending { .. }) => {}
+                                    Err(FriendRequestError::DuplicatePending { existing_id }) => {
+                                        info!(
+                                            %existing_id,
+                                            from = %sender.fmt_short(),
+                                            "incoming friend request is duplicate pending — ignored"
+                                        );
+                                    }
                                     Err(err) => {
-                                        debug!(error = %err, "failed to store incoming friend request");
+                                        info!(
+                                            error = %err,
+                                            from = %sender.fmt_short(),
+                                            "failed to store incoming friend request"
+                                        );
                                     }
                                 }
                             }
