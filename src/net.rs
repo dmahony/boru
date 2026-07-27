@@ -487,37 +487,11 @@ impl Actor {
                                 let peer_state = self.peers.get(&peer_id);
                                 let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
                                 if !is_active {
-                                    let attempts = self.retry_map.entry(peer_id).or_insert(0);
-                                    if *attempts < MAX_DIAL_RETRIES {
-                                        *attempts += 1;
-                                        let delay = std::cmp::min(
-                                            RETRY_BASE_DELAY_S * (1u64 << (*attempts - 1)),
-                                            RETRY_MAX_DELAY_S,
-                                        );
-                                        info!(
-                                            peer = %peer_id.fmt_short(),
-                                            "will retry dial (stale) in {delay}s (attempt {} / {MAX_DIAL_RETRIES})",
-                                            *attempts,
-                                        );
-                                        let local_tx = self.local_tx.clone();
-                                        let alpn = self.alpn.clone();
-                                        tokio::task::spawn(async move {
-                                            n0_future::time::sleep(Duration::from_secs(delay)).await;
-                                            let msg = LocalActorMessage::RetryDial(
-                                                EndpointAddr::new(peer_id),
-                                                alpn,
-                                            );
-                                            let _ = local_tx.try_send(msg);
-                                        });
-                                    } else {
-                                        warn!(
-                                            peer = %peer_id.fmt_short(),
-                                            "dial retries exhausted ({MAX_DIAL_RETRIES}), giving up",
-                                        );
-                                        self.retry_map.remove(&peer_id);
-                                        self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                                            .await;
-                                    }
+                                    let addr = self
+                                        .dialer
+                                        .pending_addr(peer_id)
+                                        .unwrap_or_else(|| EndpointAddr::new(peer_id));
+                                    self.schedule_retry(peer_id, addr).await;
                                 }
                             }
                         }
@@ -566,38 +540,11 @@ impl Actor {
                         let peer_state = self.peers.get(&peer_id);
                         let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
                         if !is_active {
-                            let attempts = self.retry_map.entry(peer_id).or_insert(0);
-                            if *attempts < MAX_DIAL_RETRIES {
-                                *attempts += 1;
-                                let delay = std::cmp::min(
-                                    RETRY_BASE_DELAY_S * (1u64 << (*attempts - 1)),
-                                    RETRY_MAX_DELAY_S,
-                                );
-                                info!(
-                                    peer = %peer_id.fmt_short(),
-                                    "will retry dial in {delay}s (attempt {} / {MAX_DIAL_RETRIES})",
-                                    *attempts,
-                                );
-                                let local_tx = self.local_tx.clone();
-                                let addr = peer_id;
-                                let alpn = self.alpn.clone();
-                                tokio::task::spawn(async move {
-                                    n0_future::time::sleep(Duration::from_secs(delay)).await;
-                                    let msg = LocalActorMessage::RetryDial(
-                                        EndpointAddr::new(addr),
-                                        alpn,
-                                    );
-                                    let _ = local_tx.try_send(msg);
-                                });
-                            } else {
-                                warn!(
-                                    peer = %peer_id.fmt_short(),
-                                    "dial retries exhausted ({MAX_DIAL_RETRIES}), giving up",
-                                );
-                                self.retry_map.remove(&peer_id);
-                                self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                                    .await;
-                            }
+                            let addr = self
+                                .dialer
+                                .pending_addr(peer_id)
+                                .unwrap_or_else(|| EndpointAddr::new(peer_id));
+                            self.schedule_retry(peer_id, addr).await;
                         }
                     }
                     None => {
@@ -606,38 +553,11 @@ impl Actor {
                         let peer_state = self.peers.get(&peer_id);
                         let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
                         if !is_active {
-                            let attempts = self.retry_map.entry(peer_id).or_insert(0);
-                            if *attempts < MAX_DIAL_RETRIES {
-                                *attempts += 1;
-                                let delay = std::cmp::min(
-                                    RETRY_BASE_DELAY_S * (1u64 << (*attempts - 1)),
-                                    RETRY_MAX_DELAY_S,
-                                );
-                                info!(
-                                    peer = %peer_id.fmt_short(),
-                                    "will retry dial (timeout) in {delay}s (attempt {} / {MAX_DIAL_RETRIES})",
-                                    *attempts,
-                                );
-                                let local_tx = self.local_tx.clone();
-                                let addr = peer_id;
-                                let alpn = self.alpn.clone();
-                                tokio::task::spawn(async move {
-                                    n0_future::time::sleep(Duration::from_secs(delay)).await;
-                                    let msg = LocalActorMessage::RetryDial(
-                                        EndpointAddr::new(addr),
-                                        alpn,
-                                    );
-                                    let _ = local_tx.try_send(msg);
-                                });
-                            } else {
-                                warn!(
-                                    peer = %peer_id.fmt_short(),
-                                    "dial retries exhausted ({MAX_DIAL_RETRIES}), giving up",
-                                );
-                                self.retry_map.remove(&peer_id);
-                                self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                                    .await;
-                            }
+                            let addr = self
+                                .dialer
+                                .pending_addr(peer_id)
+                                .unwrap_or_else(|| EndpointAddr::new(peer_id));
+                            self.schedule_retry(peer_id, addr).await;
                         }
                     }
                 }
@@ -713,6 +633,38 @@ impl Actor {
                     self.process_quit_queue().await;
                 }
             }
+        }
+    }
+
+    /// Schedule a retry for a peer, preserving the last-known address.
+    async fn schedule_retry(&mut self, peer_id: EndpointId, addr: EndpointAddr) {
+        let attempts = self.retry_map.entry(peer_id).or_insert(0);
+        if *attempts < MAX_DIAL_RETRIES {
+            *attempts += 1;
+            let delay = std::cmp::min(
+                RETRY_BASE_DELAY_S * (1u64 << (*attempts - 1)),
+                RETRY_MAX_DELAY_S,
+            );
+            info!(
+                peer = %peer_id.fmt_short(),
+                "will retry dial in {delay}s (attempt {} / {MAX_DIAL_RETRIES})",
+                *attempts,
+            );
+            let local_tx = self.local_tx.clone();
+            let alpn = self.alpn.clone();
+            tokio::task::spawn(async move {
+                n0_future::time::sleep(Duration::from_secs(delay)).await;
+                let msg = LocalActorMessage::RetryDial(addr, alpn);
+                let _ = local_tx.try_send(msg);
+            });
+        } else {
+            warn!(
+                peer = %peer_id.fmt_short(),
+                "dial retries exhausted ({MAX_DIAL_RETRIES}), giving up",
+            );
+            self.retry_map.remove(&peer_id);
+            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+                .await;
         }
     }
 
@@ -925,13 +877,34 @@ impl Actor {
                                 );
                                 let endpoint_addr = match self.address_lookup.endpoint_addr(peer_id)
                                 {
-                                    Some(addr) => {
+                                    Some(mut addr) => {
                                         info!(
                                             peer = %peer_id.fmt_short(),
                                             "dial from gossip lookup: relay={:?} ips={:?}",
                                             addr.relay_urls().next(),
                                             addr.ip_addrs().cloned().collect::<Vec<_>>(),
                                         );
+                                        // Gossip doesn't always include the relay URL.
+                                        // If the resolved address has no usable transport,
+                                        // add the relay URL from our own published address.
+                                        let has_relay = addr.relay_urls().next().is_some();
+                                        let has_ips = addr.ip_addrs().next().is_some();
+                                        if !has_relay && !has_ips {
+                                            let relay_url = self
+                                                .endpoint
+                                                .addr()
+                                                .relay_urls()
+                                                .next()
+                                                .cloned();
+                                            if let Some(relay) = relay_url {
+                                                addr = addr.with_relay_url(relay.clone());
+                                                info!(
+                                                    peer = %peer_id.fmt_short(),
+                                                    "added relay URL from endpoint addr: {}",
+                                                    relay,
+                                                );
+                                            }
+                                        }
                                         addr
                                     }
                                     None => {
@@ -971,10 +944,29 @@ impl Actor {
                                                     );
                                                 }
                                                 _ => {
-                                                    info!(
-                                                        peer = %peer_id.fmt_short(),
-                                                        "dial from endpoint lookup: TIMEOUT/EMPTY, using bare ID",
-                                                    );
+                                                    // No addresses from any lookup service.
+                                                    // Fall back to the relay URL we're already
+                                                    // connected to — the peer can be reached
+                                                    // through the same relay.
+                                                    let relay_url = self
+                                                        .endpoint
+                                                        .addr()
+                                                        .relay_urls()
+                                                        .next()
+                                                        .cloned();
+                                                    if let Some(relay) = relay_url {
+                                                        found = found.with_relay_url(relay.clone());
+                                                        info!(
+                                                            peer = %peer_id.fmt_short(),
+                                                            "dial from endpoint lookup: TIMEOUT/EMPTY, using relay URL: {}",
+                                                            relay,
+                                                        );
+                                                    } else {
+                                                        info!(
+                                                            peer = %peer_id.fmt_short(),
+                                                            "dial from endpoint lookup: TIMEOUT/EMPTY, using bare ID (no relay configured)",
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
@@ -1410,7 +1402,11 @@ struct Dialer {
         EndpointId,
         Option<Result<Connection, iroh::endpoint::ConnectError>>,
     )>,
-    pending_dials: HashMap<EndpointId, CancellationToken>,
+    /// In-flight dials keyed by peer id. Each entry stores the cancellation
+    /// token used to abort the dial and the original address we dialed, so
+    /// retries can preserve relay/direct addresses instead of falling back to
+    /// a bare peer id.
+    pending_dials: HashMap<EndpointId, (CancellationToken, EndpointAddr)>,
     /// Peers whose dial tasks were aborted due to JoinSet timeout or
     /// exhaustion.  They are drained one-by-one as `None` (disconnected)
     /// so the caller can trigger retry logic for each.
@@ -1438,79 +1434,15 @@ impl Dialer {
             return;
         }
         let cancel = CancellationToken::new();
-        let guard_cancel = cancel.clone();
-        // Spawn a task that cancels the dial after 8s so a hung
-        // QUIC connect doesn't block forever.
-        tokio::task::spawn(async move {
-            n0_future::time::sleep(Duration::from_secs(8)).await;
-            guard_cancel.cancel();
-        });
-        self.pending_dials.insert(endpoint_id, cancel.clone());
+        self.pending_dials
+            .insert(endpoint_id, (cancel.clone(), endpoint_addr.clone()));
         self.dial_start_times.insert(endpoint_id, Instant::now());
         let endpoint = self.endpoint.clone();
+        info!(peer = %endpoint_id.fmt_short(), "queue dial");
         self.pending.spawn(
-            // Wrap the entire dial in a tokio timeout so a hung
-            // endpoint.connect doesn't block the JoinSet forever.
             async move {
-                let dial_result = tokio::time::timeout(
-                    Duration::from_secs(20),
-                    async move {
-                let selected = select_transport(&endpoint_addr);
-                debug!(
-                    peer = %endpoint_id.fmt_short(),
-                    ?selected,
-                    "select transport"
-                );
-                let res = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => None,
-                    res = async {
-                        let direct_addr = endpoint_addr.ip_addrs().next().map(|_| {
-                            endpoint_addr.ip_addrs().fold(EndpointAddr::new(endpoint_id), |addr, ip| {
-                                addr.with_ip_addr(*ip)
-                            })
-                        });
-                        let relay_addr = endpoint_addr.relay_urls().next().map(|_| {
-                            endpoint_addr.relay_urls().fold(EndpointAddr::new(endpoint_id), |addr, relay| {
-                                addr.with_relay_url(relay.clone())
-                            })
-                        });
-                        if let Some(addr) = direct_addr {
-                            match n0_future::time::timeout(
-                                Duration::from_secs(5),
-                                endpoint.connect(addr, &alpn),
-                            )
-                            .await
-                            {
-                                Ok(Ok(conn)) => return Ok(conn),
-                                Ok(Err(err)) if relay_addr.is_some() => {
-                                    info!(peer = %endpoint_id.fmt_short(), "direct connect failed; falling back to relay: {err}");
-                                }
-                                Ok(Err(err)) => return Err(err),
-                                Err(_) => {
-                                    info!(peer = %endpoint_id.fmt_short(), "direct connect timed out; falling back to relay");
-                                }
-                            }
-                        }
-                        if let Some(addr) = relay_addr {
-                            info!(peer = %endpoint_id.fmt_short(), "connecting via relay transport");
-                            endpoint.connect(addr, &alpn).await
-                        } else {
-                            endpoint.connect(endpoint_id, &alpn).await
-                        }
-                    } => Some(res),
-                };
-                (endpoint_id, res)
-                    }
-                )
-                .await;
-                match dial_result {
-                    Ok(result) => result,
-                    Err(_) => {
-                        warn!(peer = %endpoint_id.fmt_short(), "dial timed out after 20s");
-                        (endpoint_id, None)
-                    }
-                }
+                let result = dial_endpoint(endpoint, endpoint_addr, alpn, cancel).await;
+                (endpoint_id, result)
             }
             .instrument(tracing::Span::current()),
         );
@@ -1519,6 +1451,11 @@ impl Dialer {
     /// Checks if a endpoint is currently being dialed.
     fn is_pending(&self, endpoint: EndpointId) -> bool {
         self.pending_dials.contains_key(&endpoint)
+    }
+
+    /// Return the original address used for a pending dial, if any.
+    fn pending_addr(&self, endpoint_id: EndpointId) -> Option<EndpointAddr> {
+        self.pending_dials.get(&endpoint_id).map(|(_, addr)| addr.clone())
     }
 
     /// Aborts dials that have been pending longer than STALE_DIAL_THRESHOLD_S.
@@ -1628,6 +1565,128 @@ impl Dialer {
             }
             true => std::future::pending().await,
         }
+    }
+}
+
+/// Perform a single endpoint connection attempt with hard timeouts and
+/// explicit task-per-path cancellation.
+///
+/// `endpoint.connect()` can block the async task internally if the QUIC
+/// handshake or relay setup stalls. By spawning each path attempt as its own
+/// `tokio::task` and awaiting the `JoinHandle` with `tokio::time::timeout`,
+/// we can abandon a hung connect and either fall back to the next path or
+/// return `None` so the caller retries.
+async fn dial_endpoint(
+    endpoint: Endpoint,
+    endpoint_addr: EndpointAddr,
+    alpn: Bytes,
+    cancel: CancellationToken,
+) -> Option<Result<Connection, iroh::endpoint::ConnectError>> {
+    let peer_id = endpoint_addr.id;
+    let selected = select_transport(&endpoint_addr);
+    debug!(peer = %peer_id.fmt_short(), ?selected, "select transport");
+
+    let direct_addr = endpoint_addr.ip_addrs().next().map(|_| {
+        endpoint_addr
+            .ip_addrs()
+            .fold(EndpointAddr::new(peer_id), |addr, ip| addr.with_ip_addr(*ip))
+    });
+    let relay_addr = endpoint_addr.relay_urls().next().map(|_| {
+        endpoint_addr.relay_urls().fold(EndpointAddr::new(peer_id), |addr, relay| {
+            addr.with_relay_url(relay.clone())
+        })
+    });
+
+    // Helper to await a spawned connect task with a timeout and cancellation.
+    async fn await_connect_task(
+        task: tokio::task::JoinHandle<Result<Connection, iroh::endpoint::ConnectError>>,
+        cancel: &CancellationToken,
+        timeout: Duration,
+        peer_id: EndpointId,
+        path: &str,
+    ) -> Option<Result<Connection, iroh::endpoint::ConnectError>> {
+        let mut task = Some(task);
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                if let Some(t) = task.take() {
+                    t.abort();
+                }
+                None
+            }
+            res = tokio::time::timeout(timeout, task.take().expect("task is always Some here")) => {
+                match res {
+                    // Timeout fired: task is still stuck.
+                    Err(_) => {
+                        info!(peer = %peer_id.fmt_short(), path, "connect timed out");
+                        None
+                    }
+                    // Task completed; inspect its result.
+                    Ok(Ok(connect_result)) => Some(connect_result),
+                    Ok(Err(join_err)) if join_err.is_cancelled() => None,
+                    Ok(Err(join_err)) => {
+                        warn!(peer = %peer_id.fmt_short(), path, "connect task panicked: {join_err}");
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(addr) = direct_addr {
+        info!(peer = %peer_id.fmt_short(), "connecting via direct transport");
+        let direct_task = tokio::spawn({
+            let endpoint = endpoint.clone();
+            let alpn = alpn.clone();
+            async move { endpoint.connect(addr, &alpn).await }
+        });
+        if let Some(result) = await_connect_task(
+            direct_task,
+            &cancel,
+            Duration::from_secs(5),
+            peer_id,
+            "direct",
+        )
+        .await
+        {
+            match &result {
+                Ok(_) => info!(peer = %peer_id.fmt_short(), "direct connect succeeded"),
+                Err(err) if relay_addr.is_some() => {
+                    info!(peer = %peer_id.fmt_short(), "direct connect failed; falling back to relay: {err}");
+                }
+                Err(_) => return Some(result),
+            }
+            if result.is_ok() {
+                return Some(result);
+            }
+        }
+    }
+
+    if let Some(addr) = relay_addr {
+        info!(peer = %peer_id.fmt_short(), "connecting via relay transport");
+        let relay_task = tokio::spawn({
+            let endpoint = endpoint.clone();
+            async move { endpoint.connect(addr, &alpn).await }
+        });
+        await_connect_task(
+            relay_task,
+            &cancel,
+            Duration::from_secs(10),
+            peer_id,
+            "relay",
+        )
+        .await
+    } else {
+        info!(peer = %peer_id.fmt_short(), "no usable address; connecting by peer id only");
+        let bare_task = tokio::spawn(async move { endpoint.connect(peer_id, &alpn).await });
+        await_connect_task(
+            bare_task,
+            &cancel,
+            Duration::from_secs(10),
+            peer_id,
+            "bare-id",
+        )
+        .await
     }
 }
 

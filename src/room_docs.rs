@@ -757,7 +757,16 @@ pub async fn process_roster_event(
                 Ok(Some(e)) => e,
                 Ok(None) => return Ok(false), // not a roster message
                 Err(e) => {
-                    tracing::warn!("ignoring malformed roster message: {e}");
+                    let prefix: String = msg.content[..msg.content.len().min(16)]
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    tracing::warn!(
+                        "ignoring malformed roster message (len {}): {e}; prefix=[{}]",
+                        msg.content.len(),
+                        prefix,
+                    );
                     return Ok(true); // consumed (not forwarded as chat)
                 }
             };

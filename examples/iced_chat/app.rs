@@ -2538,6 +2538,10 @@ pub enum AppMessage {
         /// Optional continuous DHT tracker for background publish/discovery
         /// in private rooms with DHT discovery enabled.
         room_tracker: Option<SharedTracker>,
+        /// Number of gossip neighbors already known at subscription time.
+        /// Used to set sender_ready immediately when NeighborUp was emitted
+        /// before the forwarder started (common on startup).
+        neighbor_count: usize,
     },
     /// Finished creating a new room (random topic).
     CreateNewRoom,
@@ -6094,6 +6098,7 @@ impl IcedChat {
                             .await
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
+                        let neighbor_count = receiver.neighbors().count();
                         let local_peer_addr = invitation_endpoint_addr(
                             endpoint.watch_addr().get(),
                             share_direct_addresses,
@@ -6232,19 +6237,21 @@ impl IcedChat {
                         room.discovery_secret = discovery_secret;
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>), String>((
+                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize), String>((
                             sender,
                             topic,
                             ticket_str,
                             room_tracker,
+                            neighbor_count,
                         ))
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str, room_tracker)) => AppMessage::RoomOpened {
+                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count)) => AppMessage::RoomOpened {
                             topic,
                             ticket: ticket_str,
                             sender,
                             room_tracker,
+                            neighbor_count,
                         },
                         Err(e) => AppMessage::RoomJoinFailed(e),
                     },
@@ -6456,6 +6463,7 @@ impl IcedChat {
                             .await
                             .map_err(|e| format!("room subscription task failed: {e}"))??;
                         let (sender, receiver) = sub.split();
+                        let neighbor_count = receiver.neighbors().count();
                         let local_peer_addr = invitation_endpoint_addr(
                             endpoint.watch_addr().get(),
                             share_direct_addresses,
@@ -6565,19 +6573,21 @@ impl IcedChat {
                         room.discovery_secret = saved_discovery_secret;
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>), String>((
+                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize), String>((
                             sender,
                             topic,
                             ticket_str,
                             room_tracker,
+                            neighbor_count,
                         ))
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str, room_tracker)) => AppMessage::RoomOpened {
+                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count)) => AppMessage::RoomOpened {
                             topic,
                             ticket: ticket_str,
                             sender,
                             room_tracker,
+                            neighbor_count,
                         },
                         Err(e) => AppMessage::RoomJoinFailed(e),
                     },
@@ -6589,15 +6599,18 @@ impl IcedChat {
                 ticket,
                 sender,
                 room_tracker,
+                neighbor_count,
             } => {
-                info!("RoomOpened FIRED topic={topic}");
+                info!("RoomOpened FIRED topic={topic} neighbor_count={neighbor_count}");
                 self.pending_topic = None;
                 self.room_loading = false;
                 self.sender = Some(sender.clone());
                 // Subscription creation is not proof that the room has a
-                // usable route. Readiness begins only after NeighborUp is
-                // delivered by the forwarder below.
-                self.sender_ready = false;
+                // usable route.  However, the gossip protocol may have already
+                // discovered neighbors before the forwarder was spawned (common
+                // on startup).  If so, mark the sender as ready immediately so
+                // that the first message send does not stall.
+                self.sender_ready = neighbor_count > 0;
 
                 // Retroactively join any pending discovered peers now that the lobby sender is available
                 let lobby_topic = Self::default_lobby_topic();
@@ -7075,6 +7088,7 @@ impl IcedChat {
                             .await
                             .map_err(|e| format!("room subscription task failed: {e}"))??;
                         let (sender, receiver) = sub.split();
+                        let neighbor_count = receiver.neighbors().count();
                         if let Some((new_peers_rx, join_cancel)) = pending_dht_fanout {
                             let _join_task = boru_core::public_room_continuous::spawn_join_fanout(
                                 new_peers_rx,
@@ -7143,19 +7157,21 @@ impl IcedChat {
                         let room = RoomStore::with_peers(&data_dir, topic, merged_peers);
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>), String>((
+                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize), String>((
                             sender,
                             topic,
                             ticket_str,
                             room_tracker,
+                            neighbor_count,
                         ))
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str, room_tracker)) => AppMessage::RoomOpened {
+                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count)) => AppMessage::RoomOpened {
                             topic,
                             ticket: ticket_str,
                             sender,
                             room_tracker,
+                            neighbor_count,
                         },
                         Err(e) => AppMessage::RoomJoinFailed(e),
                     },
@@ -8378,7 +8394,16 @@ impl IcedChat {
                         conversation.neighbors.insert(*peer);
                         conversation.sender_ready = conversation.sender.is_some();
                         if topic == self.topic {
+                            let was_ready = self.sender_ready;
                             self.sender_ready = self.sender.is_some();
+                            info!(
+                                %peer,
+                                topic = %topic,
+                                sender_some = self.sender.is_some(),
+                                sender_ready = self.sender_ready,
+                                was_ready,
+                                "NeighborUp: sender_ready updated"
+                            );
                         }
                     }
                     NetEvent::NeighborDown { peer } => {
@@ -9862,6 +9887,7 @@ impl IcedChat {
                             .await
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
+                        let neighbor_count = receiver.neighbors().count();
                         let metadata_doc = boru_core::room_docs::create_metadata_doc(
                             topic,
                             &sender,
@@ -16539,6 +16565,7 @@ impl IcedChat {
             let bubble =
                 container(body_el)
                     .padding([SPACE_10, SPACE_16])
+                    .width(Length::Fill)
                     .style(move |t: &iced::Theme| {
                         let mut s = iced::widget::container::Style {
                             border: iced::Border {
@@ -16572,7 +16599,7 @@ impl IcedChat {
                 .push(ts_el)
                 .spacing(SPACE_2)
                 .max_width(560.0)
-                .width(Length::Shrink);
+                .width(Length::Fill);
 
             // ── Link preview card ──
             if let Some(ref preview) = entry.link_preview {
