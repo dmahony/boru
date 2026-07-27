@@ -327,6 +327,11 @@ const MAX_PROFILE_IMAGE_HANDLES: usize = 500;
 /// events continue to be serviced between batches.
 const MAX_PENDING_REPLAY_PER_UPDATE: usize = 32;
 
+/// Maximum number of events to queue for an inactive conversation.
+/// When exceeded, the oldest event is dropped to prevent unbounded
+/// memory growth and Iced event-loop starvation during replay.
+const MAX_PENDING_EVENTS: usize = 256;
+
 /// Version string: the current application version from Cargo.toml,
 /// with the current git hash appended when available.
 pub fn version_tag() -> String {
@@ -8669,6 +8674,22 @@ impl IcedChat {
                     // should not increment the badge counter.
                     let should_count = Self::_is_user_visible_event(&event);
                     conversation.pending_events.push_back(event);
+                    // Cap the pending queue to prevent unbounded memory growth
+                    // and Iced event-loop starvation during replay.  When the
+                    // cap is exceeded we discard the oldest queued event and
+                    // adjust the unread counter if that event was visible.
+                    while conversation.pending_events.len() > MAX_PENDING_EVENTS {
+                        if let Some(dropped) = conversation.pending_events.pop_front() {
+                            if Self::_is_user_visible_event(&dropped) {
+                                conversation.unread = conversation.unread.saturating_sub(1);
+                            }
+                        }
+                        tracing::warn!(
+                            topic=%topic,
+                            total=conversation.pending_events.len(),
+                            "pending events cap reached, oldest event dropped"
+                        );
+                    }
                     if should_count {
                         conversation.unread = conversation.unread.saturating_add(1);
                         tracing::info!(topic=%topic, unread=conversation.unread, "queued event for inactive room");
