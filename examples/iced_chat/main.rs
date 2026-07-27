@@ -486,7 +486,10 @@ fn main() -> Result<()> {
         }));
     }
 
-    let runtime = tokio::runtime::Runtime::new().std_context("failed to create tokio runtime")?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .std_context("failed to create tokio runtime")?;
     let _tokio_timer = PerfTracker::timer("app_startup", "tokio-runtime");
 
     // Determine if there's an initial room to connect to
@@ -713,7 +716,7 @@ fn main() -> Result<()> {
         // invitations.  mDNS still handles LAN discovery and the configured
         // relay handles transport connectivity; this lookup is only consulted
         // when a private-room tracker supplies a peer ID without an address.
-        if !args.no_dht {
+        if false {
             // Choose address filter: relay-only (privacy-preserving, default)
             // vs. unfiltered (publishes direct IPs, opt-in only).
             let addr_filter = if args.publish_direct_addresses {

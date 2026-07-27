@@ -106,9 +106,17 @@ impl std::ops::Deref for Gossip {
     }
 }
 
+/// Maximum retries for a dial that times out or fails.
+const MAX_DIAL_RETRIES: usize = 3;
+/// Base delay (seconds) for exponential backoff on dial retry.
+const RETRY_BASE_DELAY_S: u64 = 5;
+/// Maximum delay (seconds) for dial retry backoff.
+const RETRY_MAX_DELAY_S: u64 = 60;
+
 #[derive(Debug)]
 enum LocalActorMessage {
     HandleConnection(Connection),
+    RetryDial(EndpointAddr, Bytes),
     Shutdown { reply: oneshot::Sender<()> },
 }
 
@@ -351,6 +359,10 @@ struct Actor {
     metrics: Arc<Metrics>,
     topic_event_forwarders: JoinSet<TopicId>,
     address_lookup: GossipAddressLookup,
+    /// Track retry attempts per peer for dial failures.
+    retry_map: HashMap<EndpointId, usize>,
+    /// Sender for internal actor messages (retry, shutdown, etc.).
+    local_tx: mpsc::Sender<LocalActorMessage>,
 }
 
 impl Actor {
@@ -395,6 +407,8 @@ impl Actor {
             local_rx,
             topic_event_forwarders: Default::default(),
             address_lookup,
+            retry_map: Default::default(),
+            local_tx: local_tx.clone(),
         };
 
         (actor, rpc_tx, local_tx)
@@ -444,6 +458,9 @@ impl Actor {
                     Some(LocalActorMessage::HandleConnection(conn)) => {
                         self.handle_connection(conn.remote_id(), ConnOrigin::Accept, conn);
                     }
+                    Some(LocalActorMessage::RetryDial(addr, alpn)) => {
+                        self.dialer.queue_dial(addr, alpn);
+                    }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
                         return false;
@@ -479,6 +496,7 @@ impl Actor {
                     Some(Ok(conn)) => {
                         debug!(peer = %peer_id.fmt_short(), "dial successful");
                         self.metrics.actor_tick_dialer_success.inc();
+                        self.retry_map.remove(&peer_id);
                         self.handle_connection(peer_id, ConnOrigin::Dial, conn);
                     }
                     Some(Err(err)) => {
@@ -487,13 +505,79 @@ impl Actor {
                         let peer_state = self.peers.get(&peer_id);
                         let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
                         if !is_active {
-                            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                                .await;
+                            let attempts = self.retry_map.entry(peer_id).or_insert(0);
+                            if *attempts < MAX_DIAL_RETRIES {
+                                *attempts += 1;
+                                let delay = std::cmp::min(
+                                    RETRY_BASE_DELAY_S * (1u64 << (*attempts - 1)),
+                                    RETRY_MAX_DELAY_S,
+                                );
+                                info!(
+                                    peer = %peer_id.fmt_short(),
+                                    "will retry dial in {delay}s (attempt {} / {MAX_DIAL_RETRIES})",
+                                    *attempts,
+                                );
+                                let local_tx = self.local_tx.clone();
+                                let addr = peer_id;
+                                let alpn = self.alpn.clone();
+                                tokio::task::spawn(async move {
+                                    n0_future::time::sleep(Duration::from_secs(delay)).await;
+                                    let msg = LocalActorMessage::RetryDial(
+                                        EndpointAddr::new(addr),
+                                        alpn,
+                                    );
+                                    let _ = local_tx.try_send(msg);
+                                });
+                            } else {
+                                warn!(
+                                    peer = %peer_id.fmt_short(),
+                                    "dial retries exhausted ({MAX_DIAL_RETRIES}), giving up",
+                                );
+                                self.retry_map.remove(&peer_id);
+                                self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+                                    .await;
+                            }
                         }
                     }
                     None => {
                         warn!(peer = %peer_id.fmt_short(), "dial disconnected");
                         self.metrics.actor_tick_dialer_failure.inc();
+                        let peer_state = self.peers.get(&peer_id);
+                        let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
+                        if !is_active {
+                            let attempts = self.retry_map.entry(peer_id).or_insert(0);
+                            if *attempts < MAX_DIAL_RETRIES {
+                                *attempts += 1;
+                                let delay = std::cmp::min(
+                                    RETRY_BASE_DELAY_S * (1u64 << (*attempts - 1)),
+                                    RETRY_MAX_DELAY_S,
+                                );
+                                info!(
+                                    peer = %peer_id.fmt_short(),
+                                    "will retry dial (timeout) in {delay}s (attempt {} / {MAX_DIAL_RETRIES})",
+                                    *attempts,
+                                );
+                                let local_tx = self.local_tx.clone();
+                                let addr = peer_id;
+                                let alpn = self.alpn.clone();
+                                tokio::task::spawn(async move {
+                                    n0_future::time::sleep(Duration::from_secs(delay)).await;
+                                    let msg = LocalActorMessage::RetryDial(
+                                        EndpointAddr::new(addr),
+                                        alpn,
+                                    );
+                                    let _ = local_tx.try_send(msg);
+                                });
+                            } else {
+                                warn!(
+                                    peer = %peer_id.fmt_short(),
+                                    "dial retries exhausted ({MAX_DIAL_RETRIES}), giving up",
+                                );
+                                self.retry_map.remove(&peer_id);
+                                self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+                                    .await;
+                            }
+                        }
                     }
                 }
             }
@@ -1286,10 +1370,10 @@ impl Dialer {
         }
         let cancel = CancellationToken::new();
         let guard_cancel = cancel.clone();
-        // Spawn a task that cancels the dial after 15s so a hung
+        // Spawn a task that cancels the dial after 8s so a hung
         // QUIC connect doesn't block forever.
         tokio::task::spawn(async move {
-            n0_future::time::sleep(Duration::from_secs(15)).await;
+            n0_future::time::sleep(Duration::from_secs(8)).await;
             guard_cancel.cancel();
         });
         self.pending_dials.insert(endpoint_id, cancel.clone());
@@ -1321,8 +1405,6 @@ impl Dialer {
                                 addr.with_relay_url(relay.clone())
                             })
                         });
-                        // Try direct first with a short timeout so a hung
-                        // QUIC handshake falls back to the relay promptly.
                         if let Some(addr) = direct_addr {
                             match n0_future::time::timeout(
                                 Duration::from_secs(5),
