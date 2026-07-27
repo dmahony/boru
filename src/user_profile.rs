@@ -93,7 +93,7 @@ pub struct UserProfile {
     pub bio: String,
 
     /// Reference to an image stored in [`ImageStore`](crate::image_store::ImageStore).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub avatar_identifier: Option<String>,
 
     /// Default path for shared files.

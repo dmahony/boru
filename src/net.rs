@@ -1350,6 +1350,10 @@ struct Dialer {
         Option<Result<Connection, iroh::endpoint::ConnectError>>,
     )>,
     pending_dials: HashMap<EndpointId, CancellationToken>,
+    /// Peers whose dial tasks were aborted due to JoinSet timeout or
+    /// exhaustion.  They are drained one-by-one as `None` (disconnected)
+    /// so the caller can trigger retry logic for each.
+    aborted_peers: VecDeque<EndpointId>,
 }
 
 impl Dialer {
@@ -1359,6 +1363,7 @@ impl Dialer {
             endpoint,
             pending: Default::default(),
             pending_dials: Default::default(),
+            aborted_peers: VecDeque::new(),
         }
     }
 
@@ -1459,13 +1464,18 @@ impl Dialer {
         EndpointId,
         Option<Result<Connection, iroh::endpoint::ConnectError>>,
     ) {
+        // First, drain any peers that were aborted by a JoinSet timeout.
+        // Returning them as `None` (disconnected) lets the caller fire
+        // retry logic instead of blocking forever.
+        if let Some(peer_id) = self.aborted_peers.pop_front() {
+            return (peer_id, None);
+        }
         match self.pending_dials.is_empty() {
             false => {
                 let (endpoint_id, res) = loop {
                     // Timeout join_next so a hung dial task doesn't block the
-                    // gossip actor's event loop forever.  Stale dials are
-                    // abandoned; the caller will re-join on rediscovery.
-                    let timed_out = match n0_future::time::timeout(
+                    // gossip actor's event loop forever.
+                    match n0_future::time::timeout(
                         Duration::from_secs(20),
                         self.pending.join_next(),
                     )
@@ -1480,18 +1490,38 @@ impl Dialer {
                             continue;
                         }
                         Ok(None) => {
-                            error!("no more pending conns available");
-                            std::future::pending().await
+                            // JoinSet is empty but pending_dials wasn't —
+                            // this means tasks were aborted externally.
+                            // Collect all pending peer IDs and return them
+                            // as disconnected so retries fire.
+                            let aborted: Vec<_> =
+                                self.pending_dials.drain().map(|(k, _)| k).collect();
+                            if aborted.is_empty() {
+                                // Nothing to recover – wait for new dials.
+                                std::future::pending().await
+                            } else {
+                                let first = aborted[0];
+                                self.aborted_peers.extend(aborted.into_iter().skip(1));
+                                break (first, None);
+                            }
                         }
                         Err(_) => {
+                            // join_next timed out – the hung dial tasks are
+                            // still in the JoinSet.  Abort them all and
+                            // return each pending peer as disconnected.
                             warn!("dial join_next timed out, abandoning stale dials");
                             self.pending.abort_all();
-                            self.pending_dials.clear();
-                            true
+                            let aborted: Vec<_> =
+                                self.pending_dials.drain().map(|(k, _)| k).collect();
+                            if aborted.is_empty() {
+                                // No pending dials to recover – wait for new ones.
+                                std::future::pending().await
+                            } else {
+                                let first = aborted[0];
+                                self.aborted_peers.extend(aborted.into_iter().skip(1));
+                                break (first, None);
+                            }
                         }
-                    };
-                    if timed_out {
-                        std::future::pending().await
                     }
                 };
 

@@ -79,7 +79,7 @@ stop_instance() {
 run_instance() {
     local binary="$1" port="$2" display="$3" data_dir="$4" relay_flag="${5:-}" relay_url="${6:-}"
     local child
-    local -a app_args=(--mcp --mcp-bind "127.0.0.1:${port}" --enable-gui-test-actions
+    local -a app_args=(--mcp --mcp-bind "127.0.0.1:${port}"
         --data-dir "$data_dir" --bind-port 0)
     if [[ -n "$relay_flag" ]]; then
         if [[ "$relay_flag" == "--relay" && -n "$relay_url" ]]; then
@@ -112,7 +112,7 @@ start_instance() {
 run_desktop() {
     local binary="$1" port="$2" data_dir="$3" relay_flag="${4:-}" relay_url="${5:-}"
     local child
-    local -a app_args=(--mcp --mcp-bind "127.0.0.1:${port}" --enable-gui-test-actions
+    local -a app_args=(--mcp --mcp-bind "127.0.0.1:${port}"
         --data-dir "$data_dir" --bind-port 0)
     if [[ -n "$relay_flag" ]]; then
         if [[ "$relay_flag" == "--relay" && -n "$relay_url" ]]; then
