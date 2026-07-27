@@ -83,6 +83,15 @@ pub enum Timer {
 pub enum Event<PI> {
     /// A new gossip message was received.
     Received(GossipEvent<PI>),
+    /// A gap in message delivery was detected: we received a message at a round significantly
+    /// higher than any previously seen, indicating that messages from earlier rounds may have
+    /// been missed. The application may use this to trigger a backfill request.
+    MissingMessages {
+        /// The highest round we had seen before this gap was detected.
+        since_round: Round,
+        /// The peer that delivered the message which triggered this gap detection.
+        from_peer: PI,
+    },
 }
 
 #[derive(Clone, derive_more::Debug, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -127,6 +136,12 @@ impl<PI> GossipEvent<PI> {
 pub struct Round(u16);
 
 impl Round {
+    /// Get the inner u16 value.
+    pub fn get(&self) -> u16 {
+        self.0
+    }
+
+    /// Increment the round count by one.
     pub fn next(&self) -> Round {
         Round(self.0 + 1)
     }
@@ -301,22 +316,30 @@ impl Default for Config {
             // application requirements. This is a parameter that should be statically configured
             // at deployment time." (p. 8)
             //
-            // Earthstar has 5ms it seems, see https://github.com/earthstar-project/earthstar/blob/1523c640fedf106f598bf79b184fb0ada64b1cc0/src/syncer/plum_tree.ts#L75
-            // However in the paper it is more like a few roundtrips if I read things correctly.
-            graft_timeout_1: Duration::from_millis(80),
+            // Tuned for relay (boru.chat) RTT of ~100-200ms.
+            // At 80ms we saw premature Grafts firing before eagerly-pushed copies arrived,
+            // causing duplicate message events and unnecessary tree churn (prune→re-graft cycles).
+            // 300ms gives enough margin for eagerly-pushed messages to arrive via relay
+            // before issuing a Graft request.
+            graft_timeout_1: Duration::from_millis(300),
 
             // Paper: "This second timeout value should be smaller that the first, in the order of an
             // average round trip time to a neighbor." (p. 9)
             //
-            // Earthstar doesn't have this step from my reading.
-            graft_timeout_2: Duration::from_millis(40),
+            // At 40ms this was firing before the first Graft response could arrive via relay
+            // (~100-200ms round trip), causing redundant Graft retransmissions to the same peer
+            // and duplicate message responses. 200ms approximates one relay RTT, matching the
+            // paper's guidance: "in the order of an average round trip time to a neighbor" (p. 9).
+            graft_timeout_2: Duration::from_millis(200),
 
             // Again, paper does not tell a recommended number here. Likely should be quite small,
             // as to not delay messages without need. This would also be the time frame in which
             // `IHave`s are aggregated to save on packets.
             //
-            // Eartstar dispatches immediately from my reading.
-            dispatch_timeout: Duration::from_millis(5),
+            // Slightly increased from 5ms to allow better IHave batching in burst scenarios
+            // without significant latency cost. For chat workloads the aggregation benefit
+            // outweighs the nominal 10ms delay.
+            dispatch_timeout: Duration::from_millis(15),
 
             // This number comes from experiment settings the plumtree paper (p. 12)
             optimization_threshold: Round(7),
@@ -376,8 +399,18 @@ pub struct State<PI> {
     /// Set to false after the first message is received. Used for initial timer scheduling.
     init: bool,
 
+    /// Message ids that have been broadcast by this node locally.
+    ///
+    /// Used to avoid pruning peers that eagerly forward our own messages back to us
+    /// (see `on_gossip` duplicate handling).
+    locally_authored: HashSet<MessageId>,
+
     /// [`Stats`] of this plumtree.
     pub(crate) stats: Stats,
+
+    /// The maximum round number seen across all received swarm messages.
+    /// Used to detect gaps in delivery rounds.
+    max_seen_round: Round,
 
     max_message_size: usize,
 }
@@ -397,7 +430,9 @@ impl<PI: PeerIdentity> State<PI> {
             dispatch_timer_scheduled: false,
             cache: Default::default(),
             init: false,
+            locally_authored: Default::default(),
             stats: Default::default(),
+            max_seen_round: Round(0),
             max_message_size,
         }
     }
@@ -480,6 +515,9 @@ impl<PI: PeerIdentity> State<PI> {
                 message.clone(),
                 now + self.config.message_cache_retention,
             );
+            // Track this message as locally authored so we don't prune
+            // eager forwarders that relay it back to us.
+            self.locally_authored.insert(id);
             self.lazy_push(message.clone(), &me, io);
         }
 
@@ -500,10 +538,20 @@ impl<PI: PeerIdentity> State<PI> {
         }
 
         // if we already received this message: move peer to lazy set
-        // and notify peer about this.
+        // and notify peer about this, UNLESS the message was originally
+        // authored by us — in that case the sender is just doing their job
+        // as an eager forwarder relaying our own broadcast, so don't penalize them.
         if self.received_messages.contains_key(&message.id) {
-            self.add_lazy(sender);
-            io.push(OutEvent::SendMessage(sender, Message::Prune));
+            // If we broadcast this message locally, skip the prune: the
+            // forwarder is correctly relaying our broadcast through eager
+            // push and shouldn't be moved to the lazy set.
+            if self.locally_authored.remove(&message.id) {
+                // Our own message came back to us via an eager forwarder.
+                // Don't prune — they're doing the right thing.
+            } else {
+                self.add_lazy(sender);
+                io.push(OutEvent::SendMessage(sender, Message::Prune));
+            }
         // otherwise store the message, emit to application and forward to peers
         } else {
             if let DeliveryScope::Swarm(prev_round) = message.scope {
@@ -515,7 +563,18 @@ impl<PI: PeerIdentity> State<PI> {
                 );
                 // increase the round for forwarding the message, and add to cache
                 // to reply to Graft messages later
-                // TODO: add callback/event to application to get missing messages that were received before?
+                // Detect round gaps: if this message's round is more than 1 above our
+                // previously-seen maximum, notify the application layer so it can
+                // request backfill of any missed messages.
+                if prev_round.0 > self.max_seen_round.0 + 1 {
+                    let since_round = self.max_seen_round;
+                    let from_peer = sender;
+                    io.push(OutEvent::EmitEvent(Event::MissingMessages {
+                        since_round,
+                        from_peer,
+                    }));
+                }
+                self.max_seen_round = self.max_seen_round.max(prev_round);
                 let message = message.next_round().expect("just checked");
 
                 self.cache.insert(
@@ -719,13 +778,15 @@ impl<PI: PeerIdentity> State<PI> {
         let Some(round) = gossip.round() else {
             return;
         };
+        let mut has_lazy_peer = false;
         for peer in self.lazy_push_peers.iter().filter(|x| *x != sender) {
             self.lazy_push_queue.entry(*peer).or_default().push(IHave {
                 id: gossip.id,
                 round,
             });
+            has_lazy_peer = true;
         }
-        if !self.dispatch_timer_scheduled {
+        if has_lazy_peer && !self.dispatch_timer_scheduled {
             io.push(OutEvent::ScheduleTimer(
                 self.config.dispatch_timeout,
                 Timer::DispatchLazyPush,
@@ -773,13 +834,13 @@ mod test {
         );
         state.handle(event, now, &mut io);
         let expected = {
-            // we expect a dispatch timer schedule and receive event, but no Graft or Prune
-            // messages
+            // we expect a MissingMessages gap event, then the Received event,
+            // but no Graft or Prune or dispatch timer messages (no lazy peers exist)
             let mut io = VecDeque::new();
-            io.push(OutEvent::ScheduleTimer(
-                config.dispatch_timeout,
-                Timer::DispatchLazyPush,
-            ));
+            io.push(OutEvent::EmitEvent(Event::MissingMessages {
+                since_round: Round(0),
+                from_peer: 3,
+            }));
             io.push(OutEvent::EmitEvent(Event::Received(GossipEvent {
                 content,
                 delivered_from: 3,
@@ -816,9 +877,13 @@ mod test {
         );
         state.handle(event, now, &mut io);
         let expected = {
-            // this time we expect the Graft and Prune messages to be sent, performing the
-            // optimization step
+            // this time we expect the MissingMessages gap event (round 9 > previous max 6),
+            // the Graft and Prune messages for the optimization step, and the Received event.
             let mut io = VecDeque::new();
+            io.push(OutEvent::EmitEvent(Event::MissingMessages {
+                since_round: Round(6),
+                from_peer: 3,
+            }));
             io.push(OutEvent::SendMessage(
                 2,
                 Message::Graft(Graft {
@@ -857,10 +922,6 @@ mod test {
             io.push(OutEvent::ScheduleTimer(
                 config.cache_evict_interval,
                 Timer::EvictCache,
-            ));
-            io.push(OutEvent::ScheduleTimer(
-                config.dispatch_timeout,
-                Timer::DispatchLazyPush,
             ));
             io.push(OutEvent::EmitEvent(Event::Received(GossipEvent {
                 content,

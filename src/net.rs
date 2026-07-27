@@ -1030,6 +1030,15 @@ impl Actor {
                                     Some(len),
                                 );
                             }
+                            crate::proto::Event::MissingMessages { since_round, from_peer } => {
+                                let peer_str = from_peer.fmt_short().to_string();
+                                crate::gossip_debug::log_event(
+                                    "MissingMessages",
+                                    Some(&topic_short),
+                                    Some(&peer_str),
+                                    Some(since_round.get() as usize),
+                                );
+                            }
                         }
                     }
 

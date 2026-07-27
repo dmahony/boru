@@ -312,11 +312,13 @@ where
             Message::Disconnect(details) => self.on_disconnect(from, details, io),
         }
 
-        // Disconnect from passive nodes right after receiving a message.
-        // TODO(frando): I'm not sure anymore that this is correct. Maybe remove?
-        if !is_disconnect && !self.active_view.contains(&from) {
-            io.push(OutEvent::DisconnectPeer(from));
-        }
+        // NOTE: DisconnectPeer on non-active senders was removed because the only
+        // legitimate message that arrives from a non-active peer is ShuffleReply
+        // (sent directly from the terminal hop, not through the active chain).
+        // Disconnecting there caused passive-view churn: handle_connection_closed
+        // removes the peer from the passive view, undoing the shuffle's purpose.
+        // Join/Neighbor/ForwardJoin all add the sender to active_view during
+        // processing, so they were never affected by this check.
     }
 
     fn handle_join(&mut self, peer: PI, io: &mut impl IO<PI>) {

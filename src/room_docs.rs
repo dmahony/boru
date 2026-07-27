@@ -960,6 +960,11 @@ pub async fn forward_room_events_for_chat(
             GossipEvent::Lagged => {
                 // Not forwarded — protocol-level backpressure signal.
             }
+            GossipEvent::MissingMessages { .. } => {
+                // Round-gap detected; the protocol suggests missed messages.
+                // Actual backfill logic can be added here later — for now, log.
+                tracing::debug!("room event forwarder: round gap detected");
+            }
         }
     }
 

@@ -321,6 +321,16 @@ pub enum Event {
     Received(Message),
     /// We missed some messages because our [`GossipReceiver`] was not progressing fast enough.
     Lagged,
+    /// A gap in message delivery was detected by the gossip protocol. The protocol received
+    /// a message whose delivery round is significantly higher than any previously seen,
+    /// indicating that messages from earlier rounds may have been missed.
+    /// The application can use this to request backfill.
+    MissingMessages {
+        /// The highest round we had seen before this gap was detected.
+        since_round: crate::proto::Round,
+        /// The peer that delivered the message which triggered this gap detection.
+        from_peer: EndpointId,
+    },
 }
 
 impl From<crate::proto::Event<EndpointId>> for Event {
@@ -333,6 +343,13 @@ impl From<crate::proto::Event<EndpointId>> for Event {
                 scope: message.scope,
                 delivered_from: message.delivered_from,
             }),
+            crate::proto::Event::MissingMessages {
+                since_round,
+                from_peer,
+            } => Self::MissingMessages {
+                since_round,
+                from_peer,
+            },
         }
     }
 }

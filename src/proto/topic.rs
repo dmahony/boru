@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     hyparview::{self, InEvent as SwarmIn},
-    plumtree::{self, GossipEvent, InEvent as GossipIn, Scope},
+    plumtree::{self, GossipEvent, InEvent as GossipIn, Round, Scope},
     state::MessageKind,
     PeerData, PeerIdentity, DEFAULT_MAX_MESSAGE_SIZE,
 };
@@ -123,6 +123,15 @@ pub enum Event<PI> {
     NeighborDown(PI),
     /// A gossip message was received for this topic
     Received(GossipEvent<PI>),
+    /// A gap in message delivery was detected: the protocol received a message at a round
+    /// significantly higher than any previously seen, suggesting messages may have been missed.
+    /// The application may use this to trigger a backfill request.
+    MissingMessages {
+        /// The highest round we had seen before this gap was detected.
+        since_round: Round,
+        /// The peer that delivered the message which triggered this gap detection.
+        from_peer: PI,
+    },
 }
 
 impl<PI> From<hyparview::Event<PI>> for Event<PI> {
@@ -138,6 +147,13 @@ impl<PI> From<plumtree::Event<PI>> for Event<PI> {
     fn from(value: plumtree::Event<PI>) -> Self {
         match value {
             plumtree::Event::Received(event) => Self::Received(event),
+            plumtree::Event::MissingMessages {
+                since_round,
+                from_peer,
+            } => Self::MissingMessages {
+                since_round,
+                from_peer,
+            },
         }
     }
 }

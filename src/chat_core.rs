@@ -2062,6 +2062,12 @@ pub async fn forward_gossip_events_with_safety(
                 // Lagged warnings are protocol-level backpressure signals;
                 // not forwarded to the frontend.
             }
+            Event::MissingMessages { .. } => {
+                // Round-gap detected; the protocol suggests missed messages.
+                // Actual backfill logic can be added here later — for now,
+                // just log at debug level so it's traceable but non-noisy.
+                tracing::debug!("round gap detected in gossip events");
+            }
         }
     }
     let _ = net_tx.send(NetEvent::Closed).await;
