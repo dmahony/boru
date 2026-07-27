@@ -127,8 +127,8 @@ check_machine() {
 
 build_binary() {
     require_command cargo
-    echo "→ cargo build --example iced_chat --features gui" >&2
-    (cd "$PROJECT_DIR" && cargo build --example iced_chat --features gui)
+    echo "→ cargo build --example boru --features gui" >&2
+    (cd "$PROJECT_DIR" && cargo build --example boru --features gui)
     require_file "$LOCAL_BINARY"
 }
 
