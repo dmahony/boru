@@ -520,6 +520,14 @@ impl ContinuousTracker {
         )
     }
 
+    /// Return the short room identity (first 8 hex chars of the topic) of
+    /// the underlying [`PublicRoomTracker`], for logging.
+    ///
+    /// Never logs the full discovery key or topic bytes.
+    pub fn identity_short_id(&self) -> String {
+        self._tracker.identity().short_id()
+    }
+
     /// Signal shutdown and wait for background tasks to complete.
     ///
     /// This fires the cancellation token and awaits the tasks, ensuring
@@ -1895,5 +1903,72 @@ mod tests {
         let policy = PublicationPolicy::new(PublicationPolicyConfig::default());
         let cloned = policy.clone();
         assert_eq!(cloned.consecutive_failures(), policy.consecutive_failures());
+    }
+
+    // ── Failure-is-non-fatal (Test E) ─────────────────────────────────
+
+    /// A `TopicDiscoveryBackend` that always fails.  Used to verify that
+    /// publication/discovery failures do not panic and that cancellation
+    /// still shuts the tracker down cleanly.
+    struct FailingBackend;
+
+    #[async_trait::async_trait]
+    impl crate::discovery_backend::TopicDiscoveryBackend for FailingBackend {
+        async fn publish(
+            &self,
+            _namespace: &crate::discovery_backend::NamespaceId,
+            _record: crate::discovery_backend::EncryptedDiscoveryRecord,
+        ) -> n0_error::Result<()> {
+            Err(n0_error::anyerr!("backend publish always fails"))
+        }
+
+        async fn lookup(
+            &self,
+            _namespace: &crate::discovery_backend::NamespaceId,
+        ) -> n0_error::Result<Vec<crate::discovery_backend::EncryptedDiscoveryRecord>> {
+            Err(n0_error::anyerr!("backend lookup always fails"))
+        }
+
+        async fn shutdown(&self) -> n0_error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Test E: A failing `TopicDiscoveryBackend` must not panic during
+    /// continuous operation, and shutdown must still complete.
+    #[tokio::test]
+    async fn failing_backend_does_not_panic_and_shuts_down_cleanly() {
+        let (sk, ep) = test_identity();
+        let tracker =
+            PublicRoomTracker::start(Box::new(FailingBackend), PublicNetwork::Test, ep, sk)
+                .await
+                .expect("tracker construction must not fail even with a failing backend");
+
+        // Use the joiner path so the internal DynamicPeerJoiner is also
+        // exercised — the joiner should never receive any peers because
+        // discovery always errors.
+        use crate::api::Command;
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Command>(64);
+        let gossip_sender = GossipSender::new(irpc::channel::mpsc::Sender::Tokio(cmd_tx));
+
+        let config = ContinuousTrackerConfig {
+            publish_interval: Duration::from_millis(10),
+            discover_interval: Duration::from_millis(10),
+            ..Default::default()
+        };
+
+        let (continuous, _neighbor_events_tx) =
+            ContinuousTracker::start_with_joiner(tracker, config.sanitize(), gossip_sender);
+
+        // Let a couple of publish + discover cycles fire against the
+        // failing backend.  No JoinPeers command should ever arrive.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "a failing backend must not produce join commands"
+        );
+
+        // Shutdown must not hang or panic.
+        continuous.shutdown().await;
     }
 }

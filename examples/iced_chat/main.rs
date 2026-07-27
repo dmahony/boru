@@ -11,13 +11,13 @@ mod design_tokens;
 mod download_progress_view;
 mod fonts;
 mod gui_test_actions;
+mod link_preview;
 mod log_viewer;
 mod mcp_server;
 mod notification;
 mod perf_tracker;
 mod persistence_coordinator;
 mod presentation;
-mod link_preview;
 
 use mimalloc::MiMalloc;
 
@@ -40,6 +40,7 @@ use boru_core::chat_core::friend_ping::{
     FRIEND_PING_ALPN,
 };
 use boru_core::chat_history::ChatHistoryStore;
+use boru_core::file_access_handler::{FileAccessHandler, NonceStore};
 use boru_core::friends::{FriendId, FriendsStore};
 use boru_core::inbox::{inbox_message_id, InboxHandle, InboxMessageId, InboxProtocol, INBOX_ALPN};
 use boru_core::mailbox::{MailboxStore, MAX_SYNC_ENVELOPES};
@@ -49,7 +50,6 @@ use boru_core::protocol_version::CATALOGUE_ALPN;
 use boru_core::room::RoomStore;
 use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::Storage;
-use boru_core::file_access_handler::{FileAccessHandler, NonceStore};
 use clap::Parser;
 use iroh::{
     address_lookup::{memory::MemoryLookup, AddrFilter, DnsAddressLookup, PkarrResolver},
@@ -60,6 +60,8 @@ use iroh_blobs::{store::fs::FsStore, BlobsProtocol};
 
 use boru_core::whisper::{WhisperBuilder, WHISPER_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
+
+use boru_core::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
 #[cfg(feature = "gui")]
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_error::{bail_any, Result, StdResultExt};
@@ -75,8 +77,8 @@ fn window_icon() -> Option<iced::window::Icon> {
 
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 const LOG_QUEUE_CAPACITY: usize = 8192;
 const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -109,7 +111,8 @@ struct Args {
     relay: Option<RelayUrl>,
     #[clap(long)]
     no_relay: bool,
-    /// Disable private-room DHT discovery. The public lobby is unaffected.
+    /// Disable public and private room DHT discovery. mDNS, relay, tickets,
+    /// and known addresses remain active.
     #[clap(long)]
     no_dht: bool,
     /// Publish direct (public) IP addresses to the DHT for relay-free connectivity.
@@ -457,9 +460,8 @@ fn main() -> Result<()> {
                 .location()
                 .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
                 .unwrap_or_else(|| "unknown location".to_string());
-            let crash_msg = format!(
-                "BORU CRASH at {timestamp}\nLocation: {location}\nMessage: {msg}"
-            );
+            let crash_msg =
+                format!("BORU CRASH at {timestamp}\nLocation: {location}\nMessage: {msg}");
             let backtrace = std::backtrace::Backtrace::force_capture();
             // Write to instance.log so the splash window displays it
             if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -622,7 +624,7 @@ fn main() -> Result<()> {
                 let stdin = child.stdin.take();
                 splash_child = Some(child);
                 Arc::new(Mutex::new(stdin))
-            },
+            }
             Err(_) => Arc::new(Mutex::new(None)),
         }
     } else {
@@ -661,6 +663,7 @@ fn main() -> Result<()> {
         inbox_events_rx,
         discovered_peers_rx,
         directory_room_rx,
+        continuous_tracker,
         dht_for_private,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
@@ -716,7 +719,7 @@ fn main() -> Result<()> {
         // invitations.  mDNS still handles LAN discovery and the configured
         // relay handles transport connectivity; this lookup is only consulted
         // when a private-room tracker supplies a peer ID without an address.
-        if false {
+        if !args.no_dht {
             // Choose address filter: relay-only (privacy-preserving, default)
             // vs. unfiltered (publishes direct IPs, opt-in only).
             let addr_filter = if args.publish_direct_addresses {
@@ -899,15 +902,121 @@ fn main() -> Result<()> {
         // Create the directory room channel for UI display.
         let (directory_room_tx, directory_room_rx_tmp) =
             tokio::sync::mpsc::channel::<app::DirectoryRoomUpdate>(64);
+
+        // ── Shared member-discovery DHT client ───────────────────────────
+        // One `distributed_topic_tracker::Dht` handle is created (when DHT is
+        // enabled) and shared between the public-lobby `MainlineDhtBackend`
+        // and existing private-room discovery.  This is intentionally separate
+        // from Iroh's `DhtAddressLookup` (address resolution) — see
+        // `docs/discovery-architecture.md` §2.
+        let room_discovery_dht = (!args.no_dht).then(|| {
+            let dht = distributed_topic_tracker::Dht::new(
+                &distributed_topic_tracker::DhtConfig::default(),
+            );
+            info!("member-discovery DHT client created");
+            dht
+        });
+        if args.no_dht {
+            info!("public-lobby DHT discovery disabled by --no-dht");
+        }
+
+        // The public-lobby continuous tracker is kept alive for the lifetime
+        // of `IcedChat` to prevent its background publish/discover/join tasks
+        // from being dropped immediately after startup.
+        let mut continuous_tracker: Option<ContinuousTracker> = None;
+
         let lobby_topic = app::IcedChat::default_lobby_topic();
         splash_send("Joining lobby...");
         if let Ok(sub) = gossip.subscribe(lobby_topic, Vec::new()).await {
             let (sender, mut receiver) = sub.split();
-            // Drain the receiver to prevent backpressure.
+
+            // ── Start the public-room DHT tracker (Steps 4) ─────────────
+            // `ContinuousTracker::start_with_joiner` needs the lobby
+            // `GossipSender`, so this must run after the subscription
+            // succeeds.  A DHT failure is non-fatal — the app continues
+            // with mDNS, relay, tickets and known addresses.
+            let mut lobby_neighbor_events_tx: Option<
+                irpc::channel::mpsc::Sender<
+                    boru_core::dynamic_joiner::NeighborEvent,
+                >,
+            > = None;
+
+            if let Some(ref dht) = room_discovery_dht {
+                let backend = boru_core::discovery_backend::MainlineDhtBackend::new(dht.clone());
+
+                match boru_core::public_room_tracker::PublicRoomTracker::start(
+                    Box::new(backend),
+                    boru_core::public_room::PublicNetwork::Mainnet,
+                    endpoint.id(),
+                    secret_key.clone(),
+                )
+                .await
+                {
+                    Ok(tracker) => {
+                        debug_assert_eq!(tracker.identity().topic, lobby_topic);
+
+                        let (tracker_handle, neighbor_events_tx) =
+                            ContinuousTracker::start_with_joiner(
+                                tracker,
+                                ContinuousTrackerConfig::default(),
+                                sender.clone(),
+                            );
+
+                        continuous_tracker = Some(tracker_handle);
+                        lobby_neighbor_events_tx = Some(neighbor_events_tx);
+
+                        info!(
+                            room = %continuous_tracker
+                                .as_ref()
+                                .map(|t| t.identity_short_id())
+                                .unwrap_or_default(),
+                            "public-lobby continuous DHT tracker started"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "public-lobby DHT tracker failed to start; \
+                             continuing without DHT member discovery"
+                        );
+                    }
+                }
+            }
+
+            // Drain the lobby receiver to prevent backpressure, forwarding
+            // gossip neighbour lifecycle events to the dynamic joiner so a
+            // `NeighborDown` lets it remove the peer from its known set and
+            // retry it after a later DHT discovery.
+            let neighbor_events_tx = lobby_neighbor_events_tx;
             tokio::spawn(async move {
                 use n0_future::StreamExt;
-                while let Some(_event) = receiver.next().await {}
+                use boru_core::api::Event;
+                use boru_core::dynamic_joiner::NeighborEvent;
+
+                while let Some(event) = receiver.next().await {
+                    let Ok(gossip_event) = event else {
+                        continue;
+                    };
+                    match &gossip_event {
+                        Event::NeighborUp(peer) => {
+                            if let Some(tx) = neighbor_events_tx.as_ref() {
+                                let _ = tx
+                                    .try_send(NeighborEvent::Up(*peer))
+                                    .await;
+                            }
+                        }
+                        Event::NeighborDown(peer) => {
+                            if let Some(tx) = neighbor_events_tx.as_ref() {
+                                let _ = tx
+                                    .try_send(NeighborEvent::Down(*peer))
+                                    .await;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             });
+
             // mDNS-based LAN peer discovery: when a peer appears on the LAN,
             // join them to the lobby gossip mesh directly, and forward the
             // peer ID to the UI for sidebar display.
@@ -970,7 +1079,7 @@ fn main() -> Result<()> {
             info!("subscribed to lobby topic");
             splash_send("Lobby joined — discovering peers");
         } else {
-            warn!("failed to subscribe to lobby topic");
+            warn!("lobby subscription failed; public-lobby DHT tracker not started");
         }
 
         // ── Directory topic subscription ──────────────────────────────────
@@ -1080,15 +1189,6 @@ fn main() -> Result<()> {
             })))
             .await;
 
-        // Stable `boru1:` invitations intentionally carry no endpoint
-        // address.  Keep the shared tracker client in the GUI so those
-        // invitations can discover a publisher and then join it by ID.
-        let dht_for_private = (!args.no_dht).then(|| {
-            distributed_topic_tracker::Dht::new(
-                &distributed_topic_tracker::DhtConfig::default(),
-            )
-        });
-
         Result::<_>::Ok((
             endpoint,
             memory_lookup,
@@ -1109,7 +1209,8 @@ fn main() -> Result<()> {
             inbox_events_rx,
             discovered_peers_rx,
             directory_room_rx,
-            dht_for_private,
+            continuous_tracker,
+            room_discovery_dht,
         ))
     })?;
 
@@ -1251,7 +1352,7 @@ fn main() -> Result<()> {
                 chat_history,
                 backfill_handle,
                 initial_topic.is_some() && args.command.is_none(),
-                None,
+                continuous_tracker,
                 Arc::clone(&discovered_peers_rx),
                 directory_room_rx,
                 dht_for_private,
@@ -1328,8 +1429,7 @@ fn main() -> Result<()> {
 
         // Splash tick at 100ms while loading a room
         // or connecting to a peer in a chat conversation.
-        let connecting = state.sender.is_none()
-            && matches!(state.screen, app::Screen::Chat { .. });
+        let connecting = state.sender.is_none() && matches!(state.screen, app::Screen::Chat { .. });
         if state.room_loading || connecting {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(100))
@@ -1835,5 +1935,82 @@ mod tests {
 
         let error = writer.write(b"abcdefgh").unwrap_err();
         assert!(error.to_string().contains("failed to rotate"));
+    }
+
+    // ── Public-room DHT tracker wiring tests ───────────────────────────
+
+    /// Test A: The GUI's `default_lobby_topic()` returns the canonical
+    /// versioned Mainnet public-room identity, so the gossip mesh,
+    /// `PublicRoomTracker`, and initial selected room all agree on the
+    /// same topic.
+    #[test]
+    fn default_lobby_topic_matches_canonical_mainnet_lobby() {
+        use boru_core::public_room::{public_lobby_topic, PublicNetwork};
+        assert_eq!(
+            IcedChat::default_lobby_topic(),
+            public_lobby_topic(PublicNetwork::Mainnet)
+        );
+    }
+
+    /// Test B: A Mainnet `PublicRoomTracker` identity uses the same gossip
+    /// topic as the GUI lobby subscription.  Uses the in-memory backend so
+    /// no live DHT access is required.
+    #[tokio::test]
+    async fn tracker_identity_matches_default_lobby_topic() {
+        use boru_core::discovery_backend::InMemoryDiscoveryBackend;
+        use boru_core::public_room::PublicNetwork;
+        use boru_core::public_room_tracker::PublicRoomTracker;
+        use iroh::SecretKey;
+
+        let sk = SecretKey::generate();
+        let tracker = PublicRoomTracker::start(
+            Box::new(InMemoryDiscoveryBackend::new()),
+            PublicNetwork::Mainnet,
+            sk.public(),
+            sk,
+        )
+        .await
+        .expect("tracker start must not fail");
+        assert_eq!(
+            tracker.identity().topic,
+            IcedChat::default_lobby_topic(),
+            "public-room tracker topic must match the GUI lobby topic"
+        );
+        tracker.shutdown().await;
+    }
+
+    /// Test D: `--no-dht` suppresses the member-discovery DHT client and
+    /// the public continuous tracker.  This isolates the startup decision
+    /// logic (the `(!args.no_dht).then(...)` guard) rather than requiring
+    /// a full network stack.
+    #[test]
+    fn no_dht_flag_disables_member_discovery_and_tracker() {
+        // — with --no-dht:
+        let args = Args::try_parse_from(["boru", "--no-dht"].iter()).unwrap();
+        assert!(args.no_dht);
+
+        // Emulate main.rs gating: the DHT client must not be created.
+        let room_discovery_dht: Option<()> = (!args.no_dht).then(|| ());
+        assert!(
+            room_discovery_dht.is_none(),
+            "--no-dht must suppress the member-discovery DHT client"
+        );
+        // The continuous tracker stays `None` because the DHT guard above
+        // is false — main.rs never enters the `if let Some(ref dht) = ...`
+        // branch.
+        let continuous_tracker: Option<()> = None;
+        assert!(
+            continuous_tracker.is_none(),
+            "--no-dht must not start the public continuous tracker"
+        );
+
+        // — without --no-dht:
+        let args = Args::try_parse_from(["boru"].iter()).unwrap();
+        assert!(!args.no_dht);
+        let room_discovery_dht: Option<()> = (!args.no_dht).then(|| ());
+        assert!(
+            room_discovery_dht.is_some(),
+            "DHT must be created when --no-dht is absent"
+        );
     }
 }

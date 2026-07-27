@@ -51,14 +51,14 @@ mismatch short-circuits to a `IdentityMismatch` failure.
 | **Types** | `MainlineDhtBackend` wraps `distributed_topic_tracker::Dht` |
 | **Purpose** | Discover `EndpointId` values of peers in a specific room |
 | **Underlying DHT** | `mainline::async_dht::AsyncDht` (separate instance from address resolution) |
-| **CLI gate** | `--no-dht` disables private-room discovery only |
+| **CLI gate** | `--no-dht` disables both public and private room-member discovery |
 
 Member discovery splits into two subsystems:
 
 | Subsystem | Tracker | Background Loop | DHT Instance |
 |---|---|---|---|
-| Public rooms | `PublicRoomTracker` | `ContinuousTracker` | Always created (never suppressed by `--no-dht`) |
-| Private rooms | `PrivateRoomTracker` | `PrivateContinuousTracker` | Created per room; gated by `--no-dht` |
+| Public rooms | `PublicRoomTracker` | `ContinuousTracker` | Created once in `main.rs` when DHT is enabled (suppressed by `--no-dht`) |
+| Private rooms | `PrivateRoomTracker` | `PrivateContinuousTracker` | Shares the single public-room DHT handle; gated by `--no-dht` |
 
 ---
 
@@ -162,19 +162,54 @@ to avoid redundant writes:
   max_retry_delay, default 60s).
 - A single success resets the backoff to zero.
 
-### 4.5 Current Limitation: GUI Integration
+### 4.5 GUI Startup Flow
 
-The `ContinuousTracker` for the **public lobby** is never spawned in the GUI.
-The field exists in `IcedChat` (`continuous_tracker: Option<ContinuousTracker>`)
-but `IcedChat::new()` receives `None` from `main.rs`.  Public lobby users in
-the GUI therefore rely on:
+The GUI (`examples/iced_chat/main.rs`) wires the public-lobby continuous
+tracker into the Iced startup path.  The full flow is:
 
-- **mDNS** (LAN only)
-- **Tickets** (out-of-band)
-- **Manual peer entry**
+```
+GUI starts
+  -> canonical Mainnet public-lobby identity  (public_lobby_topic)
+  -> lobby gossip subscription                (gossip.subscribe)
+  -> shared member-discovery DHT client       (distributed_topic_tracker::Dht)
+  -> MainlineDhtBackend                       (wraps the shared DHT handle)
+  -> PublicRoomTracker                        (Mainnet + endpoint.id + secret_key)
+  -> ContinuousTracker::start_with_joiner     (lobby GossipSender)
+  -> DynamicPeerJoiner                        (dedup, self-filter, bounded concurrency, retry)
+  -> GossipSender::join_peers                 (discovered peers join the gossip mesh)
+```
 
-The `dht_harness` example and all unit tests exercise the components
-correctly — this is a wiring gap, not a correctness issue.
+Key properties:
+
+- The **same** `lobby_topic` is used for the gossip subscription, the
+  `PublicRoomTracker::start(PublicNetwork::Mainnet, ...)` identity, and the
+  initial selected room (`IcedChat::default_lobby_topic()`).  A
+  `debug_assert_eq!` confirms the tracker's gossip topic matches the lobby
+  topic at startup.
+- The lobby gossip receiver task drains all events and forwards
+  `NeighborUp` / `NeighborDown` lifecycle events to the
+  `DynamicPeerJoiner` via the `NeighborEvent` sender returned by
+  `start_with_joiner()`.  A `NeighborDown` lets the joiner remove the peer
+  from its known set so a later DHT discovery can retry it.
+- The `ContinuousTracker` handle is stored in `IcedChat` for the lifetime of
+  the app, preventing its background tasks from being dropped.
+- The **mDNS** path is preserved and independent — both mDNS and the DHT
+  tracker feed the same lobby `GossipSender`.
+
+### 4.6 `--no-dht` Behaviour
+
+When `--no-dht` is supplied:
+
+- No member-discovery DHT client is created.
+- No `ContinuousTracker` is started for the public lobby.
+- The GUI continues to start normally with mDNS, relay, tickets, and known
+  addresses.
+- Private-room DHT discovery is also disabled.
+- Iroh's `DhtAddressLookup` (address resolution) is a separate layer and has
+  its own `--no-dht` gate — it is not the same DHT instance.
+
+A DHT failure during `PublicRoomTracker::start` is non-fatal: the error is
+logged at `WARN` level and the GUI continues without DHT member discovery.
 
 ---
 
