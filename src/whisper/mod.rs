@@ -32,7 +32,7 @@ use iroh::{
 use n0_error::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::mailbox::{MailboxAck, MailboxEnvelope};
 
@@ -207,6 +207,11 @@ impl WhisperHandle {
 
     /// Send a signed contact/control message to a peer.
     pub async fn send_control(&self, peer: PublicKey, payload: Bytes) -> Result<()> {
+        info!(
+            peer = %peer.fmt_short(),
+            payload_len = payload.len(),
+            "whisper send_control called"
+        );
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(Cmd::SendControl {
@@ -477,33 +482,38 @@ async fn run_actor(
                                 let _ = event_tx.send(WhisperEvent::Message {
                                     from,
                                     content: Bytes::from(text),
-                                });
+                                }).await;
                             }
 
                             Ok(WhisperWireMessage::Control { payload }) => {
+                                info!(
+                                    from = %from.fmt_short(),
+                                    payload_len = payload.len(),
+                                    "whisper control message received"
+                                );
                                 let _ = event_tx.send(WhisperEvent::Control {
                                     from,
                                     content: Bytes::from(payload),
-                                });
+                                }).await;
                             }
                             Ok(WhisperWireMessage::MailboxEnvelope { envelope }) => {
                                 let _ = event_tx.send(WhisperEvent::MailboxEnvelope {
                                     from,
                                     envelope,
-                                });
+                                }).await;
                             }
                             Ok(WhisperWireMessage::MailboxAck { ack }) => {
                                 let _ = event_tx.send(WhisperEvent::MailboxAck {
                                     from,
                                     ack,
-                                });
+                                }).await;
                             }
                             Err(_) => {
                                 // Fallback: forward raw bytes as a Message event.
                                 let _ = event_tx.send(WhisperEvent::Message {
                                     from,
                                     content: content.clone(),
-                                });
+                                }).await;
                             }
                         }
                     }
@@ -580,7 +590,17 @@ async fn connect_to_peer(
     event_tx: &mpsc::Sender<WhisperEvent>,
     msg_tx: &mpsc::Sender<ConnectionEvent>,
 ) -> Result<Connection> {
-    let conn = endpoint.connect(addr, WHISPER_ALPN).await?;
+    info!(
+        peer = %peer.fmt_short(),
+        alpn = WHISPER_ALPN,
+        "whisper connecting to peer"
+    );
+    let conn = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        endpoint.connect(addr, WHISPER_ALPN),
+    )
+    .await
+    .map_err(|_| n0_error::anyerr!("whisper connect timed out after 15s"))??;
     let remote_id = conn.remote_id();
     if remote_id != peer {
         conn.close(0u32.into(), b"whisper identity mismatch");
@@ -590,7 +610,7 @@ async fn connect_to_peer(
             remote_id.fmt_short()
         ));
     }
-    debug!(peer = %remote_id.fmt_short(), "whisper connected to peer");
+    info!(peer = %remote_id.fmt_short(), "whisper connected to peer");
 
     connected.lock().await.insert(remote_id, conn.clone());
     let _ = event_tx.send(WhisperEvent::Connected { peer: remote_id });

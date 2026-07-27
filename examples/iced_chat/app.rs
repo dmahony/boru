@@ -7229,6 +7229,10 @@ impl IcedChat {
                                 });
                             }
                         };
+                        info!(
+                            peer = %peer.fmt_short(),
+                            "dispatching whisper send_control for friend request"
+                        );
                         iced::Task::batch(vec![iced::Task::perform(
                             async move { whisper_handle.send_control(peer, payload).await },
                             move |result| match result {
@@ -7243,8 +7247,12 @@ impl IcedChat {
                             },
                         )])
                     }
-                    Err(FriendRequestError::DuplicatePending { .. }) => {
-                        // Already sent — just show state.
+                    Err(FriendRequestError::DuplicatePending { existing_id }) => {
+                        info!(
+                            %existing_id,
+                            peer = %peer.fmt_short(),
+                            "outgoing friend request is duplicate pending — ignoring"
+                        );
                         self.outgoing_request_states
                             .insert(peer, OutgoingRequestState::Pending);
                         self.rebuild_join_request_list();
@@ -8484,6 +8492,7 @@ impl IcedChat {
             }
 
             AppMessage::WhisperEvent(event) => {
+                info!(variant = ?event, "WhisperEvent received in iced handler");
                 match event {
                     boru_core::whisper::WhisperEvent::Control { from, content } => {
                         match SignedContactMessage::verify(&content, Some(from)) {
@@ -8635,7 +8644,11 @@ impl IcedChat {
                                 );
                             }
                             Err(err) => {
-                                debug!("invalid contact control message: {err:#}");
+                                info!(
+                                    error = %err,
+                                    from = %from.fmt_short(),
+                                    "invalid contact control message"
+                                );
                             }
                         }
                     }
