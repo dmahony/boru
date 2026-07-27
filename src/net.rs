@@ -110,14 +110,20 @@ impl std::ops::Deref for Gossip {
 const MAX_DIAL_RETRIES: usize = 3;
 /// Base delay (seconds) for exponential backoff on dial retry.
 const RETRY_BASE_DELAY_S: u64 = 5;
-/// Maximum delay (seconds) for dial retry backoff.
+/// Maximum delay (seconds) for exponential backoff on dial retry.
 const RETRY_MAX_DELAY_S: u64 = 60;
+/// How often the stale-dial cleanup timer fires (seconds).
+const STALE_DIAL_CHECK_INTERVAL_S: u64 = 10;
+/// Dials older than this (seconds) are considered stale and aborted.
+const STALE_DIAL_THRESHOLD_S: u64 = 15;
 
 #[derive(Debug)]
 enum LocalActorMessage {
+    Shutdown { reply: oneshot::Sender<()> },
     HandleConnection(Connection),
     RetryDial(EndpointAddr, Bytes),
-    Shutdown { reply: oneshot::Sender<()> },
+    /// Periodic stale-dial cleanup trigger from the spawned timer task.
+    CleanupStaleDials,
 }
 
 #[allow(missing_docs)]
@@ -417,6 +423,19 @@ impl Actor {
     pub async fn run(mut self) {
         let mut addr_update_stream = self.setup().await;
 
+        // Spawn a periodic stale-dial cleanup task that sends a message
+        // back to the actor via the local channel.  This avoids relying on
+        // a select! branch that gets dropped/reset each iteration.
+        let local_tx = self.local_tx.clone();
+        tokio::task::spawn(async move {
+            // Initial delay before first check.
+            tokio::time::sleep(Duration::from_secs(STALE_DIAL_CHECK_INTERVAL_S)).await;
+            loop {
+                let _ = local_tx.try_send(LocalActorMessage::CleanupStaleDials);
+                tokio::time::sleep(Duration::from_secs(STALE_DIAL_CHECK_INTERVAL_S)).await;
+            }
+        });
+
         let mut i = 0;
         while self.event_loop(&mut addr_update_stream, i).await {
             i += 1;
@@ -460,6 +479,48 @@ impl Actor {
                     }
                     Some(LocalActorMessage::RetryDial(addr, alpn)) => {
                         self.dialer.queue_dial(addr, alpn);
+                    }
+                    Some(LocalActorMessage::CleanupStaleDials) => {
+                        if self.dialer.cleanup_stale_dials() {
+                            if let Some(peer_id) = self.dialer.aborted_peers.pop_front() {
+                                warn!(peer = %peer_id.fmt_short(), "stale dial aborted");
+                                let peer_state = self.peers.get(&peer_id);
+                                let is_active = matches!(peer_state, Some(PeerState::Active { .. }));
+                                if !is_active {
+                                    let attempts = self.retry_map.entry(peer_id).or_insert(0);
+                                    if *attempts < MAX_DIAL_RETRIES {
+                                        *attempts += 1;
+                                        let delay = std::cmp::min(
+                                            RETRY_BASE_DELAY_S * (1u64 << (*attempts - 1)),
+                                            RETRY_MAX_DELAY_S,
+                                        );
+                                        info!(
+                                            peer = %peer_id.fmt_short(),
+                                            "will retry dial (stale) in {delay}s (attempt {} / {MAX_DIAL_RETRIES})",
+                                            *attempts,
+                                        );
+                                        let local_tx = self.local_tx.clone();
+                                        let alpn = self.alpn.clone();
+                                        tokio::task::spawn(async move {
+                                            n0_future::time::sleep(Duration::from_secs(delay)).await;
+                                            let msg = LocalActorMessage::RetryDial(
+                                                EndpointAddr::new(peer_id),
+                                                alpn,
+                                            );
+                                            let _ = local_tx.try_send(msg);
+                                        });
+                                    } else {
+                                        warn!(
+                                            peer = %peer_id.fmt_short(),
+                                            "dial retries exhausted ({MAX_DIAL_RETRIES}), giving up",
+                                        );
+                                        self.retry_map.remove(&peer_id);
+                                        self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
                     }
                     None => {
                         debug!("all gossip handles dropped, stop gossip actor");
@@ -1354,6 +1415,8 @@ struct Dialer {
     /// exhaustion.  They are drained one-by-one as `None` (disconnected)
     /// so the caller can trigger retry logic for each.
     aborted_peers: VecDeque<EndpointId>,
+    /// When each dial was started, for stale-dial detection.
+    dial_start_times: HashMap<EndpointId, Instant>,
 }
 
 impl Dialer {
@@ -1364,6 +1427,7 @@ impl Dialer {
             pending: Default::default(),
             pending_dials: Default::default(),
             aborted_peers: VecDeque::new(),
+            dial_start_times: Default::default(),
         }
     }
 
@@ -1382,6 +1446,7 @@ impl Dialer {
             guard_cancel.cancel();
         });
         self.pending_dials.insert(endpoint_id, cancel.clone());
+        self.dial_start_times.insert(endpoint_id, Instant::now());
         let endpoint = self.endpoint.clone();
         self.pending.spawn(
             // Wrap the entire dial in a tokio timeout so a hung
@@ -1456,6 +1521,39 @@ impl Dialer {
         self.pending_dials.contains_key(&endpoint)
     }
 
+    /// Aborts dials that have been pending longer than STALE_DIAL_THRESHOLD_S.
+    /// Returns true if any stale dials were found and aborted.
+    fn cleanup_stale_dials(&mut self) -> bool {
+        let now = Instant::now();
+        let threshold = Duration::from_secs(STALE_DIAL_THRESHOLD_S);
+        let stale: Vec<EndpointId> = self
+            .dial_start_times
+            .iter()
+            .filter(|(_, &start)| now.duration_since(start) > threshold)
+            .map(|(k, _)| *k)
+            .collect();
+        if stale.is_empty() {
+            return false;
+        }
+        warn!(
+            "found {} stale dials (>{:?}s), aborting",
+            stale.len(),
+            threshold
+        );
+        for peer_id in &stale {
+            self.pending_dials.remove(peer_id);
+            self.dial_start_times.remove(peer_id);
+        }
+        // Abort all tasks — the stale ones can't be selectively aborted
+        // from a JoinSet, so we abort everything and queue all pending
+        // peers as aborted.
+        self.pending.abort_all();
+        let remaining: Vec<_> = self.dial_start_times.drain().map(|(k, _)| k).collect();
+        self.aborted_peers.extend(stale);
+        self.aborted_peers.extend(remaining);
+        true
+    }
+
     /// Waits for the next dial operation to complete.
     /// `None` means disconnected
     async fn next_conn(
@@ -1483,6 +1581,7 @@ impl Dialer {
                     {
                         Ok(Some(Ok((endpoint_id, res)))) => {
                             self.pending_dials.remove(&endpoint_id);
+                            self.dial_start_times.remove(&endpoint_id);
                             break (endpoint_id, res);
                         }
                         Ok(Some(Err(e))) => {
