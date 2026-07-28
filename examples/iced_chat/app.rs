@@ -53,7 +53,6 @@ use boru_core::mailbox::{
     seal_for, IncomingAcceptance, MailboxAck, MailboxIdentity, MailboxPublicKey, MailboxStore,
 };
 use boru_core::net::Gossip;
-use boru_core::outbox::{OutboxEntry, OutboxStore};
 use boru_core::private_room_tracker::{PrivateContinuousTracker, PrivateRoomTracker};
 use boru_core::proto::TopicId;
 use boru_core::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
@@ -2036,8 +2035,6 @@ pub struct IcedChat {
     image_store: ImageStore,
     /// Persistent chat message history (loaded on startup, saved on each message).
     chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
-    /// Durable outgoing messages, shared with the active room lifecycle.
-    outbox: Arc<std::sync::Mutex<OutboxStore>>,
     /// Persistent download storage — opened once and shared with the
     /// download manager for startup recovery and ongoing tick processing.
     #[allow(dead_code)]
@@ -2690,6 +2687,8 @@ pub enum AppMessage {
     InboxEvent(InboxEvent),
     /// Results of the GUI's legacy mailbox retry pass.
     OutboxRetryResult(Vec<(TopicId, u64, bool)>),
+    /// User tapped a failed outgoing message to retry it.
+    RetryOutgoingMessage(u64),
     MessageSent(String, u64, MessageHash),
     FileSent(String),
     DownloadDone(String, PathBuf),
@@ -3951,9 +3950,6 @@ impl IcedChat {
             persist_tx,
             image_store,
             chat_history,
-            outbox: Arc::new(std::sync::Mutex::new(OutboxStore::load_or_default(
-                &data_dir,
-            ))),
             storage,
             download_manager,
             chat_history_dirty: false,
@@ -4204,14 +4200,7 @@ impl IcedChat {
         ));
     }
 
-    /// Queue a save of the outbox store.
-    fn send_save_outbox(&self) {
-        let _ = self
-            .persist_tx
-            .send(PersistenceCommand::SaveOutbox(self.outbox.clone()));
-    }
-
-    /// Queue a save of the friends store.  Coalesced.
+    /// Save the friends store.  Coalesced.
     fn send_save_friends(&self) {
         let store = self.friends.clone();
         let _ = self.persist_tx.send(PersistenceCommand::SaveFriends(store));
@@ -5098,11 +5087,9 @@ impl IcedChat {
             self.send_save_chat_history();
             id
         };
-        {
-            let mut outbox = self.outbox.lock().unwrap();
-            let _ = outbox.push(OutboxEntry::new(event_id, topic, encoded.to_vec()));
-            drop(outbox);
-            self.send_save_outbox();
+        if let Some(storage) = &self.storage {
+            let hash = boru_core::chat_history::blake3_hex(&encoded);
+            let _ = storage.insert_outgoing_message(event_id, &topic, &hash, &encoded);
         }
         info!(
             topic = %topic,
@@ -5143,6 +5130,7 @@ impl IcedChat {
             AppMessage::WhisperEvent(_) => "WhisperEvent",
             AppMessage::InboxEvent(_) => "InboxEvent",
             AppMessage::OutboxRetryResult(_) => "OutboxRetryResult",
+            AppMessage::RetryOutgoingMessage(_) => "RetryOutgoingMessage",
             AppMessage::MessageSent(..) => "MessageSent",
             AppMessage::FileSent(_) => "FileSent",
             AppMessage::DownloadDone(..) => "DownloadDone",
@@ -6998,34 +6986,61 @@ impl IcedChat {
                     self.history_saved_count = self.entries.len();
                 }
 
+                // Overlay outgoing delivery states from SQLite onto the
+                // ChatEntries so the GUI shows delivery indicators from the
+                // durable outgoing_messages table, not chat_history.json.
+                // This is the Phase 10 replacement for reading outbox.json.
+                if let Some(storage) = &self.storage {
+                    if let Ok(rows) = storage.list_outgoing_for_topic(&topic) {
+                        for row in &rows {
+                            if let Some(&index) = self.event_id_to_index.get(&row.event_id) {
+                                if let Some(entry) = self.entries.get_mut(index) {
+                                    let state = match row.delivery_state.as_str() {
+                                        "queued" => DeliveryState::Queued,
+                                        "sent" => DeliveryState::Sent,
+                                        "delivered" => DeliveryState::Delivered,
+                                        "seen" => DeliveryState::Seen,
+                                        "failed" => DeliveryState::Failed,
+                                        _ => DeliveryState::Queued,
+                                    };
+                                    if entry.delivery_state != state {
+                                        entry.delivery_state = state.clone();
+                                        entry.bump_gen();
+                                        // Keep chat_history.json in sync
+                                        let mut store = self.chat_history.lock().unwrap();
+                                        let _ = store.update_delivery_state(row.event_id, state);
+                                    }
+                                }
+                            }
+                        }
+                        self.send_save_chat_history();
+                    }
+                }
+
                 // Replay queued or previously-sent messages after a reconnect.
                 // The signed bytes are reused verbatim, so retries cannot create
                 // a second logical message or invalidate message-hash dedup.
-                let replay = {
-                    let outbox = self.outbox.lock().unwrap();
-                    outbox
-                        .pending()
-                        .into_iter()
-                        .filter(|entry| entry.topic == topic)
-                        .map(|entry| (entry.event_id, entry.signed_bytes.clone()))
-                        .collect::<Vec<_>>()
+                let replay = if let Some(storage) = &self.storage {
+                    match storage.list_pending_outgoing_for_topic(&topic) {
+                        Ok(rows) => rows
+                            .into_iter()
+                            .map(|row| (row.event_id, row.signed_bytes))
+                            .collect(),
+                        Err(_) => Vec::new(),
+                    }
+                } else {
+                    Vec::new()
                 };
                 if !replay.is_empty() {
                     let sender = sender.clone();
                     let ids = replay.iter().map(|(id, _)| *id).collect::<Vec<_>>();
                     for id in &ids {
                         let _ = self
-                            .outbox
-                            .lock()
-                            .unwrap()
-                            .update_delivery_state(*id, DeliveryState::Sent);
-                        let _ = self
                             .chat_history
                             .lock()
                             .unwrap()
                             .update_delivery_state(*id, DeliveryState::Sent);
                     }
-                    self.send_save_outbox();
                     self.send_save_chat_history();
                     // After delivering, try the next pending
                     task::spawn(async move {
@@ -9269,14 +9284,15 @@ impl IcedChat {
                 // attempts remain queued for the next periodic retry.
                 let mut changed = false;
                 {
-                    let mut outbox = self.outbox.lock().unwrap();
                     let mut history = self.chat_history.lock().unwrap();
                     for (topic, event_id, delivered) in results {
-                        let _ = outbox.increment_retry(event_id);
-                        let message_hash = outbox
-                            .get(event_id)
-                            .map(|entry| entry.hash.clone())
-                            .unwrap_or_else(|| "unknown".to_string());
+                        if let Some(storage) = &self.storage {
+                            let _ = storage.increment_outgoing_retry(event_id);
+                            if delivered {
+                                let _ = storage.update_outgoing_delivery_state(event_id, "sent");
+                            }
+                        }
+                        let message_hash = "unknown".to_string();
                         info!(
                             event_id,
                             message_hash = %message_hash,
@@ -9288,11 +9304,7 @@ impl IcedChat {
                             persistence_result = "queued",
                             "message delivery telemetry"
                         );
-                        if delivered
-                            && outbox
-                                .update_delivery_state(event_id, DeliveryState::Sent)
-                                .is_ok()
-                        {
+                        if delivered {
                             let _ = history.update_delivery_state(event_id, DeliveryState::Sent);
                             if let Some(&index) = self.event_id_to_index.get(&event_id) {
                                 if let Some(entry) = self.entries.get_mut(index) {
@@ -9303,7 +9315,6 @@ impl IcedChat {
                             }
                         }
                     }
-                    self.send_save_outbox();
                     self.send_save_chat_history();
                 }
                 if changed {
@@ -9321,10 +9332,15 @@ impl IcedChat {
                     }
                     self.message_hash_to_index.insert(msg_hash, index);
                 }
+                // Persist delivery state update in SQLite synchronously
+                // (quick UPDATE query) and offload chat_history.json save to
+                // background to avoid blocking the UI thread.
+                if let Some(storage) = &self.storage {
+                    let _ = storage.update_outgoing_delivery_state(event_id, "sent");
+                }
                 // Persist delivery state update in background so the UI thread
                 // is not blocked by disk I/O.
                 let history_arc = self.chat_history.clone();
-                let outbox_arc = self.outbox.clone();
                 iced::Task::perform(
                     tokio::task::spawn_blocking(move || {
                         let mut history = history_arc.lock().unwrap();
@@ -9332,14 +9348,9 @@ impl IcedChat {
                             .update_delivery_state(event_id, DeliveryState::Sent)
                             .is_ok()
                             && history.save().is_ok();
-                        let mut outbox = outbox_arc.lock().unwrap();
-                        let outbox_result = outbox
-                            .update_delivery_state(event_id, DeliveryState::Sent)
-                            .is_ok()
-                            && outbox.save().is_ok();
                         info!(
                             event_id,
-                            persistence_result = if history_result && outbox_result {
+                            persistence_result = if history_result {
                                 "saved"
                             } else {
                                 "failed"
@@ -9349,6 +9360,29 @@ impl IcedChat {
                     }),
                     |_| AppMessage::Noop,
                 )
+            }
+
+            AppMessage::RetryOutgoingMessage(event_id) => {
+                // User tapped a failed outgoing message to retry it.
+                // Transition state from "failed" back to "queued" in SQLite
+                // so the periodic retry loop picks it up.
+                if let Some(storage) = &self.storage {
+                    let _ = storage.update_outgoing_delivery_state(event_id, "queued");
+                }
+                // Update in-memory entry
+                if let Some(&index) = self.event_id_to_index.get(&event_id) {
+                    if let Some(entry) = self.entries.get_mut(index) {
+                        if entry.delivery_state == DeliveryState::Failed {
+                            entry.delivery_state = DeliveryState::Queued;
+                            entry.bump_gen();
+                        }
+                    }
+                }
+                // Update chat_history.json for backward compat
+                let mut store = self.chat_history.lock().unwrap();
+                let _ = store.update_delivery_state(event_id, DeliveryState::Queued);
+                self.send_save_chat_history();
+                iced::Task::none()
             }
 
             AppMessage::ExecuteFileSend(encoded) => {
@@ -11174,20 +11208,27 @@ impl IcedChat {
                 // conversations — not just the active room. Background
                 // conversations also accumulate outbox entries (e.g. from
                 // MCP-triggered sends) and must retry when the peer reconnects.
-                let all_retries: Vec<(TopicId, Vec<(u64, Vec<u8>)>)> = {
-                    let outbox = self.outbox.lock().unwrap();
-                    let pending = outbox.pending();
-                    // Group pending entries by topic
-                    let mut by_topic: std::collections::BTreeMap<TopicId, Vec<(u64, Vec<u8>)>> =
-                        std::collections::BTreeMap::new();
-                    for entry in &pending {
-                        by_topic
-                            .entry(entry.topic)
-                            .or_default()
-                            .push((entry.event_id, entry.signed_bytes.clone()));
-                    }
-                    by_topic.into_iter().collect()
-                };
+                let all_retries: Vec<(TopicId, Vec<(u64, Vec<u8>)>)> =
+                    if let Some(storage) = &self.storage {
+                        match storage.list_pending_outgoing() {
+                            Ok(rows) => {
+                                let mut by_topic: std::collections::BTreeMap<
+                                    TopicId,
+                                    Vec<(u64, Vec<u8>)>,
+                                > = std::collections::BTreeMap::new();
+                                for row in &rows {
+                                    by_topic
+                                        .entry(row.topic)
+                                        .or_default()
+                                        .push((row.event_id, row.signed_bytes.clone()));
+                                }
+                                by_topic.into_iter().collect()
+                            }
+                            Err(_) => Vec::new(),
+                        }
+                    } else {
+                        Vec::new()
+                    };
                 if !all_retries.is_empty() {
                     // Collect senders for all subscribed conversations
                     let topic_senders: Vec<(TopicId, GossipSender, bool, usize)> = {
@@ -11214,7 +11255,6 @@ impl IcedChat {
                         }
                         pairs
                     };
-                    let outbox = self.outbox.clone();
                     let history = self.chat_history.clone();
                     tasks.push(iced::Task::perform(
                         async move {
@@ -11234,10 +11274,9 @@ impl IcedChat {
                                     }
                                 }
                             }
-                            (results, outbox, history)
+                            results
                         },
-                        |(results, outbox, history)| {
-                            let _ = (outbox, history);
+                        |results| {
                             AppMessage::OutboxRetryResult(results)
                         },
                     ));
@@ -12436,17 +12475,18 @@ impl IcedChat {
                 let topic = self.topic;
                 let room_history = self.room_history.clone();
                 let chat_history = self.chat_history.clone();
-                let outbox = self.outbox.clone();
+                if let Some(storage) = &self.storage {
+                    let _ = storage.delete_outgoing_for_topic(&topic);
+                }
                 iced::Task::perform(
                     async move {
                         let mut room_history = room_history;
                         let mut chat_history = chat_history.lock().unwrap();
-                        let mut outbox = outbox.lock().unwrap();
                         let report = clear_room_history(
                             topic,
                             &mut room_history,
                             &mut chat_history,
-                            Some(&mut outbox),
+                            None,
                         )
                         .map_err(|err| err.to_string())?;
                         Ok::<_, String>((topic, room_history, report))
@@ -12765,15 +12805,19 @@ impl IcedChat {
                 .map_err(|err| err.to_string())?;
         }
 
+        // Clean up outgoing messages in storage before mutating in-memory stores
+        if let Some(storage) = &self.storage {
+            let _ = storage.delete_outgoing_for_topic(&topic);
+        }
+
         let report = {
             let mut chat_history = self.chat_history.lock().unwrap();
-            let mut outbox = self.outbox.lock().unwrap();
             delete_room_history(
                 &self.data_dir,
                 topic,
                 &mut self.room_history,
                 &mut chat_history,
-                Some(&mut outbox),
+                None,
                 Some(&mut self.friends),
             )
             .map_err(|err| err.to_string())?
@@ -12785,9 +12829,6 @@ impl IcedChat {
             self.chat_history_dirty = true;
             self.send_save_chat_history();
             self.chat_history_dirty = false;
-        }
-        if report.outbox_entries_removed > 0 {
-            self.send_save_outbox();
         }
         if report.friend_records_updated > 0 {
             self.mark_friends_sidebar_dirty();
@@ -12962,12 +13003,10 @@ impl IcedChat {
                                 let _ =
                                     store.update_delivery_state(event_id, DeliveryState::Delivered);
                                 self.send_save_chat_history();
-                                {
-                                    let mut outbox = self.outbox.lock().unwrap();
-                                    let _ = outbox
-                                        .update_delivery_state(event_id, DeliveryState::Delivered);
+                                // Keep SQLite outgoing_messages in sync
+                                if let Some(storage) = &self.storage {
+                                    let _ = storage.update_outgoing_delivery_state(event_id, "delivered");
                                 }
-                                self.send_save_outbox();
                             }
                         }
                     }
@@ -13033,6 +13072,10 @@ impl IcedChat {
                             let mut store = self.chat_history.lock().unwrap();
                             let _ =
                                 store.update_delivery_state(entry.event_id, DeliveryState::Seen);
+                            // Keep SQLite outgoing_messages in sync
+                            if let Some(storage) = &self.storage {
+                                let _ = storage.update_outgoing_delivery_state(entry.event_id, "seen");
+                            }
                         }
                     }
                 }
@@ -16847,11 +16890,28 @@ impl IcedChat {
                         .into()
                 }
             } else {
-                text(label_text)
-                    .size(TYPO_SM)
-                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
-                    .color(label_color)
+                // Local messages: make label clickable for retry when Failed
+                if matches!(entry.kind, ChatKind::Local)
+                    && entry.delivery_state == DeliveryState::Failed
+                {
+                    let event_id = entry.event_id;
+                    button(
+                        text(label_text)
+                            .size(TYPO_SM)
+                            .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                            .color(label_color),
+                    )
+                    .on_press(AppMessage::RetryOutgoingMessage(event_id))
+                    .padding(0)
+                    .style(|_t, _s| iced::widget::button::Style::default())
                     .into()
+                } else {
+                    text(label_text)
+                        .size(TYPO_SM)
+                        .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                        .color(label_color)
+                        .into()
+                }
             };
 
             // ── Clickable URL-aware body ──

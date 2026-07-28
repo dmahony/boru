@@ -40,12 +40,13 @@ use crate::catalogue_limits::CatalogueLimitsConfig;
 use crate::catalogue_model::{CatalogueView, RemoteSharedFile, SignedFileCatalogue};
 use crate::friends::{FriendRelationship, FriendsStore};
 use crate::mailbox::{seal_for, MailboxAck, MailboxEnvelope, MailboxPublicKey};
+use crate::proto::TopicId;
 use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 9;
+const CURRENT_SCHEMA_VERSION: u32 = 10;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -132,6 +133,30 @@ pub struct SharedFileRow {
     /// When the offer was created (ms since UNIX epoch).
     pub created_at_ms: u64,
     /// When the offer was last updated.
+    pub updated_at_ms: u64,
+}
+
+/// A row in the `outgoing_messages` table: tracks delivery state of
+/// messages composed locally, mirroring the fields of `OutboxEntry`
+/// but stored in SQLite so the GUI never needs to touch `outbox.json`.
+#[derive(Debug, Clone)]
+pub struct OutgoingMessageRow {
+    /// Stable, monotonically-increasing event identifier assigned locally.
+    pub event_id: u64,
+    /// The gossip topic this message was (or will be) broadcast on.
+    pub topic: TopicId,
+    /// blake3 hex hash of the raw signed message bytes.
+    pub hash: String,
+    /// The raw signed message bytes, for replay/retry without touching
+    /// the JSON outbox store.
+    pub signed_bytes: Vec<u8>,
+    /// Current delivery state: "queued", "sent", "delivered", "seen", "failed".
+    pub delivery_state: String,
+    /// Number of times a send has been attempted (for retry tracking).
+    pub retry_count: u32,
+    /// Unix-epoch milliseconds when this entry was created.
+    pub created_at_ms: u64,
+    /// Unix-epoch milliseconds when this entry was last updated.
     pub updated_at_ms: u64,
 }
 
@@ -611,6 +636,7 @@ impl Storage {
                 7 => self.migrate_v7(&conn)?,
                 8 => self.migrate_v8(&conn)?,
                 9 => self.migrate_v9(&conn)?,
+                10 => self.migrate_v10(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -940,6 +966,27 @@ impl Storage {
     fn migrate_v9(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE file_objects ADD COLUMN source_path TEXT;")
             .std_context("migrate v9 source_path")?;
+        Ok(())
+    }
+
+    /// V10 creates the `outgoing_messages` table so the GUI can read/write
+    /// delivery state from SQLite instead of `outbox.json`.
+    fn migrate_v10(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS outgoing_messages (
+                event_id INTEGER PRIMARY KEY,
+                topic_blob BLOB NOT NULL,
+                hash TEXT NOT NULL,
+                signed_bytes BLOB NOT NULL,
+                delivery_state TEXT NOT NULL DEFAULT 'queued',
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_outgoing_topic
+                ON outgoing_messages(topic_blob);",
+        )
+        .std_context("migrate v10 outgoing_messages")?;
         Ok(())
     }
 
@@ -4418,6 +4465,168 @@ impl Storage {
     {
         let conn = self.conn.lock().unwrap();
         f(&conn)
+    }
+
+    // ── Outgoing messages (Phase 10: SQLite replacement for outbox.json) ──
+
+    /// Insert a new outgoing message entry (delivery_state starts as "queued").
+    pub fn insert_outgoing_message(
+        &self,
+        event_id: u64,
+        topic: &TopicId,
+        hash: &str,
+        signed_bytes: &[u8],
+    ) -> Result<()> {
+        let now = now_ms();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO outgoing_messages
+                (event_id, topic_blob, hash, signed_bytes, delivery_state, retry_count, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 'queued', 0, ?5, ?5)",
+            params![event_id as i64, topic.as_bytes(), hash, signed_bytes, now as i64],
+        )
+        .std_context("insert outgoing message")?;
+        Ok(())
+    }
+
+    /// Update the delivery state for an outgoing message.
+    /// Returns an error if the event_id does not exist.
+    pub fn update_outgoing_delivery_state(&self, event_id: u64, state: &str) -> Result<()> {
+        let now = now_ms();
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .execute(
+                "UPDATE outgoing_messages SET delivery_state = ?1, updated_at_ms = ?2 WHERE event_id = ?3",
+                params![state, now as i64, event_id as i64],
+            )
+            .std_context("update outgoing delivery state")?;
+        if rows == 0 {
+            return Err(anyhow!("no outgoing message with event_id {event_id}").into());
+        }
+        Ok(())
+    }
+
+    /// Increment the retry count for an outgoing message.
+    pub fn increment_outgoing_retry(&self, event_id: u64) -> Result<()> {
+        let now = now_ms();
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .execute(
+                "UPDATE outgoing_messages SET retry_count = retry_count + 1, updated_at_ms = ?1 WHERE event_id = ?2",
+                params![now as i64, event_id as i64],
+            )
+            .std_context("increment outgoing retry")?;
+        if rows == 0 {
+            return Err(anyhow!("no outgoing message with event_id {event_id}").into());
+        }
+        Ok(())
+    }
+
+    /// Return all outgoing messages whose delivery_state is "queued" (ready for retry).
+    pub fn list_pending_outgoing(&self) -> Result<Vec<OutgoingMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_id, topic_blob, hash, signed_bytes, delivery_state, retry_count, created_at_ms, updated_at_ms
+                 FROM outgoing_messages
+                 WHERE delivery_state IN ('queued')
+                 ORDER BY created_at_ms ASC",
+            )
+            .std_context("prepare list_pending_outgoing")?;
+        let rows = stmt
+            .query_map([], Self::row_to_outgoing)
+            .std_context("query list_pending_outgoing")?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row.std_context("read pending outgoing row")?);
+        }
+        Ok(results)
+    }
+
+    /// Return outgoing messages for a specific topic whose delivery_state is "queued".
+    pub fn list_pending_outgoing_for_topic(&self, topic: &TopicId) -> Result<Vec<OutgoingMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_id, topic_blob, hash, signed_bytes, delivery_state, retry_count, created_at_ms, updated_at_ms
+                 FROM outgoing_messages
+                 WHERE topic_blob = ?1 AND delivery_state IN ('queued')
+                 ORDER BY created_at_ms ASC",
+            )
+            .std_context("prepare list_pending_outgoing_for_topic")?;
+        let rows = stmt
+            .query_map(params![topic.as_bytes()], Self::row_to_outgoing)
+            .std_context("query list_pending_outgoing_for_topic")?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row.std_context("read pending outgoing row")?);
+        }
+        Ok(results)
+    }
+
+    /// Return ALL outgoing messages for a topic (any delivery state).
+    /// Used by the GUI to reconstruct delivery state from SQLite on restart.
+    pub fn list_outgoing_for_topic(&self, topic: &TopicId) -> Result<Vec<OutgoingMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_id, topic_blob, hash, signed_bytes, delivery_state, retry_count, created_at_ms, updated_at_ms
+                 FROM outgoing_messages
+                 WHERE topic_blob = ?1
+                 ORDER BY created_at_ms ASC",
+            )
+            .std_context("prepare list_outgoing_for_topic")?;
+        let rows = stmt
+            .query_map(params![topic.as_bytes()], Self::row_to_outgoing)
+            .std_context("query list_outgoing_for_topic")?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row.std_context("read outgoing row")?);
+        }
+        Ok(results)
+    }
+
+    /// Get a single outgoing message by event_id.
+    pub fn get_outgoing_message(&self, event_id: u64) -> Result<Option<OutgoingMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT event_id, topic_blob, hash, signed_bytes, delivery_state, retry_count, created_at_ms, updated_at_ms
+             FROM outgoing_messages WHERE event_id = ?1",
+            params![event_id as i64],
+            Self::row_to_outgoing,
+        )
+        .optional()
+        .std_context("get outgoing message")
+    }
+
+    /// Delete all outgoing messages for a given topic (used during room cleanup).
+    pub fn delete_outgoing_for_topic(&self, topic: &TopicId) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn
+            .execute(
+                "DELETE FROM outgoing_messages WHERE topic_blob = ?1",
+                params![topic.as_bytes()],
+            )
+            .std_context("delete outgoing for topic")?;
+        Ok(count)
+    }
+
+    /// Helper to parse an outgoing_messages row from a rusqlite statement.
+    fn row_to_outgoing(row: &rusqlite::Row) -> rusqlite::Result<OutgoingMessageRow> {
+        let topic_bytes: Vec<u8> = row.get(1)?;
+        let topic_arr: [u8; 32] = topic_bytes
+            .try_into()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        Ok(OutgoingMessageRow {
+            event_id: row.get::<_, i64>(0)? as u64,
+            topic: TopicId::from_bytes(topic_arr),
+            hash: row.get(2)?,
+            signed_bytes: row.get(3)?,
+            delivery_state: row.get(4)?,
+            retry_count: row.get::<_, i64>(5)? as u32,
+            created_at_ms: row.get::<_, i64>(6)? as u64,
+            updated_at_ms: row.get::<_, i64>(7)? as u64,
+        })
     }
 }
 

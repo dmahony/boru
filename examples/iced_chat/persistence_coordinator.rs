@@ -18,7 +18,6 @@
 //! |-------|-----------|-----------|----------|
 //! | [`boru_core::conversations::ConversationStore`] | ✓ (replace) | ✓ | clone at send |
 //! | [`boru_core::chat_history::ChatHistoryStore`] | ✓ (latest via Arc) | — | lock+clone in worker |
-//! | [`boru_core::outbox::OutboxStore`] | ✓ (latest via Arc) | — | lock+clone in worker |
 //! | [`boru_core::friends::FriendsStore`] | ✓ (replace) | ✓ | clone at send |
 //! | [`AppSettings`](crate::app::AppSettings) | ✓ (replace) | ✓ | clone at send |
 //! | [`boru_core::user_profile::UserProfileStore`] | ✓ (replace) | ✓ | clone at send |
@@ -33,7 +32,6 @@ use boru_core::chat_history::ChatHistoryStore;
 use boru_core::conversations::ConversationStore;
 use boru_core::friend_request::FriendRequestStore;
 use boru_core::friends::FriendsStore;
-use boru_core::outbox::OutboxStore;
 use boru_core::user_profile::UserProfileStore;
 
 use crate::app::AppSettings;
@@ -48,7 +46,6 @@ const DEBOUNCE_MS: u64 = 200;
 enum StoreKey {
     Conversations,
     ChatHistory,
-    Outbox,
     Friends,
     Settings,
     Profile,
@@ -59,7 +56,6 @@ fn command_key(cmd: &PersistenceCommand) -> Option<StoreKey> {
     match cmd {
         PersistenceCommand::SaveConversations(_) => Some(StoreKey::Conversations),
         PersistenceCommand::SaveChatHistory(_) => Some(StoreKey::ChatHistory),
-        PersistenceCommand::SaveOutbox(_) => Some(StoreKey::Outbox),
         PersistenceCommand::SaveFriends(_) => Some(StoreKey::Friends),
         PersistenceCommand::SaveSettings { .. } => Some(StoreKey::Settings),
         PersistenceCommand::SaveProfile(_) => Some(StoreKey::Profile),
@@ -77,8 +73,6 @@ pub enum PersistenceCommand {
     SaveConversations(ConversationStore),
     /// Persist the chat-history store (locked + cloned inside the worker).
     SaveChatHistory(Arc<Mutex<ChatHistoryStore>>),
-    /// Persist the outbox store (locked + cloned inside the worker).
-    SaveOutbox(Arc<Mutex<OutboxStore>>),
     /// Replace the on-disk friends store.
     SaveFriends(FriendsStore),
     /// Persist application settings (clone at send time).
@@ -101,7 +95,6 @@ impl std::fmt::Debug for PersistenceCommand {
         match self {
             Self::SaveConversations(_) => write!(f, "SaveConversations"),
             Self::SaveChatHistory(_) => write!(f, "SaveChatHistory"),
-            Self::SaveOutbox(_) => write!(f, "SaveOutbox"),
             Self::SaveFriends(_) => write!(f, "SaveFriends"),
             Self::SaveSettings { .. } => write!(f, "SaveSettings"),
             Self::SaveProfile(_) => write!(f, "SaveProfile"),
@@ -177,12 +170,6 @@ fn execute_cmd(cmd: &PersistenceCommand) {
             let snapshot = arc.lock().unwrap().clone();
             if let Err(e) = snapshot.save() {
                 tracing::warn!(error = %e, "failed to persist chat history");
-            }
-        }
-        PersistenceCommand::SaveOutbox(arc) => {
-            let snapshot = arc.lock().unwrap().clone();
-            if let Err(e) = snapshot.save() {
-                tracing::warn!(error = %e, "failed to persist outbox");
             }
         }
         PersistenceCommand::SaveFriends(store) => {
