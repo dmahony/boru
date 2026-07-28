@@ -72,7 +72,7 @@ use n0_future::task;
 use n0_future::Stream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::connection_details::{
     self, ConnectionDetailsDialogAction, ConnectionDetailsDialogState, ConnectionDetailsViewModel,
@@ -4185,7 +4185,13 @@ impl IcedChat {
     fn send_save_conversations(&self) {}
 
     /// Legacy no-op — chat history is in SQLite.
-    fn send_save_chat_history(&self) {}
+    fn send_save_chat_history(&self) {
+        let store = self.chat_history.clone();
+        std::thread::spawn(move || {
+            let store = store.lock().unwrap();
+            let _ = store.save();
+        });
+    }
 
     /// Legacy no-op — friend data is in SQLite.
     fn send_save_friends(&self) {}
@@ -5062,7 +5068,16 @@ impl IcedChat {
         };
         if let Some(storage) = &self.storage {
             let hash = boru_core::chat_history::blake3_hex(&encoded);
-            let _ = storage.insert_outgoing_message(event_id, &topic, &hash, &encoded);
+            match storage.insert_outgoing_message(event_id, &topic, &hash, &encoded) {
+                Ok(()) => {
+                    info!("SQLite insert_outgoing_message OK for event_id={}", event_id);
+                }
+                Err(e) => {
+                    error!("SQLite insert_outgoing_message failed for event_id={}: {e}", event_id);
+                }
+            }
+        } else {
+            warn!("SQLite storage is None — outgoing messages not persisted to DB");
         }
         info!(
             topic = %topic,
@@ -9947,6 +9962,21 @@ impl IcedChat {
                     entry.bump_gen();
                 }
                 self.entries_push(entry);
+                // Persist to chat_history so images survive restarts
+                {
+                    let topic = self.topic;
+                    let local_hex = hex::encode(self.local_public.as_bytes());
+                    let mut store = self.chat_history.lock().unwrap();
+                    let hist_entry = HistoryEntry::new(
+                        topic,
+                        local_hex,
+                        Vec::new(),
+                        "image",
+                        name.clone(),
+                    );
+                    store.push_with_id(hist_entry);
+                }
+                self.send_save_chat_history();
                 self.start_next_pending_image_download()
             }
             AppMessage::ProfileImageDownloaded(peer, image_bytes) => {

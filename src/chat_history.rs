@@ -17,6 +17,7 @@ use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::chat_core::atomic_write::atomic_write_json;
 use crate::proto::TopicId;
 
 /// Current schema version — bump on breaking format changes.
@@ -344,11 +345,7 @@ impl ChatHistoryStore {
     )]
     pub fn save(&self) -> Result<PathBuf> {
         let path = self.file_path();
-        warn!(
-            path = %path.display(),
-            "save() called on deprecated JSON chat history store — no data written; \
-             use SQLite inbox/outbox tables instead"
-        );
+        atomic_write_json(&path, self, "chat history")?;
         Ok(path)
     }
 
