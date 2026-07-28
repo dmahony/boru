@@ -372,6 +372,28 @@ impl ChatHistoryStore {
         id
     }
 
+    /// Push an entry with a caller-specified `explicit_id`, advancing
+    /// `next_event_id` past it if needed.  Use this when replaying rows
+    /// from the SQLite `outgoing_messages` table whose event_ids must be
+    /// preserved for foreign-key consistency.
+    pub fn push_with_explicit_id(&mut self, mut entry: HistoryEntry, explicit_id: u64) {
+        if explicit_id >= self.next_event_id {
+            self.next_event_id = explicit_id + 1;
+        }
+        entry.event_id = explicit_id;
+        self.entries.push(entry);
+    }
+
+    /// Ensure `next_event_id` is strictly greater than `max_external_id`,
+    /// so that future calls to [`push_with_id`](Self::push_with_id) never
+    /// collide with ids already present in the SQLite `outgoing_messages`
+    /// table (which may be ahead of the JSON-based `ChatHistoryStore`).
+    pub fn seed_next_event_id(&mut self, max_external_id: u64) {
+        if max_external_id >= self.next_event_id {
+            self.next_event_id = max_external_id + 1;
+        }
+    }
+
     /// Find an entry by its stable [`event_id`](HistoryEntry::event_id).
     pub fn get_by_event_id(&self, event_id: u64) -> Option<&HistoryEntry> {
         self.entries.iter().find(|e| e.event_id == event_id)

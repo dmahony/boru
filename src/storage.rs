@@ -4476,6 +4476,10 @@ impl Storage {
     // ── Outgoing messages (Phase 10: SQLite replacement for outbox.json) ──
 
     /// Insert a new outgoing message entry (delivery_state starts as "queued").
+    ///
+    /// Returns an error if the event_id already exists in the table
+    /// (e.g. because `ChatHistoryStore::next_event_id` fell out of sync
+    /// with SQLite after a crash prevented JSON from being saved).
     pub fn insert_outgoing_message(
         &self,
         event_id: u64,
@@ -4485,13 +4489,21 @@ impl Storage {
     ) -> Result<()> {
         let now = now_ms();
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR IGNORE INTO outgoing_messages
+        let rows = conn
+            .execute(
+                "INSERT INTO outgoing_messages
                 (event_id, topic_blob, hash, signed_bytes, delivery_state, retry_count, created_at_ms, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4, 'queued', 0, ?5, ?5)",
-            params![event_id as i64, topic.as_bytes(), hash, signed_bytes, now as i64],
-        )
-        .std_context("insert outgoing message")?;
+                params![event_id as i64, topic.as_bytes(), hash, signed_bytes, now as i64],
+            )
+            .std_context("insert outgoing message")?;
+        if rows == 0 {
+            return Err(anyhow!(
+                "insert_outgoing_message: 0 rows affected for event_id={event_id} — \
+                 possible event_id collision with existing SQLite row"
+            )
+            .into());
+        }
         Ok(())
     }
 
@@ -4615,6 +4627,21 @@ impl Storage {
             )
             .std_context("delete outgoing for topic")?;
         Ok(count)
+    }
+
+    /// Return the maximum event_id in the outgoing_messages table, or 0 if empty.
+    /// Used to seed ChatHistoryStore::next_event_id so it never reuses an id
+    /// already in SQLite (prevents INSERT collision after JSON/save desync).
+    pub fn max_outgoing_event_id(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let max_id: Option<i64> = conn
+            .query_row(
+                "SELECT COALESCE(MAX(event_id), 0) FROM outgoing_messages",
+                [],
+                |row| row.get(0),
+            )
+            .std_context("max outgoing event_id")?;
+        Ok(max_id.unwrap_or(0) as u64)
     }
 
     /// Helper to parse an outgoing_messages row from a rusqlite statement.

@@ -7015,11 +7015,13 @@ impl IcedChat {
                                         kind,
                                         preview,
                                     );
-                                    // Assign the real event_id from SQLite
-                                    store.push_with_id(entry);
-                                    // Re-lock to get the stored entry
+                                    // Preserve the SQLite event_id so the
+                                    // entry can be found by event_id later.
+                                    let expected_id = row.event_id;
+                                    store.push_with_explicit_id(entry, expected_id);
+                                    // Find the entry we just stored
                                     if let Some(saved) =
-                                        store.get_by_event_id(row.event_id)
+                                        store.get_by_event_id(expected_id)
                                     {
                                         let saved = saved.clone();
                                         drop(store);

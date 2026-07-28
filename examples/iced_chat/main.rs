@@ -783,6 +783,14 @@ fn main() -> Result<()> {
             ChatHistoryStore::load_or_default(&data_dir),
         ));
 
+        // Sync ChatHistoryStore's next_event_id with the SQLite
+        // outgoing_messages table so that new event_ids never collide
+        // with rows already in SQLite (e.g. after a crash where JSON
+        // wasn't saved but SQLite was).
+        if let Ok(max_id) = storage.max_outgoing_event_id() {
+            chat_history.lock().unwrap().seed_next_event_id(max_id);
+        }
+
         // ── Backfill handler ──────────────────────────────────────────
         let backfill_handler = BackfillProtocolHandler::new(chat_history.clone());
 
