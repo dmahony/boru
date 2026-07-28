@@ -1,0 +1,479 @@
+use std::{
+    fmt,
+    future::Future,
+    io,
+    sync::{Arc, atomic::AtomicU64},
+};
+
+use iroh::{
+    EndpointId,
+    endpoint::{
+        Accepting, Connection, ConnectionError, IncomingZeroRttConnection,
+        OutgoingZeroRttConnection, RecvStream, RemoteEndpointIdError, SendStream, VarInt,
+        ZeroRttStatus,
+    },
+    protocol::{AcceptError, ProtocolHandler},
+};
+use irpc::{
+    LocalSender, RequestError, Service,
+    channel::oneshot,
+    rpc::{
+        ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED, Handler, MAX_MESSAGE_SIZE, RemoteConnection,
+        RemoteService,
+    },
+    util::AsyncReadVarintExt,
+};
+use n0_error::{Result, e};
+use n0_future::{TryFutureExt, future::Boxed as BoxFuture};
+use tracing::{Instrument, debug, error_span, trace, trace_span, warn};
+
+/// Returns a client that connects to a irpc service using an [`iroh::Endpoint`].
+pub fn client<S: irpc::Service>(
+    endpoint: iroh::Endpoint,
+    addr: impl Into<iroh::EndpointAddr>,
+    alpn: impl AsRef<[u8]>,
+) -> irpc::Client<S> {
+    let conn = IrohLazyRemoteConnection::new(endpoint, addr.into(), alpn.as_ref().to_vec());
+    irpc::Client::boxed(conn)
+}
+
+/// Wrap an existing iroh connection as an irpc remote connection.
+///
+/// This will stop working as soon as the underlying iroh connection is closed.
+/// If you need to support reconnects, use [`IrohLazyRemoteConnection`] instead.
+// TODO: remove this and provide a From instance as soon as iroh is 1.0 and
+// we can move irpc-iroh into irpc?
+#[derive(Debug, Clone)]
+pub struct IrohRemoteConnection(Connection);
+
+impl IrohRemoteConnection {
+    pub fn new(connection: Connection) -> Self {
+        Self(connection)
+    }
+}
+
+impl irpc::rpc::RemoteConnection for IrohRemoteConnection {
+    fn clone_boxed(&self) -> Box<dyn irpc::rpc::RemoteConnection> {
+        Box::new(self.clone())
+    }
+
+    fn open_bi(
+        &self,
+    ) -> n0_future::future::Boxed<std::result::Result<(SendStream, RecvStream), irpc::RequestError>>
+    {
+        let conn = self.0.clone();
+        Box::pin(async move {
+            let (send, recv) = conn.open_bi().await?;
+            Ok((send, recv))
+        })
+    }
+
+    fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
+        Box::pin(async { false })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IrohZrttRemoteConnection(OutgoingZeroRttConnection);
+
+impl IrohZrttRemoteConnection {
+    pub fn new(connection: OutgoingZeroRttConnection) -> Self {
+        Self(connection)
+    }
+}
+
+impl irpc::rpc::RemoteConnection for IrohZrttRemoteConnection {
+    fn clone_boxed(&self) -> Box<dyn irpc::rpc::RemoteConnection> {
+        Box::new(self.clone())
+    }
+
+    fn open_bi(
+        &self,
+    ) -> n0_future::future::Boxed<std::result::Result<(SendStream, RecvStream), irpc::RequestError>>
+    {
+        let conn = self.0.clone();
+        Box::pin(async move {
+            let (send, recv) = conn.open_bi().await?;
+            Ok((send, recv))
+        })
+    }
+
+    fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
+        let conn = self.0.clone();
+        Box::pin(async move {
+            match conn.handshake_completed().await {
+                Err(_) => true,
+                Ok(ZeroRttStatus::Accepted(_)) => false,
+                Ok(ZeroRttStatus::Rejected(_)) => true,
+            }
+        })
+    }
+}
+
+/// A connection to a remote service.
+///
+/// Initially this does just have the endpoint and the address. Once a
+/// connection is established, it will be stored.
+#[derive(Debug, Clone)]
+pub struct IrohLazyRemoteConnection(Arc<IrohRemoteConnectionInner>);
+
+#[derive(Debug)]
+struct IrohRemoteConnectionInner {
+    endpoint: iroh::Endpoint,
+    addr: iroh::EndpointAddr,
+    connection: tokio::sync::Mutex<Option<Connection>>,
+    alpn: Vec<u8>,
+}
+
+impl IrohLazyRemoteConnection {
+    pub fn new(endpoint: iroh::Endpoint, addr: iroh::EndpointAddr, alpn: Vec<u8>) -> Self {
+        Self(Arc::new(IrohRemoteConnectionInner {
+            endpoint,
+            addr,
+            connection: Default::default(),
+            alpn,
+        }))
+    }
+}
+
+impl RemoteConnection for IrohLazyRemoteConnection {
+    fn clone_boxed(&self) -> Box<dyn RemoteConnection> {
+        Box::new(self.clone())
+    }
+
+    fn open_bi(&self) -> BoxFuture<std::result::Result<(SendStream, RecvStream), RequestError>> {
+        let this = self.0.clone();
+        Box::pin(async move {
+            let mut guard = this.connection.lock().await;
+            let pair = match guard.as_mut() {
+                Some(conn) => {
+                    // try to reuse the connection
+                    match conn.open_bi().await {
+                        Ok(pair) => pair,
+                        Err(_) => {
+                            // try with a new connection, just once
+                            *guard = None;
+                            connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard)
+                                .await?
+                        }
+                    }
+                }
+                None => connect_and_open_bi(&this.endpoint, &this.addr, &this.alpn, guard).await?,
+            };
+            Ok(pair)
+        })
+    }
+
+    fn zero_rtt_rejected(&self) -> BoxFuture<bool> {
+        Box::pin(async { false })
+    }
+}
+
+async fn connect_and_open_bi(
+    endpoint: &iroh::Endpoint,
+    addr: &iroh::EndpointAddr,
+    alpn: &[u8],
+    mut guard: tokio::sync::MutexGuard<'_, Option<Connection>>,
+) -> Result<(SendStream, RecvStream), RequestError> {
+    let conn = endpoint
+        .connect(addr.clone(), alpn)
+        .await
+        .map_err(|err| e!(RequestError::Other, err.into()))?;
+    let (send, recv) = conn.open_bi().await?;
+    *guard = Some(conn);
+    Ok((send, recv))
+}
+
+/// A [`ProtocolHandler`] for an irpc protocol.
+///
+/// Can be added to an [`iroh::protocol::Router`] to handle incoming connections for an ALPN string.
+pub struct IrohProtocol<S> {
+    handler: Handler<S>,
+    request_id: AtomicU64,
+}
+
+impl<T> fmt::Debug for IrohProtocol<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RpcProtocol")
+    }
+}
+
+impl<S: Service> IrohProtocol<S> {
+    pub fn with_sender(local_sender: impl Into<LocalSender<S>>) -> Self
+    where
+        S: RemoteService,
+    {
+        let handler = S::remote_handler(local_sender.into());
+        Self::new(handler)
+    }
+
+    /// Creates a new [`IrohProtocol`] for the `handler`.
+    pub fn new(handler: Handler<S>) -> Self {
+        Self {
+            handler,
+            request_id: Default::default(),
+        }
+    }
+}
+
+impl<S: Service> ProtocolHandler for IrohProtocol<S> {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let handler = self.handler.clone();
+        let request_id = self
+            .request_id
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let fut = handle_connection::<S>(&connection, handler).map_err(AcceptError::from_err);
+        let span = trace_span!("rpc", id = request_id);
+        fut.instrument(span).await
+    }
+}
+
+/// A [`ProtocolHandler`] for an irpc protocol that supports 0rtt connections.
+///
+/// Can be added to an [`iroh::protocol::Router`] to handle incoming connections for an ALPN string.
+///
+/// For details about when it is safe to use 0rtt, see <https://www.iroh.computer/blog/0rtt-api>
+/// For details about when it is safe to use 0rtt, see <https://www.iroh.computer/blog/0rtt-api>
+pub struct Iroh0RttProtocol<S> {
+    handler: Handler<S>,
+    request_id: AtomicU64,
+}
+
+impl<T> fmt::Debug for Iroh0RttProtocol<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RpcProtocol")
+    }
+}
+
+impl<S: Service> Iroh0RttProtocol<S> {
+    pub fn with_sender(local_sender: impl Into<LocalSender<S>>) -> Self
+    where
+        S: RemoteService,
+    {
+        let handler = S::remote_handler(local_sender.into());
+        Self::new(handler)
+    }
+
+    /// Creates a new [`Iroh0RttProtocol`] for the `handler`.
+    pub fn new(handler: Handler<S>) -> Self {
+        Self {
+            handler,
+            request_id: Default::default(),
+        }
+    }
+}
+
+impl<S: Service> ProtocolHandler for Iroh0RttProtocol<S> {
+    async fn on_accepting(&self, accepting: Accepting) -> Result<Connection, AcceptError> {
+        let zrtt_conn = accepting.into_0rtt();
+        let handler = self.handler.clone();
+        let request_id = self
+            .request_id
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        handle_connection::<S>(&zrtt_conn, handler)
+            .map_err(AcceptError::from_err)
+            .instrument(trace_span!("rpc", id = request_id))
+            .await?;
+        let conn = zrtt_conn
+            .handshake_completed()
+            .await
+            .map_err(AcceptError::from)?;
+        Ok(conn)
+    }
+
+    async fn accept(&self, _connection: Connection) -> Result<(), AcceptError> {
+        // Noop, handled in [`Self::on_accepting`]
+        Ok(())
+    }
+}
+
+/// Handles a single iroh connection with the provided `handler`.
+///
+/// The wire format used depends on `S::SPAN_PROPAGATION` - if true, span context is expected.
+pub async fn handle_connection<S: Service>(
+    connection: &impl IncomingRemoteConnection,
+    handler: Handler<S>,
+) -> io::Result<()> {
+    if let Ok(remote) = connection.remote_id() {
+        tracing::Span::current().record("remote", tracing::field::display(remote.fmt_short()));
+    }
+    debug!("connection accepted");
+    loop {
+        let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
+            return Ok(());
+        };
+        irpc::span_propagation::scope_remote(carrier, handler(msg, rx, tx)).await?;
+    }
+}
+
+/// Reads a request from a connection and converts it to a message enum.
+///
+/// This combines `read_request_raw` with `RemoteService::with_remote_channels`.
+pub async fn read_request<S: RemoteService>(
+    connection: &impl IncomingRemoteConnection,
+) -> std::io::Result<Option<S::Message>> {
+    let Some((msg, carrier, rx, tx)) = read_request_inner::<S>(connection).await? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        irpc::span_propagation::scope_remote(carrier, async move {
+            S::with_remote_channels(msg, rx, tx)
+        })
+        .await,
+    ))
+}
+
+/// Abstracts over [`Connection`] and [`IncomingZeroRttConnection`].
+///
+/// You don't need to implement this trait yourself. It is used by [`read_request`] and
+/// [`handle_connection`] to work with both fully authenticated connections and with
+/// 0-RTT connections.
+pub trait IncomingRemoteConnection {
+    /// Accepts a single bidirectional stream.
+    fn accept_bi(
+        &self,
+    ) -> impl Future<Output = Result<(SendStream, RecvStream), ConnectionError>> + Send;
+    /// Close the connection.
+    fn close(&self, error_code: VarInt, reason: &[u8]);
+    /// Returns the remote's endpoint id.
+    ///
+    /// This may only fail for 0-RTT connections.
+    fn remote_id(&self) -> Result<EndpointId, RemoteEndpointIdError>;
+}
+
+impl IncomingRemoteConnection for IncomingZeroRttConnection {
+    async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
+        self.accept_bi().await
+    }
+
+    fn close(&self, error_code: VarInt, reason: &[u8]) {
+        self.close(error_code, reason)
+    }
+    fn remote_id(&self) -> Result<EndpointId, RemoteEndpointIdError> {
+        self.remote_id()
+    }
+}
+
+impl IncomingRemoteConnection for Connection {
+    async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
+        self.accept_bi().await
+    }
+
+    fn close(&self, error_code: VarInt, reason: &[u8]) {
+        self.close(error_code, reason)
+    }
+    fn remote_id(&self) -> Result<EndpointId, RemoteEndpointIdError> {
+        Ok(self.remote_id())
+    }
+}
+
+/// Reads a single request from the connection.
+///
+/// This accepts a bi-directional stream from the connection and reads and parses the request.
+///
+/// When `S::SPAN_PROPAGATION` is true, any propagated span context on the wire is
+/// silently dropped. Use [`handle_connection`] (or [`read_request`]) if you need
+/// the propagated context to reach the generated handler spans.
+///
+/// Returns the parsed request and the stream pair if reading and parsing the request succeeded.
+/// Returns None if the remote closed the connection with error code `0`.
+/// Returns an error for all other failure cases.
+pub async fn read_request_raw<S: Service>(
+    connection: &impl IncomingRemoteConnection,
+) -> std::io::Result<Option<(S, RecvStream, SendStream)>> {
+    Ok(read_request_inner::<S>(connection)
+        .await?
+        .map(|(msg, _carrier, rx, tx)| (msg, rx, tx)))
+}
+
+/// Internal: read a request and also return the propagated span context carrier.
+///
+/// The carrier is `Some` iff `S::SPAN_PROPAGATION` is true and the remote sent one.
+async fn read_request_inner<S: Service>(
+    connection: &impl IncomingRemoteConnection,
+) -> std::io::Result<
+    Option<(
+        S,
+        Option<irpc::span_propagation::SpanContextCarrier>,
+        RecvStream,
+        SendStream,
+    )>,
+> {
+    let (send, mut recv) = match connection.accept_bi().await {
+        Ok((s, r)) => (s, r),
+        Err(ConnectionError::ApplicationClosed(cause)) if cause.error_code.into_inner() == 0 => {
+            trace!("remote side closed connection {cause:?}");
+            return Ok(None);
+        }
+        Err(cause) => {
+            warn!("failed to accept bi stream {cause:?}");
+            return Err(cause.into());
+        }
+    };
+    let size = recv
+        .read_varint_u64()
+        .await?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "failed to read size"))?;
+    if size > MAX_MESSAGE_SIZE {
+        connection.close(
+            ERROR_CODE_MAX_MESSAGE_SIZE_EXCEEDED.into(),
+            b"request exceeded max message size",
+        );
+        return Err(e!(oneshot::RecvError::MaxMessageSizeExceeded).into());
+    }
+    let mut buf = vec![0; size as usize];
+    recv.read_exact(&mut buf)
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::UnexpectedEof, e))?;
+
+    let (carrier, msg): (Option<irpc::span_propagation::SpanContextCarrier>, S) =
+        if S::SPAN_PROPAGATION {
+            postcard::from_bytes(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        } else {
+            let msg = postcard::from_bytes(&buf)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            (None, msg)
+        };
+
+    Ok(Some((msg, carrier, recv, send)))
+}
+
+/// Utility function to listen for incoming connections and handle them with the provided handler.
+///
+/// The wire format used depends on `S::SPAN_PROPAGATION` - if true, span context is expected.
+pub async fn listen<S: Service>(endpoint: iroh::Endpoint, handler: Handler<S>) {
+    let mut request_id = 0u64;
+    let mut tasks = n0_future::task::JoinSet::new();
+    loop {
+        let incoming = tokio::select! {
+            Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                res.expect("irpc connection task panicked");
+                continue;
+            }
+            incoming = endpoint.accept() => {
+                match incoming {
+                    None => break,
+                    Some(incoming) => incoming
+                }
+            }
+        };
+        let handler = handler.clone();
+        let fut = async move {
+            match incoming.await {
+                Ok(connection) => match handle_connection::<S>(&connection, handler).await {
+                    Err(err) => warn!("connection closed with error: {err:?}"),
+                    Ok(()) => debug!("connection closed"),
+                },
+                Err(cause) => {
+                    warn!("failed to accept connection: {cause:?}");
+                }
+            };
+        };
+        let span = error_span!("rpc", id = request_id, remote = tracing::field::Empty);
+        tasks.spawn(fut.instrument(span));
+        request_id += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -355,8 +355,8 @@ fn blob_ticket_string(
 pub(crate) const SPACE_2: f32 = 2.0;
 pub(crate) use crate::design_tokens::{AVATAR_LG, AVATAR_MD, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
-    DETAILS_PANEL_WIDTH, MESSAGE_MAX_WIDTH, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24, SPACE_4,
-    SPACE_8,
+    DETAILS_PANEL_WIDTH, MESSAGE_MAX_WIDTH, RADIUS_LG, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24,
+    SPACE_4, SPACE_8,
 };
 pub(crate) const SPACE_6: f32 = 6.0;
 pub(crate) const SPACE_10: f32 = 10.0;
@@ -497,6 +497,11 @@ pub(crate) fn text_muted(theme: &iced::Theme) -> Color {
 
 /// Color for system message text (label and body).
 pub(crate) fn text_system(theme: &iced::Theme) -> Color {
+    crate::design_tokens::text_secondary(theme)
+}
+
+/// Secondary text color for labels, hints, and secondary info.
+pub(crate) fn text_secondary(theme: &iced::Theme) -> Color {
     crate::design_tokens::text_secondary(theme)
 }
 
@@ -651,6 +656,36 @@ fn container_hover(theme: &iced::Theme) -> iced::widget::container::Style {
         background: Some(iced::Background::Color(bg_hover(theme))),
         ..Default::default()
     }
+}
+
+/// Info row helper: label on the left, value on the right.
+fn info_row(
+    label: String,
+    value: String,
+    theme: &iced::Theme,
+) -> iced::widget::Row<'static, AppMessage> {
+    use iced::widget::text;
+    use iced::Length;
+    iced::widget::row![
+        text(label).size(TYPO_SM).color(text_secondary(theme)),
+        text(value)
+            .size(TYPO_SM)
+            .color(crate::design_tokens::text(theme)),
+    ]
+    .spacing(SPACE_8)
+    .width(Length::Fill)
+}
+
+/// A thin horizontal divider with muted color.
+fn divider(theme: &iced::Theme) -> iced::widget::Container<'static, AppMessage> {
+    use iced::{widget::container, Length};
+    container(iced::widget::Space::new().height(0.0).width(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(move |t| container::Style {
+            background: Some(iced::Background::Color(crate::design_tokens::border(t))),
+            ..Default::default()
+        })
 }
 
 /// Closures passed to `text().style()` need this static-compatible form.
@@ -928,7 +963,7 @@ pub(crate) const BUTTON_CARD: fn(
             c.b *= 0.85;
             c
         }
-        _ => Color::from_rgb(0.5, 0.5, 0.5),
+        _ => text_muted(theme),
     },
     border: iced::Border {
         color: match status {
@@ -14223,7 +14258,11 @@ impl IcedChat {
         .height(Length::Fill);
 
         // Wrap in a row that includes the details panel when open.
-        let base = if self.details_panel_open && matches!(self.screen, Screen::Chat { .. }) {
+        let details_usable = self.window_width >= SIDEBAR_WIDTH + DETAILS_PANEL_WIDTH + 400.0;
+        let base = if self.details_panel_open
+            && matches!(self.screen, Screen::Chat { .. })
+            && details_usable
+        {
             container(
                 row![
                     content,
@@ -15360,7 +15399,6 @@ impl IcedChat {
                 }
             });
 
-        // ── Wrap with a quiet unread tint; avoid a colored side stripe. ──
         let selected_for_unread = selected_topic.clone();
         container(btn)
             .width(Length::Fill)
@@ -16138,6 +16176,12 @@ impl IcedChat {
             .push(greeting)
             .push(Space::new().height(Length::Fixed(SPACE_6)))
             .push(conn_status)
+            .push(Space::new().height(Length::Fixed(SPACE_4)))
+            .push(
+                text("Private communication, peer to peer.")
+                    .size(TYPO_XXS)
+                    .color(text_muted(&theme)),
+            )
             .spacing(0)
             .width(Length::Fill);
 
@@ -16510,8 +16554,11 @@ impl IcedChat {
                     widget::text(spinner)
                         .size(40.0)
                         .color(accent_primary(&theme)),
-                    widget::text("Loading conversation…")
+                    widget::text("Loading conversation\u{2026}")
                         .size(14.0)
+                        .color(Self::muted_color(dark_mode)),
+                    widget::text("Setting up your conversation")
+                        .size(TYPO_XS)
                         .color(Self::muted_color(dark_mode)),
                 ]
                 .spacing(SPACE_12)
@@ -16690,13 +16737,19 @@ impl IcedChat {
                     .into()
             })
             .unwrap_or_else(|| {
-                container(text(if peer.is_some() { "?" } else { "#" }).size(TYPO_MD))
+                let initials = crate::presentation::initials(&room_name);
+                let theme_for_initials = self.theme();
+                let is_dark = matches!(theme_for_initials, iced::Theme::Dark);
+                let letter_color = crate::presentation::initials_color(&room_name, is_dark);
+                container(text(initials).size(TYPO_SM).color(letter_color))
                     .width(Length::Fixed(36.0))
                     .height(Length::Fixed(36.0))
                     .center_x(Length::Fixed(36.0))
                     .center_y(Length::Fixed(36.0))
-                    .style(|t| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(bg_surface_secondary(t))),
+                    .style(move |_t| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(bg_surface_secondary(
+                            &theme_for_initials,
+                        ))),
                         border: iced::Border {
                             radius: SPACE_8.into(),
                             ..Default::default()
@@ -16929,16 +16982,176 @@ impl IcedChat {
     }
 
     /// Right-side details panel — shows conversation metadata and actions.
-    /// Placeholder that will be fleshed out in a future step.
     fn view_details_panel(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{column, container, text, Space};
-        use iced::Length;
+        use iced::widget::{button, column, container, row, text, Space};
+        use iced::{Alignment, Length};
 
+        let theme = self.theme();
+
+        // ── Look up current conversation entry ──
+        let conversation = self.conversation_store.find(&self.topic);
+        let peer = conversation
+            .as_ref()
+            .and_then(|entry| entry.peer_id.parse::<PublicKey>().ok());
+        let is_online = peer.is_some_and(|key| self.friend_online_cache.contains(&key));
+        let is_direct = conversation
+            .as_ref()
+            .map(|entry| match &entry.kind {
+                boru_core::conversations::ConversationKind::Direct => true,
+                _ => false,
+            })
+            .unwrap_or(true);
+        let display_name = conversation
+            .as_ref()
+            .map(|entry| entry.display_name())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let last_seen = conversation
+            .as_ref()
+            .map(|entry| {
+                if is_online {
+                    "Online now".to_string()
+                } else if entry.last_seen_at_unix_ms > 0 {
+                    format_last_seen(Some(entry.last_seen_at_unix_ms))
+                } else {
+                    String::new()
+                }
+            })
+            .unwrap_or_default();
+
+        // ── Section: Contact ──
+        let mut contact_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        // Presence row: status dot + label
+        contact_items.push(
+            row![
+                icon_svg(if is_online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_SM,).style(
+                    move |t, _| iced::widget::svg::Style {
+                        color: Some(if is_online {
+                            accent_green(t)
+                        } else {
+                            text_muted(t)
+                        })
+                    }
+                ),
+                text(if is_online { "Online" } else { "Offline" })
+                    .size(TYPO_SM)
+                    .style(move |t| iced::widget::text::Style {
+                        color: Some(if is_online {
+                            accent_green(t)
+                        } else {
+                            text_muted(t)
+                        })
+                    }),
+            ]
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+
+        // Kind badge (Direct / Group)
+        let kind_label = if is_direct { "Direct" } else { "Group" };
+        let kind_badge = container(
+            text(kind_label)
+                .size(TYPO_XXS)
+                .color(accent_primary(&theme)),
+        )
+        .padding([SPACE_2, SPACE_8])
+        .style(move |t| container::Style {
+            background: Some(iced::Background::Color({
+                let mut c = accent_primary(t);
+                c.a = 0.12;
+                c
+            })),
+            border: iced::Border {
+                color: {
+                    let mut c = accent_primary(t);
+                    c.a = 0.25;
+                    c
+                },
+                width: 1.0,
+                radius: SPACE_12.into(),
+            },
+            ..Default::default()
+        });
+        // Display name with badge
+        let dn = display_name.clone();
+        contact_items.push(
+            row![
+                text(dn)
+                    .size(TYPO_SM)
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
+                Space::new().width(Length::Fixed(SPACE_8)),
+                kind_badge,
+            ]
+            .align_y(Alignment::Center)
+            .into(),
+        );
+
+        // ── Section: Peer info ──
+        let mut peer_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        if !last_seen.is_empty() {
+            peer_items.push(info_row("Last seen".to_string(), last_seen, &theme).into());
+        }
+        if let Some(pk) = peer {
+            peer_items.push(info_row("Public key".to_string(), pk.to_string(), &theme).into());
+        }
+        if let Some(entry) = conversation.as_ref() {
+            if entry.created_at_unix_ms > 0 {
+                let created = crate::presentation::relative_time(entry.created_at_unix_ms);
+                peer_items.push(info_row("Created".to_string(), created, &theme).into());
+            }
+        }
+
+        // ── Section: Tools ──
+        let connection_btn = button(
+            row![
+                icon_svg(ICON_ACTIVITY, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                    color: Some(accent_primary(t))
+                }),
+                text("Connection details")
+                    .size(TYPO_SM)
+                    .color(accent_primary(&theme)),
+            ]
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::OpenConnectionDetails)
+        .padding([SPACE_6, SPACE_12])
+        .width(Length::Fill)
+        .style(BUTTON_OUTLINE);
+
+        // ── Assemble the panel ──
         container(
             column![
+                // Heading
                 text("Details")
                     .size(TYPO_SM)
                     .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
+                Space::new().height(Length::Fixed(SPACE_12)),
+                // Contact section
+                text("Contact")
+                    .size(TYPO_XS)
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                    .color(text_secondary(&theme)),
+                Space::new().height(Length::Fixed(SPACE_4)),
+                column(contact_items).spacing(SPACE_8),
+                divider(&theme),
+                // Peer section
+                text("Peer")
+                    .size(TYPO_XS)
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                    .color(text_secondary(&theme)),
+                Space::new().height(Length::Fixed(SPACE_4)),
+                column(peer_items).spacing(SPACE_8),
+                divider(&theme),
+                // Tools section
+                text("Tools")
+                    .size(TYPO_XS)
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                    .color(text_secondary(&theme)),
+                Space::new().height(Length::Fixed(SPACE_4)),
+                connection_btn,
                 Space::new().height(Length::Fill),
             ]
             .spacing(SPACE_12),
@@ -17568,68 +17781,88 @@ impl IcedChat {
     }
 
     fn view_composer(&self) -> iced::Element<'_, AppMessage> {
+        use crate::design_tokens::{RADIUS_SM, SPACE_8};
         use iced::widget::{button, container, row, text, text_input};
-        use iced::{Alignment, Length};
+        use iced::{Alignment, Length, Padding};
+
         let has_text = !self.composer_text.is_empty();
 
-        // ── Tertiary: help button ── smallest, subdued, sits at the edge
-        let help_btn = button(text("?").size(TYPO_XS))
-            .on_press(AppMessage::ToggleHelp)
-            .style(BUTTON_MUTED)
-            .padding([SPACE_2, SPACE_6]);
-
-        // ── Secondary: attach button ── subdued but visible
+        // ── Left: attach button ── subdued but visible, sits at the leading edge
         let attach_btn = button(text("Attach").size(TYPO_SM))
             .on_press(AppMessage::AttachPressed)
             .style(BUTTON_GHOST_BG)
             .padding([SPACE_6, SPACE_10]);
 
-        // ── Primary: send button ── filled accent colour when text exists,
-        // ghost when empty (progressive disclosure)
+        // ── Center: expandable message input ── transparent bg, fills space
+        let input = text_input("Type a message…", &self.composer_text)
+            .id(COMPOSER_INPUT)
+            .on_input(AppMessage::InputChanged)
+            .on_submit(AppMessage::SendPressed)
+            .size(self.chat_text_size)
+            .width(Length::Fill)
+            .padding(Padding::new(SPACE_8))
+            .style(
+                move |t: &iced::Theme, status: iced::widget::text_input::Status| {
+                    let is_focused =
+                        matches!(status, iced::widget::text_input::Status::Focused { .. });
+                    iced::widget::text_input::Style {
+                        background: iced::Background::Color(iced::Color::TRANSPARENT),
+                        border: iced::Border {
+                            color: if is_focused {
+                                accent_primary(t)
+                            } else {
+                                iced::Color::TRANSPARENT
+                            },
+                            width: if is_focused { 1.0 } else { 0.0 },
+                            radius: RADIUS_SM.into(),
+                        },
+                        icon: iced::Color::TRANSPARENT,
+                        placeholder: crate::design_tokens::text_muted(t),
+                        value: crate::design_tokens::text(t),
+                        selection: accent_primary(t),
+                    }
+                },
+            );
+
+        // ── Right: send button ── filled accent green when text exists,
+        // transparent / subdued when empty
         let mut send_btn = button(text("Send").size(TYPO_SM))
-            .style(move |t: &iced::Theme, status| {
-                if has_text {
-                    BUTTON_PRIMARY_GREEN(t, status)
-                } else {
-                    let mut s = BUTTON_MUTED(t, iced::widget::button::Status::Disabled);
-                    s.background = None;
-                    s
-                }
-            })
+            .style(
+                move |t: &iced::Theme, status: iced::widget::button::Status| {
+                    if has_text {
+                        BUTTON_PRIMARY_GREEN(t, status)
+                    } else {
+                        let mut s = BUTTON_MUTED(t, iced::widget::button::Status::Disabled);
+                        s.background = None;
+                        s.text_color = crate::design_tokens::text_muted(t);
+                        s
+                    }
+                },
+            )
             .padding([SPACE_6, SPACE_12]);
         if has_text {
             send_btn = send_btn.on_press(AppMessage::SendPressed);
         }
 
-        // ── Action button group ── tighter spacing, secondary + primary + tertiary
-        let actions = row![attach_btn, send_btn, help_btn,]
-            .spacing(SPACE_2)
-            .align_y(Alignment::Center);
+        // ── Composer row ──
+        //  attach | text input (fill) | send
+        let composer_bar = row![attach_btn, input, send_btn]
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center)
+            .padding(Padding::new(SPACE_4));
 
-        // ── Main composer row ──
-        let composer = row![
-            text_input("Type a message…", &self.composer_text)
-                .id(COMPOSER_INPUT)
-                .on_input(AppMessage::InputChanged)
-                .on_submit(AppMessage::SendPressed)
-                .size(self.chat_text_size)
-                .width(Length::Fill),
-            actions,
-        ]
-        .spacing(SPACE_6)
-        .align_y(Alignment::Center)
-        .padding([SPACE_4, SPACE_8]);
-
-        // ── Wrapping container ── subtle border + distinct background
-        container(composer)
+        // ── Rounded composer container ──
+        //  Compact input bar with 12px rounding, subtle border, distinct surface.
+        container(composer_bar)
             .width(Length::Fill)
+            .padding(Padding::new(0.0))
             .style(move |t: &iced::Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface_secondary(t))),
                 border: iced::Border {
                     width: 1.0,
                     color: border_muted(t),
-                    radius: SPACE_8.into(),
+                    radius: RADIUS_LG.into(),
                 },
-                background: Some(iced::Background::Color(bg_surface_secondary(t))),
                 ..Default::default()
             })
             .into()
