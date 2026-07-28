@@ -353,8 +353,10 @@ fn blob_ticket_string(
 
 // ── Spacing units (4px base) ─────────────────────────────────────────
 pub(crate) const SPACE_2: f32 = 2.0;
-pub(crate) use crate::design_tokens::{AVATAR_MD, AVATAR_SM};
-pub(crate) use crate::design_tokens::{SPACE_12, SPACE_16, SPACE_24, SPACE_4, SPACE_8};
+pub(crate) use crate::design_tokens::{AVATAR_LG, AVATAR_MD, AVATAR_SM};
+pub(crate) use crate::design_tokens::{
+    MESSAGE_MAX_WIDTH, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24, SPACE_4, SPACE_8,
+};
 pub(crate) const SPACE_6: f32 = 6.0;
 pub(crate) const SPACE_10: f32 = 10.0;
 
@@ -499,53 +501,27 @@ pub(crate) fn text_system(theme: &iced::Theme) -> Color {
 
 /// Color for local (self) message label.
 fn text_local_label(theme: &iced::Theme) -> Color {
-    if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.2, 0.8, 0.2)
-    } else {
-        Color::from_rgb(0.0, 0.45, 0.0) // #0073, ~5.8:1 ✓ AA
-    }
+    crate::design_tokens::text_local_label(theme)
 }
 
 /// Color for local message body text.
 fn text_local_body(theme: &iced::Theme) -> Color {
-    if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.3, 0.9, 0.3)
-    } else {
-        Color::from_rgb(0.0, 0.35, 0.0) // #0059, ~6.5:1 ✓ AA
-    }
+    crate::design_tokens::text_local_body(theme)
 }
 
 /// Color for remote message label (nickname).
 fn text_remote_label(theme: &iced::Theme) -> Color {
-    if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.4, 0.65, 1.0) // light blue on dark
-    } else {
-        Color::from_rgb(0.0, 0.33, 0.66) // #0054A8, ~5.5:1 ✓ AA
-    }
+    crate::design_tokens::text_remote_label(theme)
 }
 
 /// Color for remote message body text.
 fn text_remote_body(theme: &iced::Theme) -> Color {
-    if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.8, 0.8, 0.8)
-    } else {
-        Color::from_rgb(0.13, 0.13, 0.13) // #222, ~11.5:1 ✓ AA
-    }
+    crate::design_tokens::text_remote_body(theme)
 }
 
 /// Background tint for message bubbles. System messages get no bubble.
 fn bubble_bg(theme: &iced::Theme, kind: ChatKind) -> Option<iced::Background> {
-    if matches!(kind, ChatKind::System) {
-        return None;
-    }
-    let (r, g, b, a) = match (theme, kind) {
-        (iced::Theme::Dark, ChatKind::Local) => (0.15, 0.3, 0.15, 0.4),
-        (iced::Theme::Dark, ChatKind::Remote) => (0.2, 0.2, 0.25, 0.4),
-        (_, ChatKind::Local) => (0.0, 0.5, 0.0, 0.06),
-        (_, ChatKind::Remote) => (0.1, 0.2, 0.5, 0.05),
-        _ => return None,
-    };
-    Some(iced::Background::Color(Color::from_rgba(r, g, b, a)))
+    crate::design_tokens::bubble_bg(theme, kind == ChatKind::Local, kind == ChatKind::System)
 }
 
 // ── Systematic palette (dark/light) ─────────────────────────────────────
@@ -567,11 +543,7 @@ pub(crate) fn bg_surface_secondary(theme: &iced::Theme) -> Color {
 /// Input field background.
 #[expect(dead_code)]
 fn bg_input(theme: &iced::Theme) -> Color {
-    if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.13, 0.13, 0.22) // #222238
-    } else {
-        Color::from_rgb(0.94, 0.94, 0.96) // #f0f0f4
-    }
+    crate::design_tokens::bg_input(theme)
 }
 
 /// Hover-state background for rows and interactive surfaces.
@@ -606,11 +578,7 @@ pub(crate) fn color_error(theme: &iced::Theme) -> Color {
 
 /// Warning / amber colour for reconnecting states.
 pub(crate) fn color_warning(theme: &iced::Theme) -> Color {
-    if matches!(theme, iced::Theme::Dark) {
-        Color::from_rgb(0.95, 0.65, 0.15) // #f2a626
-    } else {
-        Color::from_rgb(0.70, 0.45, 0.05) // #b3730d
-    }
+    crate::design_tokens::color_warning(theme)
 }
 
 // ── Lucide SVG icons (embedded as byte data at compile time) ───────
@@ -975,7 +943,7 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChatKind {
     System,
     Local,
@@ -14166,7 +14134,7 @@ impl IcedChat {
 
         let content = row![
             container(sidebar)
-                .width(Length::Fixed(300.0))
+                .width(Length::Fixed(SIDEBAR_WIDTH))
                 .height(Length::Fill)
                 .style(move |t| {
                     iced::widget::container::Style {
