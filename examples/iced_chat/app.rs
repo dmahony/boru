@@ -5040,10 +5040,16 @@ impl IcedChat {
             let hash = boru_core::chat_history::blake3_hex(&encoded);
             match storage.insert_outgoing_message(event_id, &topic, &hash, &encoded) {
                 Ok(()) => {
-                    info!("SQLite insert_outgoing_message OK for event_id={}", event_id);
+                    info!(
+                        "SQLite insert_outgoing_message OK for event_id={}",
+                        event_id
+                    );
                 }
                 Err(e) => {
-                    error!("SQLite insert_outgoing_message failed for event_id={}: {e}", event_id);
+                    error!(
+                        "SQLite insert_outgoing_message failed for event_id={}: {e}",
+                        event_id
+                    );
                 }
             }
         } else {
@@ -6391,21 +6397,41 @@ impl IcedChat {
                         room.discovery_secret = discovery_secret;
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize, Vec<PublicKey>), String>(
-                            (sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids),
-                        )
+                        Ok::<
+                            (
+                                GossipSender,
+                                TopicId,
+                                String,
+                                Option<SharedTracker>,
+                                usize,
+                                Vec<PublicKey>,
+                            ),
+                            String,
+                        >((
+                            sender,
+                            topic,
+                            ticket_str,
+                            room_tracker,
+                            neighbor_count,
+                            neighbor_ids,
+                        ))
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids)) => {
-                            AppMessage::RoomOpened {
-                                topic,
-                                ticket: ticket_str,
-                                sender,
-                                room_tracker,
-                                neighbor_count,
-                                neighbor_ids,
-                            }
-                        }
+                        Ok((
+                            sender,
+                            topic,
+                            ticket_str,
+                            room_tracker,
+                            neighbor_count,
+                            neighbor_ids,
+                        )) => AppMessage::RoomOpened {
+                            topic,
+                            ticket: ticket_str,
+                            sender,
+                            room_tracker,
+                            neighbor_count,
+                            neighbor_ids,
+                        },
                         Err(e) => AppMessage::RoomJoinFailed(e),
                     },
                 )
@@ -6728,21 +6754,41 @@ impl IcedChat {
                         room.discovery_secret = saved_discovery_secret;
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize, Vec<PublicKey>), String>(
-                            (sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids),
-                        )
+                        Ok::<
+                            (
+                                GossipSender,
+                                TopicId,
+                                String,
+                                Option<SharedTracker>,
+                                usize,
+                                Vec<PublicKey>,
+                            ),
+                            String,
+                        >((
+                            sender,
+                            topic,
+                            ticket_str,
+                            room_tracker,
+                            neighbor_count,
+                            neighbor_ids,
+                        ))
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids)) => {
-                            AppMessage::RoomOpened {
-                                topic,
-                                ticket: ticket_str,
-                                sender,
-                                room_tracker,
-                                neighbor_count,
-                                neighbor_ids,
-                            }
-                        }
+                        Ok((
+                            sender,
+                            topic,
+                            ticket_str,
+                            room_tracker,
+                            neighbor_count,
+                            neighbor_ids,
+                        )) => AppMessage::RoomOpened {
+                            topic,
+                            ticket: ticket_str,
+                            sender,
+                            room_tracker,
+                            neighbor_count,
+                            neighbor_ids,
+                        },
                         Err(e) => AppMessage::RoomJoinFailed(e),
                     },
                 )
@@ -7001,9 +7047,7 @@ impl IcedChat {
                                     SignedMessage::verify_and_decode(&row.signed_bytes)
                                 {
                                     let (kind, preview) = match &msg {
-                                        crate::Message::Message { text } => {
-                                            ("text", text.clone())
-                                        }
+                                        crate::Message::Message { text } => ("text", text.clone()),
                                         crate::Message::FileShare { name, .. } => {
                                             ("file", name.clone())
                                         }
@@ -7032,16 +7076,12 @@ impl IcedChat {
                                     let expected_id = row.event_id;
                                     store.push_with_explicit_id(entry, expected_id);
                                     // Find the entry we just stored
-                                    if let Some(saved) =
-                                        store.get_by_event_id(expected_id)
-                                    {
+                                    if let Some(saved) = store.get_by_event_id(expected_id) {
                                         let saved = saved.clone();
                                         drop(store);
-                                        if let Some(chat_entry) =
-                                            Self::history_entry_to_chat_entry(
-                                                &saved, &topic, &local_hex,
-                                            )
-                                        {
+                                        if let Some(chat_entry) = Self::history_entry_to_chat_entry(
+                                            &saved, &topic, &local_hex,
+                                        ) {
                                             self.entries_push(chat_entry);
                                         }
                                     } else {
@@ -7469,21 +7509,41 @@ impl IcedChat {
                         let room = RoomStore::with_peers(&data_dir, topic, merged_peers);
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize, Vec<PublicKey>), String>(
-                            (sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids),
-                        )
+                        Ok::<
+                            (
+                                GossipSender,
+                                TopicId,
+                                String,
+                                Option<SharedTracker>,
+                                usize,
+                                Vec<PublicKey>,
+                            ),
+                            String,
+                        >((
+                            sender,
+                            topic,
+                            ticket_str,
+                            room_tracker,
+                            neighbor_count,
+                            neighbor_ids,
+                        ))
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids)) => {
-                            AppMessage::RoomOpened {
-                                topic,
-                                ticket: ticket_str,
-                                sender,
-                                room_tracker,
-                                neighbor_count,
-                                neighbor_ids,
-                            }
-                        }
+                        Ok((
+                            sender,
+                            topic,
+                            ticket_str,
+                            room_tracker,
+                            neighbor_count,
+                            neighbor_ids,
+                        )) => AppMessage::RoomOpened {
+                            topic,
+                            ticket: ticket_str,
+                            sender,
+                            room_tracker,
+                            neighbor_count,
+                            neighbor_ids,
+                        },
                         Err(e) => AppMessage::RoomJoinFailed(e),
                     },
                 )
@@ -9977,13 +10037,8 @@ impl IcedChat {
                     let topic = self.topic;
                     let local_hex = hex::encode(self.local_public.as_bytes());
                     let mut store = self.chat_history.lock().unwrap();
-                    let hist_entry = HistoryEntry::new(
-                        topic,
-                        local_hex,
-                        Vec::new(),
-                        "image",
-                        name.clone(),
-                    );
+                    let hist_entry =
+                        HistoryEntry::new(topic, local_hex, Vec::new(), "image", name.clone());
                     store.push_with_id(hist_entry);
                 }
                 self.send_save_chat_history();
@@ -16007,8 +16062,7 @@ impl IcedChat {
             // Reconnecting — relay not yet reachable.
             // Use animated dots to show progress.
             const RECONNECT_DOTS: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
-            let dot = RECONNECT_DOTS
-                [self.main_screen_reconnect_frame % RECONNECT_DOTS.len()];
+            let dot = RECONNECT_DOTS[self.main_screen_reconnect_frame % RECONNECT_DOTS.len()];
             row![
                 icon_svg(ICON_RETRY, TYPO_SM).style(|t, _| iced::widget::svg::Style {
                     color: Some(color_warning(t))

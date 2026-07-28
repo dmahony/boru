@@ -448,10 +448,7 @@ mod tests {
         let dark = Theme::Dark;
         // Warning
         assert_eq!(color_warning(&light), WARNING);
-        assert_eq!(
-            color_warning(&dark),
-            Color::from_rgb(0.95, 0.65, 0.15)
-        );
+        assert_eq!(color_warning(&dark), Color::from_rgb(0.95, 0.65, 0.15));
         // Input bg
         assert_eq!(bg_input(&light), INPUT_BG);
         // Message text colours exist and differ per theme
