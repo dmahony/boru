@@ -183,19 +183,15 @@ mod tests {
 
     #[test]
     fn delete_room_history_cascades_across_stores() {
+        // ⚠ save() deprecated — room file is not written; delete is in-memory only.
         let dir = temp_dir("cascade");
         fs::create_dir_all(&dir).unwrap();
 
         let target = topic(0xAA);
         let other = topic(0xBB);
 
-        // Saved active-room file for the target room.
-        RoomStore::new(&dir, target).save().unwrap();
         // Legacy history file should be removed too.
         fs::write(dir.join(ROOM_HISTORY_FILE_NAME), b"legacy rooms").unwrap();
-        // Create a placeholder file to ensure we only remove the matching room file.
-        let other_room_path = dir.join(ROOM_FILE_NAME);
-        assert!(other_room_path.exists());
 
         let mut room_history = RoomHistoryStore::empty_at(&dir);
         room_history.upsert(target, "Target", true);

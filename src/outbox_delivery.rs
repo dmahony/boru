@@ -686,7 +686,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             Err(err) => (false, Some(err.to_string())),
         };
         if success {
-            let _ = self.storage.mark_acked(&msg_id, peer);
+            let _ = self.storage.mark_sent(&msg_id, peer);
         } else {
             let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
             let delay = self.retry_policy.delay_ms(row.attempts, jitter);

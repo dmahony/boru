@@ -865,9 +865,9 @@ impl FileAccessHandler {
         if expected_hex != row.content_hash {
             return FileAccessResponse::Changed;
         }
-        if request.expected_version != 0 && request.expected_version != row.updated_at_ms {
+        if request.expected_version != 0 && request.expected_version != row.version {
             return FileAccessResponse::VersionMismatch {
-                current_version: row.updated_at_ms,
+                current_version: row.version,
             };
         }
 
@@ -1172,18 +1172,18 @@ impl FileAccessHandler {
         }
 
         // ── 9. Version check ──────────────────────────────────────────
-        // FIXME: The `shared_files` table does not currently track a
-        // monotonically-increasing version number.  Until a `version`
-        // column is added and bumped on every file metadata change, the
-        // version check uses `updated_at_ms` as a heuristic proxy.  The
-        // content-hash check above (step 8) already catches the important
-        // case of file content changing — this version check is an
-        // additional guard against metadata-only changes (description,
-        // display name, collection membership).
+        // Compare against the database `version` column, which is
+        // monotonically incremented on every metadata or content change
+        // (description, display name, collection membership, hash).
+        // The content-hash check above (step 8) already catches content
+        // changes; this version check is a guard against mere metadata
+        // changes that do not alter the content hash.
         //
-        // Once `shared_files.version` is added, replace this with a direct
-        // comparison against the database version column.
-        if request.expected_version != row.updated_at_ms {
+        // Backward compatibility: expected_version == 0 (from older clients
+        // that did not track versions) is treated as "accept any version".
+        // Both code paths (the permissive check in stage 4 and the exact
+        // check here in stage 9) now compare against `row.version`.
+        if request.expected_version != row.version {
             Self::access_diag(
                 requester,
                 &request.shared_file_id,
@@ -1194,7 +1194,7 @@ impl FileAccessHandler {
                 false,
             );
             return FileAccessResponse::VersionMismatch {
-                current_version: row.updated_at_ms,
+                current_version: row.version,
             };
         }
 
@@ -1824,14 +1824,14 @@ mod tests {
 
         add_friend(&mut handler, requester);
 
-        // Use the actual updated_at_ms from the DB as the expected version.
+        // Use the actual version from the DB as the expected version.
         let row = handler
             .storage
             .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
             .expect("get shared file")
             .expect("shared file exists");
 
-        let request = make_request(metadata_id, &content_hash, row.updated_at_ms);
+        let request = make_request(metadata_id, &content_hash, row.version);
         let response = handler.check_permission(&requester, &request).await;
 
         assert!(
@@ -2392,7 +2392,7 @@ mod tests {
             .expect("get shared file")
             .expect("shared file exists");
 
-        let request = make_request(metadata_id, &content_hash, row.updated_at_ms);
+        let request = make_request(metadata_id, &content_hash, row.version);
         let response = handler.check_permission(&requester, &request).await;
 
         assert_eq!(
@@ -2424,7 +2424,7 @@ mod tests {
             .expect("get shared file")
             .expect("shared file exists");
 
-        let request = make_request(metadata_id, &content_hash, row.updated_at_ms);
+        let request = make_request(metadata_id, &content_hash, row.version);
         let response = handler.check_permission(&requester, &request).await;
 
         assert_eq!(

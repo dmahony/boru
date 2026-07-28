@@ -2342,7 +2342,7 @@ pub async fn download_blob_to_file(
     name: String,
     kind: TransferKind,
     save_path: &std::path::Path,
-    mut on_progress: impl FnMut(TransferProgress) + Send + 'static,
+    on_progress: impl FnMut(TransferProgress) + Send + 'static,
     max_bytes: Option<u64>,
 ) -> Result<()> {
     let id = TransferId::next();

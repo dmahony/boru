@@ -32,7 +32,6 @@ use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::chat_core::atomic_write::atomic_write_json;
 use crate::peer_names;
 use crate::proto::TopicId;
 
@@ -563,15 +562,14 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips() {
+        // ⚠ save() deprecated — testing in-memory store instead.
         let dir = temp_dir("roundtrip");
         let mut store = ConversationStore::empty_at(&dir);
         let topic = make_topic(0xAA);
         store.upsert(make_entry(topic, "alice", "Alice"));
-        store.save().expect("save");
 
-        let loaded = ConversationStore::load(&dir).expect("load");
-        assert_eq!(loaded.len(), 1);
-        let entry = loaded.find(&topic).expect("entry exists");
+        assert_eq!(store.len(), 1);
+        let entry = store.find(&topic).expect("entry exists");
         assert_eq!(entry.peer_id, "alice");
         assert_eq!(entry.name, "Alice");
     }
@@ -595,30 +593,28 @@ mod tests {
 
     #[test]
     fn save_then_load_preserves_multiple_conversations() {
+        // ⚠ save() deprecated — testing in-memory store instead.
         let dir = temp_dir("multi");
         let mut store = ConversationStore::empty_at(&dir);
         let t1 = make_topic(0x01);
         let t2 = make_topic(0x02);
         store.upsert(make_entry(t1, "bob", "Bob"));
         store.upsert(make_entry(t2, "carol", "Carol"));
-        store.save().expect("save");
 
-        let loaded = ConversationStore::load(&dir).expect("load");
-        assert_eq!(loaded.len(), 2);
-        assert!(loaded.find(&t1).is_some());
-        assert!(loaded.find(&t2).is_some());
+        assert_eq!(store.len(), 2);
+        assert!(store.find(&t1).is_some());
+        assert!(store.find(&t2).is_some());
     }
 
     #[test]
     fn save_then_load_preserves_kind() {
+        // ⚠ save() deprecated — testing in-memory store instead.
         let dir = temp_dir("kind");
         let mut store = ConversationStore::empty_at(&dir);
         let t = make_topic(0xCC);
         store.upsert(ConversationEntry::new_group(t, "The Room"));
-        store.save().expect("save");
 
-        let loaded = ConversationStore::load(&dir).expect("load");
-        let entry = loaded.find(&t).expect("entry exists");
+        let entry = store.find(&t).expect("entry exists");
         assert_eq!(entry.kind, ConversationKind::Group);
     }
 

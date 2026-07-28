@@ -290,8 +290,8 @@ mod tests {
             .with_conn(|conn| {
                 conn.execute(
                     "INSERT INTO shared_files (content_hash, profile_user_id, metadata_id,
-                            display_filename, description, offered, created_at_ms, updated_at_ms)
-                     VALUES (?1, ?2, 'meta-1', 'test.bin', NULL, 1, ?3, ?3)",
+                            display_filename, description, offered, created_at_ms, updated_at_ms, version)
+                     VALUES (?1, ?2, 'meta-1', 'test.bin', NULL, 1, ?3, ?3, 0)",
                     rusqlite::params![content_hash, peer_hex, 1000000i64],
                 )
                 .std_context("seed shared_file")?;

@@ -32,7 +32,6 @@ use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 use x25519_dalek::{PublicKey as EncryptionPublicKey, StaticSecret};
 
-use crate::chat_core::atomic_write::atomic_write_json;
 
 const SCHEMA_VERSION: u32 = 1;
 const NONCE_LEN: usize = 12;

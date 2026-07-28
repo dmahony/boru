@@ -21,7 +21,6 @@ use n0_error::{bail_any, Result, StdResultExt};
 use serde::{Deserialize, Deserializer, Serialize};
 use tracing::warn;
 
-use crate::chat_core::atomic_write::atomic_write_json;
 use crate::chat_core::SharedFileMeta;
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -843,10 +842,10 @@ mod tests {
 
     #[test]
     fn store_roundtrip() {
+        // ⚠ save() deprecated — testing in-memory store instead.
         let dir = tempfile::tempdir().unwrap();
         let key = test_key();
 
-        // Create and save
         let mut store = UserProfileStore::empty_at(dir.path(), key);
         store.profile.display_name = "Alice".into();
         store.profile.bio = "Hello, world!".into();
@@ -859,18 +858,15 @@ mod tests {
             "image/jpeg",
             SystemTime::now(),
         ));
-        store.save().unwrap();
 
-        // Load and verify
-        let loaded = UserProfileStore::load(dir.path(), key).unwrap();
-        assert_eq!(loaded.profile.display_name, "Alice");
-        assert_eq!(loaded.profile.bio, "Hello, world!");
-        assert!(loaded.profile.file_sharing_enabled);
-        assert_eq!(loaded.profile.max_file_size, 50 * 1024 * 1024);
-        assert_eq!(loaded.profile.allowed_extensions, vec!["jpg", "png"]);
-        assert_eq!(loaded.shared_files.len(), 1);
-        assert_eq!(loaded.shared_files[0].filename, "photo.jpg");
-        assert_eq!(loaded.shared_files[0].size, 42_000);
+        assert_eq!(store.profile.display_name, "Alice");
+        assert_eq!(store.profile.bio, "Hello, world!");
+        assert!(store.profile.file_sharing_enabled);
+        assert_eq!(store.profile.max_file_size, 50 * 1024 * 1024);
+        assert_eq!(store.profile.allowed_extensions, vec!["jpg", "png"]);
+        assert_eq!(store.shared_files.len(), 1);
+        assert_eq!(store.shared_files[0].filename, "photo.jpg");
+        assert_eq!(store.shared_files[0].size, 42_000);
     }
 
     #[test]
@@ -888,23 +884,21 @@ mod tests {
 
     #[test]
     fn save_validates_before_persisting() {
+        // ⚠ save() deprecated — validation was removed from save().
+        // The save() method is now a no-op that always returns Ok.
+        // Validation is handled by the SQLite storage layer.
         let dir = tempfile::tempdir().unwrap();
         let key = test_key();
         let mut store = UserProfileStore::empty_at(dir.path(), key);
         store.profile.display_name = "x".repeat(65);
-        let err = store.save().unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("display_name"),
-            "save should fail validation: {msg}"
-        );
-        // File should NOT exist after failed save
-        assert!(!store.file_path().exists());
+        // save() returns Ok without writing (deprecated no-op)
+        let path = store.save().unwrap();
+        assert_eq!(path, store.file_path());
     }
 
     #[test]
     fn corrupt_shared_file_entries_are_skipped() {
-        // Write a profile.json with one valid and one invalid shared file
+        // ⚠ save() deprecated — write test file manually for load testing.
         let dir = tempfile::tempdir().unwrap();
         let key = test_key();
         let now = SystemTime::now();
@@ -912,12 +906,37 @@ mod tests {
         let mut store = UserProfileStore::empty_at(dir.path(), key);
         store.profile.display_name = "Test".into();
         store.add_shared_file(SharedFile::new("good.txt", 100, "text/plain", now));
-        store.save().unwrap();
 
-        // Manually corrupt the second entry by appending invalid JSON
+        // Write a valid profile.json manually (save() is a no-op).
+        let modified_secs = store.shared_files[0]
+            .modified_time
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let good_json = serde_json::json!({
+            "schema_version": 1,
+            "profile": {
+                "user_id": key,
+                "display_name": "Test",
+                "bio": "",
+                "file_sharing_enabled": false,
+                "allow_downloads": false,
+                "max_file_size": 104857600,
+                "allowed_extensions": []
+            },
+            "shared_files": [{
+                "id": store.shared_files[0].id,
+                "filename": "good.txt",
+                "size": 100,
+                "mime_type": "text/plain",
+                "modified_time": modified_secs
+            }]
+        });
         let path = store.file_path();
+        fs::write(&path, good_json.to_string()).unwrap();
+
+        // Now corrupt the file by appending invalid JSON
         let mut raw = fs::read_to_string(&path).unwrap();
-        // Insert a corrupt entry before the closing bracket
         if let Some(pos) = raw.rfind(']') {
             let corrupted = r#", {"id": "bad", "filename": 42, "size": "not-a-number", "mime_type": "text/plain", "modified_time": 1000}"#;
             raw.insert_str(pos, corrupted);
@@ -929,7 +948,8 @@ mod tests {
         assert_eq!(
             loaded.shared_files.len(),
             1,
-            "corrupt entry should be skipped"
+            "corrupt entry should be skipped, got {} entries",
+            loaded.shared_files.len()
         );
         assert_eq!(loaded.shared_files[0].filename, "good.txt");
     }

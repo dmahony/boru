@@ -510,7 +510,7 @@ impl CatalogueHandler {
             mime_type: fo.mime_type,
             size_bytes: fo.size,
             content_hash: row.content_hash.clone(),
-            version_number: 1,
+            version_number: row.version as u32,
             updated_at_ms: row.updated_at_ms,
             collection_ids: Vec::new(),
         }))

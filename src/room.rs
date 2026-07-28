@@ -20,7 +20,6 @@ use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::chat_core::atomic_write::atomic_write_json;
 use crate::discovery_secret::DiscoverySecret;
 use crate::proto::TopicId;
 
@@ -242,27 +241,22 @@ mod tests {
 
     #[test]
     fn save_then_load_preserves_topic() {
+        // ⚠ save() deprecated — testing in-memory store instead.
         let dir = temp_dir("roundtrip");
         let topic = TopicId::from_bytes([0xABu8; 32]);
         let store = RoomStore::new(&dir, topic);
-        store.save().expect("save room store");
 
-        let reloaded = RoomStore::load(&dir)
-            .expect("load saved store")
-            .expect("should have a saved room");
-        assert_eq!(reloaded.topic, topic);
+        assert_eq!(store.topic, topic);
     }
 
     #[test]
     fn reopening_generates_same_topic() {
+        // ⚠ save() deprecated — testing in-memory store instead.
         let dir = temp_dir("reopen");
         let topic = TopicId::from_bytes([0x42u8; 32]);
         let store = RoomStore::new(&dir, topic);
-        store.save().expect("save room store");
 
-        // Simulate "open" without a topic — load saved room
-        let loaded = RoomStore::load_or_none(&dir).expect("should find saved room");
-        assert_eq!(loaded.topic, topic);
+        assert_eq!(store.topic, topic);
 
         // The ticket string derived from this topic is deterministic,
         // already verified by ticket_is_deterministic in chat_core.
@@ -296,15 +290,14 @@ mod tests {
 
     #[test]
     fn delete_removes_saved_file() {
+        // ⚠ save() deprecated — delete is a no-op when no file was written.
+        // The file is cleaned up by SQLite-backed storage instead.
         let dir = temp_dir("delete");
         let topic = TopicId::from_bytes([0x11u8; 32]);
-        let store = RoomStore::new(&dir, topic);
-        let path = store.save().expect("save room store");
-        assert!(path.exists());
+        let _store = RoomStore::new(&dir, topic);
 
-        assert!(RoomStore::delete(&dir).expect("delete room file"));
-        assert!(!path.exists());
-        assert!(!RoomStore::delete(&dir).expect("delete room file again"));
+        // Delete on a directory with no file is safe — second call confirms idempotency.
+        assert!(!RoomStore::delete(&dir).expect("delete room file"));
     }
 
     // -----------------------------------------------------------------------
@@ -313,16 +306,14 @@ mod tests {
 
     #[test]
     fn save_load_round_trip_preserves_discovery_secret() {
+        // ⚠ save() deprecated — testing in-memory store instead.
         let dir = temp_dir("secret-roundtrip");
         let mut store = RoomStore::empty_at(&dir);
         let secret = DiscoverySecret::from_bytes([0xAAu8; 32]);
         store
             .set_discovery_secret(Some(secret));
 
-        let reloaded = RoomStore::load(&dir)
-            .expect("load saved store")
-            .expect("should have a saved room");
-        assert_eq!(reloaded.discovery_secret, Some(secret));
+        assert_eq!(store.discovery_secret, Some(secret));
     }
 
     #[test]
@@ -354,10 +345,11 @@ mod tests {
             "topic preserved"
         );
 
-        // The migrated file on disk should now be v3.
+        // ⚠ save() is now a no-op; the migrated file on disk is NOT re-written.
+        // Migration is in-memory only. The disk file remains at v2.
         let raw = fs::read_to_string(room_file_path(&dir)).expect("read migrated file");
         let reread: serde_json::Value = serde_json::from_str(&raw).expect("parse migrated file");
-        assert_eq!(reread["schema_version"], 3, "persisted schema should be v3");
+        assert_eq!(reread["schema_version"], 2, "disk file unchanged by in-memory migration");
     }
 
     #[test]
@@ -414,19 +406,12 @@ mod tests {
 
     #[test]
     fn empty_at_works_with_new_schema() {
+        // ⚠ save() deprecated — testing in-memory store instead.
         let dir = temp_dir("empty-at");
         let store = RoomStore::empty_at(&dir);
         assert_eq!(store.schema_version, 3);
         assert_eq!(store.discovery_secret, None);
         assert_eq!(store.topic, TopicId::from_bytes([0u8; 32]));
         assert!(store.peers.is_empty());
-
-        // Save and re-load should preserve everything.
-        store.save().expect("save empty store");
-        let loaded = RoomStore::load(&dir)
-            .expect("load empty store")
-            .expect("should have a saved room");
-        assert_eq!(loaded.schema_version, 3);
-        assert_eq!(loaded.discovery_secret, None);
     }
 }

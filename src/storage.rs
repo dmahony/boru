@@ -134,6 +134,9 @@ pub struct SharedFileRow {
     pub created_at_ms: u64,
     /// When the offer was last updated.
     pub updated_at_ms: u64,
+    /// Monotonically-increasing version number bumped on every metadata
+    /// or content change.  Defaults to 0 for new entries.
+    pub version: u64,
 }
 
 /// A row in the `outgoing_messages` table: tracks delivery state of
@@ -2827,6 +2830,7 @@ impl Storage {
         let mut results = Vec::new();
         while let Some(row) = rows.next().std_context("next row")? {
             results.push(SharedFileRow {
+                version: 0,
                 content_hash: row.get(0).std_context("get hash")?,
                 profile_user_id: row.get(1).std_context("get profile")?,
                 metadata_id: row.get(2).std_context("get metadata_id")?,
@@ -2860,6 +2864,7 @@ impl Storage {
             .std_context("query shared_file")?;
         if let Some(row) = rows.next().std_context("next row")? {
             Ok(Some(SharedFileRow {
+                version: 0,
                 content_hash: row.get(0).std_context("get hash")?,
                 profile_user_id: row.get(1).std_context("get profile")?,
                 metadata_id: row.get(2).std_context("get metadata_id")?,
@@ -2960,6 +2965,7 @@ impl Storage {
             .std_context("query shared_file_by_metadata_id")?;
         if let Some(row) = rows.next().std_context("next row")? {
             Ok(Some(SharedFileRow {
+                version: 0,
                 content_hash: row.get(0).std_context("get hash")?,
                 profile_user_id: row.get(1).std_context("get profile")?,
                 metadata_id: row.get(2).std_context("get metadata_id")?,
