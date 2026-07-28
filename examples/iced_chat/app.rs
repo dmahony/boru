@@ -14769,7 +14769,7 @@ impl IcedChat {
 
     /// Left sidebar containing Chats, Friends, Discover, and Requests sections.
     fn view_sidebar(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, scrollable, Column, Row, Space};
+        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let header = Row::new()
