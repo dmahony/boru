@@ -26,25 +26,30 @@ All legacy JSON stores have been replaced by SQLite unified storage:
 | Legacy Store | Source | Status |
 |---|---|---|
 | `ChatHistoryStore` (`chat_history.json`) | `src/chat_history.rs` | Writes disabled — reads only |
-| `OutboxStore` (`outbox.json`) | `src/outbox.rs` | Writes disabled — reads only |
+| `OutboxStore` (`outbox.json`) | `src/outbox.rs` | Writes disabled — reads only; replaced by SQLite `outgoing_messages` table (V10) |
 | `FriendsStore` (`friends.json`) | `src/friends.rs` | Writes disabled — reads only |
 | `ConversationStore` (`conversations.json`) | `src/conversations.rs` | Writes disabled — reads only |
 | `RoomStore` (`room.json`) | `src/room.rs` | Writes disabled — reads only |
 | `FriendRequestStore` (`friend_requests.json`) | `src/friend_request.rs` | Writes disabled — reads only |
-| `UserProfileStore` (`profile.json`) | `src/user_profile.rs` | Writes disabled — reads only |
+| `UserProfile` (`user_profile.json`) | `src/user_profile.rs` | Active (no SQLite equivalent) |
 | `MailboxStore` (`mailbox.json`) | `src/mailbox.rs` | Writes disabled — reads only |
 
 All `save()` methods are marked `#[deprecated]` and log a warning without writing.
 The legacy JSON files remain on disk for backward-compatible reads during a
-limited compatibility period.  Migration readers (`Storage::import_legacy_db`,
+limited compatibility period. Migration readers (`Storage::import_legacy_db`,
 `FriendsStore::load`, `ChatHistoryStore::load`, etc.) remain available.
 
 **Do not remove migration support in the same release that introduced unified
 storage.** Legacy import support is retained for at least one documented
 compatibility period to allow existing users to migrate their data.
 
-The GUI `PersistenceCoordinator` has been removed.  AppSettings persistence is
-handled directly via `AppSettings::save()`.
+The GUI `PersistenceCoordinator` has been removed. AppSettings persistence is
+handled directly via `AppSettings::save()`. The GUI outgoing queue now reads
+from the SQLite `outgoing_messages` table (V10) instead of `outbox.json`.
+
+See [`docs/message-storage-design.md`](message-storage-design.md) for the
+current schema (V10), delivery state machine (Pending→Sending→Sent→Acked),
+crash recovery details, and full table descriptions.
 
 ## Deletion and Tombstone Semantics (Step 12)
 
