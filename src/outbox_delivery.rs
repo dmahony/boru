@@ -607,7 +607,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                     };
 
                     if success {
-                        let _ = storage.mark_acked(&row.msg_id, peer);
+                        let _ = storage.mark_sent(&row.msg_id, peer);
                     } else {
                         let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
                         let delay = retry_policy.delay_ms(row.attempts, jitter);

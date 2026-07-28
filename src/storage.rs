@@ -1661,6 +1661,37 @@ impl Storage {
         Ok(())
     }
 
+    /// Record that the transport layer successfully handed bytes to the
+    /// remote peer.  Transitions `Sending` → `Sent`.  This is distinct
+    /// from an end-to-end ACK (see [`mark_acked`]).
+    ///
+    /// `Sent` rows are still eligible for retry: after a timeout they
+    /// become claimable again via [`claim_pending_deliveries`].
+    ///
+    /// Idempotent: does nothing if the row is already `Acked` or
+    /// `Expired` (guarded by WHERE).
+    pub fn mark_sent(
+        &self,
+        msg_id: &MessageId,
+        recipient_device_id: iroh::PublicKey,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE outbox SET status = ?1
+             WHERE msg_id = ?2 AND recipient_device_id = ?3
+               AND status != ?4 AND status != ?5",
+            params![
+                DeliveryStatus::Sent as u8,
+                msg_id.as_slice(),
+                recipient_device_id.as_bytes(),
+                DeliveryStatus::Acked as u8,
+                DeliveryStatus::Expired as u8,
+            ],
+        )
+        .std_context("mark sent")?;
+        Ok(())
+    }
+
     /// Record a delivery attempt.
     pub fn record_attempt(
         &self,
@@ -6446,5 +6477,111 @@ mod tests {
             .unwrap();
         assert_eq!(claimed2.len(), 1);
         assert_eq!(claimed2[0].status, DeliveryStatus::Sending);
+    }
+
+    // ── mark_sent / mark_acked idempotency (Phase 7) ─────────────────
+
+    /// `mark_sent` transitions Sending → Sent.  Calling it twice is
+    /// harmless: the second call is a no-op that doesn't error.
+    #[test]
+    fn test_mark_sent_is_idempotent() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [50u8; 32];
+        let peer = random_public_key();
+        storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
+
+        // Claim puts row in Sending
+        let _claimed = storage.claim_pending_deliveries(5, 100).unwrap();
+        assert_eq!(_claimed.len(), 1);
+        assert_eq!(_claimed[0].status, DeliveryStatus::Sending);
+
+        // First mark_sent: Sending → Sent
+        storage.mark_sent(&msg_id, peer).unwrap();
+
+        // Sent rows are still claimable
+        let claimed_after = storage.claim_pending_deliveries(5, 100).unwrap();
+        assert!(!claimed_after.is_empty(), "Sent row should still be claimable");
+
+        // Second mark_sent: no-op, stays Sent
+        storage.mark_sent(&msg_id, peer).unwrap();
+    }
+
+    /// `mark_sent` on an already-acked row is a no-op (guarded by WHERE).
+    #[test]
+    fn test_mark_sent_noop_on_acked() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [51u8; 32];
+        let peer = random_public_key();
+        storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
+
+        // Complete the lifecycle without marking sent
+        storage.mark_acked(&msg_id, peer).unwrap();
+
+        // mark_sent on Acked row should not change status
+        storage.mark_sent(&msg_id, peer).unwrap();
+
+        // Acked rows are not claimable
+        let claimed = storage.claim_pending_deliveries(5, 200).unwrap();
+        assert!(claimed.is_empty(), "acked rows should not be claimable");
+    }
+
+    /// `mark_acked` transitions to Acked.  Calling it twice is idempotent.
+    #[test]
+    fn test_mark_acked_is_idempotent() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [52u8; 32];
+        let peer = random_public_key();
+        storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
+
+        // First mark_acked — transitions to Acked
+        storage.mark_acked(&msg_id, peer).unwrap();
+
+        // Verify: Acked rows are not claimable
+        let claimed = storage.claim_pending_deliveries(5, 200).unwrap();
+        assert!(claimed.is_empty(), "acked rows should not be claimable");
+
+        // Second mark_acked — idempotent
+        storage.mark_acked(&msg_id, peer).unwrap();
+
+        // Still not claimable
+        let claimed2 = storage.claim_pending_deliveries(5, 200).unwrap();
+        assert!(claimed2.is_empty(), "still acked after second call");
+    }
+
+    /// Integration: Sending → mark_sent → mark_acked is the expected
+    /// lifecycle: transport sends bytes (Sent), then protocol ACK arrives
+    /// (Acked).
+    #[test]
+    fn test_lifecycle_sending_sent_acked() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [53u8; 32];
+        let peer = random_public_key();
+        storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
+
+        // Claim → Sending
+        let claimed = storage.claim_pending_deliveries(5, 100).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].status, DeliveryStatus::Sending);
+
+        // transport delivers bytes → Sent
+        storage.mark_sent(&msg_id, peer).unwrap();
+
+        // Sent rows are claimable
+        let claimed_after = storage.claim_pending_deliveries(5, 100).unwrap();
+        assert!(!claimed_after.is_empty(), "Sent row should be claimable");
+
+        // protocol ACK arrives → Acked
+        storage.mark_acked(&msg_id, peer).unwrap();
+
+        // Acked rows are not claimable
+        let claimed_after_ack = storage.claim_pending_deliveries(5, 200).unwrap();
+        assert!(claimed_after_ack.is_empty(), "acked row not claimable");
+
+        // Can't go backwards: mark_sent after acked does nothing
+        storage.mark_sent(&msg_id, peer).unwrap();
+
+        // Still not claimable
+        let claimed_final = storage.claim_pending_deliveries(5, 200).unwrap();
+        assert!(claimed_final.is_empty(), "still acked after mark_sent");
     }
 }
