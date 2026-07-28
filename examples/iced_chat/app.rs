@@ -17085,6 +17085,27 @@ impl IcedChat {
                 )
             });
 
+            // Whether the NEXT entry continues this same visual group.
+            // Used to show delivery state only on the last message of a group.
+            let next_continues = i + 1 < total_entries && {
+                let next = &self.entries[i + 1];
+                let kind = |kind| match kind {
+                    ChatKind::System => crate::presentation::MessageKind::System,
+                    ChatKind::Local => crate::presentation::MessageKind::Local,
+                    ChatKind::Remote => crate::presentation::MessageKind::Remote,
+                };
+                let current_sender = entry.sender_key.map(|key| key.to_string());
+                let next_sender = next.sender_key.map(|key| key.to_string());
+                crate::presentation::continues_message_group(
+                    kind(entry.kind),
+                    kind(next.kind),
+                    current_sender.as_deref(),
+                    next_sender.as_deref(),
+                    entry.timestamp,
+                    next.timestamp,
+                )
+            };
+
             // ── Local / Remote / System-with-download messages ──
             let label_color = match entry.kind {
                 ChatKind::Local => text_local_label(&theme),
@@ -17101,7 +17122,12 @@ impl IcedChat {
             let is_friend_online = entry
                 .sender_key
                 .map_or(false, |k| self.friend_online_cache.contains(&k));
-            let label_el: iced::Element<'_, AppMessage> = if group_continues {
+            let label_el: iced::Element<'_, AppMessage> = if matches!(entry.kind, ChatKind::System)
+                && entry.download.is_none()
+            {
+                // System notices have no label — just the centred text
+                space::Space::new().height(0.0).into()
+            } else if group_continues {
                 space::Space::new().height(Length::Fixed(SPACE_2)).into()
             } else if matches!(entry.kind, ChatKind::Remote) {
                 if let Some(sender_key) = entry.sender_key {
@@ -17235,7 +17261,7 @@ impl IcedChat {
                     });
 
             let ts_text = entry.formatted_time.as_deref().unwrap_or("");
-            let metadata = if matches!(entry.kind, ChatKind::Local) && !group_continues {
+            let metadata = if matches!(entry.kind, ChatKind::Local) && !next_continues {
                 format!(
                     "{} · {}",
                     ts_text,
@@ -17352,20 +17378,30 @@ impl IcedChat {
                 }
                 // System entries with a download attachment render the
                 // download card directly (upload progress, received file).
+                // Plain text system events render as small centred notices.
                 ChatKind::System => {
                     let download = entry
                         .download
                         .as_ref()
                         .map(|dl| self.view_download_attachment(i, dl));
-                    let inner = if let Some(dl_el) = download {
-                        dl_el
+                    if let Some(dl_el) = download {
+                        Row::new().push(dl_el).width(Length::Fill)
                     } else {
-                        container(text(&entry.body).size(TYPO_XS).color(text_system(&theme)))
-                            .padding([SPACE_6, SPACE_12])
-                            .style(container_card)
-                            .into()
-                    };
-                    Row::new().push(inner).width(Length::Fill)
+                        // Centred notice — muted text, no bubble/border
+                        Row::new()
+                            .push(
+                                container(
+                                    text(&entry.body)
+                                        .size(TYPO_XXS)
+                                        .color(text_system(&theme))
+                                        .wrapping(Wrapping::Word),
+                                )
+                                .padding([SPACE_4, SPACE_24])
+                                .center_x(Length::Fill)
+                                .width(Length::Fill),
+                            )
+                            .width(Length::Fill)
+                    }
                 }
             }
             .width(Length::Fill);
