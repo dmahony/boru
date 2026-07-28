@@ -189,6 +189,11 @@ fn watcher_events(c: &mut Criterion) {
 
 fn persistence(c: &mut Criterion) {
     let mut group = c.benchmark_group("persistence");
+    // Reduce sample count from the default 100 to 50 for persistence.
+    // The default 100 samples is too many for the 10K-record iteration time,
+    // causing Criterion to fail to reach 100 samples in the default 5s window.
+    // Fewer samples = more iterations per sample = lower per-sample variance.
+    group.sample_size(50);
     let directory = tempfile::tempdir().expect("create persistence fixture directory");
     for size in [100usize, 1_000, 10_000] {
         let records: Vec<(u64, String)> = (0..size as u64)
