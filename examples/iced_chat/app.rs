@@ -6957,6 +6957,71 @@ impl IcedChat {
                     // saved — mark them so enforce_entry_cap does not try
                     // to re-save them as new.
                     self.history_saved_count = self.entries.len();
+
+                    // ── SQLite message replay ──────────────────────────
+                    // Phase 22 deprecated JSON writes; new messages are only
+                    // in SQLite outgoing_messages.  Replay them into the
+                    // in-memory ChatHistoryStore so they survive restarts.
+                    if let Some(storage) = &self.storage {
+                        if let Ok(rows) = storage.list_outgoing_for_topic(&topic) {
+                            for row in &rows {
+                                let mut store = self.chat_history.lock().unwrap();
+                                if store.get_by_event_id(row.event_id).is_some() {
+                                    continue; // already in JSON legacy store
+                                }
+                                // Decode the signed message to get kind + text
+                                if let Ok((pk, msg, _sent_at)) =
+                                    SignedMessage::verify_and_decode(&row.signed_bytes)
+                                {
+                                    let (kind, preview) = match &msg {
+                                        crate::Message::Message { text } => {
+                                            ("text", text.clone())
+                                        }
+                                        crate::Message::FileShare { name, .. } => {
+                                            ("file", name.clone())
+                                        }
+                                        crate::Message::AboutMe { name, .. } => {
+                                            ("about_me", name.clone())
+                                        }
+                                        crate::Message::Leave => ("system", "Left".into()),
+                                        crate::Message::Presence
+                                        | crate::Message::PresenceWithTicket { .. } => {
+                                            continue; // skip heartbeats
+                                        }
+                                        crate::Message::ReadReceipt { .. } => {
+                                            continue; // skip receipts
+                                        }
+                                        _ => continue,
+                                    };
+                                    let entry = HistoryEntry::new(
+                                        row.topic,
+                                        pk.to_string(),
+                                        row.signed_bytes.clone(),
+                                        kind,
+                                        preview,
+                                    );
+                                    // Assign the real event_id from SQLite
+                                    store.push_with_id(entry);
+                                    // Re-lock to get the stored entry
+                                    if let Some(saved) =
+                                        store.get_by_event_id(row.event_id)
+                                    {
+                                        let saved = saved.clone();
+                                        drop(store);
+                                        if let Some(chat_entry) =
+                                            Self::history_entry_to_chat_entry(
+                                                &saved, &topic, &local_hex,
+                                            )
+                                        {
+                                            self.entries_push(chat_entry);
+                                        }
+                                    } else {
+                                        drop(store);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Overlay outgoing delivery states from SQLite onto the
