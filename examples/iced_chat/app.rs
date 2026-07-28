@@ -746,6 +746,13 @@ pub(crate) const BUTTON_GHOST_BG: fn(
 ) -> iced::widget::button::Style = |theme, status| iced::widget::button::Style {
     background: match status {
         iced::widget::button::Status::Hovered => Some(iced::Background::Color(bg_hover(theme))),
+        iced::widget::button::Status::Pressed => {
+            let mut c = bg_hover(theme);
+            c.r *= 0.85;
+            c.g *= 0.85;
+            c.b *= 0.85;
+            Some(iced::Background::Color(c))
+        }
         _ => None,
     },
     text_color: match status {
@@ -757,6 +764,7 @@ pub(crate) const BUTTON_GHOST_BG: fn(
             c.b *= 0.85;
             c
         }
+        iced::widget::button::Status::Disabled => text_muted(theme),
         _ => Color::from_rgb(0.5, 0.5, 0.5),
     },
     border: iced::Border {
@@ -2357,6 +2365,9 @@ pub struct IcedChat {
     /// Animation frame counter for the main screen's "reconnecting to relay"
     /// status text (animated dots or spinner).
     main_screen_reconnect_frame: usize,
+    /// OS reduced-motion preference — when true, skip all spinner/loading
+    /// animations and show static indicators instead.
+    reduced_motion: bool,
     /// Cached link previews (title, description, image) keyed by URL.
     link_preview_cache: std::sync::Arc<std::sync::Mutex<link_preview::LinkPreviewCache>>,
     /// Entry index whose link preview is currently being fetched (deprecated in
@@ -3706,6 +3717,28 @@ fn profile_identity_card(
 }
 
 impl IcedChat {
+
+    /// Detect OS reduced-motion preference.
+    ///
+    /// Checks the REDUCED_MOTION env var first (for CI/testing), then queries
+    /// GNOME gsettings on Linux. Returns true when reduced motion is requested.
+    fn detect_reduced_motion() -> bool {
+        // Honour explicit override first.
+        if let Ok(val) = std::env::var("REDUCED_MOTION") {
+            return val == "1" || val.eq_ignore_ascii_case("true");
+        }
+        // GNOME-based desktops.
+        if let Ok(output) = std::process::Command::new("gsettings")
+            .args(["get", "org.gnome.desktop.interface", "enable-animations"])
+            .output()
+        {
+            if let Ok(s) = String::from_utf8(output.stdout) {
+                return s.trim() == "false";
+            }
+        }
+        false
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         secret_key: SecretKey,
@@ -3881,6 +3914,7 @@ impl IcedChat {
             splash_spinner_frame: 0,
             connecting_spinner_frame: 0,
             main_screen_reconnect_frame: 0,
+            reduced_motion: Self::detect_reduced_motion(),
             lightbox_image: None,
             pending_topic: None,
             room_loading: false,
@@ -8573,10 +8607,20 @@ impl IcedChat {
 
             // ── Global keyboard shortcuts ───────────────────────────
             AppMessage::Shortcut(Shortcut::Escape) => {
+                // Close any open overlay/dialog, outermost first.
+                if self.lightbox_image.is_some() {
+                    return iced::Task::done(AppMessage::CloseImageLightbox);
+                }
+                if self.show_create_room_dialog {
+                    return iced::Task::done(AppMessage::CancelCreateRoom);
+                }
                 if self.connection_details_dialog.is_some() {
                     return iced::Task::done(AppMessage::CloseConnectionDetails);
                 }
-                if self.show_add_menu {
+                if self.show_invite_menu {
+                    self.show_invite_menu = false;
+                    self.invite_whisper_input.clear();
+                } else if self.show_add_menu {
                     self.show_add_menu = false;
                 } else if self.help_visible {
                     self.help_visible = false;
@@ -11339,24 +11383,27 @@ impl IcedChat {
             }
 
             AppMessage::SplashTick => {
-                // Advance spinner animations.
-                self.splash_spinner_frame = (self.splash_spinner_frame + 1) % 10;
-                // Advance the connecting animation while the gossip sender
-                // hasn't arrived yet (conversation opened but peer not connected).
-                if self.sender.is_none() && matches!(self.screen, Screen::Chat { .. }) {
-                    self.connecting_spinner_frame = (self.connecting_spinner_frame + 1) % 10;
-                }
-                // Advance the main screen reconnecting animation when on
-                // the ChatList screen and not yet fully connected.
-                if matches!(self.screen, Screen::ChatList) {
-                    let is_connected = !self.neighbors.is_empty()
-                        || self.relayed_peers > 0
-                        || self.direct_peers > 0;
-                    if !is_connected {
-                        self.main_screen_reconnect_frame =
-                            (self.main_screen_reconnect_frame + 1) % 10;
+                // Skip animations when OS reduced-motion is preferred.
+                if !self.reduced_motion {
+                    // Advance spinner animations.
+                    self.splash_spinner_frame = (self.splash_spinner_frame + 1) % 10;
+                    // Advance the connecting animation while the gossip sender
+                    // hasn't arrived yet (conversation opened but peer not connected).
+                    if self.sender.is_none() && matches!(self.screen, Screen::Chat { .. }) {
+                        self.connecting_spinner_frame = (self.connecting_spinner_frame + 1) % 10;
                     }
-                }
+                    // Advance the main screen reconnecting animation when on
+                    // the ChatList screen and not yet fully connected.
+                    if matches!(self.screen, Screen::ChatList) {
+                        let is_connected = !self.neighbors.is_empty()
+                            || self.relayed_peers > 0
+                            || self.direct_peers > 0;
+                        if !is_connected {
+                            self.main_screen_reconnect_frame =
+                                (self.main_screen_reconnect_frame + 1) % 10;
+                        }
+                    }
+                } // end !reduced_motion guard
                 iced::Task::none()
             }
 
@@ -14172,8 +14219,10 @@ impl IcedChat {
         };
 
         let content = column![
-            // App icon placeholder (large emoji or icon)
-            text("🗣️").size(72),
+            // App icon — SVG speech bubble
+            icon_svg(ICON_CHAT, 72.0).style(|t, _| iced::widget::svg::Style {
+                color: Some(accent_primary(t)),
+            }),
             Space::new().height(Length::Fixed(20.0)),
             // App name — Raleway ExtraBold wordmark
             boru_logo(LogoSize::Large).color(text_color).into_element(),
@@ -15352,11 +15401,17 @@ impl IcedChat {
                 Column::new()
                     .push(
                         Row::new()
-                            .push(text(name.clone()).size(TYPO_SM).width(Length::Fill).style(
-                                move |t| iced::widget::text::Style {
-                                    color: Some(name_color(t)),
-                                },
-                            ))
+                            .push(
+                                container(
+                                    text(name.clone()).size(TYPO_SM).width(Length::Fill).style(
+                                        move |t| iced::widget::text::Style {
+                                            color: Some(name_color(t)),
+                                        },
+                                    ),
+                                )
+                                .width(Length::Fill)
+                                .clip(true),
+                            )
                             .push(text(time_label_str.clone()).size(TYPO_XXS).style(move |t| {
                                 iced::widget::text::Style {
                                     color: Some(time_color(t)),
@@ -15392,6 +15447,12 @@ impl IcedChat {
                 iced::widget::button::Style {
                     background: bg,
                     border: iced::Border {
+                        color: if is_selected {
+                            accent_primary(t)
+                        } else {
+                            iced::Color::TRANSPARENT
+                        },
+                        width: if is_selected { 3.0 } else { 0.0 },
                         radius: SPACE_4.into(),
                         ..Default::default()
                     },
@@ -16770,8 +16831,9 @@ impl IcedChat {
         );
 
         let identity = column![
-            text(room_name)
+            text(room_name.clone())
                 .size(TYPO_SM)
+                .width(Length::Fill)
                 .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
             row![
                 status_dot,
@@ -16983,7 +17045,7 @@ impl IcedChat {
 
     /// Right-side details panel — shows conversation metadata and actions.
     fn view_details_panel(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Space};
+        use iced::widget::{button, column, container, row, scrollable, text, Space};
         use iced::{Alignment, Length};
 
         let theme = self.theme();
@@ -17017,6 +17079,21 @@ impl IcedChat {
                 }
             })
             .unwrap_or_default();
+
+        // ── Determine connection type for this peer ──
+        let is_mesh_neighbor = peer.is_some_and(|pk| self.neighbors.contains(&pk));
+        let connection_type = if is_mesh_neighbor {
+            "Direct (mesh)"
+        } else if is_online {
+            "Relay"
+        } else {
+            "Not connected"
+        };
+        let connection_label = if is_online {
+            "Connected"
+        } else {
+            "Disconnected"
+        };
 
         // ── Section: Contact ──
         let mut contact_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
@@ -17087,23 +17164,116 @@ impl IcedChat {
             .into(),
         );
 
-        // ── Section: Peer info ──
-        let mut peer_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
-
         if !last_seen.is_empty() {
-            peer_items.push(info_row("Last seen".to_string(), last_seen, &theme).into());
+            contact_items.push(info_row("Last seen".to_string(), last_seen, &theme).into());
         }
+
+        // ── Section: Connection ──
+        let mut conn_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        // Connection state indicator
+        let conn_state_color = if is_online {
+            accent_green(&theme)
+        } else {
+            text_muted(&theme)
+        };
+        let conn_state_dot = icon_svg(if is_online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_SM)
+            .style(move |_t, _| iced::widget::svg::Style {
+                color: Some(conn_state_color),
+            });
+        let conn_state_row = row![
+            conn_state_dot,
+            text(connection_label)
+                .size(TYPO_SM)
+                .style(move |t| iced::widget::text::Style {
+                    color: Some(if is_online {
+                        accent_green(t)
+                    } else {
+                        text_muted(t)
+                    }),
+                }),
+        ]
+        .spacing(SPACE_6)
+        .align_y(Alignment::Center);
+        conn_items.push(conn_state_row.into());
+
+        conn_items.push(
+            info_row(
+                "Connection".to_string(),
+                connection_type.to_string(),
+                &theme,
+            )
+            .into(),
+        );
+
+        // Relay mode (global, but relevant context for the peer)
+        let relay_label = fmt_relay_mode(&self.relay_mode);
+        conn_items.push(info_row("Relay".to_string(), relay_label, &theme).into());
+
+        // ── Section: Security ──
+        let mut security_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        // All iroh QUIC connections are encrypted
+        security_items.push(
+            info_row(
+                "Encryption".to_string(),
+                "QUIC (encrypted)".to_string(),
+                &theme,
+            )
+            .into(),
+        );
+
+        // Peer public key with copy button
         if let Some(pk) = peer {
-            peer_items.push(info_row("Public key".to_string(), pk.to_string(), &theme).into());
-        }
-        if let Some(entry) = conversation.as_ref() {
-            if entry.created_at_unix_ms > 0 {
-                let created = crate::presentation::relative_time(entry.created_at_unix_ms);
-                peer_items.push(info_row("Created".to_string(), created, &theme).into());
-            }
+            let fingerprint = pk.fmt_short().to_string();
+            let full_key = pk.to_string();
+            let fpr = fingerprint.clone();
+            let copy_btn = button(text("Copy").size(TYPO_XS).color(text_muted(&theme)))
+                .on_press(AppMessage::CopyToClipboard(full_key.clone()))
+                .padding([SPACE_2, SPACE_4])
+                .style(BUTTON_GHOST_BG);
+
+            let key_row = row![
+                text("Key fingerprint")
+                    .size(TYPO_SM)
+                    .color(text_secondary(&theme)),
+                Space::new().width(Length::Fill),
+                text(fpr)
+                    .size(TYPO_SM)
+                    .color(crate::design_tokens::text(&theme))
+                    .font(crate::fonts::jetbrains_mono(iced::font::Weight::Normal)),
+                copy_btn,
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+            security_items.push(key_row.into());
         }
 
         // ── Section: Tools ──
+        let mut tool_btns: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        // Browse shared files (only for direct conversations with a peer)
+        if let Some(pk) = peer {
+            let shared_files_btn = button(
+                row![
+                    icon_svg(ICON_FILES, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                        color: Some(accent_primary(t))
+                    }),
+                    text("Shared files")
+                        .size(TYPO_SM)
+                        .color(accent_primary(&theme)),
+                ]
+                .spacing(SPACE_6)
+                .align_y(Alignment::Center),
+            )
+            .on_press(AppMessage::BrowsePeerCatalogue(pk))
+            .padding([SPACE_6, SPACE_12])
+            .width(Length::Fill)
+            .style(BUTTON_OUTLINE);
+            tool_btns.push(shared_files_btn.into());
+        }
+
         let connection_btn = button(
             row![
                 icon_svg(ICON_ACTIVITY, TYPO_SM).style(|t, _| iced::widget::svg::Style {
@@ -17120,47 +17290,104 @@ impl IcedChat {
         .padding([SPACE_6, SPACE_12])
         .width(Length::Fill)
         .style(BUTTON_OUTLINE);
+        tool_btns.push(connection_btn.into());
+
+        // ── Section: Peer ──
+        let mut peer_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        // Full peer identifier with copy button
+        if let Some(pk) = peer {
+            let full_id = pk.to_string();
+            let fid = full_id.clone();
+            let copy_btn = button(text("Copy").size(TYPO_XS).color(text_muted(&theme)))
+                .on_press(AppMessage::CopyToClipboard(fid))
+                .padding([SPACE_2, SPACE_4])
+                .style(BUTTON_GHOST_BG);
+
+            let truncated = if full_id.len() > 32 {
+                format!("{}…", &full_id[..32])
+            } else {
+                full_id.clone()
+            };
+            let peer_id_row = row![
+                text("Peer ID").size(TYPO_SM).color(text_secondary(&theme)),
+                Space::new().width(Length::Fill),
+                text(truncated)
+                    .size(TYPO_SM)
+                    .color(crate::design_tokens::text(&theme))
+                    .font(crate::fonts::jetbrains_mono(iced::font::Weight::Normal)),
+                copy_btn,
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+            peer_items.push(peer_id_row.into());
+        }
+
+        // First-seen / created date
+        if let Some(entry) = conversation.as_ref() {
+            if entry.created_at_unix_ms > 0 {
+                let created = crate::presentation::relative_time(entry.created_at_unix_ms);
+                peer_items.push(info_row("First seen".to_string(), created, &theme).into());
+            }
+        }
 
         // ── Assemble the panel ──
-        container(
-            column![
-                // Heading
-                text("Details")
-                    .size(TYPO_SM)
-                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
-                Space::new().height(Length::Fixed(SPACE_12)),
-                // Contact section
-                text("Contact")
-                    .size(TYPO_XS)
-                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
-                    .color(text_secondary(&theme)),
-                Space::new().height(Length::Fixed(SPACE_4)),
-                column(contact_items).spacing(SPACE_8),
-                divider(&theme),
-                // Peer section
-                text("Peer")
-                    .size(TYPO_XS)
-                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
-                    .color(text_secondary(&theme)),
-                Space::new().height(Length::Fixed(SPACE_4)),
-                column(peer_items).spacing(SPACE_8),
-                divider(&theme),
-                // Tools section
-                text("Tools")
-                    .size(TYPO_XS)
-                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
-                    .color(text_secondary(&theme)),
-                Space::new().height(Length::Fixed(SPACE_4)),
-                connection_btn,
-                Space::new().height(Length::Fill),
-            ]
-            .spacing(SPACE_12),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding([SPACE_12, SPACE_12])
-        .style(container_surface)
-        .into()
+        let panel_body = column![
+            // Heading
+            text("Details")
+                .size(TYPO_SM)
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
+            Space::new().height(Length::Fixed(SPACE_12)),
+            // Contact section
+            text("Contact")
+                .size(TYPO_XS)
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                .color(text_secondary(&theme)),
+            Space::new().height(Length::Fixed(SPACE_4)),
+            column(contact_items).spacing(SPACE_8),
+            divider(&theme),
+            // Connection section
+            text("Connection")
+                .size(TYPO_XS)
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                .color(text_secondary(&theme)),
+            Space::new().height(Length::Fixed(SPACE_4)),
+            column(conn_items).spacing(SPACE_8),
+            divider(&theme),
+            // Security section
+            text("Security")
+                .size(TYPO_XS)
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                .color(text_secondary(&theme)),
+            Space::new().height(Length::Fixed(SPACE_4)),
+            column(security_items).spacing(SPACE_8),
+            divider(&theme),
+            // Tools section
+            text("Tools")
+                .size(TYPO_XS)
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                .color(text_secondary(&theme)),
+            Space::new().height(Length::Fixed(SPACE_4)),
+            column(tool_btns).spacing(SPACE_8),
+            divider(&theme),
+            // Peer section
+            text("Peer")
+                .size(TYPO_XS)
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                .color(text_secondary(&theme)),
+            Space::new().height(Length::Fixed(SPACE_4)),
+            column(peer_items).spacing(SPACE_8),
+            Space::new().height(Length::Fill),
+        ]
+        .spacing(SPACE_12);
+
+        container(scrollable(panel_body))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding([SPACE_12, SPACE_12])
+            .style(container_surface)
+            .into()
     }
 
     fn view_chat_log(&self) -> iced::widget::Scrollable<'_, AppMessage> {
@@ -17546,11 +17773,13 @@ impl IcedChat {
                     bubble_col = bubble_col.push(preview_card);
                 }
             } else if entry.link_preview_loading {
-                bubble_col = bubble_col.push(
-                    text("🔍 Loading preview…")
+                bubble_col = bubble_col.push({
+                    const SP: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                    let s = SP[self.splash_spinner_frame % SP.len()];
+                    text(format!("{s} Loading preview…"))
                         .size(TYPO_XS)
-                        .color(text_muted(&theme)),
-                );
+                        .color(text_muted(&theme))
+                });
             }
 
             let msg_row = match entry.kind {
@@ -19174,7 +19403,7 @@ impl IcedChat {
             container(
                 button(
                     Row::new()
-                        .push(text("📁 ").size(TYPO_SM))
+                        .push(icon_svg(ICON_FILES, TYPO_SM))
                         .push(text("Open Downloads Folder").size(TYPO_SM))
                         .spacing(SPACE_4)
                         .align_y(Alignment::Center),
@@ -19184,11 +19413,27 @@ impl IcedChat {
                 .style(move |theme, status| {
                     let base = match status {
                         iced::widget::button::Status::Hovered => accent_primary(theme),
+                        iced::widget::button::Status::Pressed => {
+                            let mut c = accent_primary(theme);
+                            c.r *= 0.85;
+                            c.g *= 0.85;
+                            c.b *= 0.85;
+                            c
+                        }
                         _ => Color::from_rgb(0.4, 0.4, 0.4),
+                    };
+                    let bg = match status {
+                        iced::widget::button::Status::Hovered => Some(iced::Background::Color(
+                            Color::from_rgba(0.3, 0.3, 0.3, 0.06),
+                        )),
+                        iced::widget::button::Status::Pressed => Some(iced::Background::Color(
+                            Color::from_rgba(0.3, 0.3, 0.3, 0.12),
+                        )),
+                        _ => None,
                     };
                     iced::widget::button::Style {
                         text_color: base,
-                        background: None,
+                        background: bg,
                         border: iced::Border {
                             color: border_muted(theme),
                             width: 1.0,
