@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Reproduction test: simulates the exact chat-gui gossip flow
 //! to catch "decode signed message" failures.
 //!
@@ -125,6 +127,9 @@ async fn test_signed_message_gossip_flow() -> Result<()> {
                     println!("Peer B: NeighborDown {}", id.fmt_short())
                 }
                 GossipEvent::Lagged => println!("Peer B: Lagged"),
+                GossipEvent::MissingMessages { .. } => {
+                    println!("Peer B: MissingMessages gap detected");
+                }
             },
             Ok(Ok(None)) => break,
             _ => break,

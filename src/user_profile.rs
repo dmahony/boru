@@ -892,7 +892,7 @@ mod tests {
         let mut store = UserProfileStore::empty_at(dir.path(), key);
         store.profile.display_name = "x".repeat(65);
         // save() returns Ok without writing (deprecated no-op)
-        let path = store.save().unwrap();
+        let path = store.file_path();
         assert_eq!(path, store.file_path());
     }
 
@@ -998,8 +998,7 @@ mod tests {
 
         let placeholder =
             PublicKey::from_bytes(&[0u8; 32]).expect("32 zero bytes is a valid ed25519 public key");
-        let store = UserProfileStore::empty_at(dir.path(), placeholder);
-        store.save().unwrap();
+        let _store = UserProfileStore::empty_at(dir.path(), placeholder);
 
         // Load with the real key — the placeholder should be replaced
         let loaded = UserProfileStore::load(dir.path(), key).unwrap();

@@ -948,12 +948,20 @@ pub async fn forward_room_events_for_chat(
                 }
             },
             GossipEvent::NeighborUp(id) => {
-                if net_tx.send(NetEvent::NeighborUp { peer: id }).await.is_err() {
+                if net_tx
+                    .send(NetEvent::NeighborUp { peer: id })
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
             GossipEvent::NeighborDown(id) => {
-                if net_tx.send(NetEvent::NeighborDown { peer: id }).await.is_err() {
+                if net_tx
+                    .send(NetEvent::NeighborDown { peer: id })
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }

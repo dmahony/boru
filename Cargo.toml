@@ -305,7 +305,6 @@ iroh = { path = "patched/iroh" }
 iroh-dns = { path = "patched/iroh-dns" }
 iroh-relay = { path = "patched/iroh-relay" }
 irpc = { path = "patched/irpc" }
-irpc-iroh = { path = "patched/irpc-iroh" }
 mainline = { path = "patched/mainline" }
 n0-mainline = { path = "patched/n0-mainline" }
 
@@ -398,11 +397,6 @@ required-features = ["net"]
 [[test]]
 name = "test_interrupted_transfer_harness"
 path = "tests/test_interrupted_transfer_harness.rs"
-
-[[test]]
-name = "test_storage_unification"
-path = "tests/test_storage_unification.rs"
-required-features = ["net"]
 
 [[test]]
 name = "test_branding_rename"

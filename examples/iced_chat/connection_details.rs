@@ -15,7 +15,7 @@ use iced::{Alignment, Length};
 
 use crate::app::{
     accent_primary, bg_surface, border_muted, color_error, text_muted_style, BUTTON_OUTLINE,
-    SPACE_12, SPACE_2, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_MD, TYPO_SM, TYPO_XL, TYPO_XS,
+    SPACE_12, SPACE_2, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XL, TYPO_XS,
 };
 
 const DIALOG_WIDTH: f32 = 680.0;
@@ -285,7 +285,8 @@ where
             announcement,
             vec![text(message.as_str())
                 .font(crate::fonts::source_sans(Weight::Normal))
-                .size(TYPO_SM).into()],
+                .size(TYPO_SM)
+                .into()],
             on_action,
             on_value_edit,
         ),
@@ -430,15 +431,17 @@ where
 
     if let Some(copy_text) = copy_text {
         line = line.push(
-            button(text("Copy")
-                .font(crate::fonts::source_sans(Weight::Medium))
-                .size(TYPO_SM))
-                .on_press(on_action(ConnectionDetailsDialogAction::CopyValue {
-                    label,
-                    value: copy_text.to_string(),
-                }))
-                .style(BUTTON_OUTLINE)
-                .padding([SPACE_6, SPACE_12]),
+            button(
+                text("Copy")
+                    .font(crate::fonts::source_sans(Weight::Medium))
+                    .size(TYPO_SM),
+            )
+            .on_press(on_action(ConnectionDetailsDialogAction::CopyValue {
+                label,
+                value: copy_text.to_string(),
+            }))
+            .style(BUTTON_OUTLINE)
+            .padding([SPACE_6, SPACE_12]),
         );
     }
 
@@ -453,14 +456,15 @@ fn dialog_body<'a, Message>(
     announcement: Option<&'a str>,
     body_rows: Vec<iced::Element<'a, Message>>,
     on_action: impl Fn(ConnectionDetailsDialogAction) -> Message + Copy + 'a,
-    on_value_edit: impl Fn(String) -> Message + Copy + 'a,
+    _on_value_edit: impl Fn(String) -> Message + Copy + 'a,
 ) -> iced::Element<'a, Message>
 where
     Message: 'a + Clone,
 {
     let title = text(state.title())
         .font(crate::fonts::source_sans(Weight::Bold))
-        .size(TYPO_XL).width(Length::Fill);
+        .size(TYPO_XL)
+        .width(Length::Fill);
 
     let mut header = Column::new().push(title).spacing(SPACE_4);
     if let Some(message) = announcement {

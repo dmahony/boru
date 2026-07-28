@@ -102,12 +102,12 @@ pub fn jetbrains_mono(weight: Weight) -> Font {
 
 mod sizes {
     //! Type-size constants (pixels).  Preserves the original Boru scale.
-    pub const XL: f32 = 24.0;   // Primary heading
-    pub const LG: f32 = 18.0;   // Secondary heading
-    pub const MD: f32 = 15.0;   // Body / section headers / button labels
-    pub const SM: f32 = 13.0;   // Secondary body / previews
-    pub const XS: f32 = 11.0;   // Metadata / secondary labels
-    pub const XXS: f32 = 10.0;  // Fine print
+    pub const XL: f32 = 24.0; // Primary heading
+    pub const LG: f32 = 18.0; // Secondary heading
+    pub const MD: f32 = 15.0; // Body / section headers / button labels
+    pub const SM: f32 = 13.0; // Secondary body / previews
+    pub const XS: f32 = 11.0; // Metadata / secondary labels
+    pub const XXS: f32 = 10.0; // Fine print
 }
 pub use sizes::*;
 
@@ -228,9 +228,7 @@ pub fn typo_text<'a>(
     token: Typography,
     content: impl text::IntoFragment<'a>,
 ) -> text::Text<'a, iced::Theme, iced::Renderer> {
-    text(content)
-        .font(token.font())
-        .size(token.size_px())
+    text(content).font(token.font()).size(token.size_px())
 }
 
 /// Apply a typography token to an existing text widget.

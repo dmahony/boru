@@ -571,7 +571,7 @@ mod tests {
         let our_pubkey = sk.public();
         let inv = PeerInvitation {
             version: CURRENT_VERSION,
-            peer_id: our_pubkey.clone(),
+            peer_id: our_pubkey,
             display_name: "Me".to_string(),
             avatar_hash: None,
             relay_urls: vec![],

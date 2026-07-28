@@ -35,7 +35,14 @@ const FULL_RESCAN_PATH_THRESHOLD: usize = 50;
 /// Events touching these paths are discarded; the real file will emit
 /// a follow-up event when the temp file is renamed to its final name.
 const TEMP_SUFFIXES: &[&str] = &[
-    ".tmp", ".temp", ".swp", ".swx", "~", ".part", ".crdownload", ".bak",
+    ".tmp",
+    ".temp",
+    ".swp",
+    ".swx",
+    "~",
+    ".part",
+    ".crdownload",
+    ".bak",
 ];
 
 /// Filesystem changes reported by [`FileIndexer::watch`].
@@ -220,7 +227,7 @@ impl FileIndexer {
                         Ok(m) => m.modified().unwrap_or(std::time::UNIX_EPOCH),
                         Err(_) => return Ok(None),
                     };
-                    if expected_mtime.map_or(true, |exp| current_mtime == exp) {
+                    if expected_mtime.is_none_or(|exp| current_mtime == exp) {
                         entry.hash = Some(hash);
                         Ok(Some(hash))
                     } else {
@@ -477,10 +484,7 @@ fn process_event_batch(
 
                 // Safety: symlink must not escape the shared folder.
                 if !crate::user_profile::UserProfile::symlink_is_safe(p, root) {
-                    warn!(
-                        "skipping changed path outside root: {}",
-                        p.display()
-                    );
+                    warn!("skipping changed path outside root: {}", p.display());
                     continue;
                 }
                 if !crate::user_profile::UserProfile::is_path_contained(p, root) {
@@ -499,10 +503,7 @@ fn process_event_batch(
 
                 // Remove old entry for this path (the id will differ if
                 // size or mtime changed — modify-in-place).
-                let was_modified = state
-                    .files
-                    .iter()
-                    .any(|(_, f)| f.path == *p);
+                let was_modified = state.files.iter().any(|(_, f)| f.path == *p);
 
                 state.files.retain(|_, f| f.path != *p);
                 state.files.insert(new_file.id.clone(), new_file.clone());
@@ -961,10 +962,7 @@ mod tests {
                 vec!["a.txt", "b.txt", "c.tmp"],
                 EventKind::Create(CreateKind::File),
             ),
-            make_event(
-                vec!["a.txt", "b.txt"],
-                EventKind::Create(CreateKind::File),
-            ),
+            make_event(vec!["a.txt", "b.txt"], EventKind::Create(CreateKind::File)),
         ];
 
         let result = collect_unique_paths(&events);
@@ -995,9 +993,7 @@ mod tests {
 
         // A rename SHOULD trigger full rescan.
         let rename_event = Event {
-            kind: EventKind::Modify(ModifyKind::Name(
-                notify::event::RenameMode::Any,
-            )),
+            kind: EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Any)),
             paths: vec![PathBuf::from("old"), PathBuf::from("new")],
             ..Event::default()
         };

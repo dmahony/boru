@@ -11,6 +11,7 @@ use rand::RngExt;
 use rand::SeedableRng;
 
 #[test]
+#[allow(deprecated)]
 fn generate_stress_data() {
     let data_dir = std::env::var("STRESS_DATA_DIR")
         .unwrap_or_else(|_| "/tmp/iroh-stress-test-data".to_string());

@@ -454,20 +454,20 @@ async fn run_actor(
                             // channel too; otherwise its reader could continue
                             // delivering messages after authorization was removed.
                             connection.close(0u32.into(), b"whisper authorization revoked");
-                            let _ = event_tx.send(WhisperEvent::Disconnected { peer });
+                            let _ = event_tx.try_send(WhisperEvent::Disconnected { peer });
                         }
                         let _ = reply.send(removed);
                     }
                     Some(Cmd::RevokePeer(peer)) => {
                         if let Some(connection) = connected.lock().await.remove(&peer) {
                             connection.close(0u32.into(), b"whisper authorization revoked");
-                            let _ = event_tx.send(WhisperEvent::Disconnected { peer });
+                            let _ = event_tx.try_send(WhisperEvent::Disconnected { peer });
                         }
                     }
                     Some(Cmd::IncomingConnection(conn)) => {
                         let remote_id = conn.remote_id();
                         connected.lock().await.insert(remote_id, conn.clone());
-                        let _ = event_tx.send(WhisperEvent::Connected { peer: remote_id });
+                        let _ = event_tx.try_send(WhisperEvent::Connected { peer: remote_id });
                         let msg_tx = msg_tx.clone();
                         tokio::task::spawn(read_connection_loop(remote_id, conn, msg_tx));
                     }
@@ -519,7 +519,7 @@ async fn run_actor(
                     }
                     ConnectionEvent::Disconnected(peer) => {
                         connected.lock().await.remove(&peer);
-                        let _ = event_tx.send(WhisperEvent::Disconnected { peer });
+                        let _ = event_tx.try_send(WhisperEvent::Disconnected { peer });
                     }
                 }
             }
@@ -529,7 +529,7 @@ async fn run_actor(
     // Clean shutdown: close all connections.
     let peers: Vec<PublicKey> = connected.lock().await.keys().copied().collect();
     for peer in &peers {
-        let _ = event_tx.send(WhisperEvent::Disconnected { peer: *peer });
+        let _ = event_tx.try_send(WhisperEvent::Disconnected { peer: *peer });
     }
 }
 
@@ -613,7 +613,7 @@ async fn connect_to_peer(
     info!(peer = %remote_id.fmt_short(), "whisper connected to peer");
 
     connected.lock().await.insert(remote_id, conn.clone());
-    let _ = event_tx.send(WhisperEvent::Connected { peer: remote_id });
+    let _ = event_tx.try_send(WhisperEvent::Connected { peer: remote_id });
 
     // Spawn a reader for this connection.
     let msg_tx = msg_tx.clone();
@@ -774,7 +774,7 @@ async fn read_connection_loop(
         }
     }
 
-    let _ = msg_tx.send(ConnectionEvent::Disconnected(remote_id));
+    let _ = msg_tx.try_send(ConnectionEvent::Disconnected(remote_id));
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────

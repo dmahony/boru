@@ -2074,8 +2074,7 @@ impl Storage {
             }
         }
 
-        tx.commit()
-            .std_context("commit claim_pending_deliveries")?;
+        tx.commit().std_context("commit claim_pending_deliveries")?;
         Ok(results)
     }
 
@@ -2104,12 +2103,10 @@ impl Storage {
         if changed > 0 {
             crate::chat_core::DIAGNOSTICS.record(
                 None,
-                crate::diagnostics::DiagnosticEventKind::SendingRecovered {
-                    count: changed as usize,
-                },
+                crate::diagnostics::DiagnosticEventKind::SendingRecovered { count: changed },
             );
         }
-        Ok(changed as usize)
+        Ok(changed)
     }
 
     /// Atomically claim the oldest due row addressed to one peer.
@@ -4550,7 +4547,10 @@ impl Storage {
     }
 
     /// Return outgoing messages for a specific topic whose delivery_state is "queued".
-    pub fn list_pending_outgoing_for_topic(&self, topic: &TopicId) -> Result<Vec<OutgoingMessageRow>> {
+    pub fn list_pending_outgoing_for_topic(
+        &self,
+        topic: &TopicId,
+    ) -> Result<Vec<OutgoingMessageRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
@@ -6512,9 +6512,7 @@ mod tests {
         let peer = random_public_key();
         storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
 
-        let claimed = storage
-            .claim_pending_deliveries(5, 100)
-            .unwrap();
+        let claimed = storage.claim_pending_deliveries(5, 100).unwrap();
         assert_eq!(claimed.len(), 1, "should claim 1 row");
         let row = &claimed[0];
         assert_eq!(row.msg_id, msg_id);
@@ -6533,17 +6531,16 @@ mod tests {
         storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
 
         // Worker A claims
-        let claimed_a = storage
-            .claim_pending_deliveries(5, 100)
-            .unwrap();
+        let claimed_a = storage.claim_pending_deliveries(5, 100).unwrap();
         assert_eq!(claimed_a.len(), 1);
         assert_eq!(claimed_a[0].status, DeliveryStatus::Sending);
 
         // Worker B tries to claim — row is now Sending, should get nothing
-        let claimed_b = storage
-            .claim_pending_deliveries(5, 100)
-            .unwrap();
-        assert!(claimed_b.is_empty(), "worker B should not claim a Sending row");
+        let claimed_b = storage.claim_pending_deliveries(5, 100).unwrap();
+        assert!(
+            claimed_b.is_empty(),
+            "worker B should not claim a Sending row"
+        );
     }
 
     /// Rows in `Sent` status (from a prior failed attempt) are also
@@ -6563,16 +6560,14 @@ mod tests {
                 msg_id.as_slice(),
                 peer.as_bytes(),
                 DeliveryStatus::Sent as u8,
-                1,    // one prior attempt
-                100,  // due now
+                1,   // one prior attempt
+                100, // due now
             ],
         )
         .unwrap();
         drop(conn);
 
-        let claimed = storage
-            .claim_pending_deliveries(5, 100)
-            .unwrap();
+        let claimed = storage.claim_pending_deliveries(5, 100).unwrap();
         assert_eq!(claimed.len(), 1, "should claim the Sent row");
         assert_eq!(claimed[0].status, DeliveryStatus::Sending);
         assert_eq!(claimed[0].attempts, 1, "retry count preserved");
@@ -6586,9 +6581,7 @@ mod tests {
         let peer = random_public_key();
         storage.enqueue_outbox(&msg_id, peer, 200).unwrap(); // due at 200
 
-        let claimed = storage
-            .claim_pending_deliveries(5, 100)
-            .unwrap();
+        let claimed = storage.claim_pending_deliveries(5, 100).unwrap();
         assert!(claimed.is_empty(), "row is not due until 200");
     }
 
@@ -6601,9 +6594,7 @@ mod tests {
         storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
         storage.mark_acked(&msg_id, peer).unwrap();
 
-        let claimed = storage
-            .claim_pending_deliveries(5, 200)
-            .unwrap();
+        let claimed = storage.claim_pending_deliveries(5, 200).unwrap();
         assert!(claimed.is_empty(), "acked rows should not be claimable");
     }
 
@@ -6623,7 +6614,7 @@ mod tests {
              WHERE msg_id = ?3",
             params![
                 DeliveryStatus::Sending as u8,
-                50i64,  // last_attempt_at_ms = 50 (stale, cutoff = now - 60s)
+                50i64, // last_attempt_at_ms = 50 (stale, cutoff = now - 60s)
                 msg_id.as_slice(),
             ],
         )
@@ -6631,15 +6622,11 @@ mod tests {
         drop(conn);
 
         // Recover at t=70000 (stale cutoff = 10000, so 50 < 10000 = stale)
-        let recovered = storage
-            .recover_stale_sending_deliveries(70000)
-            .unwrap();
+        let recovered = storage.recover_stale_sending_deliveries(70000).unwrap();
         assert_eq!(recovered, 1, "should recover 1 stale row");
 
         // Now the row should be back in Pending and claimable
-        let claimed = storage
-            .claim_pending_deliveries(5, 70000)
-            .unwrap();
+        let claimed = storage.claim_pending_deliveries(5, 70000).unwrap();
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].status, DeliveryStatus::Sending);
     }
@@ -6653,16 +6640,12 @@ mod tests {
         storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
 
         // Claim the row (puts it in Sending with last_attempt_at_ms = 1000)
-        let claimed = storage
-            .claim_pending_deliveries(5, 1000)
-            .unwrap();
+        let claimed = storage.claim_pending_deliveries(5, 1000).unwrap();
         assert_eq!(claimed.len(), 1);
 
         // Recover at t=1020 — stale cutoff = 1020 - 60000 = -58980
         // last_attempt_at_ms=1000 > -58980, so NOT stale
-        let recovered = storage
-            .recover_stale_sending_deliveries(1020)
-            .unwrap();
+        let recovered = storage.recover_stale_sending_deliveries(1020).unwrap();
         assert_eq!(recovered, 0, "recently claimed row should not be recovered");
     }
 
@@ -6681,15 +6664,11 @@ mod tests {
             .unwrap();
 
         // claim_pending_deliveries should skip the leased row
-        let claimed = storage
-            .claim_pending_deliveries(5, 100)
-            .unwrap();
+        let claimed = storage.claim_pending_deliveries(5, 100).unwrap();
         assert!(claimed.is_empty(), "leased row should not be claimable");
 
         // After lease expires, it becomes claimable
-        let claimed2 = storage
-            .claim_pending_deliveries(5, 100 + 30_001)
-            .unwrap();
+        let claimed2 = storage.claim_pending_deliveries(5, 100 + 30_001).unwrap();
         assert_eq!(claimed2.len(), 1);
         assert_eq!(claimed2[0].status, DeliveryStatus::Sending);
     }
@@ -6715,7 +6694,10 @@ mod tests {
 
         // Sent rows are still claimable
         let claimed_after = storage.claim_pending_deliveries(5, 100).unwrap();
-        assert!(!claimed_after.is_empty(), "Sent row should still be claimable");
+        assert!(
+            !claimed_after.is_empty(),
+            "Sent row should still be claimable"
+        );
 
         // Second mark_sent: no-op, stays Sent
         storage.mark_sent(&msg_id, peer).unwrap();

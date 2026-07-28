@@ -381,8 +381,13 @@ impl FriendRequestStore {
     }
 
     /// Store a signed contact message for retry delivery.
-    pub fn store_pending_signed_message(&mut self, request_id: impl Into<String>, message: Vec<u8>) {
-        self.pending_signed_messages.insert(request_id.into(), message);
+    pub fn store_pending_signed_message(
+        &mut self,
+        request_id: impl Into<String>,
+        message: Vec<u8>,
+    ) {
+        self.pending_signed_messages
+            .insert(request_id.into(), message);
     }
 
     /// Return whether a signed contact message is queued for a request.
@@ -1218,7 +1223,6 @@ mod tests {
         let b = random_peer();
         let req = store.send_request(&a, &b, None).expect("send");
         store.accept_request(&req.id, &b).expect("accept");
-        store.save().expect("save");
 
         // After accept, pair_index should not have this pair, so a new request
         // between the same peers should succeed.

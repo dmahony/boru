@@ -83,7 +83,7 @@ async fn test_two_peers_with_relay() -> Result<()> {
                         println!("  A: NeighborDown {}", id.fmt_short())
                     }
                     GossipEvent::Lagged => println!("  A: Lagged"),
-                    GossipEvent::MissingMessages(_) => { /* recovery callback, no action needed */ }
+                    GossipEvent::MissingMessages { .. } => { /* recovery callback, no action needed */ }
                 },
                 Ok(Ok(None)) | Err(_) => break,
                 Ok(Err(e)) => return Err(e.into()),
@@ -100,7 +100,7 @@ async fn test_two_peers_with_relay() -> Result<()> {
                         println!("  B: NeighborDown {}", id.fmt_short())
                     }
                     GossipEvent::Lagged => println!("  B: Lagged"),
-                    GossipEvent::MissingMessages(_) => { /* recovery callback, no action needed */ }
+                    GossipEvent::MissingMessages { .. } => { /* recovery callback, no action needed */ }
                 },
                 Ok(Ok(None)) | Err(_) => break,
                 Ok(Err(e)) => return Err(e.into()),

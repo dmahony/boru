@@ -83,7 +83,7 @@ const LOG_QUEUE_CAPACITY: usize = 8192;
 const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const LOG_ROTATED_FILES: usize = 3;
 
-use app::{DiscoveredPeersUpdate, IcedChat, Screen};
+use app::{DiscoveredPeersUpdate, IcedChat};
 
 use perf_tracker::PerfTracker;
 
@@ -1140,10 +1140,10 @@ fn main() -> Result<()> {
         }
 
         let discovered_peers_rx = Arc::new(tokio::sync::Mutex::new(discovered_peers_rx_tmp));
-        let directory_room_rx = Arc::new(tokio::sync::Mutex::new(directory_room_rx_tmp));
+        let _directory_room_rx = Arc::new(tokio::sync::Mutex::new(directory_room_rx_tmp));
 
         // ── Directory room update channel ──
-        let (directory_room_tx, directory_room_rx_tmp) =
+        let (_directory_room_tx, directory_room_rx_tmp) =
             tokio::sync::mpsc::channel::<app::DirectoryRoomUpdate>(64);
         let directory_room_rx = Arc::new(tokio::sync::Mutex::new(directory_room_rx_tmp));
 

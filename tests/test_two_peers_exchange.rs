@@ -180,6 +180,7 @@ async fn test_two_peers_exchange_messages() -> Result<()> {
             GossipEvent::NeighborUp(id) => println!("  B: NeighborUp {}", id.fmt_short()),
             GossipEvent::NeighborDown(id) => println!("  B: NeighborDown {}", id.fmt_short()),
             GossipEvent::Lagged => println!("  B: Lagged"),
+            GossipEvent::MissingMessages { .. } => println!("  B: MissingMessages"),
         }
     }
 

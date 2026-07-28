@@ -11,9 +11,7 @@ use chrono::Timelike;
 use crate::notification::backend::{
     NoopBackend, NotificationAction as Action, NotificationBackend, RenderedNotification,
 };
-use crate::notification::event::{
-    NotificationActionTarget, NotificationEvent, NotificationEventKind, NotificationPriority,
-};
+use crate::notification::event::{NotificationEvent, NotificationEventKind, NotificationPriority};
 
 /// How message previews are shown in notifications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,24 +406,24 @@ impl NotificationService {
         // Override for non-message event types
         let (title, body) = match &event.event_kind {
             NotificationEventKind::FriendRequest => match preview {
-                PreviewMode::Hidden => {
-                    ("Boru Chat".to_string(), "New friend request".to_string())
-                }
+                PreviewMode::Hidden => ("Boru Chat".to_string(), "New friend request".to_string()),
                 _ => ("Friend request".to_string(), event.title_hint.clone()),
             },
             NotificationEventKind::FriendRequestAccepted => match preview {
-                PreviewMode::Hidden => {
-                    ("Boru Chat".to_string(), "Friend request accepted".to_string())
-                }
+                PreviewMode::Hidden => (
+                    "Boru Chat".to_string(),
+                    "Friend request accepted".to_string(),
+                ),
                 _ => (
                     event.title_hint.clone(),
                     "Accepted your request".to_string(),
                 ),
             },
             NotificationEventKind::FileTransferCompleted => match preview {
-                PreviewMode::Hidden => {
-                    ("Boru Chat".to_string(), "File transfer completed".to_string())
-                }
+                PreviewMode::Hidden => (
+                    "Boru Chat".to_string(),
+                    "File transfer completed".to_string(),
+                ),
                 _ => (event.title_hint.clone(), event.body_hint.clone()),
             },
             NotificationEventKind::FileTransferFailed => match preview {

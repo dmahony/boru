@@ -1,4 +1,5 @@
 #![cfg(feature = "net")]
+#![allow(deprecated)]
 
 //! Two-instance normal-chat regression test.
 //!

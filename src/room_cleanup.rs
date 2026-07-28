@@ -132,7 +132,7 @@ mod tests {
         friends::{DirectConversationState, FriendId, FriendRecord},
         outbox::OutboxEntry,
         proto::TopicId,
-        room::{RoomStore, ROOM_FILE_NAME},
+        room::ROOM_FILE_NAME,
         room_history::{RoomHistoryStore, ROOM_HISTORY_FILE_NAME},
     };
     use std::{
@@ -321,8 +321,13 @@ mod tests {
         outbox.push(outbox_entry(1, target)).unwrap();
         outbox.push(outbox_entry(2, other)).unwrap();
 
-        let report = clear_room_history(target, &mut room_history, &mut chat_history, Some(&mut outbox))
-            .unwrap();
+        let report = clear_room_history(
+            target,
+            &mut room_history,
+            &mut chat_history,
+            Some(&mut outbox),
+        )
+        .unwrap();
 
         assert_eq!(report.topic, target);
         assert!(report.room_history_updated);
@@ -348,7 +353,8 @@ mod tests {
         let mut chat_history = ChatHistoryStore::empty_at(&dir);
         chat_history.push(history_entry(other, "other-1"));
 
-        let report = clear_room_history(target, &mut room_history, &mut chat_history, None).unwrap();
+        let report =
+            clear_room_history(target, &mut room_history, &mut chat_history, None).unwrap();
 
         assert_eq!(report.topic, target);
         assert!(!report.room_history_updated);

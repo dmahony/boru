@@ -112,7 +112,9 @@ impl GossipAddressLookup {
             let mut friends = friends.lock().expect("poisoned");
             let id = FriendId::from_public_key(endpoint_id);
             // Record the address in the friends store (SQLite is authoritative).
-            friends.get_mut(&id).map(|record| record.record_addrs([addr]));
+            if let Some(record) = friends.get_mut(&id) {
+                record.record_addrs([addr]);
+            }
         }
         let mut guard = self.endpoints.write().expect("poisoned");
         match guard.entry(endpoint_id) {

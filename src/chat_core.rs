@@ -1024,7 +1024,9 @@ pub fn verify_advertisement(ad: &RoomAdvertisement, signature: &[u8], author: Pu
         Ok(a) => a,
         Err(_) => return false,
     };
-    author.verify(&bytes, &iroh::Signature::from_bytes(&sig_bytes)).is_ok()
+    author
+        .verify(&bytes, &iroh::Signature::from_bytes(&sig_bytes))
+        .is_ok()
 }
 
 const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;
@@ -2049,12 +2051,20 @@ pub async fn forward_gossip_events_with_safety(
                 }
             }
             Event::NeighborUp(id) => {
-                if net_tx.send(NetEvent::NeighborUp { peer: id }).await.is_err() {
+                if net_tx
+                    .send(NetEvent::NeighborUp { peer: id })
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
             Event::NeighborDown(id) => {
-                if net_tx.send(NetEvent::NeighborDown { peer: id }).await.is_err() {
+                if net_tx
+                    .send(NetEvent::NeighborDown { peer: id })
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -2334,6 +2344,7 @@ pub async fn download_blob_with_progress(
 /// The blob is downloaded to the local store, then streamed from the store
 /// to `save_path` in fixed-size chunks.  No whole-file buffer is allocated.
 /// Progress events (`TransferProgress`) are emitted via `on_progress`.
+#[allow(clippy::too_many_arguments)]
 pub async fn download_blob_to_file(
     blob_store: &iroh_blobs::api::Store,
     endpoint: &Endpoint,

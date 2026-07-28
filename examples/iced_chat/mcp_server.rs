@@ -55,7 +55,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::gui_test_actions::{ActionRecord, ActionStatus, GuiActionHistory, GuiActionRateLimiter};
+use crate::gui_test_actions::{GuiActionHistory, GuiActionRateLimiter};
 use boru_core::catalogue_client::fetch_remote_catalogue;
 use boru_core::chat_core::{broadcast_diagnostic_probe, message_hash, Message};
 use boru_core::conversations::ConversationNetEvent;

@@ -829,7 +829,6 @@ mod tests {
         // Set up: they're already friends
         let fid = FriendId::from_public_key(their_sk.public());
         friends.set_relationship(fid, FriendRelationship::Friends);
-        friends.save().ok();
 
         let (outcome, signed_msg) =
             accept_peer_invitation(&invitation, &context, &mut friends, &mut friend_requests)
@@ -951,7 +950,6 @@ mod tests {
         // Set up: peer is blocked
         let fid = FriendId::from_public_key(their_sk.public());
         friends.set_relationship(fid, FriendRelationship::Blocked);
-        friends.save().ok();
 
         let err = accept_peer_invitation(&invitation, &context, &mut friends, &mut friend_requests)
             .expect_err("blocked peer should be rejected");
@@ -1330,10 +1328,7 @@ mod tests {
         let retrieved = friend_requests
             .take_pending_signed_message(request_id)
             .expect("should retrieve from memory");
-        assert_eq!(
-            retrieved, stored,
-            "signed message bytes must match"
-        );
+        assert_eq!(retrieved, stored, "signed message bytes must match");
     }
 
     #[test]
@@ -1535,7 +1530,6 @@ mod tests {
 
         let fid = FriendId::from_public_key(their_sk.public());
         friends.set_relationship(fid.clone(), FriendRelationship::Friends);
-        friends.save().ok();
 
         // When: opening the first conversation
         let result = open_or_create_first_conversation(
@@ -1588,7 +1582,6 @@ mod tests {
 
         let fid = FriendId::from_public_key(their_sk.public());
         friends.set_relationship(fid.clone(), FriendRelationship::Friends);
-        friends.save().ok();
 
         // First call
         let result1 = open_or_create_first_conversation(
@@ -1720,7 +1713,6 @@ mod tests {
 
         let fid = FriendId::from_public_key(their_sk.public());
         friends.set_relationship(fid, FriendRelationship::Blocked);
-        friends.save().ok();
 
         let err = open_or_create_first_conversation(
             &our_sk.public(),
@@ -1753,7 +1745,6 @@ mod tests {
         let mut conversations = ConversationStore::empty_at(&dir);
         let fid = FriendId::from_public_key(their_sk.public());
         friends.set_relationship(fid.clone(), FriendRelationship::Friends);
-        friends.save().ok();
 
         let result = open_or_create_first_conversation(
             &our_sk.public(),

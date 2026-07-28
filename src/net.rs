@@ -34,8 +34,8 @@ use self::{
 };
 use crate::{
     api::{self, Command, Event, GossipApi, RpcMessage},
-    diagnostics::{DiagnosticEventKind, DiscoverySource},
     chat_core::DIAGNOSTICS,
+    diagnostics::{DiagnosticEventKind, DiscoverySource},
     friends::FriendsStore,
     metrics::Metrics,
     proto::{self, HyparviewConfig, PeerData, PlumtreeConfig, Scope, TopicId},
@@ -119,7 +119,9 @@ const STALE_DIAL_THRESHOLD_S: u64 = 15;
 
 #[derive(Debug)]
 enum LocalActorMessage {
-    Shutdown { reply: oneshot::Sender<()> },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
     HandleConnection(Connection),
     RetryDial(EndpointAddr, Bytes),
     /// Periodic stale-dial cleanup trigger from the spawned timer task.
@@ -890,12 +892,8 @@ impl Actor {
                                         let has_relay = addr.relay_urls().next().is_some();
                                         let has_ips = addr.ip_addrs().next().is_some();
                                         if !has_relay && !has_ips {
-                                            let relay_url = self
-                                                .endpoint
-                                                .addr()
-                                                .relay_urls()
-                                                .next()
-                                                .cloned();
+                                            let relay_url =
+                                                self.endpoint.addr().relay_urls().next().cloned();
                                             if let Some(relay) = relay_url {
                                                 addr = addr.with_relay_url(relay.clone());
                                                 info!(
@@ -1030,7 +1028,10 @@ impl Actor {
                                     Some(len),
                                 );
                             }
-                            crate::proto::Event::MissingMessages { since_round, from_peer } => {
+                            crate::proto::Event::MissingMessages {
+                                since_round,
+                                from_peer,
+                            } => {
                                 let peer_str = from_peer.fmt_short().to_string();
                                 crate::gossip_debug::log_event(
                                     "MissingMessages",
@@ -1464,7 +1465,9 @@ impl Dialer {
 
     /// Return the original address used for a pending dial, if any.
     fn pending_addr(&self, endpoint_id: EndpointId) -> Option<EndpointAddr> {
-        self.pending_dials.get(&endpoint_id).map(|(_, addr)| addr.clone())
+        self.pending_dials
+            .get(&endpoint_id)
+            .map(|(_, addr)| addr.clone())
     }
 
     /// Aborts dials that have been pending longer than STALE_DIAL_THRESHOLD_S.
@@ -1598,12 +1601,16 @@ async fn dial_endpoint(
     let direct_addr = endpoint_addr.ip_addrs().next().map(|_| {
         endpoint_addr
             .ip_addrs()
-            .fold(EndpointAddr::new(peer_id), |addr, ip| addr.with_ip_addr(*ip))
+            .fold(EndpointAddr::new(peer_id), |addr, ip| {
+                addr.with_ip_addr(*ip)
+            })
     });
     let relay_addr = endpoint_addr.relay_urls().next().map(|_| {
-        endpoint_addr.relay_urls().fold(EndpointAddr::new(peer_id), |addr, relay| {
-            addr.with_relay_url(relay.clone())
-        })
+        endpoint_addr
+            .relay_urls()
+            .fold(EndpointAddr::new(peer_id), |addr, relay| {
+                addr.with_relay_url(relay.clone())
+            })
     });
 
     // Helper to await a spawned connect task with a timeout and cancellation.

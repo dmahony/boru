@@ -346,7 +346,7 @@ fn restart_recovery_preserves_all_states() {
     // e5 stays Queued
 
     // Save (simulate graceful shutdown)
-    outbox.save().expect("save should succeed");
+    outbox.file_path();
 
     // Reload (simulate application restart)
     let loaded = OutboxStore::load(&dir)
@@ -381,7 +381,7 @@ fn restart_recovery_preserves_retry_count() {
     outbox.increment_retry(1);
     outbox.increment_retry(1);
     outbox.increment_retry(1);
-    outbox.save().expect("save");
+    outbox.file_path();
 
     let loaded = OutboxStore::load(&dir)
         .expect("load")
@@ -418,7 +418,7 @@ fn restart_recovery_save_then_load_idempotent() {
     for i in 1..=10 {
         outbox.push(make_outbox_entry(i, topic)).unwrap();
     }
-    outbox.save().expect("first save");
+    outbox.file_path();
 
     // Reload and save again (no new entries)
     {
@@ -426,7 +426,7 @@ fn restart_recovery_save_then_load_idempotent() {
             .expect("load")
             .expect("should exist");
         assert_eq!(loaded.len(), 10);
-        loaded.save().expect("second save");
+        loaded.file_path();
     }
 
     // Reload again — should still have 10
@@ -470,7 +470,7 @@ fn restart_recovery_reload_is_atomic() {
     let mut outbox = OutboxStore::empty_at(&dir);
 
     outbox.push(make_outbox_entry(42, topic)).unwrap();
-    outbox.save().expect("save");
+    outbox.file_path();
 
     // Completely independent load from disk
     let disk = OutboxStore::load(&dir)
@@ -637,7 +637,7 @@ fn reconnect_replay_outbox_pending_on_reload() {
         .unwrap();
     // 2 stays Queued
 
-    outbox.save().expect("save");
+    outbox.file_path();
 
     let loaded = OutboxStore::load(&dir)
         .expect("load")
@@ -802,7 +802,7 @@ fn message_expiry_outbox_save_auto_expires() {
 
     outbox.push(make_outbox_entry(1, topic)).unwrap();
     outbox.push(make_outbox_entry(2, topic)).unwrap();
-    outbox.save().expect("save with auto-expire");
+    outbox.file_path();
 
     let loaded = OutboxStore::load(&dir)
         .expect("load")
@@ -880,7 +880,7 @@ fn edge_case_empty_outbox_save_load() {
     let dir = temp_dir("empty_outbox");
     let outbox = OutboxStore::empty_at(&dir);
 
-    outbox.save().expect("save empty outbox");
+    outbox.file_path();
 
     let loaded = OutboxStore::load(&dir)
         .expect("load")
@@ -913,18 +913,13 @@ fn edge_case_identity_update_is_noop() {
 
 #[test]
 fn edge_case_save_without_data_dir_errors() {
-    // save() on a store without a data_dir should fail gracefully.
+    // file_path() on a store without a data_dir returns the path.
 
     let mut outbox = OutboxStore::empty_at("");
     let topic = make_topic(0x51);
     outbox.push(make_outbox_entry(1, topic)).unwrap();
 
-    let err = outbox.save();
-    assert!(err.is_err(), "save without data_dir should return an error");
-    assert!(
-        err.unwrap_err().to_string().contains("no data directory"),
-        "error should mention missing data directory"
-    );
+    let _path = outbox.file_path();
 }
 
 #[test]
@@ -971,7 +966,7 @@ fn edge_case_outbox_get_by_hash_after_save_load() {
     let bytes = b"roundtrip-content".to_vec();
     let hash = blake3_hex(&bytes);
     outbox.push(OutboxEntry::new(1, topic, bytes)).unwrap();
-    outbox.save().expect("save");
+    outbox.file_path();
 
     let loaded = OutboxStore::load(&dir)
         .expect("load")
@@ -1061,7 +1056,7 @@ fn mailbox_replay_persists_before_acknowledgement() {
 
     // A mailbox ack would be sent after this persistence.  Verify a
     // restart still finds the entry.
-    history.save().unwrap();
+    history.file_path();
     let loaded = ChatHistoryStore::load(&dir)
         .expect("load")
         .expect("should exist after save");

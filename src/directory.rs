@@ -149,9 +149,8 @@ mod tests {
     fn directory_topic_differs_from_lobby() {
         let relay = "https://boru.chat:8443";
         let dir_topic = directory_topic(relay);
-        let lobby_topic = crate::public_room::public_lobby_topic(
-            crate::public_room::PublicNetwork::Mainnet,
-        );
+        let lobby_topic =
+            crate::public_room::public_lobby_topic(crate::public_room::PublicNetwork::Mainnet);
         assert_ne!(dir_topic, lobby_topic);
     }
 

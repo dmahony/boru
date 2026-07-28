@@ -222,23 +222,22 @@ async fn test_iced_chat_exact_flow() -> Result<()> {
     };
 
     // Wait for gossip to connect
-    let drain_net =
-        |rx: &Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<NetEvent>>>,
-         _label: &str,
-         sim: &mut SimChat| {
-            let mut count = 0;
-            loop {
-                let item = rx.try_lock().unwrap().try_recv();
-                match item {
-                    Ok(event) => {
-                        count += 1;
-                        let _ = handle_net_event(event, sim);
-                    }
-                    Err(_) => break,
+    let drain_net = |rx: &Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<NetEvent>>>,
+                     _label: &str,
+                     sim: &mut SimChat| {
+        let mut count = 0;
+        loop {
+            let item = rx.try_lock().unwrap().try_recv();
+            match item {
+                Ok(event) => {
+                    count += 1;
+                    let _ = handle_net_event(event, sim);
                 }
+                Err(_) => break,
             }
-            count
-        };
+        }
+        count
+    };
 
     for i in 0..60 {
         sleep(Duration::from_millis(200)).await;
