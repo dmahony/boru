@@ -15,7 +15,6 @@ use std::{
 
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 use crate::chat_core::atomic_write::atomic_write_json;
 use crate::proto::TopicId;

@@ -14776,16 +14776,24 @@ impl IcedChat {
             .push(boru_logo(LogoSize::Small).into_element())
             .push(Space::new().width(Length::Fill))
             .push(
-                button(icon_svg(ICON_SETTINGS, TYPO_MD))
-                    .on_press(AppMessage::OpenSettings)
-                    .padding([SPACE_6, SPACE_8])
-                    .style(BUTTON_ICON),
+                iced::widget::tooltip::Tooltip::new(
+                    button(icon_svg(ICON_SETTINGS, TYPO_MD))
+                        .on_press(AppMessage::OpenSettings)
+                        .padding([SPACE_6, SPACE_8])
+                        .style(BUTTON_ICON),
+                    text("Settings").size(TYPO_XS),
+                    iced::widget::tooltip::Position::Bottom,
+                ),
             )
             .push(
-                button(icon_svg(ICON_PLUS, TYPO_MD))
-                    .on_press(AppMessage::ToggleAddMenu)
-                    .padding([SPACE_6, SPACE_8])
-                    .style(BUTTON_ICON),
+                iced::widget::tooltip::Tooltip::new(
+                    button(icon_svg(ICON_PLUS, TYPO_MD))
+                        .on_press(AppMessage::ToggleAddMenu)
+                        .padding([SPACE_6, SPACE_8])
+                        .style(BUTTON_ICON),
+                    text("New conversation").size(TYPO_XS),
+                    iced::widget::tooltip::Position::Bottom,
+                ),
             )
             .align_y(Alignment::Center);
 
@@ -16853,23 +16861,39 @@ impl IcedChat {
         .spacing(SPACE_2)
         .width(Length::Fill);
 
-        let search = button(icon_svg(ICON_SEARCH, TYPO_SM))
-            .padding([SPACE_6, SPACE_8])
-            .style(BUTTON_ICON);
+        let search = iced::widget::tooltip::Tooltip::new(
+            button(icon_svg(ICON_SEARCH, TYPO_SM))
+                .padding([SPACE_6, SPACE_8])
+                .style(BUTTON_ICON),
+            text("Search").size(TYPO_XS),
+            iced::widget::tooltip::Position::Bottom,
+        );
 
-        let shared = button(icon_svg(ICON_FILES, TYPO_SM))
-            .padding([SPACE_6, SPACE_8])
-            .style(BUTTON_ICON);
+        let shared = iced::widget::tooltip::Tooltip::new(
+            button(icon_svg(ICON_FILES, TYPO_SM))
+                .padding([SPACE_6, SPACE_8])
+                .style(BUTTON_ICON),
+            text("Shared files").size(TYPO_XS),
+            iced::widget::tooltip::Position::Bottom,
+        );
 
-        let details_toggle = button(icon_svg(ICON_MESH, TYPO_SM))
-            .on_press(AppMessage::ToggleDetailsPanel)
-            .padding([SPACE_6, SPACE_8])
-            .style(BUTTON_ICON);
+        let details_toggle = iced::widget::tooltip::Tooltip::new(
+            button(icon_svg(ICON_MESH, TYPO_SM))
+                .on_press(AppMessage::ToggleDetailsPanel)
+                .padding([SPACE_6, SPACE_8])
+                .style(BUTTON_ICON),
+            text("Details panel").size(TYPO_XS),
+            iced::widget::tooltip::Position::Bottom,
+        );
 
-        let more = button(icon_svg(ICON_MORE, TYPO_MD))
-            .on_press(AppMessage::ToggleChatOptions)
-            .padding([SPACE_6, SPACE_8])
-            .style(BUTTON_ICON);
+        let more = iced::widget::tooltip::Tooltip::new(
+            button(icon_svg(ICON_MORE, TYPO_MD))
+                .on_press(AppMessage::ToggleChatOptions)
+                .padding([SPACE_6, SPACE_8])
+                .style(BUTTON_ICON),
+            text("More options").size(TYPO_XS),
+            iced::widget::tooltip::Position::Bottom,
+        );
 
         container(
             row![
