@@ -1451,10 +1451,14 @@ fn main() -> Result<()> {
     .subscription(|state: &IcedChat| {
         let mut subs: Vec<iced::Subscription<app::AppMessage>> = vec![];
 
-        // Splash tick at 100ms while loading a room
-        // or connecting to a peer in a chat conversation.
+        // Splash tick at 100ms while loading a room,
+        // connecting to a peer in a chat conversation,
+        // or reconnecting on the main ChatList screen.
         let connecting = state.sender.is_none() && matches!(state.screen, app::Screen::Chat { .. });
-        if state.room_loading || connecting {
+        let main_reconnecting = matches!(state.screen, app::Screen::ChatList)
+            && state.sender.is_none()
+            && !state.room_loading;
+        if state.room_loading || connecting || main_reconnecting {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(100))
                     .map(|_| app::AppMessage::SplashTick),

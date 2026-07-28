@@ -2336,6 +2336,9 @@ pub struct IcedChat {
     /// Animation frame counter for the connecting-to-peer spinner shown in
     /// the chat view when the gossip sender isn't ready yet.
     connecting_spinner_frame: usize,
+    /// Animation frame counter for the main screen's "reconnecting to relay"
+    /// status text (animated dots or spinner).
+    main_screen_reconnect_frame: usize,
     /// Cached link previews (title, description, image) keyed by URL.
     link_preview_cache: std::sync::Arc<std::sync::Mutex<link_preview::LinkPreviewCache>>,
     /// Entry index whose link preview is currently being fetched (deprecated in
@@ -3861,6 +3864,7 @@ impl IcedChat {
             splash_has_rendered: false,
             splash_spinner_frame: 0,
             connecting_spinner_frame: 0,
+            main_screen_reconnect_frame: 0,
             lightbox_image: None,
             pending_topic: None,
             room_loading: false,
@@ -11216,6 +11220,17 @@ impl IcedChat {
                 if self.sender.is_none() && matches!(self.screen, Screen::Chat { .. }) {
                     self.connecting_spinner_frame = (self.connecting_spinner_frame + 1) % 10;
                 }
+                // Advance the main screen reconnecting animation when on
+                // the ChatList screen and not yet fully connected.
+                if matches!(self.screen, Screen::ChatList) {
+                    let is_connected = !self.neighbors.is_empty()
+                        || self.relayed_peers > 0
+                        || self.direct_peers > 0;
+                    if !is_connected {
+                        self.main_screen_reconnect_frame =
+                            (self.main_screen_reconnect_frame + 1) % 10;
+                    }
+                }
                 iced::Task::none()
             }
 
@@ -15901,8 +15916,12 @@ impl IcedChat {
             .count();
 
         // ── Connection state (single source of truth) ──
-        let is_connected =
+        let has_peer_connections =
             !self.neighbors.is_empty() || self.relayed_peers > 0 || self.direct_peers > 0;
+        // Relay is reachable when the gossip subscription succeeded (RoomOpened
+        // delivered a sender).  Peer counts may still be zero if no-one else is
+        // online, but the relay connection itself is healthy.
+        let is_relay_reachable = self.sender.is_some() || has_peer_connections;
         let is_offline = matches!(self.mesh_health, MeshHealth::Offline(_));
 
         // ── Greeting ──
@@ -15919,7 +15938,7 @@ impl IcedChat {
         .width(Length::Fill);
 
         // ── Connection status bar ──
-        let conn_status: iced::Element<'_, AppMessage> = if is_connected {
+        let conn_status: iced::Element<'_, AppMessage> = if has_peer_connections {
             row![
                 icon_svg(ICON_ONLINE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
                     color: Some(accent_green(t))
@@ -15953,13 +15972,30 @@ impl IcedChat {
             .spacing(SPACE_4)
             .align_y(Alignment::Center)
             .into()
+        } else if is_relay_reachable {
+            // Relay is connected but no peers are online yet.
+            row![
+                icon_svg(ICON_ONLINE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                    color: Some(accent_green(t))
+                }),
+                text("Connected — waiting for peers…")
+                    .size(TYPO_SM)
+                    .color(text_muted(&theme)),
+            ]
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center)
+            .into()
         } else {
-            // Reconnecting / degraded
+            // Reconnecting — relay not yet reachable.
+            // Use animated dots to show progress.
+            const RECONNECT_DOTS: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+            let dot = RECONNECT_DOTS
+                [self.main_screen_reconnect_frame % RECONNECT_DOTS.len()];
             row![
                 icon_svg(ICON_RETRY, TYPO_SM).style(|t, _| iced::widget::svg::Style {
                     color: Some(color_warning(t))
                 }),
-                text("Reconnecting to the relay…")
+                text(format!("Reconnecting to the relay {dot}"))
                     .size(TYPO_SM)
                     .color(color_warning(&theme)),
                 Space::new().width(Length::Fixed(SPACE_8)),
@@ -15982,7 +16018,7 @@ impl IcedChat {
             .width(Length::Fill);
 
         // ── Mesh status + progress log ──
-        let mesh_status_text = if is_connected {
+        let mesh_status_text = if has_peer_connections {
             let n = self.neighbors.len();
             let d = self.direct_peers;
             let r = self.relayed_peers;
@@ -16275,7 +16311,7 @@ impl IcedChat {
         let page_header = row![
             text("Home").size(TYPO_LG).width(Length::Fill),
             // Connection indicator dot (compact)
-            if is_connected {
+            if has_peer_connections || is_relay_reachable {
                 icon_svg(ICON_ONLINE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
                     color: Some(accent_green(t)),
                 })
