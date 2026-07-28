@@ -19,13 +19,32 @@ conversation metadata. This document focuses on Step 12: deletion semantics.
 | 18 | Redirect legacy message-store access | **Done** | `Storage::open()` imports existing `message_store.db`; storage integration in GUI is deferred |
 | 19 | Update storage documentation | **Done** | `docs/message-storage-design.md` (comprehensive design doc), `docs/storage-redesign.md` (this file), `README.md` updated |
 
-### Remaining Risk
+### Deprecation Status (Phase 22+)
 
-- `ChatHistoryStore` and `OutboxStore` (JSON) remain as the active frontend
-  persistence layer. The SQLite `Storage` is fully implemented and tested but
-  not yet wired as the primary store in the GUI.
-- A future integration pass should eliminate JSON writes entirely and make
-  `Storage` the authoritative state for the GUI.
+All legacy JSON stores have been replaced by SQLite unified storage:
+
+| Legacy Store | Source | Status |
+|---|---|---|
+| `ChatHistoryStore` (`chat_history.json`) | `src/chat_history.rs` | Writes disabled — reads only |
+| `OutboxStore` (`outbox.json`) | `src/outbox.rs` | Writes disabled — reads only |
+| `FriendsStore` (`friends.json`) | `src/friends.rs` | Writes disabled — reads only |
+| `ConversationStore` (`conversations.json`) | `src/conversations.rs` | Writes disabled — reads only |
+| `RoomStore` (`room.json`) | `src/room.rs` | Writes disabled — reads only |
+| `FriendRequestStore` (`friend_requests.json`) | `src/friend_request.rs` | Writes disabled — reads only |
+| `UserProfileStore` (`profile.json`) | `src/user_profile.rs` | Writes disabled — reads only |
+| `MailboxStore` (`mailbox.json`) | `src/mailbox.rs` | Writes disabled — reads only |
+
+All `save()` methods are marked `#[deprecated]` and log a warning without writing.
+The legacy JSON files remain on disk for backward-compatible reads during a
+limited compatibility period.  Migration readers (`Storage::import_legacy_db`,
+`FriendsStore::load`, `ChatHistoryStore::load`, etc.) remain available.
+
+**Do not remove migration support in the same release that introduced unified
+storage.** Legacy import support is retained for at least one documented
+compatibility period to allow existing users to migrate their data.
+
+The GUI `PersistenceCoordinator` has been removed.  AppSettings persistence is
+handled directly via `AppSettings::save()`.
 
 ## Deletion and Tombstone Semantics (Step 12)
 

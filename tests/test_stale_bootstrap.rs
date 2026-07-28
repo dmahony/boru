@@ -114,20 +114,18 @@ fn test_room_store_peers_roundtrip() -> Result<()> {
     let mut store = RoomStore::new(dir.path(), topic);
     assert!(store.peers.is_empty(), "new store has empty peers");
 
-    // Set peers and persist
-    store.set_peers(vec![addr.clone()])?;
-
-    // Reload from disk
-    let loaded = RoomStore::load(dir.path())?.expect("should load saved room store");
-    assert_eq!(loaded.topic, topic, "topic should survive roundtrip");
-    assert_eq!(loaded.peers.len(), 1, "should have 1 peer");
-    assert_eq!(loaded.peers[0].id, pk, "peer ID should survive roundtrip");
+    // Set peers (in-memory only — SQLite is the authoritative store)
+    store.set_peers(vec![addr.clone()]);
+    assert_eq!(store.peers.len(), 1, "should have 1 peer");
+    assert_eq!(store.peers[0].id, pk, "peer ID should be set in memory");
 
     // Clear peers
-    let mut reloaded = loaded;
-    reloaded.clear_peers()?;
-    let cleared = RoomStore::load(dir.path())?.expect("should load cleared store");
-    assert!(cleared.peers.is_empty(), "cleared store has empty peers");
+    store.clear_peers();
+    assert!(store.peers.is_empty(), "cleared store has empty peers");
+
+    // Restore one peer for roundtrip test
+    store.set_peers(vec![addr.clone()]);
+    assert_eq!(store.peers.len(), 1, "should have 1 peer after restore");
 
     // Load a v1-format file (no peers field) — the store migrates
     // it to the current schema version with empty peers.

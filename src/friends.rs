@@ -1,5 +1,9 @@
 //! Durable friends list storage for Boru.
 //!
+//! **DEPRECATED** — friend relationships are stored in the SQLite database
+//! via the unified storage layer.  This JSON file is retained only for
+//! backward-compatible reads during a transition period.
+//!
 //! This module owns the on-disk `friends.json` file that lives beside the
 //! persistent `secret_key.txt` identity file.
 
@@ -17,6 +21,7 @@ use crate::proto::TopicId;
 use iroh::{EndpointAddr, PublicKey};
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// Current schema version.
 ///
@@ -417,15 +422,21 @@ impl FriendsStore {
     }
 
     /// Persist the store atomically to `friends.json`.
+    ///
+    /// **DEPRECATED:** friend data is now in the SQLite unified storage.
+    /// This method logs a warning and returns the legacy path without
+    /// writing to disk.
+    #[deprecated(
+        since = "0.21.0",
+        note = "SQLite friend_relationships table replaces friends.json writes"
+    )]
     pub fn save(&self) -> Result<PathBuf> {
-        let data_dir = self.data_dir();
-        if data_dir.as_os_str().is_empty() {
-            return Err(n0_error::anyerr!(
-                "friends store has no data directory bound to it",
-            ));
-        }
         let path = self.file_path();
-        atomic_write_json(&path, self, "friends store")?;
+        warn!(
+            path = %path.display(),
+            "save() called on deprecated JSON friends store — no data written; \
+             use SQLite friend_relationships table instead"
+        );
         Ok(path)
     }
 

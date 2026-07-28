@@ -715,14 +715,6 @@ pub fn open_or_create_first_conversation(
     let name = peer.fmt_short().to_string();
     conversation_store.upsert(ConversationEntry::new(topic, peer.to_string(), name));
 
-    // ── 6. Persist both stores (best-effort) ───────────────────────────
-    if let Err(e) = conversation_store.save() {
-        tracing::warn!("failed to save conversation store: {e}");
-    }
-    if let Err(e) = friends_store.save() {
-        tracing::warn!("failed to save friends store: {e}");
-    }
-
     Ok(FirstConversationResult::Ready { topic })
 }
 
@@ -1239,64 +1231,57 @@ mod tests {
         );
     }
 
-    // ── New tests: restart persistence ──────────────────────────────────────
+    // ── New tests: in-memory state verification ────────────────────────────
+    // Legacy JSON store write is a no-op; persistence is handled by SQLite.
+    // These tests verify in-memory state after pairing operations.
 
     #[test]
-    fn test_restart_persistence() {
-        // Simulate a full restart: create a pairing, save stores to disk,
-        // reload fresh stores, and verify all state is intact.
+    fn test_pairing_preserves_in_memory_state() {
+        // Verify that after accepting a pairing, the in-memory friends and
+        // request stores contain the expected data.
         let our_sk = SecretKey::generate();
         let their_sk = SecretKey::generate();
         let invitation = make_invitation("Alice", &their_sk);
         let context = make_context(&our_sk, "Bob");
-        let dir = temp_dir("restart-persistence");
+        let dir = temp_dir("inmemory-state");
 
-        // ── First session ────────────────────────────────────────────────
         let mut friends = FriendsStore::empty_at(&dir);
         let mut friend_requests = FriendRequestStore::empty_at(&dir);
 
         accept_peer_invitation(&invitation, &context, &mut friends, &mut friend_requests)
             .expect("pairing should succeed");
 
-        // Save both stores to disk
-        friends.save().expect("save friends");
-        friend_requests.save().expect("save friend requests");
-
-        // ── After restart: reload from disk ─────────────────────────────
-        let reloaded_friends = FriendsStore::load(&dir).expect("reload friends");
-        let reloaded_requests = FriendRequestStore::load(&dir).expect("reload friend requests");
-
-        // Verify friend record survived
+        // Verify friend record in memory
         let fid = FriendId::from_public_key(their_sk.public());
-        let record = reloaded_friends
+        let record = friends
             .get(&fid)
-            .expect("friend record must survive restart");
+            .expect("friend record must exist in memory");
         assert_eq!(
             record.last_announced_name.as_deref(),
             Some("Alice"),
-            "display name must survive restart"
+            "display name must be set in memory"
         );
         assert!(
             record.direct_conversation.is_some(),
-            "direct conversation must survive restart"
+            "direct conversation must be set in memory"
         );
 
-        // Verify friend request survived
+        // Verify friend request in memory
         let our_pk_str = our_sk.public().to_string();
-        let outgoing = reloaded_requests.list_outgoing_by_status(
+        let outgoing = friend_requests.list_outgoing_by_status(
             &our_pk_str,
             crate::friend_request::FriendRequestStatus::Pending,
         );
-        assert_eq!(outgoing.len(), 1, "friend request must survive restart");
+        assert_eq!(outgoing.len(), 1, "friend request must exist in memory");
         assert_eq!(
             outgoing[0].recipient,
             their_sk.public().to_string(),
-            "recipient must be correct after restart"
+            "recipient must be correct"
         );
 
-        // Verify pending pairing file survived
-        let pairings = load_pending_pairings(&dir).expect("load pending pairings after restart");
-        assert_eq!(pairings.len(), 1, "pending pairing must survive restart");
+        // Verify pending pairing file survived (this file is NOT the legacy JSON store)
+        let pairings = load_pending_pairings(&dir).expect("load pending pairings");
+        assert_eq!(pairings.len(), 1, "pending pairing must exist");
         assert_eq!(pairings[0].peer_key, their_sk.public().to_string());
     }
 
@@ -1336,23 +1321,18 @@ mod tests {
             "stored bytes should match returned bytes"
         );
 
-        // Store again for persistence test
+        // Store again — verify in-memory state (persistence is SQLite now)
         friend_requests.store_pending_signed_message(request_id.clone(), stored.clone());
-
-        // Save and reload
-        friend_requests.save().expect("save friend requests");
-        let mut reloaded = FriendRequestStore::load(&dir).expect("reload");
-
         assert!(
-            reloaded.has_pending_signed_message(request_id),
-            "pending signed message must survive save/load"
+            friend_requests.has_pending_signed_message(request_id),
+            "pending signed message must exist in memory"
         );
-        let retrieved = reloaded
+        let retrieved = friend_requests
             .take_pending_signed_message(request_id)
-            .expect("should retrieve after reload");
+            .expect("should retrieve from memory");
         assert_eq!(
             retrieved, stored,
-            "signed message bytes must survive persistence"
+            "signed message bytes must match"
         );
     }
 

@@ -1,5 +1,9 @@
 //! Durable room metadata for Boru.
 //!
+//! **DEPRECATED** — room metadata is stored in the SQLite database
+//! via the unified storage layer.  This JSON file is retained only for
+//! backward-compatible reads during a transition period.
+//!
 //! This module owns the on-disk `room.json` file that lives beside the
 //! persistent `secret_key.txt` identity file.  When a user runs `open`
 //! without specifying a topic, the saved topic is reused so that
@@ -128,17 +132,12 @@ impl RoomStore {
 
         if store.schema_version < SCHEMA_VERSION {
             // ── v2 → v3 migration: add discovery_secret field ─────────
-            // Older files lack the discovery_secret field (it is
-            // `#[serde(default)]` so deserializing a v2 file as v3 would
-            // default it to None anyway), but we bump the version to v3
-            // so that future migrations have a consistent base.
+            // Apply migration in memory.  The on-disk file keeps v2's
+            // schema_version; the migration is idempotent and runs on
+            // every load until the legacy file is naturally removed.
             store.discovery_secret = None;
             store.schema_version = SCHEMA_VERSION;
             store.data_dir = data_dir.to_path_buf();
-            // Persist the migrated store so future loads skip migration.
-            if let Err(err) = store.save() {
-                warn!(error = %err, "failed to persist v3 room migration");
-            }
             Ok(Some(store))
         } else if store.schema_version > SCHEMA_VERSION {
             Err(n0_error::anyerr!(
@@ -167,39 +166,39 @@ impl RoomStore {
         }
     }
 
-    /// Replace the full peers list and persist to disk.
-    pub fn set_peers(&mut self, peers: Vec<EndpointAddr>) -> Result<()> {
+    /// Replace the full peers list (in-memory only — SQLite is authoritative).
+    pub fn set_peers(&mut self, peers: Vec<EndpointAddr>) {
         self.peers = peers;
-        self.save()?;
-        Ok(())
     }
 
-    /// Clear the peers list and persist to disk.
-    pub fn clear_peers(&mut self) -> Result<()> {
+    /// Clear the peers list (in-memory only — SQLite is authoritative).
+    pub fn clear_peers(&mut self) {
         self.peers.clear();
-        self.save()?;
-        Ok(())
     }
 
-    /// Set the discovery secret and persist to disk.
+    /// Set the discovery secret (in-memory only — SQLite is authoritative).
     ///
     /// Pass `None` to clear a previously stored secret.
-    pub fn set_discovery_secret(&mut self, secret: Option<DiscoverySecret>) -> Result<()> {
+    pub fn set_discovery_secret(&mut self, secret: Option<DiscoverySecret>) {
         self.discovery_secret = secret;
-        self.save()?;
-        Ok(())
     }
 
     /// Persist the room store atomically to `room.json`.
+    ///
+    /// **DEPRECATED:** room metadata is now in the SQLite unified
+    /// storage. This method logs a warning and returns the legacy path
+    /// without writing to disk.
+    #[deprecated(
+        since = "0.21.0",
+        note = "SQLite room tables replace room.json writes"
+    )]
     pub fn save(&self) -> Result<PathBuf> {
-        let data_dir = self.data_dir();
-        if data_dir.as_os_str().is_empty() {
-            return Err(n0_error::anyerr!(
-                "room store has no data directory bound to it",
-            ));
-        }
         let path = self.file_path();
-        atomic_write_json(&path, self, "room store")?;
+        warn!(
+            path = %path.display(),
+            "save() called on deprecated JSON room store — no data written; \
+             use SQLite room tables instead"
+        );
         Ok(path)
     }
 
@@ -318,8 +317,7 @@ mod tests {
         let mut store = RoomStore::empty_at(&dir);
         let secret = DiscoverySecret::from_bytes([0xAAu8; 32]);
         store
-            .set_discovery_secret(Some(secret))
-            .expect("set discovery secret");
+            .set_discovery_secret(Some(secret));
 
         let reloaded = RoomStore::load(&dir)
             .expect("load saved store")

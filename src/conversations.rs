@@ -1,5 +1,9 @@
 //! Durable conversation records for Boru.
 //!
+//! **DEPRECATED** — conversation records are stored in the SQLite database
+//! via the unified storage layer.  This JSON file is retained only for
+//! backward-compatible reads during a transition period.
+//!
 //! A conversation is a persisted record keyed by gossip [`TopicId`] that
 //! survives application restarts.  Each entry tracks the direct one-to-one
 //! conversations the user has engaged in — distinct from the transient
@@ -26,6 +30,7 @@ use std::{
 
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::chat_core::atomic_write::atomic_write_json;
 use crate::peer_names;
@@ -360,15 +365,21 @@ impl ConversationStore {
     }
 
     /// Persist the store atomically to `conversations.json`.
+    ///
+    /// **DEPRECATED:** conversation data is now in the SQLite unified
+    /// storage. This method logs a warning and returns the legacy path
+    /// without writing to disk.
+    #[deprecated(
+        since = "0.21.0",
+        note = "SQLite conversation_meta table replaces conversations.json writes"
+    )]
     pub fn save(&self) -> Result<PathBuf> {
-        let data_dir = self.data_dir();
-        if data_dir.as_os_str().is_empty() {
-            return Err(n0_error::anyerr!(
-                "conversation store has no data directory bound to it",
-            ));
-        }
         let path = self.file_path();
-        atomic_write_json(&path, self, "conversation store")?;
+        warn!(
+            path = %path.display(),
+            "save() called on deprecated JSON conversation store — no data written; \
+             use SQLite conversation_meta table instead"
+        );
         Ok(path)
     }
 

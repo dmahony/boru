@@ -612,17 +612,17 @@ mod tests {
         let mut store = FriendsStore::empty_at(tmp_dir.path());
         let record = store.ensure_friend(FriendId::from_public_key(pk2));
         record.record_addrs(std::iter::once(ep2.addr()));
-        store.save()?;
 
-        // 2. Simulate startup: reload store and register friends
-        let reloaded_store = FriendsStore::load(tmp_dir.path())?;
+        // 2. Verify in-memory state then register friends directly
+        //    (legacy JSON persistence is a no-op — SQLite is authoritative)
+        assert_eq!(store.len(), 1, "friend should exist in memory");
         let (mgr, _events) = FriendPingManager::spawn(
             ep1.clone(),
             Duration::from_millis(100),
             Duration::from_secs(2),
         );
 
-        for (id, record) in reloaded_store.iter() {
+        for (id, record) in store.iter() {
             let pk = id.parse_public_key()?;
             let addr = record.known_addrs.first().cloned();
             mgr.add_friend(pk, addr).await?;

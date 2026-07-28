@@ -1,9 +1,19 @@
 //! Encrypted recipient-hosted store-and-forward delivery for direct messages.
 //!
+//! **DEPRECATED** — mailbox state is stored in the SQLite database via the
+//! unified storage layer (Phase 13).  This JSON file is retained only for
+//! backward-compatible reads during a transition period.
+//!
 //! A mailbox stores opaque, authenticated ciphertext.  It never decrypts a
 //! message and only accepts envelopes signed by an explicitly authorized
 //! sender.  Entries remain until the recipient signs an acknowledgement, or
 //! until the configured retention period expires.
+//!
+//! # Migration
+//!
+//! New writes go to the SQLite mailbox tables.  The JSON file is no longer
+//! written to disk.  Reads from this module are supported for a limited
+//! compatibility period.
 
 use std::{
     collections::HashMap,
@@ -409,11 +419,20 @@ impl MailboxStore {
         Ok(Some(store))
     }
     /// Persist atomically and remove expired entries.
+    ///
+    /// **DEPRECATED**: mailbox state is now in SQLite.  This method logs
+    /// a warning and returns the legacy file path without writing to disk.
+    #[deprecated(
+        since = "0.21.0",
+        note = "SQLite mailbox tables replace mailbox.json writes"
+    )]
     pub fn save(&self) -> Result<PathBuf> {
-        let mut copy = self.clone();
-        copy.expire();
         let path = self.data_dir.join(MAILBOX_FILE_NAME);
-        atomic_write_json(&path, &copy, "mailbox store")?;
+        tracing::warn!(
+            path = %path.display(),
+            "save() called on deprecated JSON mailbox store — no data written; \
+             use SQLite mailbox tables instead"
+        );
         Ok(path)
     }
     fn expire(&mut self) {
@@ -511,6 +530,7 @@ impl MailboxStore {
     /// duplicates. If the message id is already present, all immutable
     /// envelope fields are compared before returning `Duplicate`; a mismatch
     /// is rejected rather than allowing an id collision to alter stored state.
+    #[allow(deprecated)]
     pub fn accept_incoming_with_status(
         &mut self,
         identity: &MailboxIdentity,
@@ -537,26 +557,19 @@ impl MailboxStore {
             return Ok((id, payload, IncomingAcceptance::Duplicate));
         }
         self.enqueue(envelope, allowed_senders)?;
-        self.save()?;
         Ok((id, payload, IncomingAcceptance::Inserted))
     }
 
-    /// Remove an acknowledged outgoing envelope and persist the removal.
+    /// Remove an acknowledged outgoing envelope (in-memory only — SQLite is authoritative).
+    #[allow(deprecated)]
     pub fn acknowledge_and_save(&mut self, ack: &MailboxAck) -> Result<bool> {
-        let removed = self.acknowledge(ack)?;
-        if removed {
-            self.save()?;
-        }
-        Ok(removed)
+        self.acknowledge(ack)
     }
 
-    /// Remove and persist an acknowledged outgoing envelope.
+    /// Remove an acknowledged outgoing envelope (in-memory only — SQLite is authoritative).
+    #[allow(deprecated)]
     pub fn acknowledge_outgoing_and_save(&mut self, ack: &MailboxAck) -> Result<bool> {
-        let removed = self.acknowledge_outgoing(ack)?;
-        if removed {
-            self.save()?;
-        }
-        Ok(removed)
+        self.acknowledge_outgoing(ack)
     }
     /// Return pending envelopes whose recipient identity matches `who`.
     ///

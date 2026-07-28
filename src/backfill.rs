@@ -854,9 +854,10 @@ mod tests {
         // Empty history store — we never get to query it anyway because
         // the delay fires first on the server side.
         let data_dir = temp_store_path("slow_timeout");
-        let history_store = ChatHistoryStore::empty_at(data_dir);
-        // Save so the store file exists (serves backfill reads)
-        let _ = history_store.save();
+        let history_store = ChatHistoryStore::empty_at(&data_dir);
+        // Write the store file directly since save() is a no-op on deprecated stores.
+        let json = serde_json::to_string(&history_store).unwrap();
+        std::fs::write(history_store.file_path(), &json).ok();
         let store = Arc::new(Mutex::new(history_store));
         let slow_handler = DelayedBackfillHandler {
             history_store: store.clone(),

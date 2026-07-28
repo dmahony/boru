@@ -19,7 +19,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::link_preview;
-use crate::persistence_coordinator::PersistenceCommand;
 use boru_core::api::{GossipSender, GossipTopic};
 use boru_core::backfill::{BackfillHandle, BACKFILL_TRIGGER_THRESHOLD};
 pub(crate) use boru_core::chat_callbacks::TransferKind;
@@ -2028,9 +2027,9 @@ pub struct IcedChat {
     #[expect(dead_code)]
     pub notice: String,
     data_dir: PathBuf,
-    /// Sender to the background persistence worker for offloading
-    /// synchronous JSON writes from the UI event loop.
-    persist_tx: std::sync::mpsc::Sender<PersistenceCommand>,
+    /// Dead field — retained to avoid changing the constructor signature.
+    /// Legacy JSON persistence has been replaced by SQLite unified storage.
+    persist_tx: std::sync::mpsc::Sender<()>,
     /// Per-user image storage, backed by `<data_dir>/files/` (or `BORU_CHAT_FILES_DIR`).
     image_store: ImageStore,
     /// Persistent chat message history (loaded on startup, saved on each message).
@@ -3706,7 +3705,7 @@ impl IcedChat {
         local_public: PublicKey,
         relay_mode: RelayMode,
         data_dir: std::path::PathBuf,
-        persist_tx: std::sync::mpsc::Sender<PersistenceCommand>,
+        persist_tx: std::sync::mpsc::Sender<()>,
         runtime_handle: tokio::runtime::Handle,
         net_rx: Arc<Mutex<Receiver<ConversationNetEvent>>>,
         net_tx: Sender<ConversationNetEvent>,
@@ -4178,35 +4177,20 @@ impl IcedChat {
         settings.save(&self.data_dir);
     }
 
-    // ── Background persistence helpers ────────────────────────────────
-    // These send typed commands to the PersistenceCoordinator worker,
-    // offloading synchronous JSON writes from the UI event loop.
+    // ── Background persistence helpers (legacy JSON stores — all no-ops) ──
+    // All legacy JSON stores have been replaced by SQLite unified storage.
+    // These methods are retained as stubs to avoid changing call sites.
 
-    /// Queue a save of the conversation store.  Coalesced — only the
-    /// newest unsaved version is written to disk.
-    fn send_save_conversations(&self) {
-        let store = self.conversation_store.clone();
-        let _ = self
-            .persist_tx
-            .send(PersistenceCommand::SaveConversations(store));
-    }
+    /// Legacy no-op — conversation data is in SQLite.
+    fn send_save_conversations(&self) {}
 
-    /// Queue a save of the chat-history store.  The worker locks the
-    /// Arc<Mutex> and clones the data before writing, so the save is
-    /// fully offloaded.
-    fn send_save_chat_history(&self) {
-        let _ = self.persist_tx.send(PersistenceCommand::SaveChatHistory(
-            self.chat_history.clone(),
-        ));
-    }
+    /// Legacy no-op — chat history is in SQLite.
+    fn send_save_chat_history(&self) {}
 
-    /// Save the friends store.  Coalesced.
-    fn send_save_friends(&self) {
-        let store = self.friends.clone();
-        let _ = self.persist_tx.send(PersistenceCommand::SaveFriends(store));
-    }
+    /// Legacy no-op — friend data is in SQLite.
+    fn send_save_friends(&self) {}
 
-    /// Queue a save of the settings.  Coalesced + debounced.
+    /// Save AppSettings directly (not a legacy JSON store — still active).
     fn send_save_settings(&self) {
         let settings = AppSettings {
             dark_mode: self.dark_mode,
@@ -4215,25 +4199,14 @@ impl IcedChat {
             chat_text_size: self.chat_text_size,
             display_name: Some(self.local_label.clone()),
         };
-        let data_dir = self.data_dir.clone();
-        let _ = self
-            .persist_tx
-            .send(PersistenceCommand::SaveSettings { settings, data_dir });
+        settings.save(&self.data_dir);
     }
 
-    /// Queue a save of the user profile store.  Coalesced + debounced.
-    fn send_save_profile(&self) {
-        let store = self.profile_store.clone();
-        let _ = self.persist_tx.send(PersistenceCommand::SaveProfile(store));
-    }
+    /// Legacy no-op — profile data is in SQLite.
+    fn send_save_profile(&self) {}
 
-    /// Queue a save of the friend-request store.  Coalesced + debounced.
-    fn send_save_friend_requests(&self) {
-        let store = self.friend_request_store.clone();
-        let _ = self
-            .persist_tx
-            .send(PersistenceCommand::SaveFriendRequests(store));
-    }
+    /// Legacy no-op — friend request data is in SQLite.
+    fn send_save_friend_requests(&self) {}
 
     /// Keep the virtualized chat log anchored to the latest entry when the
     /// user is already following the conversation.  The custom windowed

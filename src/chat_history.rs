@@ -1,5 +1,9 @@
 //! Durable chat history storage for Boru.
 //!
+//! **DEPRECATED** — chat messages are now stored in the SQLite database
+//! via the unified storage layer.  This JSON file is retained only for
+//! backward-compatible reads during a transition period.
+//!
 //! Chat messages are persisted atomically so room history remains available
 //! after restart. Outgoing messages additionally live in the durable outbox
 //! until transport delivery has been observed.
@@ -11,6 +15,7 @@ use std::{
 
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::chat_core::atomic_write::atomic_write_json;
 use crate::proto::TopicId;
@@ -330,15 +335,21 @@ impl ChatHistoryStore {
     }
 
     /// Persist chat history using an atomic replacement.
+    ///
+    /// **DEPRECATED:** chat messages are now in the SQLite
+    /// inbox/outbox tables. This method logs a warning and returns the
+    /// legacy path without writing to disk.
+    #[deprecated(
+        since = "0.21.0",
+        note = "SQLite inbox/outbox tables replace chat_history.json writes"
+    )]
     pub fn save(&self) -> Result<PathBuf> {
-        let data_dir = &self.data_dir;
-        if data_dir.as_os_str().is_empty() {
-            return Err(n0_error::anyerr!(
-                "chat history store has no data directory bound to it",
-            ));
-        }
         let path = self.file_path();
-        atomic_write_json(&path, self, "chat history")?;
+        warn!(
+            path = %path.display(),
+            "save() called on deprecated JSON chat history store — no data written; \
+             use SQLite inbox/outbox tables instead"
+        );
         Ok(path)
     }
 

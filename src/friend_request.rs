@@ -1,5 +1,9 @@
 //! Durable friend request store and API for Boru.
 //!
+//! **DEPRECATED** — friend request state is stored in the SQLite database
+//! via the unified storage layer.  This JSON file is retained only for
+//! backward-compatible reads during a transition period.
+//!
 //! This module owns the on-disk `friend_requests.json` file that lives beside
 //! the persistent `secret_key.txt` identity file and the `friends.json` friends
 //! list.
@@ -69,6 +73,7 @@ use std::{
 use crate::chat_core::atomic_write::atomic_write_json;
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 const SCHEMA_VERSION: u32 = 1;
 /// Name of the on-disk friend requests file (lives beside `secret_key.txt`).
@@ -338,15 +343,21 @@ impl FriendRequestStore {
     }
 
     /// Persist the store atomically to `friend_requests.json`.
+    ///
+    /// **DEPRECATED:** friend request data is now in the SQLite unified
+    /// storage. This method logs a warning and returns the legacy path
+    /// without writing to disk.
+    #[deprecated(
+        since = "0.21.0",
+        note = "SQLite friend_requests table replaces friend_requests.json writes"
+    )]
     pub fn save(&self) -> Result<PathBuf> {
-        let data_dir = self.data_dir();
-        if data_dir.as_os_str().is_empty() {
-            return Err(n0_error::anyerr!(
-                "friend request store has no data directory bound to it",
-            ));
-        }
         let path = self.file_path();
-        atomic_write_json(&path, self, "friend request store")?;
+        warn!(
+            path = %path.display(),
+            "save() called on deprecated JSON friend request store — no data written; \
+             use SQLite friend_requests table instead"
+        );
         Ok(path)
     }
 

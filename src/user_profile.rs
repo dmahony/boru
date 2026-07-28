@@ -1,5 +1,9 @@
 //! User profile and shared file data models for Boru.
 //!
+//! **DEPRECATED** — user profile data is stored in the SQLite database
+//! via the unified storage layer.  This JSON file is retained only for
+//! backward-compatible reads during a transition period.
+//!
 //! This module defines [`UserProfile`] (local user identity and preferences)
 //! and [`SharedFile`] (metadata about files the user shares with peers).
 //!
@@ -15,6 +19,7 @@ use std::{
 use iroh::PublicKey;
 use n0_error::{bail_any, Result, StdResultExt};
 use serde::{Deserialize, Deserializer, Serialize};
+use tracing::warn;
 
 use crate::chat_core::atomic_write::atomic_write_json;
 use crate::chat_core::SharedFileMeta;
@@ -311,10 +316,22 @@ impl UserProfile {
 
     /// Convenience: save this profile by wrapping it in a [`UserProfileStore`]
     /// and persisting it atomically.
+    ///
+    /// **DEPRECATED:** profile data is now in the SQLite unified storage.
+    /// This method logs a warning and returns the legacy path without
+    /// writing to disk.
+    #[deprecated(
+        since = "0.21.0",
+        note = "SQLite profile tables replace profile.json writes"
+    )]
     pub fn save(&self, data_dir: impl AsRef<Path>) -> Result<PathBuf> {
-        let mut store = UserProfileStore::empty_at(data_dir.as_ref(), self.user_id);
-        store.set_profile(self.clone());
-        store.save()
+        let path = data_dir.as_ref().join(PROFILE_FILE_NAME);
+        warn!(
+            path = %path.display(),
+            "save() called on deprecated JSON profile store — no data written; \
+             use SQLite profile tables instead"
+        );
+        Ok(path)
     }
 
     /// Validate profile fields, returning an error on constraint violation.
@@ -704,19 +721,20 @@ impl UserProfileStore {
 
     /// Persist the store atomically to `profile.json`.
     ///
-    /// Validates the profile before writing.  Returns the path of the
-    /// written file on success.
+    /// **DEPRECATED:** profile data is now in the SQLite unified storage.
+    /// This method logs a warning and returns the legacy path without
+    /// writing to disk.
+    #[deprecated(
+        since = "0.21.0",
+        note = "SQLite profile tables replace profile.json writes"
+    )]
     pub fn save(&self) -> Result<PathBuf> {
-        let data_dir = self.data_dir();
-        if data_dir.as_os_str().is_empty() {
-            return Err(n0_error::anyerr!(
-                "profile store has no data directory bound to it",
-            ));
-        }
-        // Validate before persisting.
-        self.profile.validate()?;
         let path = self.file_path();
-        atomic_write_json(&path, self, "profile store")?;
+        warn!(
+            path = %path.display(),
+            "save() called on deprecated JSON profile store — no data written; \
+             use SQLite profile tables instead"
+        );
         Ok(path)
     }
 }

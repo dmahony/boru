@@ -1,11 +1,15 @@
 //! Durable encrypted outbox storage for Boru.
 //!
+//! **DEPRECATED** — the `outgoing_messages` table in the SQLite database
+//! (migration V10) is the authoritative outbox store.  This JSON file is
+//! retained only for backward-compatible reads during a transition period.
+//!
 //! Outgoing messages (signed+encoded) are persisted *before* they are
 //! broadcast so that in-flight messages survive a crash or restart.
 //! Messages are stored with their delivery state so the layer above can
 //! retry failed sends and track end-to-end delivery.
 //!
-//! # Lifecycle
+//! # Lifecycle (legacy)
 //!
 //! 1. **Push** — a signed message is pushed into the outbox before
 //!    [`broadcast`](crate::api::GossipSender::broadcast) is called.
@@ -17,7 +21,7 @@
 //! 4. **Remove** — once a terminal state (Seen or Failed) is reached the
 //!    entry may be removed or allowed to expire.
 //!
-//! # Expiry
+//! # Expiry (legacy)
 //!
 //! Old entries (default 7 days) are cleaned up automatically on save.
 //! Call [`OutboxStore::expire`] explicitly or rely on the automatic
@@ -28,6 +32,12 @@
 //! [`push`](OutboxStore::push) checks for an existing entry with the
 //! same [`event_id`](OutboxEntry::event_id) and returns an error if one
 //! already exists — preventing the same message from being queued twice.
+//!
+//! # Migration
+//!
+//! New writes go to the SQLite `outgoing_messages` table.  The JSON file is
+//! no longer written to disk.  Reads from this module are supported for a
+//! limited compatibility period.
 
 use std::{
     collections::HashMap,
@@ -244,22 +254,20 @@ impl OutboxStore {
 
     /// Persist the outbox store atomically to disk.
     ///
-    /// Before writing, expired entries are automatically removed.
-    /// Uses [`atomic_write_json`] for crash-safe writes.
+    /// **DEPRECATED**: the `outgoing_messages` SQLite table is now the
+    /// authoritative outbox store.  This method logs a warning and returns
+    /// the legacy file path without writing to disk.
+    #[deprecated(
+        since = "0.21.0",
+        note = "outgoing_messages SQLite table replaces outbox.json writes"
+    )]
     pub fn save(&self) -> Result<PathBuf> {
-        let data_dir = &self.data_dir;
-        if data_dir.as_os_str().is_empty() {
-            return Err(n0_error::anyerr!(
-                "outbox store has no data directory bound to it",
-            ));
-        }
-
         let path = self.file_path();
-
-        // Clone, expire, and write.
-        let mut to_save = self.clone();
-        to_save.expire_internal();
-        atomic_write_json(&path, &to_save, "outbox store")?;
+        tracing::warn!(
+            path = %path.display(),
+            "save() called on deprecated JSON outbox store — no data written; \
+             use SQLite outgoing_messages table instead"
+        );
         Ok(path)
     }
 

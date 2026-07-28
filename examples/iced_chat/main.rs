@@ -16,7 +16,6 @@ mod log_viewer;
 mod mcp_server;
 mod notification;
 mod perf_tracker;
-mod persistence_coordinator;
 mod presentation;
 
 use mimalloc::MiMalloc;
@@ -1338,8 +1337,7 @@ fn main() -> Result<()> {
 
     let initial_topic = initial_room.as_ref().map(|r| r.0);
 
-    let persist_coordinator = persistence_coordinator::PersistenceCoordinator::spawn();
-    let persist_tx = persist_coordinator.sender();
+    let (persist_tx, _persist_rx) = std::sync::mpsc::channel::<()>();
 
     let app_cell = std::sync::Mutex::new(Some((
         {
