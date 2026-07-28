@@ -112,7 +112,9 @@ pub const AVATAR_MD: f32 = 48.0;
 pub const AVATAR_LG: f32 = 64.0;
 
 // ── Layout ────────────────────────────────────────────────────────────
-pub const SIDEBAR_WIDTH: f32 = 300.0;
+pub const SIDEBAR_WIDTH: f32 = 280.0;
+/// Width of the right-side details panel when open.
+pub const DETAILS_PANEL_WIDTH: f32 = 280.0;
 pub const MESSAGE_MAX_WIDTH: f32 = 480.0;
 pub const IMAGE_PREVIEW_MAX_WIDTH: f32 = 360.0;
 pub const IMAGE_PREVIEW_MAX_HEIGHT: f32 = 400.0;
@@ -464,7 +466,7 @@ mod tests {
 
     #[test]
     fn layout_tokens_are_reasonable() {
-        assert_eq!(SIDEBAR_WIDTH, 300.0);
+        assert_eq!(SIDEBAR_WIDTH, 280.0);
         assert_eq!(AVATAR_LG, 64.0);
         assert!(MESSAGE_MAX_WIDTH > 0.0);
         assert!(IMAGE_PREVIEW_MAX_WIDTH > 0.0);

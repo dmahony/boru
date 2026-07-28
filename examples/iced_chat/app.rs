@@ -355,7 +355,8 @@ fn blob_ticket_string(
 pub(crate) const SPACE_2: f32 = 2.0;
 pub(crate) use crate::design_tokens::{AVATAR_LG, AVATAR_MD, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
-    MESSAGE_MAX_WIDTH, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24, SPACE_4, SPACE_8,
+    DETAILS_PANEL_WIDTH, MESSAGE_MAX_WIDTH, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24, SPACE_4,
+    SPACE_8,
 };
 pub(crate) const SPACE_6: f32 = 6.0;
 pub(crate) const SPACE_10: f32 = 10.0;
@@ -626,6 +627,20 @@ fn container_primary(theme: &iced::Theme) -> iced::widget::container::Style {
 fn container_surface(theme: &iced::Theme) -> iced::widget::container::Style {
     iced::widget::container::Style {
         background: Some(iced::Background::Color(bg_surface(theme))),
+        ..Default::default()
+    }
+}
+
+/// Container style for the conversation header — adds a subtle bottom border
+/// to visually separate the header from the message log.
+fn container_header(theme: &iced::Theme) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        background: Some(iced::Background::Color(bg_surface(theme))),
+        border: iced::Border {
+            color: crate::design_tokens::border(theme),
+            width: 0.0,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -2316,6 +2331,8 @@ pub struct IcedChat {
     link_preview_fetch_index: Option<usize>,
     /// Whether the chat options popover is open.
     show_chat_options: bool,
+    /// Whether the right-side details panel is open.
+    details_panel_open: bool,
 
     // ── Room advertisement (public directory) ──
     /// Which rooms are being advertised into the directory topic.
@@ -2630,6 +2647,8 @@ pub enum AppMessage {
     ToggleHelp,
     /// Toggle the chat options popover (room info, delete, settings).
     ToggleChatOptions,
+    /// Toggle the right-side details panel.
+    ToggleDetailsPanel,
     OpenSettings,
     CloseSettings,
     /// Open the friend requests management screen.
@@ -3534,22 +3553,12 @@ fn view_local_profile_block(
         .spacing(SPACE_2)
         .align_x(Alignment::Start);
 
-    // ── Settings gear and add button ──
-    let settings_btn = button(icon_svg(ICON_SETTINGS, TYPO_MD))
-        .on_press(AppMessage::OpenSettings)
-        .padding([SPACE_6, SPACE_8])
-        .style(BUTTON_ICON);
-    let add_btn = button(icon_svg(ICON_PLUS, TYPO_MD))
-        .on_press(AppMessage::ToggleAddMenu)
-        .padding([SPACE_6, SPACE_8])
-        .style(BUTTON_ICON);
+    // ── Settings gear and add button are now in the sidebar header ──
 
     Row::new()
         .push(avatar)
         .push(name_col)
         .push(Space::new().width(Length::Fill))
-        .push(settings_btn)
-        .push(add_btn)
         .spacing(SPACE_8)
         .align_y(Alignment::Center)
         .into()
@@ -3849,6 +3858,7 @@ impl IcedChat {
             composer_text: String::new(),
             help_visible: false,
             show_chat_options: false,
+            details_panel_open: false,
             pending_file: None,
             pending_offline_ids: HashMap::new(),
             pending_image: VecDeque::new(),
@@ -5246,6 +5256,7 @@ impl IcedChat {
             AppMessage::OpenDirectory => "OpenDirectory",
             AppMessage::DirectoryRoomJoin(..) => "DirectoryRoomJoin",
             AppMessage::DirectoryRoomUpdate(..) => "DirectoryRoomUpdate",
+            AppMessage::ToggleDetailsPanel => "ToggleDetailsPanel",
         }
     }
 }
@@ -8472,6 +8483,12 @@ impl IcedChat {
             }
             AppMessage::ToggleChatOptions => {
                 self.show_chat_options = !self.show_chat_options;
+                // Close the details panel when opening the options popover
+                self.details_panel_open = false;
+                iced::Task::none()
+            }
+            AppMessage::ToggleDetailsPanel => {
+                self.details_panel_open = !self.details_panel_open;
                 iced::Task::none()
             }
 
@@ -14205,9 +14222,31 @@ impl IcedChat {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        let base = container(content)
+        // Wrap in a row that includes the details panel when open.
+        let base = if self.details_panel_open && matches!(self.screen, Screen::Chat { .. }) {
+            container(
+                row![
+                    content,
+                    container(self.view_details_panel())
+                        .width(Length::Fixed(DETAILS_PANEL_WIDTH))
+                        .height(Length::Fill)
+                        .style(move |t| {
+                            iced::widget::container::Style {
+                                background: Some(iced::Background::Color(bg_surface(t))),
+                                ..Default::default()
+                            }
+                        }),
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill),
+            )
             .width(iced::Length::Fill)
-            .height(iced::Length::Fill);
+            .height(iced::Length::Fill)
+        } else {
+            container(content)
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+        };
 
         if self.connection_details_dialog.is_some() {
             self.view_connection_details_dialog(base)
@@ -14642,12 +14681,24 @@ impl IcedChat {
 
     /// Left sidebar containing Chats, Friends, Discover, and Requests sections.
     fn view_sidebar(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{container, scrollable, Column, Row, Space};
+        use iced::widget::{button, container, scrollable, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let header = Row::new()
             .push(boru_logo(LogoSize::Small).into_element())
-            .spacing(SPACE_4)
+            .push(Space::new().width(Length::Fill))
+            .push(
+                button(icon_svg(ICON_SETTINGS, TYPO_MD))
+                    .on_press(AppMessage::OpenSettings)
+                    .padding([SPACE_6, SPACE_8])
+                    .style(BUTTON_ICON),
+            )
+            .push(
+                button(icon_svg(ICON_PLUS, TYPO_MD))
+                    .on_press(AppMessage::ToggleAddMenu)
+                    .padding([SPACE_6, SPACE_8])
+                    .style(BUTTON_ICON),
+            )
             .align_y(Alignment::Center);
 
         let is_online = !matches!(self.mesh_health, MeshHealth::Offline(_));
@@ -15243,8 +15294,9 @@ impl IcedChat {
                     ..Default::default()
                 }
             } else {
+                // Invisible by default — appears only on hover (hover/overflow menu pattern)
                 iced::widget::button::Style {
-                    text_color: text_muted(t),
+                    text_color: Color::from_rgba(0.0, 0.0, 0.0, 0.0),
                     background: None,
                     border: Border {
                         radius: SPACE_4.into(),
@@ -16611,7 +16663,7 @@ impl IcedChat {
     // ── Chat screen view ─────────────────────────────────────────────
 
     fn view_chat_header(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, text};
+        use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
         let topic_hex = self.topic.to_string();
@@ -16626,11 +16678,7 @@ impl IcedChat {
             .unwrap_or_else(|| format!("Room {short_topic}"));
         let peer = conversation.and_then(|entry| PublicKey::from_str(&entry.peer_id).ok());
         let online = peer.is_some_and(|key| self.friend_online_cache.contains(&key));
-        let status = if online {
-            "Online"
-        } else {
-            "Offline · last seen"
-        };
+        let status_text = if online { "Online" } else { "Offline" };
 
         let avatar: iced::Element<'_, AppMessage> = peer
             .and_then(|key| self.friend_image_handles.get(&key).and_then(|h| h.clone()))
@@ -16658,36 +16706,51 @@ impl IcedChat {
                     .into()
             });
 
+        let status_dot = icon_svg(if online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_XS).style(
+            move |t, _| iced::widget::svg::Style {
+                color: Some(if online {
+                    accent_green(t)
+                } else {
+                    text_muted(t)
+                }),
+            },
+        );
+
         let identity = column![
             text(room_name)
-                .size(TYPO_MD)
+                .size(TYPO_SM)
                 .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
-            text(status)
-                .size(TYPO_XS)
-                .style(move |t| iced::widget::text::Style {
-                    color: Some(if online {
-                        accent_green(t)
-                    } else {
-                        text_muted(t)
+            row![
+                status_dot,
+                text(status_text)
+                    .size(TYPO_XS)
+                    .style(move |t| iced::widget::text::Style {
+                        color: Some(if online {
+                            accent_green(t)
+                        } else {
+                            text_muted(t)
+                        }),
                     }),
-                }),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center),
         ]
         .spacing(SPACE_2)
         .width(Length::Fill);
-        let search = button(
-            row![icon_svg(ICON_SEARCH, TYPO_SM), text("Search").size(TYPO_XS)].spacing(SPACE_4),
-        )
-        .padding([SPACE_6, SPACE_8])
-        .style(BUTTON_ICON);
-        let shared = button(
-            row![
-                icon_svg(ICON_FILES, TYPO_SM),
-                text("Shared files").size(TYPO_XS)
-            ]
-            .spacing(SPACE_4),
-        )
-        .padding([SPACE_6, SPACE_8])
-        .style(BUTTON_ICON);
+
+        let search = button(icon_svg(ICON_SEARCH, TYPO_SM))
+            .padding([SPACE_6, SPACE_8])
+            .style(BUTTON_ICON);
+
+        let shared = button(icon_svg(ICON_FILES, TYPO_SM))
+            .padding([SPACE_6, SPACE_8])
+            .style(BUTTON_ICON);
+
+        let details_toggle = button(icon_svg(ICON_MESH, TYPO_SM))
+            .on_press(AppMessage::ToggleDetailsPanel)
+            .padding([SPACE_6, SPACE_8])
+            .style(BUTTON_ICON);
+
         let more = button(icon_svg(ICON_MORE, TYPO_MD))
             .on_press(AppMessage::ToggleChatOptions)
             .padding([SPACE_6, SPACE_8])
@@ -16701,17 +16764,19 @@ impl IcedChat {
                     .style(BUTTON_ICON),
                 avatar,
                 identity,
+                Space::new().width(Length::Fill),
                 search,
                 shared,
+                details_toggle,
                 more,
             ]
-            .spacing(SPACE_8)
+            .spacing(SPACE_6)
             .align_y(Alignment::Center),
         )
         .width(Length::Fill)
-        .height(Length::Fixed(72.0))
+        .height(Length::Fixed(64.0))
         .padding([SPACE_8, SPACE_12])
-        .style(container_surface)
+        .style(container_header)
         .into()
     }
 
@@ -16862,6 +16927,29 @@ impl IcedChat {
             .width(Length::Shrink)
             .into()
     }
+
+    /// Right-side details panel — shows conversation metadata and actions.
+    /// Placeholder that will be fleshed out in a future step.
+    fn view_details_panel(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{column, container, text, Space};
+        use iced::Length;
+
+        container(
+            column![
+                text("Details")
+                    .size(TYPO_SM)
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
+                Space::new().height(Length::Fill),
+            ]
+            .spacing(SPACE_12),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding([SPACE_12, SPACE_12])
+        .style(container_surface)
+        .into()
+    }
+
     fn view_chat_log(&self) -> iced::widget::Scrollable<'_, AppMessage> {
         use iced::widget::space;
         use iced::widget::text::Wrapping;
