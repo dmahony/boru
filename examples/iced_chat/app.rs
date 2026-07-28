@@ -2621,6 +2621,10 @@ pub enum AppMessage {
         /// Used to set sender_ready immediately when NeighborUp was emitted
         /// before the forwarder started (common on startup).
         neighbor_count: usize,
+        /// Peer IDs of gossip neighbors already known at subscription time.
+        /// Used to emit diagnostic events retroactively when NeighborUp was
+        /// missed (emitted before the forwarder started).
+        neighbor_ids: Vec<PublicKey>,
     },
     /// Finished creating a new room (random topic).
     CreateNewRoom,
@@ -6279,7 +6283,8 @@ impl IcedChat {
                             .await
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
-                        let neighbor_count = receiver.neighbors().count();
+                        let neighbor_ids: Vec<PublicKey> = receiver.neighbors().collect();
+                        let neighbor_count = neighbor_ids.len();
                         let local_peer_addr = invitation_endpoint_addr(
                             endpoint.watch_addr().get(),
                             share_direct_addresses,
@@ -6418,18 +6423,19 @@ impl IcedChat {
                         room.discovery_secret = discovery_secret;
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize), String>(
-                            (sender, topic, ticket_str, room_tracker, neighbor_count),
+                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize, Vec<PublicKey>), String>(
+                            (sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids),
                         )
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count)) => {
+                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids)) => {
                             AppMessage::RoomOpened {
                                 topic,
                                 ticket: ticket_str,
                                 sender,
                                 room_tracker,
                                 neighbor_count,
+                                neighbor_ids,
                             }
                         }
                         Err(e) => AppMessage::RoomJoinFailed(e),
@@ -6643,7 +6649,8 @@ impl IcedChat {
                             .await
                             .map_err(|e| format!("room subscription task failed: {e}"))??;
                         let (sender, receiver) = sub.split();
-                        let neighbor_count = receiver.neighbors().count();
+                        let neighbor_ids: Vec<PublicKey> = receiver.neighbors().collect();
+                        let neighbor_count = neighbor_ids.len();
                         let local_peer_addr = invitation_endpoint_addr(
                             endpoint.watch_addr().get(),
                             share_direct_addresses,
@@ -6753,18 +6760,19 @@ impl IcedChat {
                         room.discovery_secret = saved_discovery_secret;
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize), String>(
-                            (sender, topic, ticket_str, room_tracker, neighbor_count),
+                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize, Vec<PublicKey>), String>(
+                            (sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids),
                         )
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count)) => {
+                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids)) => {
                             AppMessage::RoomOpened {
                                 topic,
                                 ticket: ticket_str,
                                 sender,
                                 room_tracker,
                                 neighbor_count,
+                                neighbor_ids,
                             }
                         }
                         Err(e) => AppMessage::RoomJoinFailed(e),
@@ -6778,6 +6786,7 @@ impl IcedChat {
                 sender,
                 room_tracker,
                 neighbor_count,
+                neighbor_ids,
             } => {
                 info!("RoomOpened FIRED topic={topic} neighbor_count={neighbor_count}");
                 self.pending_topic = None;
@@ -6797,6 +6806,46 @@ impl IcedChat {
                 // on startup).  If so, mark the sender as ready immediately so
                 // that the first message send does not stall.
                 self.sender_ready = neighbor_count > 0;
+
+                // Retroactively emit diagnostic events for neighbors that were
+                // already connected before the forwarder started. When NeighborUp
+                // fires during gossip bootstrap (before the forwarder is spawned),
+                // the app misses ConnectionEstablished/PeerDiscovered/etc. Emit
+                // them now so the diagnostics layer transitions from Connecting
+                // to Connected without requiring a manual chat click.
+                for &peer in &neighbor_ids {
+                    if peer != self.local_public {
+                        DIAGNOSTICS.record_with_peer(
+                            Some(topic),
+                            Some(peer.to_string()),
+                            DiagnosticEventKind::PeerDiscovered,
+                        );
+                        DIAGNOSTICS.record_with_peer(
+                            Some(topic),
+                            Some(peer.to_string()),
+                            DiagnosticEventKind::ConnectionEstablished {
+                                remote_address: None,
+                                transport: None,
+                                used_relay: None,
+                            },
+                        );
+                        DIAGNOSTICS.record_with_peer(
+                            Some(topic),
+                            Some(peer.to_string()),
+                            DiagnosticEventKind::RoomSubscriptionJoined,
+                        );
+                        DIAGNOSTICS.record_with_peer(
+                            Some(topic),
+                            Some(peer.to_string()),
+                            DiagnosticEventKind::PeerAddedToTopic,
+                        );
+                        DIAGNOSTICS.record_with_peer(
+                            Some(topic),
+                            Some(peer.to_string()),
+                            DiagnosticEventKind::PeerJoinedRoom,
+                        );
+                    }
+                }
 
                 // Retroactively join any pending discovered peers now that the lobby sender is available
                 let lobby_topic = Self::default_lobby_topic();
@@ -7382,7 +7431,8 @@ impl IcedChat {
                             .await
                             .map_err(|e| format!("room subscription task failed: {e}"))??;
                         let (sender, receiver) = sub.split();
-                        let neighbor_count = receiver.neighbors().count();
+                        let neighbor_ids: Vec<PublicKey> = receiver.neighbors().collect();
+                        let neighbor_count = neighbor_ids.len();
                         if let Some((new_peers_rx, join_cancel)) = pending_dht_fanout {
                             let _join_task = boru_core::public_room_continuous::spawn_join_fanout(
                                 new_peers_rx,
@@ -7451,18 +7501,19 @@ impl IcedChat {
                         let room = RoomStore::with_peers(&data_dir, topic, merged_peers);
                         let _ = room.save();
 
-                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize), String>(
-                            (sender, topic, ticket_str, room_tracker, neighbor_count),
+                        Ok::<(GossipSender, TopicId, String, Option<SharedTracker>, usize, Vec<PublicKey>), String>(
+                            (sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids),
                         )
                     },
                     |result| match result {
-                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count)) => {
+                        Ok((sender, topic, ticket_str, room_tracker, neighbor_count, neighbor_ids)) => {
                             AppMessage::RoomOpened {
                                 topic,
                                 ticket: ticket_str,
                                 sender,
                                 room_tracker,
                                 neighbor_count,
+                                neighbor_ids,
                             }
                         }
                         Err(e) => AppMessage::RoomJoinFailed(e),
@@ -15297,7 +15348,6 @@ impl IcedChat {
                     profile_version: self.friend_profile_versions.get(peer).copied().unwrap_or(0),
                 })
             })
-            .filter(|p| p.online)
             .collect();
         peers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
         let dep = SidebarDiscoveredPeersDependency {
