@@ -1011,6 +1011,7 @@ impl MessageStore {
     ///
     /// Returns `true` if a new row was inserted, `false` if a duplicate
     /// was silently ignored.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_chat_message(
         &self,
         msg_hash: &[u8; 32],

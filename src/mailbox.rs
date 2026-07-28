@@ -32,7 +32,6 @@ use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 use x25519_dalek::{PublicKey as EncryptionPublicKey, StaticSecret};
 
-
 const SCHEMA_VERSION: u32 = 1;
 const NONCE_LEN: usize = 12;
 const SIGNATURE_LEN: usize = Signature::LENGTH;

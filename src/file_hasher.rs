@@ -121,13 +121,11 @@ async fn spawn_blocking_hash(
     expected_mtime: Option<SystemTime>,
 ) -> Result<Option<[u8; 32]>> {
     let path_str = path.to_string_lossy().to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        do_hash(&path, expected_size, expected_mtime)
-    })
-    .await
-    .map_err(|join_err| {
-        anyhow::anyhow!("hashing task panicked for {path_str}: {join_err}")
-    })??;
+    let result = tokio::task::spawn_blocking(move || do_hash(&path, expected_size, expected_mtime))
+        .await
+        .map_err(|join_err| {
+            anyhow::anyhow!("hashing task panicked for {path_str}: {join_err}")
+        })??;
     Ok(result)
 }
 
@@ -144,10 +142,7 @@ fn do_hash(
         if e.kind() == io::ErrorKind::NotFound {
             anyhow::anyhow!("file vanished before hashing: {}", path.display())
         } else {
-            anyhow::anyhow!(
-                "failed to stat {} before hashing: {e:#}",
-                path.display()
-            )
+            anyhow::anyhow!("failed to stat {} before hashing: {e:#}", path.display())
         }
     })?;
 
@@ -167,12 +162,8 @@ fn do_hash(
 
     // ── 2. Stream the file through a blake3 hasher ──────────────────
     // Streaming avoids loading the entire file into memory.
-    let mut file = std::fs::File::open(path).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to open {} for hashing: {e:#}",
-            path.display()
-        )
-    })?;
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("failed to open {} for hashing: {e:#}", path.display()))?;
 
     let mut hasher = blake3::Hasher::new();
     if let Err(e) = io::copy(&mut file, &mut hasher) {

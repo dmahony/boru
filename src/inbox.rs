@@ -686,7 +686,7 @@ impl InboxProtocol {
                     Ok(Some((envelopes, has_more)))
                 } else {
                     // Fall back to emitting an event when no provider is set.
-                    let _ = guard.envelope_tx.send(InboxEvent::SyncRequested {
+                    let _ = guard.envelope_tx.try_send(InboxEvent::SyncRequested {
                         from: verified_sender,
                         since_ms: effective_since,
                     });
@@ -737,10 +737,12 @@ impl InboxProtocol {
                 );
 
                 // 4. Emit event so the frontend can apply the tombstone to the store.
-                let _ = guard.envelope_tx.send(InboxEvent::DeleteTombstoneReceived {
-                    from: verified_sender,
-                    proof,
-                });
+                let _ = guard
+                    .envelope_tx
+                    .try_send(InboxEvent::DeleteTombstoneReceived {
+                        from: verified_sender,
+                        proof,
+                    });
                 Ok(None)
             }
         }

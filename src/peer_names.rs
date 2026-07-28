@@ -173,7 +173,14 @@ pub fn resolve_peer_name<'a>(
     }
     // Fallback: last 5 hex characters of the peer's public key.
     let full = peer.to_string();
-    let suffix: String = full.chars().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect();
+    let suffix: String = full
+        .chars()
+        .rev()
+        .take(5)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     suffix
 }
 

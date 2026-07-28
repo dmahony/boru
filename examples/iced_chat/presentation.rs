@@ -37,7 +37,10 @@ pub(crate) fn continues_message_group(
     if previous_kind == MessageKind::Local {
         // Local entries belong to the current user, even when older data has
         // no sender key attached.
-        if previous_sender != current_sender && previous_sender.is_some() && current_sender.is_some() {
+        if previous_sender != current_sender
+            && previous_sender.is_some()
+            && current_sender.is_some()
+        {
             return false;
         }
     } else if previous_sender != current_sender {

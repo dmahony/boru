@@ -182,7 +182,8 @@ impl NotificationEvent {
         action_target: Option<NotificationActionTarget>,
     ) -> Self {
         let now = now_unix_ms();
-        let notification_id = format!("{:?}:{}:{}",
+        let notification_id = format!(
+            "{:?}:{}:{}",
             event_kind,
             conversation_id.map(|t| t.to_string()).unwrap_or_default(),
             now,
@@ -293,7 +294,10 @@ mod tests {
             label: "Decline".into(),
         });
 
-        assert_eq!(event.action_target, Some(NotificationActionTarget::OpenFriendRequests));
+        assert_eq!(
+            event.action_target,
+            Some(NotificationActionTarget::OpenFriendRequests)
+        );
         assert_eq!(event.actions.len(), 2);
         assert_eq!(event.actions[0].id, "accept");
         assert_eq!(event.actions[1].id, "decline");
@@ -345,18 +349,39 @@ mod tests {
     #[test]
     fn test_event_kind_label() {
         assert_eq!(NotificationEventKind::NewMessage.label(), "New message");
-        assert_eq!(NotificationEventKind::FriendRequest.label(), "Friend request");
-        assert_eq!(NotificationEventKind::ConnectionLost.label(), "Connection lost");
-        assert_eq!(NotificationEventKind::ConnectionRestored.label(), "Connection restored");
+        assert_eq!(
+            NotificationEventKind::FriendRequest.label(),
+            "Friend request"
+        );
+        assert_eq!(
+            NotificationEventKind::ConnectionLost.label(),
+            "Connection lost"
+        );
+        assert_eq!(
+            NotificationEventKind::ConnectionRestored.label(),
+            "Connection restored"
+        );
     }
 
     #[test]
     fn test_action_target_label() {
         let topic = TopicId::from([0u8; 32]);
-        assert_eq!(NotificationActionTarget::OpenConversation(topic).label(), "open-conversation");
-        assert_eq!(NotificationActionTarget::OpenFriendRequests.label(), "open-friend-requests");
-        assert_eq!(NotificationActionTarget::OpenChatList.label(), "open-chat-list");
-        assert_eq!(NotificationActionTarget::OpenSettings.label(), "open-settings");
+        assert_eq!(
+            NotificationActionTarget::OpenConversation(topic).label(),
+            "open-conversation"
+        );
+        assert_eq!(
+            NotificationActionTarget::OpenFriendRequests.label(),
+            "open-friend-requests"
+        );
+        assert_eq!(
+            NotificationActionTarget::OpenChatList.label(),
+            "open-chat-list"
+        );
+        assert_eq!(
+            NotificationActionTarget::OpenSettings.label(),
+            "open-settings"
+        );
     }
 
     #[test]
@@ -397,7 +422,10 @@ mod tests {
             "File transfer completed",
             None,
         );
-        assert_eq!(event.event_kind, NotificationEventKind::FileTransferCompleted);
+        assert_eq!(
+            event.event_kind,
+            NotificationEventKind::FileTransferCompleted
+        );
         assert_eq!(event.title_hint, "Boru Chat");
     }
 
@@ -434,6 +462,9 @@ mod tests {
             "is online again",
             None,
         );
-        assert_eq!(restored.event_kind, NotificationEventKind::ConnectionRestored);
+        assert_eq!(
+            restored.event_kind,
+            NotificationEventKind::ConnectionRestored
+        );
     }
 }

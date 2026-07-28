@@ -511,7 +511,12 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
         loop {
             let batch = self
                 .storage
-                .claim_n_due_outbox(now, &self.lease_owner, self.lease_duration_ms, self.claim_batch_size)
+                .claim_n_due_outbox(
+                    now,
+                    &self.lease_owner,
+                    self.lease_duration_ms,
+                    self.claim_batch_size,
+                )
                 .unwrap_or_default();
 
             if batch.is_empty() {
@@ -548,37 +553,36 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
 
                     // Run lease-extension heartbeat in a background task
                     // if fraction > 0 and the lease is long enough.
-                    let heartbeat_handle = if lease_heartbeat_fraction > 0.0
-                        && lease_duration_ms >= 10_000
-                    {
-                        let interval_ms =
-                            (lease_duration_ms as f64 * lease_heartbeat_fraction) as u64;
-                        let storage_hb = storage.clone();
-                        let msg_id = row.msg_id;
-                        let lease_owner_hb = lease_owner.clone();
-                        Some(tokio::spawn(async move {
-                            loop {
-                                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
-                                let now = unix_ms();
-                                let locked_until = now.saturating_add(lease_duration_ms);
-                                let ok = storage_hb
-                                    .extend_outbox_lease(
-                                        &msg_id,
-                                        peer,
-                                        &lease_owner_hb,
-                                        now,
-                                        locked_until,
-                                    )
-                                    .unwrap_or(false);
-                                if !ok {
-                                    // Lease was lost (cancelled or claimed by another worker).
-                                    break;
+                    let heartbeat_handle =
+                        if lease_heartbeat_fraction > 0.0 && lease_duration_ms >= 10_000 {
+                            let interval_ms =
+                                (lease_duration_ms as f64 * lease_heartbeat_fraction) as u64;
+                            let storage_hb = storage.clone();
+                            let msg_id = row.msg_id;
+                            let lease_owner_hb = lease_owner.clone();
+                            Some(tokio::spawn(async move {
+                                loop {
+                                    tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                                    let now = unix_ms();
+                                    let locked_until = now.saturating_add(lease_duration_ms);
+                                    let ok = storage_hb
+                                        .extend_outbox_lease(
+                                            &msg_id,
+                                            peer,
+                                            &lease_owner_hb,
+                                            now,
+                                            locked_until,
+                                        )
+                                        .unwrap_or(false);
+                                    if !ok {
+                                        // Lease was lost (cancelled or claimed by another worker).
+                                        break;
+                                    }
                                 }
-                            }
-                        }))
-                    } else {
-                        None
-                    };
+                            }))
+                        } else {
+                            None
+                        };
 
                     let outcome: Result<()> = async {
                         let authorized = policy.authorize(peer).await?;
@@ -854,7 +858,7 @@ mod tests {
     #[tokio::test]
     async fn test_different_peers_deliver_concurrently() {
         use crate::storage::Storage;
-        use crate::store::{StoredEnvelope};
+        use crate::store::StoredEnvelope;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
@@ -920,16 +924,11 @@ mod tests {
         }));
 
         let (_trigger, rx) = mpsc::channel(1);
-        let worker = OutboxDeliveryWorker::new(
-            storage.clone(),
-            policy,
-            transport,
-            "test-worker",
-            rx,
-        )
-        .with_max_concurrent(NonZeroUsize::new(3).unwrap())
-        .with_claim_batch_size(3)
-        .with_lease(5_000); // short lease for tests
+        let worker =
+            OutboxDeliveryWorker::new(storage.clone(), policy, transport, "test-worker", rx)
+                .with_max_concurrent(NonZeroUsize::new(3).unwrap())
+                .with_claim_batch_size(3)
+                .with_lease(5_000); // short lease for tests
 
         worker.run_once().await;
 
@@ -1007,16 +1006,11 @@ mod tests {
         }));
 
         let (_trigger, rx) = mpsc::channel(1);
-        let worker = OutboxDeliveryWorker::new(
-            storage.clone(),
-            policy,
-            transport,
-            "test-worker",
-            rx,
-        )
-        .with_max_concurrent(NonZeroUsize::new(3).unwrap())
-        .with_claim_batch_size(3)
-        .with_lease(5_000);
+        let worker =
+            OutboxDeliveryWorker::new(storage.clone(), policy, transport, "test-worker", rx)
+                .with_max_concurrent(NonZeroUsize::new(3).unwrap())
+                .with_claim_batch_size(3)
+                .with_lease(5_000);
 
         worker.run_once().await;
 

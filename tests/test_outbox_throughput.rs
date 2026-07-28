@@ -48,11 +48,7 @@ fn make_conv_id(byte: u8) -> [u8; 32] {
     [byte; 32]
 }
 
-fn sample_envelope(
-    msg_id: MessageId,
-    conv_id: [u8; 32],
-    peer: PublicKey,
-) -> StoredEnvelope {
+fn sample_envelope(msg_id: MessageId, conv_id: [u8; 32], peer: PublicKey) -> StoredEnvelope {
     StoredEnvelope {
         msg_id,
         conversation_id: conv_id,

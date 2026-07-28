@@ -263,6 +263,10 @@ pub mod perf;
 /// automatically evicted when storage limits are exceeded.
 pub mod diagnostics;
 
+/// Relational storage layer with managed migrations.
+pub mod storage;
+/// Durable inbox/outbox storage.
+pub mod store;
 /// Durable offline delivery is owned by `outbox_delivery`; no second retry loop
 /// is registered here.
 /// UI event types emitted by the core layer when persistent state changes.
@@ -271,10 +275,6 @@ pub mod diagnostics;
 /// the affected projection from the repository.
 #[cfg(feature = "net")]
 pub mod ui_events;
-/// Relational storage layer with managed migrations.
-pub mod storage;
-/// Durable inbox/outbox storage.
-pub mod store;
 
 /// Catalogue retrieval protocol — versioned request/response wire wrappers.
 ///

@@ -187,10 +187,7 @@ impl RoomStore {
     /// **DEPRECATED:** room metadata is now in the SQLite unified
     /// storage. This method logs a warning and returns the legacy path
     /// without writing to disk.
-    #[deprecated(
-        since = "0.21.0",
-        note = "SQLite room tables replace room.json writes"
-    )]
+    #[deprecated(since = "0.21.0", note = "SQLite room tables replace room.json writes")]
     pub fn save(&self) -> Result<PathBuf> {
         let path = self.file_path();
         warn!(
@@ -310,8 +307,7 @@ mod tests {
         let dir = temp_dir("secret-roundtrip");
         let mut store = RoomStore::empty_at(&dir);
         let secret = DiscoverySecret::from_bytes([0xAAu8; 32]);
-        store
-            .set_discovery_secret(Some(secret));
+        store.set_discovery_secret(Some(secret));
 
         assert_eq!(store.discovery_secret, Some(secret));
     }
@@ -349,7 +345,10 @@ mod tests {
         // Migration is in-memory only. The disk file remains at v2.
         let raw = fs::read_to_string(room_file_path(&dir)).expect("read migrated file");
         let reread: serde_json::Value = serde_json::from_str(&raw).expect("parse migrated file");
-        assert_eq!(reread["schema_version"], 2, "disk file unchanged by in-memory migration");
+        assert_eq!(
+            reread["schema_version"], 2,
+            "disk file unchanged by in-memory migration"
+        );
     }
 
     #[test]

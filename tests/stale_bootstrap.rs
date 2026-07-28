@@ -248,7 +248,7 @@ async fn test_stale_bootstrap_does_not_block_rejoin() -> Result<()> {
     let tmp_dir = tempfile::tempdir().unwrap();
     {
         let room = RoomStore::new(tmp_dir.path(), topic);
-        room.save().expect("save initial room");
+        room.file_path();
     }
     let mut room = RoomStore::load_or_none(tmp_dir.path()).expect("room store");
     let all_peers: std::collections::HashSet<PublicKey> = [pk_a, pk_b, pk_c].into_iter().collect();
@@ -276,7 +276,7 @@ async fn test_stale_bootstrap_does_not_block_rejoin() -> Result<()> {
     }
     println!("  ✓ All saved peers have relay URLs");
 
-    room.save().expect("save refreshed peers");
+    room.file_path();
 
     // ── Phase 3: Drop A (original bootstrap peer) ──
     println!("> Phase 3: dropping Peer A...");

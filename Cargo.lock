@@ -9710,7 +9710,3 @@ dependencies = [
  "syn 2.0.119",
  "winnow",
 ]
-
-[[patch.unused]]
-name = "irpc-iroh"
-version = "0.17.0"

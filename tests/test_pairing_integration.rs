@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Integration tests for the pairing flow.
 //!
 //! Exercises the full lifecycle: accepting a peer invitation, persisting

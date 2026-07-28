@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! End-to-end coverage for the complete friend-request feature.
 //!
 //! Uses two independent [`FriendRequestStore`]s with real temporary
@@ -8,7 +10,6 @@
 //! `FriendRequestRejected`).
 //!
 //! The data-model validation rules (self-request, duplicate-pending,
-//! unauthorized, invalid transitions) are already covered by
 //! `friend_request.rs` 36 unit tests — this file adds the multi-store
 //! and persistence integration layer the unit tests cannot reach.
 //!

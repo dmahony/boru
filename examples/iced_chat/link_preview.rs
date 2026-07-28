@@ -27,9 +27,8 @@ const URL_PATTERN: &str = r#"(?:(?:https?)://)[^\s<>"`{}|\[\]\\^]+"#;
 
 /// Compiled once, used everywhere — avoids recompiling the regex on every call
 /// to URL detection functions.
-static URL_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(URL_PATTERN).expect("Invalid URL_PATTERN constant")
-});
+static URL_REGEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(URL_PATTERN).expect("Invalid URL_PATTERN constant"));
 
 /// Maximum URL length we'll try to fetch a preview for.
 const MAX_PREVIEW_URL_LEN: usize = 2048;
@@ -543,7 +542,11 @@ impl LinkPreviewCache {
         if let Ok(mut map) = self.inner.lock() {
             // Evict oldest if at capacity (only when inserting a new key)
             if !map.contains_key(url) && map.len() >= MAX_CACHE_SIZE {
-                if let Some(oldest_key) = map.iter().min_by_key(|(_, e)| e.fetched_at).map(|(k, _)| k.clone()) {
+                if let Some(oldest_key) = map
+                    .iter()
+                    .min_by_key(|(_, e)| e.fetched_at)
+                    .map(|(k, _)| k.clone())
+                {
                     map.remove(&oldest_key);
                 }
             }
@@ -618,12 +621,8 @@ mod tests {
     fn test_parse_url_segments_single_url() {
         let segments = parse_url_segments("Check this: https://example.com/page");
         assert_eq!(segments.len(), 2);
-        assert!(
-            matches!(&segments[0], TextSegment::Text(t) if t == "Check this: ")
-        );
-        assert!(
-            matches!(&segments[1], TextSegment::Url(u) if u == "https://example.com/page")
-        );
+        assert!(matches!(&segments[0], TextSegment::Text(t) if t == "Check this: "));
+        assert!(matches!(&segments[1], TextSegment::Url(u) if u == "https://example.com/page"));
     }
 
     #[test]
@@ -641,12 +640,8 @@ mod tests {
     fn test_parse_url_segments_url_at_start() {
         let segments = parse_url_segments("https://example.com is cool");
         assert_eq!(segments.len(), 2);
-        assert!(
-            matches!(&segments[0], TextSegment::Url(u) if u == "https://example.com")
-        );
-        assert!(
-            matches!(&segments[1], TextSegment::Text(t) if t == " is cool")
-        );
+        assert!(matches!(&segments[0], TextSegment::Url(u) if u == "https://example.com"));
+        assert!(matches!(&segments[1], TextSegment::Text(t) if t == " is cool"));
     }
 
     #[test]
@@ -654,9 +649,7 @@ mod tests {
         let segments = parse_url_segments("Visit https://example.com");
         assert_eq!(segments.len(), 2);
         assert!(matches!(&segments[0], TextSegment::Text(t) if t == "Visit "));
-        assert!(
-            matches!(&segments[1], TextSegment::Url(u) if u == "https://example.com")
-        );
+        assert!(matches!(&segments[1], TextSegment::Url(u) if u == "https://example.com"));
     }
 
     #[test]
@@ -734,8 +727,7 @@ mod tests {
 
     #[test]
     fn test_extract_og_image() {
-        let html =
-            r#"<meta property="og:image" content="https://example.com/image.jpg" />"#;
+        let html = r#"<meta property="og:image" content="https://example.com/image.jpg" />"#;
         assert_eq!(
             extract_og_image(html),
             Some("https://example.com/image.jpg".to_string())
@@ -779,9 +771,7 @@ mod tests {
         assert_eq!(urls.len(), 2);
         let segments = parse_url_segments("http://example.com");
         assert_eq!(segments.len(), 1);
-        assert!(
-            matches!(&segments[0], TextSegment::Url(u) if u == "http://example.com")
-        );
+        assert!(matches!(&segments[0], TextSegment::Url(u) if u == "http://example.com"));
     }
 
     #[test]
@@ -896,24 +886,20 @@ mod tests {
             let mut set = IN_FLIGHT_URLS.lock().unwrap();
             set.insert("https://test-guard.example.com".to_string());
         }
-        assert!(
-            IN_FLIGHT_URLS
-                .lock()
-                .unwrap()
-                .contains("https://test-guard.example.com")
-        );
+        assert!(IN_FLIGHT_URLS
+            .lock()
+            .unwrap()
+            .contains("https://test-guard.example.com"));
 
         // Dropping the guard should remove it
         {
             let guard = InFlightGuard::new("https://test-guard.example.com");
             drop(guard);
         }
-        assert!(
-            !IN_FLIGHT_URLS
-                .lock()
-                .unwrap()
-                .contains("https://test-guard.example.com")
-        );
+        assert!(!IN_FLIGHT_URLS
+            .lock()
+            .unwrap()
+            .contains("https://test-guard.example.com"));
     }
 
     /// Disarmed guard does NOT unregister on drop.
@@ -929,12 +915,10 @@ mod tests {
             // guard drops here but should NOT remove the URL
         }
         // URL should still be registered
-        assert!(
-            IN_FLIGHT_URLS
-                .lock()
-                .unwrap()
-                .contains("https://test-disarm.example.com")
-        );
+        assert!(IN_FLIGHT_URLS
+            .lock()
+            .unwrap()
+            .contains("https://test-disarm.example.com"));
         // Cleanup
         IN_FLIGHT_URLS
             .lock()
@@ -964,7 +948,10 @@ mod tests {
     /// Verify the semaphore is configured with the expected permit count.
     #[test]
     fn test_semaphore_max_permits() {
-        assert_eq!(PREVIEW_SEMAPHORE.available_permits(), MAX_CONCURRENT_FETCHES);
+        assert_eq!(
+            PREVIEW_SEMAPHORE.available_permits(),
+            MAX_CONCURRENT_FETCHES
+        );
     }
 
     /// Verify the MAX_CONCURRENT_FETCHES constant is reasonable.

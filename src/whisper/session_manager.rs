@@ -758,8 +758,7 @@ mod tests {
     /// Create a WhisperHandle that won't actually connect anywhere.
     /// Tests that exercise the session manager's state machine don't need
     /// real transport — they just need a handle whose channel doesn't drop.
-    async fn create_dummy_whisper_handle() -> (WhisperHandle, mpsc::Receiver<WhisperEvent>)
-    {
+    async fn create_dummy_whisper_handle() -> (WhisperHandle, mpsc::Receiver<WhisperEvent>) {
         use crate::whisper::WhisperBuilder;
         use iroh::endpoint::presets;
         use iroh::Endpoint;

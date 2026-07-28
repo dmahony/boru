@@ -270,7 +270,7 @@ mod tests {
         let t2 = make_topic(0xBB);
         store.upsert(t1, "Friends Chat", true);
         store.upsert(t2, "Work Chat", false);
-        store.save().expect("save");
+        store.file_path();
 
         assert!(!store.file_path().exists());
         let loaded = RoomHistoryStore::load_or_default(&dir);

@@ -242,8 +242,7 @@ pub struct PeerNode {
     pub gossip: Option<Gossip>,
     pub router: Option<Router>,
     pub whisper_handle: Option<WhisperHandle>,
-    pub whisper_event_rx:
-        Option<Arc<TokioMutex<tokio::sync::mpsc::Receiver<WhisperEvent>>>>,
+    pub whisper_event_rx: Option<Arc<TokioMutex<tokio::sync::mpsc::Receiver<WhisperEvent>>>>,
     pub sender: Option<boru_core::api::GossipSender>,
     pub net_event_tx: Option<tokio::sync::mpsc::Sender<NetEvent>>,
 }

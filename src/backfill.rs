@@ -356,7 +356,12 @@ async fn serve_backfill(connection: Connection, store: &Mutex<ChatHistoryStore>)
             let skipped = total_available.saturating_sub(filtered.len()) as u32;
             let count = filtered.len();
 
-            trace!(count, skipped, truncated_by_bytes, "backfill: sending response");
+            trace!(
+                count,
+                skipped,
+                truncated_by_bytes,
+                "backfill: sending response"
+            );
 
             let response = BackfillResponse {
                 messages: filtered,
@@ -509,9 +514,16 @@ async fn backfill_actor(endpoint: Endpoint, mut cmd_rx: mpsc::Receiver<Cmd>) {
                 safety,
                 reply,
             } => {
-                let result =
-                    do_backfill_request(&endpoint, addr, since_ms, max_messages, topic, net_tx, safety)
-                        .await;
+                let result = do_backfill_request(
+                    &endpoint,
+                    addr,
+                    since_ms,
+                    max_messages,
+                    topic,
+                    net_tx,
+                    safety,
+                )
+                .await;
                 let _ = reply.send(result);
             }
         }
@@ -529,7 +541,7 @@ async fn backfill_actor(endpoint: Endpoint, mut cmd_rx: mpsc::Receiver<Cmd>) {
 ///
 /// Total messages across all rounds are capped at
 /// [`CLIENT_MAX_BACKFILL_MESSAGES`] for defense-in-depth.
-
+///
 /// Single backfill round: connect to peer, send request, read and return
 /// the response.  Has an explicit return type so it can be wrapped in
 /// `tokio::time::timeout` without type-inference issues.
@@ -764,7 +776,7 @@ mod tests {
         let decoded: BackfillResponse = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.messages.len(), 2);
         assert_eq!(decoded.skipped, 10);
-        assert_eq!(decoded.truncated_by_bytes, false);
+        assert!(!decoded.truncated_by_bytes);
         assert_eq!(decoded.messages[0].as_ref(), &[1u8; 64]);
     }
 

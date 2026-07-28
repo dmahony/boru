@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Comprehensive integration tests for the refactored friend-request and
 //! conversation model.
 //!

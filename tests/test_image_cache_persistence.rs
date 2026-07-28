@@ -58,7 +58,7 @@ fn image_cache_round_trip_rehydrates_after_restart_and_blocks_other_users() {
     entry.image_identifier = Some(image_id.clone());
     entry.image_bytes = Some(image_bytes.clone());
     history.push_with_id(entry);
-    let history_path = history.save().unwrap();
+    let history_path = history.file_path();
     assert!(history_path.is_file());
 
     let loaded_history = ChatHistoryStore::load_or_default(dir.path());
@@ -78,7 +78,7 @@ fn image_cache_round_trip_rehydrates_after_restart_and_blocks_other_users() {
     reloaded_entry.image_bytes = None;
     let mut reloaded_history = ChatHistoryStore::empty_at(dir.path());
     reloaded_history.push(reloaded_entry.clone());
-    reloaded_history.save().unwrap();
+    reloaded_history.file_path();
 
     let restarted_history = ChatHistoryStore::load_or_default(dir.path());
     assert_eq!(restarted_history.entries.len(), 1);

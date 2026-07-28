@@ -1639,13 +1639,9 @@ pub async fn prepare_referenced_file(
     let (file_data, file_blake3_bytes) = tokio::task::spawn_blocking(move || {
         let data = fs::read(&src_for_worker).map_err(|e| {
             if e.kind() == io::ErrorKind::PermissionDenied {
-                anyhow::anyhow!(
-                    "permission denied reading referenced source: {src_for_worker}"
-                )
+                anyhow::anyhow!("permission denied reading referenced source: {src_for_worker}")
             } else {
-                anyhow::anyhow!(
-                    "failed to read referenced source {src_for_worker}: {e:#}"
-                )
+                anyhow::anyhow!("failed to read referenced source {src_for_worker}: {e:#}")
             }
         })?;
         let hash = blake3::hash(&data);

@@ -366,10 +366,13 @@ impl FriendPingActor {
                 // Frontends suppress the "is now ONLINE/OFFLINE" system message
                 // for friends that have no prior history in the store, avoiding
                 // a startup notification burst.
-                let _ = self.event_tx.send(FriendEvent::StatusChanged {
-                    peer,
-                    status: new_status,
-                }).await;
+                let _ = self
+                    .event_tx
+                    .send(FriendEvent::StatusChanged {
+                        peer,
+                        status: new_status,
+                    })
+                    .await;
             }
             state.status = new_status;
             if let Some(addr) = successful_addr.filter(|addr| !addr.addrs.is_empty()) {

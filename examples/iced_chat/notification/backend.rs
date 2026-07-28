@@ -4,7 +4,7 @@
 //! notifications using the native notification API. A no-op backend is
 //! provided for unsupported platforms and tests.
 
-use crate::notification::event::{NotificationActionTarget, NotificationEvent, NotificationPriority};
+use crate::notification::event::{NotificationActionTarget, NotificationPriority};
 
 /// A rendered notification ready for display by a backend.
 ///

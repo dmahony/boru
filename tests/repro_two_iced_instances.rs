@@ -101,10 +101,7 @@ async fn spawn_peer(
     Ok((router, ep.clone(), ep.secret_key().clone(), gossip, pk))
 }
 
-fn drain_net(
-    rx: &Arc<Mutex<tokio::sync::mpsc::Receiver<NetEvent>>>,
-    sim: &mut TestPeer,
-) -> usize {
+fn drain_net(rx: &Arc<Mutex<tokio::sync::mpsc::Receiver<NetEvent>>>, sim: &mut TestPeer) -> usize {
     let mut count = 0;
     while let Ok(event) = rx.try_lock().unwrap().try_recv() {
         count += 1;
