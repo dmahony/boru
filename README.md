@@ -62,66 +62,80 @@ All persistent data lives under a single data directory, resolved in this order:
 2. `BORU_DATA_DIR` environment variable (also checks legacy `BORU_CHAT_DATA_DIR` for backward compatibility)
 3. `$XDG_DATA_HOME/boru` (typically `~/.local/share/boru/`)
 4. `$PWD/.boru`
-###
-File Layout
+
+### File Layout
 
 ```text
 <data_dir>/
-├── boru.db                # SQLite: inbox, outbox, file objects, attachments
-├── chat_history.json       # Per-room chat message history
-├── outbox.json             # Outgoing message delivery state
-├── conversations.json      # Conversation metadata
-├── rooms.json              # Room topic registry
-├── friends.json            # Friend contact list
-├── friend_requests.json    # Friend request state
-├── mailbox.json            # Encrypted offline message delivery
-├── settings.json           # UI / app preferences
-├── user_profile.json       # Profile settings + shared file metadata
-├── secret_key.txt          # Node identity secret key
-├── message_store.db        # Legacy SQLite (migration source, read-only)
-└── files/                  # Per-user image store
+├── boru.db                # SQLite authoritative store (V10 schema)
+├── chat_history.json       # Legacy JSON — reads only (writes deprecated)
+├── outbox.json             # Legacy JSON — reads only (writes deprecated)
+├── conversations.json      # Legacy JSON — reads only (writes deprecated)
+├── rooms.json              # Legacy JSON — reads only (writes deprecated)
+├── friends.json            # Legacy JSON — reads only (writes deprecated)
+├── friend_requests.json    # Legacy JSON — reads only (writes deprecated)
+├── mailbox.json            # Legacy JSON — reads only (writes deprecated)
+├── settings.json           # UI / app preferences (JSON, active)
+├── user_profile.json       # Profile display name (JSON, active)
+├── secret_key.txt          # Node identity secret key (hex-encoded)
+├── message_store.db        # Legacy SQLite V1 — migration source (read-only)
+└── files/                  # Per-user image store (content-addressed)
     └── <user-hash>/<content-hash>.<ext>
 ```
 
-### Storage Layers
+### Storage Architecture
 
-| Layer | Store | Backend | Purpose |
+| Store | Backend | Purpose | Status |
 |---|---|---|---|
-| **Primary relational** | `Storage` (SQLite) | `boru.db` | Inbox/outbox, contacts, file objects, attachments, shared files, permissions, downloads |
-| **Chat history** | `ChatHistoryStore` | `chat_history.json` | Per-room message history (JSON, authoritative) |
-| **Outgoing queue** | `OutboxStore` | `outbox.json` | Delivery state tracking (JSON, still active in GUI) |
-| **Conversations** | `ConversationStore` | `conversations.json` | Conversation metadata (JSON) |
-| **Friends** | `FriendsStore` | `friends.json` | Friend list (JSON) |
-| **Friend requests** | `FriendRequestStore` | `friend_requests.json` | Pending/accepted/declined requests (JSON) |
-| **Mailbox** | `MailboxStore` | `mailbox.json` | Encrypted offline-message envelopes (JSON) |
-| **Room history** | `RoomHistoryStore` | `rooms.json` | Topic registry (JSON) |
-| **User profile** | `UserProfile` | `user_profile.json` | Display name, sharing settings (JSON) |
-| **Images** | `ImageStore` | `files/` | Content-addressed user-uploaded images |
+| `Storage` | SQLite (`boru.db`) | **Authoritative** — inbox, outbox, contacts, sync cursors, file objects, attachments, DM messages, outgoing messages, shared files, permissions, downloads, profile manifest state, tombstones, sync dedup, acknowledgements | **Active** (V10 schema) |
+| `ChatHistoryStore` | `chat_history.json` | Per-room chat message history | Legacy — reads only |
+| `OutboxStore` | `outbox.json` | Outgoing message delivery state | Legacy — reads only |
+| `ConversationStore` | `conversations.json` | Conversation metadata | Legacy — reads only |
+| `FriendsStore` | `friends.json` | Friend contact list with addresses | Legacy — reads only |
+| `FriendRequestStore` | `friend_requests.json` | Pending/accepted/declined requests | Legacy — reads only |
+| `MailboxStore` | `mailbox.json` | Encrypted offline-message envelopes | Legacy — reads only |
+| `RoomHistoryStore` | `rooms.json` | Topic registry | Legacy — reads only |
+| `UserProfile` | `user_profile.json` | Display name, sharing settings | Active |
+| `ImageStore` | `files/` | Content-addressed user-uploaded images | Active |
 
-### Key Design Properties
+### Key Properties
 
+- **SQLite is authoritative** — all persistent message, file, and delivery state
+  lives in `boru.db`. Legacy JSON files remain on disk for backward-compatible
+  reads during a limited compatibility period, but their `save()` methods are
+  no-ops that log deprecation warnings.
 - **Exactly-once local persistence** — `INSERT … ON CONFLICT DO NOTHING`
-  prevents duplicate message storage at the SQLite level.
-- **At-least-once transport** — outbox rows survive crashes (Sent→Pending
-  recovery), retry with configurable backoff, and ACK-based dedup at the
-  recipient.
-- **WAL mode + integrity checks** — crash-safe writes, automatic corruption
-  detection on open.
-- **Forward-only migrations** — schema is tracked; opening a newer DB on an
-  older binary is safely rejected.
+  prevents duplicate message storage at every SQLite write path.
+- **At-least-once transport delivery** — outbox rows survive crashes (Sent→Pending
+  and Sending→Pending recovery), retry with exponential backoff, lease-based
+  worker claiming, and ACK-based dedup at the recipient.
+- **WAL mode + integrity checks** — crash-safe writes via `PRAGMA journal_mode=WAL`,
+  automatic corruption detection via `PRAGMA integrity_check` on every open.
+- **Forward-only migrations** — schema version is tracked in `schema_version`
+  table; opening a newer DB on an older binary is safely rejected with a clear
+  error. Partial migration recovery re-runs only unapplied migrations.
 - **Content-addressed attachments** — file objects keyed by blake3 hash for
-  deduplication and integrity.
-- **Plaintext at rest** — ciphertext blobs are stored unencrypted in SQLite;
-  transport-layer encryption (QUIC/TLS 1.3) protects messages in flight.
-- **Restrictive permissions** — data directory and database are `0o700`/`0o600`
-  on Unix.
+  deduplication and integrity verification.
+- **Plaintext at rest** — database file is unencrypted on disk. Transport-layer
+  encryption (QUIC/TLS 1.3) protects messages in flight. Ciphertext blobs in
+  the inbox table cannot be decrypted without the recipient's key, but anyone
+  with filesystem access to `boru.db` can read the encrypted byte payloads.
+- **Restrictive permissions** — data directory `0o700`, database file `0o600`.
 
 ### Schema Versions
 
 | Version | What's added |
 |---|---|
 | 1 | `inbox`, `outbox`, `contacts`, `sync_cursor` (message delivery) |
-| 2 | `file_objects`, `message_attachments`, `shared_files`, `file_collections`, `file_collection_items`, `shared_file_permissions`, `downloads`, `profile_manifest_state` |
+| 2 | `file_objects`, `message_attachments`, `shared_files`, `file_collections`, `file_collection_items`, `shared_file_permissions`, `downloads`, `profile_manifest_state`, `dm_*` tables |
+| 3 | Outgoing DM tables (`dm_conversations`, `dm_sender_sequences`, `dm_messages`, `dm_outbox`) as standalone migration |
+| 4 | Outbox worker leases (`lease_owner`, `locked_until_ms`, `expires_at_ms` columns + `idx_outbox_next_attempt`) |
+| 5 | DM acknowledgements (`acknowledged_at_ms` on `dm_messages`, `dm_acknowledgements` table) |
+| 6 | Sync dedup table (`sync_dedup` — prevents re-serving same envelopes) |
+| 7 | File verification & replacements (`file_verification`, `file_replacements` tables) |
+| 8 | Download paths (`temp_path`, `destination_path` on `downloads`) |
+| 9 | File source paths (`source_path` on `file_objects`) |
+| 10 | GUI outgoing queue (`outgoing_messages` table — replaces `outbox.json`) |
 
 See [`docs/message-storage-design.md`](docs/message-storage-design.md) for
 the full storage architecture.
@@ -243,14 +257,13 @@ ready for chat only after the room is joined and the peer/mesh status reports a
 connected gossip neighbour; a process being bound to its MCP or GUI port is
 not sufficient readiness evidence.
 
-The GUI's active conversation and outgoing-queue source of truth remains the
-JSON-backed `ChatHistoryStore` and `OutboxStore`. The SQLite `Storage` database
-is the durable core store for inbox/outbox envelopes, files, profiles, and
-crash recovery, and is independently validated by the storage integration
-tests. Do not treat the JSON and SQLite files as two independently writable
-authorities: compare them only through the documented import/migration and
-integration paths. A queue entry must be persisted before acknowledging a
-send, and a restart must reload it before retry delivery.
+All persistent message, delivery, and file state lives in the SQLite `boru.db`
+database. Legacy JSON stores (`chat_history.json`, `outbox.json`, etc.) remain
+on disk for backward-compatible reads only — their `save()` methods are no-ops.
+The GUI reads from SQLite for the outgoing message queue (via the
+`outgoing_messages` table, added in schema V10). Do not rely on the JSON files
+as a write target; treat them as a compatibility layer for existing installations
+that have not yet migrated.
 
 Recommended local gate commands (run from the repository root):
 

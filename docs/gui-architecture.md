@@ -129,20 +129,22 @@ The GUI connects to the networking layer via:
 
 ## State Persistence
 
-The GUI uses a mix of persistence backends:
+The GUI uses SQLite as its authoritative persistence backend. Legacy JSON stores
+remain on disk for backward-compatible reads only — their `save()` methods are
+no-ops that log deprecation warnings.
 
-| Store | Backend | Purpose |
-|-------|---------|---------|
-| `Storage` (SQLite) | `boru.db` | Inbox/outbox, file objects, file library, operations progress |
-| `ChatHistoryStore` (JSON) | `chat_history.json` | Per-room chat history (active frontend) |
-| `OutboxStore` (JSON) | `outbox.json` | Outgoing message delivery state (active frontend) |
-| `ConversationStore` (JSON) | `conversations.json` | Conversation metadata |
-| `FriendsStore` (JSON) | `friends.json` | Friend contact list |
-| `FriendRequestStore` (JSON) | `friend_requests.json` | Friend request state |
-| `MailboxStore` (JSON) | `mailbox.json` | Encrypted offline envelopes |
-| `RoomStore` (JSON) | `rooms.json` | Room topic registry |
-| `UserProfile` (JSON) | `profile.json` | Display name, sharing settings |
-| `ImageStore` (disk) | `files/` | Content-addressed images |
+| Store | Backend | Purpose | Status |
+|---|---|---|---|
+| `Storage` (SQLite) | `boru.db` (V10) | **Authoritative** — inbox, outbox, file objects, file library, operations progress, DM messages, outgoing messages | **Active** |
+| `ChatHistoryStore` (JSON) | `chat_history.json` | Per-room chat history | Legacy (reads only) |
+| `OutboxStore` (JSON) | `outbox.json` | Outgoing message delivery state | Legacy (reads only); replaced by SQLite `outgoing_messages` table (V10) |
+| `ConversationStore` (JSON) | `conversations.json` | Conversation metadata | Legacy (reads only) |
+| `FriendsStore` (JSON) | `friends.json` | Friend contact list | Legacy (reads only) |
+| `FriendRequestStore` (JSON) | `friend_requests.json` | Friend request state | Legacy (reads only) |
+| `MailboxStore` (JSON) | `mailbox.json` | Encrypted offline envelopes | Legacy (reads only) |
+| `RoomStore` (JSON) | `rooms.json` | Room topic registry | Legacy (reads only) |
+| `UserProfile` (JSON) | `profile.json` | Display name, sharing settings | Active |
+| `ImageStore` (disk) | `files/` | Content-addressed images | Active |
 
 ## Key Design Decisions
 
