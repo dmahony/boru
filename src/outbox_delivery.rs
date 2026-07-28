@@ -487,12 +487,16 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
         let now = self.clock.now_ms();
         let _ = self.storage.expire_outbox(now);
         let _ = self.storage.recover_stale_outbox_leases(now);
+        let _ = self.storage.recover_stale_sending_deliveries(now);
 
         if self.max_concurrent.get() <= 1 {
-            // ── Sequential path (backward-compatible) ────────────────
-            let rows = self.storage.fetch_due_outbox(now).unwrap_or_default();
+            // ── Sequential path ─────────────────────────────────────
+            let rows = self
+                .storage
+                .claim_pending_deliveries(self.claim_limit, now)
+                .unwrap_or_default();
             let mut attempted = 0;
-            for row in rows.into_iter().take(self.claim_limit as usize) {
+            for row in rows {
                 attempted += 1;
                 self.process_claim(row).await;
             }
@@ -639,6 +643,7 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
     pub async fn run_once_for_peer(&self, peer: PublicKey, max_attempts: u32) -> usize {
         let now = unix_ms();
         let _ = self.storage.recover_stale_outbox_leases(now);
+        let _ = self.storage.recover_stale_sending_deliveries(now);
         let _ = self.storage.expire_outbox(now);
         let mut attempted = 0;
         while attempted < max_attempts.max(1) {

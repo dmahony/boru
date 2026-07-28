@@ -506,7 +506,7 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         let now = crate::chat_core::now_ms() as i64;
 
-        // Reset crash-left "Sent" rows back to "Pending".
+        // Recover crash-left Sent rows back to Pending.
         conn.execute(
             "UPDATE outbox SET
                 status = ?1,
@@ -520,6 +520,21 @@ impl Storage {
             ],
         )
         .std_context("recover crash-left Sent outbox")?;
+
+        // Recover crash-left Sending rows back to Pending.
+        conn.execute(
+            "UPDATE outbox SET
+                status = ?1,
+                next_attempt_at_ms = ?2,
+                last_error_code = 'crash_recovered'
+             WHERE status = ?3",
+            params![
+                crate::store::DeliveryStatus::Pending as u8,
+                now,
+                crate::store::DeliveryStatus::Sending as u8,
+            ],
+        )
+        .std_context("recover crash-left Sending outbox")?;
 
         // Reset stale Pending timestamps to now.
         conn.execute(
@@ -1679,6 +1694,10 @@ impl Storage {
     }
 
     /// Fetch pending messages due for retry.
+    ///
+    /// Excludes ``Acked``, ``Expired``, and ``Sending`` rows — the latter
+    /// are claimed by an in-flight delivery and will become eligible again
+    /// after recovery if the worker crashes.
     pub fn fetch_due_outbox(&self, now_ms: u64) -> Result<Vec<OutboxRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
@@ -1687,16 +1706,17 @@ impl Storage {
                         next_attempt_at_ms, last_error_code, last_attempt_at_ms,
                         lease_owner, locked_until_ms, expires_at_ms
                  FROM outbox
-                 WHERE status != ?1 AND status != ?2 AND next_attempt_at_ms <= ?3
-                   AND (locked_until_ms IS NULL OR locked_until_ms <= ?3)
+                 WHERE status != ?1 AND status != ?2 AND status != ?3 AND next_attempt_at_ms <= ?4
+                   AND (locked_until_ms IS NULL OR locked_until_ms <= ?4)
                  ORDER BY rowid
-                 LIMIT ?4",
+                 LIMIT ?5",
             )
             .std_context("prepare fetch_due_outbox")?;
         let mut rows = stmt
             .query(params![
                 DeliveryStatus::Acked as u8,
                 DeliveryStatus::Expired as u8,
+                DeliveryStatus::Sending as u8,
                 now_ms as i64,
                 MAX_OUTBOX_CLAIM_LIMIT as i64,
             ])
@@ -1880,6 +1900,135 @@ impl Storage {
 
         tx.commit().std_context("commit batch outbox claim")?;
         Ok(results)
+    }
+
+    /// Atomically claim due `Pending` or `Sent` outbox rows whose
+    /// `next_attempt_at_ms` has arrived, transitioning them to `Sending`
+    /// and setting `last_attempt_at_ms` to `now_ms`.
+    ///
+    /// Returns the claimed rows in natural order (oldest `next_attempt_at_ms`
+    /// first).  An empty vec means no claimable rows were found.
+    ///
+    /// This is the durable claim primitive for single-owner workers.
+    /// The `Sending` status acts as a per-row lock that prevents two workers
+    /// from concurrently picking up the same row.  Stale `Sending` rows are
+    /// recovered by [`recover_stale_sending_deliveries`].
+    pub fn claim_pending_deliveries(&self, limit: u32, now_ms: u64) -> Result<Vec<OutboxRow>> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn
+            .unchecked_transaction()
+            .std_context("begin claim_pending_deliveries")?;
+        let limit = limit.clamp(1, MAX_OUTBOX_CLAIM_LIMIT) as i64;
+
+        // Select candidates — due Pending or Sent rows.
+        let mut candidates: Vec<(MessageId, Vec<u8>)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT msg_id, recipient_device_id FROM outbox
+                     WHERE (status = ?1 OR status = ?2) AND next_attempt_at_ms <= ?3
+                       AND (locked_until_ms IS NULL OR locked_until_ms <= ?3)
+                     ORDER BY next_attempt_at_ms, rowid LIMIT ?4",
+                )
+                .std_context("prepare claim_pending_deliveries select")?;
+            let mut rows = stmt
+                .query(params![
+                    DeliveryStatus::Pending as u8,
+                    DeliveryStatus::Sent as u8,
+                    now_ms as i64,
+                    limit,
+                ])
+                .std_context("query claim_pending_deliveries candidates")?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().std_context("next claim_pending row")? {
+                let msg_id: MessageId = row.get(0).std_context("get msg_id")?;
+                let recipient: Vec<u8> = row.get(1).std_context("get recipient")?;
+                out.push((msg_id, recipient));
+            }
+            out
+        };
+
+        if candidates.is_empty() {
+            tx.commit()
+                .std_context("commit empty claim_pending_deliveries")?;
+            return Ok(Vec::new());
+        }
+
+        // Atomically transition each candidate to Sending.
+        candidates.retain(|(msg_id, recipient)| {
+            tx.execute(
+                "UPDATE outbox SET status = ?1, last_attempt_at_ms = ?2
+                 WHERE msg_id = ?3 AND recipient_device_id = ?4
+                   AND (status = ?5 OR status = ?6)",
+                params![
+                    DeliveryStatus::Sending as u8,
+                    now_ms as i64,
+                    msg_id.as_slice(),
+                    recipient,
+                    DeliveryStatus::Pending as u8,
+                    DeliveryStatus::Sent as u8,
+                ],
+            )
+            .unwrap_or(0)
+                == 1
+        });
+
+        // Fetch full row data for successfully claimed entries.
+        let mut results = Vec::with_capacity(candidates.len());
+        for (msg_id, recipient) in &candidates {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT msg_id, recipient_device_id, status, attempts,
+                            next_attempt_at_ms, last_error_code, last_attempt_at_ms,
+                            lease_owner, locked_until_ms, expires_at_ms
+                     FROM outbox WHERE msg_id = ?1 AND recipient_device_id = ?2",
+                )
+                .std_context("prepare claim_pending row fetch")?;
+            let mut rows = stmt
+                .query(params![msg_id.as_slice(), recipient])
+                .std_context("query claim_pending row")?;
+            if let Some(row_ref) = rows.next().std_context("next claim_pending fetched row")? {
+                if let Ok(row) = row_to_outbox(row_ref) {
+                    results.push(row);
+                }
+            }
+        }
+
+        tx.commit()
+            .std_context("commit claim_pending_deliveries")?;
+        Ok(results)
+    }
+
+    /// Recover rows stuck in `Sending` back to `Pending` so they become
+    /// eligible for re-claiming.  A row is considered stale when its
+    /// `last_attempt_at_ms` is older than `stale_age_ms` before `now_ms`.
+    ///
+    /// The retry count is preserved; only the status and error code are
+    /// updated.  A `SendingRecovered` diagnostic event is recorded with
+    /// the count of recovered rows.
+    pub fn recover_stale_sending_deliveries(&self, now_ms: u64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn
+            .execute(
+                "UPDATE outbox SET status = ?1, last_error_code = 'sending_recovered'
+                 WHERE status = ?2
+                   AND last_attempt_at_ms IS NOT NULL
+                   AND last_attempt_at_ms < ?3",
+                params![
+                    DeliveryStatus::Pending as u8,
+                    DeliveryStatus::Sending as u8,
+                    (now_ms as i64).saturating_sub(60_000), // default stale age: 60s
+                ],
+            )
+            .std_context("recover stale Sending deliveries")?;
+        if changed > 0 {
+            crate::chat_core::DIAGNOSTICS.record(
+                None,
+                crate::diagnostics::DiagnosticEventKind::SendingRecovered {
+                    count: changed as usize,
+                },
+            );
+        }
+        Ok(changed as usize)
     }
 
     /// Atomically claim the oldest due row addressed to one peer.
@@ -6103,5 +6252,199 @@ mod tests {
                 "removed file should not appear in cached files"
             );
         }
+    }
+
+    // ── Durable delivery claiming (Phase 6) ─────────────────────────
+
+    /// Claim a pending outbox row via `claim_pending_deliveries`:
+    /// status transitions from Pending → Sending, `last_attempt_at_ms` is
+    /// set, and the returned row has the `Sending` status.
+    #[test]
+    fn test_claim_pending_deliveries_transitions_to_sending() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [40u8; 32];
+        let peer = random_public_key();
+        storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
+
+        let claimed = storage
+            .claim_pending_deliveries(5, 100)
+            .unwrap();
+        assert_eq!(claimed.len(), 1, "should claim 1 row");
+        let row = &claimed[0];
+        assert_eq!(row.msg_id, msg_id);
+        assert_eq!(row.status, DeliveryStatus::Sending);
+        assert_eq!(row.last_attempt_at_ms, Some(100));
+        assert_eq!(row.attempts, 0);
+    }
+
+    /// Two workers calling `claim_pending_deliveries` on the same row:
+    /// only the first succeeds, the second gets nothing.
+    #[test]
+    fn test_claim_pending_deliveries_two_competitors_one_wins() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [41u8; 32];
+        let peer = random_public_key();
+        storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
+
+        // Worker A claims
+        let claimed_a = storage
+            .claim_pending_deliveries(5, 100)
+            .unwrap();
+        assert_eq!(claimed_a.len(), 1);
+        assert_eq!(claimed_a[0].status, DeliveryStatus::Sending);
+
+        // Worker B tries to claim — row is now Sending, should get nothing
+        let claimed_b = storage
+            .claim_pending_deliveries(5, 100)
+            .unwrap();
+        assert!(claimed_b.is_empty(), "worker B should not claim a Sending row");
+    }
+
+    /// Rows in `Sent` status (from a prior failed attempt) are also
+    /// eligible for claiming when `next_attempt_at_ms` has arrived.
+    #[test]
+    fn test_claim_pending_deliveries_includes_sent_rows() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [42u8; 32];
+        let peer = random_public_key();
+
+        // Insert a row directly in Sent status with due next_attempt
+        let conn = storage.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO outbox (msg_id, recipient_device_id, status, attempts, next_attempt_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                msg_id.as_slice(),
+                peer.as_bytes(),
+                DeliveryStatus::Sent as u8,
+                1,    // one prior attempt
+                100,  // due now
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let claimed = storage
+            .claim_pending_deliveries(5, 100)
+            .unwrap();
+        assert_eq!(claimed.len(), 1, "should claim the Sent row");
+        assert_eq!(claimed[0].status, DeliveryStatus::Sending);
+        assert_eq!(claimed[0].attempts, 1, "retry count preserved");
+    }
+
+    /// Rows scheduled in the future are not claimable.
+    #[test]
+    fn test_claim_pending_deliveries_respects_future_timestamps() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [43u8; 32];
+        let peer = random_public_key();
+        storage.enqueue_outbox(&msg_id, peer, 200).unwrap(); // due at 200
+
+        let claimed = storage
+            .claim_pending_deliveries(5, 100)
+            .unwrap();
+        assert!(claimed.is_empty(), "row is not due until 200");
+    }
+
+    /// A delivered-and-acked row is terminal — no claiming occurs.
+    #[test]
+    fn test_claim_pending_deliveries_excludes_acked_rows() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [44u8; 32];
+        let peer = random_public_key();
+        storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
+        storage.mark_acked(&msg_id, peer).unwrap();
+
+        let claimed = storage
+            .claim_pending_deliveries(5, 200)
+            .unwrap();
+        assert!(claimed.is_empty(), "acked rows should not be claimable");
+    }
+
+    /// Recover stale Sending rows — those stuck in Sending with an old
+    /// `last_attempt_at_ms` are moved back to Pending.
+    #[test]
+    fn test_recover_stale_sending_deliveries() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [45u8; 32];
+        let peer = random_public_key();
+        storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
+
+        // Manually put the row in Sending with a stale last_attempt_at_ms
+        let conn = storage.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE outbox SET status = ?1, last_attempt_at_ms = ?2
+             WHERE msg_id = ?3",
+            params![
+                DeliveryStatus::Sending as u8,
+                50i64,  // last_attempt_at_ms = 50 (stale, cutoff = now - 60s)
+                msg_id.as_slice(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Recover at t=70000 (stale cutoff = 10000, so 50 < 10000 = stale)
+        let recovered = storage
+            .recover_stale_sending_deliveries(70000)
+            .unwrap();
+        assert_eq!(recovered, 1, "should recover 1 stale row");
+
+        // Now the row should be back in Pending and claimable
+        let claimed = storage
+            .claim_pending_deliveries(5, 70000)
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].status, DeliveryStatus::Sending);
+    }
+
+    /// Fresh Sending rows (claimed recently) are NOT recovered.
+    #[test]
+    fn test_recover_stale_sending_does_not_touch_recent_rows() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [46u8; 32];
+        let peer = random_public_key();
+        storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
+
+        // Claim the row (puts it in Sending with last_attempt_at_ms = 1000)
+        let claimed = storage
+            .claim_pending_deliveries(5, 1000)
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+
+        // Recover at t=1020 — stale cutoff = 1020 - 60000 = -58980
+        // last_attempt_at_ms=1000 > -58980, so NOT stale
+        let recovered = storage
+            .recover_stale_sending_deliveries(1020)
+            .unwrap();
+        assert_eq!(recovered, 0, "recently claimed row should not be recovered");
+    }
+
+    /// `claim_pending_deliveries` respects the lease guard: a row locked by
+    /// another worker (via the lease mechanism) is not claimable.
+    #[test]
+    fn test_claim_pending_deliveries_respects_locks() {
+        let storage = Storage::memory().unwrap();
+        let msg_id = [47u8; 32];
+        let peer = random_public_key();
+        storage.enqueue_outbox(&msg_id, peer, 100).unwrap();
+
+        // Leased by another worker (as if claimed via claim_due_outbox)
+        storage
+            .claim_due_outbox(100, "lease-worker", 30_000, 1)
+            .unwrap();
+
+        // claim_pending_deliveries should skip the leased row
+        let claimed = storage
+            .claim_pending_deliveries(5, 100)
+            .unwrap();
+        assert!(claimed.is_empty(), "leased row should not be claimable");
+
+        // After lease expires, it becomes claimable
+        let claimed2 = storage
+            .claim_pending_deliveries(5, 100 + 30_001)
+            .unwrap();
+        assert_eq!(claimed2.len(), 1);
+        assert_eq!(claimed2[0].status, DeliveryStatus::Sending);
     }
 }

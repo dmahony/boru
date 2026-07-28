@@ -271,6 +271,10 @@ pub enum DiagnosticEventKind {
         peer_id: Option<String>,
         delivery_state: String,
     },
+    /// A delivery stuck in ``Sending`` was recovered back to ``Pending``.
+    SendingRecovered {
+        count: usize,
+    },
 
     // ── Catalogue events ─────────────────────────────────────────
     /// A catalogue fetch from a remote peer has started.

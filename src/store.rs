@@ -26,6 +26,10 @@ pub enum DeliveryStatus {
     Sent = 1,
     Acked = 2,
     Expired = 3,
+    /// A row currently being delivered by one worker.  If a row stays in
+    /// ``Sending`` past a reasonable deadline, a recovery pass moves it
+    /// back to ``Pending`` so another worker can retry.
+    Sending = 4,
 }
 
 impl TryFrom<u8> for DeliveryStatus {
@@ -37,6 +41,7 @@ impl TryFrom<u8> for DeliveryStatus {
             1 => Ok(DeliveryStatus::Sent),
             2 => Ok(DeliveryStatus::Acked),
             3 => Ok(DeliveryStatus::Expired),
+            4 => Ok(DeliveryStatus::Sending),
             _ => Err(anyhow!("invalid status code")),
         }
     }
@@ -1584,18 +1589,20 @@ impl MessageStore {
     }
 
     /// Fetch pending messages that are due for a retry attempt.
+    /// Excludes ``Acked``, ``Expired``, and ``Sending`` rows.
     pub fn fetch_due_outbox(&self, now_ms: u64) -> Result<Vec<OutboxRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT msg_id, recipient_device_id, status, attempts, next_attempt_at_ms, last_error_code, last_attempt_at_ms 
              FROM outbox 
-             WHERE status != ?1 AND status != ?2 AND next_attempt_at_ms <= ?3"
+             WHERE status != ?1 AND status != ?2 AND status != ?3 AND next_attempt_at_ms <= ?4"
         ).std_context("prepare fetch due")?;
 
         let mut rows = stmt
             .query(params![
                 DeliveryStatus::Acked as u8,
                 DeliveryStatus::Expired as u8,
+                DeliveryStatus::Sending as u8,
                 now_ms as i64
             ])
             .std_context("query due outbox")?;
