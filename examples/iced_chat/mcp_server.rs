@@ -57,7 +57,7 @@ use std::time::Duration;
 
 use crate::gui_test_actions::{GuiActionHistory, GuiActionRateLimiter};
 use boru_core::catalogue_client::fetch_remote_catalogue;
-use boru_core::chat_core::{broadcast_diagnostic_probe, message_hash, Message};
+use boru_core::chat_core::{broadcast_diagnostic_probe, message_hash, Message, SignedMessage};
 use boru_core::conversations::ConversationNetEvent;
 use boru_core::diagnostics::{
     self, classify_discovery_test, classify_failures, generate_probe_id, ConnectionDiagnosticState,
@@ -697,18 +697,28 @@ fn handle_create_public_room(req: &JsonRpcRequest, state: &McpAppState) -> Resul
     persist_directory_store(state)?;
 
     // Broadcast the new ad on the directory gossip topic so other peers
-    // discover it without waiting for the periodic tick. Fire-and-forget
-    // via a spawned task since broadcast is async.
+    // discover it without waiting for the periodic tick.
     if let Some(ref sender) = *state.directory_sender.lock().unwrap() {
         let sender = sender.clone();
-        let payload = serde_json::to_vec(&ad)
-            .map_err(|e| format!("serialize ad: {e}"))?
-            .into();
-        tokio::spawn(async move {
-            if let Err(e) = sender.broadcast(payload).await {
-                warn!("failed to broadcast directory ad: {e}");
+        let sk = state.secret_key.clone();
+        let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
+        let signature = sk.sign(&ad_bytes);
+        let msg = Message::RoomAdvertisement {
+            ad,
+            signature: signature.to_bytes().to_vec(),
+        };
+        match SignedMessage::sign_and_encode(&sk, &msg) {
+            Ok(encoded) => {
+                tokio::spawn(async move {
+                    if let Err(e) = sender.broadcast(encoded).await {
+                        warn!("failed to broadcast directory ad: {e}");
+                    }
+                });
             }
-        });
+            Err(e) => {
+                warn!("failed to sign directory ad: {e}");
+            }
+        }
     }
 
     Ok(serde_json::json!({ "created": true, "topic": topic.to_string(), "ticket": ticket }))
