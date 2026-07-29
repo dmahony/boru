@@ -28,6 +28,7 @@ use boru_core::proto::TopicId;
 /// Each variant identifies the category of event so the notification service
 /// can apply the correct rendering, deduplication, grouping, and privacy rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[expect(dead_code)]
 pub enum NotificationEventKind {
     /// A new text message, file share, or image share arrived.
     NewMessage,
@@ -47,6 +48,7 @@ pub enum NotificationEventKind {
 
 impl NotificationEventKind {
     /// Human-readable category label for diagnostics and settings.
+    #[expect(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             Self::NewMessage => "New message",
@@ -63,6 +65,7 @@ impl NotificationEventKind {
 /// Priority level for the notification — controls whether the notification
 /// is shown during Do Not Disturb and whether it bypasses rate limiting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[expect(dead_code)]
 pub enum NotificationPriority {
     /// Low priority — grouped, may be suppressed during DND.
     Low,
@@ -83,6 +86,7 @@ impl Default for NotificationPriority {
 ///
 /// Action targets are parsed from structured data — never from displayed text.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[expect(dead_code)]
 pub enum NotificationActionTarget {
     /// Open the chat conversation with the given topic.
     OpenConversation(TopicId),
@@ -98,6 +102,7 @@ pub enum NotificationActionTarget {
 
 impl NotificationActionTarget {
     /// Human-readable label for diagnostics.
+    #[expect(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             Self::OpenConversation(_) => "open-conversation",
@@ -111,6 +116,7 @@ impl NotificationActionTarget {
 
 /// A notification action that the user can take on a notification.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[expect(dead_code)]
 pub struct NotificationAction {
     /// Stable action identifier (e.g. "open", "mark_read", "accept", "decline").
     /// Used to route the action back to the handler.
@@ -141,6 +147,7 @@ pub struct NotificationAction {
 /// * `action_target` — Where to navigate when the notification is clicked.
 /// * `actions` — Optional list of user-selectable actions.
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 pub struct NotificationEvent {
     /// Stable notification ID for deduplication and dismissal.
     /// Format: `{kind}:{conversation_id}:{message_hash_or_sequence}`.
@@ -173,6 +180,7 @@ pub struct NotificationEvent {
 
 impl NotificationEvent {
     /// Create a new notification event with the current timestamp.
+    #[expect(dead_code)]
     pub fn new(
         event_kind: NotificationEventKind,
         peer_id: Option<PublicKey>,
@@ -205,30 +213,35 @@ impl NotificationEvent {
 
     /// Set a custom notification ID for deduplication (e.g. when the ID
     /// should be based on a protocol message hash rather than a timestamp).
+    #[expect(dead_code)]
     pub fn with_notification_id(mut self, id: impl Into<String>) -> Self {
         self.notification_id = id.into();
         self
     }
 
     /// Set the priority level.
+    #[expect(dead_code)]
     pub fn with_priority(mut self, priority: NotificationPriority) -> Self {
         self.priority = priority;
         self
     }
 
     /// Set the group key for grouping related notifications.
+    #[expect(dead_code)]
     pub fn with_group_key(mut self, key: impl Into<String>) -> Self {
         self.group_key = Some(key.into());
         self
     }
 
     /// Add a user-selectable action to this notification.
+    #[expect(dead_code)]
     pub fn with_action(mut self, action: NotificationAction) -> Self {
         self.actions.push(action);
         self
     }
 
     /// Set the timestamp explicitly (for replaying historical events).
+    #[expect(dead_code)]
     pub fn with_timestamp(mut self, ts: u64) -> Self {
         self.timestamp = ts;
         self
@@ -237,6 +250,7 @@ impl NotificationEvent {
 
 // ── Helper ─────────────────────────────────────────────────────────────────
 
+#[expect(dead_code)]
 fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -12,6 +12,7 @@ use crate::notification::event::{NotificationActionTarget, NotificationPriority}
 /// deduplication rules, and user preferences before the backend
 /// sees them.
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 pub struct RenderedNotification {
     pub id: String,
     pub title: String,
@@ -25,6 +26,7 @@ pub struct RenderedNotification {
 
 /// An action that can be taken on a notification.
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 pub enum NotificationAction {
     /// Open the conversation or screen.
     Open,
@@ -55,6 +57,7 @@ impl std::fmt::Display for NotificationAction {
 /// Every desktop platform that supports native notifications implements
 /// this trait. The core notification service uses this interface and
 /// never calls platform-specific APIs directly.
+#[expect(dead_code)]
 pub trait NotificationBackend: std::fmt::Debug {
     /// Show a new notification.
     fn show(&self, notification: &RenderedNotification);
@@ -78,6 +81,7 @@ pub trait NotificationBackend: std::fmt::Debug {
 /// Used on unsupported platforms and in tests where no real desktop
 /// notification server is available.
 #[derive(Debug)]
+#[expect(dead_code)]
 pub struct NoopBackend;
 
 impl NotificationBackend for NoopBackend {

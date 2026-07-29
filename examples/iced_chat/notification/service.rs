@@ -17,6 +17,7 @@ use crate::notification::event::{
 
 /// How message previews are shown in notifications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(dead_code)]
 pub enum PreviewMode {
     /// Show sender name and message content.
     Full,
@@ -34,6 +35,7 @@ impl Default for PreviewMode {
 
 /// Global notification preferences.
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 pub struct NotificationPreferences {
     /// Master notification toggle.
     pub enabled: bool,
@@ -70,12 +72,14 @@ impl Default for NotificationPreferences {
 
 /// Per-conversation mute state.
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 pub struct ConversationMute {
     /// When the mute expires, if temporary. None = indefinite.
     pub expires_at: Option<SystemTime>,
 }
 
 impl ConversationMute {
+    #[expect(dead_code)]
     pub fn is_muted(&self) -> bool {
         match self.expires_at {
             Some(expiry) => SystemTime::now() < expiry,
@@ -86,6 +90,7 @@ impl ConversationMute {
 
 /// Do Not Disturb schedule.
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 pub struct DoNotDisturb {
     pub enabled: bool,
     /// Start hour (0–23, local time).
@@ -112,6 +117,7 @@ impl Default for DoNotDisturb {
 
 impl DoNotDisturb {
     /// Returns true if the current local time falls within the DND window.
+    #[expect(dead_code)]
     pub fn is_active(&self) -> bool {
         if !self.enabled {
             return false;
@@ -135,6 +141,7 @@ impl DoNotDisturb {
 
 /// Bounded cache of recently processed notification event IDs.
 #[derive(Debug)]
+#[expect(dead_code)]
 struct DedupCache {
     entries: HashMap<String, Instant>,
     max_entries: usize,
@@ -153,6 +160,7 @@ impl Default for DedupCache {
 
 impl DedupCache {
     /// Check if a key was already seen and, if not, record it.
+    #[expect(dead_code)]
     fn try_insert(&mut self, key: &str) -> bool {
         self.evict_stale();
         if self.entries.contains_key(key) {
@@ -172,6 +180,7 @@ impl DedupCache {
         true
     }
 
+    #[expect(dead_code)]
     fn evict_stale(&mut self) {
         let cutoff = Instant::now() - self.ttl;
         self.entries.retain(|_, &mut t| t > cutoff);
@@ -182,6 +191,7 @@ impl DedupCache {
 
 /// Tracks active notification groups for combining related notifications.
 #[derive(Debug)]
+#[expect(dead_code)]
 struct GroupTracker {
     /// group_key → (first_event_time, notification_id, current_count)
     groups: HashMap<String, (Instant, String, u64)>,
@@ -200,6 +210,7 @@ impl Default for GroupTracker {
 
 impl GroupTracker {
     /// Returns (is_new_group, notification_id_for_batch_update).
+    #[expect(dead_code)]
     fn track(&mut self, group_key: &str, fallback_id: &str) -> (bool, String) {
         self.evict_stale();
 
@@ -217,6 +228,7 @@ impl GroupTracker {
         (true, id)
     }
 
+    #[expect(dead_code)]
     fn evict_stale(&mut self) {
         let cutoff = Instant::now() - self.window;
         self.groups.retain(|_, &mut (t, _, _)| t > cutoff);
@@ -239,6 +251,7 @@ impl GroupTracker {
 /// - Send through a platform backend
 /// - Handle notification actions
 #[derive(Debug)]
+#[expect(dead_code)]
 pub struct NotificationService {
     backend: Box<dyn NotificationBackend + Send>,
     preferences: NotificationPreferences,
@@ -250,6 +263,7 @@ pub struct NotificationService {
 
 impl NotificationService {
     /// Create a new notification service with a no-op backend.
+    #[expect(dead_code)]
     pub fn new() -> Self {
         Self {
             backend: Box::new(NoopBackend),
@@ -262,26 +276,31 @@ impl NotificationService {
     }
 
     /// Replace the platform backend.
+    #[expect(dead_code)]
     pub fn set_backend(&mut self, backend: Box<dyn NotificationBackend + Send>) {
         self.backend = backend;
     }
 
     /// Update user notification preferences.
+    #[expect(dead_code)]
     pub fn set_preferences(&mut self, prefs: NotificationPreferences) {
         self.preferences = prefs;
     }
 
     /// Update the Do Not Disturb schedule.
+    #[expect(dead_code)]
     pub fn set_dnd(&mut self, dnd: DoNotDisturb) {
         self.dnd = dnd;
     }
 
     /// Set or update the mute state for a conversation.
+    #[expect(dead_code)]
     pub fn set_conversation_mute(&mut self, topic: TopicId, mute: ConversationMute) {
         self.mutes.insert(topic, mute);
     }
 
     /// Remove mute state for a conversation (unmute).
+    #[expect(dead_code)]
     pub fn remove_conversation_mute(&mut self, topic: &TopicId) {
         self.mutes.remove(topic);
     }
@@ -290,6 +309,7 @@ impl NotificationService {
     ///
     /// Takes an internal notification event plus current application
     /// focus state and decides whether to show, update, or ignore.
+    #[expect(dead_code)]
     pub fn handle_event(&mut self, event: &NotificationEvent, focus: &WindowFocusState) {
         // 1. Master toggle
         if !self.preferences.enabled {
@@ -353,22 +373,26 @@ impl NotificationService {
     }
 
     /// Dismiss a notification by ID.
+    #[expect(dead_code)]
     pub fn dismiss(&mut self, id: &str) {
         self.backend.close(id);
     }
 
     /// Dismiss all notifications in a group.
+    #[expect(dead_code)]
     pub fn dismiss_group(&mut self, _group_key: &str) {
         tracing::debug!("[notif] dismiss group: {_group_key}");
     }
 
     /// Handle a notification action.
+    #[expect(dead_code)]
     pub fn handle_action(&mut self, action: &str) {
         tracing::debug!("[notif] action: {action}");
     }
 
     // ── Private helpers ──────────────────────────────────────────
 
+    #[expect(dead_code)]
     fn event_kind_enabled(&self, kind: &NotificationEventKind) -> bool {
         match kind {
             NotificationEventKind::NewMessage => self.preferences.messages,
@@ -383,6 +407,7 @@ impl NotificationService {
         }
     }
 
+    #[expect(dead_code)]
     fn dedup_key(&self, event: &NotificationEvent) -> String {
         let conv = event
             .conversation_id
@@ -391,6 +416,7 @@ impl NotificationService {
         format!("{:?}_{}_{}", event.event_kind, conv, event.title_hint)
     }
 
+    #[expect(dead_code)]
     fn render(
         &self,
         event: &NotificationEvent,
@@ -483,6 +509,7 @@ impl Default for NotificationService {
 /// - application_running_in_background
 /// - active_conversation_id
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 pub struct WindowFocusState {
     pub window_focused: bool,
     pub window_visible: bool,
@@ -492,6 +519,7 @@ pub struct WindowFocusState {
 }
 
 impl WindowFocusState {
+    #[expect(dead_code)]
     pub fn new() -> Self {
         Self {
             window_focused: true,
@@ -504,12 +532,14 @@ impl WindowFocusState {
 
     /// Returns true if the application is in a state where the user
     /// is actively looking at a conversation (focused and visible).
+    #[expect(dead_code)]
     pub fn is_focused_or_visible(&self) -> bool {
         self.window_focused && self.window_visible && !self.window_minimised
     }
 
     /// Returns true if the user is actively viewing a conversation
     /// and that conversation matches the given topic.
+    #[expect(dead_code)]
     pub fn is_viewing_conversation(&self, topic: &TopicId) -> bool {
         self.is_focused_or_visible() && self.active_conversation_id.as_ref() == Some(topic)
     }

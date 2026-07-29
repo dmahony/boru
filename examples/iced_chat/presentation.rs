@@ -165,6 +165,7 @@ pub(crate) fn relative_time(unix_ms: u64) -> String {
 }
 
 /// Format an optional last-seen timestamp, returning an empty label when absent.
+#[expect(dead_code)]
 pub(crate) fn format_last_seen(last_seen_ms: Option<u64>) -> String {
     let Some(unix_ms) = last_seen_ms else {
         return String::new();
@@ -177,6 +178,7 @@ pub(crate) fn format_last_seen(last_seen_ms: Option<u64>) -> String {
 }
 
 /// Consistent singular/plural wording for count-based labels.
+#[expect(dead_code)]
 pub(crate) fn count_label(count: usize, singular: &str, plural: &str) -> String {
     format!("{count} {}", if count == 1 { singular } else { plural })
 }

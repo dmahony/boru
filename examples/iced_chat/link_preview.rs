@@ -149,6 +149,7 @@ pub fn parse_url_segments(body: &str) -> Vec<TextSegment> {
 
 /// Check whether a body message is "URL-primary" — i.e. consists only of
 /// a single URL (with optional whitespace) so a large preview card is shown.
+#[expect(dead_code)]
 pub fn is_url_only_message(body: &str) -> bool {
     let trimmed = body.trim();
     if trimmed.is_empty() {
@@ -231,6 +232,7 @@ pub fn find_first_url(body: &str) -> Option<String> {
 }
 
 /// Find all unique URLs in the body text.
+#[expect(dead_code)]
 pub fn find_all_urls(body: &str) -> Vec<String> {
     let mut urls: Vec<String> = URL_REGEX
         .find_iter(body)
@@ -261,6 +263,7 @@ impl InFlightGuard {
     /// Disarm the guard so it does NOT unregister on drop. Use when the URL
     /// should remain registered (e.g., on successful completion where the
     /// cache now serves subsequent requests).
+    #[expect(dead_code)]
     fn disarm(mut self) {
         self.active = false;
     }
@@ -561,6 +564,7 @@ impl LinkPreviewCache {
     }
 
     /// Evict expired entries based on their type-specific TTL.
+    #[expect(dead_code)]
     pub fn evict_expired(&self) {
         if let Ok(mut map) = self.inner.lock() {
             map.retain(|_, entry| {
@@ -578,6 +582,7 @@ impl LinkPreviewCache {
     }
 
     /// Evict a single URL from the cache (used when retrying a failed URL).
+    #[expect(dead_code)]
     pub fn evict(&self, url: &str) {
         if let Ok(mut map) = self.inner.lock() {
             map.remove(url);
@@ -585,11 +590,13 @@ impl LinkPreviewCache {
     }
 
     /// Returns the number of entries currently in the cache.
+    #[expect(dead_code)]
     pub fn len(&self) -> usize {
         self.inner.lock().ok().map_or(0, |m| m.len())
     }
 
     /// Returns true if the cache is empty.
+    #[expect(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

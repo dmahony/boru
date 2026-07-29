@@ -214,6 +214,7 @@ pub(crate) use crate::fonts::{
 };
 
 /// Brand wordmark font weight (800 = ExtraBold).
+#[expect(dead_code)]
 pub(crate) const BRAND_LOGO_WEIGHT: u16 = 800;
 
 // ── BoruLogo component ────────────────────────────────────────────
@@ -224,6 +225,7 @@ pub(crate) enum LogoSize {
     /// Compact header — ~16 px.
     Small,
     /// Authentication / onboarding screens — ~28 px.
+    #[expect(dead_code)]
     Medium,
     /// Splash screen — ~44 px.
     Large,
@@ -353,9 +355,9 @@ fn blob_ticket_string(
 
 // ── Spacing units (4px base) ─────────────────────────────────────────
 pub(crate) const SPACE_2: f32 = 2.0;
-pub(crate) use crate::design_tokens::{AVATAR_LG, AVATAR_MD, AVATAR_SM};
+pub(crate) use crate::design_tokens::{AVATAR_MD, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
-    DETAILS_PANEL_WIDTH, MESSAGE_MAX_WIDTH, RADIUS_LG, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24,
+    DETAILS_PANEL_WIDTH, RADIUS_LG, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24,
     SPACE_4, SPACE_8,
 };
 pub(crate) const SPACE_6: f32 = 6.0;
@@ -603,6 +605,7 @@ pub(crate) const ICON_NOTIFICATION: &[u8] = include_bytes!("../../assets/icons/l
 pub(crate) const ICON_ONLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle-filled.svg");
 pub(crate) const ICON_OFFLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle.svg");
 pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
+#[expect(dead_code)]
 pub(crate) const ICON_UNREAD: &[u8] =
     include_bytes!("../../assets/icons/lucide/message-circle-fill.svg");
 
@@ -677,7 +680,7 @@ fn info_row(
 }
 
 /// A thin horizontal divider with muted color.
-fn divider(theme: &iced::Theme) -> iced::widget::Container<'static, AppMessage> {
+fn divider(_theme: &iced::Theme) -> iced::widget::Container<'static, AppMessage> {
     use iced::{widget::container, Length};
     container(iced::widget::Space::new().height(0.0).width(Length::Fill))
         .width(Length::Fill)
@@ -919,6 +922,7 @@ pub(crate) const BUTTON_ICON: fn(
 ) -> iced::widget::button::Style = crate::design_tokens::icon_button;
 
 /// Transparent full-size backdrop button — invisible but clickable.
+#[expect(dead_code)]
 pub(crate) const BUTTON_BACKDROP: fn(
     &iced::Theme,
     iced::widget::button::Status,
@@ -931,6 +935,7 @@ pub(crate) const BUTTON_BACKDROP: fn(
 
 /// Transparent-wide button — no background, no border, inherits parent text color.
 /// Used for clickable rows that should look like plain containers.
+#[expect(dead_code)]
 pub(crate) const BUTTON_TRANSPARENT: fn(
     &iced::Theme,
     iced::widget::button::Status,
@@ -1264,11 +1269,13 @@ pub(crate) enum CatalogueDownloadState {
     /// Download completed successfully — file is on disk.
     Completed {
         /// Filesystem path to the saved file.
+        #[expect(dead_code)]
         path: PathBuf,
     },
     /// Download failed with an error message.
     Failed(String),
     /// Download was cancelled.
+    #[expect(dead_code)]
     Cancelled,
 }
 
@@ -2000,6 +2007,11 @@ pub struct IcedChat {
     /// Counter for periodic invisible keepalive heartbeat (decremented per
     /// ConnMonitorTick, broadcasts Message::Heartbeat when it hits 0, resets to 2).
     heartbeat_counter: u32,
+    /// Counter for periodic latency ping (decremented per ConnMonitorTick,
+    /// broadcasts Message::LatencyPing when it hits 0, resets to 15 ~ every 15s).
+    latency_ping_counter: u32,
+    /// Measured round-trip latency per peer, populated by latency ping/pong probes.
+    peer_latencies: HashMap<PublicKey, Duration>,
     /// Guards against overlapping async connection refresh tasks.
     conn_refresh_in_flight: bool,
     /// Set by on_neighbor_up/on_neighbor_down when a connection count refresh
@@ -2049,6 +2061,7 @@ pub struct IcedChat {
     data_dir: PathBuf,
     /// Dead field — retained to avoid changing the constructor signature.
     /// Legacy JSON persistence has been replaced by SQLite unified storage.
+    #[expect(dead_code)]
     persist_tx: std::sync::mpsc::Sender<()>,
     /// Per-user image storage, backed by `<data_dir>/files/` (or `BORU_CHAT_FILES_DIR`).
     image_store: ImageStore,
@@ -2329,6 +2342,8 @@ pub struct IcedChat {
     pending_create_room_action: Option<GuiActionId>,
     /// ConfirmCreateNewRoom action waiting for the room to be created.
     pending_confirm_create_room_action: Option<GuiActionId>,
+    /// DownloadFile action waiting for the async download to complete.
+    pending_download_action: Option<GuiActionId>,
     /// Sender for GUI state snapshots — publishes an [`IcedStateSnapshot`] after
     /// each `update()` so the MCP server can watch for condition changes.
     pub gui_state_tx: tokio::sync::watch::Sender<IcedStateSnapshot>,
@@ -2353,9 +2368,11 @@ pub struct IcedChat {
     /// Used for responsive layout decisions (breakpoint at 640px).
     window_width: f32,
     /// Timestamp when the splash screen first appeared (used for minimum-display timing).
+    #[expect(dead_code)]
     pub splash_start_time: std::time::Instant,
     /// Set to true after the first SplashTick so the minimum-display timer starts
     /// counting from GUI render, not from the heavyweight async init in main().
+    #[expect(dead_code)]
     splash_has_rendered: bool,
     /// Animation frame counter for the room-loading and connecting spinners.
     splash_spinner_frame: usize,
@@ -2631,7 +2648,6 @@ fn apply_discovered_peers_update(peers: &mut Vec<PublicKey>, update: DiscoveredP
 }
 
 #[derive(Debug, Clone)]
-#[expect(dead_code)]
 pub enum AppMessage {
     // ── Navigation ──
     /// Open the chat list screen (go back from a chat).
@@ -3518,7 +3534,7 @@ fn view_local_profile_block(
     profile_image_handle: Option<iced::widget::image::Handle>,
 ) -> iced::Element<'static, AppMessage> {
     let _timer = PerfTracker::timer("view_local_profile_block", "build");
-    use iced::widget::{button, container, text, Column, Row, Space};
+    use iced::widget::{container, text, Column, Row, Space};
     use iced::{Alignment, Background, Border, Length};
 
     let theme = if dark_mode {
@@ -3976,6 +3992,8 @@ impl IcedChat {
             },
             presence_counter: 5,
             heartbeat_counter: 2,
+            latency_ping_counter: 15,
+            peer_latencies: HashMap::new(),
             conn_refresh_in_flight: false,
             needs_conn_refresh: false,
             self_sent_events: HashMap::new(),
@@ -4117,6 +4135,7 @@ impl IcedChat {
             pending_select_peer_action: None,
             pending_create_room_action: None,
             pending_confirm_create_room_action: None,
+            pending_download_action: None,
             gui_state_tx,
             gui_state_enabled: true,
             last_snapshot: None,
@@ -4235,17 +4254,14 @@ impl IcedChat {
 
     /// Legacy no-op — chat history is in SQLite.
     fn send_save_chat_history(&self) {
-        let store = self.chat_history.clone();
-        std::thread::spawn(move || {
-            let store = store.lock().unwrap();
-            let _ = store.save();
-        });
+        // Legacy no-op — chat history is in SQLite.
     }
 
     /// Legacy no-op — friend data is in SQLite.
     fn send_save_friends(&self) {}
 
     /// Save AppSettings directly (not a legacy JSON store — still active).
+    #[expect(dead_code)]
     fn send_save_settings(&self) {
         let settings = AppSettings {
             dark_mode: self.dark_mode,
@@ -4807,6 +4823,7 @@ impl IcedChat {
     }
 
     /// Convert a SQLite `ChatMessageRow` to a `ChatEntry` for in-memory replay.
+    #[expect(dead_code)]
     fn chat_message_row_to_chat_entry(
         row: &boru_core::store::ChatMessageRow,
         local_hex: &str,
@@ -5381,6 +5398,7 @@ impl IcedChat {
         self.history_saved_count = 0;
     }
 
+    #[expect(dead_code)]
     fn clear_current_room_history_runtime(
         &mut self,
         topic: TopicId,
@@ -5646,6 +5664,7 @@ fn format_last_seen(last_seen_ms: Option<u64>) -> String {
 /// - Today:    "12:34"
 /// - This week: "Mon 12:34"
 /// - Older:    "Jan 5"
+#[expect(dead_code)]
 fn format_message_time(timestamp_ms: i64) -> String {
     use chrono::{Local, TimeZone};
 
@@ -5654,6 +5673,7 @@ fn format_message_time(timestamp_ms: i64) -> String {
     format_message_time_with(timestamp_ms, now, to_local)
 }
 
+#[expect(dead_code)]
 fn format_message_time_with<Tz, F>(
     timestamp_ms: i64,
     now: chrono::DateTime<Tz>,
@@ -6204,7 +6224,7 @@ impl IcedChat {
                     let ticket_str = ticket.to_string();
                     // Persist a minimal RoomStore entry so the room and its
                     // ticket survive restarts (needed for periodic re-advertise).
-                    let room = RoomStore::with_peers(
+                    let _room = RoomStore::with_peers(
                         &self.data_dir,
                         topic,
                         vec![invitation_endpoint_addr(
@@ -6212,7 +6232,6 @@ impl IcedChat {
                             self.share_direct_addresses,
                         )],
                     );
-                    let _ = room.save();
                     // Mark as advertised so the periodic tick broadcasts it.
                     self.advertised_rooms.insert(topic);
                     let display_name = if room_name.is_empty() {
@@ -6475,7 +6494,6 @@ impl IcedChat {
                         let mut room =
                             RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);
                         room.discovery_secret = discovery_secret;
-                        let _ = room.save();
 
                         Ok::<
                             (
@@ -6832,7 +6850,6 @@ impl IcedChat {
                         };
                         let mut room = RoomStore::with_peers(&data_dir, topic, saved_peers);
                         room.discovery_secret = saved_discovery_secret;
-                        let _ = room.save();
 
                         Ok::<
                             (
@@ -7586,8 +7603,7 @@ impl IcedChat {
                         .map_err(|e| e.to_string())?;
                         let _ = sender.broadcast(presence).await;
 
-                        let room = RoomStore::with_peers(&data_dir, topic, merged_peers);
-                        let _ = room.save();
+                        let _room = RoomStore::with_peers(&data_dir, topic, merged_peers);
 
                         Ok::<
                             (
@@ -7657,9 +7673,8 @@ impl IcedChat {
                             .unwrap_or_default();
                         let record = self.friends.ensure_friend(fid);
                         record.set_direct_conversation(topic, DirectConversationState::Pending);
-                        let room =
+                        let _room =
                             RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
-                        let _ = room.save();
                         self.try_save_friends();
                         self.send_save_friend_requests();
 
@@ -7818,8 +7833,7 @@ impl IcedChat {
                     let record = self.friends.ensure_friend(fid);
                     record.set_direct_conversation(topic, DirectConversationState::Active);
                     record.relationship = FriendRelationship::Friends;
-                    let room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
-                    let _ = room.save();
+                    let _room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                     self.try_save_friends();
 
                     // Show the accepted friend immediately in the sidebar.
@@ -7894,8 +7908,7 @@ impl IcedChat {
                 ));
                 self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                 let _ = self.send_save_conversations();
-                let room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
-                let _ = room.save();
+                let _room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                 self.try_save_friends();
                 let action = ContactAction::ConversationInvite {
                     topic,
@@ -8177,6 +8190,7 @@ impl IcedChat {
                 if trimmed == "/connections" {
                     use boru_core::chat_core::check_peer_connection_type;
                     let neighbors: Vec<iroh::PublicKey> = self.neighbors.iter().copied().collect();
+                    let peer_lat = self.peer_latencies.clone();
                     if neighbors.is_empty() {
                         self.push_system("No known peers to inspect.");
                     } else {
@@ -8191,8 +8205,12 @@ impl IcedChat {
                                         .get(pk)
                                         .cloned()
                                         .unwrap_or_else(|| pk.fmt_short().to_string());
+                                    let lat_str = peer_lat
+                                        .get(pk)
+                                        .map(|d| format!(" {}ms", d.as_millis()))
+                                        .unwrap_or_default();
                                     lines.push(format!(
-                                        "  {label} — {} ({})",
+                                        "  {label} - {} ({}){lat_str}",
                                         match ctype {
                                             boru_core::chat_core::ConnectionType::Direct => {
                                                 "direct"
@@ -8425,13 +8443,9 @@ impl IcedChat {
                                             match store.enqueue_outgoing(envelope) {
                                                 Ok(msg_id) => {
                                                     // Persist the envelope first (fallback for offline peers).
-                                                    if let Err(save_err) = store.save() {
-                                                        AppMessage::ErrorMsg(format!(
-                                                            "Failed to persist offline message: {save_err}"
-                                                        ))
-                                                    } else {
-                                                        // Attempt proactive direct QUIC delivery.
-                                                        match send_deliver(
+                                                    // Save is a no-op — SQLite unified storage handles persistence.
+                                                    // Attempt proactive direct QUIC delivery.
+                                                    match send_deliver(
                                                             &endpoint,
                                                             &secret_key,
                                                             peer_key,
@@ -8455,7 +8469,6 @@ impl IcedChat {
                                                                 }
                                                             }
                                                         }
-                                                    }
                                                 }
                                                 Err(enq_err) => AppMessage::ErrorMsg(format!(
                                                     "Failed to queue offline message: {enq_err}"
@@ -9093,9 +9106,8 @@ impl IcedChat {
                                 self.chats_sidebar_revision =
                                     self.chats_sidebar_revision.wrapping_add(1);
                                 let _ = self.send_save_conversations();
-                                let room =
+                                let _room =
                                     RoomStore::with_peers(&self.data_dir, topic, persisted_addrs);
-                                let _ = room.save();
                                 self.try_save_friends();
                                 self.friend_online_cache.insert(sender);
                                 self.chats_sidebar_revision =
@@ -9179,12 +9191,11 @@ impl IcedChat {
                         if should_open_private {
                             let private_topic = private_topic(&self.local_public, &from);
                             if let Some(ticket) = invite_ticket {
-                                let room = RoomStore::with_peers(
+                                let _room = RoomStore::with_peers(
                                     &self.data_dir,
                                     private_topic,
                                     ticket.peers,
                                 );
-                                let _ = room.save();
                             }
                             let already_on_topic = matches!(
                                 self.screen,
@@ -9291,7 +9302,8 @@ impl IcedChat {
                                         }
                                     }
 
-                                    let _ = store.save();
+                                    // Save is a no-op — SQLite unified storage handles persistence.
+
                                     // Persist the cursor so subsequent reconnects resume from here.
                                     if let Some(stg) = &storage {
                                         let _ = stg.upsert_sync_cursor(
@@ -9398,7 +9410,7 @@ impl IcedChat {
                                 }
                                 // Persist accepted state. Duplicates remain
                                 // unchanged, but are acknowledged below.
-                                let _ = store.save();
+                                // Save is a no-op — SQLite unified storage handles persistence.
                                 // Send an acknowledgement for both new and
                                 // duplicate deliveries: the prior ack may have
                                 // been lost after durable acceptance.
@@ -9569,8 +9581,7 @@ impl IcedChat {
                         let mut history = history_arc.lock().unwrap();
                         let history_result = history
                             .update_delivery_state(event_id, DeliveryState::Sent)
-                            .is_ok()
-                            && history.save().is_ok();
+                            .is_ok();
                         info!(
                             event_id,
                             persistence_result = if history_result { "saved" } else { "failed" },
@@ -9990,6 +10001,12 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::DownloadDonePeerFile(name, path) => {
+                // Transition to Completed if initiated by a GUI test action.
+                if let Some(action_id) = self.pending_download_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
                 self.push_system(format!("*{name}* is complete"));
                 if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
                     self.catalogue_downloads.insert(
@@ -10016,6 +10033,12 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::DownloadFailed(error) => {
+                // Transition to Failed if initiated by a GUI test action.
+                if let Some(action_id) = self.pending_download_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Failed);
+                }
                 self.push_system(format!("Download failed: {error}"));
                 // If the error carries a catalogue file name (format "name : error"),
                 // mark it as failed in the catalogue view.
@@ -10732,6 +10755,14 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::RequestFileDownload { peer, file } => {
+                // Transition to AppMessageHandled if initiated by a GUI test action.
+                // Keep the action_id stored — it's consumed when the download
+                // completes (DownloadDonePeerFile or DownloadFailed).
+                if let Some(ref action_id) = self.pending_download_action {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(action_id, GuiActionState::AppMessageHandled);
+                }
                 let display_name = file.display_name.clone();
                 let content_hash = file.content_hash.clone();
                 self.catalogue_downloads
@@ -10745,6 +10776,9 @@ impl IcedChat {
                 let dn_for_err = display_name.clone();
                 let content_hash = file.content_hash.clone();
                 let size_bytes = file.size_bytes;
+                // If size_bytes is 0 (unknown/uncached metadata), pass None
+                // to avoid an immediate "blob too large" failure on the first byte.
+                let max_bytes = if size_bytes > 0 { Some(size_bytes) } else { None };
                 iced::Task::perform(
                     async move {
                         let _ = tokio::fs::create_dir_all(&dl_dir).await;
@@ -10771,7 +10805,7 @@ impl IcedChat {
                                     }
                                 }
                             },
-                            Some(size_bytes),
+                            max_bytes,
                         )
                         .await
                         .map_err(|e| format!("Download failed: {e}"))?;
@@ -11193,6 +11227,7 @@ impl IcedChat {
                         let _ = self
                             .gui_action_history
                             .set_state(&action_id, GuiActionState::AppMessageQueued);
+                        self.pending_download_action = Some(action_id);
                         return iced::Task::done(AppMessage::RequestFileDownload { peer, file });
                     }
                     // Other GUI commands retain their existing diagnostic-only
@@ -11685,6 +11720,35 @@ impl IcedChat {
                     }
                 } else {
                     self.heartbeat_counter -= 1;
+                }
+
+                // ── Periodic latency ping (~15s) ──
+                // Broadcasts a LatencyPing to measure round-trip time to all
+                // connected peers.  Peers respond with a LatencyPong, and the
+                // pong handler in record_latency stores the measured RTT.
+                if self.latency_ping_counter == 0 {
+                    self.latency_ping_counter = 15;
+                    if let Some(ref sender) = self.sender {
+                        let sk = self.secret_key.clone();
+                        let s = sender.clone();
+                        tasks.push(iced::Task::perform(
+                            async move {
+                                let sent_at_ms = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                if let Ok(encoded) = SignedMessage::sign_and_encode(
+                                    &sk,
+                                    &crate::Message::LatencyPing { sent_at_ms },
+                                ) {
+                                    s.broadcast(encoded).await.ok();
+                                }
+                            },
+                            |_| AppMessage::Noop,
+                        ));
+                    }
+                } else {
+                    self.latency_ping_counter -= 1;
                 }
 
                 // ── Periodic room-advertisement broadcast (~60s) ──
@@ -13323,9 +13387,46 @@ impl IcedChat {
         // A neighbor disappearing is not a permanent delivery failure.  Keep
         // queued messages queued so the outbox can retry when the mesh returns.
 
+        // ── LatencyPing → auto-respond with LatencyPong ──
+        // When we receive a LatencyPing, broadcast a pong with the same
+        // sent_at_ms so the sender can measure round-trip time.
+        let latency_pong_task = match event {
+            NetEvent::Message {
+                from,
+                message: crate::Message::LatencyPing { sent_at_ms },
+                ..
+            } if *from != self.local_public => {
+                // Copy before entering the 'static closure
+                let ping_ts = *sent_at_ms;
+                if let Some(ref sender) = self.sender {
+                    let sk = self.secret_key.clone();
+                    let s = sender.clone();
+                    Some(iced::Task::perform(
+                        async move {
+                            if let Ok(encoded) = SignedMessage::sign_and_encode(
+                                &sk,
+                                &crate::Message::LatencyPong { sent_at_ms: ping_ts },
+                            ) {
+                                s.broadcast(encoded).await.ok();
+                            }
+                        },
+                        |_| AppMessage::Noop,
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
         self.try_save_friends();
         self.try_save_chat_history();
-        read_receipt_task
+        // Combine tasks: if both read_receipt and latency_pong exist, chain them.
+        // Otherwise return whichever is Some.
+        match (read_receipt_task, latency_pong_task) {
+            (Some(a), Some(b)) => Some(iced::Task::batch(vec![a, b])),
+            (a, b) => a.or(b),
+        }
     }
 
     /// If the entry at `entry_index` contains a URL, check the cache and
@@ -13923,6 +14024,7 @@ impl ChatCallbacks for IcedChat {
         self.friend_online_cache.remove(&peer);
         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.needs_conn_refresh = true;
+        self.peer_latencies.remove(&peer);
     }
 
     fn record_activity(&mut self, peer: PublicKey) {
@@ -13953,6 +14055,15 @@ impl ChatCallbacks for IcedChat {
 
     fn request_quit(&mut self) {
         // IcedChat handles window close through the iced framework.
+    }
+
+    fn on_latency_ping(&mut self, _peer: PublicKey, _sent_at_ms: u64) {
+        // Pong sending is handled at the frontend event-loop level
+        // in process_net_event where we have access to the gossip sender.
+    }
+
+    fn record_latency(&mut self, peer: PublicKey, latency: Duration) {
+        self.peer_latencies.insert(peer, latency);
     }
 }
 
@@ -19059,6 +19170,7 @@ impl std::hash::Hash for DiscoveredPeersRxHandle {
 }
 
 /// Wrapper for the directory room channel (bounded mpsc).
+#[expect(dead_code)]
 struct DirectoryRoomRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>);
 
 impl std::hash::Hash for DirectoryRoomRxHandle {

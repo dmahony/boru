@@ -411,6 +411,9 @@ pub struct StatusContext {
     pub peer_connection_types: HashMap<PublicKey, ConnectionType>,
     /// Last time we saw any gossip activity from each peer.
     pub last_activity: HashMap<PublicKey, Instant>,
+    /// Measured round-trip latency per peer, populated by periodic
+    /// [`Message::LatencyPing`] / [`Message::LatencyPong`] probes.
+    pub peer_latencies: HashMap<PublicKey, Duration>,
     /// Current mesh health summary for the UI.
     pub mesh_health: MeshHealth,
     /// Whether private-room DHT discovery is enabled.
@@ -943,6 +946,20 @@ pub enum Message {
     /// This is intentionally separate from `Presence`, which is a
     /// *visible* status indicator.
     Heartbeat,
+    /// Latency probe ping — asks the receiving peer to reply with a pong
+    /// carrying the same `sent_at_ms` so the sender can measure round-trip
+    /// time.  Never displayed in the chat log.
+    LatencyPing {
+        /// Unix epoch milliseconds when this ping was sent.
+        sent_at_ms: u64,
+    },
+    /// Latency probe pong — echoes back the `sent_at_ms` from the
+    /// corresponding [`LatencyPing`] so the original sender can compute
+    /// round-trip latency.  Never displayed in the chat log.
+    LatencyPong {
+        /// Unix epoch milliseconds from the original ping.
+        sent_at_ms: u64,
+    },
     /// A diagnostic probe sent through the normal gossip path — not displayed
     /// as an ordinary chat message by default.
     DiagnosticProbe(crate::diagnostics::DiagnosticProbe),
@@ -1769,6 +1786,23 @@ pub fn handle_net_event_for_topic(
                     // Heartbeat is invisible — record activity to update
                     // mesh health timestamps, but never push to the chat log.
                     cb.record_activity(from);
+                }
+                Message::LatencyPing { sent_at_ms } => {
+                    // Record activity and let the frontend respond with a pong.
+                    cb.record_activity(from);
+                    cb.on_latency_ping(from, sent_at_ms);
+                }
+                Message::LatencyPong { sent_at_ms } => {
+                    // We sent a ping earlier — this pong lets us compute RTT.
+                    cb.record_activity(from);
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    if now_ms >= sent_at_ms {
+                        let rtt = Duration::from_millis(now_ms - sent_at_ms);
+                        cb.record_latency(from, rtt);
+                    }
                 }
                 Message::DiagnosticProbe(ref probe) => {
                     // Diagnostic probes travel through the normal gossip path

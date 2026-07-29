@@ -24,6 +24,7 @@ const FIRST_VALUE_INPUT_ID: &str = "connection-details-first-value";
 
 /// Copy-ready row for the advanced connection-details view.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(dead_code)]
 pub(crate) struct ConnectionDetailRow {
     /// Stable label shown in the UI.
     pub label: &'static str,
@@ -34,6 +35,7 @@ pub(crate) struct ConnectionDetailRow {
 }
 
 impl ConnectionDetailRow {
+    #[expect(dead_code)]
     fn new(label: &'static str, value: String, copy_text: Option<String>) -> Self {
         Self {
             label,
@@ -80,6 +82,7 @@ impl ConnectionDetailsViewModel {
     }
 
     /// Copy-ready rows for the advanced dialog.
+    #[expect(dead_code)]
     pub(crate) fn rows(&self) -> Vec<ConnectionDetailRow> {
         vec![
             ConnectionDetailRow::new(
@@ -132,6 +135,7 @@ impl ConnectionDetailsViewModel {
         &self.transport_state
     }
 
+    #[expect(dead_code)]
     pub(crate) fn connected_peers(&self) -> usize {
         self.connected_peers
     }
@@ -192,28 +196,34 @@ impl ConnectionDetailsViewModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConnectionDetailsDialogState {
     /// Data is still loading.
+    #[expect(dead_code)]
     Loading { message: String },
     /// No details are available for the current surface.
+    #[expect(dead_code)]
     Empty { message: String },
     /// A recoverable error occurred while building the details snapshot.
+    #[expect(dead_code)]
     Error { message: String },
     /// Ready-to-render redacted connection data.
     Ready(ConnectionDetailsViewModel),
 }
 
 impl ConnectionDetailsDialogState {
+    #[expect(dead_code)]
     pub(crate) fn loading(message: impl Into<String>) -> Self {
         Self::Loading {
             message: message.into(),
         }
     }
 
+    #[expect(dead_code)]
     pub(crate) fn empty(message: impl Into<String>) -> Self {
         Self::Empty {
             message: message.into(),
         }
     }
 
+    #[expect(dead_code)]
     pub(crate) fn error(message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
@@ -230,6 +240,7 @@ impl ConnectionDetailsDialogState {
     }
 
     /// Visible announcement message for loading / empty / error states.
+    #[expect(dead_code)]
     pub(crate) fn body_message(&self) -> Option<&str> {
         match self {
             Self::Loading { message } | Self::Empty { message } | Self::Error { message } => {
@@ -240,6 +251,7 @@ impl ConnectionDetailsDialogState {
     }
 
     /// Rows available to render in the ready state.
+    #[expect(dead_code)]
     pub(crate) fn rows(&self) -> Vec<ConnectionDetailRow> {
         match self {
             Self::Ready(model) => model.rows(),

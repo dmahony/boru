@@ -228,11 +228,28 @@ fn init_logging(data_dir: &Path) -> Result<WorkerGuard> {
     // very high-volume discovery and DNS diagnostics at DEBUG; leaving that
     // level enabled made a single GUI session grow iced_chat.log to tens of
     // megabytes.  Operators can still opt into the full trace with RUST_LOG.
-    let file_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    //
+    // Known-harmless WARN patterns that are suppressed to ERROR:
+    //   iroh::socket        – relay connect fails to N0 relays (use1-1, usw1-1)
+    //                         which are unreachable from Dragon, and
+    //                         no-path-datagram for peers only on those relays
+    //   iroh::net_report    – captive-portal probe timeout on non-internet LANs
+    //   noq_proto::connection – connection-close path cleanup (always benign)
+    //   winit               – XSETTINGS warning on headless/xrdp sessions
+    let file_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            "info,iroh::socket=error,iroh::net_report=error,\
+             noq_proto::connection=error,winit=error",
+        )
+    });
     // These are expected during normal endpoint startup and address
     // discovery. Keep them in the persistent log, but avoid making the GUI
     // terminal noisy. More severe events from either target remain visible.
-    let terminal_filter = EnvFilter::new("info,swarm_discovery=warn,iroh::net_report=error");
+    let terminal_filter = EnvFilter::new(
+        "info,swarm_discovery=warn,\
+         iroh::socket=error,iroh::net_report=error,\
+         noq_proto::connection=error,winit=error",
+    );
     let subscriber = build_logging_subscriber(
         writer,
         std::io::stderr,
@@ -514,10 +531,7 @@ fn main() -> Result<()> {
                         None => {
                             let t = TopicId::from_bytes(rand::random());
                             info!(topic = %t, "opening new chat room");
-                            let room = RoomStore::new(&data_dir, t);
-                            if let Err(err) = room.save() {
-                                warn!(error = %err, "failed to save room metadata");
-                            }
+                            let _room = RoomStore::new(&data_dir, t);
                             (t, vec![])
                         }
                     },

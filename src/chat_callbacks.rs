@@ -330,4 +330,20 @@ pub trait ChatCallbacks {
     ///
     /// The default implementation is a no-op.
     fn on_transfer_progress(&mut self, _event: TransferProgress) {}
+
+    // ── Latency probe callbacks ──────────────────────────────────────────
+
+    /// Called when a [`LatencyPing`] is received from `peer`.
+    ///
+    /// The frontend should respond by broadcasting a [`LatencyPong`] with
+    /// the same `sent_at_ms` value.  The default implementation is a no-op
+    /// (the ping is silently absorbed).
+    fn on_latency_ping(&mut self, _peer: PublicKey, _sent_at_ms: u64) {}
+
+    /// Record a measured round-trip latency for `peer`.
+    ///
+    /// Called when a [`LatencyPong`] arrives and the round-trip time has
+    /// been computed.  Frontends store this in their per-peer latency map
+    /// for display.  The default implementation is a no-op.
+    fn record_latency(&mut self, _peer: PublicKey, _latency: Duration) {}
 }

@@ -45,6 +45,7 @@ const JETBRAINS_MONO_ITALIC_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-I
 pub const SOURCE_SANS_3: &str = "Source Sans 3";
 
 /// Internal family name for Manrope.
+#[expect(dead_code)]
 pub const MANROPE: &str = "Manrope";
 
 /// Internal family name for Raleway (branding weight).
@@ -66,6 +67,7 @@ pub fn source_sans(weight: Weight) -> Font {
 }
 
 /// Return a `Font` for Manrope at the given weight.
+#[expect(dead_code)]
 pub fn manrope(weight: Weight) -> Font {
     Font {
         family: Family::Name(MANROPE),
@@ -119,6 +121,7 @@ pub use sizes::*;
 
 /// Semantic typography role mapped to font, weight, and size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(dead_code)]
 pub enum Typography {
     // Manrope display headings
     /// Display large — Manrope Bold, 24 px.
@@ -166,6 +169,7 @@ pub enum Typography {
 
 impl Typography {
     /// Return the font family name for this token.
+    #[expect(dead_code)]
     pub fn family_name(self) -> &'static str {
         match self {
             Self::DisplayLarge | Self::DisplayMedium => SOURCE_SANS_3,
@@ -176,6 +180,7 @@ impl Typography {
     }
 
     /// Return the font weight for this token.
+    #[expect(dead_code)]
     pub fn weight(self) -> Weight {
         match self {
             Self::DisplayLarge | Self::PageTitle => Weight::Bold,
@@ -193,6 +198,7 @@ impl Typography {
     }
 
     /// Return the default pixel size for this token.
+    #[expect(dead_code)]
     pub fn size_px(self) -> f32 {
         match self {
             Self::DisplayLarge | Self::PageTitle => XL,
@@ -209,6 +215,7 @@ impl Typography {
     }
 
     /// Return an `iced::Font` for this token.
+    #[expect(dead_code)]
     pub fn font(self) -> Font {
         match self {
             Self::DisplayLarge => source_sans(Weight::Bold),
@@ -224,6 +231,7 @@ impl Typography {
 
 /// Build an `Element` with the correct typography applied.
 /// Shorthand for `.font(font).size(px)`.
+#[expect(dead_code)]
 pub fn typo_text<'a>(
     token: Typography,
     content: impl text::IntoFragment<'a>,
@@ -232,6 +240,7 @@ pub fn typo_text<'a>(
 }
 
 /// Apply a typography token to an existing text widget.
+#[expect(dead_code)]
 pub fn with_typo<'a>(
     widget: text::Text<'a, iced::Theme, iced::Renderer>,
     token: Typography,
@@ -241,6 +250,7 @@ pub fn with_typo<'a>(
 
 /// Like `typo_text` but with a custom `Pixels` size override
 /// (for accessibility scaling).
+#[expect(dead_code)]
 pub fn typo_text_scaled<'a>(
     token: Typography,
     content: impl text::IntoFragment<'a>,

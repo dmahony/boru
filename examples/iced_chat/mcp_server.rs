@@ -2616,7 +2616,8 @@ fn handle_get_failure_analysis(req: &JsonRpcRequest, state: &McpAppState) -> Res
 }
 
 /// `boru_browse_peer_catalogue` — fetch and return a remote peer's file
-/// catalogue.
+/// catalogue, persisting it locally so that `boru_download_file` can
+/// initiate downloads from this peer's catalogue.
 ///
 /// Connects to the specified peer via the iroh endpoint, fetches their signed
 /// file catalogue, and returns the catalogue metadata along with the list of
@@ -2675,6 +2676,15 @@ async fn handle_browse_peer_catalogue(
     let catalogue = fetch_remote_catalogue(&state.endpoint, peer_pk, None)
         .await
         .map_err(|e| format!("Failed to fetch catalogue from peer '{peer_id}': {e}"))?;
+
+    // Persist the fetched catalogue locally so that boru_download_file can
+    // look it up via initiate_download().
+    let storage = state.storage.as_ref().ok_or_else(|| {
+        "Storage not available — cannot persist remote catalogue for download initiation.".to_string()
+    })?;
+    storage
+        .replace_remote_catalogue(&catalogue)
+        .map_err(|e| format!("Failed to store remote catalogue for peer '{peer_id}': {e:#}"))?;
 
     let files: Vec<Value> = catalogue
         .files

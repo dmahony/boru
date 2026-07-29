@@ -91,36 +91,47 @@ pub const SPACE_8: f32 = 8.0;
 pub const SPACE_12: f32 = 12.0;
 pub const SPACE_16: f32 = 16.0;
 pub const SPACE_24: f32 = 24.0;
+#[expect(dead_code)]
 pub const SPACE_32: f32 = 32.0;
 
 // ── Control heights ───────────────────────────────────────────────────
+#[expect(dead_code)]
 pub const CONTROL_HEIGHT: f32 = 40.0;
+#[expect(dead_code)]
 pub const CONTROL_HEIGHT_COMPACT: f32 = 36.0;
 
 // ── Corner radii ──────────────────────────────────────────────────────
 pub const RADIUS_SM: f32 = 8.0;
+#[expect(dead_code)]
 pub const RADIUS_MD: f32 = 10.0;
 pub const RADIUS_LG: f32 = 12.0;
+#[expect(dead_code)]
 pub const RADIUS_XL: f32 = 14.0;
 
 // ── Focus ─────────────────────────────────────────────────────────────
+#[expect(dead_code)]
 pub const FOCUS_WIDTH: f32 = 2.0;
 
 // ── Avatar sizes ──────────────────────────────────────────────────────
 pub const AVATAR_SM: f32 = 36.0;
 pub const AVATAR_MD: f32 = 48.0;
+#[expect(dead_code)]
 pub const AVATAR_LG: f32 = 64.0;
 
 // ── Layout ────────────────────────────────────────────────────────────
 pub const SIDEBAR_WIDTH: f32 = 280.0;
 /// Width of the right-side details panel when open.
 pub const DETAILS_PANEL_WIDTH: f32 = 280.0;
+#[expect(dead_code)]
 pub const MESSAGE_MAX_WIDTH: f32 = 480.0;
+#[expect(dead_code)]
 pub const IMAGE_PREVIEW_MAX_WIDTH: f32 = 360.0;
+#[expect(dead_code)]
 pub const IMAGE_PREVIEW_MAX_HEIGHT: f32 = 400.0;
 
 // ── Shadow tokens ─────────────────────────────────────────────────────
 /// Subtle card shadow — rgba(0,0,0,0.08) offset(0,1) blur(3).
+#[expect(dead_code)]
 pub fn shadow_card(theme: &Theme) -> iced::Shadow {
     let _ = theme;
     iced::Shadow {
@@ -131,6 +142,7 @@ pub fn shadow_card(theme: &Theme) -> iced::Shadow {
 }
 
 /// Dialog / popover shadow — rgba(0,0,0,0.20) offset(0,4) blur(12).
+#[expect(dead_code)]
 pub fn shadow_dialog(theme: &Theme) -> iced::Shadow {
     let _ = theme;
     iced::Shadow {
@@ -141,6 +153,7 @@ pub fn shadow_dialog(theme: &Theme) -> iced::Shadow {
 }
 
 /// Elevated modal shadow — rgba(0,0,0,0.30) offset(0,4) blur(24).
+#[expect(dead_code)]
 pub fn shadow_elevated(theme: &Theme) -> iced::Shadow {
     let _ = theme;
     iced::Shadow {
@@ -326,6 +339,7 @@ pub fn bubble_bg(theme: &Theme, is_local: bool, is_system: bool) -> Option<Backg
 
 // ── Style helpers ─────────────────────────────────────────────────────
 
+#[expect(dead_code)]
 pub fn focus(theme: &Theme) -> iced::Border {
     iced::Border {
         color: primary(theme),
@@ -334,6 +348,7 @@ pub fn focus(theme: &Theme) -> iced::Border {
     }
 }
 
+#[expect(dead_code)]
 pub fn surface_style(theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(surface(theme))),
@@ -348,6 +363,7 @@ pub fn surface_style(theme: &Theme) -> container::Style {
 
 /// Card container style — surface bg, subtle border, rounded corners,
 /// light drop shadow.
+#[expect(dead_code)]
 pub fn card_style(theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(surface(theme))),
@@ -362,6 +378,7 @@ pub fn card_style(theme: &Theme) -> container::Style {
 }
 
 /// Elevated container style — for dialogs, popovers, modals.
+#[expect(dead_code)]
 pub fn elevated_style(theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(surface(theme))),
