@@ -6355,6 +6355,8 @@ impl IcedChat {
                         };
                         store.upsert(ad, local_pk);
                     }
+                    self.public_rooms_sidebar_revision =
+                        self.public_rooms_sidebar_revision.wrapping_add(1);
                     // Broadcast an immediate advertisement on the directory
                     // topic so other peers see it without waiting for the
                     // ~60 s periodic tick.  If the directory sender is not
@@ -12077,6 +12079,8 @@ impl IcedChat {
                         }
                     }
                 }
+                self.public_rooms_sidebar_revision =
+                    self.public_rooms_sidebar_revision.wrapping_add(1);
 
                 // ── Profile image download: drain pending queue ─────────
                 // Processed here (on ConnMonitorTick) as a fallback path in
@@ -13458,6 +13462,8 @@ impl IcedChat {
             if verify_advertisement(ad, signature, *from) {
                 let mut store = self.directory_store.lock().unwrap();
                 store.upsert(ad.clone(), *from);
+                self.public_rooms_sidebar_revision =
+                    self.public_rooms_sidebar_revision.wrapping_add(1);
                 trace!(
                     "upserted RoomAdvertisement from {} for room {}",
                     from.fmt_short(),
