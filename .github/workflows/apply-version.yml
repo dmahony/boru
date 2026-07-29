@@ -1,7 +1,14 @@
 name: Apply Version
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
+
+concurrency:
+  group: apply-version-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
