@@ -64,6 +64,7 @@ use boru_core::diagnostics::{
     DiagnosticEvent, DiagnosticEventKind, DiagnosticStageState, Diagnostics, DiscoveryTestResult,
     GuiWaitCondition, IcedMessageJournal, IcedStateSnapshot, PeerDiagnosticState, ProbeTestResult,
 };
+use boru_core::directory::DirectoryStore;
 use boru_core::download_initiation::initiate_download;
 use boru_core::net::Gossip;
 use boru_core::proto::TopicId;
@@ -311,6 +312,8 @@ pub struct McpAppState {
     /// Persistent storage for file catalogues and download state.
     /// `None` when storage is unavailable (e.g. ephemeral mode).
     pub storage: Option<boru_core::storage::Storage>,
+    /// Public-room advertisements loaded from and persisted to SQLite.
+    pub directory_store: Arc<Mutex<DirectoryStore>>,
 }
 
 // =============================================================================
@@ -459,6 +462,9 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
         "boru_get_peer_status" => handle_get_peer_status(req, state),
         "boru_wait_for_peer" => handle_wait_for_peer(req, state).await,
         "boru_run_discovery_test" => handle_run_discovery_test(req, state).await,
+        "boru_list_public_rooms" => handle_list_public_rooms(state),
+        "boru_create_public_room" => handle_create_public_room(req, state),
+        "boru_delete_public_room" => handle_delete_public_room(req, state),
         "boru_join_lobby_room" => {
             if !state.gui_test_actions_enabled || state.gui_action_tx.is_none() {
                 return jsonrpc_error(
@@ -619,6 +625,106 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
         },
         Err(e) => jsonrpc_error(req.id.clone(), -32000, "Internal error", &e),
     }
+}
+
+/// List public-room advertisements known by the local directory store.
+fn handle_list_public_rooms(state: &McpAppState) -> Result<Value, String> {
+    let store = state
+        .directory_store
+        .lock()
+        .map_err(|_| "directory store mutex poisoned".to_string())?;
+    let rooms: Vec<Value> = store
+        .list_active()
+        .into_iter()
+        .map(|(ad, author)| {
+            serde_json::json!({
+                "topic": ad.topic.to_string(),
+                "name": ad.room_name,
+                "description": ad.description,
+                "ticket": ad.ticket,
+                "member_count": ad.member_count,
+                "last_activity": ad.last_activity,
+                "author": author.to_string(),
+            })
+        })
+        .collect();
+    let count = rooms.len();
+    Ok(serde_json::json!({ "rooms": rooms, "count": count }))
+}
+
+/// Create a local public-room advertisement.
+fn handle_create_public_room(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
+    let name = req
+        .params
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing required argument: name".to_string())?;
+    validate_bounded(name, 256, "name")?;
+    validate_no_control_chars(name, "name")?;
+    if name.trim().is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    let description = req
+        .params
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    validate_bounded(description, 4096, "description")?;
+    validate_no_control_chars(description, "description")?;
+
+    let topic = TopicId::from_bytes(rand::random());
+    let ticket = boru_core::chat_core::Ticket::new(topic, Vec::new()).to_string();
+    let ad = boru_core::chat_core::RoomAdvertisement {
+        room_name: name.to_string(),
+        description: description.to_string(),
+        topic,
+        ticket: ticket.clone(),
+        member_count: 0,
+        last_activity: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    };
+    state
+        .directory_store
+        .lock()
+        .map_err(|_| "directory store mutex poisoned".to_string())?
+        .upsert(ad, state.endpoint.id());
+    persist_directory_store(state)?;
+    Ok(serde_json::json!({ "created": true, "topic": topic.to_string(), "ticket": ticket }))
+}
+
+/// Delete a public-room advertisement by topic.
+fn handle_delete_public_room(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
+    let topic = req
+        .params
+        .get("topic")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing required argument: topic".to_string())?
+        .parse::<TopicId>()
+        .map_err(|e| format!("Invalid topic: {e}"))?;
+    let removed = state
+        .directory_store
+        .lock()
+        .map_err(|_| "directory store mutex poisoned".to_string())?
+        .remove_topic(topic);
+    persist_directory_store(state)?;
+    Ok(
+        serde_json::json!({ "deleted": removed > 0, "removed": removed, "topic": topic.to_string() }),
+    )
+}
+
+fn persist_directory_store(state: &McpAppState) -> Result<(), String> {
+    let Some(storage) = state.storage.as_ref() else {
+        return Ok(());
+    };
+    let store = state
+        .directory_store
+        .lock()
+        .map_err(|_| "directory store mutex poisoned".to_string())?;
+    storage
+        .with_conn(|conn| Ok(store.save_to_db(conn)?))
+        .map_err(|e| format!("failed to persist directory store: {e}"))
 }
 
 /// Validate the outer JSON object for each GUI MCP method.

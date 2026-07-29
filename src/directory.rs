@@ -180,6 +180,14 @@ impl DirectoryStore {
             .collect()
     }
 
+    /// Remove all advertisements for a room topic and return the number removed.
+    pub fn remove_topic(&mut self, topic: TopicId) -> usize {
+        let before = self.ads.len();
+        self.ads
+            .retain(|(stored_topic, _), _| *stored_topic != topic);
+        before - self.ads.len()
+    }
+
     /// Remove advertisements older than `max_age`.
     ///
     /// Call this periodically (e.g. every 60 seconds) to keep the store

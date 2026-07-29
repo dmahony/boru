@@ -1164,11 +1164,6 @@ fn main() -> Result<()> {
         }
 
         let discovered_peers_rx = Arc::new(tokio::sync::Mutex::new(discovered_peers_rx_tmp));
-        let _directory_room_rx = Arc::new(tokio::sync::Mutex::new(directory_room_rx_tmp));
-
-        // ── Directory room update channel ──
-        let (_directory_room_tx, directory_room_rx_tmp) =
-            tokio::sync::mpsc::channel::<app::DirectoryRoomUpdate>(64);
         let directory_room_rx = Arc::new(tokio::sync::Mutex::new(directory_room_rx_tmp));
 
         // Spawn the backfill background actor for requesting history
@@ -1352,6 +1347,20 @@ fn main() -> Result<()> {
             )),
             gui_state_rx: Some(_gui_state_rx.clone()),
             storage: boru_core::storage::Storage::open(&data_dir).ok(),
+            directory_store: {
+                let store = Arc::new(std::sync::Mutex::new(
+                    boru_core::directory::DirectoryStore::new(),
+                ));
+                if let Ok(storage) = boru_core::storage::Storage::open(&data_dir) {
+                    let _ = storage.with_conn(|conn| {
+                        Ok(store
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("directory store mutex poisoned"))?
+                            .load_from_db(conn)?)
+                    });
+                }
+                store
+            },
         };
 
         if let Err(e) = runtime.block_on(mcp_server::spawn_mcp_server(mcp_config, mcp_state)) {

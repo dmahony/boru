@@ -2078,6 +2078,8 @@ pub struct IcedChat {
     pub friend_events_rx: Arc<Mutex<Receiver<FriendEvent>>>,
     /// Set of peer PublicKeys currently connected as gossip neighbors.
     neighbors: HashSet<PublicKey>,
+    /// Number of gossip neighbors for each subscribed room.
+    room_neighbor_counts: HashMap<TopicId, u32>,
     /// Number of peers reachable via a direct (hole-punched) connection.
     direct_peers: usize,
     /// Number of peers connected through a relay server.
@@ -2508,6 +2510,8 @@ pub struct IcedChat {
     /// Channel for receiving room advertisements from the background directory
     /// subscription task.
     directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>,
+    /// Topics already queued for automatic subscription after discovery.
+    auto_subscribed_rooms: HashSet<TopicId>,
 }
 
 /// Cached profile data received from a peer via ProfileUpdate gossip.
@@ -4089,6 +4093,7 @@ impl IcedChat {
             friend_mgr,
             friend_events_rx,
             neighbors: HashSet::new(),
+            room_neighbor_counts: HashMap::new(),
             direct_peers: 0,
             relayed_peers: 0,
             conn_refresh_counter: 0,
@@ -4269,6 +4274,7 @@ impl IcedChat {
             create_room_advertise: false,
             directory_store,
             directory_room_rx,
+            auto_subscribed_rooms: HashSet::new(),
         }
     }
 
@@ -7120,6 +7126,8 @@ impl IcedChat {
                 // on startup).  If so, mark the sender as ready immediately so
                 // that the first message send does not stall.
                 self.sender_ready = neighbor_count > 0;
+                self.room_neighbor_counts
+                    .insert(topic, neighbor_count as u32);
 
                 // Retroactively emit diagnostic events for neighbors that were
                 // already connected before the forwarder started. When NeighborUp
@@ -9124,6 +9132,10 @@ impl IcedChat {
                 match &event {
                     NetEvent::NeighborUp { peer } => {
                         conversation.neighbors.insert(*peer);
+                        self.room_neighbor_counts
+                            .entry(topic)
+                            .and_modify(|count| *count = count.saturating_add(1))
+                            .or_insert(1);
                         conversation.sender_ready = conversation.sender.is_some();
                         if topic == self.topic {
                             let was_ready = self.sender_ready;
@@ -9140,6 +9152,9 @@ impl IcedChat {
                     }
                     NetEvent::NeighborDown { peer } => {
                         conversation.neighbors.remove(peer);
+                        if let Some(count) = self.room_neighbor_counts.get_mut(&topic) {
+                            *count = count.saturating_sub(1);
+                        }
                         conversation.sender_ready =
                             !conversation.neighbors.is_empty() && conversation.sender.is_some();
                         if topic == self.topic {
@@ -10869,7 +10884,11 @@ impl IcedChat {
                                 }
                             })
                             .unwrap_or_else(|| topic.to_string());
-                        let neighbor_count = self.neighbors.len() as u32;
+                        let neighbor_count = self
+                            .room_neighbor_counts
+                            .get(&topic)
+                            .copied()
+                            .unwrap_or_default();
                         let ticket = self.room_ticket(topic).to_string();
                         iced::Task::perform(
                             async move {
@@ -12084,9 +12103,12 @@ impl IcedChat {
                                                 }
                                             })
                                             .unwrap_or_else(|| topic.to_string());
-                                        // Count neighbors in this room — use the
-                                        // overall neighbor count as an approximation.
-                                        let neighbor_count = self.neighbors.len() as u32;
+                                        // Count neighbors in this specific room.
+                                        let neighbor_count = self
+                                            .room_neighbor_counts
+                                            .get(&topic)
+                                            .copied()
+                                            .unwrap_or_default();
                                         // Build a join ticket for the room
                                         let ticket = self.room_ticket(topic).to_string();
                                         Some((topic, name, topic, ticket, neighbor_count))
@@ -12180,17 +12202,53 @@ impl IcedChat {
 
                 // ── Drain directory room channel ──────────────────────
                 // Poll the directory gossip channel for new room advertisements
-                // received from other peers.  Each ad is verified and stored.
+                // received from other peers.  Each ad is stored and queued for
+                // a background subscription so discovery does not require a
+                // manual ticket exchange.
+                let mut discovered_room_tasks = Vec::new();
                 {
                     let mut dir_guard = self.directory_room_rx.try_lock();
                     if let Ok(ref mut rx) = dir_guard {
                         while let Ok(DirectoryRoomUpdate(ad, from)) = rx.try_recv() {
                             info!(from = %from, topic = %ad.topic, "received room advertisement");
-                            let mut store = self.directory_store.lock().unwrap();
-                            store.upsert(ad, from);
+                            self.directory_store
+                                .lock()
+                                .unwrap()
+                                .upsert(ad.clone(), from);
+
+                            // Parse the authenticated ticket and use its topic;
+                            // never subscribe to an untrusted raw advertisement
+                            // topic when the ticket disagrees with it.
+                            let Ok(ticket) = ad.ticket.parse::<Ticket>() else {
+                                warn!(from = %from, "ignoring room advertisement with invalid ticket");
+                                continue;
+                            };
+                            let topic = ticket.topic;
+                            if topic == self.topic
+                                || self.conversations.contains_key(&topic)
+                                || !self.auto_subscribed_rooms.insert(topic)
+                            {
+                                continue;
+                            }
+
+                            let mut entry = ConversationEntry::new(topic, "", ad.room_name);
+                            entry.archived = true;
+                            self.conversation_store.upsert(entry);
+                            self.chats_sidebar_revision =
+                                self.chats_sidebar_revision.wrapping_add(1);
+                            discovered_room_tasks.push(iced::Task::done(
+                                AppMessage::BackgroundSubscribe(
+                                    topic,
+                                    self.discovered_peers.clone(),
+                                ),
+                            ));
                         }
                     }
                 }
+                if !discovered_room_tasks.is_empty() {
+                    let _ = self.send_save_conversations();
+                }
+                tasks.extend(discovered_room_tasks);
                 self.public_rooms_sidebar_revision =
                     self.public_rooms_sidebar_revision.wrapping_add(1);
 
