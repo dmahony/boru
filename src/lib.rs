@@ -110,6 +110,7 @@ pub mod download_limits;
 /// Durable friends list storage for the chat frontends.
 #[cfg(feature = "net")]
 pub mod friends;
+pub mod group_id;
 
 /// Durable conversation records for the chat frontends.
 ///

@@ -32,6 +32,7 @@ use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::group_id::GroupId;
 use crate::peer_names;
 use crate::proto::TopicId;
 
@@ -107,11 +108,23 @@ pub struct ConversationEntry {
     /// What kind of conversation this is.
     #[serde(default)]
     pub kind: ConversationKind,
+    /// Stable group identity for group conversations; unset for direct chats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<GroupId>,
+    /// Epoch which produced `topic`, when this is a group conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_epoch: Option<u64>,
     /// Unix-epoch milliseconds when the conversation was first created.
     pub created_at_unix_ms: u64,
     /// Unix-epoch milliseconds of the most recent activity.
     #[serde(default)]
     pub last_seen_at_unix_ms: u64,
+    /// Preview of the most recent message, if one has been observed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_message_preview: String,
+    /// Number of messages received while this conversation was unread.
+    #[serde(default)]
+    pub unread_count: u32,
     /// Whether the conversation is archived and should not appear in the
     /// default conversation list.
     #[serde(default)]
@@ -127,22 +140,40 @@ impl ConversationEntry {
             peer_id: peer_id.into(),
             name: name.into(),
             kind: ConversationKind::Direct,
+            group_id: None,
+            current_epoch: None,
             created_at_unix_ms: now,
             last_seen_at_unix_ms: now,
+            last_message_preview: String::new(),
+            unread_count: 0,
             archived: false,
         }
     }
 
     /// Create a new group conversation entry.
     pub fn new_group(topic: TopicId, name: impl Into<String>) -> Self {
+        Self::new_group_epoch(GroupId::generate(), 1, topic, name)
+    }
+
+    /// Create a group conversation for an existing stable group and epoch.
+    pub fn new_group_epoch(
+        group_id: GroupId,
+        epoch: u64,
+        topic: TopicId,
+        name: impl Into<String>,
+    ) -> Self {
         let now = now_unix_ms();
         Self {
             topic,
             peer_id: String::new(),
             name: name.into(),
             kind: ConversationKind::Group,
+            group_id: Some(group_id),
+            current_epoch: Some(epoch),
             created_at_unix_ms: now,
             last_seen_at_unix_ms: now,
+            last_message_preview: String::new(),
+            unread_count: 0,
             archived: false,
         }
     }
@@ -150,6 +181,20 @@ impl ConversationEntry {
     /// Bump the last-seen timestamp to now.
     pub fn touch(&mut self) {
         self.last_seen_at_unix_ms = now_unix_ms();
+    }
+
+    /// Update message summary and unread state after a received message.
+    pub fn record_message(&mut self, preview: impl Into<String>, unread: bool) {
+        self.last_message_preview = preview.into();
+        self.last_seen_at_unix_ms = now_unix_ms();
+        if unread {
+            self.unread_count = self.unread_count.saturating_add(1);
+        }
+    }
+
+    /// Mark the conversation read without changing its last activity.
+    pub fn mark_read(&mut self) {
+        self.unread_count = 0;
     }
 
     /// Display label for the conversation.
@@ -170,6 +215,54 @@ impl ConversationEntry {
             // Fallback: truncate the raw ID (unlikely — peer_id is usually a valid PublicKey).
             self.peer_id[..self.peer_id.len().min(16)].to_string()
         }
+    }
+}
+
+/// Stable relationship between a group and its epoch topics.
+///
+/// The group id is the conversation identity while the current epoch topic is
+/// the active gossip subscription. Older topics are retained for eventual
+/// history merging, but are not merged or subscribed automatically yet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupTopicHistory {
+    group_id: GroupId,
+    epochs: BTreeMap<u64, TopicId>,
+}
+
+impl GroupTopicHistory {
+    /// Create a mapping containing the initial epoch.
+    pub fn new(group_id: GroupId, epoch: u64, topic: TopicId) -> Self {
+        let mut epochs = BTreeMap::new();
+        epochs.insert(epoch, topic);
+        Self { group_id, epochs }
+    }
+
+    /// Stable group identity.
+    pub fn group_id(&self) -> GroupId {
+        self.group_id
+    }
+
+    /// Record an epoch/topic pair idempotently.
+    pub fn insert_epoch(&mut self, epoch: u64, topic: TopicId) -> Option<TopicId> {
+        self.epochs.insert(epoch, topic)
+    }
+
+    /// Return the numerically greatest known epoch and its topic.
+    pub fn current(&self) -> Option<(u64, TopicId)> {
+        self.epochs
+            .iter()
+            .next_back()
+            .map(|(&epoch, &topic)| (epoch, topic))
+    }
+
+    /// Resolve a topic for a known epoch.
+    pub fn topic_for_epoch(&self, epoch: u64) -> Option<TopicId> {
+        self.epochs.get(&epoch).copied()
+    }
+
+    /// Iterate known epochs oldest first for future history merging.
+    pub fn epochs(&self) -> impl Iterator<Item = (u64, TopicId)> + '_ {
+        self.epochs.iter().map(|(&epoch, &topic)| (epoch, topic))
     }
 }
 
@@ -548,6 +641,36 @@ mod tests {
     fn conversation_kind_group_is_preserved() {
         let entry = ConversationEntry::new_group(make_topic(0xBB), "Room");
         assert_eq!(entry.kind, ConversationKind::Group);
+    }
+
+    #[test]
+    fn group_conversation_keeps_stable_id_and_epoch_topic_mapping() {
+        let group_id = GroupId::from_bytes([0x11; 32]);
+        let first_topic = make_topic(0x01);
+        let next_topic = make_topic(0x02);
+        let entry = ConversationEntry::new_group_epoch(group_id, 1, first_topic, "Team");
+        assert_eq!(entry.group_id, Some(group_id));
+        assert_eq!(entry.current_epoch, Some(1));
+        assert_eq!(entry.peer_id, "");
+
+        let mut history = GroupTopicHistory::new(group_id, 1, first_topic);
+        assert_eq!(history.insert_epoch(2, next_topic), None);
+        assert_eq!(history.current(), Some((2, next_topic)));
+        assert_eq!(history.topic_for_epoch(1), Some(first_topic));
+        assert_eq!(history.topic_for_epoch(2), Some(next_topic));
+    }
+
+    #[test]
+    fn group_conversation_serializes_for_restart_without_changing_direct_kind() {
+        let group_id = GroupId::from_bytes([0x22; 32]);
+        let group = ConversationEntry::new_group_epoch(group_id, 3, make_topic(0x33), "Persisted");
+        let restored: ConversationEntry =
+            serde_json::from_str(&serde_json::to_string(&group).unwrap()).unwrap();
+        assert_eq!(restored.group_id, Some(group_id));
+        assert_eq!(restored.current_epoch, Some(3));
+        let direct = ConversationEntry::new(make_topic(0x44), "peer", "Direct");
+        assert_eq!(direct.kind, ConversationKind::Direct);
+        assert_eq!(direct.group_id, None);
     }
 
     // ── Load / save ──────────────────────────────────────────────────────
