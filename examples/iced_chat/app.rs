@@ -609,6 +609,7 @@ pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../assets/icons/luci
 #[expect(dead_code)]
 pub(crate) const ICON_UNREAD: &[u8] =
     include_bytes!("../../assets/icons/lucide/message-circle-fill.svg");
+pub(crate) const ICON_SWEEP: &[u8] = include_bytes!("../../assets/icons/lucide/trash-2.svg");
 
 // ── SVG icon helper ──────────────────────────────────────────────────
 /// Create an SVG icon widget from embedded Lucide icon bytes.
@@ -2729,6 +2730,8 @@ pub enum AppMessage {
     ToggleHelp,
     /// Toggle the chat options popover (room info, delete, settings).
     ToggleChatOptions,
+    /// Clear conversation history from screen and database.
+    ClearConversation,
     /// Toggle the right-side details panel.
     ToggleDetailsPanel,
     OpenSettings,
@@ -5220,6 +5223,7 @@ impl IcedChat {
             AppMessage::AttachPressed => "AttachPressed",
             AppMessage::ToggleHelp => "ToggleHelp",
             AppMessage::ToggleChatOptions => "ToggleChatOptions",
+            AppMessage::ClearConversation => "ClearConversation",
             AppMessage::OpenSettings => "OpenSettings",
             AppMessage::CloseSettings => "CloseSettings",
             AppMessage::NetEvent(_) => "NetEvent",
@@ -8633,6 +8637,30 @@ impl IcedChat {
                 self.show_chat_options = !self.show_chat_options;
                 // Close the details panel when opening the options popover
                 self.details_panel_open = false;
+                iced::Task::none()
+            }
+            AppMessage::ClearConversation => {
+                let topic = self.topic;
+                // Clear screen entries and indexes
+                self.entries.clear();
+                self.event_id_to_index.clear();
+                self.message_hash_to_index.clear();
+                self.layout_cache.borrow_mut().clear();
+                self.history_saved_count = 0;
+
+                // Clear from in-memory chat history store
+                {
+                    let mut chat_history = self.chat_history.lock().unwrap();
+                    let _ = clear_room_history(topic, &mut self.room_history, &mut chat_history, None);
+                }
+                self.send_save_chat_history();
+
+                // Clear from SQLite outgoing_messages
+                if let Some(storage) = &self.storage {
+                    let _ = storage.delete_outgoing_for_topic(&topic);
+                }
+
+                self.push_system("Conversation cleared.");
                 iced::Task::none()
             }
             AppMessage::ToggleDetailsPanel => {
@@ -17103,6 +17131,15 @@ impl IcedChat {
             iced::widget::tooltip::Position::Bottom,
         );
 
+        let sweep = iced::widget::tooltip::Tooltip::new(
+            button(icon_svg(ICON_SWEEP, TYPO_SM))
+                .on_press(AppMessage::ClearConversation)
+                .padding([SPACE_4, SPACE_6])
+                .style(BUTTON_ICON),
+            text("Clear conversation").size(TYPO_XS),
+            iced::widget::tooltip::Position::Bottom,
+        );
+
         let shared = iced::widget::tooltip::Tooltip::new(
             button(icon_svg(ICON_FILES, TYPO_SM))
                 .padding([SPACE_4, SPACE_6])
@@ -17139,6 +17176,7 @@ impl IcedChat {
                 identity,
                 Space::new().width(Length::Fill),
                 search,
+                sweep,
                 shared,
                 details_toggle,
                 more,
