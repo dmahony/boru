@@ -112,6 +112,14 @@ pub mod download_limits;
 pub mod friends;
 pub mod group_id;
 
+/// Authenticated membership control events.
+#[cfg(feature = "net")]
+pub mod group_events;
+
+/// Secure member removal and per-epoch credential rotation.
+#[cfg(feature = "net")]
+pub mod group_epoch;
+
 /// Durable conversation records for the chat frontends.
 ///
 /// Persists conversation metadata keyed by gossip topic, surviving

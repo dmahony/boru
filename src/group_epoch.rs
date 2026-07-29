@@ -1,0 +1,384 @@
+//! Secure epoch rotation for private group conversations.
+//!
+//! Epoch credentials are deliberately not carried in the signed control event:
+//! the event is safe to gossip, while the new topic and discovery secret are
+//! delivered through individually encrypted mailbox envelopes to survivors.
+
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use iroh::{PublicKey, SecretKey, Signature};
+use serde::{Deserialize, Serialize};
+use serde_byte_array::ByteArray;
+
+use crate::{
+    discovery_secret::DiscoverySecret,
+    group_id::GroupId,
+    mailbox::{self, MailboxEnvelope, MailboxIdentity, MailboxPublicKey},
+    TopicId,
+};
+
+const SIGNATURE_LEN: usize = Signature::LENGTH;
+
+/// Credentials used to subscribe to one group epoch.
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EpochCredentials {
+    group_id: GroupId,
+    epoch: u64,
+    topic: TopicId,
+    discovery_secret: DiscoverySecret,
+}
+
+impl fmt::Debug for EpochCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EpochCredentials")
+            .field("group_id", &self.group_id)
+            .field("epoch", &self.epoch)
+            .field("topic", &self.topic)
+            .field("discovery_secret", &"[redacted]")
+            .finish()
+    }
+}
+
+impl EpochCredentials {
+    /// Generate fresh random topic and discovery credentials.
+    pub fn generate(group_id: GroupId, epoch: u64) -> Self {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).expect("OS entropy source failed");
+        Self::from_parts(
+            group_id,
+            epoch,
+            TopicId::from_bytes(bytes),
+            DiscoverySecret::generate(),
+        )
+    }
+
+    /// Construct credentials, primarily for persistence and deterministic tests.
+    pub fn from_parts(
+        group_id: GroupId,
+        epoch: u64,
+        topic: TopicId,
+        discovery_secret: DiscoverySecret,
+    ) -> Self {
+        Self {
+            group_id,
+            epoch,
+            topic,
+            discovery_secret,
+        }
+    }
+    /// Stable group identity.
+    pub fn group_id(&self) -> GroupId {
+        self.group_id
+    }
+    /// Epoch number.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    /// Gossip topic for this epoch.
+    pub fn topic(&self) -> &TopicId {
+        &self.topic
+    }
+    /// Discovery secret for this epoch.
+    pub fn secret(&self) -> &DiscoverySecret {
+        &self.discovery_secret
+    }
+}
+
+/// Signed public control event recording member removal.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MemberRemovedEvent {
+    /// Group identity.
+    pub group_id: GroupId,
+    /// Epoch in which the removal was authorized.
+    pub epoch: u64,
+    /// Removed identity.
+    pub member: PublicKey,
+    /// Owner identity.
+    pub actor: PublicKey,
+    /// Event timestamp.
+    pub timestamp: u64,
+    /// Owner signature over all other fields.
+    pub signature: ByteArray<SIGNATURE_LEN>,
+}
+
+/// Signed public control event recording the new epoch topic.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EpochChangedEvent {
+    /// Group identity.
+    pub group_id: GroupId,
+    /// Previous epoch.
+    pub old_epoch: u64,
+    /// New epoch.
+    pub new_epoch: u64,
+    /// Owner identity.
+    pub actor: PublicKey,
+    /// Event timestamp.
+    pub timestamp: u64,
+    /// Owner signature over all other fields.
+    pub signature: ByteArray<SIGNATURE_LEN>,
+}
+
+/// A secure, recipient-specific delivery of new epoch credentials.
+#[derive(Clone, Debug)]
+pub struct CredentialDelivery {
+    recipient: PublicKey,
+    envelope: MailboxEnvelope,
+}
+impl CredentialDelivery {
+    /// Recipient identity.
+    pub fn recipient(&self) -> PublicKey {
+        self.recipient
+    }
+    /// Open after checking the recipient's mailbox identity.
+    pub fn open(&self, identity: &MailboxIdentity) -> Result<EpochCredentials, EpochRotationError> {
+        let bytes = identity
+            .open(&self.envelope)
+            .map_err(|_| EpochRotationError::DecryptionFailed)?;
+        postcard::from_bytes(&bytes).map_err(|e| EpochRotationError::Decode(e.to_string()))
+    }
+}
+
+/// Result of an atomic owner removal and epoch rotation.
+#[derive(Clone, Debug)]
+pub struct EpochRotation {
+    credentials: EpochCredentials,
+    member_removed: MemberRemovedEvent,
+    epoch_changed: EpochChangedEvent,
+    deliveries: Vec<CredentialDelivery>,
+}
+impl EpochRotation {
+    /// New credentials for local owner state.
+    pub fn credentials(&self) -> &EpochCredentials {
+        &self.credentials
+    }
+    /// Signed removal event.
+    pub fn member_removed_event(&self) -> &MemberRemovedEvent {
+        &self.member_removed
+    }
+    /// Signed epoch event.
+    pub fn epoch_changed_event(&self) -> &EpochChangedEvent {
+        &self.epoch_changed
+    }
+    /// Encrypted deliveries, one for each remaining member with a mailbox key.
+    pub fn deliveries(&self) -> &[CredentialDelivery] {
+        &self.deliveries
+    }
+    /// Open the delivery addressed to `identity`.
+    pub fn open_for(
+        &self,
+        identity: &MailboxIdentity,
+    ) -> Result<EpochCredentials, EpochRotationError> {
+        self.deliveries
+            .iter()
+            .find(|d| d.recipient == identity.public_key().identity)
+            .ok_or(EpochRotationError::NotRecipient)
+            .and_then(|d| d.open(identity))
+    }
+}
+
+impl MemberRemovedEvent {
+    /// Verify the owner signature without trusting the event contents.
+    pub fn verify(&self, owner: PublicKey) -> bool {
+        if self.actor != owner {
+            return false;
+        }
+        postcard::to_stdvec(&(
+            self.group_id,
+            self.epoch,
+            self.member,
+            self.actor,
+            self.timestamp,
+        ))
+        .ok()
+        .and_then(|bytes| {
+            owner
+                .verify(&bytes, &Signature::from_bytes(&self.signature))
+                .ok()
+        })
+        .is_some()
+    }
+}
+
+impl EpochChangedEvent {
+    /// Verify the owner signature without trusting the event contents.
+    pub fn verify(&self, owner: PublicKey) -> bool {
+        if self.actor != owner {
+            return false;
+        }
+        postcard::to_stdvec(&(
+            self.group_id,
+            self.old_epoch,
+            self.new_epoch,
+            self.actor,
+            self.timestamp,
+        ))
+        .ok()
+        .and_then(|bytes| {
+            owner
+                .verify(&bytes, &Signature::from_bytes(&self.signature))
+                .ok()
+        })
+        .is_some()
+    }
+}
+
+/// Errors that prevent rotation. State is unchanged on every error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EpochRotationError {
+    /// Caller is not the owner.
+    NotOwner,
+    /// Target was not an active member.
+    NotMember,
+    /// A survivor has no authenticated encryption key.
+    MissingRecipient(PublicKey),
+    /// Event signing failed or payload could not be encoded.
+    Encode(String),
+    /// Mailbox sealing failed.
+    EncryptionFailed,
+    /// Recipient could not decrypt the envelope.
+    DecryptionFailed,
+    /// Credential payload was malformed.
+    Decode(String),
+    /// No envelope was addressed to this identity.
+    NotRecipient,
+}
+
+/// Authoritative local state for one group's current epoch and membership.
+#[derive(Clone, Debug)]
+pub struct EpochRotationState {
+    current: EpochCredentials,
+    owner: PublicKey,
+    members: HashSet<PublicKey>,
+}
+impl EpochRotationState {
+    /// Create state with the owner as the sole member.
+    pub fn new(current: EpochCredentials, owner: PublicKey) -> Self {
+        let mut members = HashSet::new();
+        members.insert(owner);
+        Self {
+            current,
+            owner,
+            members,
+        }
+    }
+    /// Add a member after the authenticated membership protocol accepts it.
+    pub fn add_member(&mut self, member: PublicKey) {
+        self.members.insert(member);
+    }
+    /// Current credentials.
+    pub fn current(&self) -> &EpochCredentials {
+        &self.current
+    }
+    /// Active members, including owner.
+    pub fn members(&self) -> &HashSet<PublicKey> {
+        &self.members
+    }
+
+    /// Remove one member and atomically create and distribute the next epoch.
+    ///
+    /// Recipient keys are looked up before any state mutation. The removed
+    /// identity is explicitly excluded even if a stale key is supplied.
+    pub fn rotate_after_removal(
+        &mut self,
+        owner_key: &SecretKey,
+        removed: PublicKey,
+        recipient_keys: &HashMap<PublicKey, MailboxPublicKey>,
+    ) -> Result<EpochRotation, EpochRotationError> {
+        if owner_key.public() != self.owner {
+            return Err(EpochRotationError::NotOwner);
+        }
+        if !self.members.contains(&removed) || removed == self.owner {
+            return Err(EpochRotationError::NotMember);
+        }
+        let survivors: Vec<_> = self
+            .members
+            .iter()
+            .copied()
+            .filter(|p| *p != removed && *p != self.owner)
+            .collect();
+        for member in &survivors {
+            if !recipient_keys.contains_key(member) {
+                return Err(EpochRotationError::MissingRecipient(*member));
+            }
+        }
+        let old = self.current;
+        let next = EpochCredentials::generate(
+            old.group_id,
+            old.epoch
+                .checked_add(1)
+                .ok_or_else(|| EpochRotationError::Encode("epoch overflow".into()))?,
+        );
+        let timestamp = now_secs();
+        let member_removed = sign_removed(owner_key, old.group_id, old.epoch, removed, timestamp)?;
+        let epoch_changed = sign_epoch(owner_key, old.group_id, old.epoch, next.epoch, timestamp)?;
+        let payload =
+            postcard::to_stdvec(&next).map_err(|e| EpochRotationError::Encode(e.to_string()))?;
+        let mut deliveries = Vec::with_capacity(survivors.len());
+        for member in survivors {
+            let envelope = mailbox::seal_for(owner_key, recipient_keys[&member], &payload)
+                .map_err(|_| EpochRotationError::EncryptionFailed)?;
+            deliveries.push(CredentialDelivery {
+                recipient: member,
+                envelope,
+            });
+        }
+        self.members.remove(&removed);
+        self.current = next;
+        Ok(EpochRotation {
+            credentials: next,
+            member_removed,
+            epoch_changed,
+            deliveries,
+        })
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+fn sign_removed(
+    key: &SecretKey,
+    group_id: GroupId,
+    epoch: u64,
+    member: PublicKey,
+    timestamp: u64,
+) -> Result<MemberRemovedEvent, EpochRotationError> {
+    let actor = key.public();
+    let bytes = postcard::to_stdvec(&(group_id, epoch, member, actor, timestamp))
+        .map_err(|e| EpochRotationError::Encode(e.to_string()))?;
+    Ok(MemberRemovedEvent {
+        group_id,
+        epoch,
+        member,
+        actor,
+        timestamp,
+        signature: ByteArray::new(key.sign(&bytes).to_bytes()),
+    })
+}
+fn sign_epoch(
+    key: &SecretKey,
+    group_id: GroupId,
+    old_epoch: u64,
+    new_epoch: u64,
+    timestamp: u64,
+) -> Result<EpochChangedEvent, EpochRotationError> {
+    let actor = key.public();
+    let bytes = postcard::to_stdvec(&(group_id, old_epoch, new_epoch, actor, timestamp))
+        .map_err(|e| EpochRotationError::Encode(e.to_string()))?;
+    Ok(EpochChangedEvent {
+        group_id,
+        old_epoch,
+        new_epoch,
+
+        actor,
+        timestamp,
+        signature: ByteArray::new(key.sign(&bytes).to_bytes()),
+    })
+}
