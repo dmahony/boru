@@ -1128,42 +1128,50 @@ fn main() -> Result<()> {
         // Subscribe to the directory gossip topic for public-room discovery.
         // The directory topic is derived from the relay URL so all peers on
         // the same relay share one directory mesh.
-        if let Some(ref relay_url) = relay_url_for_directory {
-            let dir_topic = boru_core::directory::directory_topic(relay_url);
-            if let Ok(sub) = gossip.subscribe(dir_topic, Vec::new()).await {
-                splash_send("Joining directory...");
-                let (_sender, mut receiver) = sub.split();
-                let dir_tx = directory_room_tx.clone();
-                tokio::spawn(async move {
-                    use n0_future::StreamExt;
-                    while let Some(event) = receiver.next().await {
-                        let Ok(boru_core::api::Event::Received(msg)) = event else {
-                            continue;
-                        };
-                        // Skip room-doc markers (metadata 0xFE, roster 0xFF)
-                        if let Some(&marker) = msg.content.first() {
-                            if marker == 0xFE || marker == 0xFF {
+        //
+        // The sender is shared with the MCP server so boru_create_public_room
+        // can broadcast new ads immediately.
+        let directory_sender: Arc<Mutex<Option<GossipSender>>> =
+            Arc::new(Mutex::new(None));
+        {
+            let dir_sender_for_mcp = directory_sender.clone();
+            if let Some(ref relay_url) = relay_url_for_directory {
+                let dir_topic = boru_core::directory::directory_topic(relay_url);
+                if let Ok(sub) = gossip.subscribe(dir_topic, Vec::new()).await {
+                    splash_send("Joining directory...");
+                    let (sender, mut receiver) = sub.split();
+                    *dir_sender_for_mcp.lock().unwrap() = Some(sender);
+                    let dir_tx = directory_room_tx.clone();
+                    tokio::spawn(async move {
+                        use n0_future::StreamExt;
+                        while let Some(event) = receiver.next().await {
+                            let Ok(boru_core::api::Event::Received(msg)) = event else {
                                 continue;
+                            };
+                            // Skip room-doc markers (metadata 0xFE, roster 0xFF)
+                            if let Some(&marker) = msg.content.first() {
+                                if marker == 0xFE || marker == 0xFF {
+                                    continue;
+                                }
+                            }
+                            if let Ok((from, message, _sent_at)) =
+                                SignedMessage::verify_and_decode(&msg.content)
+                            {
+                                if let Message::RoomAdvertisement { ad, .. } = message {
+                                    let _ = dir_tx.try_send(app::DirectoryRoomUpdate(ad, from));
+                                }
                             }
                         }
-                        if let Ok((from, message, _sent_at)) =
-                            SignedMessage::verify_and_decode(&msg.content)
-                        {
-                            if let Message::RoomAdvertisement { ad, .. } = message {
-                                let _ = dir_tx.try_send(app::DirectoryRoomUpdate(ad, from));
-                            }
-                        }
-                    }
-                });
-                info!("subscribed to directory topic");
-                splash_send("Directory joined");
+                    });
+                    info!("subscribed to directory topic");
+                    splash_send("Directory joined");
+                } else {
+                    warn!("failed to subscribe to directory topic");
+                }
             } else {
-                warn!("failed to subscribe to directory topic");
+                info!("directory topic: relay disabled, skipping subscription");
             }
-        } else {
-            info!("directory topic: relay disabled, skipping subscription");
         }
-
         let discovered_peers_rx = Arc::new(tokio::sync::Mutex::new(discovered_peers_rx_tmp));
         let directory_room_rx = Arc::new(tokio::sync::Mutex::new(directory_room_rx_tmp));
 
