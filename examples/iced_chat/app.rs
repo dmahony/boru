@@ -605,6 +605,7 @@ pub(crate) const ICON_NOTIFICATION: &[u8] = include_bytes!("../../assets/icons/l
 pub(crate) const ICON_ONLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle-filled.svg");
 pub(crate) const ICON_OFFLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle.svg");
 pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
+pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../assets/icons/lucide/paperclip.svg");
 #[expect(dead_code)]
 pub(crate) const ICON_UNREAD: &[u8] =
     include_bytes!("../../assets/icons/lucide/message-circle-fill.svg");
@@ -2905,6 +2906,8 @@ pub enum AppMessage {
     ProfileSaved,
     /// Copy text to the system clipboard.
     CopyToClipboard(String),
+    /// Copy a chat message body to the clipboard with visual feedback.
+    CopyMessage(usize),
     /// Copy the user's own friend ID (public key) to the clipboard with visual feedback.
     CopyFriendId,
     /// Clear the "Copied!" visual feedback after copy.
@@ -5296,6 +5299,7 @@ impl IcedChat {
             AppMessage::RemoveSharedFile(_) => "RemoveSharedFile",
             AppMessage::SharedFileRemoved(_) => "SharedFileRemoved",
             AppMessage::CopyToClipboard(_) => "CopyToClipboard",
+            AppMessage::CopyMessage(_) => "CopyMessage",
             AppMessage::CopyFriendId => "CopyFriendId",
             AppMessage::FriendIdCopiedClear => "FriendIdCopiedClear",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
@@ -12296,6 +12300,7 @@ impl IcedChat {
             }
 
             AppMessage::LinkPreviewLoaded(idx, result) => {
+                tracing::info!(entry_index = idx, result = ?result, "LinkPreviewLoaded fired");
                 if idx >= self.entries.len() {
                     tracing::warn!(entry_index = idx, "LinkPreviewLoaded: out of bounds");
                     return iced::Task::none();
@@ -12308,7 +12313,7 @@ impl IcedChat {
                         entry.link_preview_error = false;
                     }
                     link_preview::LinkPreviewResult::Error(e) => {
-                        tracing::debug!(entry_index = idx, error = %e, "link preview fetch failed");
+                        tracing::info!(entry_index = idx, error = %e, "link preview fetch failed");
                         entry.link_preview_loading = false;
                         entry.link_preview_error = true;
                     }
@@ -12537,6 +12542,20 @@ impl IcedChat {
 
             AppMessage::CopyToClipboard(text) => {
                 return iced::clipboard::write(text);
+            }
+
+            AppMessage::CopyMessage(idx) => {
+                if let Some(entry) = self.entries.get(idx) {
+                    // Truncate long messages in the toast
+                    let preview: String = if entry.body.len() > 60 {
+                        format!("{}…", &entry.body[..60])
+                    } else {
+                        entry.body.clone()
+                    };
+                    self.toast_message = Some(format!("Copied: {preview}"));
+                    return iced::clipboard::write(entry.body.clone());
+                }
+                iced::Task::none()
             }
 
             AppMessage::CopyFriendId => {
@@ -13487,8 +13506,21 @@ impl IcedChat {
         if entry_index >= self.entries.len() {
             return None;
         }
+        // Don't re-fetch if we already tried and failed, or are still loading
+        if self.entries[entry_index].link_preview_loading
+            || self.entries[entry_index].link_preview_error
+            || self.entries[entry_index].link_preview.is_some()
+        {
+            return None;
+        }
         let body = self.entries[entry_index].body.clone();
-        let first_url = link_preview::find_first_url(&body)?;
+        let first_url = match link_preview::find_first_url(&body) {
+            Some(url) => {
+                tracing::info!(url = %url, entry_index, "link preview: found URL in message body");
+                url
+            }
+            None => return None,
+        };
 
         // Check cache first
         if self
@@ -17892,6 +17924,20 @@ impl IcedChat {
                         s
                     });
 
+            // Wrap non-system bubbles in a button so clicking copies the
+            // message body to the clipboard with a toast confirmation.
+            let clickable_bubble: iced::Element<'_, AppMessage> =
+                if !matches!(entry.kind, ChatKind::System) && !entry.body.is_empty()
+                {
+                    button(bubble)
+                        .on_press(AppMessage::CopyMessage(i))
+                        .padding(0)
+                        .style(|_t, _s| iced::widget::button::Style::default())
+                        .into()
+                } else {
+                    bubble.into()
+                };
+
             let ts_text = entry.formatted_time.as_deref().unwrap_or("");
             let metadata = if matches!(entry.kind, ChatKind::Local) && !next_continues {
                 format!(
@@ -17905,7 +17951,7 @@ impl IcedChat {
             let ts_el = text(metadata).size(TYPO_XXS).color(text_muted(&theme));
 
             let mut bubble_col = Column::new()
-                .push(bubble)
+                .push(clickable_bubble)
                 .push(ts_el)
                 .spacing(SPACE_2)
                 .max_width(560.0)
@@ -17932,7 +17978,16 @@ impl IcedChat {
                             .into(),
                     );
                 }
-                if let Some(ref img_url) = preview.image_url {
+                if let Some(ref bytes) = preview.image_bytes {
+                    let handle = iced::widget::image::Handle::from_bytes(bytes.clone());
+                    preview_children.push(
+                        iced::widget::image(handle)
+                            .width(Length::Fill)
+                            .height(Length::Fixed(180.0))
+                            .content_fit(iced::ContentFit::Cover)
+                            .into(),
+                    );
+                } else if let Some(ref img_url) = preview.image_url {
                     let display_url = link_preview::truncate_url(img_url, 60);
                     preview_children.push(
                         text(display_url)
@@ -18212,11 +18267,11 @@ impl IcedChat {
 
         let has_text = !self.composer_text.is_empty();
 
-        // ── Left: attach button ── subdued but visible, sits at the leading edge
-        let attach_btn = button(text("Attach").size(TYPO_SM))
+        // ── Attach button (paperclip icon) ── sits next to send
+        let attach_btn = button(icon_svg(ICON_PAPERCLIP, TYPO_SM))
             .on_press(AppMessage::AttachPressed)
-            .style(BUTTON_GHOST_BG)
-            .padding([SPACE_6, SPACE_10]);
+            .style(BUTTON_ICON)
+            .padding([SPACE_4, SPACE_6]);
 
         // ── Center: expandable message input ── transparent bg, fills space
         let input = text_input("Type a message…", &self.composer_text)
@@ -18270,8 +18325,8 @@ impl IcedChat {
         }
 
         // ── Composer row ──
-        //  attach | text input (fill) | send
-        let composer_bar = row![attach_btn, input, send_btn]
+        //  text input (fill) | attach | send
+        let composer_bar = row![input, attach_btn, send_btn]
             .spacing(SPACE_6)
             .align_y(Alignment::Center)
             .padding(Padding::new(SPACE_4));

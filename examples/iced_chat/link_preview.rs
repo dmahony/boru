@@ -89,6 +89,9 @@ pub struct LinkPreviewData {
     pub description: Option<String>,
     /// URL of an OpenGraph image, if any.
     pub image_url: Option<String>,
+    /// Raw bytes of the preview image, downloaded alongside the
+    /// OpenGraph metadata.  Rendered as a thumbnail in the preview card.
+    pub image_bytes: Option<Vec<u8>>,
 }
 
 /// Outcome of fetching a link preview.
@@ -344,7 +347,13 @@ pub async fn fetch_link_preview(url: &str) -> LinkPreviewResult {
         }
     };
 
+    // ── Try platform-specific oEmbed first ──
+    if let Some(preview) = fetch_youtube_oembed(url).await {
+        return LinkPreviewResult::Success(preview);
+    }
+
     // ── Fetch ──
+    tracing::info!(url = %url, "link preview: starting HTML fetch");
     let response = match HTTP_CLIENT.get(url).send().await {
         Ok(r) => r,
         Err(e) => return LinkPreviewResult::Error(format!("fetch: {e}")),
@@ -371,6 +380,13 @@ pub async fn fetch_link_preview(url: &str) -> LinkPreviewResult {
     let description = extract_description(&body);
     let image_url = extract_og_image(&body);
 
+    // ── Download preview image ──
+    let image_bytes = if let Some(ref img_url) = image_url {
+        fetch_preview_image(img_url).await.ok()
+    } else {
+        None
+    };
+
     // Unregister in-flight — the cache will serve this URL from now on
     drop(guard);
     IN_FLIGHT_URLS.lock().ok().map(|mut s| s.remove(url));
@@ -380,6 +396,94 @@ pub async fn fetch_link_preview(url: &str) -> LinkPreviewResult {
         title,
         description,
         image_url,
+        image_bytes,
+    })
+}
+
+/// Download a preview image from an og:image URL, capped at 2 MiB.
+///
+/// Returns the raw image bytes on success, or an error string.
+/// A failure here is non-fatal — the preview card will still render
+/// with title and description, just without the thumbnail.
+async fn fetch_preview_image(url: &str) -> Result<Vec<u8>, String> {
+    const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
+
+    // Quick filter: data: URIs are inline and typically huge; skip them.
+    if url.starts_with("data:") {
+        return Err("data: URI — skipping".into());
+    }
+
+    let response = HTTP_CLIENT
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("image fetch: {e}"))?;
+
+    // Only accept image content types
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type.starts_with("image/") {
+        return Err(format!("not an image ({content_type})"));
+    }
+
+    stream_body_with_limit(response, MAX_IMAGE_BYTES)
+        .await
+        .map(|s| s.into_bytes())
+}
+
+/// Download a preview image from an og:image URL, capped at 2 MiB.
+
+// ── Platform-specific preview fetchers ─────────────────────────────────
+
+/// Try to fetch a preview via YouTube's oEmbed API.
+/// Returns Some(LinkPreviewData) on success, None if the URL isn't a
+/// recognised YouTube URL or the API call fails.
+async fn fetch_youtube_oembed(url: &str) -> Option<LinkPreviewData> {
+    // Match YouTube video URLs: youtube.com/watch?v=... and youtu.be/...
+    let video_id = if let Some(caps) =
+        regex::Regex::new(r"(?:youtube\.com/watch\?v=|youtu\.be/)([A-Za-z0-9_-]{11})")
+            .ok()?
+            .captures(url)
+    {
+        caps.get(1)?.as_str().to_string()
+    } else {
+        return None;
+    };
+
+    let oembed_url = format!(
+        "https://www.youtube.com/oembed?format=json&url=https://www.youtube.com/watch?v={video_id}"
+    );
+
+    let response = HTTP_CLIENT
+        .get(&oembed_url)
+        .send()
+        .await
+        .ok()?;
+
+    let body = stream_body_with_limit(response, 64 * 1024).await.ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
+
+    let title = parsed.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let thumbnail_url = parsed.get("thumbnail_url").and_then(|v| v.as_str());
+
+    // Download the thumbnail image
+    let image_bytes = if let Some(img_url) = thumbnail_url {
+        // Use a higher-quality thumbnail: replace hqdefault with maxresdefault
+        let hq_url = img_url.replace("hqdefault", "maxresdefault");
+        fetch_preview_image(&hq_url).await.ok()
+    } else {
+        None
+    };
+
+    Some(LinkPreviewData {
+        url: url.to_string(),
+        title,
+        description: None, // oEmbed doesn't include description for YouTube
+        image_url: thumbnail_url.map(|s| s.to_string()),
+        image_bytes,
     })
 }
 
