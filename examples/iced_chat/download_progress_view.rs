@@ -400,10 +400,12 @@ pub fn view_download_progress(
     }
     body = body.spacing(SPACE_6);
 
-    // Card container with state-coloured border
+    // Card container with state-coloured border.
+    // Extra right padding (SPACE_16 + SPACE_12) keeps the card clear of the
+    // scrollable's overlay scrollbar (~12 px).
     let card = container(body)
         .width(Length::Fill)
-        .padding([SPACE_12, SPACE_16])
+        .padding(iced::Padding::new(SPACE_12).left(SPACE_16).right(SPACE_16 + SPACE_12))
         .style(move |t| widget::container::Style {
             background: Some(iced::Background::Color(bg_surface(t))),
             border: iced::Border {

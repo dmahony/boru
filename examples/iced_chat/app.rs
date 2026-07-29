@@ -1722,11 +1722,14 @@ impl ChatEntry {
     /// Call whenever label, delivery_state, or reactions change.
     fn update_cache(&mut self) {
         self.label_text = if matches!(self.kind, ChatKind::Local) && self.event_id > 0 {
-            Some(format!(
-                "{} {}",
-                self.label,
-                self.delivery_state.display_icon()
-            ))
+            let icon = self.delivery_state.display_icon();
+            // The Seen (eye) icon is intentionally omitted from the label
+            // per UX spec — it adds visual noise without actionable value.
+            if icon == "\u{1F441}" {
+                Some(self.label.clone())
+            } else {
+                Some(format!("{} {}", self.label, icon))
+            }
         } else {
             Some(self.label.clone())
         };
@@ -16930,8 +16933,8 @@ impl IcedChat {
             .map(|handle| {
                 iced::widget::image(handle)
                     .content_fit(iced::ContentFit::ScaleDown)
-                    .width(Length::Fixed(36.0))
-                    .height(Length::Fixed(36.0))
+                    .width(Length::Fixed(30.0))
+                    .height(Length::Fixed(30.0))
                     .into()
             })
             .unwrap_or_else(|| {
@@ -16940,10 +16943,10 @@ impl IcedChat {
                 let is_dark = matches!(theme_for_initials, iced::Theme::Dark);
                 let letter_color = crate::presentation::initials_color(&room_name, is_dark);
                 container(text(initials).size(TYPO_SM).color(letter_color))
-                    .width(Length::Fixed(36.0))
-                    .height(Length::Fixed(36.0))
-                    .center_x(Length::Fixed(36.0))
-                    .center_y(Length::Fixed(36.0))
+                    .width(Length::Fixed(30.0))
+                    .height(Length::Fixed(30.0))
+                    .center_x(Length::Fixed(30.0))
+                    .center_y(Length::Fixed(30.0))
                     .style(move |_t| iced::widget::container::Style {
                         background: Some(iced::Background::Color(bg_surface_secondary(
                             &theme_for_initials,
@@ -16992,7 +16995,7 @@ impl IcedChat {
 
         let search = iced::widget::tooltip::Tooltip::new(
             button(icon_svg(ICON_SEARCH, TYPO_SM))
-                .padding([SPACE_6, SPACE_8])
+                .padding([SPACE_4, SPACE_6])
                 .style(BUTTON_ICON),
             text("Search").size(TYPO_XS),
             iced::widget::tooltip::Position::Bottom,
@@ -17000,7 +17003,7 @@ impl IcedChat {
 
         let shared = iced::widget::tooltip::Tooltip::new(
             button(icon_svg(ICON_FILES, TYPO_SM))
-                .padding([SPACE_6, SPACE_8])
+                .padding([SPACE_4, SPACE_6])
                 .style(BUTTON_ICON),
             text("Shared files").size(TYPO_XS),
             iced::widget::tooltip::Position::Bottom,
@@ -17009,7 +17012,7 @@ impl IcedChat {
         let details_toggle = iced::widget::tooltip::Tooltip::new(
             button(icon_svg(ICON_MESH, TYPO_SM))
                 .on_press(AppMessage::ToggleDetailsPanel)
-                .padding([SPACE_6, SPACE_8])
+                .padding([SPACE_4, SPACE_6])
                 .style(BUTTON_ICON),
             text("Details panel").size(TYPO_XS),
             iced::widget::tooltip::Position::Bottom,
@@ -17018,7 +17021,7 @@ impl IcedChat {
         let more = iced::widget::tooltip::Tooltip::new(
             button(icon_svg(ICON_MORE, TYPO_MD))
                 .on_press(AppMessage::ToggleChatOptions)
-                .padding([SPACE_6, SPACE_8])
+                .padding([SPACE_4, SPACE_6])
                 .style(BUTTON_ICON),
             text("More options").size(TYPO_XS),
             iced::widget::tooltip::Position::Bottom,
@@ -17026,9 +17029,9 @@ impl IcedChat {
 
         container(
             row![
-                button(text("←").size(TYPO_LG))
+                button(text("←").size(TYPO_MD))
                     .on_press(AppMessage::GoToChatList)
-                    .padding([SPACE_6, SPACE_8])
+                    .padding([SPACE_4, SPACE_6])
                     .style(BUTTON_ICON),
                 avatar,
                 identity,
@@ -17038,12 +17041,12 @@ impl IcedChat {
                 details_toggle,
                 more,
             ]
-            .spacing(SPACE_6)
+            .spacing(SPACE_4)
             .align_y(Alignment::Center),
         )
         .width(Length::Fill)
-        .height(Length::Fixed(64.0))
-        .padding([SPACE_8, SPACE_12])
+        .height(Length::Fixed(52.0))
+        .padding([SPACE_6, SPACE_10])
         .style(container_header)
         .into()
     }
@@ -17321,6 +17324,43 @@ impl IcedChat {
             contact_items.push(info_row("Last seen".to_string(), last_seen, &theme).into());
         }
 
+        // Peer ID with copy button
+        if let Some(pk) = peer {
+            let full_id = pk.to_string();
+            let fid = full_id.clone();
+            let copy_btn = button(text("Copy").size(TYPO_XS).color(text_muted(&theme)))
+                .on_press(AppMessage::CopyToClipboard(fid))
+                .padding([SPACE_2, SPACE_4])
+                .style(BUTTON_GHOST_BG);
+
+            let truncated = if full_id.len() > 32 {
+                format!("{}…", &full_id[..32])
+            } else {
+                full_id.clone()
+            };
+            let peer_id_row = row![
+                text("Peer ID").size(TYPO_SM).color(text_secondary(&theme)),
+                Space::new().width(Length::Fill),
+                text(truncated)
+                    .size(TYPO_SM)
+                    .color(crate::design_tokens::text(&theme))
+                    .font(crate::fonts::jetbrains_mono(iced::font::Weight::Normal)),
+                copy_btn,
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+            contact_items.push(peer_id_row.into());
+        }
+
+        // First-seen / created date
+        if let Some(entry) = conversation.as_ref() {
+            if entry.created_at_unix_ms > 0 {
+                let created = crate::presentation::relative_time(entry.created_at_unix_ms);
+                contact_items.push(info_row("First seen".to_string(), created, &theme).into());
+            }
+        }
+
         // ── Section: Connection ──
         let mut conn_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
 
@@ -17454,46 +17494,6 @@ impl IcedChat {
         .style(BUTTON_OUTLINE);
         tool_btns.push(connection_btn.into());
 
-        // ── Section: Peer ──
-        let mut peer_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
-
-        // Full peer identifier with copy button
-        if let Some(pk) = peer {
-            let full_id = pk.to_string();
-            let fid = full_id.clone();
-            let copy_btn = button(text("Copy").size(TYPO_XS).color(text_muted(&theme)))
-                .on_press(AppMessage::CopyToClipboard(fid))
-                .padding([SPACE_2, SPACE_4])
-                .style(BUTTON_GHOST_BG);
-
-            let truncated = if full_id.len() > 32 {
-                format!("{}…", &full_id[..32])
-            } else {
-                full_id.clone()
-            };
-            let peer_id_row = row![
-                text("Peer ID").size(TYPO_SM).color(text_secondary(&theme)),
-                Space::new().width(Length::Fill),
-                text(truncated)
-                    .size(TYPO_SM)
-                    .color(crate::design_tokens::text(&theme))
-                    .font(crate::fonts::jetbrains_mono(iced::font::Weight::Normal)),
-                copy_btn,
-            ]
-            .spacing(SPACE_4)
-            .align_y(Alignment::Center)
-            .width(Length::Fill);
-            peer_items.push(peer_id_row.into());
-        }
-
-        // First-seen / created date
-        if let Some(entry) = conversation.as_ref() {
-            if entry.created_at_unix_ms > 0 {
-                let created = crate::presentation::relative_time(entry.created_at_unix_ms);
-                peer_items.push(info_row("First seen".to_string(), created, &theme).into());
-            }
-        }
-
         // ── Assemble the panel ──
         let panel_body = column![
             // Heading
@@ -17532,14 +17532,6 @@ impl IcedChat {
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(tool_btns).spacing(SPACE_4),
-            divider(&theme),
-            // Peer section
-            text("Peer")
-                .size(TYPO_XS)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold))
-                .color(text_secondary(&theme)),
-            Space::new().height(Length::Fixed(SPACE_2)),
-            column(peer_items).spacing(SPACE_4),
             Space::new().height(Length::Fill),
         ]
         .spacing(SPACE_4);
