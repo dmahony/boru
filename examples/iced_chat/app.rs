@@ -8015,7 +8015,10 @@ impl IcedChat {
                             }
                         },
                     ),
-                    iced::Task::done(AppMessage::OpenRoom(topic)),
+                    iced::Task::done(AppMessage::BackgroundSubscribe(
+                        topic,
+                        self.discovered_peers.clone(),
+                    )),
                 ];
                 if let Some(t) = mailbox_task {
                     tasks.push(t);
@@ -9274,7 +9277,13 @@ impl IcedChat {
                             );
                             if !already_on_topic {
                                 self.save_room_to_history();
-                                return iced::Task::done(AppMessage::OpenRoom(private_topic));
+                                // Use BackgroundSubscribe to avoid slow-path
+                                // subscription with WAL replay storm.
+                                let bootstrap = self.discovered_peers.clone();
+                                return iced::Task::done(AppMessage::BackgroundSubscribe(
+                                    private_topic,
+                                    bootstrap,
+                                ));
                             }
                         }
 
