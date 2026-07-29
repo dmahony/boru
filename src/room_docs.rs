@@ -63,6 +63,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use iroh::{PublicKey, SecretKey, Signature};
 use n0_error::{bail_any, Result, StdResultExt};
 use n0_future::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -96,6 +97,32 @@ const METADATA_MARKER: u8 = 0xFE;
 
 /// The current wire format version embedded in every sync message.
 const WIRE_VERSION: u8 = 0x01;
+const AUTHORIZED_WIRE_VERSION: u8 = 0x02;
+
+/// Authorization policy for security-sensitive room document changes.
+/// Public rooms retain the legacy unsigned wire format. Private rooms accept
+/// changes only when signed by the configured owner.
+#[derive(Debug, Clone)]
+pub enum RoomAuthorization {
+    /// Legacy unsigned authorization used by public rooms.
+    Public,
+    /// Owner-signature authorization used by private rooms.
+    Private {
+        /// Public identity of the room owner.
+        owner: PublicKey,
+        /// Signing key, present only on the owner node.
+        signing_key: Option<Arc<SecretKey>>,
+    },
+}
+
+impl RoomAuthorization {
+    fn signer(&self) -> Option<&SecretKey> {
+        match self {
+            Self::Public => None,
+            Self::Private { signing_key, .. } => signing_key.as_deref(),
+        }
+    }
+}
 
 // ── Data types ─────────────────────────────────────────────────────────
 
@@ -282,20 +309,58 @@ fn encode_wire(metadata: &RoomMetadata) -> Result<Bytes> {
     Ok(Bytes::from(buf))
 }
 
+fn metadata_signing_payload(owner: &PublicKey, metadata: &RoomMetadata) -> Vec<u8> {
+    postcard::to_stdvec(&(AUTHORIZED_WIRE_VERSION, owner, metadata))
+        .expect("postcard serialization is infallible")
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthorizedMetadataEnvelope {
+    version: u8,
+    owner: PublicKey,
+    payload: RoomMetadata,
+    signature: Vec<u8>,
+}
+
+fn encode_authorized_wire(
+    metadata: &RoomMetadata,
+    owner: PublicKey,
+    signer: &SecretKey,
+) -> Result<Bytes> {
+    let envelope = AuthorizedMetadataEnvelope {
+        version: AUTHORIZED_WIRE_VERSION,
+        owner,
+        payload: metadata.clone(),
+        signature: signer
+            .sign(&metadata_signing_payload(&owner, metadata))
+            .to_bytes()
+            .to_vec(),
+    };
+    let mut buf = vec![METADATA_MARKER];
+    postcard::to_io(&envelope, &mut buf).std_context("encode authorized metadata envelope")?;
+    Ok(Bytes::from(buf))
+}
+
 fn decode_wire(data: &[u8]) -> Result<Option<RoomMetadata>> {
     if data.first() != Some(&METADATA_MARKER) {
         return Ok(None); // not a metadata message
     }
-    // Check wire version before attempting to decode the payload,
-    // so that unknown versions get a clear error regardless of
-    // payload shape.
     let body = &data[1..];
+    // Version 2 is handled by the authorization-aware path below. Keep the
+    // legacy decoder unchanged so public-room interoperability is preserved.
+    if body.first() == Some(&AUTHORIZED_WIRE_VERSION) {
+        return Ok(Some(
+            postcard::from_bytes::<AuthorizedMetadataEnvelope>(body)
+                .std_context("decode authorized metadata envelope")?
+                .payload,
+        ));
+    }
     if body.first() != Some(&WIRE_VERSION) {
         let actual = body.first().copied().unwrap_or(0);
         bail_any!(
             "unsupported metadata wire version {} (expected {})",
             actual,
-            WIRE_VERSION,
+            WIRE_VERSION
         );
     }
     let envelope: MetadataEnvelope =
@@ -304,10 +369,29 @@ fn decode_wire(data: &[u8]) -> Result<Option<RoomMetadata>> {
         bail_any!(
             "unsupported metadata wire version {} (expected {})",
             envelope.version,
-            WIRE_VERSION,
+            WIRE_VERSION
         );
     }
     Ok(Some(envelope.payload))
+}
+
+fn decode_authorized_wire(data: &[u8]) -> Result<Option<(PublicKey, RoomMetadata, Signature)>> {
+    if data.first() != Some(&METADATA_MARKER) || data.get(1) != Some(&AUTHORIZED_WIRE_VERSION) {
+        return Ok(None);
+    }
+    let envelope: AuthorizedMetadataEnvelope =
+        postcard::from_bytes(&data[1..]).std_context("decode authorized metadata envelope")?;
+    Ok(Some((
+        envelope.owner,
+        envelope.payload.clone(),
+        Signature::from_bytes(
+            envelope
+                .signature
+                .as_slice()
+                .try_into()
+                .map_err(|_| n0_error::anyerr!("invalid owner signature length"))?,
+        ),
+    )))
 }
 
 // ── Doc handle ─────────────────────────────────────────────────────────
@@ -328,6 +412,8 @@ pub struct RoomMetadataDoc {
     /// Channel via which metadata updates (from remote peers) are
     /// forwarded to the consumer of this handle.
     event_tx: mpsc::Sender<RoomMetadataEvent>,
+    /// Authorization policy for security-sensitive updates.
+    authorization: RoomAuthorization,
 }
 
 impl RoomMetadataDoc {
@@ -391,6 +477,44 @@ pub async fn create_metadata_doc(
         topic,
         state,
         event_tx,
+        authorization: RoomAuthorization::Public,
+    })
+}
+
+/// Create a metadata document for a private room. The owner key is required
+/// to create/update state; joiners pass `None` and can only accept verified
+/// owner updates.
+pub async fn create_private_metadata_doc(
+    topic: TopicId,
+    gossip_sender: &GossipSender,
+    initial: RoomMetadata,
+    owner: PublicKey,
+    signing_key: Option<SecretKey>,
+) -> Result<RoomMetadataDoc> {
+    if let Some(key) = &signing_key {
+        if key.public() != owner {
+            bail_any!("private room signing key does not match owner");
+        }
+    }
+    let authorization = RoomAuthorization::Private {
+        owner,
+        signing_key: signing_key.map(Arc::new),
+    };
+    let state = Arc::new(RwLock::new(initial.clone()));
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    if let Some(signer) = authorization.signer() {
+        let wire = encode_authorized_wire(&initial, owner, signer)?;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            gossip_sender.broadcast(wire),
+        )
+        .await;
+    }
+    Ok(RoomMetadataDoc {
+        topic,
+        state,
+        event_tx,
+        authorization,
     })
 }
 
@@ -424,6 +548,35 @@ pub async fn update_metadata(
     Ok(snapshot)
 }
 
+/// Update metadata while enforcing the document's authorization policy.
+/// Public rooms delegate to the legacy behavior; private rooms require the
+/// owner signing key held by the document.
+pub async fn update_authorized_metadata(
+    doc: &RoomMetadataDoc,
+    gossip_sender: &GossipSender,
+    update: RoomMetadataUpdate,
+) -> Result<RoomMetadata> {
+    let (owner, signer) = match &doc.authorization {
+        RoomAuthorization::Public => return update_metadata(doc, gossip_sender, update).await,
+        RoomAuthorization::Private { owner, signing_key } => (
+            *owner,
+            signing_key.as_deref().ok_or_else(|| {
+                n0_error::anyerr!("only the private room owner may change metadata")
+            })?,
+        ),
+    };
+    let incoming: RoomMetadata = update.into();
+    incoming.validate()?;
+    {
+        let mut state = doc.state.write().await;
+        state.merge(&incoming);
+    }
+    let snapshot = doc.state.read().await.clone();
+    gossip_sender
+        .broadcast(encode_authorized_wire(&snapshot, owner, signer)?)
+        .await?;
+    Ok(snapshot)
+}
 /// Read the current metadata snapshot from the doc handle.
 pub async fn read_metadata(doc: &RoomMetadataDoc) -> RoomMetadata {
     doc.snapshot().await
@@ -462,6 +615,27 @@ pub async fn process_gossip_event(
                     return Ok(true); // still consumed (not forwarded as chat)
                 }
             };
+
+            // Private rooms accept only version-2 owner-signed updates.
+            if let RoomAuthorization::Private { owner, .. } = &doc.authorization {
+                let Some((signed_owner, signed_payload, signature)) =
+                    decode_authorized_wire(&msg.content)?
+                else {
+                    tracing::warn!("ignoring unsigned metadata update in private room");
+                    return Ok(true);
+                };
+                if signed_owner != *owner
+                    || signed_owner
+                        .verify(
+                            &metadata_signing_payload(&signed_owner, &signed_payload),
+                            &signature,
+                        )
+                        .is_err()
+                {
+                    tracing::warn!("ignoring metadata update with invalid owner signature");
+                    return Ok(true);
+                }
+            }
 
             // Validate the received metadata before merging.
             if let Err(e) = payload.validate() {
@@ -580,6 +754,8 @@ pub struct RosterDoc {
     topic: TopicId,
     /// Shared member map: hex-encoded public key → member info.
     members: Arc<RwLock<HashMap<String, RosterMember>>>,
+    /// Authorization policy for membership changes.
+    authorization: RoomAuthorization,
 }
 
 impl RosterDoc {
@@ -666,7 +842,34 @@ pub async fn create_roster_doc(
     )
     .await;
 
-    Ok(RosterDoc { topic, members })
+    Ok(RosterDoc {
+        topic,
+        members,
+        authorization: RoomAuthorization::Public,
+    })
+}
+
+/// Create a roster for a private room. Only a node holding the owner signing
+/// key may call membership mutation APIs on the returned document.
+pub async fn create_private_roster_doc(
+    topic: TopicId,
+    gossip_sender: &GossipSender,
+    self_pub_key: String,
+    self_display_name: String,
+    owner: PublicKey,
+    signing_key: Option<SecretKey>,
+) -> Result<RosterDoc> {
+    if let Some(key) = &signing_key {
+        if key.public() != owner {
+            bail_any!("private room signing key does not match owner");
+        }
+    }
+    let mut doc = create_roster_doc(topic, gossip_sender, self_pub_key, self_display_name).await?;
+    doc.authorization = RoomAuthorization::Private {
+        owner,
+        signing_key: signing_key.map(Arc::new),
+    };
+    Ok(doc)
 }
 
 fn make_roster_entries(members: &HashMap<String, RosterMember>) -> Vec<RosterMemberEntry> {
@@ -689,6 +892,15 @@ pub async fn add_member(
     pub_key: String,
     display_name: String,
 ) -> Result<RosterMember> {
+    if matches!(
+        &doc.authorization,
+        RoomAuthorization::Private {
+            signing_key: None,
+            ..
+        }
+    ) {
+        bail_any!("only the private room owner may change membership");
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -719,6 +931,15 @@ pub async fn remove_member(
     gossip_sender: &GossipSender,
     pub_key: &str,
 ) -> Result<Option<RosterMember>> {
+    if matches!(
+        &doc.authorization,
+        RoomAuthorization::Private {
+            signing_key: None,
+            ..
+        }
+    ) {
+        bail_any!("only the private room owner may change membership");
+    }
     let removed = {
         let mut members = doc.members.write().await;
         members.remove(pub_key)
@@ -1338,5 +1559,42 @@ mod tests {
         // Should be sorted by joined_at ascending
         assert_eq!(entries[0].pub_key, "a");
         assert_eq!(entries[1].pub_key, "b");
+    }
+
+    #[test]
+    fn authorized_metadata_wire_verifies_owner_signature() {
+        let key = SecretKey::generate();
+        let metadata = RoomMetadata {
+            name: Some("Private".into()),
+            description: Some("Owner controlled".into()),
+            rules: None,
+        };
+        let wire = encode_authorized_wire(&metadata, key.public(), &key).unwrap();
+        let (owner, decoded, signature) = decode_authorized_wire(&wire).unwrap().unwrap();
+        assert_eq!(owner, key.public());
+        assert_eq!(decoded, metadata);
+        assert!(owner
+            .verify(&metadata_signing_payload(&owner, &decoded), &signature)
+            .is_ok());
+    }
+
+    #[test]
+    fn authorized_metadata_wire_rejects_tampering() {
+        let key = SecretKey::generate();
+        let metadata = RoomMetadata {
+            name: Some("Private".into()),
+            description: None,
+            rules: None,
+        };
+        let wire = encode_authorized_wire(&metadata, key.public(), &key).unwrap();
+        let (owner, _decoded, signature) = decode_authorized_wire(&wire).unwrap().unwrap();
+        let tampered = RoomMetadata {
+            name: Some("Attacker".into()),
+            description: None,
+            rules: None,
+        };
+        assert!(owner
+            .verify(&metadata_signing_payload(&owner, &tampered), &signature)
+            .is_err());
     }
 }
