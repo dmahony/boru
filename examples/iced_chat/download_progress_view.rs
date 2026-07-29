@@ -42,9 +42,9 @@ fn resolve_theme(dark_mode: bool) -> iced::Theme {
 /// Colour keyed to the current download state — used for the state badge.
 fn state_badge_color(state: &DownloadState, theme: &iced::Theme) -> Color {
     match state {
-        DownloadState::Ready { .. } | DownloadState::Active { .. } | DownloadState::Paused { .. } => {
-            accent_primary(theme)
-        }
+        DownloadState::Ready { .. }
+        | DownloadState::Active { .. }
+        | DownloadState::Paused { .. } => accent_primary(theme),
         DownloadState::Completed { .. } => accent_green(theme),
         DownloadState::Failed { failure } => match failure.stability_label() {
             "Temporary" => Color::from_rgb(0.78, 0.58, 0.16),

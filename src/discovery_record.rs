@@ -47,7 +47,9 @@
 use distributed_topic_tracker::Record;
 use iroh::{EndpointId, SecretKey};
 use n0_error::Result;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -56,13 +58,13 @@ use serde::{Deserialize, Serialize};
 /// Current version of the [`DiscoveryRecordPayload`] wire format.
 ///
 /// Increment when adding fields to the payload structure.
-pub const DISCOVERY_RECORD_CONTENT_VERSION: u8 = 1;
+pub const DISCOVERY_RECORD_CONTENT_VERSION: u8 = 2;
 
 /// Maximum allowed size (bytes) for a serialized [`DiscoveryRecordPayload`].
 ///
 /// The actual payload is ~35 bytes; this generous limit exists for validation
 /// and forward-compatibility safety.
-pub const DISCOVERY_RECORD_MAX_PAYLOAD_SIZE: usize = 128;
+pub const DISCOVERY_RECORD_MAX_PAYLOAD_SIZE: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Payload
@@ -73,20 +75,89 @@ pub const DISCOVERY_RECORD_MAX_PAYLOAD_SIZE: usize = 128;
 /// Carries the publisher's [`EndpointId`] and a version byte for forward
 /// compatibility.  Serialised with **postcard** (the tracker crate's native
 /// codec), so this struct must derive both [`Serialize`] and [`Deserialize`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscoveryRecordPayload {
     /// The publisher's iroh EndpointId — a 32-byte Ed25519 public key.
     endpoint_id: [u8; 32],
     /// Wire-format version for forward compatibility.
     version: u8,
+    /// Optional human-readable room name.
+    #[serde(default)]
+    room_name: Option<String>,
+    /// Optional ticket that can be used to join the room.
+    #[serde(default)]
+    ticket: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for DiscoveryRecordPayload {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct PayloadVisitor;
+
+        impl<'de> Visitor<'de> for PayloadVisitor {
+            type Value = DiscoveryRecordPayload;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a discovery record payload")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let endpoint_id = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::custom("missing endpoint id"))?;
+                let version = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::custom("missing payload version"))?;
+                let room_name = optional_metadata(&mut seq)?;
+                let ticket = optional_metadata(&mut seq)?;
+
+                Ok(DiscoveryRecordPayload {
+                    endpoint_id,
+                    version,
+                    room_name,
+                    ticket,
+                })
+            }
+        }
+
+        deserializer.deserialize_tuple(4, PayloadVisitor)
+    }
+}
+
+fn optional_metadata<'de, A>(seq: &mut A) -> std::result::Result<Option<String>, A::Error>
+where
+    A: SeqAccess<'de>,
+{
+    match seq.next_element::<Option<String>>() {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => Ok(None),
+        Err(error) if is_unexpected_end(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn is_unexpected_end<E: fmt::Display>(error: &E) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("hit the end") || text.contains("unexpected end")
 }
 
 impl DiscoveryRecordPayload {
-    /// Build a new payload advertising `endpoint_id`.
-    pub fn new(endpoint_id: &EndpointId) -> Self {
+    /// Build a new payload advertising `endpoint_id` and optional room metadata.
+    pub fn new(
+        endpoint_id: &EndpointId,
+        room_name: Option<String>,
+        ticket: Option<String>,
+    ) -> Self {
         Self {
             endpoint_id: *endpoint_id.as_bytes(),
             version: DISCOVERY_RECORD_CONTENT_VERSION,
+            room_name,
+            ticket,
         }
     }
 
@@ -98,6 +169,16 @@ impl DiscoveryRecordPayload {
     /// The wire-format version of this payload.
     pub fn version(&self) -> u8 {
         self.version
+    }
+
+    /// The optional human-readable room name.
+    pub fn room_name(&self) -> Option<&str> {
+        self.room_name.as_deref()
+    }
+
+    /// The optional room join ticket.
+    pub fn ticket(&self) -> Option<&str> {
+        self.ticket.as_deref()
     }
 }
 
@@ -131,8 +212,10 @@ pub fn create_discovery_record(
     unix_minute: u64,
     endpoint_id: &EndpointId,
     secret_key: &SecretKey,
+    room_name: Option<String>,
+    ticket: Option<String>,
 ) -> Result<Record> {
-    let payload = DiscoveryRecordPayload::new(endpoint_id);
+    let payload = DiscoveryRecordPayload::new(endpoint_id, room_name, ticket);
     Ok(Record::sign(
         topic,
         unix_minute,
@@ -198,20 +281,48 @@ mod tests {
     #[test]
     fn payload_roundtrip() {
         let (_sk, ep) = test_identity();
-        let payload = DiscoveryRecordPayload::new(&ep);
+        let payload = DiscoveryRecordPayload::new(&ep, None, None);
         assert_eq!(payload.endpoint_id(), *ep.as_bytes());
         assert_eq!(payload.version(), DISCOVERY_RECORD_CONTENT_VERSION);
     }
 
     #[test]
-    fn payload_version_is_1() {
-        assert_eq!(DISCOVERY_RECORD_CONTENT_VERSION, 1);
+    fn payload_version_is_2() {
+        assert_eq!(DISCOVERY_RECORD_CONTENT_VERSION, 2);
+    }
+
+    #[test]
+    fn payload_roundtrip_preserves_room_metadata() {
+        let (_sk, ep) = test_identity();
+        let payload = DiscoveryRecordPayload::new(
+            &ep,
+            Some("A public room".to_owned()),
+            Some("ticket-string".to_owned()),
+        );
+
+        assert_eq!(payload.room_name(), Some("A public room"));
+        assert_eq!(payload.ticket(), Some("ticket-string"));
+        let encoded = postcard::to_allocvec(&payload).unwrap();
+        let decoded: DiscoveryRecordPayload = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn payload_v1_decodes_without_metadata() {
+        let (_sk, ep) = test_identity();
+        let v1_bytes = postcard::to_allocvec(&(*ep.as_bytes(), 1u8)).unwrap();
+        let decoded: DiscoveryRecordPayload = postcard::from_bytes(&v1_bytes).unwrap();
+
+        assert_eq!(decoded.endpoint_id(), *ep.as_bytes());
+        assert_eq!(decoded.version(), 1);
+        assert_eq!(decoded.room_name(), None);
+        assert_eq!(decoded.ticket(), None);
     }
 
     #[test]
     fn payload_size_is_bounded() {
         let (_sk, ep) = test_identity();
-        let payload = DiscoveryRecordPayload::new(&ep);
+        let payload = DiscoveryRecordPayload::new(&ep, None, None);
         let encoded = postcard::to_allocvec(&payload).unwrap();
         assert!(
             encoded.len() <= DISCOVERY_RECORD_MAX_PAYLOAD_SIZE,
@@ -235,7 +346,7 @@ mod tests {
         let minute = 1_000_000;
         let (sk, ep) = test_identity_seeded();
 
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
 
         // Verify the record carries the right metadata
         assert_eq!(record.topic(), topic);
@@ -253,7 +364,7 @@ mod tests {
         let minute = 2_000_000;
         let (sk, ep) = test_identity();
 
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
 
         // The Record's embedded pub_key equals the EndpointId
         assert_eq!(record.pub_key(), *ep.as_bytes());
@@ -265,7 +376,7 @@ mod tests {
         let minute = 3_000_000;
         let (sk, ep) = test_identity();
 
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
 
         // Self-verify with correct topic and minute
         assert!(record.verify(&topic, minute).is_ok());
@@ -278,7 +389,7 @@ mod tests {
         let minute = 4_000_000;
         let (sk, ep) = test_identity();
 
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
 
         assert!(record.verify(&wrong_topic, minute).is_err());
     }
@@ -290,7 +401,7 @@ mod tests {
         let wrong_minute = 9_999_999;
         let (sk, ep) = test_identity();
 
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
 
         assert!(record.verify(&topic, wrong_minute).is_err());
     }
@@ -301,7 +412,7 @@ mod tests {
         let minute = 6_000_000;
         let (sk, ep) = test_identity();
 
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
         let bytes = record.to_bytes();
         let restored = Record::from_bytes(bytes).unwrap();
 
@@ -318,7 +429,7 @@ mod tests {
         let minute = 7_000_000;
         let (sk, ep) = test_identity();
 
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
         let _payload: DiscoveryRecordPayload = record.content().unwrap();
         // If we get here, postcard decoding succeeded
     }
@@ -338,8 +449,8 @@ mod tests {
         let ep2 = sk2.public();
         assert_ne!(ep1, ep2);
 
-        let r1 = create_discovery_record(topic, minute, &ep1, &sk1).unwrap();
-        let r2 = create_discovery_record(topic, minute, &ep2, &sk2).unwrap();
+        let r1 = create_discovery_record(topic, minute, &ep1, &sk1, None, None).unwrap();
+        let r2 = create_discovery_record(topic, minute, &ep2, &sk2, None, None).unwrap();
 
         assert_ne!(r1.pub_key(), r2.pub_key());
         let d1 = decode_discovery_record(&r1).unwrap();
@@ -354,8 +465,8 @@ mod tests {
         let minute = 9_000_000;
         let (sk, ep) = test_identity();
 
-        let ra = create_discovery_record(topic_a, minute, &ep, &sk).unwrap();
-        let rb = create_discovery_record(topic_b, minute, &ep, &sk).unwrap();
+        let ra = create_discovery_record(topic_a, minute, &ep, &sk, None, None).unwrap();
+        let rb = create_discovery_record(topic_b, minute, &ep, &sk, None, None).unwrap();
 
         // Same endpoint, same minute — but different topic => different records
         assert_ne!(ra.to_bytes(), rb.to_bytes());
@@ -370,7 +481,7 @@ mod tests {
         let now = unix_minute(0);
         let (sk, ep) = test_identity();
 
-        let record = create_discovery_record(topic, now, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, now, &ep, &sk, None, None).unwrap();
         assert!(record.verify(&topic, now).is_ok());
     }
 
@@ -380,7 +491,7 @@ mod tests {
         let minute = 10_000_000;
         let (sk, ep) = test_identity();
 
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
         let serialized = record.to_bytes();
 
         // The raw record is ~171 B.  Even after HPKE encryption it stays
@@ -407,8 +518,8 @@ mod tests {
         let minute = 11_000_000;
         let (sk, ep) = test_identity_seeded();
 
-        let r1 = create_discovery_record(topic, minute, &ep, &sk).unwrap();
-        let r2 = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let r1 = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
+        let r2 = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
 
         assert_eq!(r1.to_bytes(), r2.to_bytes());
     }
@@ -423,7 +534,7 @@ mod tests {
         let (sk, ep) = test_identity();
 
         // Create a valid record then verify its content is at least decodable
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
         assert!(decode_discovery_record(&record).is_ok());
     }
 }

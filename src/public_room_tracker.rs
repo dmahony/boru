@@ -79,6 +79,9 @@ pub struct PublicRoomTracker {
     local_endpoint_id: EndpointId,
     /// This node's iroh SecretKey — used to sign discovery records.
     secret_key: SecretKey,
+    /// Optional metadata advertised with this room's discovery records.
+    room_name: Option<String>,
+    ticket: Option<String>,
     /// Cancellation token for future background tasks.
     cancel: CancellationToken,
 }
@@ -108,8 +111,25 @@ impl PublicRoomTracker {
             identity,
             local_endpoint_id,
             secret_key,
+            room_name: None,
+            ticket: None,
             cancel: CancellationToken::new(),
         }
+    }
+
+    /// Create a tracker with room metadata included in each publication.
+    pub fn new_with_metadata(
+        backend: Box<dyn TopicDiscoveryBackend>,
+        identity: PublicRoomIdentity,
+        local_endpoint_id: EndpointId,
+        secret_key: SecretKey,
+        room_name: Option<String>,
+        ticket: Option<String>,
+    ) -> Self {
+        let mut tracker = Self::new(backend, identity, local_endpoint_id, secret_key);
+        tracker.room_name = room_name;
+        tracker.ticket = ticket;
+        tracker
     }
 
     /// Convenience constructor that derives the room identity from a network
@@ -165,6 +185,8 @@ impl PublicRoomTracker {
             now,
             &self.local_endpoint_id,
             &self.secret_key,
+            self.room_name.clone(),
+            self.ticket.clone(),
         )?;
         let namespace = NamespaceId::new(canonical_lobby_key(discovery_key));
         let result = async {

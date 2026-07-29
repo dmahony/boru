@@ -229,6 +229,8 @@ impl PrivateRoomTracker {
             now,
             &self.local_endpoint_id,
             &self.secret_key,
+            None,
+            None,
         )?;
         let encrypted_record = record.encrypt(&self.encryption_key(now));
         let wire_record = encrypted_record.to_bytes()?;
@@ -846,7 +848,7 @@ mod tests {
 
         // This exercises decryption and validation of a real record.  The
         // payload is the sensitive value that must not be formatted into logs.
-        let payload = crate::discovery_record::DiscoveryRecordPayload::new(&publisher);
+        let payload = crate::discovery_record::DiscoveryRecordPayload::new(&publisher, None, None);
         let payload_bytes = postcard::to_allocvec(&payload).unwrap();
         let payload_hex = hex::encode(payload_bytes);
 
@@ -1045,9 +1047,15 @@ mod tests {
         // also be rejected at decryption, not passed to record validation.
         let other_key = SecretKey::generate();
         let other_ep = other_key.public();
-        let record =
-            create_discovery_record(*secret.as_bytes(), unix_minute(0), &other_ep, &other_key)
-                .unwrap();
+        let record = create_discovery_record(
+            *secret.as_bytes(),
+            unix_minute(0),
+            &other_ep,
+            &other_key,
+            None,
+            None,
+        )
+        .unwrap();
         let wrong_envelope = record
             .encrypt(&tracker.encryption_key(unix_minute(0) + 1))
             .to_bytes()

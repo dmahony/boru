@@ -749,7 +749,13 @@ impl ChatCallbacks for AppState {
         self.push_entry(entry, true);
     }
 
-    fn set_pending_file(&mut self, name: String, ticket: String, _size: u64, _thumbnail: Option<Vec<u8>>) {
+    fn set_pending_file(
+        &mut self,
+        name: String,
+        ticket: String,
+        _size: u64,
+        _thumbnail: Option<Vec<u8>>,
+    ) {
         self.pending_file = Some((name, ticket));
     }
 
@@ -1755,7 +1761,12 @@ pub fn handle_net_event_for_topic(
                         );
                     }
                 }
-                Message::FileShare { name, ticket, size, thumbnail } => {
+                Message::FileShare {
+                    name,
+                    ticket,
+                    size,
+                    thumbnail,
+                } => {
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) {
@@ -3076,7 +3087,9 @@ mod tests {
         let bytes = postcard::to_stdvec(&msg).unwrap();
         let decoded: Message = postcard::from_bytes(&bytes).unwrap();
         match decoded {
-            Message::FileShare { name, ticket, size, .. } => {
+            Message::FileShare {
+                name, ticket, size, ..
+            } => {
                 assert_eq!(name, "photo.png");
                 assert_eq!(ticket, "ticket123");
                 assert_eq!(size, 1024);

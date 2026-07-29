@@ -123,7 +123,13 @@ impl ChatCallbacks for TestChat {
     fn friend_set_name(&mut self, _fid: FriendId, _name: String) {}
     fn mark_friends_dirty(&mut self) {}
 
-    fn set_pending_file(&mut self, name: String, ticket: String, _size: u64, _thumbnail: Option<Vec<u8>>) {
+    fn set_pending_file(
+        &mut self,
+        name: String,
+        ticket: String,
+        _size: u64,
+        _thumbnail: Option<Vec<u8>>,
+    ) {
         self.pending_file = Some((name, ticket));
     }
 

@@ -457,16 +457,15 @@ async fn fetch_youtube_oembed(url: &str) -> Option<LinkPreviewData> {
         "https://www.youtube.com/oembed?format=json&url=https://www.youtube.com/watch?v={video_id}"
     );
 
-    let response = HTTP_CLIENT
-        .get(&oembed_url)
-        .send()
-        .await
-        .ok()?;
+    let response = HTTP_CLIENT.get(&oembed_url).send().await.ok()?;
 
     let body = stream_body_with_limit(response, 64 * 1024).await.ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
 
-    let title = parsed.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let title = parsed
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let thumbnail_url = parsed.get("thumbnail_url").and_then(|v| v.as_str());
 
     // Download the thumbnail image

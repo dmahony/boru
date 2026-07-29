@@ -110,7 +110,9 @@ impl ConnectionDetailsViewModel {
             ),
             ConnectionDetailRow::new(
                 "Latency",
-                self.latency_info.clone().unwrap_or_else(|| "Unavailable".to_string()),
+                self.latency_info
+                    .clone()
+                    .unwrap_or_else(|| "Unavailable".to_string()),
                 None,
             ),
             ConnectionDetailRow::new(
@@ -875,7 +877,8 @@ mod tests {
         let details =
             ConnectionDetailsViewModel::new("peer", None, "state", "disc", "trans", 2, None, None);
         let summary = details.support_summary();
-        assert!(summary.contains("Unavailable fields: Relay URL, Last technical connection error, Latency"));
+        assert!(summary
+            .contains("Unavailable fields: Relay URL, Last technical connection error, Latency"));
     }
 
     #[test]

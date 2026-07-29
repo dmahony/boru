@@ -507,7 +507,7 @@ mod tests {
         let topic = test_topic();
         let minute = 1_000_000;
         let (sk, ep) = test_identity_seeded();
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
         let validator = test_validator(topic, minute);
         let result = validator.validate_single(&record);
         assert_eq!(result, Ok(*ep.as_bytes()));
@@ -518,7 +518,7 @@ mod tests {
         let topic = test_topic();
         let minute = 1_000_000;
         let (sk, ep) = test_identity_seeded();
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
 
         // Tamper with the signature bytes (last 64 bytes).
         let mut bytes = record.to_bytes();
@@ -540,7 +540,7 @@ mod tests {
         let now_minute = 1_000_000;
         let old_minute = now_minute - DEFAULT_MAX_RECORD_AGE_MINUTES - 1;
         let (sk, ep) = test_identity_seeded();
-        let record = create_discovery_record(topic, old_minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, old_minute, &ep, &sk, None, None).unwrap();
         let validator = test_validator(topic, now_minute);
         let result = validator.validate_single(&record);
         assert!(
@@ -555,7 +555,7 @@ mod tests {
         let now_minute = 1_000_000;
         let future_minute = now_minute + DEFAULT_MAX_CLOCK_SKEW_MINUTES + 1;
         let (sk, ep) = test_identity_seeded();
-        let record = create_discovery_record(topic, future_minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, future_minute, &ep, &sk, None, None).unwrap();
         let validator = test_validator(topic, now_minute);
         let result = validator.validate_single(&record);
         assert!(
@@ -582,7 +582,7 @@ mod tests {
         // create_discovery_record signs with sk_a and embeds ep_b in the
         // payload — but the payload's endpoint_id will be ep_b's bytes while
         // the record's pub_key will be sk_a's public key.
-        let record = create_discovery_record(topic, minute, &ep_b, &sk_a).unwrap();
+        let record = create_discovery_record(topic, minute, &ep_b, &sk_a, None, None).unwrap();
 
         let validator = test_validator(topic, minute);
         let result = validator.validate_single(&record);
@@ -597,7 +597,7 @@ mod tests {
         let topic = test_topic();
         let minute = 1_000_000;
         let (sk, ep) = test_identity_seeded();
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
 
         let config = ValidationConfig {
             topic,
@@ -619,7 +619,7 @@ mod tests {
         let now_minute = 1_000_000;
         let old_minute = now_minute - DEFAULT_MAX_RECORD_AGE_MINUTES;
         let (sk, ep) = test_identity_seeded();
-        let record = create_discovery_record(topic, old_minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, old_minute, &ep, &sk, None, None).unwrap();
         let validator = test_validator(topic, now_minute);
         let result = validator.validate_single(&record);
         assert!(
@@ -634,7 +634,7 @@ mod tests {
         let now_minute = 1_000_000;
         let future_minute = now_minute + DEFAULT_MAX_CLOCK_SKEW_MINUTES;
         let (sk, ep) = test_identity_seeded();
-        let record = create_discovery_record(topic, future_minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, future_minute, &ep, &sk, None, None).unwrap();
         let validator = test_validator(topic, now_minute);
         let result = validator.validate_single(&record);
         assert!(
@@ -683,7 +683,7 @@ mod tests {
             let seed = [i as u8; 32];
             let sk = iroh::SecretKey::from_bytes(&seed);
             let ep = sk.public();
-            records.push(create_discovery_record(topic, 1_000_000, &ep, &sk).unwrap());
+            records.push(create_discovery_record(topic, 1_000_000, &ep, &sk, None, None).unwrap());
         }
         let result = validator.filter_and_build(records, None);
         assert_eq!(result.counters.total, HARD_MAX_RECORDS_PER_LOOKUP);
@@ -698,7 +698,7 @@ mod tests {
         let minute = 1_000_000;
         let (sk, ep) = test_identity_seeded();
 
-        let record = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
         let validator = test_validator(topic, minute);
 
         let result = validator.filter_and_build(vec![record], Some(&ep));
@@ -717,8 +717,8 @@ mod tests {
         let minute = 1_000_000;
         let (sk, ep) = test_identity_seeded();
 
-        let r1 = create_discovery_record(topic, minute, &ep, &sk).unwrap();
-        let r2 = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let r1 = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
+        let r2 = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
         let validator = test_validator(topic, minute);
 
         let result = validator.filter_and_build(vec![r1, r2], None);
@@ -741,7 +741,7 @@ mod tests {
             let seed = [i as u8; 32];
             let sk = iroh::SecretKey::from_bytes(&seed);
             let ep = sk.public();
-            records.push(create_discovery_record(topic, minute, &ep, &sk).unwrap());
+            records.push(create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap());
         }
 
         let validator = test_validator(topic, minute);
@@ -765,7 +765,7 @@ mod tests {
             let seed = [i as u8; 32];
             let sk = iroh::SecretKey::from_bytes(&seed);
             let ep = sk.public();
-            records.push(create_discovery_record(topic, minute, &ep, &sk).unwrap());
+            records.push(create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap());
         }
 
         let validator = test_validator(topic, minute);
@@ -799,7 +799,7 @@ mod tests {
             let sk = iroh::SecretKey::from_bytes(&seed);
             (sk.clone(), sk.public())
         };
-        let valid = create_discovery_record(topic, minute, &ep1, &sk1).unwrap();
+        let valid = create_discovery_record(topic, minute, &ep1, &sk1, None, None).unwrap();
 
         // Stale record.
         let (sk2, ep2) = {
@@ -812,6 +812,8 @@ mod tests {
             minute - DEFAULT_MAX_RECORD_AGE_MINUTES - 5,
             &ep2,
             &sk2,
+            None,
+            None,
         )
         .unwrap();
 
@@ -826,7 +828,8 @@ mod tests {
             let sk = iroh::SecretKey::from_bytes(&seed);
             (sk.clone(), sk.public())
         };
-        let mismatched = create_discovery_record(topic, minute, &ep_other, &sk3).unwrap();
+        let mismatched =
+            create_discovery_record(topic, minute, &ep_other, &sk3, None, None).unwrap();
 
         let validator = test_validator(topic, minute);
         let result = validator.filter_and_build(vec![valid, stale, mismatched], None);
@@ -943,7 +946,7 @@ mod tests {
         let topic = test_topic();
         let now = unix_minute(0);
         let (sk, ep) = test_identity();
-        let record = create_discovery_record(topic, now, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, now, &ep, &sk, None, None).unwrap();
         let validator = test_validator(topic, now);
         let result = validator.validate_single(&record);
         assert!(
@@ -958,7 +961,7 @@ mod tests {
         let now = unix_minute(0);
         let one_min_ago = now.saturating_sub(1);
         let (sk, ep) = test_identity();
-        let record = create_discovery_record(topic, one_min_ago, &ep, &sk).unwrap();
+        let record = create_discovery_record(topic, one_min_ago, &ep, &sk, None, None).unwrap();
         let validator = test_validator(topic, now);
         let result = validator.validate_single(&record);
         assert!(
@@ -988,7 +991,7 @@ mod tests {
         let (sk, ep) = test_identity_seeded();
 
         // Valid record (will be accepted).
-        let valid = create_discovery_record(topic, minute, &ep, &sk).unwrap();
+        let valid = create_discovery_record(topic, minute, &ep, &sk, None, None).unwrap();
 
         // Stale record (will be rejected with Stale).
         let (sk2, ep2) = {
@@ -1001,6 +1004,8 @@ mod tests {
             minute - DEFAULT_MAX_RECORD_AGE_MINUTES - 5,
             &ep2,
             &sk2,
+            None,
+            None,
         )
         .unwrap();
 

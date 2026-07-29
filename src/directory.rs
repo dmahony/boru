@@ -18,7 +18,9 @@ use std::{
 
 use crate::chat_core::RoomAdvertisement;
 use crate::proto::TopicId;
+use anyhow::{anyhow, Result};
 use iroh::PublicKey;
+use rusqlite::{params, Connection};
 
 // ---------------------------------------------------------------------------
 // Directory topic derivation
@@ -85,6 +87,89 @@ impl DirectoryStore {
     /// to the current time.
     pub fn upsert(&mut self, ad: RoomAdvertisement, author: PublicKey) {
         self.ads.insert((ad.topic, author), (ad, Instant::now()));
+    }
+
+    /// Persist all current advertisements to the SQLite directory table.
+    pub fn save_to_db(&self, conn: &Connection) -> Result<()> {
+        conn.execute("DELETE FROM directory_ads", [])?;
+        for ((topic, author), (ad, received)) in &self.ads {
+            let received_at_ms = std::time::SystemTime::now()
+                .checked_sub(received.elapsed())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .ok_or_else(|| anyhow!("directory advertisement timestamp overflow"))?
+                .as_millis() as i64;
+            conn.execute(
+                "INSERT INTO directory_ads
+                    (topic, author, room_name, description, ticket, member_count,
+                     last_activity, received_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    topic.as_bytes(),
+                    author.as_bytes(),
+                    ad.room_name,
+                    ad.description,
+                    ad.ticket,
+                    ad.member_count as i64,
+                    ad.last_activity as i64,
+                    received_at_ms,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Load persisted advertisements, replacing the in-memory contents.
+    pub fn load_from_db(&mut self, conn: &Connection) -> Result<()> {
+        let mut stmt = conn.prepare(
+            "SELECT topic, author, room_name, description, ticket, member_count,
+                    last_activity, received_at_ms
+             FROM directory_ads",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let topic: Vec<u8> = row.get(0)?;
+            let author: Vec<u8> = row.get(1)?;
+            let topic: [u8; 32] = topic.try_into().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(0, "topic".into(), rusqlite::types::Type::Blob)
+            })?;
+            let author: [u8; 32] = author.try_into().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(1, "author".into(), rusqlite::types::Type::Blob)
+            })?;
+            let author = PublicKey::from_bytes(&author).map_err(|_| {
+                rusqlite::Error::InvalidColumnType(1, "author".into(), rusqlite::types::Type::Blob)
+            })?;
+            Ok((
+                RoomAdvertisement {
+                    room_name: row.get(2)?,
+                    description: row.get(3)?,
+                    topic: TopicId::from_bytes(topic),
+                    ticket: row.get(4)?,
+                    member_count: row.get::<_, i64>(5)? as u32,
+                    last_activity: row.get::<_, i64>(6)? as u64,
+                },
+                author,
+                row.get::<_, i64>(7)?,
+            ))
+        })?;
+
+        let now = Instant::now();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| anyhow!("system clock is before UNIX epoch"))?
+            .as_millis() as i64;
+        self.ads.clear();
+        for row in rows {
+            let (ad, author, received_at_ms) = row?;
+            let age_ms = now_ms.saturating_sub(received_at_ms).max(0) as u64;
+            self.ads.insert(
+                (ad.topic, author),
+                (
+                    ad,
+                    now.checked_sub(Duration::from_millis(age_ms))
+                        .unwrap_or(now),
+                ),
+            );
+        }
+        Ok(())
     }
 
     /// Return all active advertisements paired with their author.
@@ -285,5 +370,28 @@ mod tests {
         store.upsert(make_ad("room-beta", topic), author_b);
 
         assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn directory_store_round_trips_sqlite() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE directory_ads (
+                topic BLOB NOT NULL, author BLOB NOT NULL, room_name TEXT NOT NULL,
+                description TEXT NOT NULL, ticket TEXT NOT NULL, member_count INTEGER NOT NULL,
+                last_activity INTEGER NOT NULL, received_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (topic, author)
+            )",
+        )
+        .unwrap();
+        let mut original = DirectoryStore::new();
+        let ad = make_ad("persisted", make_topic(9));
+        let author = make_public_key(42);
+        original.upsert(ad.clone(), author);
+        original.save_to_db(&conn).unwrap();
+
+        let mut restored = DirectoryStore::new();
+        restored.load_from_db(&conn).unwrap();
+        assert_eq!(restored.list_active(), vec![(ad, author)]);
     }
 }

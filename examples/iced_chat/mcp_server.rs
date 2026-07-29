@@ -2680,7 +2680,8 @@ async fn handle_browse_peer_catalogue(
     // Persist the fetched catalogue locally so that boru_download_file can
     // look it up via initiate_download().
     let storage = state.storage.as_ref().ok_or_else(|| {
-        "Storage not available — cannot persist remote catalogue for download initiation.".to_string()
+        "Storage not available — cannot persist remote catalogue for download initiation."
+            .to_string()
     })?;
     storage
         .replace_remote_catalogue(&catalogue)
@@ -2826,8 +2827,8 @@ fn parse_topic_id(s: &str) -> Result<TopicId, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boru_core::diagnostics::GuiTestCommand;
     use crate::gui_test_actions::{ActionRecord, ActionStatus};
+    use boru_core::diagnostics::GuiTestCommand;
     use serde_json::json;
 
     // ── handle_gui_open_room validation tests ──────────────────────────
@@ -6036,7 +6037,9 @@ mod tests {
         let (state, _rx) = make_gate_test_state(false, false).await;
         let topic = TopicId::from_bytes([7; 32]);
         state.rooms.lock().unwrap().push(topic);
-        state.diagnostics.record(Some(topic), DiagnosticEventKind::RoomJoinStarted);
+        state
+            .diagnostics
+            .record(Some(topic), DiagnosticEventKind::RoomJoinStarted);
         let response = handle_request(&make_generic_request("boru_get_node_status"), &state).await;
         let result = response.result.unwrap();
 
@@ -6059,7 +6062,9 @@ mod tests {
         let missing = handle_request(&request, &state).await;
         assert_eq!(missing.error.unwrap().code, -32000);
 
-        state.diagnostics.record(Some(topic), DiagnosticEventKind::RoomJoined);
+        state
+            .diagnostics
+            .record(Some(topic), DiagnosticEventKind::RoomJoined);
         let joined = handle_request(&request, &state).await;
         let result = joined.result.expect("joined room should be reported");
         assert_eq!(result["joined"], true);
@@ -6071,8 +6076,12 @@ mod tests {
     #[tokio::test]
     async fn test_discovery_events_support_count_alias_and_sequence_filter() {
         let (state, _rx) = make_gate_test_state(false, false).await;
-        state.diagnostics.record(None, DiagnosticEventKind::PeerDiscovered);
-        state.diagnostics.record(None, DiagnosticEventKind::RoomJoinStarted);
+        state
+            .diagnostics
+            .record(None, DiagnosticEventKind::PeerDiscovered);
+        state
+            .diagnostics
+            .record(None, DiagnosticEventKind::RoomJoinStarted);
         let mut request = make_generic_request("boru_get_discovery_events");
         request.params = json!({"since_sequence": 0, "count": 1});
         let response = handle_request(&request, &state).await;
@@ -6106,7 +6115,10 @@ mod tests {
 
         assert_eq!(result["found"], false);
         assert_eq!(result["peer_id"], "unknown-peer");
-        assert!(result["message"].as_str().unwrap().contains("never been observed"));
+        assert!(result["message"]
+            .as_str()
+            .unwrap()
+            .contains("never been observed"));
     }
 
     #[tokio::test]
@@ -6118,12 +6130,10 @@ mod tests {
             "target_state": "connected",
             "timeout_ms": 1,
         });
-        let response = tokio::time::timeout(
-            Duration::from_millis(100),
-            handle_request(&request, &state),
-        )
-        .await
-        .expect("wait tool must honor its timeout");
+        let response =
+            tokio::time::timeout(Duration::from_millis(100), handle_request(&request, &state))
+                .await
+                .expect("wait tool must honor its timeout");
         let result = response.result.unwrap();
 
         assert_eq!(result["reached"], false);
@@ -6140,7 +6150,12 @@ mod tests {
         let error = response.error.unwrap();
 
         assert_eq!(error.code, -32000);
-        assert!(error.data.unwrap().as_str().unwrap().contains("Invalid target_state"));
+        assert!(error
+            .data
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("Invalid target_state"));
     }
 
     #[tokio::test]
@@ -6166,6 +6181,11 @@ mod tests {
 
         assert_eq!(error.code, -32601);
         assert_eq!(error.message, "Method not found");
-        assert!(error.data.unwrap().as_str().unwrap().contains("boru_not_a_real_tool"));
+        assert!(error
+            .data
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("boru_not_a_real_tool"));
     }
 }

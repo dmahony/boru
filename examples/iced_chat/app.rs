@@ -54,8 +54,12 @@ use boru_core::mailbox::{
 use boru_core::net::Gossip;
 use boru_core::private_room_tracker::{PrivateContinuousTracker, PrivateRoomTracker};
 use boru_core::proto::TopicId;
-use boru_core::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
+use boru_core::public_room::{public_discovery_key, PublicNetwork, PublicRoomIdentity};
+use boru_core::public_room_continuous::{
+    ContinuousTracker as PublicContinuousTracker, ContinuousTrackerConfig,
+};
 use boru_core::public_room_safety::PublicRoomSafety;
+use boru_core::public_room_tracker::PublicRoomTracker;
 use boru_core::room::RoomStore;
 use boru_core::room_cleanup::{clear_room_history, delete_room_history, RoomHistoryClearReport};
 use boru_core::room_docs::{self, RoomMetadata};
@@ -101,10 +105,16 @@ use iced::Color;
 #[derive(Debug)]
 pub struct SharedTracker {
     /// The underlying continuous tracker (publish + discover loops).
-    tracker: Arc<tokio::sync::Mutex<Option<PrivateContinuousTracker>>>,
+    tracker: Arc<tokio::sync::Mutex<Option<TrackerInner>>>,
     /// Cancellation token for the join-fanout background task, so it
     /// exits promptly when the room is left or deleted.
     join_cancel: Arc<tokio_util::sync::CancellationToken>,
+}
+
+#[derive(Debug)]
+enum TrackerInner {
+    Private(PrivateContinuousTracker),
+    Public(PublicContinuousTracker),
 }
 
 impl SharedTracker {
@@ -113,8 +123,17 @@ impl SharedTracker {
         join_cancel: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
-            tracker: Arc::new(tokio::sync::Mutex::new(Some(tracker))),
+            tracker: Arc::new(tokio::sync::Mutex::new(Some(TrackerInner::Private(
+                tracker,
+            )))),
             join_cancel: Arc::new(join_cancel),
+        }
+    }
+
+    fn new_public(tracker: PublicContinuousTracker) -> Self {
+        Self {
+            tracker: Arc::new(tokio::sync::Mutex::new(Some(TrackerInner::Public(tracker)))),
+            join_cancel: Arc::new(tokio_util::sync::CancellationToken::new()),
         }
     }
 
@@ -124,7 +143,10 @@ impl SharedTracker {
         let inner = self.tracker.clone();
         task::spawn(async move {
             if let Some(tracker) = inner.lock().await.take() {
-                tracker.shutdown().await;
+                match tracker {
+                    TrackerInner::Private(tracker) => tracker.shutdown().await,
+                    TrackerInner::Public(tracker) => tracker.shutdown().await,
+                }
             }
         });
     }
@@ -357,8 +379,7 @@ fn blob_ticket_string(
 pub(crate) const SPACE_2: f32 = 2.0;
 pub(crate) use crate::design_tokens::{AVATAR_MD, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
-    DETAILS_PANEL_WIDTH, RADIUS_LG, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24,
-    SPACE_4, SPACE_8,
+    DETAILS_PANEL_WIDTH, RADIUS_LG, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24, SPACE_4, SPACE_8,
 };
 pub(crate) const SPACE_6: f32 = 6.0;
 pub(crate) const SPACE_10: f32 = 10.0;
@@ -1266,7 +1287,10 @@ impl DownloadState {
     /// Returns true if this is a terminal state that should not be
     /// overwritten by late progress events.
     fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled
+        )
     }
 }
 
@@ -1454,9 +1478,9 @@ impl DownloadAttachment {
     #[expect(dead_code)]
     fn status_tone(&self) -> Color {
         match self.state {
-            DownloadState::Ready { .. } | DownloadState::Active { .. } | DownloadState::Paused { .. } => {
-                accent_primary(&iced::Theme::Dark)
-            }
+            DownloadState::Ready { .. }
+            | DownloadState::Active { .. }
+            | DownloadState::Paused { .. } => accent_primary(&iced::Theme::Dark),
             DownloadState::Completed { .. } => Color::from_rgb(0.2, 0.7, 0.2),
             DownloadState::Failed { ref failure } => match failure.stability_label() {
                 "Temporary" => Color::from_rgb(0.78, 0.58, 0.16),
@@ -1708,7 +1732,13 @@ impl ChatEntry {
             event_id: 0,
             delivery_state: DeliveryState::default(),
             sender_key: None,
-            download: Some(DownloadAttachment::new(kind, name, ticket, source_peer, thumbnail)),
+            download: Some(DownloadAttachment::new(
+                kind,
+                name,
+                ticket,
+                source_peer,
+                thumbnail,
+            )),
             widget_gen: 0,
             label_text: None,
             reactions_text: None,
@@ -1737,12 +1767,18 @@ impl ChatEntry {
     /// Generate a JPEG thumbnail from a video file via ffmpeg.
     fn generate_video_thumbnail(path: &std::path::Path) -> Option<Vec<u8>> {
         std::process::Command::new("ffmpeg")
-            .arg("-i").arg(path)
-            .arg("-vframes").arg("1")
-            .arg("-vf").arg("scale=320:-1")
-            .arg("-f").arg("image2pipe")
-            .arg("-q:v").arg("5")
-            .arg("-v").arg("quiet")
+            .arg("-i")
+            .arg(path)
+            .arg("-vframes")
+            .arg("1")
+            .arg("-vf")
+            .arg("scale=320:-1")
+            .arg("-f")
+            .arg("image2pipe")
+            .arg("-q:v")
+            .arg("5")
+            .arg("-v")
+            .arg("quiet")
             .arg("-")
             .output()
             .ok()
@@ -2266,7 +2302,7 @@ pub struct IcedChat {
     /// Kept alive for the lifetime of the app — dropping it cancels the
     /// background publish/discover tasks.
     #[expect(dead_code)]
-    continuous_tracker: Option<ContinuousTracker>,
+    continuous_tracker: Option<PublicContinuousTracker>,
     /// Receiver handle for discovered peers from the DHT discovery loop.
     /// Read by the subscription stream to produce NewDiscoveredPeers events.
     pub discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
@@ -3795,7 +3831,6 @@ fn profile_identity_card(
 }
 
 impl IcedChat {
-
     /// Detect OS reduced-motion preference.
     ///
     /// Checks the REDUCED_MOTION env var first (for CI/testing), then queries
@@ -3845,7 +3880,7 @@ impl IcedChat {
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
         backfill_handle: BackfillHandle,
         return_to_chat_list_after_open: bool,
-        continuous_tracker: Option<ContinuousTracker>,
+        continuous_tracker: Option<PublicContinuousTracker>,
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
         directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>,
         dht: Option<distributed_topic_tracker::Dht>,
@@ -3984,6 +4019,19 @@ impl IcedChat {
             })
             .collect::<Vec<_>>()
             .into();
+
+        let directory_store = Arc::new(StdMutex::new(DirectoryStore::new()));
+        if let Some(storage) = storage.as_ref() {
+            if let Err(err) = storage.with_conn(|conn| {
+                directory_store
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("directory store mutex poisoned"))?
+                    .load_from_db(conn)?;
+                Ok(())
+            }) {
+                warn!("failed to load directory advertisements: {err}");
+            }
+        }
 
         Self {
             screen: Screen::ChatList,
@@ -4219,7 +4267,7 @@ impl IcedChat {
             ),
             directory_sender: None,
             create_room_advertise: false,
-            directory_store: Arc::new(StdMutex::new(DirectoryStore::new())),
+            directory_store,
             directory_room_rx,
         }
     }
@@ -4305,6 +4353,24 @@ impl IcedChat {
             display_name: Some(self.local_label.clone()),
         };
         settings.save(&self.data_dir);
+    }
+
+    /// Persist the current public-room directory snapshot to SQLite.
+    fn save_directory_store(&self) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let result = storage.with_conn(|conn| {
+            let store = self
+                .directory_store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("directory store mutex poisoned"))?;
+            store.save_to_db(conn)?;
+            Ok(())
+        });
+        if let Err(err) = result {
+            warn!("failed to save directory advertisements: {err}");
+        }
     }
 
     // ── Background persistence helpers (legacy JSON stores — all no-ops) ──
@@ -5916,10 +5982,16 @@ impl IcedChat {
                 None
             } else {
                 let count = self.peer_latencies.len();
-                let avg_ms: u128 = self.peer_latencies.values()
+                let avg_ms: u128 = self
+                    .peer_latencies
+                    .values()
                     .map(|d| d.as_millis())
-                    .sum::<u128>() / count as u128;
-                Some(format!("{avg_ms} ms ({count} peer{}", if count == 1 { ")" } else { "s)" }))
+                    .sum::<u128>()
+                    / count as u128;
+                Some(format!(
+                    "{avg_ms} ms ({count} peer{}",
+                    if count == 1 { ")" } else { "s)" }
+                ))
             },
         ))
     }
@@ -6355,8 +6427,47 @@ impl IcedChat {
                         };
                         store.upsert(ad, local_pk);
                     }
+                    self.save_directory_store();
                     self.public_rooms_sidebar_revision =
                         self.public_rooms_sidebar_revision.wrapping_add(1);
+
+                    // Keep publishing this user-created public room after the
+                    // initial directory advertisement.  The DHT record carries
+                    // the room metadata so later discovery can present a
+                    // directly joinable room.
+                    if let Some(dht) = self.dht.clone() {
+                        let identity = PublicRoomIdentity::new(
+                            topic,
+                            public_discovery_key(
+                                PublicNetwork::Mainnet,
+                                &display_name,
+                                boru_core::public_room::PROTOCOL_VERSION,
+                            ),
+                        );
+                        let tracker = PublicRoomTracker::new_with_metadata(
+                            Box::new(MainlineDhtBackend::new(dht)),
+                            identity,
+                            self.endpoint.id(),
+                            self.endpoint.secret_key().clone(),
+                            Some(display_name.clone()),
+                            Some(ticket_str.clone()),
+                        );
+                        let (new_peers_tx, mut new_peers_rx) =
+                            tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
+                        // Public rooms are not subscribed by the creator here;
+                        // drain the discovery channel until the tracker is
+                        // shut down rather than allowing it to back up.
+                        tokio::spawn(async move { while new_peers_rx.recv().await.is_some() {} });
+                        self.room_trackers.insert(
+                            topic,
+                            SharedTracker::new_public(PublicContinuousTracker::start(
+                                tracker,
+                                ContinuousTrackerConfig::default(),
+                                new_peers_tx,
+                            )),
+                        );
+                    }
+
                     // Broadcast an immediate advertisement on the directory
                     // topic so other peers see it without waiting for the
                     // ~60 s periodic tick.  If the directory sender is not
@@ -7268,9 +7379,9 @@ impl IcedChat {
                                     if let Some(saved) = store.get_by_event_id(expected_id) {
                                         let saved = saved.clone();
                                         drop(store);
-                                        if let Some(chat_entry) = self.history_entry_to_chat_entry(
-                                            &saved, &topic, &local_hex,
-                                        ) {
+                                        if let Some(chat_entry) = self
+                                            .history_entry_to_chat_entry(&saved, &topic, &local_hex)
+                                        {
                                             self.entries_push(chat_entry);
                                         }
                                     } else {
@@ -7984,10 +8095,7 @@ impl IcedChat {
                         }
                         iced::Task::batch(tasks)
                     } else {
-                        iced::Task::done(AppMessage::BackgroundSubscribe(
-                            topic,
-                            bootstrap_peers,
-                        ))
+                        iced::Task::done(AppMessage::BackgroundSubscribe(topic, bootstrap_peers))
                     }
                 } else {
                     iced::Task::none()
@@ -8556,29 +8664,30 @@ impl IcedChat {
                                                     // Save is a no-op — SQLite unified storage handles persistence.
                                                     // Attempt proactive direct QUIC delivery.
                                                     match send_deliver(
-                                                            &endpoint,
-                                                            &secret_key,
-                                                            peer_key,
-                                                            delivery_envelope,
-                                                        )
-                                                        .await
-                                                        {
-                                                            Ok(()) => AppMessage::OfflineDMStatus {
+                                                        &endpoint,
+                                                        &secret_key,
+                                                        peer_key,
+                                                        delivery_envelope,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(()) => AppMessage::OfflineDMStatus {
+                                                            message_id: msg_id,
+                                                            label,
+                                                            status:
+                                                                OfflineDeliveryStatus::Delivered,
+                                                        },
+                                                        Err(_) => {
+                                                            // Peer offline; envelope is already stored for later
+                                                            // sync-based delivery.
+                                                            AppMessage::OfflineDMStatus {
                                                                 message_id: msg_id,
                                                                 label,
                                                                 status:
-                                                                    OfflineDeliveryStatus::Delivered,
-                                                            },
-                                                            Err(_) => {
-                                                                // Peer offline; envelope is already stored for later
-                                                                // sync-based delivery.
-                                                                AppMessage::OfflineDMStatus {
-                                                                    message_id: msg_id,
-                                                                    label,
-                                                                    status: OfflineDeliveryStatus::Queued,
-                                                                }
+                                                                    OfflineDeliveryStatus::Queued,
                                                             }
                                                         }
+                                                    }
                                                 }
                                                 Err(enq_err) => AppMessage::ErrorMsg(format!(
                                                     "Failed to queue offline message: {enq_err}"
@@ -8691,7 +8800,8 @@ impl IcedChat {
                 // Clear from in-memory chat history store
                 {
                     let mut chat_history = self.chat_history.lock().unwrap();
-                    let _ = clear_room_history(topic, &mut self.room_history, &mut chat_history, None);
+                    let _ =
+                        clear_room_history(topic, &mut self.room_history, &mut chat_history, None);
                 }
                 self.send_save_chat_history();
 
@@ -9256,8 +9366,7 @@ impl IcedChat {
                                 // to open it when ready.
                                 let bootstrap = self.discovered_peers.clone();
                                 return iced::Task::done(AppMessage::BackgroundSubscribe(
-                                    topic,
-                                    bootstrap,
+                                    topic, bootstrap,
                                 ));
                             }
                             Ok((sender, ContactAction::AddressUpdate { addrs }))
@@ -9785,7 +9894,11 @@ impl IcedChat {
                 } else {
                     None
                 };
-                let transfer_kind = if is_video { TransferKind::Video } else { TransferKind::File };
+                let transfer_kind = if is_video {
+                    TransferKind::Video
+                } else {
+                    TransferKind::File
+                };
 
                 // Create a download card immediately showing upload progress,
                 // rather than waiting for the upload to finish.
@@ -10003,10 +10116,7 @@ impl IcedChat {
                             DownloadState::Ready { total } => *total,
                             _ => None,
                         };
-                        d.state = DownloadState::Active {
-                            bytes: 0,
-                            total,
-                        };
+                        d.state = DownloadState::Active { bytes: 0, total };
                     }
                 }
                 // The Active card is taller than the Ready card. Rebuild the
@@ -10269,12 +10379,8 @@ impl IcedChat {
                         } = dl.state
                         {
                             if let Some(path) = saved_path {
-                                let encoded = format!(
-                                    "{}|{}|{}",
-                                    saved_name,
-                                    path.display(),
-                                    path.display()
-                                );
+                                let encoded =
+                                    format!("{}|{}|{}", saved_name, path.display(), path.display());
                                 return self.update(AppMessage::ExecuteFileSend(encoded));
                             }
                         }
@@ -10967,7 +11073,11 @@ impl IcedChat {
                 let size_bytes = file.size_bytes;
                 // If size_bytes is 0 (unknown/uncached metadata), pass None
                 // to avoid an immediate "blob too large" failure on the first byte.
-                let max_bytes = if size_bytes > 0 { Some(size_bytes) } else { None };
+                let max_bytes = if size_bytes > 0 {
+                    Some(size_bytes)
+                } else {
+                    None
+                };
                 iced::Task::perform(
                     async move {
                         let _ = tokio::fs::create_dir_all(&dl_dir).await;
@@ -11632,6 +11742,7 @@ impl IcedChat {
             }
 
             AppMessage::ConnMonitorTick => {
+                self.save_directory_store();
                 if self.pending_image_upload.is_some() {
                     self.image_upload_spinner_frame = (self.image_upload_spinner_frame + 1) % 10;
                 }
@@ -11925,7 +12036,8 @@ impl IcedChat {
                                 let sent_at_ms = SystemTime::now()
                                     .duration_since(UNIX_EPOCH)
                                     .unwrap_or_default()
-                                    .as_millis() as u64;
+                                    .as_millis()
+                                    as u64;
                                 if let Ok(encoded) = SignedMessage::sign_and_encode(
                                     &sk,
                                     &crate::Message::LatencyPing { sent_at_ms },
@@ -13613,7 +13725,9 @@ impl IcedChat {
                         async move {
                             if let Ok(encoded) = SignedMessage::sign_and_encode(
                                 &sk,
-                                &crate::Message::LatencyPong { sent_at_ms: ping_ts },
+                                &crate::Message::LatencyPong {
+                                    sent_at_ms: ping_ts,
+                                },
                             ) {
                                 s.broadcast(encoded).await.ok();
                             }
@@ -14154,13 +14268,23 @@ impl ChatCallbacks for IcedChat {
         self.entries_push(entry);
     }
 
-    fn set_pending_file(&mut self, name: String, ticket: String, size: u64, thumbnail: Option<Vec<u8>>) {
+    fn set_pending_file(
+        &mut self,
+        name: String,
+        ticket: String,
+        size: u64,
+        thumbnail: Option<Vec<u8>>,
+    ) {
         self.pending_file = Some((name.clone(), ticket.clone()));
         // Create a download card entry so the file appears as a card with a
         // download button, not just a system notification.  The download
         // entry index is set so ExecuteDownloadAt can find the entry.
         self.download_entry_index = Some(self.entries.len());
-        let xfer_kind = if thumbnail.is_some() { TransferKind::Video } else { TransferKind::File };
+        let xfer_kind = if thumbnail.is_some() {
+            TransferKind::Video
+        } else {
+            TransferKind::File
+        };
         let mut entry = ChatEntry::system_download(
             format!("File received: {name}"),
             xfer_kind,
@@ -14172,9 +14296,7 @@ impl ChatCallbacks for IcedChat {
         // Pre-populate the total size so the progress bar appears immediately
         // when the user clicks Download — no need to wait for Phase 2 export.
         if let Some(dl) = entry.download.as_mut() {
-            dl.state = DownloadState::Ready {
-                total: Some(size),
-            };
+            dl.state = DownloadState::Ready { total: Some(size) };
         }
         self.entries_push(entry);
     }
@@ -15117,26 +15239,22 @@ impl IcedChat {
         let header = Row::new()
             .push(boru_logo(LogoSize::Small).into_element())
             .push(Space::new().width(Length::Fill))
-            .push(
-                iced::widget::tooltip::Tooltip::new(
-                    button(icon_svg(ICON_SETTINGS, TYPO_MD))
-                        .on_press(AppMessage::OpenSettings)
-                        .padding([SPACE_6, SPACE_8])
-                        .style(BUTTON_ICON),
-                    text("Settings").size(TYPO_XS),
-                    iced::widget::tooltip::Position::Bottom,
-                ),
-            )
-            .push(
-                iced::widget::tooltip::Tooltip::new(
-                    button(icon_svg(ICON_PLUS, TYPO_MD))
-                        .on_press(AppMessage::ToggleAddMenu)
-                        .padding([SPACE_6, SPACE_8])
-                        .style(BUTTON_ICON),
-                    text("New conversation").size(TYPO_XS),
-                    iced::widget::tooltip::Position::Bottom,
-                ),
-            )
+            .push(iced::widget::tooltip::Tooltip::new(
+                button(icon_svg(ICON_SETTINGS, TYPO_MD))
+                    .on_press(AppMessage::OpenSettings)
+                    .padding([SPACE_6, SPACE_8])
+                    .style(BUTTON_ICON),
+                text("Settings").size(TYPO_XS),
+                iced::widget::tooltip::Position::Bottom,
+            ))
+            .push(iced::widget::tooltip::Tooltip::new(
+                button(icon_svg(ICON_PLUS, TYPO_MD))
+                    .on_press(AppMessage::ToggleAddMenu)
+                    .padding([SPACE_6, SPACE_8])
+                    .style(BUTTON_ICON),
+                text("New conversation").size(TYPO_XS),
+                iced::widget::tooltip::Position::Bottom,
+            ))
             .align_y(Alignment::Center);
 
         let is_online = !matches!(self.mesh_health, MeshHealth::Offline(_));
@@ -17936,77 +18054,76 @@ impl IcedChat {
             let is_friend_online = entry
                 .sender_key
                 .map_or(false, |k| self.friend_online_cache.contains(&k));
-            let label_el: iced::Element<'_, AppMessage> = if matches!(entry.kind, ChatKind::System)
-                && entry.download.is_none()
-            {
-                // System notices have no label — just the centred text
-                space::Space::new().height(0.0).into()
-            } else if group_continues {
-                space::Space::new().height(Length::Fixed(SPACE_2)).into()
-            } else if matches!(entry.kind, ChatKind::Remote) {
-                if let Some(sender_key) = entry.sender_key {
-                    let status_icon = icon_svg(
-                        if is_friend_online {
-                            ICON_ONLINE
-                        } else {
-                            ICON_OFFLINE
-                        },
-                        TYPO_XXS,
-                    )
-                    .style(move |t, _| iced::widget::svg::Style {
-                        color: Some(if is_friend_online {
-                            accent_green(t)
-                        } else {
-                            Self::muted_color(false)
-                        }),
-                    });
-                    button(
-                        Row::new()
-                            .push(status_icon)
-                            .push(
-                                text(label_text)
-                                    .size(TYPO_SM)
-                                    .font(crate::fonts::inter(iced::font::Weight::Semibold))
-                                    .color(label_color),
-                            )
-                            .spacing(SPACE_4)
-                            .align_y(Alignment::Center),
-                    )
-                    .on_press(AppMessage::OpenPeerProfile(sender_key))
-                    .padding(0)
-                    .style(|_t, _s| iced::widget::button::Style::default())
-                    .into()
-                } else {
-                    text(label_text)
-                        .size(TYPO_SM)
-                        .font(crate::fonts::inter(iced::font::Weight::Semibold))
-                        .color(label_color)
+            let label_el: iced::Element<'_, AppMessage> =
+                if matches!(entry.kind, ChatKind::System) && entry.download.is_none() {
+                    // System notices have no label — just the centred text
+                    space::Space::new().height(0.0).into()
+                } else if group_continues {
+                    space::Space::new().height(Length::Fixed(SPACE_2)).into()
+                } else if matches!(entry.kind, ChatKind::Remote) {
+                    if let Some(sender_key) = entry.sender_key {
+                        let status_icon = icon_svg(
+                            if is_friend_online {
+                                ICON_ONLINE
+                            } else {
+                                ICON_OFFLINE
+                            },
+                            TYPO_XXS,
+                        )
+                        .style(move |t, _| iced::widget::svg::Style {
+                            color: Some(if is_friend_online {
+                                accent_green(t)
+                            } else {
+                                Self::muted_color(false)
+                            }),
+                        });
+                        button(
+                            Row::new()
+                                .push(status_icon)
+                                .push(
+                                    text(label_text)
+                                        .size(TYPO_SM)
+                                        .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                                        .color(label_color),
+                                )
+                                .spacing(SPACE_4)
+                                .align_y(Alignment::Center),
+                        )
+                        .on_press(AppMessage::OpenPeerProfile(sender_key))
+                        .padding(0)
+                        .style(|_t, _s| iced::widget::button::Style::default())
                         .into()
-                }
-            } else {
-                // Local messages: make label clickable for retry when Failed
-                if matches!(entry.kind, ChatKind::Local)
-                    && entry.delivery_state == DeliveryState::Failed
-                {
-                    let event_id = entry.event_id;
-                    button(
+                    } else {
                         text(label_text)
                             .size(TYPO_SM)
                             .font(crate::fonts::inter(iced::font::Weight::Semibold))
-                            .color(label_color),
-                    )
-                    .on_press(AppMessage::RetryOutgoingMessage(event_id))
-                    .padding(0)
-                    .style(|_t, _s| iced::widget::button::Style::default())
-                    .into()
+                            .color(label_color)
+                            .into()
+                    }
                 } else {
-                    text(label_text)
-                        .size(TYPO_SM)
-                        .font(crate::fonts::inter(iced::font::Weight::Semibold))
-                        .color(label_color)
+                    // Local messages: make label clickable for retry when Failed
+                    if matches!(entry.kind, ChatKind::Local)
+                        && entry.delivery_state == DeliveryState::Failed
+                    {
+                        let event_id = entry.event_id;
+                        button(
+                            text(label_text)
+                                .size(TYPO_SM)
+                                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                                .color(label_color),
+                        )
+                        .on_press(AppMessage::RetryOutgoingMessage(event_id))
+                        .padding(0)
+                        .style(|_t, _s| iced::widget::button::Style::default())
                         .into()
-                }
-            };
+                    } else {
+                        text(label_text)
+                            .size(TYPO_SM)
+                            .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                            .color(label_color)
+                            .into()
+                    }
+                };
 
             // ── Clickable URL-aware body ──
             let segments = entry.parsed_segments.as_deref().unwrap_or(&[]);
@@ -18077,8 +18194,7 @@ impl IcedChat {
             // Wrap non-system bubbles in a button so clicking copies the
             // message body to the clipboard with a toast confirmation.
             let clickable_bubble: iced::Element<'_, AppMessage> =
-                if !matches!(entry.kind, ChatKind::System) && !entry.body.is_empty()
-                {
+                if !matches!(entry.kind, ChatKind::System) && !entry.body.is_empty() {
                     button(bubble)
                         .on_press(AppMessage::CopyMessage(i))
                         .padding(0)
@@ -18226,9 +18342,10 @@ impl IcedChat {
                     if let Some(dl_el) = download {
                         // Right padding keeps the card clear of the
                         // scrollable's overlay scrollbar (~12 px).
-                        Row::new().push(dl_el).width(Length::Fill).padding(
-                            iced::Padding::default().right(SPACE_12),
-                        )
+                        Row::new()
+                            .push(dl_el)
+                            .width(Length::Fill)
+                            .padding(iced::Padding::default().right(SPACE_12))
                     } else {
                         // Centred notice — muted text, no bubble/border
                         Row::new()
@@ -18726,13 +18843,9 @@ impl IcedChat {
         .width(Length::Fill)
         .max_width(680.0);
 
-        let scrollable = scrollable(
-            container(body)
-                .width(Length::Fill)
-                .center_x(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill);
+        let scrollable = scrollable(container(body).width(Length::Fill).center_x(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill);
 
         column![header, scrollable]
             .width(Length::Fill)
