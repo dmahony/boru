@@ -1335,17 +1335,19 @@ fn main() -> Result<()> {
         {
             let dir_sender = directory_sender.clone();
             let dir_gossip = gossip.clone();
-            let dir_relay = fmt_relay_mode(&relay_mode);
+            let dir_relay = relay_url_for_directory.clone();
             runtime.spawn(async move {
-                let topic = app::IcedChat::derive_directory_topic_from_relay(&dir_relay);
-                match dir_gossip.subscribe(topic, Vec::new()).await {
-                    Ok(gt) => {
-                        let (sender, _rx) = gt.split();
-                        *dir_sender.lock().unwrap() = Some(sender);
-                        info!("MCP directory gossip topic subscribed: {topic}");
-                    }
-                    Err(e) => {
-                        warn!("MCP directory gossip subscription failed: {e}");
+                if let Some(ref relay_url) = dir_relay {
+                    let topic = boru_core::directory::directory_topic(relay_url);
+                    match dir_gossip.subscribe(topic, Vec::new()).await {
+                        Ok(gt) => {
+                            let (sender, _rx) = gt.split();
+                            *dir_sender.lock().unwrap() = Some(sender);
+                            info!("MCP directory gossip topic subscribed: {topic}");
+                        }
+                        Err(e) => {
+                            warn!("MCP directory gossip subscription failed: {e}");
+                        }
                     }
                 }
             });
