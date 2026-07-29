@@ -1336,7 +1336,7 @@ fn main() -> Result<()> {
             let dir_sender = directory_sender.clone();
             let dir_gossip = gossip.clone();
             let dir_relay = fmt_relay_mode(&relay_mode);
-            tokio::spawn(async move {
+            runtime.spawn(async move {
                 let topic = app::IcedChat::derive_directory_topic_from_relay(&dir_relay);
                 match dir_gossip.subscribe(topic, Vec::new()).await {
                     Ok(gt) => {
