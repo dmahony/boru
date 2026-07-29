@@ -1229,7 +1229,13 @@ impl DownloadFailure {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum DownloadState {
-    Ready,
+    Ready {
+        /// Total file size in bytes, if known ahead of time
+        /// (e.g. provided in the FileShare message).  Carried
+        /// forward into Active when the user clicks Download so
+        /// the progress bar appears immediately.
+        total: Option<u64>,
+    },
     Active {
         bytes: u64,
         total: Option<u64>,
@@ -1304,7 +1310,7 @@ impl DownloadAttachment {
             name: name.into(),
             ticket: ticket.into(),
             transfer_id: None,
-            state: DownloadState::Ready,
+            state: DownloadState::Ready { total: None },
             source_peer: source_peer.into(),
             speed_bytes_per_sec: None,
         }
@@ -1328,7 +1334,7 @@ impl DownloadAttachment {
     #[expect(dead_code)]
     fn action_label(&self) -> &'static str {
         match self.state {
-            DownloadState::Ready => "Download",
+            DownloadState::Ready { .. } => "Download",
             DownloadState::Active { .. } => "Downloading",
             DownloadState::Paused { .. } => "Paused",
             DownloadState::Completed { .. } => "Open",
@@ -1341,7 +1347,7 @@ impl DownloadAttachment {
     #[expect(dead_code)]
     fn status_label(&self) -> String {
         match &self.state {
-            DownloadState::Ready => "Ready to download".to_string(),
+            DownloadState::Ready { .. } => "Ready to download".to_string(),
             DownloadState::Active {
                 bytes,
                 total: Some(total),
@@ -1432,7 +1438,7 @@ impl DownloadAttachment {
     #[expect(dead_code)]
     fn status_tone(&self) -> Color {
         match self.state {
-            DownloadState::Ready | DownloadState::Active { .. } | DownloadState::Paused { .. } => {
+            DownloadState::Ready { .. } | DownloadState::Active { .. } | DownloadState::Paused { .. } => {
                 accent_primary(&iced::Theme::Dark)
             }
             DownloadState::Completed { .. } => Color::from_rgb(0.2, 0.7, 0.2),
@@ -1449,7 +1455,7 @@ impl DownloadAttachment {
         // Rows: title + action + spacing. Active adds progress + source rows.
         // Error state adds a failure-title, action, and detail rows.
         match self.state {
-            DownloadState::Ready => 84.0,
+            DownloadState::Ready { .. } => 84.0,
             DownloadState::Active { total: Some(_), .. } | DownloadState::Paused { .. } => 112.0,
             DownloadState::Active { total: None, .. } => 176.0,
             DownloadState::Completed { .. } => 92.0,
@@ -9708,6 +9714,7 @@ impl IcedChat {
                             let msg = crate::Message::FileShare {
                                 name: filename.clone(),
                                 ticket: ticket_str.clone(),
+                                size: file_size,
                             };
                             let encoded_msg = SignedMessage::sign_and_encode(&secret_key, &msg)
                                 .map_err(|e| format!("Failed to sign: {e}"))?;
@@ -9853,14 +9860,20 @@ impl IcedChat {
                 let Some(dl) = entry.download.clone() else {
                     return iced::Task::done(AppMessage::ErrorMsg("No download attached.".into()));
                 };
-                if !matches!(dl.state, DownloadState::Ready) {
+                if !matches!(dl.state, DownloadState::Ready { .. }) {
                     return iced::Task::none();
                 }
                 if let Some(e) = self.entries.get_mut(entry_index) {
                     if let Some(ref mut d) = e.download {
+                        // Carry forward the total from Ready so the progress
+                        // bar appears immediately when the user clicks Download.
+                        let total = match &d.state {
+                            DownloadState::Ready { total } => *total,
+                            _ => None,
+                        };
                         d.state = DownloadState::Active {
                             bytes: 0,
-                            total: None,
+                            total,
                         };
                     }
                 }
@@ -9943,7 +9956,7 @@ impl IcedChat {
                         if matches!(download.state, DownloadState::Paused { .. }) {
                             // Revert to Ready so the user can click Download again.
                             // In a full implementation this would resume the transfer.
-                            download.state = DownloadState::Ready;
+                            download.state = DownloadState::Ready { total: None };
                             self.layout_cache.borrow_mut().invalidate_from(entry_index);
                         }
                     }
@@ -13954,19 +13967,27 @@ impl ChatCallbacks for IcedChat {
         self.entries_push(entry);
     }
 
-    fn set_pending_file(&mut self, name: String, ticket: String) {
+    fn set_pending_file(&mut self, name: String, ticket: String, size: u64) {
         self.pending_file = Some((name.clone(), ticket.clone()));
         // Create a download card entry so the file appears as a card with a
         // download button, not just a system notification.  The download
         // entry index is set so ExecuteDownloadAt can find the entry.
         self.download_entry_index = Some(self.entries.len());
-        self.entries_push(ChatEntry::system_download(
+        let mut entry = ChatEntry::system_download(
             format!("File received: {name}"),
             TransferKind::File,
             name,
             ticket,
             "",
-        ));
+        );
+        // Pre-populate the total size so the progress bar appears immediately
+        // when the user clicks Download — no need to wait for Phase 2 export.
+        if let Some(dl) = entry.download.as_mut() {
+            dl.state = DownloadState::Ready {
+                total: Some(size),
+            };
+        }
+        self.entries_push(entry);
     }
 
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
@@ -17981,7 +18002,11 @@ impl IcedChat {
                         .as_ref()
                         .map(|dl| self.view_download_attachment(i, dl));
                     if let Some(dl_el) = download {
-                        Row::new().push(dl_el).width(Length::Fill)
+                        // Right padding keeps the card clear of the
+                        // scrollable's overlay scrollbar (~12 px).
+                        Row::new().push(dl_el).width(Length::Fill).padding(
+                            iced::Padding::default().right(SPACE_12),
+                        )
                     } else {
                         // Centred notice — muted text, no bubble/border
                         Row::new()

@@ -206,8 +206,8 @@ pub trait ChatCallbacks {
         sent_at: Option<u64>,
     );
 
-    /// Record a pending file download: `(filename, ticket_string)`.
-    fn set_pending_file(&mut self, name: String, ticket: String);
+    /// Record a pending file download: `(filename, ticket_string, size_in_bytes)`.
+    fn set_pending_file(&mut self, name: String, ticket: String, size: u64);
 
     /// Record a pending image download: `(filename, blob_hash, sender_pk)`.
     /// The frontend should automatically download and render the image.

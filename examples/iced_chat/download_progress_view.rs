@@ -42,7 +42,7 @@ fn resolve_theme(dark_mode: bool) -> iced::Theme {
 /// Colour keyed to the current download state — used for the state badge.
 fn state_badge_color(state: &DownloadState, theme: &iced::Theme) -> Color {
     match state {
-        DownloadState::Ready | DownloadState::Active { .. } | DownloadState::Paused { .. } => {
+        DownloadState::Ready { .. } | DownloadState::Active { .. } | DownloadState::Paused { .. } => {
             accent_primary(theme)
         }
         DownloadState::Completed { .. } => accent_green(theme),
@@ -58,7 +58,7 @@ fn state_badge_color(state: &DownloadState, theme: &iced::Theme) -> Color {
 /// Short human-readable label for each state (shown in the badge).
 fn state_badge_label(state: &DownloadState) -> String {
     match state {
-        DownloadState::Ready => "Pending".to_string(),
+        DownloadState::Ready { .. } => "Pending".to_string(),
         DownloadState::Active { .. } => "Downloading".to_string(),
         DownloadState::Paused { .. } => "Paused".to_string(),
         DownloadState::Completed { .. } => "Complete".to_string(),
@@ -401,11 +401,9 @@ pub fn view_download_progress(
     body = body.spacing(SPACE_6);
 
     // Card container with state-coloured border.
-    // Extra right padding (SPACE_16 + SPACE_12) keeps the card clear of the
-    // scrollable's overlay scrollbar (~12 px).
     let card = container(body)
         .width(Length::Fill)
-        .padding(iced::Padding::new(SPACE_12).left(SPACE_16).right(SPACE_16 + SPACE_12))
+        .padding([SPACE_12, SPACE_16])
         .style(move |t| widget::container::Style {
             background: Some(iced::Background::Color(bg_surface(t))),
             border: iced::Border {
@@ -436,57 +434,82 @@ fn progress_section<'a>(
             total: Some(total),
         } if *total > 0 => {
             let f = (*bytes as f32 / *total as f32).clamp(0.0, 1.0);
-            (f, false)
+            (Some(f), false)
         }
         DownloadState::Paused {
             bytes,
             total: Some(total),
         } if *total > 0 => {
             let f = (*bytes as f32 / *total as f32).clamp(0.0, 1.0);
-            (f, true)
+            (Some(f), true)
         }
+        // Show an indeterminate label when downloading without a known total
+        // (Phase 1: blob download to local store).  The progress bar stays
+        // hidden but the user sees bytes received so they know the transfer
+        // is active.
+        DownloadState::Active { bytes, .. } if *bytes > 0 => (None, false),
         _ => return None,
     };
 
-    let pct = (fraction * 100.0).round() as u8;
     let theme = resolve_theme(dark_mode);
-    let bar = iced::widget::progress_bar(0.0..=1.0, fraction)
-        .length(Length::Fill)
-        .girth(Length::Fixed(6.0))
-        .style(move |t| {
-            let (active, back) = if dimmed {
-                let c = border_muted(t);
-                (c, Color::from_rgba(c.r, c.g, c.b, 0.3))
-            } else {
-                (accent_primary(t), {
+
+    if let Some(fraction) = fraction {
+        let pct = (fraction * 100.0).round() as u8;
+        let bar = iced::widget::progress_bar(0.0..=1.0, fraction)
+            .length(Length::Fill)
+            .girth(Length::Fixed(6.0))
+            .style(move |t| {
+                let (active, back) = if dimmed {
                     let c = border_muted(t);
-                    Color::from_rgba(c.r, c.g, c.b, 0.4)
-                })
-            };
-            widget::progress_bar::Style {
-                background: back.into(),
-                bar: active.into(),
-                border: iced::Border::default(),
-            }
-        });
+                    (c, Color::from_rgba(c.r, c.g, c.b, 0.3))
+                } else {
+                    (accent_primary(t), {
+                        let c = border_muted(t);
+                        Color::from_rgba(c.r, c.g, c.b, 0.4)
+                    })
+                };
+                widget::progress_bar::Style {
+                    background: back.into(),
+                    bar: active.into(),
+                    border: iced::Border::default(),
+                }
+            });
 
-    let pct_label = text(format!("{pct}%"))
-        .font(crate::fonts::inter(Weight::Bold))
-        .size(TYPO_XXS)
-        .color(if dimmed {
-            border_muted(&theme)
+        let pct_label = text(format!("{pct}%"))
+            .font(crate::fonts::inter(Weight::Bold))
+            .size(TYPO_XXS)
+            .color(if dimmed {
+                border_muted(&theme)
+            } else {
+                accent_primary(&theme)
+            });
+
+        Some(
+            Row::new()
+                .push(bar)
+                .push(pct_label)
+                .align_y(Alignment::Center)
+                .spacing(SPACE_8)
+                .into(),
+        )
+    } else {
+        // No total known yet — show a simple bytes-received label
+        if let DownloadState::Active { bytes, .. } = state {
+            Some(
+                Row::new()
+                    .push(
+                        text(format!("{} received — detecting size…", human_size(*bytes)))
+                            .font(crate::fonts::inter(Weight::Normal))
+                            .size(TYPO_XS)
+                            .color(accent_primary(&theme)),
+                    )
+                    .align_y(Alignment::Center)
+                    .into(),
+            )
         } else {
-            accent_primary(&theme)
-        });
-
-    Some(
-        Row::new()
-            .push(bar)
-            .push(pct_label)
-            .align_y(Alignment::Center)
-            .spacing(SPACE_8)
-            .into(),
-    )
+            None
+        }
+    }
 }
 
 /// Build the action-button row according to the current state.
@@ -498,7 +521,7 @@ fn action_buttons<'a>(
     use AppMessage::*;
 
     let buttons: Vec<iced::Element<'a, AppMessage>> = match state {
-        DownloadState::Ready => {
+        DownloadState::Ready { .. } => {
             vec![action_button("Download", ExecuteDownloadAt(entry_index)).into()]
         }
         DownloadState::Active { .. } => {

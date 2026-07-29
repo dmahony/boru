@@ -158,7 +158,7 @@ impl ChatCallbacks for TestPeer {
     fn friend_set_name(&mut self, _fid: FriendId, _name: String) {}
     fn mark_friends_dirty(&mut self) {}
 
-    fn set_pending_file(&mut self, _name: String, _ticket: String) {}
+    fn set_pending_file(&mut self, _name: String, _ticket: String, _size: u64) {}
 
     fn push_system(&mut self, text: String) {
         self.system_messages.lock().unwrap().push(text.clone());

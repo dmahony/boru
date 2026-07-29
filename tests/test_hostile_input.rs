@@ -1181,6 +1181,7 @@ fn all_message_variants_handle_gracefully() {
         Message::FileShare {
             name: "f.txt".into(),
             ticket: "tkt".into(),
+            size: 0,
         },
         Message::Leave,
         Message::Presence,

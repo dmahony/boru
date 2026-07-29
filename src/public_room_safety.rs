@@ -940,6 +940,7 @@ mod tests {
                 message: crate::chat_core::Message::FileShare {
                     name: "file.bin".into(),
                     ticket: "ticket123".into(),
+                    size: 1024,
                 },
                 sent_at: 1000,
             };
@@ -953,6 +954,7 @@ mod tests {
             message: crate::chat_core::Message::FileShare {
                 name: "extra.bin".into(),
                 ticket: "ticket456".into(),
+                size: 2048,
             },
             sent_at: 1000,
         };

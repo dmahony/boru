@@ -136,7 +136,7 @@ impl ChatCallbacks for BenchPeer {
         self.received_count += 1;
     }
 
-    fn set_pending_file(&mut self, _name: String, _ticket: String) {}
+    fn set_pending_file(&mut self, _name: String, _ticket: String, _size: u64) {}
 
     fn set_pending_image(&mut self, _name: String, _hash: [u8; 32], _from: PublicKey) {}
 

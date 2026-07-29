@@ -749,7 +749,7 @@ impl ChatCallbacks for AppState {
         self.push_entry(entry, true);
     }
 
-    fn set_pending_file(&mut self, name: String, ticket: String) {
+    fn set_pending_file(&mut self, name: String, ticket: String, _size: u64) {
         self.pending_file = Some((name, ticket));
     }
 
@@ -879,6 +879,9 @@ pub enum Message {
         name: String,
         /// BlobTicket serialized to string.
         ticket: String,
+        /// Total file size in bytes, so the receiver can show a
+        /// progress bar immediately without waiting for blob metadata.
+        size: u64,
     },
     /// Graceful goodbye — the sender is leaving the chat.
     /// This is a best-effort notification: the gossip protocol also
@@ -1746,7 +1749,7 @@ pub fn handle_net_event_for_topic(
                         );
                     }
                 }
-                Message::FileShare { name, ticket } => {
+                Message::FileShare { name, ticket, size } => {
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) {
@@ -1754,7 +1757,7 @@ pub fn handle_net_event_for_topic(
                             if !is_muted {
                                 let sender_name = cb.resolve_name(&from);
                                 cb.push_system(format!("{} shared a file: {}", sender_name, name));
-                                cb.set_pending_file(name, ticket);
+                                cb.set_pending_file(name, ticket, size);
                             }
                         }
                     }
@@ -3061,13 +3064,15 @@ mod tests {
         let msg = Message::FileShare {
             name: "photo.png".into(),
             ticket: "ticket123".into(),
+            size: 1024,
         };
         let bytes = postcard::to_stdvec(&msg).unwrap();
         let decoded: Message = postcard::from_bytes(&bytes).unwrap();
         match decoded {
-            Message::FileShare { name, ticket } => {
+            Message::FileShare { name, ticket, size } => {
                 assert_eq!(name, "photo.png");
                 assert_eq!(ticket, "ticket123");
+                assert_eq!(size, 1024);
             }
             _ => panic!("expected FileShare"),
         }
@@ -3464,6 +3469,7 @@ mod tests {
             message: Message::FileShare {
                 name: "doc.pdf".into(),
                 ticket: "abc123".into(),
+                size: 0,
             },
             sent_at: now_secs(),
         };
@@ -4582,6 +4588,7 @@ mod tests {
             Message::FileShare {
                 ref name,
                 ref ticket,
+                size: _,
             } => {
                 assert_eq!(name, "doc.pdf");
                 assert_eq!(ticket, "tkt");
