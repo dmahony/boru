@@ -41,7 +41,7 @@ jobs:
         id: apply
         run: |
           python scripts/version.py apply 2>&1 | tee apply_output.txt
-          NEW_VER=$(grep -oP 'Version updated from [\d.]+ to \K[\d.]+' apply_output.txt || true)
+          NEW_VER=$(grep -oP 'Version updated from [\d.]+ to \K\d+\.\d+\.\d+' apply_output.txt || true)
           if [ -n "$NEW_VER" ]; then
             echo "new_version=$NEW_VER" >> "$GITHUB_OUTPUT"
           fi
