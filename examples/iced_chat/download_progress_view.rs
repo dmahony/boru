@@ -193,7 +193,6 @@ pub fn view_download_progress(
     let attachment_icon = match attachment.kind {
         super::app::TransferKind::Image => ICON_ACTIVITY,
         super::app::TransferKind::Video => ICON_ACTIVITY,
-        super::app::TransferKind::Video => ICON_ACTIVITY,
         super::app::TransferKind::File => ICON_FILES,
     };
 
