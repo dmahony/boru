@@ -164,6 +164,7 @@ enum Command {
 pub use boru_core::chat_core::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_core::diagnostics::GuiTestHandle;
 use boru_core::diagnostics::IcedMessageJournal;
+use boru_core::api::GossipSender;
 
 // ── Network event bridging ────────────────────────────────────────────
 pub use boru_core::chat_core::forward_gossip_events;
@@ -1328,6 +1329,28 @@ fn main() -> Result<()> {
         // the running application.
         let mcp_diagnostics = boru_core::chat_core::DIAGNOSTICS.clone();
 
+        // ── Directory gossip sender (shared with MCP) ──
+        let directory_sender: Arc<Mutex<Option<GossipSender>>> =
+            Arc::new(Mutex::new(None));
+        {
+            let dir_sender = directory_sender.clone();
+            let dir_gossip = gossip.clone();
+            let dir_relay = fmt_relay_mode(&relay_mode);
+            tokio::spawn(async move {
+                let topic = app::IcedChat::derive_directory_topic_from_relay(&dir_relay);
+                match dir_gossip.subscribe(topic, Vec::new()).await {
+                    Ok(gt) => {
+                        let (sender, _rx) = gt.split();
+                        *dir_sender.lock().unwrap() = Some(sender);
+                        info!("MCP directory gossip topic subscribed: {topic}");
+                    }
+                    Err(e) => {
+                        warn!("MCP directory gossip subscription failed: {e}");
+                    }
+                }
+            });
+        }
+
         let mcp_state = mcp_server::McpAppState {
             diagnostics: mcp_diagnostics,
             iced_diagnostics: iced_diagnostics.clone(),
@@ -1361,6 +1384,7 @@ fn main() -> Result<()> {
                 }
                 store
             },
+            directory_sender,
         };
 
         if let Err(e) = runtime.block_on(mcp_server::spawn_mcp_server(mcp_config, mcp_state)) {

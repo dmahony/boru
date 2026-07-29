@@ -4324,7 +4324,7 @@ impl IcedChat {
     /// All peers on the same relay server derive the same topic ID,
     /// enabling discovery of advertised public rooms without an
     /// out-of-band rendezvous point.
-    fn derive_directory_topic_from_relay(relay_url: &str) -> TopicId {
+    pub fn derive_directory_topic_from_relay(relay_url: &str) -> TopicId {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"iroh-gossip-chat/directory/v1");
         hasher.update(relay_url.as_bytes());

@@ -314,6 +314,10 @@ pub struct McpAppState {
     pub storage: Option<boru_core::storage::Storage>,
     /// Public-room advertisements loaded from and persisted to SQLite.
     pub directory_store: Arc<Mutex<DirectoryStore>>,
+    /// Shared gossip sender for the directory topic.
+    /// Initially `None` — populated by the background directory-subscription
+    /// task as soon as the gossip subscription completes.
+    pub directory_sender: Arc<Mutex<Option<boru_core::api::GossipSender>>>,
 }
 
 // =============================================================================
@@ -689,8 +693,24 @@ fn handle_create_public_room(req: &JsonRpcRequest, state: &McpAppState) -> Resul
         .directory_store
         .lock()
         .map_err(|_| "directory store mutex poisoned".to_string())?
-        .upsert(ad, state.endpoint.id());
+        .upsert(ad.clone(), state.endpoint.id());
     persist_directory_store(state)?;
+
+    // Broadcast the new ad on the directory gossip topic so other peers
+    // discover it without waiting for the periodic tick. Fire-and-forget
+    // via a spawned task since broadcast is async.
+    if let Some(ref sender) = *state.directory_sender.lock().unwrap() {
+        let sender = sender.clone();
+        let payload = serde_json::to_vec(&ad)
+            .map_err(|e| format!("serialize ad: {e}"))?
+            .into();
+        tokio::spawn(async move {
+            if let Err(e) = sender.broadcast(payload).await {
+                warn!("failed to broadcast directory ad: {e}");
+            }
+        });
+    }
+
     Ok(serde_json::json!({ "created": true, "topic": topic.to_string(), "ticket": ticket }))
 }
 
