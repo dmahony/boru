@@ -114,6 +114,10 @@ pub struct ConversationEntry {
     /// Epoch which produced `topic`, when this is a group conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_epoch: Option<u64>,
+    /// Epoch-to-topic mappings retained for group history queries. Historical
+    /// messages stay in the messages table under their original topic.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub epoch_topics: BTreeMap<u64, TopicId>,
     /// Unix-epoch milliseconds when the conversation was first created.
     pub created_at_unix_ms: u64,
     /// Unix-epoch milliseconds of the most recent activity.
@@ -142,6 +146,7 @@ impl ConversationEntry {
             kind: ConversationKind::Direct,
             group_id: None,
             current_epoch: None,
+            epoch_topics: BTreeMap::new(),
             created_at_unix_ms: now,
             last_seen_at_unix_ms: now,
             last_message_preview: String::new(),
@@ -170,6 +175,7 @@ impl ConversationEntry {
             kind: ConversationKind::Group,
             group_id: Some(group_id),
             current_epoch: Some(epoch),
+            epoch_topics: [(epoch, topic)].into_iter().collect(),
             created_at_unix_ms: now,
             last_seen_at_unix_ms: now,
             last_message_preview: String::new(),
@@ -306,6 +312,9 @@ impl ConversationStore {
         self.by_topic.clear();
         for (i, entry) in self.conversations.iter().enumerate() {
             self.by_topic.insert(entry.topic, i);
+            for topic in entry.epoch_topics.values() {
+                self.by_topic.insert(*topic, i);
+            }
         }
     }
 
@@ -355,6 +364,43 @@ impl ConversationStore {
     }
 
     fn insert_or_update(&mut self, entry: ConversationEntry) -> Option<ConversationEntry> {
+        // A rotated group topic updates the existing logical conversation.
+        // Keep every epoch mapping on that one entry instead of creating a
+        // second sidebar row.
+        if let Some(idx) = entry.group_id.and_then(|group_id| {
+            self.conversations
+                .iter()
+                .position(|existing| existing.group_id == Some(group_id))
+        }) {
+            if self.conversations[idx].topic != entry.topic {
+                let old = self.conversations[idx].clone();
+                let existing = &mut self.conversations[idx];
+                existing.epoch_topics.extend(entry.epoch_topics);
+                if let (Some(epoch), Some(topic)) = (entry.current_epoch, Some(entry.topic)) {
+                    existing.epoch_topics.insert(epoch, topic);
+                    if existing
+                        .current_epoch
+                        .map_or(true, |current| epoch >= current)
+                    {
+                        existing.current_epoch = Some(epoch);
+                        existing.topic = topic;
+                    }
+                }
+                existing.last_seen_at_unix_ms = entry.last_seen_at_unix_ms;
+                existing.last_message_preview = entry.last_message_preview;
+                existing.unread_count = entry.unread_count;
+                existing.archived = entry.archived;
+                if !entry.name.is_empty() {
+                    existing.name = entry.name;
+                }
+                if existing.last_seen_at_unix_ms > old.last_seen_at_unix_ms {
+                    self.bubble_up(idx);
+                }
+                self.rebuild_index();
+                return Some(old);
+            }
+        }
+
         if let Some(&idx) = self.by_topic.get(&entry.topic) {
             let old = std::mem::replace(&mut self.conversations[idx], entry);
             // Re-position if the recency changed
@@ -363,6 +409,7 @@ impl ConversationStore {
             } else if self.conversations[idx].last_seen_at_unix_ms < old.last_seen_at_unix_ms {
                 self.bubble_down(idx);
             }
+            self.rebuild_index();
             Some(old)
         } else {
             // Insert at the correct sorted position (most-recent-first)
@@ -371,10 +418,7 @@ impl ConversationStore {
                 .binary_search_by(|e| entry.last_seen_at_unix_ms.cmp(&e.last_seen_at_unix_ms))
                 .unwrap_or_else(|e| e);
             self.conversations.insert(pos, entry);
-            // Update indices for entries at `pos` and above
-            for i in pos..self.conversations.len() {
-                self.by_topic.insert(self.conversations[i].topic, i);
-            }
+            self.rebuild_index();
             None
         }
     }
@@ -658,6 +702,35 @@ mod tests {
         assert_eq!(history.current(), Some((2, next_topic)));
         assert_eq!(history.topic_for_epoch(1), Some(first_topic));
         assert_eq!(history.topic_for_epoch(2), Some(next_topic));
+    }
+
+    #[test]
+    fn group_upserts_keep_one_sidebar_conversation_across_epochs() {
+        let dir = temp_dir("group-epochs");
+        let group_id = GroupId::from_bytes([0x55; 32]);
+        let first_topic = make_topic(0x10);
+        let second_topic = make_topic(0x20);
+        let mut store = ConversationStore::empty_at(&dir);
+        store.upsert(ConversationEntry::new_group_epoch(
+            group_id,
+            1,
+            first_topic,
+            "Friends",
+        ));
+        store.upsert(ConversationEntry::new_group_epoch(
+            group_id,
+            2,
+            second_topic,
+            "Friends",
+        ));
+
+        assert_eq!(store.len(), 1);
+        let entry = store.find(&second_topic).unwrap();
+        assert_eq!(entry.topic, second_topic);
+        assert_eq!(entry.current_epoch, Some(2));
+        assert_eq!(entry.epoch_topics.get(&1), Some(&first_topic));
+        assert_eq!(entry.epoch_topics.get(&2), Some(&second_topic));
+        assert!(store.find(&first_topic).is_some());
     }
 
     #[test]

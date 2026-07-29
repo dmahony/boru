@@ -716,8 +716,8 @@ fn handle_create_public_room(req: &JsonRpcRequest, state: &McpAppState) -> Resul
                 ad,
                 signature: signature.to_bytes().to_vec(),
             };
-            let encoded = SignedMessage::sign_and_encode(&sk, &msg)
-                .map_err(|e| format!("sign ad: {e}"))?;
+            let encoded =
+                SignedMessage::sign_and_encode(&sk, &msg).map_err(|e| format!("sign ad: {e}"))?;
             tokio::spawn(async move {
                 match gossip.subscribe(topic, Vec::new()).await {
                     Ok(sub) => {

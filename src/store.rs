@@ -265,6 +265,18 @@ impl MessageStore {
                 ON messages(topic, timestamp_ms);
             CREATE INDEX IF NOT EXISTS idx_messages_hash
                 ON messages(msg_hash);
+
+            -- Stable group identity to epoch-topic mapping. Messages remain
+            -- keyed by their original topic; this table lets history queries
+            -- span rotations without rewriting historical rows.
+            CREATE TABLE IF NOT EXISTS group_epoch_topics (
+                group_id BLOB NOT NULL,
+                epoch INTEGER NOT NULL,
+                topic BLOB NOT NULL UNIQUE,
+                PRIMARY KEY (group_id, epoch)
+            );
+            CREATE INDEX IF NOT EXISTS idx_group_epoch_topics_group
+                ON group_epoch_topics(group_id, epoch);
             ",
         )
         .std_context("init schema")?;
@@ -1073,6 +1085,102 @@ impl MessageStore {
         Ok(is_new)
     }
 
+    /// Register an epoch's topic for a stable group identity.
+    ///
+    /// This is intentionally a mapping-only operation: existing message rows
+    /// retain their original topic and are never copied or rewritten.
+    pub fn register_group_epoch(
+        &self,
+        group_id: [u8; 32],
+        epoch: u64,
+        topic: [u8; 32],
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO group_epoch_topics (group_id, epoch, topic)
+             VALUES (?1, ?2, ?3)",
+            params![group_id.as_slice(), epoch as i64, topic.as_slice()],
+        )
+        .std_context("register group epoch")?;
+        Ok(conn.changes() > 0)
+    }
+
+    /// Return the known epoch/topic mappings for a group, oldest first.
+    pub fn list_group_epochs(&self, group_id: &[u8; 32]) -> Result<Vec<(u64, [u8; 32])>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT epoch, topic FROM group_epoch_topics
+                 WHERE group_id = ?1 ORDER BY epoch ASC",
+            )
+            .std_context("prepare list group epochs")?;
+        let mut rows = stmt
+            .query([group_id.as_slice()])
+            .std_context("query list group epochs")?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().std_context("next group epoch")? {
+            let topic_blob: Vec<u8> = row.get(1).std_context("get group epoch topic")?;
+            let topic: [u8; 32] = topic_blob
+                .try_into()
+                .map_err(|_| anyhow!("invalid stored group epoch topic"))?;
+            let epoch = row.get::<_, i64>(0).map_err(|error| anyhow!(error))? as u64;
+            result.push((epoch, topic));
+        }
+        Ok(result)
+    }
+
+    /// Return chat history for every locally known epoch of a group.
+    ///
+    /// Results are chronological across epoch boundaries. Pagination is
+    /// applied after merging the topics, so the UI can treat all epochs as a
+    /// single conversation. Messages are not duplicated when an epoch mapping
+    /// is registered repeatedly.
+    pub fn get_messages_for_group(
+        &self,
+        group_id: &[u8; 32],
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ChatMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.msg_hash, m.topic, m.sender, m.timestamp_ms, m.kind,
+                        m.body, m.signed_bytes, m.delivery_state,
+                        m.image_identifier, m.id
+                 FROM messages AS m
+                 WHERE m.topic IN (
+                     SELECT topic FROM group_epoch_topics WHERE group_id = ?1
+                 )
+                 ORDER BY m.timestamp_ms ASC, m.id ASC
+                 LIMIT ?2 OFFSET ?3",
+            )
+            .std_context("prepare get messages for group")?;
+        let mut rows = stmt
+            .query(params![group_id.as_slice(), limit as i64, offset as i64])
+            .std_context("query get messages for group")?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().std_context("next group message")? {
+            result.push(row_to_chat_message(row)?);
+        }
+        Ok(result)
+    }
+
+    /// Count all stored messages across a group's known epochs.
+    pub fn count_messages_for_group(&self, group_id: &[u8; 32]) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE topic IN (
+                     SELECT topic FROM group_epoch_topics WHERE group_id = ?1
+                 )",
+                [group_id.as_slice()],
+                |row| row.get(0),
+            )
+            .std_context("count messages for group")?;
+        Ok(count as usize)
+    }
+
     /// Return chat messages for a given topic, most recent first,
     /// with optional pagination (`limit` + `offset`).
     pub fn get_messages_for_topic(
@@ -1698,6 +1806,52 @@ impl MessageStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_history_merges_known_epochs_without_rewriting_messages() {
+        let store = MessageStore::memory().unwrap();
+        let group_id = [7u8; 32];
+        let topic_a = [1u8; 32];
+        let topic_b = [2u8; 32];
+        let sender = [9u8; 32];
+        let local = [0u8; 32];
+        store.register_group_epoch(group_id, 1, topic_a).unwrap();
+        store.register_group_epoch(group_id, 2, topic_b).unwrap();
+        assert!(store
+            .insert_chat_message(
+                &[11u8; 32],
+                &topic_a,
+                &sender,
+                20,
+                "text",
+                "old",
+                None,
+                None,
+                &local
+            )
+            .unwrap());
+        assert!(store
+            .insert_chat_message(
+                &[12u8; 32],
+                &topic_b,
+                &sender,
+                10,
+                "text",
+                "new",
+                None,
+                None,
+                &local
+            )
+            .unwrap());
+
+        let messages = store.get_messages_for_group(&group_id, 0, 10).unwrap();
+        assert_eq!(
+            messages.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(),
+            ["new", "old"]
+        );
+        assert_eq!(store.count_messages_for_topic(&topic_a).unwrap(), 1);
+        assert_eq!(store.count_messages_for_topic(&topic_b).unwrap(), 1);
+    }
 
     #[test]
     fn incoming_acceptance_persists_replay_metadata_across_restart() {

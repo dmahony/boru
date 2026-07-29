@@ -161,10 +161,10 @@ enum Command {
 }
 
 // ── Message protocol ──────────────────────────────────────────────────
+use boru_core::api::GossipSender;
 pub use boru_core::chat_core::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_core::diagnostics::GuiTestHandle;
 use boru_core::diagnostics::IcedMessageJournal;
-use boru_core::api::GossipSender;
 
 // ── Network event bridging ────────────────────────────────────────────
 pub use boru_core::chat_core::forward_gossip_events;
@@ -1338,8 +1338,7 @@ fn main() -> Result<()> {
         let mcp_diagnostics = boru_core::chat_core::DIAGNOSTICS.clone();
 
         // ── Directory gossip sender (shared with MCP) ──
-        let directory_sender: Arc<Mutex<Option<GossipSender>>> =
-            Arc::new(Mutex::new(None));
+        let directory_sender: Arc<Mutex<Option<GossipSender>>> = Arc::new(Mutex::new(None));
         {
             let dir_sender = directory_sender.clone();
             let dir_gossip = gossip.clone();
@@ -1494,9 +1493,7 @@ fn main() -> Result<()> {
             // Always subscribe to the directory gossip topic at startup
             // so this peer can discover public rooms advertised by others
             // without having to create an advertised room itself first.
-            let task = task.chain(iced::Task::done(
-                app::AppMessage::SubscribeDirectoryTopic,
-            ));
+            let task = task.chain(iced::Task::done(app::AppMessage::SubscribeDirectoryTopic));
             (state, task)
         },
         IcedChat::update,
