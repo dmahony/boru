@@ -188,13 +188,25 @@ impl DirectoryStore {
         before - self.ads.len()
     }
 
+    /// Remove one advertisement and return whether it was present.
+    pub fn remove(&mut self, topic: TopicId, author: PublicKey) -> bool {
+        self.ads.remove(&(topic, author)).is_some()
+    }
+
     /// Remove advertisements older than `max_age`.
     ///
     /// Call this periodically (e.g. every 60 seconds) to keep the store
     /// from accumulating stale entries from peers that have gone offline.
-    pub fn evict_stale(&mut self, max_age: Duration) {
+    pub fn evict_stale(&mut self, max_age: Duration) -> Vec<(TopicId, PublicKey)> {
         let cutoff = Instant::now() - max_age;
-        self.ads.retain(|_, (_, received)| *received >= cutoff);
+        let evicted: Vec<_> = self
+            .ads
+            .iter()
+            .filter(|(_, (_, received))| *received < cutoff)
+            .map(|(key, _)| *key)
+            .collect();
+        self.ads.retain(|key, _| !evicted.contains(key));
+        evicted
     }
 
     /// Return the number of stored advertisements.
@@ -261,10 +273,13 @@ mod tests {
     }
 
     fn make_public_key(id: u8) -> PublicKey {
-        let bytes = [id; 32];
-        // PublicKey doesn't have a from_bytes constructor that takes [u8; 32]
-        // directly.  Use it as an endpoint ID via the key exchange namespace.
-        PublicKey::from_bytes(&bytes).expect("valid public key bytes")
+        for candidate in id..=u8::MAX {
+            let bytes = [candidate; 32];
+            if let Ok(key) = PublicKey::from_bytes(&bytes) {
+                return key;
+            }
+        }
+        panic!("no valid test public key found");
     }
 
     fn make_ad(room_name: &str, topic: TopicId) -> RoomAdvertisement {
@@ -343,6 +358,22 @@ mod tests {
     }
 
     #[test]
+    fn directory_store_remove_deletes_only_requested_author() {
+        let mut store = DirectoryStore::new();
+        let topic = make_topic(1);
+        let author_a = make_public_key(42);
+        let author_b = make_public_key(43);
+
+        store.upsert(make_ad("room-a", topic), author_a);
+        store.upsert(make_ad("room-b", topic), author_b);
+
+        assert!(store.remove(topic, author_a));
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.list_active()[0].1, author_b);
+        assert!(!store.remove(topic, author_a));
+    }
+
+    #[test]
     fn directory_store_evict_stale() {
         let mut store = DirectoryStore::new();
         let topic = make_topic(1);
@@ -351,19 +382,8 @@ mod tests {
 
         store.upsert(ad, author);
 
-        // With a zero-length max_age, everything should be evicted
-        // (Instant::now() - Duration::ZERO is effectively now, but
-        // "now - ZERO" = now, so entries at "now" are still >= cutoff).
-        // Use a very small duration to ensure the entry is older than the cutoff.
-        store.evict_stale(Duration::from_nanos(1));
-        // The entry was just inserted so it should still be present.
-        assert_eq!(store.len(), 1);
-
-        // There is no way to forcefully set Instant in the past, so we
-        // approximate by using Instant::now() + small delay won't help.
-        // Instead, verify that len() doesn't change for very small durations.
-        store.evict_stale(Duration::from_secs(0));
-        assert_eq!(store.len(), 1);
+        assert_eq!(store.evict_stale(Duration::from_secs(0)).len(), 1);
+        assert!(store.is_empty());
     }
 
     /// Different authors advertising the same topic are stored separately.
@@ -371,8 +391,8 @@ mod tests {
     fn same_topic_different_authors() {
         let mut store = DirectoryStore::new();
         let topic = make_topic(1);
-        let author_a = make_public_key(10);
-        let author_b = make_public_key(20);
+        let author_a = make_public_key(42);
+        let author_b = make_public_key(43);
 
         store.upsert(make_ad("room-alpha", topic), author_a);
         store.upsert(make_ad("room-beta", topic), author_b);

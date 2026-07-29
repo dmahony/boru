@@ -2613,6 +2613,7 @@ struct SidebarDiscoveredPeersDependency {
 struct SidebarPublicRoomRow {
     room_name: String,
     member_count: u32,
+    author: PublicKey,
     advertisement: RoomAdvertisement,
 }
 
@@ -2620,6 +2621,7 @@ struct SidebarPublicRoomRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct SidebarPublicRoomsDependency {
     dark_mode: bool,
+    local_public: PublicKey,
     rooms: Vec<SidebarPublicRoomRow>,
 }
 
@@ -3221,6 +3223,8 @@ pub enum AppMessage {
     OpenDirectory,
     /// Join a room from the directory.
     DirectoryRoomJoin(RoomAdvertisement),
+    /// Delete a locally-created room advertisement from the directory.
+    DeleteDirectoryRoom(TopicId),
     /// A room advertisement was received from the directory gossip topic.
     DirectoryRoomUpdate(RoomAdvertisement, PublicKey),
 }
@@ -5494,6 +5498,7 @@ impl IcedChat {
             AppMessage::DirectorySubscribed(..) => "DirectorySubscribed",
             AppMessage::OpenDirectory => "OpenDirectory",
             AppMessage::DirectoryRoomJoin(..) => "DirectoryRoomJoin",
+            AppMessage::DeleteDirectoryRoom(_) => "DeleteDirectoryRoom",
             AppMessage::DirectoryRoomUpdate(..) => "DirectoryRoomUpdate",
             AppMessage::ToggleDetailsPanel => "ToggleDetailsPanel",
         }
@@ -10981,6 +10986,33 @@ impl IcedChat {
                     }
                 }
             }
+            AppMessage::DeleteDirectoryRoom(topic) => {
+                let local_author = self.local_public;
+                let removed = self
+                    .directory_store
+                    .lock()
+                    .map(|mut store| store.remove(topic, local_author))
+                    .unwrap_or(false);
+                if removed {
+                    if let Some(storage) = self.storage.as_ref() {
+                        if let Err(err) = storage.with_conn(|conn| {
+                            conn.execute(
+                                "DELETE FROM directory_ads WHERE topic = ?1 AND author = ?2",
+                                rusqlite::params![topic.as_bytes(), local_author.as_bytes()],
+                            )
+                            .map_err(n0_error::AnyError::from_std)?;
+                            Ok(())
+                        }) {
+                            warn!("failed to delete directory advertisement: {err}");
+                        }
+                    }
+                    self.advertised_rooms.remove(&topic);
+                    self.public_rooms_sidebar_revision =
+                        self.public_rooms_sidebar_revision.wrapping_add(1);
+                    self.refresh_sidebar_counts();
+                }
+                iced::Task::none()
+            }
             AppMessage::DirectoryRoomUpdate(..) => {
                 // Room advertisements from the directory topic are drained
                 // directly from directory_room_rx on ConnMonitorTick.
@@ -11761,6 +11793,28 @@ impl IcedChat {
             }
 
             AppMessage::ConnMonitorTick => {
+                let evicted = {
+                    let mut store = self.directory_store.lock().unwrap();
+                    store.evict_stale(Duration::from_secs(60 * 60))
+                };
+                if !evicted.is_empty() {
+                    if let Some(storage) = self.storage.as_ref() {
+                        if let Err(err) = storage.with_conn(|conn| {
+                            for (topic, author) in &evicted {
+                                conn.execute(
+                                    "DELETE FROM directory_ads WHERE topic = ?1 AND author = ?2",
+                                    rusqlite::params![topic.as_bytes(), author.as_bytes()],
+                                )
+                                .map_err(n0_error::AnyError::from_std)?;
+                            }
+                            Ok(())
+                        }) {
+                            warn!("failed to delete stale directory advertisements: {err}");
+                        }
+                    }
+                    self.public_rooms_sidebar_revision =
+                        self.public_rooms_sidebar_revision.wrapping_add(1);
+                }
                 self.save_directory_store();
                 if self.pending_image_upload.is_some() {
                     self.image_upload_spinner_frame = (self.image_upload_spinner_frame + 1) % 10;
@@ -16156,15 +16210,17 @@ impl IcedChat {
                     .then_with(|| a.room_name.cmp(&b.room_name))
             });
             list.into_iter()
-                .map(|(ad, _author)| SidebarPublicRoomRow {
+                .map(|(ad, author)| SidebarPublicRoomRow {
                     room_name: ad.room_name.clone(),
                     member_count: ad.member_count,
+                    author,
                     advertisement: ad,
                 })
                 .collect()
         };
         let dep = SidebarPublicRoomsDependency {
             dark_mode: self.dark_mode,
+            local_public: self.local_public,
             rooms,
         };
         self.cached_public_rooms_revision.set(cur_revision);
@@ -16197,6 +16253,21 @@ impl IcedChat {
                 String::new()
             };
             let ad_for_join = room.advertisement.clone();
+            let is_local_room = room.author == dep.local_public;
+            let mut actions = Row::new().push(
+                button(text("Join").size(TYPO_XS))
+                    .on_press(AppMessage::DirectoryRoomJoin(ad_for_join))
+                    .style(BUTTON_GHOST_BG)
+                    .padding([SPACE_4, SPACE_8]),
+            );
+            if is_local_room {
+                actions = actions.push(
+                    button(text("Delete").size(TYPO_XS))
+                        .on_press(AppMessage::DeleteDirectoryRoom(room.advertisement.topic))
+                        .style(BUTTON_GHOST_BG)
+                        .padding([SPACE_4, SPACE_8]),
+                );
+            }
 
             let row_el = Row::new()
                 .push(
@@ -16206,12 +16277,7 @@ impl IcedChat {
                         .spacing(SPACE_2)
                         .width(Length::Fill),
                 )
-                .push(
-                    button(text("Join").size(TYPO_XS))
-                        .on_press(AppMessage::DirectoryRoomJoin(ad_for_join))
-                        .style(BUTTON_GHOST_BG)
-                        .padding([SPACE_4, SPACE_8]),
-                )
+                .push(actions)
                 .spacing(SPACE_4)
                 .align_y(Alignment::Center)
                 .padding([SPACE_4, SPACE_12])
