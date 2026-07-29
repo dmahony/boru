@@ -3,12 +3,13 @@
 Acts as a runtime watchdog: detects hangs (heartbeat timeout)
 and crashes (pipe close).
 
-Usage: python3 splash.py [--log LOGFILE]
+Usage: python3 splash.py [--log LOGFILE] [--version VERSION_STRING]
 Stdin: lines become status messages.
   "hb"        → heartbeat tick (resets timeout)
   "DONE"      → close splash
   other text  → shown as status messages
-If --log is given, the log file is tailed and lines shown as messages."""
+If --log is given, the log file is tailed and lines shown as messages.
+If --version is given, that string is displayed as the version label."""
 
 import tkinter as tk
 import sys
@@ -17,18 +18,18 @@ import time
 import threading
 
 FADE_COLORS = [
-    "#e2e8f0", "#c8d0dc", "#aeb8c8",
-    "#94a0b4", "#7a88a0", "#64748b",
+    "#ffffff", "#d9d9d9", "#b3b3b3",
+    "#8c8c8c", "#666666", "#404040",
 ]
-BG = "#0f0f1a"
-ACCENT = "#4a9eff"
-SUBTLE = "#64748b"
+BG = "#000000"
+ACCENT = "#ffffff"
+SUBTLE = "#ffffff"
 WARN_FG = "#f2a626"  # amber for not-responding
 CRASH_FG = "#e64040"  # red for crash
 
 
 class SplashScreen:
-    def __init__(self, logfile=None):
+    def __init__(self, logfile=None, version="v0.0.0"):
         self.root = tk.Tk()
         self.root.title("Boru")
         self.root.geometry("440x360+%d+%d" % self._center(440, 360))
@@ -43,7 +44,7 @@ class SplashScreen:
 
         tk.Label(inner, text="BORU", font=("sans-serif", 28, "bold"),
                  fg=ACCENT, bg=BG).pack(pady=(20, 2))
-        tk.Label(inner, text="v0.101.1", font=("sans-serif", 9),
+        tk.Label(inner, text=version, font=("sans-serif", 9),
                  fg=SUBTLE, bg=BG).pack()
 
         self.spinner_frames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
@@ -189,7 +190,16 @@ class SplashScreen:
 
 if __name__ == "__main__":
     logfile = None
+    version = "v0.0.0"
     args = sys.argv[1:]
-    if len(args) >= 2 and args[0] == "--log":
-        logfile = args[1]
-    SplashScreen(logfile=logfile).run()
+    i = 0
+    while i < len(args):
+        if args[i] == "--log" and i + 1 < len(args):
+            logfile = args[i + 1]
+            i += 2
+        elif args[i] == "--version" and i + 1 < len(args):
+            version = args[i + 1]
+            i += 2
+        else:
+            i += 1
+    SplashScreen(logfile=logfile, version=version).run()
