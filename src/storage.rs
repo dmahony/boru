@@ -46,7 +46,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 10;
+const CURRENT_SCHEMA_VERSION: u32 = 11;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -640,6 +640,7 @@ impl Storage {
                 8 => self.migrate_v8(&conn)?,
                 9 => self.migrate_v9(&conn)?,
                 10 => self.migrate_v10(&conn)?,
+                11 => self.migrate_v11(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -990,6 +991,25 @@ impl Storage {
                 ON outgoing_messages(topic_blob);",
         )
         .std_context("migrate v10 outgoing_messages")?;
+        Ok(())
+    }
+
+    /// V11 creates the durable public-room directory advertisement table.
+    fn migrate_v11(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS directory_ads (
+                topic BLOB NOT NULL,
+                author BLOB NOT NULL,
+                room_name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                ticket TEXT NOT NULL,
+                member_count INTEGER NOT NULL,
+                last_activity INTEGER NOT NULL,
+                received_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (topic, author)
+            );",
+        )
+        .std_context("migrate v11 directory_ads")?;
         Ok(())
     }
 
