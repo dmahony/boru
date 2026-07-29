@@ -18439,8 +18439,32 @@ impl IcedChat {
     }
 
     fn view_settings_screen(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, lazy, scrollable, text, Column, Row, Space};
+        use iced::widget::{
+            button, column, container, lazy, row, scrollable, text, Column, Row, Space,
+        };
         use iced::{Alignment, Length};
+
+        // ── Header row ──────────────────────────────────────────────
+        let back_btn = button(text("←").size(TYPO_MD))
+            .on_press(AppMessage::CloseSettings)
+            .padding([SPACE_4, SPACE_6])
+            .style(BUTTON_ICON);
+
+        let header = container(
+            row![
+                back_btn,
+                text("Settings")
+                    .size(TYPO_SM)
+                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                Space::new().width(Length::Fill),
+            ]
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(52.0))
+        .padding([SPACE_6, SPACE_10])
+        .style(container_header);
 
         // ── Identity section ──
         let profile_identity_key = ProfileIdentityCacheKey {
@@ -18467,24 +18491,10 @@ impl IcedChat {
             .into();
 
         // ── Cacheable sections ──
-        // Keep conversation selection and other chat state out of this key so the
-        // settings subtree only invalidates when actual settings data changes.
         let cached_key = self.settings_cached_key();
         let cached_sections = lazy(cached_key, Self::view_settings_screen_cached);
 
-        // ── Assemble page ──
-        let content = Column::new()
-            .push(text("Settings").size(TYPO_XL))
-            .push(Space::new().height(Length::Fixed(SPACE_16)))
-            .push(identity_card)
-            .push(Space::new().height(Length::Fixed(SPACE_12)));
-
-        let content = content
-            .push(cached_sections)
-            .push(Space::new().height(Length::Fixed(SPACE_12)));
-
-        // Build the shared files card directly (not lazily cached) so
-        // it reflects the current state of self.shared_files.
+        // ── Shared files ──
         let mut shared_file_rows: Vec<iced::Element<'_, AppMessage>> = Vec::new();
 
         if self.shared_files.is_empty() {
@@ -18540,7 +18550,6 @@ impl IcedChat {
             }
         }
 
-        // Add File button
         let add_button_row = Row::new().push(
             button(text("Add File").size(TYPO_SM))
                 .on_press(AppMessage::AddSharedFile)
@@ -18552,27 +18561,32 @@ impl IcedChat {
 
         let shared_files_card = section_card("SHARED FILES", shared_file_rows);
 
-        let content = content
-            .push(shared_files_card)
-            .push(Space::new().height(Length::Fixed(SPACE_16)))
-            .spacing(SPACE_6)
-            .padding(SPACE_24)
-            .align_x(Alignment::Start)
-            .width(Length::Fill)
-            .max_width(520.0);
+        // ── Body (scrollable) ──
+        let body = column![
+            identity_card,
+            Space::new().height(Length::Fixed(SPACE_12)),
+            cached_sections,
+            Space::new().height(Length::Fixed(SPACE_12)),
+            shared_files_card,
+            Space::new().height(Length::Fixed(SPACE_24)),
+        ]
+        .spacing(SPACE_6)
+        .padding(SPACE_24)
+        .align_x(Alignment::Start)
+        .width(Length::Fill)
+        .max_width(680.0);
 
         let scrollable = scrollable(
-            container(content)
+            container(body)
                 .width(Length::Fill)
                 .center_x(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fill);
 
-        container(scrollable)
+        column![header, scrollable]
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(container_primary)
             .into()
     }
 
@@ -18703,45 +18717,6 @@ impl IcedChat {
             .align_y(Alignment::Center);
 
         let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into()]);
-
-        // ── Invitations section ──
-        let invitation_label = if key.direct_address_sharing {
-            "Direct address sharing on"
-        } else {
-            "Direct address sharing off"
-        };
-        let invitation_row = Row::new()
-            .push(
-                Column::new()
-                    .push(text(invitation_label).size(TYPO_MD))
-                    .push(
-                        text("Include your direct endpoint addresses in room invitations.")
-                            .size(TYPO_XS)
-                            .style(text_muted_style),
-                    )
-                    .spacing(SPACE_2)
-                    .width(Length::Fill)
-                    .align_x(Alignment::Start),
-            )
-            .push(
-                button(
-                    text(if key.direct_address_sharing {
-                        "Hide addresses"
-                    } else {
-                        "Share addresses"
-                    })
-                    .size(TYPO_SM),
-                )
-                .on_press(AppMessage::ToggleInviteAddressSharing(
-                    !key.direct_address_sharing,
-                ))
-                .style(BUTTON_OUTLINE)
-                .padding([SPACE_6, SPACE_12]),
-            )
-            .spacing(SPACE_12)
-            .align_y(Alignment::Center);
-
-        let invitation_card = section_card("INVITATIONS", vec![invitation_row.into()]);
 
         // ── Network section ──
         let connection_details_focus_anchor = iced::widget::text_input("", "")
@@ -18895,49 +18870,18 @@ impl IcedChat {
 
         let data_card = section_card("DATA", vec![clear_history_row.into()]);
 
-        // ── Bottom navigation ──
-        let nav_row = Row::new()
-            .push(
-                button(text("← Back").size(TYPO_MD))
-                    .on_press(AppMessage::CloseSettings)
-                    .style(|t, _status| iced::widget::button::Style {
-                        background: Some(iced::Background::Color(bg_surface(t))),
-                        border: iced::Border {
-                            color: border_muted(t),
-                            width: 1.0,
-                            radius: SPACE_8.into(),
-                        },
-                        text_color: text_muted_style(t)
-                            .color
-                            .unwrap_or(iced::Color::from_rgb(0.6, 0.6, 0.6)),
-                        ..Default::default()
-                    })
-                    .padding([SPACE_8, SPACE_16]),
-            )
-            .spacing(SPACE_8)
-            .align_y(Alignment::Center);
-
         // ── Assemble page ──
         let content = Column::new()
-            .push(text("Settings").size(TYPO_XL))
-            .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(appearance_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(notifications_card)
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
-            .push(invitation_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(network_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(relay_card)
             .push(data_card)
-            .push(Space::new().height(Length::Fixed(SPACE_16)))
-            .push(nav_row)
             .spacing(SPACE_6)
-            .padding(SPACE_24)
-            .align_x(Alignment::Start)
-            .width(Length::Fill)
-            .max_width(520.0);
+            .width(Length::Fill);
 
         let scrollable = scrollable(
             container(content)
