@@ -2817,6 +2817,7 @@ fn parse_topic_id(s: &str) -> Result<TopicId, String> {
 mod tests {
     use super::*;
     use boru_core::diagnostics::GuiTestCommand;
+    use crate::gui_test_actions::{ActionRecord, ActionStatus};
     use serde_json::json;
 
     // ── handle_gui_open_room validation tests ──────────────────────────
@@ -6003,5 +6004,158 @@ mod tests {
             response.error.is_some(),
             "Control chars in peer_id should produce error"
         );
+    }
+
+    // ── Core diagnostic tool contract tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_core_dispatch_routes_ping_and_preserves_jsonrpc_id() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let mut request = make_generic_request("boru_ping");
+        request.id = Some(json!(42));
+        let response = handle_request(&request, &state).await;
+
+        assert_eq!(response.jsonrpc, "2.0");
+        assert_eq!(response.id, Some(json!(42)));
+        assert_eq!(response.result.unwrap()["pong"], true);
+        assert!(response.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_node_status_reports_active_rooms_and_latest_sequence() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let topic = TopicId::from_bytes([7; 32]);
+        state.rooms.lock().unwrap().push(topic);
+        state.diagnostics.record(Some(topic), DiagnosticEventKind::RoomJoinStarted);
+        let response = handle_request(&make_generic_request("boru_get_node_status"), &state).await;
+        let result = response.result.unwrap();
+
+        assert_eq!(result["node_id"], state.node_id);
+        assert_eq!(result["version"], "test");
+        assert_eq!(result["active_room_count"], 1);
+        assert_eq!(result["active_rooms"][0], hex::encode(topic.as_bytes()));
+        // Diagnostic sequences start at zero for the first recorded event.
+        assert_eq!(result["latest_event_sequence"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_room_status_requires_joined_room_and_accepts_valid_joined_room() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let topic = TopicId::from_bytes([8; 32]);
+        let room_id = hex::encode(topic.as_bytes());
+        let mut request = make_generic_request("boru_get_room_status");
+        request.params = json!({"room_id": room_id});
+
+        let missing = handle_request(&request, &state).await;
+        assert_eq!(missing.error.unwrap().code, -32000);
+
+        state.diagnostics.record(Some(topic), DiagnosticEventKind::RoomJoined);
+        let joined = handle_request(&request, &state).await;
+        let result = joined.result.expect("joined room should be reported");
+        assert_eq!(result["joined"], true);
+        assert_eq!(result["subscribed"], true);
+        assert_eq!(result["peer_count"], 0);
+        assert_eq!(result["room_id"], room_id);
+    }
+
+    #[tokio::test]
+    async fn test_discovery_events_support_count_alias_and_sequence_filter() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        state.diagnostics.record(None, DiagnosticEventKind::PeerDiscovered);
+        state.diagnostics.record(None, DiagnosticEventKind::RoomJoinStarted);
+        let mut request = make_generic_request("boru_get_discovery_events");
+        request.params = json!({"since_sequence": 0, "count": 1});
+        let response = handle_request(&request, &state).await;
+        let result = response.result.unwrap();
+
+        assert_eq!(result["returned_count"], 1);
+        assert_eq!(result["latest_sequence"], 1);
+        assert_eq!(result["events"].as_array().unwrap().len(), 1);
+        assert_eq!(result["events"][0]["sequence"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_find_received_probe_returns_explicit_not_found_result() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let mut request = make_generic_request("boru_find_received_probe");
+        request.params = json!({"probe_id": "probe-that-does-not-exist"});
+        let response = handle_request(&request, &state).await;
+        let result = response.result.unwrap();
+
+        assert_eq!(result["received"], false);
+        assert_eq!(result["probe_id"], "probe-that-does-not-exist");
+    }
+
+    #[tokio::test]
+    async fn test_peer_status_unknown_peer_is_non_error_diagnostic_result() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let mut request = make_generic_request("boru_get_peer_status");
+        request.params = json!({"peer_id": "unknown-peer"});
+        let response = handle_request(&request, &state).await;
+        let result = response.result.unwrap();
+
+        assert_eq!(result["found"], false);
+        assert_eq!(result["peer_id"], "unknown-peer");
+        assert!(result["message"].as_str().unwrap().contains("never been observed"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_peer_timeout_is_bounded_and_reports_not_reached() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let mut request = make_generic_request("boru_wait_for_peer");
+        request.params = json!({
+            "peer_id": "peer-not-observed",
+            "target_state": "connected",
+            "timeout_ms": 1,
+        });
+        let response = tokio::time::timeout(
+            Duration::from_millis(100),
+            handle_request(&request, &state),
+        )
+        .await
+        .expect("wait tool must honor its timeout");
+        let result = response.result.unwrap();
+
+        assert_eq!(result["reached"], false);
+        assert!(result["peer"].is_null());
+        assert_eq!(result["target_state"], "connected");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_target_state_is_rejected_before_waiting() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let mut request = make_generic_request("boru_wait_for_peer");
+        request.params = json!({"peer_id": "peer", "target_state": "made_up", "timeout_ms": 1});
+        let response = handle_request(&request, &state).await;
+        let error = response.error.unwrap();
+
+        assert_eq!(error.code, -32000);
+        assert!(error.data.unwrap().as_str().unwrap().contains("Invalid target_state"));
+    }
+
+    #[tokio::test]
+    async fn test_send_probe_rejects_unjoined_room_without_broadcasting() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let topic = TopicId::from_bytes([9; 32]);
+        let mut request = make_generic_request("boru_send_probe");
+        request.params = json!({"room_id": hex::encode(topic.as_bytes()), "payload": "probe"});
+        let response = handle_request(&request, &state).await;
+
+        let error = response.error.unwrap();
+        assert_eq!(error.code, -32000);
+        assert!(error.data.unwrap().as_str().unwrap().contains("not joined"));
+        assert_eq!(state.diagnostics.event_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_unknown_method_returns_jsonrpc_method_not_found() {
+        let (state, _rx) = make_gate_test_state(false, false).await;
+        let request = make_generic_request("boru_not_a_real_tool");
+        let response = handle_request(&request, &state).await;
+        let error = response.error.unwrap();
+
+        assert_eq!(error.code, -32601);
+        assert_eq!(error.message, "Method not found");
+        assert!(error.data.unwrap().as_str().unwrap().contains("boru_not_a_real_tool"));
     }
 }

@@ -11,7 +11,9 @@ use chrono::Timelike;
 use crate::notification::backend::{
     NoopBackend, NotificationAction as Action, NotificationBackend, RenderedNotification,
 };
-use crate::notification::event::{NotificationEvent, NotificationEventKind, NotificationPriority};
+use crate::notification::event::{
+    NotificationActionTarget, NotificationEvent, NotificationEventKind, NotificationPriority,
+};
 
 /// How message previews are shown in notifications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
