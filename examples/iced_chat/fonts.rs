@@ -8,15 +8,16 @@
 //!
 //! | Family          | Weights loaded               | Scope                          |
 //! |-----------------|------------------------------|--------------------------------|
-//! | Source Sans 3   | 400 (Regular) · 500 (Medium) · 600 (Semibold) · 700 (Bold) | Primary app font (85-90% of UI) |
+//! | Inter           | 400 (Regular) · 500 (Medium) · 600 (SemiBold) · 700 (Bold) | Primary app font (85-90% of UI) |
 //! | Manrope        | 600 (Semibold) · 700 (Bold)  | Legacy export (not used by UI)  |
 //! | Raleway         | 800 (ExtraBold)              | Boru wordmark / branding only   |
 //! | JetBrains Mono  | 400 (Regular) · 500 (Medium) | Technical/code values           |
 //!
 //! ## Licence
 //!
-//! Source Sans 3, Manrope, Raleway, and JetBrains Mono are licensed under
-//! the SIL Open Font License 1.1. See fonts/OFL.txt for the full text.
+//! Inter, Manrope, Raleway, and JetBrains Mono are licensed under
+//! the SIL Open Font License 1.1. See fonts/Inter-OFL.txt for the full
+//! Inter license text and fonts/OFL.txt for the other families.
 
 use iced::font::{self, Family, Weight};
 use iced::widget::text;
@@ -24,8 +25,17 @@ use iced::{Font, Pixels};
 
 // ── Font file data (bundled at compile time, loaded at startup) ──────
 
-/// Source Sans 3 variable font — contains all weights from 200-900.
-const SOURCE_SANS_3_BYTES: &[u8] = include_bytes!("fonts/SourceSans3.ttf");
+/// Inter Regular (400) — static font.
+const INTER_REGULAR_BYTES: &[u8] = include_bytes!("fonts/Inter-Regular.ttf");
+
+/// Inter Medium (500) — static font.
+const INTER_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/Inter-Medium.ttf");
+
+/// Inter SemiBold (600) — static font.
+const INTER_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/Inter-SemiBold.ttf");
+
+/// Inter Bold (700) — static font.
+const INTER_BOLD_BYTES: &[u8] = include_bytes!("fonts/Inter-Bold.ttf");
 
 /// Manrope variable font — contains all weights from 200-800.
 const MANROPE_BYTES: &[u8] = include_bytes!("fonts/Manrope.ttf");
@@ -41,8 +51,8 @@ const JETBRAINS_MONO_ITALIC_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-I
 
 // ── Font family names ────────────────────────────────────────────────
 
-/// Internal family name for Source Sans 3.
-pub const SOURCE_SANS_3: &str = "Source Sans 3";
+/// Internal family name for Inter.
+pub const INTER: &str = "Inter";
 
 /// Internal family name for Manrope.
 #[expect(dead_code)]
@@ -56,10 +66,10 @@ pub const JETBRAINS_MONO: &str = "JetBrains Mono";
 
 // ── Font constructors ────────────────────────────────────────────────
 
-/// Return a `Font` for Source Sans 3 at the given weight.
-pub fn source_sans(weight: Weight) -> Font {
+/// Return a `Font` for Inter at the given weight.
+pub fn inter(weight: Weight) -> Font {
     Font {
-        family: Family::Name(SOURCE_SANS_3),
+        family: Family::Name(INTER),
         weight,
         stretch: iced::font::Stretch::Normal,
         style: iced::font::Style::Normal,
@@ -124,38 +134,38 @@ pub use sizes::*;
 #[expect(dead_code)]
 pub enum Typography {
     // Manrope display headings
-    /// Display large — Manrope Bold, 24 px.
+    /// Display large — Inter Bold, 24 px.
     DisplayLarge,
-    /// Display medium — Manrope Semibold, 18 px.
+    /// Display medium — Inter SemiBold, 18 px.
     DisplayMedium,
 
-    // Source Sans 3 headings and interface text
-    /// Page title — Source Sans 3 Bold, 24 px.
+    // Inter headings and interface text
+    /// Page title — Inter Bold, 24 px.
     PageTitle,
-    /// Section heading — Source Sans 3 Semibold, 18 px.
+    /// Section heading — Inter SemiBold, 18 px.
     SectionHeading,
-    /// Contact name — Source Sans 3 Semibold, 15 px.
+    /// Contact name — Inter SemiBold, 15 px.
     ContactName,
 
-    /// Chat message body — Source Sans 3 Regular, 13 px.
+    /// Chat message body — Inter Regular, 13 px.
     ChatMessage,
-    /// Conversation preview — Source Sans 3 Regular, 13 px.
+    /// Conversation preview — Inter Regular, 13 px.
     ConversationPreview,
-    /// Unread conversation preview — Source Sans 3 Semibold, 13 px.
+    /// Unread conversation preview — Inter SemiBold, 13 px.
     ConversationPreviewUnread,
-    /// Button label — Source Sans 3 Medium, 15 px.
+    /// Button label — Inter Medium, 15 px.
     ButtonLabel,
-    /// Navigation label — Source Sans 3 Medium, 15 px.
+    /// Navigation label — Inter Medium, 15 px.
     NavigationLabel,
-    /// Form label — Source Sans 3 Medium, 15 px.
+    /// Form label — Inter Medium, 15 px.
     FormLabel,
-    /// Supporting / secondary text — Source Sans 3 Regular, 13 px.
+    /// Supporting / secondary text — Inter Regular, 13 px.
     SupportingText,
-    /// Timestamp — Source Sans 3 Regular, 11 px.
+    /// Timestamp — Inter Regular, 11 px.
     Timestamp,
-    /// Delivery state — Source Sans 3 Regular, 11 px.
+    /// Delivery state — Inter Regular, 11 px.
     DeliveryState,
-    /// System message — Source Sans 3 Medium, 13 px.
+    /// System message — Inter Medium, 13 px.
     SystemMessage,
 
     // JetBrains Mono
@@ -172,10 +182,10 @@ impl Typography {
     #[expect(dead_code)]
     pub fn family_name(self) -> &'static str {
         match self {
-            Self::DisplayLarge | Self::DisplayMedium => SOURCE_SANS_3,
+            Self::DisplayLarge | Self::DisplayMedium => INTER,
             Self::BoruWordmark => RALEWAY,
             Self::TechnicalValue => JETBRAINS_MONO,
-            _ => SOURCE_SANS_3,
+            _ => INTER,
         }
     }
 
@@ -218,11 +228,11 @@ impl Typography {
     #[expect(dead_code)]
     pub fn font(self) -> Font {
         match self {
-            Self::DisplayLarge => source_sans(Weight::Bold),
-            Self::DisplayMedium => source_sans(Weight::Semibold),
+            Self::DisplayLarge => inter(Weight::Bold),
+            Self::DisplayMedium => inter(Weight::Semibold),
             Self::BoruWordmark => raleway_extra_bold(),
             Self::TechnicalValue => jetbrains_mono(Weight::Normal),
-            _ => source_sans(self.weight()),
+            _ => inter(self.weight()),
         }
     }
 }
@@ -271,7 +281,10 @@ pub fn typo_text_scaled<'a>(
 /// back to the default sans-serif font).
 pub fn load_fonts() -> iced::Task<crate::app::AppMessage> {
     iced::Task::batch(vec![
-        font::load(SOURCE_SANS_3_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(INTER_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(INTER_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(INTER_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(INTER_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(MANROPE_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(RALEWAY_EXTRA_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(JETBRAINS_MONO_BYTES).map(|_| crate::app::AppMessage::Noop),

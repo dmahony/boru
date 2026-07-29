@@ -90,7 +90,7 @@ fn human_size(bytes: u64) -> String {
 fn state_badge(state: &DownloadState, tone: Color) -> iced::widget::Container<'static, AppMessage> {
     container(
         text(state_badge_label(state))
-            .font(crate::fonts::source_sans(Weight::Semibold))
+            .font(crate::fonts::inter(Weight::Semibold))
             .size(TYPO_XXS)
             .color(
                 // Use a perceptually balanced off-white against the badge color
@@ -113,7 +113,7 @@ fn state_badge(state: &DownloadState, tone: Color) -> iced::widget::Container<'s
 /// A small ghost-style button with a compact outline.
 fn action_button<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a, AppMessage> {
     let lbl = text(label)
-        .font(crate::fonts::source_sans(Weight::Medium))
+        .font(crate::fonts::inter(Weight::Medium))
         .size(TYPO_XS);
     button(lbl)
         .on_press(msg)
@@ -146,7 +146,7 @@ fn action_button<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a
 /// A subtle text-only button (borderless, uses muted/destructive colour).
 fn text_button<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a, AppMessage> {
     let lbl = text(label)
-        .font(crate::fonts::source_sans(Weight::Normal))
+        .font(crate::fonts::inter(Weight::Normal))
         .size(TYPO_XS);
     button(lbl)
         .on_press(msg)
@@ -227,7 +227,7 @@ pub fn view_download_progress(
         .push(state_badge(state, tone))
         .push(
             text(attachment.name.clone())
-                .font(crate::fonts::source_sans(Weight::Semibold))
+                .font(crate::fonts::inter(Weight::Semibold))
                 .size(TYPO_SM)
                 .color(tone)
                 .wrapping(Wrapping::Word)
@@ -235,7 +235,7 @@ pub fn view_download_progress(
         )
         .push(
             text(size_text)
-                .font(crate::fonts::source_sans(Weight::Normal))
+                .font(crate::fonts::inter(Weight::Normal))
                 .size(TYPO_XXS)
                 .color(muted)
                 .width(Length::Shrink),
@@ -266,14 +266,14 @@ pub fn view_download_progress(
                 Row::new()
                     .push(
                         text(source_label)
-                            .font(crate::fonts::source_sans(Weight::Normal))
+                            .font(crate::fonts::inter(Weight::Normal))
                             .size(TYPO_XS)
                             .color(muted)
                             .width(Length::Fill),
                     )
                     .push(
                         text(speed_label)
-                            .font(crate::fonts::source_sans(Weight::Normal))
+                            .font(crate::fonts::inter(Weight::Normal))
                             .size(TYPO_XS)
                             .color(tone),
                     )
@@ -296,7 +296,7 @@ pub fn view_download_progress(
                 .unwrap_or_default();
             Some(
                 text(format!("{detail}{speed}"))
-                    .font(crate::fonts::source_sans(Weight::Normal))
+                    .font(crate::fonts::inter(Weight::Normal))
                     .size(TYPO_XS)
                     .color(accent_primary(&theme)),
             )
@@ -314,11 +314,11 @@ pub fn view_download_progress(
                 .push(
                     row![
                         text(failure.title())
-                            .font(crate::fonts::source_sans(Weight::Medium))
+                            .font(crate::fonts::inter(Weight::Medium))
                             .size(TYPO_XS)
                             .color(error_color),
                         text(failure.stability_label())
-                            .font(crate::fonts::source_sans(Weight::Normal))
+                            .font(crate::fonts::inter(Weight::Normal))
                             .size(TYPO_XXS)
                             .color(tone),
                     ]
@@ -327,14 +327,14 @@ pub fn view_download_progress(
                 )
                 .push(
                     text(failure.message())
-                        .font(crate::fonts::source_sans(Weight::Normal))
+                        .font(crate::fonts::inter(Weight::Normal))
                         .size(TYPO_XS)
                         .color(muted)
                         .width(Length::Fill),
                 )
                 .push(
                     text(format!("Recovery: {}", failure.recovery_action()))
-                        .font(crate::fonts::source_sans(Weight::Normal))
+                        .font(crate::fonts::inter(Weight::Normal))
                         .size(TYPO_XS)
                         .color(tone)
                         .width(Length::Fill),
@@ -374,7 +374,7 @@ pub fn view_download_progress(
     body = body.push(
         button(
             text("Open downloads folder")
-                .font(crate::fonts::source_sans(Weight::Medium))
+                .font(crate::fonts::inter(Weight::Medium))
                 .size(TYPO_XS),
         )
         .on_press(AppMessage::OpenDownloadsFolder)
@@ -469,7 +469,7 @@ fn progress_section<'a>(
         });
 
     let pct_label = text(format!("{pct}%"))
-        .font(crate::fonts::source_sans(Weight::Bold))
+        .font(crate::fonts::inter(Weight::Bold))
         .size(TYPO_XXS)
         .color(if dimmed {
             border_muted(&theme)

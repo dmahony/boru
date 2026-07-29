@@ -4728,6 +4728,7 @@ impl IcedChat {
     ///
     /// Returns `None` for entries whose kind or sender cannot be resolved.
     fn history_entry_to_chat_entry(
+        &self,
         hist: &HistoryEntry,
         _topic: &TopicId,
         local_hex: &str,
@@ -4748,8 +4749,16 @@ impl IcedChat {
             ChatKind::System => "System".to_string(),
             ChatKind::Local => "You".to_string(),
             ChatKind::Remote => {
-                // Truncated public key as label
-                hist.sender[..hist.sender.len().min(16)].to_string()
+                // Resolve the peer's display name through the full priority
+                // chain (friend label → announced name → names cache → short key).
+                // Without this, restarted apps show truncated hex keys in
+                // history messages until a new live message refreshes the label.
+                if let Ok(pk) = PublicKey::from_str(&hist.sender) {
+                    self.resolve_name(&pk)
+                } else {
+                    // Fallback: truncated public key as label
+                    hist.sender[..hist.sender.len().min(16)].to_string()
+                }
             }
         };
 
@@ -5831,6 +5840,15 @@ impl IcedChat {
             ),
             self.neighbors.len(),
             last_error,
+            if self.peer_latencies.is_empty() {
+                None
+            } else {
+                let count = self.peer_latencies.len();
+                let avg_ms: u128 = self.peer_latencies.values()
+                    .map(|d| d.as_millis())
+                    .sum::<u128>() / count as u128;
+                Some(format!("{avg_ms} ms ({count} peer{}", if count == 1 { ")" } else { "s)" }))
+            },
         ))
     }
 
@@ -7117,7 +7135,7 @@ impl IcedChat {
                         drop(chat_history);
                         for hist_entry in &json_entries {
                             if let Some(chat_entry) =
-                                Self::history_entry_to_chat_entry(hist_entry, &topic, &local_hex)
+                                self.history_entry_to_chat_entry(hist_entry, &topic, &local_hex)
                             {
                                 self.entries_push(chat_entry);
                             }
@@ -7176,7 +7194,7 @@ impl IcedChat {
                                     if let Some(saved) = store.get_by_event_id(expected_id) {
                                         let saved = saved.clone();
                                         drop(store);
-                                        if let Some(chat_entry) = Self::history_entry_to_chat_entry(
+                                        if let Some(chat_entry) = self.history_entry_to_chat_entry(
                                             &saved, &topic, &local_hex,
                                         ) {
                                             self.entries_push(chat_entry);
@@ -16953,7 +16971,7 @@ impl IcedChat {
             text(room_name.clone())
                 .size(TYPO_SM)
                 .width(Length::Fill)
-                .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
+                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
             row![
                 status_dot,
                 text(status_text)
@@ -17075,7 +17093,7 @@ impl IcedChat {
             // ── Room name ──
             text(room_name.clone())
                 .size(TYPO_LG)
-                .font(crate::fonts::source_sans(iced::font::Weight::Bold)),
+                .font(crate::fonts::inter(iced::font::Weight::Bold)),
             // ── Back button ──
             button(text("← Back to chats").size(TYPO_SM))
                 .on_press(AppMessage::GoToChatList)
@@ -17291,7 +17309,7 @@ impl IcedChat {
             row![
                 text(dn)
                     .size(TYPO_SM)
-                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
+                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
                 Space::new().width(Length::Fixed(SPACE_8)),
                 kind_badge,
             ]
@@ -17344,6 +17362,15 @@ impl IcedChat {
         // Relay mode (global, but relevant context for the peer)
         let relay_label = fmt_relay_mode(&self.relay_mode);
         conn_items.push(info_row("Relay".to_string(), relay_label, &theme).into());
+
+        // Latency to this peer (if available)
+        if let Some(pk) = peer {
+            if let Some(latency) = self.peer_latencies.get(&pk) {
+                let ms = latency.as_millis();
+                let latency_text = format!("{ms} ms");
+                conn_items.push(info_row("Latency".to_string(), latency_text, &theme).into());
+            }
+        }
 
         // ── Section: Security ──
         let mut security_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
@@ -17472,55 +17499,55 @@ impl IcedChat {
             // Heading
             text("Details")
                 .size(TYPO_SM)
-                .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
-            Space::new().height(Length::Fixed(SPACE_12)),
+                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+            Space::new().height(Length::Fixed(SPACE_8)),
             // Contact section
             text("Contact")
                 .size(TYPO_XS)
-                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                .font(crate::fonts::inter(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
-            Space::new().height(Length::Fixed(SPACE_4)),
-            column(contact_items).spacing(SPACE_8),
+            Space::new().height(Length::Fixed(SPACE_2)),
+            column(contact_items).spacing(SPACE_4),
             divider(&theme),
             // Connection section
             text("Connection")
                 .size(TYPO_XS)
-                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                .font(crate::fonts::inter(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
-            Space::new().height(Length::Fixed(SPACE_4)),
-            column(conn_items).spacing(SPACE_8),
+            Space::new().height(Length::Fixed(SPACE_2)),
+            column(conn_items).spacing(SPACE_4),
             divider(&theme),
             // Security section
             text("Security")
                 .size(TYPO_XS)
-                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                .font(crate::fonts::inter(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
-            Space::new().height(Length::Fixed(SPACE_4)),
-            column(security_items).spacing(SPACE_8),
+            Space::new().height(Length::Fixed(SPACE_2)),
+            column(security_items).spacing(SPACE_4),
             divider(&theme),
             // Tools section
             text("Tools")
                 .size(TYPO_XS)
-                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                .font(crate::fonts::inter(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
-            Space::new().height(Length::Fixed(SPACE_4)),
-            column(tool_btns).spacing(SPACE_8),
+            Space::new().height(Length::Fixed(SPACE_2)),
+            column(tool_btns).spacing(SPACE_4),
             divider(&theme),
             // Peer section
             text("Peer")
                 .size(TYPO_XS)
-                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                .font(crate::fonts::inter(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
-            Space::new().height(Length::Fixed(SPACE_4)),
-            column(peer_items).spacing(SPACE_8),
+            Space::new().height(Length::Fixed(SPACE_2)),
+            column(peer_items).spacing(SPACE_4),
             Space::new().height(Length::Fill),
         ]
-        .spacing(SPACE_12);
+        .spacing(SPACE_4);
 
         container(scrollable(panel_body))
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding([SPACE_12, SPACE_12])
+            .padding([SPACE_8, SPACE_8])
             .style(container_surface)
             .into()
     }
@@ -17727,7 +17754,7 @@ impl IcedChat {
                             .push(
                                 text(label_text)
                                     .size(TYPO_SM)
-                                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                                    .font(crate::fonts::inter(iced::font::Weight::Semibold))
                                     .color(label_color),
                             )
                             .spacing(SPACE_4)
@@ -17740,7 +17767,7 @@ impl IcedChat {
                 } else {
                     text(label_text)
                         .size(TYPO_SM)
-                        .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                        .font(crate::fonts::inter(iced::font::Weight::Semibold))
                         .color(label_color)
                         .into()
                 }
@@ -17753,7 +17780,7 @@ impl IcedChat {
                     button(
                         text(label_text)
                             .size(TYPO_SM)
-                            .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                            .font(crate::fonts::inter(iced::font::Weight::Semibold))
                             .color(label_color),
                     )
                     .on_press(AppMessage::RetryOutgoingMessage(event_id))
@@ -17763,7 +17790,7 @@ impl IcedChat {
                 } else {
                     text(label_text)
                         .size(TYPO_SM)
-                        .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                        .font(crate::fonts::inter(iced::font::Weight::Semibold))
                         .color(label_color)
                         .into()
                 }

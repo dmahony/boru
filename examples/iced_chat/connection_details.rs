@@ -15,7 +15,7 @@ use iced::{Alignment, Length};
 
 use crate::app::{
     accent_primary, bg_surface, border_muted, color_error, text_muted_style, BUTTON_OUTLINE,
-    SPACE_12, SPACE_2, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XL, TYPO_XS,
+    SPACE_12, SPACE_16, SPACE_2, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XL, TYPO_XS,
 };
 
 const DIALOG_WIDTH: f32 = 680.0;
@@ -56,6 +56,7 @@ pub(crate) struct ConnectionDetailsViewModel {
     connected_peers: usize,
     connected_peers_display: String,
     last_connection_error: Option<String>,
+    latency_info: Option<String>,
 }
 
 impl ConnectionDetailsViewModel {
@@ -68,6 +69,7 @@ impl ConnectionDetailsViewModel {
         transport_state: impl Into<String>,
         connected_peers: usize,
         last_connection_error: Option<String>,
+        latency_info: Option<String>,
     ) -> Self {
         Self {
             local_peer_id: redact_sensitive_text(local_peer_id.into()),
@@ -78,6 +80,7 @@ impl ConnectionDetailsViewModel {
             connected_peers,
             connected_peers_display: connected_peers.to_string(),
             last_connection_error: last_connection_error.map(redact_sensitive_text),
+            latency_info,
         }
     }
 
@@ -103,6 +106,11 @@ impl ConnectionDetailsViewModel {
             ConnectionDetailRow::new(
                 "Connected peers",
                 self.connected_peers_display.clone(),
+                None,
+            ),
+            ConnectionDetailRow::new(
+                "Latency",
+                self.latency_info.clone().unwrap_or_else(|| "Unavailable".to_string()),
                 None,
             ),
             ConnectionDetailRow::new(
@@ -148,6 +156,10 @@ impl ConnectionDetailsViewModel {
         self.last_connection_error.as_deref()
     }
 
+    pub(crate) fn latency_info(&self) -> Option<&str> {
+        self.latency_info.as_deref()
+    }
+
     /// Copy-ready support summary for bug reports and diagnostics.
     pub(crate) fn support_summary(&self) -> String {
         let unavailable = self.unavailable_fields();
@@ -165,9 +177,13 @@ impl ConnectionDetailsViewModel {
             .relay_url
             .clone()
             .unwrap_or_else(|| "Unavailable".to_string());
+        let latency = self
+            .latency_info
+            .clone()
+            .unwrap_or_else(|| "Unavailable".to_string());
 
         format!(
-            "Support diagnostic summary\nLocal peer ID: {}\nRelay URL: {}\nRoom or mesh state: {}\nDiscovery state: {}\nTransport state: {}\nConnected peers: {}\nLast technical connection error: {}\nUnavailable fields: {}",
+            "Support diagnostic summary\nLocal peer ID: {}\nRelay URL: {}\nRoom or mesh state: {}\nDiscovery state: {}\nTransport state: {}\nConnected peers: {}\nLast technical connection error: {}\nLatency: {}\nUnavailable fields: {}",
             self.local_peer_id,
             relay_url,
             self.room_or_mesh_state,
@@ -175,6 +191,7 @@ impl ConnectionDetailsViewModel {
             self.transport_state,
             self.connected_peers,
             last_error,
+            latency,
             unavailable_text,
         )
     }
@@ -187,6 +204,9 @@ impl ConnectionDetailsViewModel {
         }
         if self.last_connection_error.is_none() {
             fields.push("Last technical connection error");
+        }
+        if self.latency_info.is_none() {
+            fields.push("Latency");
         }
         fields
     }
@@ -296,7 +316,7 @@ where
             state,
             announcement,
             vec![text(message.as_str())
-                .font(crate::fonts::source_sans(Weight::Normal))
+                .font(crate::fonts::inter(Weight::Normal))
                 .size(TYPO_SM)
                 .into()],
             on_action,
@@ -306,7 +326,7 @@ where
             state,
             announcement,
             vec![text(message.as_str())
-                .font(crate::fonts::source_sans(Weight::Normal))
+                .font(crate::fonts::inter(Weight::Normal))
                 .size(TYPO_SM)
                 .style(text_muted_style)
                 .into()],
@@ -317,7 +337,7 @@ where
             state,
             announcement,
             vec![text(message.as_str())
-                .font(crate::fonts::source_sans(Weight::Normal))
+                .font(crate::fonts::inter(Weight::Normal))
                 .size(TYPO_SM)
                 .style(|theme| iced::widget::text::Style {
                     color: Some(color_error(theme)),
@@ -379,6 +399,14 @@ where
                     on_value_edit,
                 ),
                 connection_detail_row(
+                    "Latency",
+                    model.latency_info().unwrap_or("Unavailable"),
+                    None,
+                    false,
+                    on_action,
+                    on_value_edit,
+                ),
+                connection_detail_row(
                     "Last technical connection error",
                     model.last_connection_error().unwrap_or("None"),
                     None,
@@ -407,7 +435,7 @@ where
     Message: 'a + Clone,
 {
     let label_widget = text(label)
-        .font(crate::fonts::source_sans(Weight::Semibold))
+        .font(crate::fonts::inter(Weight::Semibold))
         .size(TYPO_SM)
         .width(Length::Fill)
         .style(|theme| iced::widget::text::Style {
@@ -445,7 +473,7 @@ where
         line = line.push(
             button(
                 text("Copy")
-                    .font(crate::fonts::source_sans(Weight::Medium))
+                    .font(crate::fonts::inter(Weight::Medium))
                     .size(TYPO_SM),
             )
             .on_press(on_action(ConnectionDetailsDialogAction::CopyValue {
@@ -474,7 +502,7 @@ where
     Message: 'a + Clone,
 {
     let title = text(state.title())
-        .font(crate::fonts::source_sans(Weight::Bold))
+        .font(crate::fonts::inter(Weight::Bold))
         .size(TYPO_XL)
         .width(Length::Fill);
 
@@ -482,19 +510,19 @@ where
     if let Some(message) = announcement {
         header = header.push(
             text(message)
-                .font(crate::fonts::source_sans(Weight::Normal))
+                .font(crate::fonts::inter(Weight::Normal))
                 .size(TYPO_XS)
                 .style(text_muted_style)
                 .width(Length::Fill),
         );
     }
 
-    let mut content = Column::new().push(header).spacing(SPACE_12);
+    let mut content = Column::new().push(header).spacing(SPACE_6);
 
     if !body_rows.is_empty() {
         let rows = body_rows
             .into_iter()
-            .fold(Column::new().spacing(SPACE_8), |col, row| col.push(row));
+            .fold(Column::new().spacing(SPACE_4), |col, row| col.push(row));
         content = content.push(
             scrollable(rows)
                 .height(Length::Fixed(DIALOG_MAX_HEIGHT - 150.0))
@@ -507,7 +535,7 @@ where
         footer = footer.push(
             button(
                 text("Copy details")
-                    .font(crate::fonts::source_sans(Weight::Medium))
+                    .font(crate::fonts::inter(Weight::Medium))
                     .size(TYPO_SM),
             )
             .on_press(on_action(ConnectionDetailsDialogAction::CopyDetails))
@@ -518,7 +546,7 @@ where
     footer = footer.push(
         button(
             text("Close")
-                .font(crate::fonts::source_sans(Weight::Medium))
+                .font(crate::fonts::inter(Weight::Medium))
                 .size(TYPO_SM),
         )
         .on_press(on_action(ConnectionDetailsDialogAction::Close))
@@ -528,16 +556,16 @@ where
 
     let dialog = Column::new()
         .push(content)
-        .push(Space::new().height(Length::Fixed(SPACE_12)))
+        .push(Space::new().height(Length::Fixed(SPACE_8)))
         .push(footer)
-        .spacing(SPACE_12)
+        .spacing(SPACE_8)
         .width(Length::Fixed(DIALOG_WIDTH))
         .align_x(Alignment::Start);
 
     let overlay = container(dialog)
         .width(Length::Shrink)
         .height(Length::Shrink)
-        .padding(SPACE_24)
+        .padding(SPACE_16)
         .style(move |theme| iced::widget::container::Style {
             background: Some(iced::Background::Color(bg_surface(theme))),
             border: iced::Border {
@@ -663,6 +691,7 @@ mod tests {
             "1 direct, 1 relayed",
             3,
             Some("GATT_CONN_TIMEOUT after peer handshake".to_string()),
+            None,
         );
 
         let summary = details.support_summary();
@@ -675,7 +704,8 @@ mod tests {
         assert!(summary.contains("Connected peers: 3"));
         assert!(summary
             .contains("Last technical connection error: GATT_CONN_TIMEOUT after peer handshake"));
-        assert!(summary.contains("Unavailable fields: none"));
+        assert!(summary.contains("Latency: Unavailable"));
+        assert!(summary.contains("Unavailable fields: Latency"));
     }
 
     #[test]
@@ -691,10 +721,11 @@ mod tests {
             "transport state",
             7,
             None,
+            None,
         );
 
         let rows = details.rows();
-        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.len(), 8);
         assert_eq!(rows[0].label, "Local peer ID");
         assert_eq!(rows[0].copy_text.as_deref(), Some("peer-id-123"));
         assert_eq!(rows[1].label, "Relay URL");
@@ -706,9 +737,10 @@ mod tests {
         assert!(rows[3].copy_text.is_none());
         assert!(rows[4].copy_text.is_none());
         assert!(rows[5].copy_text.is_none());
-        assert!(rows[6].copy_text.is_none());
-        assert_eq!(rows[6].label, "Last technical connection error");
-        assert_eq!(rows[6].value, "None");
+        assert!(rows[6].copy_text.is_none()); // Latency
+        assert!(rows[7].copy_text.is_none());
+        assert_eq!(rows[7].label, "Last technical connection error");
+        assert_eq!(rows[7].value, "None");
     }
 
     #[test]
@@ -742,6 +774,7 @@ mod tests {
             "Transport ready",
             1,
             None,
+            None,
         ));
 
         assert_eq!(loading.body_message(), Some("Loading connection details…"));
@@ -756,7 +789,7 @@ mod tests {
         assert!(loading.rows().is_empty());
         assert!(empty.rows().is_empty());
         assert!(error.rows().is_empty());
-        assert_eq!(ready.rows().len(), 7);
+        assert_eq!(ready.rows().len(), 8);
         assert!(ready.can_copy_details());
         assert!(ready
             .support_summary()
@@ -777,6 +810,7 @@ mod tests {
             "trans",
             1,
             Some("err".to_string()),
+            Some("5 ms (1 peer)".to_string()),
         );
         assert!(
             full.unavailable_fields().is_empty(),
@@ -791,6 +825,7 @@ mod tests {
             "trans",
             1,
             Some("err".to_string()),
+            None,
         );
         assert!(no_relay.unavailable_fields().contains(&"Relay URL"));
 
@@ -802,14 +837,15 @@ mod tests {
             "trans",
             1,
             None,
+            None,
         );
         assert!(no_error
             .unavailable_fields()
             .contains(&"Last technical connection error"));
 
         let both_missing =
-            ConnectionDetailsViewModel::new("peer", None, "state", "disc", "trans", 1, None);
-        assert_eq!(both_missing.unavailable_fields().len(), 2);
+            ConnectionDetailsViewModel::new("peer", None, "state", "disc", "trans", 1, None, None);
+        assert_eq!(both_missing.unavailable_fields().len(), 3);
     }
 
     #[test]
@@ -822,21 +858,24 @@ mod tests {
             "Listening",
             0,
             None,
+            None,
         );
         let rows = details.rows();
-        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.len(), 8);
         assert_eq!(rows[1].value, "Unavailable");
         assert_eq!(rows[1].copy_text, None);
-        assert_eq!(rows[6].value, "None");
+        assert_eq!(rows[6].value, "Unavailable");
         assert_eq!(rows[6].copy_text, None);
+        assert_eq!(rows[7].value, "None");
+        assert_eq!(rows[7].copy_text, None);
     }
 
     #[test]
     fn support_summary_reports_unavailable_fields_when_missing() {
         let details =
-            ConnectionDetailsViewModel::new("peer", None, "state", "disc", "trans", 2, None);
+            ConnectionDetailsViewModel::new("peer", None, "state", "disc", "trans", 2, None, None);
         let summary = details.support_summary();
-        assert!(summary.contains("Unavailable fields: Relay URL, Last technical connection error"));
+        assert!(summary.contains("Unavailable fields: Relay URL, Last technical connection error, Latency"));
     }
 
     #[test]
@@ -849,6 +888,7 @@ mod tests {
             "trans",
             2,
             Some("err".to_string()),
+            Some("10 ms (1 peer)".to_string()),
         );
         let summary = details.support_summary();
         assert!(summary.contains("Unavailable fields: none"));
@@ -864,6 +904,7 @@ mod tests {
             "direct",
             3,
             Some("timeout".to_string()),
+            None,
         );
         let rows = details.rows();
         assert!(
@@ -874,7 +915,7 @@ mod tests {
             rows[1].copy_text.is_some(),
             "relay URL should have copy_text"
         );
-        for i in 2..=6 {
+        for i in 2..=7 {
             assert!(
                 rows[i].copy_text.is_none(),
                 "row {} '{}' should be display-only",
@@ -925,7 +966,7 @@ mod tests {
     #[test]
     fn dialog_body_message_is_none_when_ready() {
         let ready = ConnectionDetailsDialogState::ready(ConnectionDetailsViewModel::new(
-            "peer", None, "state", "disc", "trans", 1, None,
+            "peer", None, "state", "disc", "trans", 1, None, None,
         ));
         assert!(ready.body_message().is_none());
     }
@@ -944,7 +985,7 @@ mod tests {
         assert!(!error.can_copy_details());
 
         let ready = ConnectionDetailsDialogState::ready(ConnectionDetailsViewModel::new(
-            "peer", None, "state", "disc", "trans", 1, None,
+            "peer", None, "state", "disc", "trans", 1, None, None,
         ));
         assert!(ready.support_summary().is_some());
         assert!(ready.can_copy_details());
@@ -956,7 +997,7 @@ mod tests {
         let empty = ConnectionDetailsDialogState::empty("...");
         let error = ConnectionDetailsDialogState::error("...");
         let ready = ConnectionDetailsDialogState::ready(ConnectionDetailsViewModel::new(
-            "peer", None, "state", "disc", "trans", 1, None,
+            "peer", None, "state", "disc", "trans", 1, None, None,
         ));
         assert_eq!(loading.title(), "Connection details");
         assert_eq!(empty.title(), "Connection details");

@@ -1457,7 +1457,7 @@ fn main() -> Result<()> {
         ..Default::default()
     })
     .default_font(iced::Font {
-        family: iced::font::Family::Name(crate::fonts::SOURCE_SANS_3),
+        family: iced::font::Family::Name(crate::fonts::INTER),
         weight: iced::font::Weight::Normal,
         stretch: iced::font::Stretch::Normal,
         style: iced::font::Style::Normal,
