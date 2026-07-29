@@ -1481,6 +1481,12 @@ fn main() -> Result<()> {
             // Load bundled fonts at startup (non-fatal — falls back to
             // system default sans-serif on failure).
             let task = task.chain(fonts::load_fonts());
+            // Always subscribe to the directory gossip topic at startup
+            // so this peer can discover public rooms advertised by others
+            // without having to create an advertised room itself first.
+            let task = task.chain(iced::Task::done(
+                app::AppMessage::SubscribeDirectoryTopic,
+            ));
             (state, task)
         },
         IcedChat::update,
