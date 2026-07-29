@@ -628,6 +628,8 @@ fn main() -> Result<()> {
             .arg(&splash_script)
             .arg("--log")
             .arg(&splash_log_path)
+            .arg("--version")
+            .arg(app::version_tag())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
