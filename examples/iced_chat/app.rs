@@ -619,7 +619,9 @@ pub(crate) fn icon_svg<'a>(
     iced::widget::svg(iced::widget::svg::Handle::from_memory(svg_bytes))
         .width(iced::Length::Fixed(size))
         .height(iced::Length::Fixed(size))
-        .style(|_t, _s| iced::widget::svg::Style { color: None })
+        .style(|t, _s| iced::widget::svg::Style {
+            color: Some(crate::design_tokens::text(t)),
+        })
 }
 
 // ── Container style helpers ──────────────────────────────────────────────
@@ -1256,6 +1258,14 @@ pub(crate) enum DownloadState {
         failure: DownloadFailure,
     },
     Cancelled,
+}
+
+impl DownloadState {
+    /// Returns true if this is a terminal state that should not be
+    /// overwritten by late progress events.
+    fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled)
+    }
 }
 
 /// Download state tracked per file in the peer catalogue view.
@@ -4505,7 +4515,14 @@ impl IcedChat {
                             };
                             self.last_download_progress_at = Some(now);
                             self.last_download_progress_bytes = bytes;
-                            download.state = DownloadState::Active { bytes, total };
+                            // Do not overwrite a terminal state (Completed /
+                            // Failed / Cancelled) set by DownloadDone — a late
+                            // progress event in the queue could otherwise flip
+                            // the card back to Active after it has already
+                            // shown the green Completed badge.
+                            if !download.state.is_terminal() {
+                                download.state = DownloadState::Active { bytes, total };
+                            }
                             download.speed_bytes_per_sec = Some(speed);
                             self.transfer_id_to_index.insert(id, idx);
                             invalidate_from = Some(idx);
