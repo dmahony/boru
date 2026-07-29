@@ -7382,18 +7382,23 @@ impl IcedChat {
                 if self.return_to_chat_list_after_open {
                     self.return_to_chat_list_after_open = false;
                     let task = iced::Task::done(AppMessage::GoToChatList);
+                    let replay_task = self.replay_pending_events_batch(topic);
                     if bg_tasks.is_empty() {
-                        return task;
+                        return iced::Task::batch([task, replay_task]);
                     }
                     let mut all: Vec<iced::Task<AppMessage>> = bg_tasks;
                     all.push(task);
+                    all.push(replay_task);
                     return iced::Task::batch(all);
                 }
 
+                let replay_task = self.replay_pending_events_batch(topic);
                 if bg_tasks.is_empty() {
-                    iced::Task::none()
+                    replay_task
                 } else {
-                    iced::Task::batch(bg_tasks)
+                    let mut all: Vec<iced::Task<AppMessage>> = bg_tasks;
+                    all.push(replay_task);
+                    iced::Task::batch(all)
                 }
             }
 
@@ -7900,6 +7905,10 @@ impl IcedChat {
                         topic,
                         addrs: vec![local_addr],
                     };
+                    // Use BackgroundSubscribe for the direct conversation to avoid
+                    // slow-path gossip subscription with WAL replay storm on startup.
+                    // The conversation appears in the sidebar; user clicks to open.
+                    let bootstrap_peers = self.discovered_peers.clone();
                     if let Ok(payload) = SignedContactMessage::sign(&secret_key, &action) {
                         let mut tasks: Vec<iced::Task<AppMessage>> = vec![
                             iced::Task::perform(
@@ -7908,7 +7917,10 @@ impl IcedChat {
                                 },
                                 |_| AppMessage::Noop,
                             ),
-                            iced::Task::done(AppMessage::OpenRoom(topic)),
+                            iced::Task::done(AppMessage::BackgroundSubscribe(
+                                topic,
+                                bootstrap_peers.clone(),
+                            )),
                         ];
                         // Also advertise our mailbox key so the friend can
                         // encrypt offline messages to us.
@@ -7928,7 +7940,10 @@ impl IcedChat {
                         }
                         iced::Task::batch(tasks)
                     } else {
-                        iced::Task::done(AppMessage::OpenRoom(topic))
+                        iced::Task::done(AppMessage::BackgroundSubscribe(
+                            topic,
+                            bootstrap_peers,
+                        ))
                     }
                 } else {
                     iced::Task::none()
@@ -9164,7 +9179,15 @@ impl IcedChat {
                                 self.outgoing_request_states
                                     .insert(sender, OutgoingRequestState::Accepted);
                                 self.rebuild_join_request_list();
-                                return iced::Task::done(AppMessage::OpenRoom(topic));
+                                // Use BackgroundSubscribe instead of OpenRoom to avoid
+                                // slow-path gossip subscription with WAL replay storm.
+                                // The conversation appears in the sidebar; user clicks
+                                // to open it when ready.
+                                let bootstrap = self.discovered_peers.clone();
+                                return iced::Task::done(AppMessage::BackgroundSubscribe(
+                                    topic,
+                                    bootstrap,
+                                ));
                             }
                             Ok((sender, ContactAction::AddressUpdate { addrs }))
                                 if addrs.iter().all(|addr| addr.id == sender) =>
