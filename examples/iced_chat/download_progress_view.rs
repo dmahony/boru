@@ -192,6 +192,8 @@ pub fn view_download_progress(
     let error_color = color_error(&theme);
     let attachment_icon = match attachment.kind {
         super::app::TransferKind::Image => ICON_ACTIVITY,
+        super::app::TransferKind::Video => ICON_ACTIVITY,
+        super::app::TransferKind::Video => ICON_ACTIVITY,
         super::app::TransferKind::File => ICON_FILES,
     };
 
@@ -359,6 +361,28 @@ pub fn view_download_progress(
 
     // ── Assemble the card ───────────────────────────────────────────────
     let mut body = Column::new().push(title_row).spacing(SPACE_6);
+
+    // ── Thumbnail preview for video files ───────────────────────────────
+    if let Some(ref thumb_bytes) = attachment.thumbnail {
+        let handle = iced::widget::image::Handle::from_bytes(thumb_bytes.clone());
+        body = body.push(
+            iced::widget::image(handle)
+                .content_fit(iced::ContentFit::ScaleDown)
+                .width(Length::Fill)
+                .height(Length::Fixed(180.0)),
+        );
+    }
+
+    // ── Thumbnail preview for video files ───────────────────────────────
+    if let Some(ref thumb_bytes) = attachment.thumbnail {
+        let handle = iced::widget::image::Handle::from_bytes(thumb_bytes.clone());
+        body = body.push(
+            iced::widget::image(handle)
+                .content_fit(iced::ContentFit::ScaleDown)
+                .width(Length::Fill)
+                .height(Length::Fixed(180.0)),
+        );
+    }
 
     if let Some(src) = source_row {
         body = body.push(src);
@@ -537,7 +561,10 @@ fn action_buttons<'a>(
             ]
         }
         DownloadState::Completed { .. } => {
-            vec![action_button("Open", OpenDownloadedFile(name.to_string())).into()]
+            vec![
+                action_button("Open", OpenDownloadedFile(name.to_string())).into(),
+                text_button("Re-share", ReshareFile(entry_index)).into(),
+            ]
         }
         DownloadState::Failed { failure } if failure.retry_available() => {
             vec![

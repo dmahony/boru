@@ -558,7 +558,7 @@ async fn test_many_messages_handle_net_event_scaling() -> n0_error::Result<()> {
             self.entries.push(ChatEntry::remote(label, text));
             self.received_count += 1;
         }
-        fn set_pending_file(&mut self, _name: String, _ticket: String, _size: u64) {}
+        fn set_pending_file(&mut self, _name: String, _ticket: String, _size: u64, _thumbnail: Option<Vec<u8>>) {}
         fn set_pending_image(&mut self, _name: String, _hash: MessageHash, _from: PublicKey) {}
         fn has_message(&self, _hash: &MessageHash) -> bool {
             false

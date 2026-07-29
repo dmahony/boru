@@ -426,7 +426,7 @@ async fn test_mdns_only_local_discovery() -> Result<()> {
         ) {
             self.received.push(format!("[{label}] {text}"));
         }
-        fn set_pending_file(&mut self, _name: String, _ticket: String, _size: u64) {}
+        fn set_pending_file(&mut self, _name: String, _ticket: String, _size: u64, _thumbnail: Option<Vec<u8>>) {}
         fn set_pending_image(
             &mut self,
             _name: String,

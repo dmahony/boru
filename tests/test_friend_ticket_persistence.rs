@@ -56,7 +56,7 @@ impl ChatCallbacks for TestFrontend {
         _sent_at: Option<u64>,
     ) {
     }
-    fn set_pending_file(&mut self, _name: String, _ticket: String, _size: u64) {}
+    fn set_pending_file(&mut self, _name: String, _ticket: String, _size: u64, _thumbnail: Option<Vec<u8>>) {}
     fn set_pending_image(&mut self, _name: String, _hash: MessageHash, _from: PublicKey) {}
     fn has_message(&self, _hash: &MessageHash) -> bool {
         false
