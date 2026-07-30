@@ -6867,17 +6867,19 @@ impl IcedChat {
                     } else {
                         None
                     };
-                    // Show success feedback and stay on the chat list.
-                    self.push_system(format!(
-                        "Public room created. Share the ticket to invite others:\n{ticket_str}"
-                    ));
-                    self.screen = Screen::ChatList;
+                    // Complete the pending GUI test action before opening the room.
                     if let Some(action_id) = self.pending_confirm_create_room_action.take() {
                         let _ = self
                             .gui_action_history
                             .set_state(&action_id, GuiActionState::Completed);
                     }
-                    return advert_task.unwrap_or_else(iced::Task::none);
+                    // Open the room so the user goes straight into it.
+                    let open_task = iced::Task::done(AppMessage::OpenRoom(topic));
+                    return if let Some(advert_task) = advert_task {
+                        iced::Task::batch(vec![advert_task, open_task])
+                    } else {
+                        open_task
+                    };
                 }
 
                 // ── Private room: subscribe and join immediately ────
@@ -8532,6 +8534,8 @@ impl IcedChat {
                         topic,
                         self.discovered_peers.clone(),
                     )),
+                    // Navigate the sender straight into the chat room.
+                    iced::Task::done(AppMessage::OpenRoom(topic)),
                 ];
                 if let Some(t) = mailbox_task {
                     tasks.push(t);
