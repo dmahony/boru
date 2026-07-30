@@ -2696,6 +2696,16 @@ struct SidebarRequestRow {
     label: String,
 }
 
+/// A pending group-invite row displayed in the REQUESTS sidebar section.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SidebarGroupInviteRow {
+    invite_id: Vec<u8>,
+    inviter_public_key: Vec<u8>,
+    group_name: String,
+    ticket: String,
+    inviter_label: String,
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct SidebarRequestsDependency {
     dark_mode: bool,
@@ -2704,6 +2714,7 @@ struct SidebarRequestsDependency {
     requests_revision: u64,
     incoming: Vec<SidebarRequestRow>,
     friend_request_error: String,
+    group_invites: Vec<SidebarGroupInviteRow>,
 }
 
 /// A structured join-request item exposed by the main-menu ViewModel.
@@ -2974,6 +2985,8 @@ pub enum AppMessage {
     InviteMemberToggled(PublicKey),
     /// Confirm and send the group invite to selected members.
     ConfirmInviteMember,
+    /// Accept a pending group invite and join the room.
+    AcceptGroupInvite(Vec<u8>),
     // ── End Invite Member ──
     /// Copy the support-safe connection-details summary to the clipboard.
     CopyConnectionDetails,
@@ -5468,6 +5481,7 @@ impl IcedChat {
             AppMessage::HideInviteMemberDialog => "HideInviteMemberDialog",
             AppMessage::InviteMemberToggled(_) => "InviteMemberToggled",
             AppMessage::ConfirmInviteMember => "ConfirmInviteMember",
+            AppMessage::AcceptGroupInvite(_) => "AcceptGroupInvite",
             AppMessage::CopyConnectionDetails => "CopyConnectionDetails",
             AppMessage::CopyConnectionDetailsValue { .. } => "CopyConnectionDetailsValue",
             AppMessage::DismissToast => "DismissToast",
@@ -9819,8 +9833,9 @@ impl IcedChat {
                             if parts.len() >= 5 && parts[0] == "INVITE" {
                                 let invite_id_hex = parts[1];
                                 let inviter_pk_str = parts[2];
-                                let _group_id_hex = parts[3];
+                                let group_id_hex = parts[3];
                                 let group_name = parts[4];
+                                let ticket_str = parts.get(5).copied().unwrap_or("");
 
                                 // Decode invite_id from hex
                                 use data_encoding::HEXLOWER;
@@ -9831,9 +9846,17 @@ impl IcedChat {
                                     }
                                 }
 
+                                // Decode group_id from hex
+                                let mut group_id = [0u8; 32];
+                                if let Ok(decoded) = HEXLOWER.decode(group_id_hex.as_bytes()) {
+                                    if decoded.len() == 32 {
+                                        group_id.copy_from_slice(&decoded);
+                                    }
+                                }
+
                                 if let Ok(inviter_pk) = PublicKey::from_str(inviter_pk_str) {
                                     self.push_system(format!(
-                                        "{label} invited you to group \"{group_name}\" (scroll down to INVITES section to join)"
+                                        "{label} invited you to group \"{group_name}\" (see REQUESTS section to accept)"
                                     ));
 
                                     // Persist in local invite inbox
@@ -9846,16 +9869,22 @@ impl IcedChat {
                                         let expire_ms = now_ms + 7 * 24 * 60 * 60 * 1000;
                                         let invite_row = boru_core::storage::GroupInviteRow {
                                             invite_id,
-                                            group_id: [0u8; 32], // will be filled during accept
+                                            group_id,
                                             inviter_public_key: inviter_pk.to_vec(),
                                             recipient_public_key: self.secret_key.public().to_vec(),
                                             epoch: 1,
                                             status: "Pending".into(),
                                             created_at_ms: now_ms,
                                             expires_at_ms: expire_ms,
+                                            ticket: ticket_str.to_string(),
                                         };
                                         let _ = st.create_group_invite(&invite_row);
                                     }
+
+                                    // Bump sidebar so the REQUESTS section updates
+                                    self.requests_sidebar_revision =
+                                        self.requests_sidebar_revision.wrapping_add(1);
+                                    self.refresh_sidebar_counts();
                                 }
                             }
                         }
@@ -11479,11 +11508,24 @@ impl IcedChat {
                 let storage = self.storage.clone();
                 let data_dir = self.data_dir.clone();
                 let sk = self.secret_key.clone();
+                let endpoint = self.endpoint.clone();
+                let share_direct_addresses = self.share_direct_addresses;
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
                 let expire_ms = now_ms + 7 * 24 * 60 * 60 * 1000; // 7 days
+
+                // Construct a ticket so the invitee can join the room
+                let ticket_str = Ticket {
+                    topic,
+                    peers: vec![invitation_endpoint_addr(
+                        endpoint.watch_addr().get(),
+                        share_direct_addresses,
+                    )],
+                    discovery_secret: None,
+                }
+                .to_string();
 
                 iced::Task::perform(
                     async move {
@@ -11503,17 +11545,19 @@ impl IcedChat {
                                     status: "Pending".into(),
                                     created_at_ms: now_ms,
                                     expires_at_ms: expire_ms,
+                                    ticket: ticket_str.clone(),
                                 };
                                 let _ = st.create_group_invite(&invite_row);
                             }
 
                             // 2. Send invite as DM via whisper - using INVITE prefix + base64
                             // invite_id + group_id (each 32 bytes) encoded as hex via data-encoding
+                            // Final field is the room ticket so the invitee can join directly.
                             use data_encoding::HEXLOWER;
                             let invite_id_hex = HEXLOWER.encode(&invite_id);
                             let group_id_hex = HEXLOWER.encode(&group_id_bytes);
                             let invite_text = format!(
-                                "INVITE:{invite_id_hex}:{inviter_pk}:{group_id_hex}:{group_name}"
+                                "INVITE:{invite_id_hex}:{inviter_pk}:{group_id_hex}:{group_name}:{ticket_str}"
                             );
                             let _ = whisper_handle.send_dm(*peer_key, invite_text).await;
                         }
@@ -11527,6 +11571,43 @@ impl IcedChat {
                 )
             }
             // ── End Invite Member ──
+            AppMessage::AcceptGroupInvite(invite_id) => {
+                // Look up the invite ticket and auto-join the room
+                let invite = self.storage.as_ref().and_then(|st| {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    st.get_pending_group_invites(&self.local_public.to_vec(), now_ms)
+                        .ok()?
+                        .into_iter()
+                        .find(|inv| inv.invite_id.as_slice() == invite_id.as_slice())
+                });
+
+                if let Some(inv) = invite {
+                    if !inv.ticket.is_empty() {
+                        self.join_ticket_input = inv.ticket.clone();
+                        // Mark the invite as accepted
+                        let mut id = [0u8; 32];
+                        let len = inv.invite_id.len().min(32);
+                        id[..len].copy_from_slice(&inv.invite_id[..len]);
+                        if let Some(ref st) = self.storage {
+                            let _ = st.update_group_invite_state(&id, "Accepted");
+                        }
+                        // Bump revision to remove the invite from sidebar
+                        self.requests_sidebar_revision =
+                            self.requests_sidebar_revision.wrapping_add(1);
+                        self.refresh_sidebar_counts();
+                        return iced::Task::done(AppMessage::JoinFromTicket);
+                    }
+                    self.push_system(
+                        "Cannot accept group invite: no ticket available. Ask the sender to re-invite.".to_string(),
+                    );
+                } else {
+                    self.push_system("Group invite not found or expired.".to_string());
+                }
+                iced::Task::none()
+            }
             AppMessage::CopyConnectionDetails => {
                 if self.connection_details_dialog.is_some() {
                     if let Some(summary) =
@@ -15191,7 +15272,23 @@ impl IcedChat {
                 &self.local_public.to_string(),
                 boru_core::friend_request::FriendRequestStatus::Pending,
             )
-            .len();
+            .len()
+            + self
+                .storage
+                .as_ref()
+                .map(|st| {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    st.get_pending_group_invites(
+                        &self.local_public.to_vec(),
+                        now_ms,
+                    )
+                    .unwrap_or_default()
+                    .len()
+                })
+                .unwrap_or(0);
     }
 }
 
@@ -17564,11 +17661,43 @@ impl IcedChat {
             })
             .collect();
         incoming.sort_by(|a, b| a.label.cmp(&b.label));
+
+        // Fetch pending group invites
+        let group_invites: Vec<SidebarGroupInviteRow> = self
+            .storage
+            .as_ref()
+            .map(|st| {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                st.get_pending_group_invites(&self.local_public.to_vec(), now_ms)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|inv| SidebarGroupInviteRow {
+                        invite_id: inv.invite_id.to_vec(),
+                        inviter_public_key: inv.inviter_public_key.clone(),
+                        group_name: String::new(), // group name not stored in invite row
+                        ticket: inv.ticket,
+                        inviter_label: {
+                            let mut arr = [0u8; 32];
+                            let len = inv.inviter_public_key.len().min(32);
+                            arr[..len].copy_from_slice(&inv.inviter_public_key[..len]);
+                            PublicKey::from_bytes(&arr)
+                                .map(|pk| self.resolve_name(&pk))
+                                .unwrap_or_else(|_| "Unknown".to_string())
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let dep = SidebarRequestsDependency {
             dark_mode: self.dark_mode,
             requests_revision: self.requests_sidebar_revision,
             incoming,
             friend_request_error: self.friend_request_error.clone(),
+            group_invites,
         };
         self.cached_requests_revision.set(cur_revision);
         *self.cached_requests_dep.borrow_mut() = Some(dep.clone());
@@ -17629,7 +17758,9 @@ impl IcedChat {
             .width(Length::Fill),
         );
 
-        if dep.incoming.is_empty() {
+        let has_requests = !dep.incoming.is_empty() || !dep.group_invites.is_empty();
+
+        if !has_requests {
             let theme = Self::theme_from_dark(dep.dark_mode);
             section = section.push(Self::sidebar_empty_state_block(
                 &theme,
@@ -17639,6 +17770,7 @@ impl IcedChat {
                 None,
             ));
         } else {
+            // ── Friend requests ──
             for request in &dep.incoming {
                 let row_el = Row::new()
                     .push(
@@ -17686,6 +17818,40 @@ impl IcedChat {
                     .width(Length::Fill);
 
                 section = section.push(container(row_el).width(Length::Fill));
+            }
+
+            // ── Group invites ──
+            if !dep.group_invites.is_empty() {
+                for invite in &dep.group_invites {
+                    let inviter_label = &invite.inviter_label;
+                    let invite_id = invite.invite_id.clone();
+                    let row_el = Row::new()
+                        .push(
+                            text(format!("Group invite from {inviter_label}"))
+                                .size(TYPO_SM)
+                                .width(Length::Fill),
+                        )
+                        .push(
+                            button(text("Join").size(TYPO_XS))
+                                .on_press(AppMessage::AcceptGroupInvite(invite_id))
+                                .padding([SPACE_2, SPACE_4])
+                                .style(move |t, _status| iced::widget::button::Style {
+                                    background: Some(iced::Background::Color(accent_primary(t))),
+                                    text_color: Color::WHITE,
+                                    border: iced::Border {
+                                        radius: SPACE_4.into(),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                }),
+                        )
+                        .spacing(SPACE_4)
+                        .align_y(Alignment::Center)
+                        .padding([SPACE_4, SPACE_12])
+                        .width(Length::Fill);
+
+                    section = section.push(container(row_el).width(Length::Fill));
+                }
             }
         }
 

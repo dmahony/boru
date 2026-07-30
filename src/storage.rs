@@ -48,7 +48,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 13;
+const CURRENT_SCHEMA_VERSION: u32 = 14;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -391,6 +391,7 @@ pub struct GroupInviteRow {
     pub status: String,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
+    pub ticket: String,
 }
 
 // ── Storage ───────────────────────────────────────────────────────────────
@@ -697,6 +698,7 @@ impl Storage {
                 11 => self.migrate_v11(&conn)?,
                 12 => self.migrate_v12(&conn)?,
                 13 => self.migrate_v13(&conn)?,
+                14 => self.migrate_v14(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -1117,6 +1119,14 @@ impl Storage {
         Ok(())
     }
 
+    /// V14 adds a `ticket` column to `group_invites` so pending invites carry
+    /// the room ticket needed to accept and join the group's gossip room.
+    fn migrate_v14(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch("ALTER TABLE group_invites ADD COLUMN ticket TEXT NOT NULL DEFAULT '';")
+            .std_context("migrate v14 group_invites ticket column")?;
+        Ok(())
+    }
+
     /// during repeat sync requests.  Every message id served via SyncResponse
     /// is recorded in sync_dedup.  The query_pending_outbound_for_recipient
     /// method filters out already-served ids so that subsequent sync requests
@@ -1297,7 +1307,7 @@ impl Storage {
     /// Insert an invitation idempotently.
     pub fn create_group_invite(&self, invite: &GroupInviteRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("INSERT OR IGNORE INTO group_invites(invite_id,group_id,inviter_public_key,recipient_public_key,epoch,status,created_at_ms,expires_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![invite.invite_id.as_slice(),invite.group_id.as_slice(),invite.inviter_public_key,invite.recipient_public_key,invite.epoch as i64,invite.status,invite.created_at_ms as i64,invite.expires_at_ms as i64]).std_context("create group invite")?;
+        conn.execute("INSERT OR IGNORE INTO group_invites(invite_id,group_id,inviter_public_key,recipient_public_key,epoch,status,created_at_ms,expires_at_ms,ticket) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![invite.invite_id.as_slice(),invite.group_id.as_slice(),invite.inviter_public_key,invite.recipient_public_key,invite.epoch as i64,invite.status,invite.created_at_ms as i64,invite.expires_at_ms as i64,invite.ticket]).std_context("create group invite")?;
         Ok(())
     }
 
@@ -1308,7 +1318,7 @@ impl Storage {
         now_ms: u64,
     ) -> Result<Vec<GroupInviteRow>> {
         let conn = self.conn.lock().unwrap();
-        let mut st=conn.prepare("SELECT invite_id,group_id,inviter_public_key,recipient_public_key,epoch,status,created_at_ms,expires_at_ms FROM group_invites WHERE recipient_public_key=?1 AND status='Pending' AND expires_at_ms>?2 ORDER BY created_at_ms").std_context("prepare pending invites")?;
+        let mut st=conn.prepare("SELECT invite_id,group_id,inviter_public_key,recipient_public_key,epoch,status,created_at_ms,expires_at_ms,ticket FROM group_invites WHERE recipient_public_key=?1 AND status='Pending' AND expires_at_ms>?2 ORDER BY created_at_ms").std_context("prepare pending invites")?;
         let rows = st
             .query_map(params![recipient_public_key, now_ms as i64], |r| {
                 let a: Vec<u8> = r.get(0)?;
@@ -1326,6 +1336,7 @@ impl Storage {
                     status: r.get(5)?,
                     created_at_ms: r.get::<_, i64>(6)? as u64,
                     expires_at_ms: r.get::<_, i64>(7)? as u64,
+                    ticket: r.get(8)?,
                 })
             })
             .std_context("query group rows")?;
@@ -7226,6 +7237,7 @@ mod tests {
             status: "Pending".into(),
             created_at_ms: 3,
             expires_at_ms: 100,
+            ticket: String::new(),
         };
         storage.create_group_invite(&invite).unwrap();
         storage.create_group_invite(&invite).unwrap();
