@@ -598,6 +598,11 @@ impl Actor {
     }
 
     async fn handle_addr_update(&mut self, endpoint_addr: EndpointAddr) {
+        debug!(
+            peer = %endpoint_addr.id.fmt_short(),
+            relay = ?endpoint_addr.relay_urls().next(),
+            "gossip address update",
+        );
         // let peer_data = our_peer_data(&self.endpoint, current_addresses);
         let peer_data = encode_peer_data(&endpoint_addr.into());
         self.handle_in_event(InEvent::UpdatePeerData(peer_data), Instant::now())

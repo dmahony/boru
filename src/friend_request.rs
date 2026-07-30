@@ -612,6 +612,57 @@ impl FriendRequestStore {
         self.transition_request(request_id, caller, FriendRequestStatus::Cancelled)
     }
 
+    /// Confirm that an outgoing pending request was accepted on the remote
+    /// side.
+    ///
+    /// This is called by the `requester` when they receive an authenticated
+    /// acceptance notification (e.g. a `ConversationInvite` or
+    /// `FriendRequestAccepted`) from the recipient.  It mirrors the
+    /// requester's local store to reflect the remote acceptance without
+    /// requiring the local side to be the recipient.
+    ///
+    /// # Errors
+    ///
+    /// - [`FriendRequestError::NotFound`] — no request exists with the given
+    ///   id.
+    /// - [`FriendRequestError::Unauthorized`] — the caller is not the
+    ///   requester of the request.
+    /// - [`FriendRequestError::InvalidTransition`] — the request is not in
+    ///   `Pending` state.
+    pub fn confirm_outgoing_accepted(
+        &mut self,
+        request_id: &str,
+        caller: &str,
+    ) -> std::result::Result<FriendRequest, FriendRequestError> {
+        let request = self
+            .requests
+            .get(request_id)
+            .ok_or_else(|| FriendRequestError::NotFound(request_id.to_string()))?;
+
+        if caller != request.requester {
+            return Err(FriendRequestError::Unauthorized {
+                action: "confirm_outgoing_accepted".to_string(),
+                expected: request.requester.clone(),
+            });
+        }
+
+        if request.status != FriendRequestStatus::Pending {
+            return Err(FriendRequestError::InvalidTransition {
+                from: request.status,
+                to: FriendRequestStatus::Accepted,
+            });
+        }
+
+        let request = request.clone();
+        self.remove_from_index(&request);
+
+        let stored = self.requests.get_mut(request_id).expect("just checked");
+        stored.status = FriendRequestStatus::Accepted;
+        stored.updated_at_unix_ms = now_unix_ms();
+
+        Ok(stored.clone())
+    }
+
     /// Internal helper: transition a request to a new status with authorization
     /// and validity checks.
     fn transition_request(
@@ -1231,6 +1282,91 @@ mod tests {
             .clone()
             .send_request(&a, &b, None)
             .expect("new request after accept should work");
+        assert_eq!(new_req.status, FriendRequestStatus::Pending);
+    }
+
+    #[test]
+    fn requester_can_confirm_outgoing_accepted() {
+        let mut store = FriendRequestStore::default();
+        let a = random_peer();
+        let b = random_peer();
+        let req = store.send_request(&a, &b, None).expect("send");
+
+        // Requester confirms remote acceptance.
+        let confirmed = store
+            .confirm_outgoing_accepted(&req.id, &a)
+            .expect("requester confirms outgoing accepted");
+        assert_eq!(confirmed.status, FriendRequestStatus::Accepted);
+
+        // Verify outgoing list reflects Accepted.
+        let outgoing = store.list_outgoing_by_status(&a, FriendRequestStatus::Accepted);
+        assert_eq!(outgoing.len(), 1);
+        assert!(store
+            .list_outgoing_by_status(&a, FriendRequestStatus::Pending)
+            .is_empty());
+    }
+
+    #[test]
+    fn confirm_outgoing_accepted_rejects_recipient() {
+        let mut store = FriendRequestStore::default();
+        let a = random_peer();
+        let b = random_peer();
+        let req = store.send_request(&a, &b, None).expect("send");
+
+        // Recipient cannot call confirm_outgoing_accepted.
+        let err = store
+            .confirm_outgoing_accepted(&req.id, &b)
+            .expect_err("recipient cannot confirm outgoing accepted");
+        assert!(matches!(err, FriendRequestError::Unauthorized { .. }));
+    }
+
+    #[test]
+    fn confirm_outgoing_accepted_rejects_third_party() {
+        let mut store = FriendRequestStore::default();
+        let a = random_peer();
+        let b = random_peer();
+        let c = random_peer();
+        let req = store.send_request(&a, &b, None).expect("send");
+
+        let err = store
+            .confirm_outgoing_accepted(&req.id, &c)
+            .expect_err("third party cannot confirm outgoing accepted");
+        assert!(matches!(err, FriendRequestError::Unauthorized { .. }));
+    }
+
+    #[test]
+    fn confirm_outgoing_accepted_rejects_not_pending() {
+        let mut store = FriendRequestStore::default();
+        let a = random_peer();
+        let b = random_peer();
+        let req = store.send_request(&a, &b, None).expect("send");
+
+        // Accept via normal path first.
+        store.accept_request(&req.id, &b).expect("accept");
+
+        // Now confirm_outgoing_accepted should fail — request is no longer Pending.
+        let err = store
+            .confirm_outgoing_accepted(&req.id, &a)
+            .expect_err("cannot confirm non-pending request");
+        assert!(matches!(err, FriendRequestError::InvalidTransition { .. }));
+    }
+
+    #[test]
+    fn confirm_outgoing_accepted_unblocks_new_request() {
+        let mut store = FriendRequestStore::default();
+        let a = random_peer();
+        let b = random_peer();
+        let req = store.send_request(&a, &b, None).expect("send");
+
+        // Requester confirms acceptance remotely.
+        store
+            .confirm_outgoing_accepted(&req.id, &a)
+            .expect("confirm accepted");
+
+        // pair_index should now allow a new request between the same peers.
+        let new_req = store
+            .send_request(&a, &b, None)
+            .expect("new request after confirm_accepted works");
         assert_eq!(new_req.status, FriendRequestStatus::Pending);
     }
 }

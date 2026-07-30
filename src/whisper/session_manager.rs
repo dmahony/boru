@@ -244,6 +244,7 @@ impl SessionManagerActor {
                     return;
                 }
                 let entry = self.sessions.entry(peer).or_insert_with(PeerSession::new);
+                info!(%peer, state = ?entry.state, "session manager starting session");
                 match entry.state {
                     SessionState::Disconnected | SessionState::Reconnecting => {
                         entry.set_state(SessionState::Connecting, &self.event_tx, peer);
@@ -278,6 +279,7 @@ impl SessionManagerActor {
                 }
             }
             Cmd::StopSession { peer } => {
+                info!(%peer, "session manager stopping session");
                 if let Some(entry) = self.sessions.get_mut(&peer) {
                     entry.reconnect_attempt = 0;
                     entry.backoff = BACKOFF_BASE;

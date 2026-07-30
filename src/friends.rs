@@ -21,7 +21,7 @@ use crate::proto::TopicId;
 use iroh::{EndpointAddr, PublicKey};
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 /// Current schema version.
 ///
@@ -362,6 +362,7 @@ impl FriendsStore {
         let data_dir = data_dir.as_ref();
         let path = friends_file_path(data_dir);
         if !path.exists() {
+            debug!(path = %path.display(), "friends file not found, returning empty store");
             return Ok(Self::empty_at(data_dir));
         }
 
@@ -403,6 +404,11 @@ impl FriendsStore {
         }
 
         store.data_dir = data_dir.to_path_buf();
+        info!(
+            path = %path.display(),
+            count = store.friends.len(),
+            "friends store loaded"
+        );
         Ok(store)
     }
 
@@ -457,12 +463,18 @@ impl FriendsStore {
 
     /// Insert or update a friend record.
     pub fn upsert(&mut self, id: FriendId, record: FriendRecord) {
-        self.friends.insert(id, record);
+        let is_new = !self.friends.contains_key(&id);
+        self.friends.insert(id.clone(), record);
+        debug!(friend = %id.as_str(), is_new, "friend upserted");
     }
 
     /// Remove a friend by id.
     pub fn remove(&mut self, id: &FriendId) -> Option<FriendRecord> {
-        self.friends.remove(id)
+        let removed = self.friends.remove(id);
+        if removed.is_some() {
+            info!(friend = %id.as_str(), "friend removed");
+        }
+        removed
     }
 
     /// Remove all room references associated with a topic.
@@ -474,6 +486,9 @@ impl FriendsStore {
             if record.remove_room(topic) {
                 changed += 1;
             }
+        }
+        if changed > 0 {
+            debug!(?topic, count = changed, "friend rooms removed");
         }
         changed
     }
@@ -495,24 +510,27 @@ impl FriendsStore {
 
     /// Mark a peer online and update its last-seen timestamp.
     pub fn mark_online(&mut self, id: FriendId) -> &mut FriendRecord {
-        let record = self.ensure_friend(id);
+        let record = self.ensure_friend(id.clone());
         record.status.online = true;
         record.status.last_seen_at_unix_ms = Some(now_unix_ms());
+        debug!(friend = %id.as_str(), "friend marked online");
         record
     }
 
     /// Mark a peer offline and update its last-offline timestamp.
     pub fn mark_offline(&mut self, id: FriendId) -> &mut FriendRecord {
-        let record = self.ensure_friend(id);
+        let record = self.ensure_friend(id.clone());
         record.status.online = false;
         record.status.last_offline_at_unix_ms = Some(now_unix_ms());
+        debug!(friend = %id.as_str(), "friend marked offline");
         record
     }
 
     /// Update the user-facing label for a peer.
     pub fn set_label(&mut self, id: FriendId, label: impl Into<String>) -> &mut FriendRecord {
-        let record = self.ensure_friend(id);
+        let record = self.ensure_friend(id.clone());
         record.label = Some(label.into());
+        debug!(friend = %id.as_str(), "friend label set");
         record
     }
 
@@ -522,8 +540,9 @@ impl FriendsStore {
         id: FriendId,
         name: impl Into<String>,
     ) -> &mut FriendRecord {
-        let record = self.ensure_friend(id);
+        let record = self.ensure_friend(id.clone());
         record.last_announced_name = Some(name.into());
+        debug!(friend = %id.as_str(), "friend last announced name updated");
         record
     }
 
@@ -533,8 +552,12 @@ impl FriendsStore {
         id: FriendId,
         relationship: FriendRelationship,
     ) -> &mut FriendRecord {
-        let record = self.ensure_friend(id);
+        let record = self.ensure_friend(id.clone());
+        let old = record.relationship;
         record.relationship = relationship;
+        if old != relationship {
+            info!(friend = %id.as_str(), ?old, new = ?relationship, "friend relationship changed");
+        }
         record
     }
 

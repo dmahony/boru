@@ -37,6 +37,7 @@ use iroh::{PublicKey, SecretKey};
 use n0_error::{Result, StdResultExt};
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
 
 use crate::catalogue_limits::CatalogueLimitsConfig;
 use crate::catalogue_model::{CatalogueView, RemoteSharedFile, SignedFileCatalogue};
@@ -540,6 +541,7 @@ impl Storage {
         // Recover interrupted file transfers after the schema is ready.
         storage.recover_downloads_from_restart()?;
 
+        info!(db_path = %db_path.display(), "storage opened successfully");
         Ok(storage)
     }
 
@@ -575,6 +577,7 @@ impl Storage {
                  The database is corrupt and cannot be opened. Restore from backup or delete the file."
             ).into());
         }
+        debug!("database integrity check passed");
         Ok(())
     }
 
@@ -586,6 +589,7 @@ impl Storage {
     /// 3. **Stale Pending timestamps** — rows with `next_attempt_at_ms` in the
     ///    future are reset to now so they become due immediately.
     fn recover_crash_state(&self) -> Result<()> {
+        debug!("recovering crash state");
         let conn = self.conn.lock().unwrap();
         let now = crate::chat_core::now_ms() as i64;
 
@@ -679,8 +683,15 @@ impl Storage {
 
         let start = current.unwrap_or(0);
         if start >= CURRENT_SCHEMA_VERSION {
+            debug!(version = start, "database already at latest schema");
             return Ok(());
         }
+
+        info!(
+            from_version = start,
+            to_version = CURRENT_SCHEMA_VERSION,
+            "running database migrations"
+        );
 
         // Run each migration in its own transaction.
         for v in (start + 1)..=CURRENT_SCHEMA_VERSION {

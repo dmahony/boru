@@ -5028,6 +5028,10 @@ mod tests {
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
             storage: Some(boru_core::storage::Storage::memory().expect("test storage")),
+            directory_store: Arc::new(std::sync::Mutex::new(
+                boru_core::directory::DirectoryStore::new(),
+            )),
+            directory_sender: Arc::new(std::sync::Mutex::new(None)),
         };
         (state, gossip_rx)
     }

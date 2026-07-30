@@ -1555,6 +1555,12 @@ pub struct ChatEntry {
     image_identifier: Option<String>,
     /// Non-fatal rendering / persistence error to show inline with the image.
     image_error: Option<String>,
+    /// Original image pixel width, extracted from image bytes at construction time.
+    /// Used to compute the display size (scale-to-fit) during rendering.
+    image_width: Option<u32>,
+    /// Original image pixel height, extracted from image bytes at construction time.
+    /// Used to compute the display size (scale-to-fit) during rendering.
+    image_height: Option<u32>,
     /// Unix epoch milliseconds when this message was sent (protocol sent_at
     /// for remote messages, local creation time for system/local messages).
     timestamp: Option<i64>,
@@ -1598,6 +1604,8 @@ impl ChatEntry {
             image_bytes: None,
             image_identifier: None,
             image_error: None,
+            image_width: None,
+            image_height: None,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -1615,7 +1623,10 @@ impl ChatEntry {
         s.update_cache();
         s
     }
-    fn local(label: impl Into<String>, text: impl Into<String>) -> Self {
+    fn local(
+        label: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
         let label = sanitize_single_line(&label.into());
         let text = sanitize_display_text(&text.into(), DEFAULT_MAX_DISPLAY_LENGTH);
         Self {
@@ -1630,6 +1641,8 @@ impl ChatEntry {
             image_bytes: None,
             image_identifier: None,
             image_error: None,
+            image_width: None,
+            image_height: None,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -1664,6 +1677,8 @@ impl ChatEntry {
             image_bytes: None,
             image_identifier: None,
             image_error: None,
+            image_width: None,
+            image_height: None,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -1692,6 +1707,16 @@ impl ChatEntry {
         image_identifier: Option<String>,
         image_error: Option<String>,
     ) -> Self {
+        // Extract original image dimensions for scale-to-fit rendering.
+        let (img_w, img_h) = {
+            use std::io::Cursor;
+            image::ImageReader::new(Cursor::new(&image_bytes))
+                .with_guessed_format()
+                .ok()
+                .and_then(|r| r.into_dimensions().ok())
+                .map(|(w, h)| (Some(w), Some(h)))
+                .unwrap_or((None, None))
+        };
         Self {
             kind,
             label: sanitize_single_line(&label.into()),
@@ -1704,6 +1729,8 @@ impl ChatEntry {
             image_bytes: Some(image_bytes), // Keep for session history/replay
             image_identifier,
             image_error,
+            image_width: img_w,
+            image_height: img_h,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -1740,6 +1767,8 @@ impl ChatEntry {
             image_bytes: None,
             image_identifier: None,
             image_error: None,
+            image_width: None,
+            image_height: None,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -5036,6 +5065,8 @@ impl IcedChat {
                 image_bytes: hist.image_bytes.clone(),
                 image_identifier: hist.image_identifier.clone(),
                 image_error: None,
+                image_width: None,
+                image_height: None,
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
@@ -5063,6 +5094,8 @@ impl IcedChat {
                 image_bytes: None,
                 image_identifier: None,
                 image_error: None,
+                image_width: None,
+                image_height: None,
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
@@ -5133,6 +5166,8 @@ impl IcedChat {
             image_bytes: None,
             image_identifier: row.image_identifier.clone(),
             image_error: None,
+            image_width: None,
+            image_height: None,
             timestamp: Some(row.timestamp_ms),
             event_id: row.id as u64,
             delivery_state,
@@ -8518,6 +8553,13 @@ impl IcedChat {
                 description,
                 members: friend_keys,
             } => {
+                info!(
+                    ?group_id,
+                    name = %display_name,
+                    member_count = friend_keys.len(),
+                    ?topic,
+                    "group created",
+                );
                 // Save the current room state to the conversation cache so the
                 // user can switch back to it without a slow re-subscribe.
                 self.save_room_to_history();
@@ -9677,6 +9719,20 @@ impl IcedChat {
                                 self.outgoing_request_states
                                     .insert(sender, OutgoingRequestState::Accepted);
                                 self.rebuild_join_request_list();
+                                // Update the friend request store to reflect remote acceptance.
+                                let local_str = self.local_public.to_string();
+                                let sender_str = sender.to_string();
+                                if let Some(pending_id) = self
+                                    .friend_request_store
+                                    .list_outgoing_by_status(&local_str, FriendRequestStatus::Pending)
+                                    .into_iter()
+                                    .find(|r| r.recipient == sender_str)
+                                    .map(|r| r.id.clone())
+                                {
+                                    let _ = self
+                                        .friend_request_store
+                                        .confirm_outgoing_accepted(&pending_id, &local_str);
+                                }
                                 let fid = FriendId::from_public_key(sender);
                                 let record = self.friends.ensure_friend(fid);
                                 record.relationship = FriendRelationship::Friends;
@@ -9753,6 +9809,21 @@ impl IcedChat {
                                 self.outgoing_request_states
                                     .insert(sender, OutgoingRequestState::Accepted);
                                 self.rebuild_join_request_list();
+                                // Update the friend request store to reflect remote
+                                // acceptance — the ConversationInvite signals acceptance.
+                                let local_str = self.local_public.to_string();
+                                let sender_str = sender.to_string();
+                                if let Some(pending_id) = self
+                                    .friend_request_store
+                                    .list_outgoing_by_status(&local_str, FriendRequestStatus::Pending)
+                                    .into_iter()
+                                    .find(|r| r.recipient == sender_str)
+                                    .map(|r| r.id.clone())
+                                {
+                                    let _ = self
+                                        .friend_request_store
+                                        .confirm_outgoing_accepted(&pending_id, &local_str);
+                                }
                                 // Use BackgroundSubscribe instead of OpenRoom to avoid
                                 // slow-path gossip subscription with WAL replay storm.
                                 // The conversation appears in the sidebar; user clicks
@@ -10852,6 +10923,14 @@ impl IcedChat {
                 message_hash,
                 image_identifier,
             } => {
+                info!(
+                    ?sender,
+                    name = %name,
+                    image_size = image_bytes.len(),
+                    ?message_hash,
+                    has_identifier = image_identifier.is_some(),
+                    "image download completed",
+                );
                 self.pending_image_upload = None;
                 if sender == self.local_public && image_identifier.is_none() {
                     let mut profile_file = SharedFile::new(
@@ -10915,7 +10994,14 @@ impl IcedChat {
                 self.start_next_pending_image_download()
             }
             AppMessage::ProfileImageDownloaded(peer, image_bytes) => {
-                if image_bytes.is_empty() || image_bytes.len() > 2 * 1024 * 1024 {
+                let size = image_bytes.len();
+                if image_bytes.is_empty() || size > 2 * 1024 * 1024 {
+                    debug!(
+                        %peer,
+                        size,
+                        reason = if image_bytes.is_empty() { "empty" } else { "oversized" },
+                        "profile image download rejected",
+                    );
                     // Ignore empty or oversized images (>2MB) and clear cached ticket
                     // so the next AboutMe broadcast can retry.
                     self.friend_image_tickets.remove(&peer);
@@ -10925,14 +11011,27 @@ impl IcedChat {
                 // available even when the peer is offline.
                 save_friend_profile_image(&self.data_dir, &peer, &image_bytes);
                 let handle = iced::widget::image::Handle::from_bytes(image_bytes);
-                self.friend_image_handles.insert(peer, Some(handle));
+                self.friend_image_handles.insert(peer, Some(handle.clone()));
                 self.enforce_profile_image_cap();
+                // Backfill existing chat entries that were pushed before the async
+                // profile image download completed.  Without this, the first message
+                // from a peer forever shows the "?" fallback because entries_push
+                // only copies avatar_handle at push time, when friend_image_handles
+                // still contains `Some(None)` (seeded by record_profile_image_ticket).
+                for entry in &mut self.entries {
+                    if entry.sender_key == Some(peer) && entry.avatar_handle.is_none() {
+                        entry.avatar_handle = Some(handle.clone());
+                        entry.bump_gen();
+                    }
+                }
                 // Trigger UI re-draw by marking friends dirty so the sidebar
                 // re-renders with the updated profile image.
                 self.mark_friends_sidebar_dirty();
+                debug!(%peer, size, "profile image loaded and cached");
                 iced::Task::none()
             }
             AppMessage::ProfileImageDownloadFailed(peer) => {
+                warn!(%peer, "profile image download failed");
                 // Download failed (e.g. peer temporarily unreachable).  Remove
                 // the cached ticket so the next periodic AboutMe re-broadcast
                 // can retry the download.  Without this, the dedup guard in
@@ -10959,6 +11058,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::ImageUploadFailed(error) => {
+                info!(%error, "image upload failed");
                 self.pending_image_upload = None;
                 self.push_system(format!("Image upload failed: {error}"));
                 iced::Task::none()
@@ -14815,6 +14915,7 @@ impl IcedChat {
             .and_then(|(fid, _)| fid.parse_public_key().ok())
     }
     fn handle_friend_event(&mut self, event: FriendEvent) {
+        info!(?event, "friend event received");
         match event {
             FriendEvent::StatusChanged { peer, status } => {
                 let fid = FriendId::from_public_key(peer);
@@ -16452,11 +16553,11 @@ impl IcedChat {
         content = content.push(Self::sidebar_collapsible_section_header(
             "REQUESTS",
             request_count,
-            3,
-            self.sidebar_section_collapsed[3],
+            4,
+            self.sidebar_section_collapsed[4],
             self.dark_mode,
         ));
-        if !self.sidebar_section_collapsed[3] {
+        if !self.sidebar_section_collapsed[4] {
             content = content.push(self.view_sidebar_requests());
         }
 
@@ -20290,11 +20391,15 @@ impl IcedChat {
             let ts_el = text(metadata).size(TYPO_XXS).color(text_muted(&theme));
 
             let mut bubble_col = Column::new()
-                .push(clickable_bubble)
-                .push(ts_el)
                 .spacing(SPACE_2)
                 .max_width(560.0)
                 .width(Length::Fill);
+            // Skip the body bubble for image-only entries (empty body + image present)
+            if entry.body.is_empty() && entry.image_handle.is_some() {
+                bubble_col = bubble_col.push(ts_el);
+            } else {
+                bubble_col = bubble_col.push(clickable_bubble).push(ts_el);
+            }
 
             // ── Link preview card ──
             if let Some(ref preview) = entry.link_preview {
@@ -20448,14 +20553,28 @@ impl IcedChat {
 
             // ── Image (cached handle — decoded once at construction) ──
             if let Some(handle) = self.image_handle_for_entry(entry) {
+                // Compute display size from original image dimensions.
+                // If the image fits within the max width, use its original size.
+                // Otherwise, scale down proportionally to fit.
+                let (orig_w, orig_h) = match (entry.image_width, entry.image_height) {
+                    (Some(w), Some(h)) if w > 0 && h > 0 => (w as f32, h as f32),
+                    _ => (IMAGE_PREVIEW_MAX_WIDTH, IMAGE_PREVIEW_MAX_HEIGHT),
+                };
+                let aspect = orig_w / orig_h;
+                let max_w = IMAGE_PREVIEW_MAX_WIDTH;
+                let (display_w, display_h) = if orig_w <= max_w {
+                    (orig_w, orig_h)
+                } else {
+                    (max_w, (max_w / aspect).round().max(50.0))
+                };
                 let img = iced::widget::image(handle)
-                    .content_fit(iced::ContentFit::Contain)
-                    .width(Length::Fixed(IMAGE_PREVIEW_MAX_WIDTH))
-                    .height(Length::Fixed(IMAGE_PREVIEW_MAX_HEIGHT));
+                    .content_fit(iced::ContentFit::ScaleDown)
+                    .width(Length::Fixed(display_w))
+                    .height(Length::Fixed(display_h));
                 // Keep the preview edge consistent.
                 let framed = container(img)
-                    .width(Length::Fixed(IMAGE_PREVIEW_MAX_WIDTH))
-                    .height(Length::Fixed(IMAGE_PREVIEW_MAX_HEIGHT))
+                    .width(Length::Fixed(display_w))
+                    .height(Length::Fixed(display_h))
                     .style(|t| iced::widget::container::Style {
                         border: iced::Border {
                             color: border_muted(t),
@@ -23733,6 +23852,8 @@ mod tests {
             link_preview_loading: false,
             link_preview_error: false,
             parsed_segments: None,
+            image_width: None,
+            image_height: None,
         };
         assert_eq!(e.body, "hello");
         assert_eq!(e.label, "peer");
@@ -24161,6 +24282,41 @@ mod tests {
         let dep = app.sidebar_requests_dependency();
         assert_eq!(dep.incoming.len(), 1);
         assert_eq!(dep.incoming[0].requester, peer_public);
+    }
+
+    #[test]
+    fn sidebar_requests_dependency_includes_group_invites() {
+        let (_runtime, mut app, local_public, peer_public) = build_join_request_test_app();
+        // Give the app storage so group invite persistence works
+        let storage = boru_core::storage::Storage::memory().expect("test storage");
+        app.storage = Some(storage);
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let expire_ms = now_ms + 7 * 24 * 60 * 60 * 1000;
+        let invite_id = rand::random::<[u8; 32]>();
+        let group_id = rand::random::<[u8; 32]>();
+
+        let invite_row = boru_core::storage::GroupInviteRow {
+            invite_id,
+            group_id,
+            inviter_public_key: peer_public.to_vec(),
+            recipient_public_key: local_public.to_vec(),
+            epoch: 1,
+            status: "Pending".into(),
+            created_at_ms: now_ms,
+            expires_at_ms: expire_ms,
+            ticket: String::new(),
+        };
+        app.storage.as_ref().unwrap().create_group_invite(&invite_row).unwrap();
+
+        let dep = app.sidebar_requests_dependency();
+        assert_eq!(dep.group_invites.len(), 1, "should have one group invite");
+        assert_eq!(dep.group_invites[0].invite_id, invite_id.to_vec());
+        // The inviter label should resolve (even without a name saved, it shows short key)
+        assert!(!dep.group_invites[0].inviter_label.is_empty());
     }
 
     /// Test that the button text for each state can be read from the

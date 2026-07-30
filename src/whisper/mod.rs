@@ -550,6 +550,7 @@ async fn get_or_connect(
     {
         let guard = connected.lock().await;
         if let Some(conn) = guard.get(peer) {
+            debug!(recipient = %peer.fmt_short(), "whisper already connected");
             return Ok(conn.clone());
         }
     }
@@ -559,6 +560,11 @@ async fn get_or_connect(
         Some(info) => {
             let transport_addrs: std::collections::BTreeSet<_> =
                 info.addrs().map(|a| a.addr().clone()).collect();
+            debug!(
+                peer = %peer.fmt_short(),
+                addrs = transport_addrs.len(),
+                "whisper discovered peer addresses"
+            );
             if transport_addrs.is_empty() {
                 // remote_info has no addresses — fall back to ID-only resolution
                 // which triggers DHT/mDNS/DNS lookup during connect().
@@ -664,6 +670,13 @@ async fn send_text_message(
     connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
     msg_tx: &mpsc::Sender<ConnectionEvent>,
 ) -> Result<()> {
+    let payload_size = text.len();
+    debug!(
+        recipient = %peer.fmt_short(),
+        payload_size,
+        msg_type = "text",
+        "whisper send_text_message"
+    );
     // Create a dummy event_tx for get_or_connect to borrow.
     let (dummy_tx, _) = mpsc::channel(1);
 
@@ -685,6 +698,12 @@ async fn send_control_message(
     connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
     msg_tx: &mpsc::Sender<ConnectionEvent>,
 ) -> Result<()> {
+    debug!(
+        peer = %peer.fmt_short(),
+        payload_len = payload.len(),
+        msg_type = "control",
+        "whisper send_control_message"
+    );
     let (dummy_tx, _) = mpsc::channel(1);
     let conn = get_or_connect(endpoint, peer, connected, &dummy_tx, msg_tx).await?;
     write_framed_message(
@@ -703,6 +722,11 @@ async fn send_mailbox_envelope(
     connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
     msg_tx: &mpsc::Sender<ConnectionEvent>,
 ) -> Result<()> {
+    debug!(
+        recipient = %peer.fmt_short(),
+        msg_type = "mailbox_envelope",
+        "whisper send_mailbox_envelope"
+    );
     let (dummy_tx, _) = mpsc::channel(1);
     let conn = get_or_connect(endpoint, peer, connected, &dummy_tx, msg_tx).await?;
     write_framed_message(&conn, &WhisperWireMessage::MailboxEnvelope { envelope }).await
@@ -715,6 +739,11 @@ async fn send_mailbox_ack(
     connected: &Arc<Mutex<HashMap<PublicKey, Connection>>>,
     msg_tx: &mpsc::Sender<ConnectionEvent>,
 ) -> Result<()> {
+    debug!(
+        recipient = %peer.fmt_short(),
+        msg_type = "mailbox_ack",
+        "whisper send_mailbox_ack"
+    );
     let (dummy_tx, _) = mpsc::channel(1);
     let conn = get_or_connect(endpoint, peer, connected, &dummy_tx, msg_tx).await?;
     write_framed_message(&conn, &WhisperWireMessage::MailboxAck { ack }).await
@@ -754,6 +783,12 @@ async fn read_connection_loop(
                     warn!(peer = %remote_id.fmt_short(), "whisper read payload failed: {e}");
                     break;
                 }
+
+                debug!(
+                    peer = %remote_id.fmt_short(),
+                    payload_len,
+                    "whisper message received from peer"
+                );
 
                 if msg_tx
                     .send(ConnectionEvent::Message {

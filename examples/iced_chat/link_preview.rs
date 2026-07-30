@@ -852,6 +852,7 @@ mod tests {
             title: Some("Example".to_string()),
             description: None,
             image_url: None,
+            image_bytes: None,
         });
         cache.insert("https://example.com", result.clone());
         let cached = cache.get("https://example.com");
@@ -927,6 +928,7 @@ mod tests {
                     title: None,
                     description: None,
                     image_url: None,
+                    image_bytes: None,
                 }),
             );
         }
@@ -956,6 +958,7 @@ mod tests {
                 title: Some("OK".to_string()),
                 description: None,
                 image_url: None,
+                image_bytes: None,
             }),
         );
         // Both should be present
