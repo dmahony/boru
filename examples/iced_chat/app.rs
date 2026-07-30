@@ -11559,7 +11559,22 @@ impl IcedChat {
                             let invite_text = format!(
                                 "INVITE:{invite_id_hex}:{inviter_pk}:{group_id_hex}:{group_name}:{ticket_str}"
                             );
-                            let _ = whisper_handle.send_dm(*peer_key, invite_text).await;
+                            match whisper_handle.send_dm(*peer_key, invite_text.clone()).await {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        ?peer_key,
+                                        invite_len = invite_text.len(),
+                                        "whisper DM sent for group invite"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        ?peer_key,
+                                        error = %e,
+                                        "whisper DM failed for group invite"
+                                    );
+                                }
+                            }
                         }
 
                         let count = selected.len();
