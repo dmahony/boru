@@ -8521,6 +8521,10 @@ impl IcedChat {
                 // Save the current room state before switching to the new group
                 self.save_room_to_history();
                 self.entries.clear();
+                self.event_id_to_index.clear();
+                self.message_hash_to_index.clear();
+                self.self_sent_events.clear();
+                self.history_saved_count = 0;
                 self.composer_text.clear();
                 self.pending_file = None;
                 self.pending_image.clear();
