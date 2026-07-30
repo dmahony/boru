@@ -15252,7 +15252,12 @@ impl IcedChat {
     /// Call this when a sidebar revision counter changes so the next
     /// `view_sidebar()` render uses up-to-date cached values.
     fn refresh_sidebar_counts(&mut self) {
-        self.cached_chat_count = self.conversation_store.len();
+        self.cached_chat_count = self
+            .conversation_store
+            .active_iter()
+            .into_iter()
+            .filter(|e| !matches!(e.kind, ConversationKind::Group))
+            .count();
         self.cached_group_count = self
             .conversation_store
             .active_iter()
@@ -16457,6 +16462,7 @@ impl IcedChat {
             .conversation_store
             .active_iter()
             .into_iter()
+            .filter(|entry| !matches!(entry.kind, boru_core::conversations::ConversationKind::Group))
             .map(|entry| {
                 let peer_pk = if entry.peer_id.is_empty() {
                     None
