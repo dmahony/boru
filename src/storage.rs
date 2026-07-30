@@ -1318,6 +1318,21 @@ impl Storage {
     /// Insert an invitation idempotently.
     pub fn create_group_invite(&self, invite: &GroupInviteRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        // Ensure the groups row exists so the foreign-key constraint on
+        // group_invites.group_id is satisfied.  The invitee may not yet
+        // have a local groups row.  Use INSERT OR IGNORE — if the row
+        // already exists (e.g. inviter side), this is a no-op.
+        conn.execute(
+            "INSERT OR IGNORE INTO groups(group_id,name,description,owner_public_key,current_epoch,created_at_ms,updated_at_ms) VALUES (?1,?2,'',?3,?4,?5,?5)",
+            params![
+                invite.group_id.as_slice(),
+                "",                          // name filled in later when joined
+                invite.inviter_public_key,   // proxy for owner
+                invite.epoch as i64,
+                invite.created_at_ms as i64,
+            ],
+        )
+        .std_context("ensure groups row for invite")?;
         conn.execute("INSERT OR IGNORE INTO group_invites(invite_id,group_id,inviter_public_key,recipient_public_key,epoch,status,created_at_ms,expires_at_ms,ticket) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![invite.invite_id.as_slice(),invite.group_id.as_slice(),invite.inviter_public_key,invite.recipient_public_key,invite.epoch as i64,invite.status,invite.created_at_ms as i64,invite.expires_at_ms as i64,invite.ticket]).std_context("create group invite")?;
         Ok(())
     }
