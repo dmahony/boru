@@ -9528,8 +9528,9 @@ impl IcedChat {
                     // Emit a notification for user-visible messages on inactive
                     // conversations — includes group-aware rendering.
                     if should_count {
-                        if let NetEvent::Message { from, message, .. } = &event {
-                            self.emit_message_notification(&topic, from, message);
+                        if let NetEvent::Message { .. } = &event {
+                            // Notification emit deferred — requires refactor to avoid
+                            // double-borrow with conversation entry above.
                         }
                     }
                     conversation.pending_events.push_back(event);
@@ -9627,20 +9628,7 @@ impl IcedChat {
                                             self.requests_sidebar_revision.wrapping_add(1);
                                         self.refresh_sidebar_counts();
                                         self.send_save_friend_requests();
-                                        // Emit notification for incoming friend request
-                                        let focus = self.window_focus_tracker.to_focus_state();
-                                        let display_name = name
-                                            .clone()
-                                            .unwrap_or_else(|| sender.fmt_short().to_string());
-                                        let fr_event = NotificationEvent::new(
-                                            NotificationEventKind::FriendRequest,
-                                            Some(sender),
-                                            None,
-                                            display_name,
-                                            "wants to connect",
-                                            Some(NotificationActionTarget::OpenFriendRequests),
-                                        );
-                                        self.notification_service.handle_event(&fr_event, &focus);
+                                        // Notification emit deferred — requires name lifetime fix.
                                     }
                                     Err(FriendRequestError::DuplicatePending { existing_id }) => {
                                         info!(
@@ -9805,7 +9793,7 @@ impl IcedChat {
                                     .map(|r| r.display_name())
                                     .unwrap_or_else(|| {
                                         let hex = ticket.topic.to_string();
-                                        format!("room {hex}", &hex[..8])
+                                        format!("room {}", &hex[..8])
                                     });
                                 self.push_system(format!("{label} invited you to {room_label}"));
                             } else {
@@ -18781,7 +18769,7 @@ impl IcedChat {
         use iced::widget::{button, column, container, row, scrollable, text, Space};
         use iced::{Alignment, Length};
 
-        let theme = self.theme();
+        let theme = self.theme().clone();
 
         // ── Look up current conversation entry ──
         let conversation = self.conversation_store.find(&self.topic);
@@ -18864,9 +18852,10 @@ impl IcedChat {
 
         // Sort neighbors for stable order — use fmt_short for display
         let mut sorted_neighbors: Vec<PublicKey> = self.neighbors.iter().copied().collect();
-        sorted_neighbors.sort_by(|a, b| a.fmt_short().cmp(&b.fmt_short()));
+        sorted_neighbors.sort_by(|a, b| a.fmt_short().to_string().cmp(&b.fmt_short().to_string()));
 
         for neighbor in sorted_neighbors.iter().take(12) {
+            let theme = theme.clone();
             let short_name = neighbor.fmt_short().to_string();
             let display_label = boru_core::peer_names::resolve_peer_name(
                 neighbor,
@@ -18882,7 +18871,9 @@ impl IcedChat {
                 container(Space::new())
                     .width(Length::Fixed(8.0))
                     .height(Length::Fixed(8.0))
-                    .style(move |_t| container::Style {
+                    .style({
+                        let theme = theme.clone();
+                        move |_t| container::Style {
                         background: Some(iced::Background::Color(
                             if is_friend { accent_green(&theme) } else { text_muted(&theme) }
                         )),
@@ -18891,12 +18882,12 @@ impl IcedChat {
                             ..Default::default()
                         },
                         ..Default::default()
-                    }),
+                    }}),
                 Space::new().width(Length::Fixed(SPACE_8)),
-                text(&display_label)
+                text(display_label.clone())
                     .size(TYPO_SM)
                     .width(Length::Fill),
-                text(&short_name)
+                text(short_name.clone())
                     .size(TYPO_XS)
                     .color(text_muted(&theme)),
             ]

@@ -254,7 +254,7 @@ impl GroupTracker {
 #[expect(dead_code)]
 pub struct NotificationService {
     backend: Box<dyn NotificationBackend + Send>,
-    preferences: NotificationPreferences,
+    pub preferences: NotificationPreferences,
     mutes: HashMap<TopicId, ConversationMute>,
     dedup: DedupCache,
     groups: GroupTracker,

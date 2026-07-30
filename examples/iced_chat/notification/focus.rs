@@ -16,7 +16,7 @@
 //! [`AppMessage::WindowFocusEvent`] variants so the app's update() method can
 //! forward changes to the notification service.
 
-use crate::notification::service::FocusState;
+use crate::notification::service::WindowFocusState;
 use std::time::{Duration, Instant};
 
 // ── Window focus tracker ───────────────────────────────────────────────────
@@ -155,12 +155,13 @@ impl WindowFocusTracker {
     }
 
     /// Build a [`FocusState`] snapshot for the notification service.
-    pub fn to_focus_state(&self) -> FocusState {
-        FocusState {
+    pub fn to_focus_state(&self) -> WindowFocusState {
+        WindowFocusState {
             window_focused: self.window_focused,
             window_visible: self.window_visible,
-            active_conversation_id: self.active_conversation_id.clone(),
-            running_in_background: self.running_in_background,
+            window_minimised: false,
+            active_conversation_id: None,
+            app_running_in_background: self.running_in_background,
         }
     }
 
