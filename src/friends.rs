@@ -1,11 +1,8 @@
 //! Durable friends list storage for Boru.
 //!
-//! **DEPRECATED** — friend relationships are stored in the SQLite database
-//! via the unified storage layer.  This JSON file is retained only for
-//! backward-compatible reads during a transition period.
-//!
 //! This module owns the on-disk `friends.json` file that lives beside the
-//! persistent `secret_key.txt` identity file.
+//! persistent `secret_key.txt` identity file.  Friend relationships are
+//! persisted as JSON using [`atomic_write_json`] for crash-safe atomic writes.
 
 use std::{
     collections::BTreeMap,
@@ -15,13 +12,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::chat_core::atomic_write::atomic_write_json;
 use crate::chat_core::Ticket;
 use crate::mailbox::MailboxPublicKey;
 use crate::proto::TopicId;
 use iroh::{EndpointAddr, PublicKey};
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Current schema version.
 ///
@@ -429,20 +427,18 @@ impl FriendsStore {
 
     /// Persist the store atomically to `friends.json`.
     ///
-    /// **DEPRECATED:** friend data is now in the SQLite unified storage.
-    /// This method logs a warning and returns the legacy path without
-    /// writing to disk.
-    #[deprecated(
-        since = "0.21.0",
-        note = "SQLite friend_relationships table replaces friends.json writes"
-    )]
+    /// Uses [`atomic_write_json`] for crash-safe writes: serialise →
+    /// round-trip validation → fsync → atomic rename.
     pub fn save(&self) -> Result<PathBuf> {
+        let data_dir = self.data_dir();
+        if data_dir.as_os_str().is_empty() {
+            return Err(n0_error::anyerr!(
+                "friends store has no data directory bound to it",
+            ));
+        }
         let path = self.file_path();
-        warn!(
-            path = %path.display(),
-            "save() called on deprecated JSON friends store — no data written; \
-             use SQLite friend_relationships table instead"
-        );
+        atomic_write_json(&path, self, "friends store")?;
+        debug!(path = %path.display(), "friends store saved");
         Ok(path)
     }
 
@@ -598,16 +594,17 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips() {
-        // ⚠ save() deprecated — testing in-memory store instead.
         let dir = temp_dir("roundtrip");
         let mut store = FriendsStore::empty_at(&dir);
         let pk = iroh::SecretKey::generate().public();
         let id = FriendId::from_public_key(pk);
         store.set_label(id.clone(), "Bob");
         store.mark_online(id.clone());
+        store.save().expect("save");
 
-        assert_eq!(store.len(), 1);
-        let record = store.get(&id).expect("friend exists");
+        let reloaded = FriendsStore::load(&dir).expect("load");
+        assert_eq!(reloaded.len(), 1);
+        let record = reloaded.get(&id).expect("friend exists");
         assert_eq!(record.label.as_deref(), Some("Bob"));
         assert!(record.status.online);
         assert!(record.status.last_seen_at_unix_ms.is_some());
@@ -647,7 +644,6 @@ mod tests {
 
     #[test]
     fn save_then_load_preserves_address_and_room_data() {
-        // ⚠ save() deprecated — testing in-memory store instead.
         let dir = temp_dir("rich-roundtrip");
         let mut store = FriendsStore::empty_at(&dir);
         let pk = iroh::SecretKey::generate().public();
@@ -664,14 +660,16 @@ mod tests {
         store
             .ensure_friend(id.clone())
             .record_room(topic, ticket.clone());
-        let record = store.get(&id).expect("friend");
+        store.save().expect("save");
+
+        let reloaded = FriendsStore::load(&dir).expect("load");
+        let record = reloaded.get(&id).expect("friend");
         assert_eq!(record.known_addrs, ticket.peers);
         assert_eq!(record.rooms.get(&topic), Some(&ticket));
     }
 
     #[test]
     fn save_then_load_preserves_direct_conversation() {
-        // ⚠ save() deprecated — testing in-memory store instead.
         let dir = temp_dir("direct-conversation-roundtrip");
         let mut store = FriendsStore::empty_at(&dir);
         let pk = iroh::SecretKey::generate().public();
@@ -680,8 +678,10 @@ mod tests {
         store
             .ensure_friend(id.clone())
             .set_direct_conversation(topic, DirectConversationState::Active);
+        store.save().expect("save");
 
-        let conversation = store
+        let reloaded = FriendsStore::load(&dir).expect("load");
+        let conversation = reloaded
             .get(&id)
             .and_then(FriendRecord::direct_conversation)
             .expect("direct conversation");

@@ -4516,8 +4516,16 @@ impl IcedChat {
         // Legacy no-op — chat history is in SQLite.
     }
 
-    /// Legacy no-op — friend data is in SQLite.
-    fn send_save_friends(&self) {}
+    /// Persist the friends store in a background thread to avoid blocking
+    /// the GUI event loop.  Uses [`atomic_write_json`] for crash-safe writes.
+    fn send_save_friends(&self) {
+        let store = self.friends.clone();
+        std::thread::spawn(move || {
+            if let Err(err) = store.save() {
+                tracing::warn!("failed to save friends store: {err}");
+            }
+        });
+    }
 
     /// Save AppSettings directly (not a legacy JSON store — still active).
     #[expect(dead_code)]
@@ -4535,8 +4543,15 @@ impl IcedChat {
     /// Legacy no-op — profile data is in SQLite.
     fn send_save_profile(&self) {}
 
-    /// Legacy no-op — friend request data is in SQLite.
-    fn send_save_friend_requests(&self) {}
+    /// Persist the friend request store in a background thread.
+    fn send_save_friend_requests(&self) {
+        let store = self.friend_request_store.clone();
+        std::thread::spawn(move || {
+            if let Err(err) = store.save() {
+                tracing::warn!("failed to save friend request store: {err}");
+            }
+        });
+    }
 
     /// Keep the virtualized chat log anchored to the latest entry when the
     /// user is already following the conversation.  The custom windowed
