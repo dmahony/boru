@@ -1867,6 +1867,8 @@ pub enum Screen {
     FriendProfile(PublicKey),
     /// Public room directory — browse advertised rooms from the current relay.
     Discover,
+    /// Group list — shows known groups and a create-group button.
+    Groups,
 }
 
 // ── Per-conversation runtime state ─────────────────────────────────────
@@ -2024,8 +2026,8 @@ pub struct IcedChat {
     /// Currently selected chat list topic, used by cached sidebar rows to
     /// update selection styling without rebuilding row contents.
     sidebar_selected_topic: Rc<Cell<Option<TopicId>>>,
-    /// Track sidebar section collapsed state: [chats, friends, discover, requests, public_rooms]
-    sidebar_section_collapsed: [bool; 5],
+    /// Track sidebar section collapsed state: [chats, groups, friends, discover, requests, public_rooms]
+    sidebar_section_collapsed: [bool; 6],
 
     // ── Chat state (active room — display cache) ──
     /// Active conversation topic (display cache).
@@ -2208,6 +2210,7 @@ pub struct IcedChat {
 
     // ── Cached sidebar counts (recalculated on revision change) ──
     cached_chat_count: usize,
+    cached_group_count: usize,
     cached_friend_count: usize,
     cached_discover_count: usize,
     cached_public_room_count: usize,
@@ -2859,6 +2862,8 @@ pub enum AppMessage {
     JoinTicketInputChanged(String),
     NewChatCreated,
     RoomSelected(TopicId),
+    /// Open a group chat from the groups sidebar list.
+    OpenGroupChat(TopicId),
 
     // ── Chat ──
     InputChanged(String),
@@ -4226,6 +4231,7 @@ impl IcedChat {
             public_rooms_sidebar_revision: 0,
             requests_sidebar_revision: 0,
             cached_chat_count: 0,   // Recalculated on first ConnMonitorTick
+            cached_group_count: 0,
             cached_friend_count: 0, // Will be set below after friends init
             cached_discover_count: 0,
             cached_public_room_count: 0,
@@ -4241,7 +4247,7 @@ impl IcedChat {
             cached_requests_revision: Cell::new(0),
             cached_requests_dep: std::cell::RefCell::new(None),
             sidebar_selected_topic: Rc::new(Cell::new(None)),
-            sidebar_section_collapsed: [false; 5],
+            sidebar_section_collapsed: [false; 6],
             initial_bootstrap_peers: initial_bootstrap,
             return_to_chat_list_after_open,
             whisper_handle,
@@ -5414,6 +5420,7 @@ impl IcedChat {
             AppMessage::JoinTicketInputChanged(_) => "JoinTicketInputChanged",
             AppMessage::NewChatCreated => "NewChatCreated",
             AppMessage::RoomSelected(_) => "RoomSelected",
+            AppMessage::OpenGroupChat(_) => "OpenGroupChat",
             AppMessage::InputChanged(_) => "InputChanged",
             AppMessage::SendPressed => "SendPressed",
             AppMessage::AttachPressed => "AttachPressed",
@@ -6049,6 +6056,7 @@ impl IcedChat {
             Screen::Settings => "Settings open".to_string(),
             Screen::ChatList => "Chat list open".to_string(),
             Screen::Discover => "Discover".to_string(),
+            Screen::Groups => "Groups".to_string(),
         };
 
         let mesh_state = match &self.mesh_health {
@@ -6279,6 +6287,7 @@ impl IcedChat {
             Screen::PeerCatalogue(_) => ("PeerCatalogue", None),
             Screen::FriendProfile(_) => ("FriendProfile", None),
             Screen::Discover => ("Discover", None),
+            Screen::Groups => ("Groups", None),
         };
         let snapshot = IcedStateSnapshot {
             node_id: self.local_public.to_string(),
@@ -8483,6 +8492,7 @@ impl IcedChat {
             }
 
             AppMessage::RoomSelected(topic) => iced::Task::done(AppMessage::OpenRoom(topic)),
+            AppMessage::OpenGroupChat(topic) => iced::Task::done(AppMessage::OpenRoom(topic)),
 
             // ── Group Creation ───────────────────────────────────────
             AppMessage::GroupCreated {
@@ -15152,6 +15162,12 @@ impl IcedChat {
     /// `view_sidebar()` render uses up-to-date cached values.
     fn refresh_sidebar_counts(&mut self) {
         self.cached_chat_count = self.conversation_store.len();
+        self.cached_group_count = self
+            .conversation_store
+            .active_iter()
+            .into_iter()
+            .filter(|e| matches!(e.kind, ConversationKind::Group))
+            .count();
         self.cached_friend_count = self
             .friends
             .iter()
@@ -15476,6 +15492,7 @@ impl IcedChat {
             Screen::PeerCatalogue(peer) => self.view_peer_catalogue(*peer),
             Screen::FriendProfile(peer) => self.view_friend_profile(*peer),
             Screen::Discover => self.view_discover(),
+            Screen::Groups => self.view_sidebar_groups(),
         };
 
         let content = row![
@@ -16214,6 +16231,7 @@ impl IcedChat {
         // Use cached counts (recomputed via refresh_sidebar_counts when
         // the corresponding revision counter changes).
         let chat_count = self.cached_chat_count;
+        let group_count = self.cached_group_count;
         let friend_count = self.cached_friend_count;
         let discover_count = self.cached_discover_count;
         let public_room_count = self.cached_public_room_count;
@@ -16245,15 +16263,27 @@ impl IcedChat {
             content = content.push(self.view_sidebar_chats());
         }
 
-        // FRIENDS section
+        // GROUPS section
         content = content.push(Self::sidebar_collapsible_section_header(
-            "FRIENDS",
-            friend_count,
+            "GROUPS",
+            group_count,
             1,
             self.sidebar_section_collapsed[1],
             self.dark_mode,
         ));
         if !self.sidebar_section_collapsed[1] {
+            content = content.push(self.view_sidebar_groups());
+        }
+
+        // FRIENDS section
+        content = content.push(Self::sidebar_collapsible_section_header(
+            "FRIENDS",
+            friend_count,
+            2,
+            self.sidebar_section_collapsed[2],
+            self.dark_mode,
+        ));
+        if !self.sidebar_section_collapsed[2] {
             content = content.push(self.view_sidebar_friends());
         }
 
@@ -16261,11 +16291,11 @@ impl IcedChat {
         content = content.push(Self::sidebar_collapsible_section_header(
             "DISCOVER",
             discover_count,
-            2,
-            self.sidebar_section_collapsed[2],
+            3,
+            self.sidebar_section_collapsed[3],
             self.dark_mode,
         ));
-        if !self.sidebar_section_collapsed[2] {
+        if !self.sidebar_section_collapsed[3] {
             content = content.push(self.view_sidebar_discovered_peers());
         }
 
@@ -16273,11 +16303,11 @@ impl IcedChat {
         content = content.push(Self::sidebar_collapsible_section_header(
             "PUBLIC ROOMS",
             public_room_count,
-            4,
-            self.sidebar_section_collapsed[4],
+            5,
+            self.sidebar_section_collapsed[5],
             self.dark_mode,
         ));
-        if !self.sidebar_section_collapsed[4] {
+        if !self.sidebar_section_collapsed[5] {
             content = content.push(self.view_sidebar_public_rooms());
         }
 
@@ -16503,6 +16533,102 @@ impl IcedChat {
                 "No conversations yet",
                 "Start a chat with one of your friends.",
                 Some(("Start Chat", AppMessage::CreateNewRoom)),
+            ));
+        }
+
+        section.into()
+    }
+
+    fn view_sidebar_groups(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, text, Column, Row, Space};
+        use iced::{Alignment, Length};
+
+        let dark_mode = self.dark_mode;
+        let theme = Self::theme_from_dark(dark_mode);
+
+        // Collect group data into owned tuples so we can return an Element
+        // without borrowing local state.
+        let group_data: Vec<(TopicId, String)> = self
+            .conversation_store
+            .active_iter()
+            .into_iter()
+            .filter(|e| matches!(e.kind, ConversationKind::Group))
+            .map(|e| (e.topic, e.display_name().to_string()))
+            .collect();
+
+        let mut section = Column::new().spacing(SPACE_2);
+
+        // Create Group button at the top
+        let create_btn = button(
+            Row::new()
+                .push(icon_svg(ICON_PLUS, TYPO_SM))
+                .push(text(" Create Group").size(TYPO_SM))
+                .spacing(SPACE_6)
+                .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::ShowCreateGroupDialog)
+        .width(Length::Fill)
+        .padding([SPACE_6, SPACE_12])
+        .style(BUTTON_GHOST_BG);
+        section = section.push(create_btn);
+
+        // Group list — build all rows in a separate vec, then extend
+        let mut rows: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+        for (topic, name) in &group_data {
+            let theme_clone = theme.clone();
+            let initial = name
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "G".to_string());
+
+            let row_btn = button(
+                Row::new()
+                    .push(
+                        container(text(initial).size(TYPO_SM).color(crate::design_tokens::text(&theme)))
+                            .width(24)
+                            .height(24)
+                            .align_x(Alignment::Center)
+                            .align_y(Alignment::Center)
+                            .style(move |t: &iced::Theme| iced::widget::container::Style {
+                                background: Some(iced::Background::Color(bg_hover(t))),
+                                border: iced::Border {
+                                    radius: 12.0.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }),
+                    )
+                    .push(text(name.clone()).size(TYPO_SM).width(Length::Fill))
+                    .spacing(SPACE_8)
+                    .align_y(Alignment::Center),
+            )
+            .on_press(AppMessage::OpenGroupChat(*topic))
+            .width(Length::Fill)
+            .padding([SPACE_6, SPACE_12])
+            .style(move |t, status| iced::widget::button::Style {
+                background: matches!(status, iced::widget::button::Status::Hovered)
+                    .then(|| iced::Background::Color(bg_hover(t))),
+                border: iced::Border {
+                    radius: SPACE_4.into(),
+                    ..Default::default()
+                },
+                text_color: crate::design_tokens::text(&theme_clone),
+                ..Default::default()
+            });
+            rows.push(row_btn.into());
+        }
+        for row in rows {
+            section = section.push(row);
+        }
+
+        if group_data.is_empty() {
+            section = section.push(Self::sidebar_empty_state_block(
+                &theme,
+                ICON_CHAT,
+                "No groups yet",
+                "Create a group to chat with multiple friends.",
+                None::<(&str, AppMessage)>,
             ));
         }
 
