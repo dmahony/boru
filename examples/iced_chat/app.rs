@@ -8518,6 +8518,13 @@ impl IcedChat {
                 description,
                 members: friend_keys,
             } => {
+                // Save the current room state before switching to the new group
+                self.save_room_to_history();
+                self.entries.clear();
+                self.composer_text.clear();
+                self.pending_file = None;
+                self.pending_image.clear();
+
                 // Apply the gossip sender for the new group room
                 self.sender = Some(*sender);
                 self.room_loading = false;
