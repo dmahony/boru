@@ -1438,11 +1438,7 @@ pub fn remember_signed_message(
 }
 
 /// Take the raw signed payload for a message, if it was observed locally.
-pub fn take_signed_message(
-    from: PublicKey,
-    hash: MessageHash,
-    sent_at: u64,
-) -> Option<Vec<u8>> {
+pub fn take_signed_message(from: PublicKey, hash: MessageHash, sent_at: u64) -> Option<Vec<u8>> {
     SIGNED_MESSAGE_CACHE
         .lock()
         .ok()
@@ -1453,11 +1449,7 @@ pub fn take_signed_message(
 /// Frontends use this while handling a decoded event to persist authenticated
 /// bytes in durable history; the backfill responder uses `take_signed_message`
 /// when it needs ownership of the payload.
-pub fn get_signed_message(
-    from: PublicKey,
-    hash: MessageHash,
-    sent_at: u64,
-) -> Option<Vec<u8>> {
+pub fn get_signed_message(from: PublicKey, hash: MessageHash, sent_at: u64) -> Option<Vec<u8>> {
     SIGNED_MESSAGE_CACHE
         .lock()
         .ok()

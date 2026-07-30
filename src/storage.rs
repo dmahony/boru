@@ -1136,40 +1136,123 @@ impl Storage {
 
     /// List groups, optionally including archived groups.
     pub fn list_groups(&self, include_archived: bool) -> Result<Vec<GroupRow>> {
-        let conn=self.conn.lock().unwrap(); let mut st=conn.prepare("SELECT group_id,name,description,owner_public_key,current_epoch,created_at_ms,updated_at_ms,archived FROM groups WHERE (?1 OR archived=0) ORDER BY updated_at_ms DESC").std_context("prepare group query")?;
-        let rows=st.query_map([include_archived as i64], |r| { let b:Vec<u8>=r.get(0)?; let mut id=[0u8;32]; id.copy_from_slice(&b); Ok(GroupRow{group_id:id,name:r.get(1)?,description:r.get(2)?,owner_public_key:r.get(3)?,current_epoch:r.get::<_,i64>(4)? as u64,created_at_ms:r.get::<_,i64>(5)? as u64,updated_at_ms:r.get::<_,i64>(6)? as u64,archived:r.get::<_,i64>(7)? != 0}) }).std_context("query group rows")?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>().std_context("collect group rows")?)
+        let conn = self.conn.lock().unwrap();
+        let mut st=conn.prepare("SELECT group_id,name,description,owner_public_key,current_epoch,created_at_ms,updated_at_ms,archived FROM groups WHERE (?1 OR archived=0) ORDER BY updated_at_ms DESC").std_context("prepare group query")?;
+        let rows = st
+            .query_map([include_archived as i64], |r| {
+                let b: Vec<u8> = r.get(0)?;
+                let mut id = [0u8; 32];
+                id.copy_from_slice(&b);
+                Ok(GroupRow {
+                    group_id: id,
+                    name: r.get(1)?,
+                    description: r.get(2)?,
+                    owner_public_key: r.get(3)?,
+                    current_epoch: r.get::<_, i64>(4)? as u64,
+                    created_at_ms: r.get::<_, i64>(5)? as u64,
+                    updated_at_ms: r.get::<_, i64>(6)? as u64,
+                    archived: r.get::<_, i64>(7)? != 0,
+                })
+            })
+            .std_context("query group rows")?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .std_context("collect group rows")?)
     }
 
     /// Update group display metadata and archive state.
-    pub fn update_group_metadata(&self, group_id: &[u8;32], name: &str, description: &str, updated_at_ms: u64, archived: bool) -> Result<bool> {
-        let conn=self.conn.lock().unwrap(); Ok(conn.execute("UPDATE groups SET name=?1,description=?2,updated_at_ms=?3,archived=?4 WHERE group_id=?5",params![name,description,updated_at_ms as i64,archived as i64,group_id.as_slice()]).std_context("update group metadata")? != 0)
+    pub fn update_group_metadata(
+        &self,
+        group_id: &[u8; 32],
+        name: &str,
+        description: &str,
+        updated_at_ms: u64,
+        archived: bool,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("UPDATE groups SET name=?1,description=?2,updated_at_ms=?3,archived=?4 WHERE group_id=?5",params![name,description,updated_at_ms as i64,archived as i64,group_id.as_slice()]).std_context("update group metadata")? != 0)
     }
 
     /// Insert or replace a membership row (safe for retries).
     pub fn add_group_member(&self, member: &GroupMemberRow) -> Result<()> {
-        let conn=self.conn.lock().unwrap(); conn.execute("INSERT INTO group_members (group_id,public_key,role,joined_at_ms,invited_by,epoch_joined,state) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(group_id,public_key) DO UPDATE SET role=excluded.role,invited_by=excluded.invited_by,epoch_joined=excluded.epoch_joined,state=excluded.state",params![member.group_id.as_slice(),member.public_key,member.role,member.joined_at_ms as i64,member.invited_by,member.epoch_joined as i64,member.state]).std_context("add group member")?; Ok(())
+        let conn = self.conn.lock().unwrap();
+        conn.execute("INSERT INTO group_members (group_id,public_key,role,joined_at_ms,invited_by,epoch_joined,state) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(group_id,public_key) DO UPDATE SET role=excluded.role,invited_by=excluded.invited_by,epoch_joined=excluded.epoch_joined,state=excluded.state",params![member.group_id.as_slice(),member.public_key,member.role,member.joined_at_ms as i64,member.invited_by,member.epoch_joined as i64,member.state]).std_context("add group member")?;
+        Ok(())
     }
 
     /// Update an existing member's role/state.
-    pub fn update_group_member(&self, group_id:&[u8;32], public_key:&[u8], role: &str, state:&str) -> Result<bool> {
-        let conn=self.conn.lock().unwrap(); Ok(conn.execute("UPDATE group_members SET role=?1,state=?2 WHERE group_id=?3 AND public_key=?4",params![role,state,group_id.as_slice(),public_key]).std_context("update group member")? != 0)
+    pub fn update_group_member(
+        &self,
+        group_id: &[u8; 32],
+        public_key: &[u8],
+        role: &str,
+        state: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .execute(
+                "UPDATE group_members SET role=?1,state=?2 WHERE group_id=?3 AND public_key=?4",
+                params![role, state, group_id.as_slice(), public_key],
+            )
+            .std_context("update group member")?
+            != 0)
     }
 
     /// Mark a member as left/removed without deleting the audit row.
-    pub fn remove_group_member(&self, group_id:&[u8;32], public_key:&[u8], state:&str) -> Result<bool> { let conn=self.conn.lock().unwrap(); Ok(conn.execute("UPDATE group_members SET state=?1 WHERE group_id=?2 AND public_key=?3", params![state,group_id.as_slice(),public_key]).std_context("remove group member")? != 0) }
+    pub fn remove_group_member(
+        &self,
+        group_id: &[u8; 32],
+        public_key: &[u8],
+        state: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .execute(
+                "UPDATE group_members SET state=?1 WHERE group_id=?2 AND public_key=?3",
+                params![state, group_id.as_slice(), public_key],
+            )
+            .std_context("remove group member")?
+            != 0)
+    }
 
     /// List members in deterministic key order.
-    pub fn list_group_members(&self, group_id:&[u8;32]) -> Result<Vec<GroupMemberRow>> {
-        let conn=self.conn.lock().unwrap(); let mut st=conn.prepare("SELECT group_id,public_key,role,joined_at_ms,invited_by,epoch_joined,state FROM group_members WHERE group_id=?1 ORDER BY public_key").std_context("prepare group query")?;
-        let rows=st.query_map([group_id.as_slice()],|r|{let b:Vec<u8>=r.get(0)?;let mut id=[0u8;32];id.copy_from_slice(&b);Ok(GroupMemberRow{group_id:id,public_key:r.get(1)?,role:r.get(2)?,joined_at_ms:r.get::<_,i64>(3)? as u64,invited_by:r.get(4)?,epoch_joined:r.get::<_,i64>(5)? as u64,state:r.get(6)?})}).std_context("query group rows")?; Ok(rows.collect::<rusqlite::Result<Vec<_>>>().std_context("collect group rows")?)
+    pub fn list_group_members(&self, group_id: &[u8; 32]) -> Result<Vec<GroupMemberRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st=conn.prepare("SELECT group_id,public_key,role,joined_at_ms,invited_by,epoch_joined,state FROM group_members WHERE group_id=?1 ORDER BY public_key").std_context("prepare group query")?;
+        let rows = st
+            .query_map([group_id.as_slice()], |r| {
+                let b: Vec<u8> = r.get(0)?;
+                let mut id = [0u8; 32];
+                id.copy_from_slice(&b);
+                Ok(GroupMemberRow {
+                    group_id: id,
+                    public_key: r.get(1)?,
+                    role: r.get(2)?,
+                    joined_at_ms: r.get::<_, i64>(3)? as u64,
+                    invited_by: r.get(4)?,
+                    epoch_joined: r.get::<_, i64>(5)? as u64,
+                    state: r.get(6)?,
+                })
+            })
+            .std_context("query group rows")?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .std_context("collect group rows")?)
     }
 
     /// Insert a group epoch idempotently.
-    pub fn create_group_epoch(&self, epoch:&GroupEpochRow) -> Result<()> { let conn=self.conn.lock().unwrap(); conn.execute("INSERT OR IGNORE INTO group_epochs(group_id,epoch,topic_id,discovery_secret,created_at_ms) VALUES (?1,?2,?3,?4,?5)",params![epoch.group_id.as_slice(),epoch.epoch as i64,epoch.topic_id.as_ref() as &[u8],epoch.discovery_secret,epoch.created_at_ms as i64]).std_context("create group epoch")?; conn.execute("UPDATE groups SET current_epoch=MAX(current_epoch,?1),updated_at_ms=MAX(updated_at_ms,?2) WHERE group_id=?3",params![epoch.epoch as i64,epoch.created_at_ms as i64,epoch.group_id.as_slice()]).std_context("update group epoch")?; Ok(()) }
+    pub fn create_group_epoch(&self, epoch: &GroupEpochRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("INSERT OR IGNORE INTO group_epochs(group_id,epoch,topic_id,discovery_secret,created_at_ms) VALUES (?1,?2,?3,?4,?5)",params![epoch.group_id.as_slice(),epoch.epoch as i64,epoch.topic_id.as_ref() as &[u8],epoch.discovery_secret,epoch.created_at_ms as i64]).std_context("create group epoch")?;
+        conn.execute("UPDATE groups SET current_epoch=MAX(current_epoch,?1),updated_at_ms=MAX(updated_at_ms,?2) WHERE group_id=?3",params![epoch.epoch as i64,epoch.created_at_ms as i64,epoch.group_id.as_slice()]).std_context("update group epoch")?;
+        Ok(())
+    }
 
     /// Return the newest epoch for a group.
-    pub fn get_current_group_epoch(&self, group_id:&[u8;32]) -> Result<Option<GroupEpochRow>> { let conn=self.conn.lock().unwrap(); conn.query_row("SELECT group_id,epoch,topic_id,discovery_secret,created_at_ms FROM group_epochs WHERE group_id=?1 ORDER BY epoch DESC LIMIT 1",[group_id.as_slice()],|r|{let b:Vec<u8>=r.get(0)?;let mut id=[0u8;32];id.copy_from_slice(&b);let t:Vec<u8>=r.get(2)?;let mut topic=[0u8;32];topic.copy_from_slice(&t);Ok(GroupEpochRow{group_id:id,epoch:r.get::<_,i64>(1)? as u64,topic_id:topic.into(),discovery_secret:r.get(3)?,created_at_ms:r.get::<_,i64>(4)? as u64})}).optional().std_context("get current group epoch") }
+    pub fn get_current_group_epoch(&self, group_id: &[u8; 32]) -> Result<Option<GroupEpochRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT group_id,epoch,topic_id,discovery_secret,created_at_ms FROM group_epochs WHERE group_id=?1 ORDER BY epoch DESC LIMIT 1",[group_id.as_slice()],|r|{let b:Vec<u8>=r.get(0)?;let mut id=[0u8;32];id.copy_from_slice(&b);let t:Vec<u8>=r.get(2)?;let mut topic=[0u8;32];topic.copy_from_slice(&t);Ok(GroupEpochRow{group_id:id,epoch:r.get::<_,i64>(1)? as u64,topic_id:topic.into(),discovery_secret:r.get(3)?,created_at_ms:r.get::<_,i64>(4)? as u64})}).optional().std_context("get current group epoch")
+    }
 
     /// Look up the group for a given epoch topic, using the unique topic→group index.
     pub fn find_group_by_topic(&self, topic_id: &TopicId) -> Result<Option<GroupRow>> {
@@ -1194,13 +1277,56 @@ impl Storage {
     }
 
     /// Insert an invitation idempotently.
-    pub fn create_group_invite(&self, invite:&GroupInviteRow) -> Result<()> { let conn=self.conn.lock().unwrap(); conn.execute("INSERT OR IGNORE INTO group_invites(invite_id,group_id,inviter_public_key,recipient_public_key,epoch,status,created_at_ms,expires_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![invite.invite_id.as_slice(),invite.group_id.as_slice(),invite.inviter_public_key,invite.recipient_public_key,invite.epoch as i64,invite.status,invite.created_at_ms as i64,invite.expires_at_ms as i64]).std_context("create group invite")?; Ok(()) }
+    pub fn create_group_invite(&self, invite: &GroupInviteRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("INSERT OR IGNORE INTO group_invites(invite_id,group_id,inviter_public_key,recipient_public_key,epoch,status,created_at_ms,expires_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![invite.invite_id.as_slice(),invite.group_id.as_slice(),invite.inviter_public_key,invite.recipient_public_key,invite.epoch as i64,invite.status,invite.created_at_ms as i64,invite.expires_at_ms as i64]).std_context("create group invite")?;
+        Ok(())
+    }
 
     /// List pending, non-expired invitations for a recipient.
-    pub fn get_pending_group_invites(&self, recipient_public_key:&[u8], now_ms:u64) -> Result<Vec<GroupInviteRow>> { let conn=self.conn.lock().unwrap();let mut st=conn.prepare("SELECT invite_id,group_id,inviter_public_key,recipient_public_key,epoch,status,created_at_ms,expires_at_ms FROM group_invites WHERE recipient_public_key=?1 AND status='Pending' AND expires_at_ms>?2 ORDER BY created_at_ms").std_context("prepare pending invites")?;let rows=st.query_map(params![recipient_public_key,now_ms as i64],|r|{let a:Vec<u8>=r.get(0)?;let b:Vec<u8>=r.get(1)?;let mut aid=[0u8;32];let mut gid=[0u8;32];aid.copy_from_slice(&a);gid.copy_from_slice(&b);Ok(GroupInviteRow{invite_id:aid,group_id:gid,inviter_public_key:r.get(2)?,recipient_public_key:r.get(3)?,epoch:r.get::<_,i64>(4)? as u64,status:r.get(5)?,created_at_ms:r.get::<_,i64>(6)? as u64,expires_at_ms:r.get::<_,i64>(7)? as u64})}).std_context("query group rows")?;Ok(rows.collect::<rusqlite::Result<Vec<_>>>().std_context("collect group rows")?) }
+    pub fn get_pending_group_invites(
+        &self,
+        recipient_public_key: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<GroupInviteRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut st=conn.prepare("SELECT invite_id,group_id,inviter_public_key,recipient_public_key,epoch,status,created_at_ms,expires_at_ms FROM group_invites WHERE recipient_public_key=?1 AND status='Pending' AND expires_at_ms>?2 ORDER BY created_at_ms").std_context("prepare pending invites")?;
+        let rows = st
+            .query_map(params![recipient_public_key, now_ms as i64], |r| {
+                let a: Vec<u8> = r.get(0)?;
+                let b: Vec<u8> = r.get(1)?;
+                let mut aid = [0u8; 32];
+                let mut gid = [0u8; 32];
+                aid.copy_from_slice(&a);
+                gid.copy_from_slice(&b);
+                Ok(GroupInviteRow {
+                    invite_id: aid,
+                    group_id: gid,
+                    inviter_public_key: r.get(2)?,
+                    recipient_public_key: r.get(3)?,
+                    epoch: r.get::<_, i64>(4)? as u64,
+                    status: r.get(5)?,
+                    created_at_ms: r.get::<_, i64>(6)? as u64,
+                    expires_at_ms: r.get::<_, i64>(7)? as u64,
+                })
+            })
+            .std_context("query group rows")?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .std_context("collect group rows")?)
+    }
 
     /// Update invitation state; repeated updates to the same state are harmless.
-    pub fn update_group_invite_state(&self, invite_id:&[u8;32], state:&str) -> Result<bool> { let conn=self.conn.lock().unwrap();Ok(conn.execute("UPDATE group_invites SET status=?1 WHERE invite_id=?2",params![state,invite_id.as_slice()]).std_context("update group invite")? != 0) }
+    pub fn update_group_invite_state(&self, invite_id: &[u8; 32], state: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .execute(
+                "UPDATE group_invites SET status=?1 WHERE invite_id=?2",
+                params![state, invite_id.as_slice()],
+            )
+            .std_context("update group invite")?
+            != 0)
+    }
 
     /// Atomically create and queue an outgoing direct message.
     pub fn queue_outgoing_dm(
@@ -7002,34 +7128,99 @@ mod tests {
     #[test]
     fn group_storage_crud_and_idempotency() {
         let storage = Storage::memory().unwrap();
-        let group = GroupRow { group_id: [1;32], name: "Team".into(), description: "Desc".into(), owner_public_key: vec![9;32], current_epoch: 0, created_at_ms: 10, updated_at_ms: 10, archived: false };
+        let group = GroupRow {
+            group_id: [1; 32],
+            name: "Team".into(),
+            description: "Desc".into(),
+            owner_public_key: vec![9; 32],
+            current_epoch: 0,
+            created_at_ms: 10,
+            updated_at_ms: 10,
+            archived: false,
+        };
         storage.create_group(&group).unwrap();
         storage.create_group(&group).unwrap();
         assert_eq!(storage.list_groups(false).unwrap(), vec![group.clone()]);
-        assert!(storage.update_group_metadata(&group.group_id, "Renamed", "New", 20, false).unwrap());
-        assert_eq!(storage.get_group(&group.group_id).unwrap().unwrap().name, "Renamed");
-        let member = GroupMemberRow { group_id: group.group_id, public_key: vec![2;32], role: "Member".into(), joined_at_ms: 11, invited_by: Some(vec![9;32]), epoch_joined: 1, state: "Invited".into() };
+        assert!(storage
+            .update_group_metadata(&group.group_id, "Renamed", "New", 20, false)
+            .unwrap());
+        assert_eq!(
+            storage.get_group(&group.group_id).unwrap().unwrap().name,
+            "Renamed"
+        );
+        let member = GroupMemberRow {
+            group_id: group.group_id,
+            public_key: vec![2; 32],
+            role: "Member".into(),
+            joined_at_ms: 11,
+            invited_by: Some(vec![9; 32]),
+            epoch_joined: 1,
+            state: "Invited".into(),
+        };
         storage.add_group_member(&member).unwrap();
         storage.add_group_member(&member).unwrap();
-        assert_eq!(storage.list_group_members(&group.group_id).unwrap().len(), 1);
-        assert!(storage.update_group_member(&group.group_id, &member.public_key, "Member", "Active").unwrap());
-        assert_eq!(storage.list_group_members(&group.group_id).unwrap()[0].state, "Active");
+        assert_eq!(
+            storage.list_group_members(&group.group_id).unwrap().len(),
+            1
+        );
+        assert!(storage
+            .update_group_member(&group.group_id, &member.public_key, "Member", "Active")
+            .unwrap());
+        assert_eq!(
+            storage.list_group_members(&group.group_id).unwrap()[0].state,
+            "Active"
+        );
     }
 
     #[test]
     fn group_epochs_and_pending_invites_survive_crud() {
         let storage = Storage::memory().unwrap();
-        let group = GroupRow { group_id: [4;32], name: "G".into(), description: "".into(), owner_public_key: vec![1;32], current_epoch: 0, created_at_ms: 1, updated_at_ms: 1, archived: false };
+        let group = GroupRow {
+            group_id: [4; 32],
+            name: "G".into(),
+            description: "".into(),
+            owner_public_key: vec![1; 32],
+            current_epoch: 0,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            archived: false,
+        };
         storage.create_group(&group).unwrap();
-        let epoch = GroupEpochRow { group_id: group.group_id, epoch: 1, topic_id: [5;32].into(), discovery_secret: vec![6;32], created_at_ms: 2 };
+        let epoch = GroupEpochRow {
+            group_id: group.group_id,
+            epoch: 1,
+            topic_id: [5; 32].into(),
+            discovery_secret: vec![6; 32],
+            created_at_ms: 2,
+        };
         storage.create_group_epoch(&epoch).unwrap();
         storage.create_group_epoch(&epoch).unwrap();
-        assert_eq!(storage.get_current_group_epoch(&group.group_id).unwrap(), Some(epoch));
-        let invite = GroupInviteRow { invite_id: [7;32], group_id: group.group_id, inviter_public_key: vec![1;32], recipient_public_key: vec![2;32], epoch: 1, status: "Pending".into(), created_at_ms: 3, expires_at_ms: 100 };
+        assert_eq!(
+            storage.get_current_group_epoch(&group.group_id).unwrap(),
+            Some(epoch)
+        );
+        let invite = GroupInviteRow {
+            invite_id: [7; 32],
+            group_id: group.group_id,
+            inviter_public_key: vec![1; 32],
+            recipient_public_key: vec![2; 32],
+            epoch: 1,
+            status: "Pending".into(),
+            created_at_ms: 3,
+            expires_at_ms: 100,
+        };
         storage.create_group_invite(&invite).unwrap();
         storage.create_group_invite(&invite).unwrap();
-        assert_eq!(storage.get_pending_group_invites(&[2;32], 50).unwrap(), vec![invite.clone()]);
-        assert!(storage.update_group_invite_state(&invite.invite_id, "Accepted").unwrap());
-        assert!(storage.get_pending_group_invites(&[2;32], 50).unwrap().is_empty());
+        assert_eq!(
+            storage.get_pending_group_invites(&[2; 32], 50).unwrap(),
+            vec![invite.clone()]
+        );
+        assert!(storage
+            .update_group_invite_state(&invite.invite_id, "Accepted")
+            .unwrap());
+        assert!(storage
+            .get_pending_group_invites(&[2; 32], 50)
+            .unwrap()
+            .is_empty());
     }
 }

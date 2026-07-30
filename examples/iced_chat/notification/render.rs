@@ -4,9 +4,7 @@
 //! The renderer is separate from the service so it can be unit-tested
 //! independently and reused by multiple frontends.
 
-use crate::notification::event::{
-    NotificationEvent, NotificationEventKind,
-};
+use crate::notification::event::{NotificationEvent, NotificationEventKind};
 
 /// Privacy mode for notification content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,9 +56,10 @@ pub struct RenderedNotification {
 /// current privacy mode.
 pub fn render_event(event: &NotificationEvent, preview_mode: PreviewMode) -> RenderedNotification {
     let (title, body) = match preview_mode {
-        PreviewMode::Hidden => {
-            ("Boru Chat".to_string(), render_hidden_body(event.event_kind))
-        }
+        PreviewMode::Hidden => (
+            "Boru Chat".to_string(),
+            render_hidden_body(event.event_kind),
+        ),
         PreviewMode::SenderOnly => {
             let title = event.title_hint.clone();
             (title, render_sender_only_body(event.event_kind))
@@ -145,11 +144,7 @@ pub fn sanitize_preview(text: &str) -> String {
 }
 
 /// Render a group summary notification (e.g. "Alice\n4 new messages").
-pub fn render_group_summary(
-    title: &str,
-    count: usize,
-    conversations: usize,
-) -> (String, String) {
+pub fn render_group_summary(title: &str, count: usize, conversations: usize) -> (String, String) {
     if count <= 1 {
         (title.to_string(), String::new())
     } else if conversations <= 1 {
@@ -159,7 +154,10 @@ pub fn render_group_summary(
         // Multiple conversations
         (
             "Boru Chat".to_string(),
-            format!("{} new messages from {} conversations", count, conversations),
+            format!(
+                "{} new messages from {} conversations",
+                count, conversations
+            ),
         )
     }
 }
