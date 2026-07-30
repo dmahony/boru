@@ -1623,10 +1623,7 @@ impl ChatEntry {
         s.update_cache();
         s
     }
-    fn local(
-        label: impl Into<String>,
-        text: impl Into<String>,
-    ) -> Self {
+    fn local(label: impl Into<String>, text: impl Into<String>) -> Self {
         let label = sanitize_single_line(&label.into());
         let text = sanitize_display_text(&text.into(), DEFAULT_MAX_DISPLAY_LENGTH);
         Self {
@@ -2392,8 +2389,6 @@ pub struct IcedChat {
     room_trackers: HashMap<TopicId, SharedTracker>,
     /// Whether the create-room dialog is currently shown.
     show_create_room_dialog: bool,
-    /// Whether the \\\"Add\\\" menu dropdown in the sidebar header is open.
-    show_add_menu: bool,
     /// Whether the group creation dialog is currently shown.
     show_create_group_dialog: bool,
     /// Group name text input in the group creation dialog.
@@ -2867,9 +2862,6 @@ pub enum AppMessage {
     /// The room switch / join failed.
     RoomJoinFailed(String),
 
-    // ── Add Menu ──
-    /// Toggle the \"Add\" menu dropdown in the sidebar header.
-    ToggleAddMenu,
     /// Open the file picker to select a file containing a friend's public key.
     ImportFriendFromFile,
     /// A file was selected for importing a friend's public key.
@@ -4335,7 +4327,6 @@ impl IcedChat {
             create_room_name: String::new(),
             room_trackers: HashMap::new(),
             show_create_room_dialog: false,
-            show_add_menu: false,
             connection_details_dialog: None,
             connection_details_announcement: None,
             connection_details_focus_target: None,
@@ -5638,7 +5629,6 @@ impl IcedChat {
             AppMessage::GuiActionTimeout(_) => "GuiActionTimeout",
             AppMessage::GuiTestWaitSatisfied(_) => "GuiTestWaitSatisfied",
             AppMessage::GuiTestWaitTimedOut { .. } => "GuiTestWaitTimedOut",
-            AppMessage::ToggleAddMenu => "ToggleAddMenu",
             AppMessage::ImportFriendFromFile => "ImportFriendFromFile",
             AppMessage::ImportFriendFromFilePicked(_) => "ImportFriendFromFilePicked",
             AppMessage::SubscribeStoredConversations => "SubscribeStoredConversations",
@@ -6672,28 +6662,20 @@ impl IcedChat {
                 )
             }
 
-            // ── Add Menu ──
-            AppMessage::ToggleAddMenu => {
-                self.show_add_menu = !self.show_add_menu;
-                iced::Task::none()
-            }
-            AppMessage::ImportFriendFromFile => {
-                self.show_add_menu = false;
-                iced::Task::perform(
-                    rfd::AsyncFileDialog::new()
-                        .set_title("Select file with friend's public key")
-                        .pick_file(),
-                    |file| {
-                        if let Some(file) = file {
-                            AppMessage::ImportFriendFromFilePicked(
-                                file.path().to_string_lossy().to_string(),
-                            )
-                        } else {
-                            AppMessage::Noop
-                        }
-                    },
-                )
-            }
+            AppMessage::ImportFriendFromFile => iced::Task::perform(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Select file with friend's public key")
+                    .pick_file(),
+                |file| {
+                    if let Some(file) = file {
+                        AppMessage::ImportFriendFromFilePicked(
+                            file.path().to_string_lossy().to_string(),
+                        )
+                    } else {
+                        AppMessage::Noop
+                    }
+                },
+            ),
             AppMessage::ImportFriendFromFilePicked(path) => {
                 if path.is_empty() {
                     return iced::Task::none();
@@ -9300,8 +9282,6 @@ impl IcedChat {
                     self.invite_whisper_input.clear();
                 } else if self.show_create_group_dialog {
                     self.show_create_group_dialog = false;
-                } else if self.show_add_menu {
-                    self.show_add_menu = false;
                 } else if self.help_visible {
                     self.help_visible = false;
                 } else if matches!(self.screen, Screen::Settings) {
@@ -9728,7 +9708,10 @@ impl IcedChat {
                                 let sender_str = sender.to_string();
                                 if let Some(pending_id) = self
                                     .friend_request_store
-                                    .list_outgoing_by_status(&local_str, FriendRequestStatus::Pending)
+                                    .list_outgoing_by_status(
+                                        &local_str,
+                                        FriendRequestStatus::Pending,
+                                    )
                                     .into_iter()
                                     .find(|r| r.recipient == sender_str)
                                     .map(|r| r.id.clone())
@@ -9819,7 +9802,10 @@ impl IcedChat {
                                 let sender_str = sender.to_string();
                                 if let Some(pending_id) = self
                                     .friend_request_store
-                                    .list_outgoing_by_status(&local_str, FriendRequestStatus::Pending)
+                                    .list_outgoing_by_status(
+                                        &local_str,
+                                        FriendRequestStatus::Pending,
+                                    )
                                     .into_iter()
                                     .find(|r| r.recipient == sender_str)
                                     .map(|r| r.id.clone())
@@ -11228,7 +11214,6 @@ impl IcedChat {
             }
             AppMessage::OpenConnectionDetails => {
                 self.show_create_room_dialog = false;
-                self.show_add_menu = false;
                 self.friend_profile_menu_open = false;
                 self.friend_profile_renaming = false;
                 self.friend_remove_confirm = false;
@@ -15410,12 +15395,9 @@ impl IcedChat {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64;
-                    st.get_pending_group_invites(
-                        &self.local_public.to_vec(),
-                        now_ms,
-                    )
-                    .unwrap_or_default()
-                    .len()
+                    st.get_pending_group_invites(&self.local_public.to_vec(), now_ms)
+                        .unwrap_or_default()
+                        .len()
                 })
                 .unwrap_or(0);
     }
@@ -15787,8 +15769,6 @@ impl IcedChat {
             self.view_create_group_dialog(base)
         } else if self.show_invite_member_dialog {
             self.view_invite_member_dialog(base)
-        } else if self.show_add_menu {
-            self.view_sidebar_add_menu(base)
         } else if let Some(entry_index) = self.lightbox_image {
             self.view_image_lightbox(base, entry_index)
         } else {
@@ -15872,218 +15852,6 @@ impl IcedChat {
             });
 
         stack![base, overlay].into()
-    }
-
-    /// Wrap the base layout in an overlay showing the \"Add\" menu dropdown.
-    fn view_sidebar_add_menu<'a>(
-        &self,
-        base: iced::widget::Container<'a, AppMessage>,
-    ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, container, row, text, Column, Space};
-        use iced::{Alignment, Length};
-
-        let dark_mode = self.dark_mode;
-        let theme = Self::theme_from_dark(dark_mode);
-
-        // Build the dropdown panel
-        struct MenuItem {
-            icon: &'static [u8],
-            label: &'static str,
-            action: Option<AppMessage>,
-            disabled: bool,
-        }
-
-        let items = vec![
-            MenuItem {
-                icon: ICON_CHAT,
-                label: "Create Public Room",
-                action: Some(AppMessage::CreateNewRoom),
-                disabled: false,
-            },
-            MenuItem {
-                icon: ICON_FRIEND,
-                label: "Add Friend",
-                action: Some(AppMessage::OpenFriendRequests),
-                disabled: false,
-            },
-            MenuItem {
-                icon: ICON_CHAT,
-                label: "Join Ticket",
-                action: Some(AppMessage::JoinFromTicket),
-                disabled: false,
-            },
-            MenuItem {
-                icon: include_bytes!("../../assets/icons/lucide/minus.svg"),
-                label: "Scan QR Code",
-                action: None,
-                disabled: true,
-            },
-            MenuItem {
-                icon: ICON_FILES,
-                label: "Import Friend",
-                action: Some(AppMessage::ImportFriendFromFile),
-                disabled: false,
-            },
-        ];
-
-        let future_items = vec![
-            MenuItem {
-                icon: ICON_FRIEND,
-                label: "Create Group Chat",
-                action: Some(AppMessage::ShowCreateGroupDialog),
-                disabled: false,
-            },
-            MenuItem {
-                icon: include_bytes!("../../assets/icons/lucide/smartphone.svg"),
-                label: "Pair Device",
-                action: None,
-                disabled: true,
-            },
-        ];
-
-        let mut menu_col = Column::new().spacing(0).width(Length::Fixed(220.0));
-
-        // Header
-        menu_col = menu_col.push(
-            container(
-                row![
-                    iced::Element::from(icon_svg(ICON_PLUS, TYPO_SM)),
-                    text(" Add").size(TYPO_SM),
-                ]
-                .spacing(SPACE_4)
-                .align_y(Alignment::Center),
-            )
-            .padding([SPACE_8, SPACE_12])
-            .width(Length::Fill),
-        );
-
-        let sep_color = border_muted(&theme);
-
-        // Primary items
-        for item in &items {
-            let label_color = if item.disabled {
-                text_muted(&theme)
-            } else {
-                text_remote_body(&theme)
-            };
-
-            let mut btn = button(
-                row![
-                    icon_svg(item.icon, TYPO_SM),
-                    text(item.label).size(TYPO_SM).color(label_color),
-                ]
-                .spacing(SPACE_8)
-                .align_y(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([SPACE_8, SPACE_12])
-            .style(move |_t, status| {
-                let bg = if matches!(status, iced::widget::button::Status::Hovered) {
-                    iced::Color::from_rgba(0.3, 0.3, 0.3, 0.2)
-                } else {
-                    iced::Color::TRANSPARENT
-                };
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(bg)),
-                    border: iced::Border {
-                        radius: SPACE_4.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            });
-
-            if !item.disabled {
-                if let Some(msg) = &item.action {
-                    btn = btn.on_press(msg.clone());
-                }
-            }
-
-            menu_col = menu_col.push(btn);
-        }
-
-        // Separator
-        menu_col = menu_col.push(
-            container(
-                container(Space::new().height(1.0))
-                    .width(Length::Fill)
-                    .style(move |t| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(sep_color)),
-                        ..Default::default()
-                    }),
-            )
-            .padding([SPACE_4, SPACE_12])
-            .width(Length::Fill),
-        );
-
-        // Future items
-        let future_label_color = text_muted(&theme);
-        for item in &future_items {
-            let btn = button(
-                row![
-                    icon_svg(item.icon, TYPO_SM),
-                    text(item.label).size(TYPO_SM).color(future_label_color),
-                ]
-                .spacing(SPACE_8)
-                .align_y(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([SPACE_8, SPACE_12])
-            .style(move |_t, status| {
-                let bg = if matches!(status, iced::widget::button::Status::Hovered) {
-                    iced::Color::from_rgba(0.3, 0.3, 0.3, 0.2)
-                } else {
-                    iced::Color::TRANSPARENT
-                };
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(bg)),
-                    border: iced::Border {
-                        radius: SPACE_4.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            });
-
-            menu_col = menu_col.push(btn);
-        }
-
-        // Dropdown panel styling
-        let menu_panel = container(menu_col)
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(bg_surface(t))),
-                border: iced::Border {
-                    color: border_muted(t),
-                    width: 1.0,
-                    radius: SPACE_8.into(),
-                },
-                ..Default::default()
-            })
-            .padding(SPACE_4);
-
-        let menu = container(menu_panel)
-            .width(Length::Fill)
-            .height(Length::Shrink)
-            .align_x(iced::Alignment::Start)
-            .align_y(iced::Alignment::Start)
-            .padding(iced::Padding {
-                top: 56.0,
-                right: 0.0,
-                bottom: 0.0,
-                left: SPACE_12,
-            });
-
-        // Full backdrop and stack
-        let backdrop = button(Space::new().width(Length::Fill).height(Length::Fill))
-            .on_press(AppMessage::ToggleAddMenu)
-            .style(|_t: &iced::Theme, _status| iced::widget::button::Style {
-                background: None,
-                border: iced::Border::default(),
-                text_color: iced::Color::TRANSPARENT,
-                ..Default::default()
-            });
-
-        iced::widget::stack![base, backdrop, menu].into()
     }
 
     /// Minimal dialog for creating a new room with optional DHT discovery.
@@ -16436,14 +16204,6 @@ impl IcedChat {
                 text("Settings").size(TYPO_XS),
                 iced::widget::tooltip::Position::Bottom,
             ))
-            .push(iced::widget::tooltip::Tooltip::new(
-                button(icon_svg(ICON_PLUS, TYPO_MD))
-                    .on_press(AppMessage::ToggleAddMenu)
-                    .padding([SPACE_6, SPACE_8])
-                    .style(BUTTON_ICON),
-                text("New conversation").size(TYPO_XS),
-                iced::widget::tooltip::Position::Bottom,
-            ))
             .align_y(Alignment::Center);
 
         let is_online = !matches!(self.mesh_health, MeshHealth::Offline(_));
@@ -16586,7 +16346,12 @@ impl IcedChat {
             .conversation_store
             .active_iter()
             .into_iter()
-            .filter(|entry| !matches!(entry.kind, boru_core::conversations::ConversationKind::Group))
+            .filter(|entry| {
+                !matches!(
+                    entry.kind,
+                    boru_core::conversations::ConversationKind::Group
+                )
+            })
             .map(|entry| {
                 let peer_pk = if entry.peer_id.is_empty() {
                     None
@@ -18002,11 +17767,9 @@ impl IcedChat {
     // ── Main panel (empty state — landing screen) ─────────────────────
 
     /// Landing screen shown when no conversation is selected.
-    /// Replaces the old "Select a conversation" placeholder with an
-    /// engaging home screen: branding, status, quick actions, and
-    /// a scrollable recent-activity feed.
+    /// Redesigned: connection status first, then actions, then activity.
     fn view_main_empty_state(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, row, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = self.theme();
@@ -18034,9 +17797,6 @@ impl IcedChat {
         // ── Connection state (single source of truth) ──
         let has_peer_connections =
             !self.neighbors.is_empty() || self.relayed_peers > 0 || self.direct_peers > 0;
-        // Relay is reachable when the gossip subscription succeeded (RoomOpened
-        // delivered a sender).  Peer counts may still be zero if no-one else is
-        // online, but the relay connection itself is healthy.
         let is_relay_reachable = self.sender.is_some() || has_peer_connections;
         let is_offline = matches!(self.mesh_health, MeshHealth::Offline(_));
 
@@ -18053,197 +17813,259 @@ impl IcedChat {
         .size(TYPO_LG)
         .width(Length::Fill);
 
-        // ── Connection status bar ──
-        let conn_status: iced::Element<'_, AppMessage> = if has_peer_connections {
-            row![
-                icon_svg(ICON_ONLINE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
-                    color: Some(accent_green(t))
-                }),
-                text("Boru is connected and ready.")
-                    .size(TYPO_SM)
-                    .color(text_muted(&theme)),
-            ]
-            .spacing(SPACE_6)
-            .align_y(Alignment::Center)
-            .into()
+        // ── Connection status (prominent, full-width) ──
+        let reconnecting_text: String;
+        let (status_icon, status_text, status_color, show_retry, show_details): (
+            &[u8],
+            String,
+            fn(&iced::Theme) -> iced::Color,
+            bool,
+            bool,
+        ) = if has_peer_connections {
+            (
+                ICON_ONLINE,
+                "Boru is connected and ready.".to_string(),
+                accent_green,
+                false,
+                false,
+            )
         } else if is_offline {
-            let _relay_text = fmt_relay_mode(&self.relay_mode);
-            row![
-                icon_svg(ICON_OFFLINE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
-                    color: Some(color_error(t))
-                }),
-                text("Boru could not reach the relay.")
-                    .size(TYPO_SM)
-                    .color(color_error(&theme)),
-                Space::new().width(Length::Fixed(SPACE_8)),
-                button(text("Retry").size(TYPO_SM))
-                    .on_press(AppMessage::RetryConnection)
-                    .padding([SPACE_4, SPACE_12])
-                    .style(BUTTON_PRIMARY),
-                button(text("Details").size(TYPO_SM))
-                    .on_press(AppMessage::OpenConnectionDetails)
-                    .padding([SPACE_4, SPACE_12])
-                    .style(BUTTON_OUTLINE),
-            ]
-            .spacing(SPACE_4)
-            .align_y(Alignment::Center)
-            .into()
+            (
+                ICON_OFFLINE,
+                "Boru could not reach the relay.".to_string(),
+                color_error,
+                true,
+                true,
+            )
         } else if is_relay_reachable {
-            // Relay is connected but no peers are online yet.
-            row![
-                icon_svg(ICON_ONLINE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
-                    color: Some(accent_green(t))
-                }),
-                text("Connected — waiting for peers…")
-                    .size(TYPO_SM)
-                    .color(text_muted(&theme)),
-            ]
-            .spacing(SPACE_6)
-            .align_y(Alignment::Center)
-            .into()
+            (
+                ICON_ONLINE,
+                "Connected \u{2014} waiting for peers\u{2026}".to_string(),
+                accent_green,
+                false,
+                false,
+            )
         } else {
-            // Reconnecting — relay not yet reachable.
-            // Use animated dots to show progress.
-            const RECONNECT_DOTS: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+            const RECONNECT_DOTS: [&str; 4] = ["\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}"];
             let dot = RECONNECT_DOTS[self.main_screen_reconnect_frame % RECONNECT_DOTS.len()];
-            row![
-                icon_svg(ICON_RETRY, TYPO_SM).style(|t, _| iced::widget::svg::Style {
-                    color: Some(color_warning(t))
-                }),
-                text(format!("Reconnecting to the relay {dot}"))
-                    .size(TYPO_SM)
-                    .color(color_warning(&theme)),
-                Space::new().width(Length::Fixed(SPACE_8)),
-                button(text("Details").size(TYPO_SM))
-                    .on_press(AppMessage::OpenConnectionDetails)
-                    .padding([SPACE_4, SPACE_12])
-                    .style(BUTTON_OUTLINE),
-            ]
-            .spacing(SPACE_4)
-            .align_y(Alignment::Center)
-            .into()
+            reconnecting_text = format!("Reconnecting to the relay {dot}");
+            (ICON_RETRY, reconnecting_text, color_warning, false, true)
         };
 
-        // ── Welcome card (greeting + status) ──
-        let mut welcome_col = Column::new()
-            .push(greeting)
-            .push(Space::new().height(Length::Fixed(SPACE_6)))
-            .push(conn_status)
-            .push(Space::new().height(Length::Fixed(SPACE_4)))
+        let mut status_row = Row::new()
             .push(
-                text("Private communication, peer to peer.")
-                    .size(TYPO_XXS)
-                    .color(text_muted(&theme)),
+                icon_svg(status_icon, TYPO_LG).style(move |t, _| iced::widget::svg::Style {
+                    color: Some(status_color(t)),
+                }),
             )
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
+            .push(text(status_text).size(TYPO_MD).color(status_color(&theme)))
             .spacing(0)
-            .width(Length::Fill);
+            .align_y(Alignment::Center);
 
-        // ── Mesh status + progress log ──
-        let mesh_status_text = if has_peer_connections {
-            let n = self.neighbors.len();
-            let d = self.direct_peers;
-            let r = self.relayed_peers;
-            let health = match &self.mesh_health {
-                MeshHealth::Good => "healthy",
-                MeshHealth::Degraded(_) => "degraded",
-                MeshHealth::Offline(_) => "offline",
-            };
-            format!(
-                "Mesh: {health} — {n} neighbor{}, {d} direct, {r} relayed",
-                if n == 1 { "" } else { "s" }
-            )
-        } else if self.room_loading || self.sender.is_none() {
-            "Connecting to relay — joining lobby...".to_string()
-        } else if self.neighbors.is_empty() {
-            "Connected to lobby — waiting for peers...".to_string()
-        } else {
-            format!(
-                "Connecting — {} peer{} found",
-                self.neighbors.len(),
-                if self.neighbors.len() == 1 { "" } else { "s" }
-            )
+        if show_retry {
+            status_row = status_row
+                .push(Space::new().width(Length::Fixed(SPACE_12)))
+                .push(
+                    button(text("Retry").size(TYPO_SM))
+                        .on_press(AppMessage::RetryConnection)
+                        .padding([SPACE_4, SPACE_12])
+                        .style(BUTTON_PRIMARY),
+                );
+        }
+        if show_details {
+            status_row = status_row
+                .push(Space::new().width(Length::Fixed(SPACE_8)))
+                .push(
+                    button(text("Details").size(TYPO_SM))
+                        .on_press(AppMessage::OpenConnectionDetails)
+                        .padding([SPACE_4, SPACE_12])
+                        .style(BUTTON_OUTLINE),
+                );
+        }
+
+        // ── Mesh health with reason ──
+        let mesh_health_text = match &self.mesh_health {
+            MeshHealth::Good => "Mesh is healthy".to_string(),
+            MeshHealth::Degraded(reason) => format!("\u{26A0} Mesh degraded: {reason}"),
+            MeshHealth::Offline(reason) => format!("\u{2717} Mesh offline: {reason}"),
         };
+        let mesh_peers_text = format!(
+            "{} neighbor{}, {} direct, {} relayed",
+            self.neighbors.len(),
+            if self.neighbors.len() == 1 { "" } else { "s" },
+            self.direct_peers,
+            self.relayed_peers,
+        );
+
+        // ── Mesh event log (all events, not just last 4) ──
         let log_lines: Vec<iced::Element<'_, AppMessage>> = self
             .mesh_event_log
             .iter()
             .rev()
-            .take(4)
-            .map(|line| text(line).size(10).color(text_muted(&theme)).into())
+            .map(|line| text(line).size(TYPO_XS).color(text_muted(&theme)).into())
             .collect();
-        welcome_col = welcome_col.push(column![
-            Space::new().height(Length::Fixed(SPACE_6)),
-            row![
-                icon_svg(ICON_MESH, TYPO_SM).style(|t, _| iced::widget::svg::Style {
-                    color: Some(text_muted(t))
-                }),
-                text(mesh_status_text)
-                    .size(TYPO_SM)
+        let event_log: iced::Element<'_, AppMessage> = if log_lines.is_empty() {
+            container(
+                text("No recent mesh events.")
+                    .size(TYPO_XS)
                     .color(text_muted(&theme)),
-            ]
-            .spacing(SPACE_4)
-            .align_y(Alignment::Center),
-            container(Column::with_children(log_lines).spacing(1)).padding([SPACE_2, SPACE_8]),
-        ]);
+            )
+            .padding([SPACE_4, SPACE_8])
+            .into()
+        } else {
+            container(
+                scrollable(
+                    Column::with_children(log_lines)
+                        .spacing(1)
+                        .width(Length::Fill),
+                )
+                .height(Length::Fixed(120.0)),
+            )
+            .padding([SPACE_4, SPACE_8])
+            .into()
+        };
 
-        let welcome_card = container(welcome_col)
-            .padding([SPACE_16, (SPACE_24 - SPACE_4)])
-            .width(Length::Fill)
-            .style(container_card);
+        // ── Connection status card (full-width, prominent) ──
+        let conn_card = container(
+            Column::new()
+                .push(greeting)
+                .push(Space::new().height(Length::Fixed(SPACE_10)))
+                .push(status_row)
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(
+                    text("Private communication, peer to peer.")
+                        .size(TYPO_XXS)
+                        .color(text_muted(&theme)),
+                )
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(
+                    Row::new()
+                        .push(
+                            icon_svg(ICON_MESH, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                                color: Some(text_muted(t)),
+                            }),
+                        )
+                        .push(Space::new().width(Length::Fixed(SPACE_6)))
+                        .push(
+                            Column::new()
+                                .push(
+                                    text(mesh_health_text.clone())
+                                        .size(TYPO_SM)
+                                        .color(text_system(&theme)),
+                                )
+                                .push(
+                                    text(mesh_peers_text.clone())
+                                        .size(TYPO_XS)
+                                        .color(text_muted(&theme)),
+                                )
+                                .spacing(SPACE_2),
+                        )
+                        .spacing(0)
+                        .align_y(Alignment::Start),
+                )
+                .push(Space::new().height(Length::Fixed(SPACE_6)))
+                .push(event_log)
+                .spacing(0)
+                .width(Length::Fill),
+        )
+        .padding(SPACE_16)
+        .width(Length::Fill)
+        .style(container_card);
 
-        // ── Primary action cards: Start Chat, Add Friend ──
-        let primary_actions = Row::new()
-            .push(
+        // ── Action section: 5 action buttons in a grid ──
+        struct ActionButton<'a> {
+            icon: &'a [u8],
+            label: &'a str,
+            description: &'a str,
+            message: AppMessage,
+        }
+
+        let actions = [
+            ActionButton {
+                icon: ICON_CHAT,
+                label: "Create Public Room",
+                description: "Open a public room for anyone to join",
+                message: AppMessage::CreateNewRoom,
+            },
+            ActionButton {
+                icon: ICON_NOTIFICATION,
+                label: "Create Group Chat",
+                description: "Start a private group conversation",
+                message: AppMessage::ShowCreateGroupDialog,
+            },
+            ActionButton {
+                icon: ICON_FRIEND,
+                label: "Add Friend",
+                description: "Add a friend by key or invite file",
+                message: AppMessage::OpenFriendRequests,
+            },
+            ActionButton {
+                icon: ICON_SEARCH,
+                label: "Join Ticket",
+                description: "Join a room using a ticket code",
+                message: AppMessage::JoinFromTicket,
+            },
+            ActionButton {
+                icon: ICON_FILES,
+                label: "Import Friend",
+                description: "Import a friend from a key file",
+                message: AppMessage::ImportFriendFromFile,
+            },
+        ];
+
+        let mut action_buttons: Vec<iced::Element<'_, AppMessage>> = actions
+            .iter()
+            .map(|a| {
                 button(
                     Column::new()
                         .push(
-                            icon_svg(ICON_CHAT, TYPO_XL).style(|t, _| iced::widget::svg::Style {
+                            icon_svg(a.icon, TYPO_XL).style(|t, _| iced::widget::svg::Style {
                                 color: Some(accent_primary(t)),
                             }),
                         )
                         .push(Space::new().height(Length::Fixed(SPACE_8)))
-                        .push(text("Start Chat").size(TYPO_MD))
+                        .push(text(a.label).size(TYPO_MD))
                         .push(Space::new().height(Length::Fixed(SPACE_4)))
-                        .push(
-                            text("Start a conversation or join by ticket")
-                                .size(TYPO_SM)
-                                .color(text_muted(&theme)),
-                        )
+                        .push(text(a.description).size(TYPO_XS).color(text_muted(&theme)))
                         .spacing(0)
-                        .align_x(Alignment::Center),
+                        .align_x(Alignment::Center)
+                        .width(Length::Fill),
                 )
-                .on_press(AppMessage::ToggleAddMenu)
-                .padding([(SPACE_24 - SPACE_4), SPACE_16])
+                .on_press(a.message.clone())
+                .padding([SPACE_16, SPACE_12])
                 .width(Length::Fill)
-                .style(BUTTON_CARD),
-            )
-            .push(
-                button(
-                    Column::new()
-                        .push(icon_svg(ICON_FRIEND, TYPO_XL).style(|t, _| {
-                            iced::widget::svg::Style {
-                                color: Some(accent_primary(t)),
-                            }
-                        }))
-                        .push(Space::new().height(Length::Fixed(SPACE_8)))
-                        .push(text("Add Friend").size(TYPO_MD))
-                        .push(Space::new().height(Length::Fixed(SPACE_4)))
-                        .push(
-                            text("Add a friend by key or invite file")
-                                .size(TYPO_SM)
-                                .color(text_muted(&theme)),
-                        )
-                        .spacing(0)
-                        .align_x(Alignment::Center),
-                )
-                .on_press(AppMessage::OpenFriendRequests)
-                .padding([(SPACE_24 - SPACE_4), SPACE_16])
-                .width(Length::Fill)
-                .style(BUTTON_CARD),
-            )
-            .spacing(SPACE_12)
-            .width(Length::Fill);
+                .style(BUTTON_CARD)
+                .into()
+            })
+            .collect();
 
-        // ── Secondary action: Share Files ──
+        // Responsive grid: 3 columns on wide, 2 on medium, 1 on narrow
+        let action_grid: iced::Element<'_, AppMessage> = if narrow {
+            Column::with_children(action_buttons)
+                .spacing(SPACE_8)
+                .width(Length::Fill)
+                .into()
+        } else {
+            let cols = if self.window_width < 900.0 { 2 } else { 3 };
+            let mut rows: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+            let mut i = 0;
+            while i < action_buttons.len() {
+                let end = (i + cols).min(action_buttons.len());
+                let mut row = Row::new().spacing(SPACE_8).width(Length::Fill);
+                for btn in action_buttons.drain(i..end) {
+                    row = row.push(btn);
+                }
+                i = end;
+                rows.push(row.into());
+            }
+            Column::with_children(rows)
+                .spacing(SPACE_8)
+                .width(Length::Fill)
+                .into()
+        };
+
+        // ── Share files ──
         let share_files_btn = button(
             row![
                 icon_svg(ICON_FILES, TYPO_SM).style(|t, _| iced::widget::svg::Style {
@@ -18258,16 +18080,16 @@ impl IcedChat {
             .spacing(SPACE_8)
             .align_y(Alignment::Center),
         )
-        .on_press(AppMessage::OpenSettings) // Opens settings where file browser is
+        .on_press(AppMessage::OpenSettings)
         .padding([SPACE_10, SPACE_16])
         .width(Length::Fill)
         .style(BUTTON_CARD);
 
-        // ── Left column assembly ──
+        // ── Left column: connection card + actions + share files ──
         let left_col = Column::new()
-            .push(welcome_card)
+            .push(conn_card)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
-            .push(primary_actions)
+            .push(action_grid)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(share_files_btn)
             .spacing(0)
@@ -24314,7 +24136,11 @@ mod tests {
             expires_at_ms: expire_ms,
             ticket: String::new(),
         };
-        app.storage.as_ref().unwrap().create_group_invite(&invite_row).unwrap();
+        app.storage
+            .as_ref()
+            .unwrap()
+            .create_group_invite(&invite_row)
+            .unwrap();
 
         let dep = app.sidebar_requests_dependency();
         assert_eq!(dep.group_invites.len(), 1, "should have one group invite");

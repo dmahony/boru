@@ -134,7 +134,9 @@ impl EncryptionState {
     /// Internal helper: persist the state for a single group to SQLite.
     fn save_current_group_state(&self, group_id: &GroupId) {
         let Some(ref conn) = self.db else { return };
-        let Some(state) = self.groups.get(group_id) else { return };
+        let Some(state) = self.groups.get(group_id) else {
+            return;
+        };
         let conn = conn.lock().unwrap();
         if let Err(e) = persistence::save_group_state(&conn, group_id, state) {
             tracing::warn!("failed to save group encryption state for {group_id}: {e}");
@@ -145,11 +147,16 @@ impl EncryptionState {
     ///
     /// Returns `true` if a state was loaded and inserted into `self.groups`,
     /// `false` if no persisted state existed.
-    pub fn load_group_state_from_db(&mut self, group_id: &GroupId) -> Result<bool, EncryptionError> {
-        let Some(ref conn) = self.db else { return Ok(false) };
-        let conn = conn.lock().map_err(|e| {
-            EncryptionError::Internal(format!("db lock: {e}"))
-        })?;
+    pub fn load_group_state_from_db(
+        &mut self,
+        group_id: &GroupId,
+    ) -> Result<bool, EncryptionError> {
+        let Some(ref conn) = self.db else {
+            return Ok(false);
+        };
+        let conn = conn
+            .lock()
+            .map_err(|e| EncryptionError::Internal(format!("db lock: {e}")))?;
         match persistence::load_group_state(&conn, group_id) {
             Ok(Some(state)) => {
                 self.groups.insert(*group_id, state);
