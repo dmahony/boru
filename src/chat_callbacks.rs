@@ -171,6 +171,18 @@ pub trait ChatCallbacks {
     /// Check whether `peer` is a tracked friend.
     fn is_friend(&self, peer: &PublicKey) -> bool;
 
+    /// Return whether a peer is an authorised participant in the topic being
+    /// processed even when they are not in the direct-friend store.
+    ///
+    /// Group conversations deliberately reuse the normal signed chat message
+    /// protocol, but group members need not be direct friends.  Frontends can
+    /// override this hook so shared file/image announcements receive the same
+    /// treatment as direct-chat announcements.  The default remains strict:
+    /// non-friends are not allowed to announce blobs.
+    fn accepts_group_peer(&self, _topic: Option<crate::proto::TopicId>, _peer: &PublicKey) -> bool {
+        false
+    }
+
     /// Check whether `peer` is blocked (their messages are silently dropped).
     fn is_blocked(&self, _peer: &PublicKey) -> bool {
         false

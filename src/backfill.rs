@@ -687,9 +687,10 @@ async fn do_backfill_request(
                     max_ts = max_ts.max(sent_at);
                     let net_event = NetEvent::Message {
                         from,
-                        message,
+                        message: message.clone(),
                         sent_at,
                     };
+                    crate::chat_core::remember_signed_message(from, &message, sent_at, raw);
                     let net_event = match &safety {
                         Some(s) => match filter_net_event_with_safety(net_event, s) {
                             Some(ev) => ev,

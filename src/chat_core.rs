@@ -1407,6 +1407,48 @@ const DEDUP_SWEEP_THRESHOLD: usize = 10_000;
 static SEEN_MESSAGES: LazyLock<Mutex<HashMap<DedupKey, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Raw signed payloads observed during this process, retained so the existing
+/// history backfill responder can serve the exact authenticated bytes rather
+/// than an unsigned UI preview.  The key matches the normal message dedup key.
+static SIGNED_MESSAGE_CACHE: LazyLock<Mutex<HashMap<DedupKey, Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Remember the authenticated wire payload for a decoded message.
+///
+/// This is intentionally bounded by the same TTL as message deduplication;
+/// it is a transport cache, not a second history store.
+pub fn remember_signed_message(
+    from: PublicKey,
+    message: &Message,
+    sent_at: u64,
+    signed_bytes: &[u8],
+) {
+    let key = (from, message_hash(message), sent_at);
+    if let Ok(mut cache) = SIGNED_MESSAGE_CACHE.lock() {
+        cache.insert(key, signed_bytes.to_vec());
+        if cache.len() >= DEDUP_SWEEP_THRESHOLD {
+            cache.retain(|key, _| {
+                SEEN_MESSAGES
+                    .lock()
+                    .map(|seen| seen.contains_key(key))
+                    .unwrap_or(false)
+            });
+        }
+    }
+}
+
+/// Take the raw signed payload for a message, if it was observed locally.
+pub fn take_signed_message(
+    from: PublicKey,
+    hash: MessageHash,
+    sent_at: u64,
+) -> Option<Vec<u8>> {
+    SIGNED_MESSAGE_CACHE
+        .lock()
+        .ok()
+        .and_then(|mut cache| cache.remove(&(from, hash, sent_at)))
+}
+
 /// Prune entries older than [`DEDUP_TTL`] from the seen-messages set.
 fn prune_seen_messages() {
     let now = Instant::now();
@@ -1710,7 +1752,7 @@ pub fn handle_net_event_for_topic(
                     }
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);
-                        if cb.is_friend(&from) {
+                        if cb.is_friend(&from) || cb.accepts_group_peer(topic, &from) {
                             cb.friend_set_name(fid, name.clone());
                             cb.mark_friends_dirty();
                         }
@@ -1745,7 +1787,7 @@ pub fn handle_net_event_for_topic(
                             );
                         }
                         let fid = FriendId::from_public_key(from);
-                        if cb.is_friend(&from) {
+                        if cb.is_friend(&from) || cb.accepts_group_peer(topic, &from) {
                             cb.friend_mark_online(fid);
                             // NOT mark_friends_dirty — online status is
                             // determined by the dedicated friend ping manager
@@ -1769,7 +1811,7 @@ pub fn handle_net_event_for_topic(
                 } => {
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);
-                        if cb.is_friend(&from) {
+                        if cb.is_friend(&from) || cb.accepts_group_peer(topic, &from) {
                             cb.friend_mark_online(fid);
                             if !is_muted {
                                 let sender_name = cb.resolve_name(&from);
@@ -1782,7 +1824,7 @@ pub fn handle_net_event_for_topic(
                 Message::ImageShare { name, hash } => {
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);
-                        if cb.is_friend(&from) {
+                        if cb.is_friend(&from) || cb.accepts_group_peer(topic, &from) {
                             cb.friend_mark_online(fid);
                             if !is_muted {
                                 cb.set_pending_image(name, hash, from);
@@ -2079,6 +2121,7 @@ pub async fn forward_gossip_events_with_safety(
                     crate::perf::PerfTracker::timer("forward_gossip_decode", "verify_and_decode");
                 match SignedMessage::verify_and_decode(&msg.content) {
                     Ok((from, message, sent_at)) => {
+                        remember_signed_message(from, &message, sent_at, &msg.content);
                         let net_event = NetEvent::Message {
                             from,
                             message,
