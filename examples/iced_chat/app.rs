@@ -18,6 +18,15 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::notification::event::{
+    NotificationActionTarget, NotificationEvent, NotificationEventKind,
+};
+use crate::notification::focus::WindowFocusTracker;
+use crate::notification::service::{
+    ConversationMute, DoNotDisturb, NotificationPreferences, NotificationService, PreviewMode,
+    WindowFocusState,
+};
+use crate::notification::backend::NoopBackend;
 use crate::link_preview;
 use boru_core::api::{GossipSender, GossipTopic};
 use boru_core::backfill::{BackfillHandle, BACKFILL_TRIGGER_THRESHOLD};
@@ -32,8 +41,10 @@ use boru_core::chat_core::{
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_core::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_core::conversations::{
-    spawn_conversation_forwarder, ConversationEntry, ConversationNetEvent, ConversationStore,
+    spawn_conversation_forwarder, ConversationEntry, ConversationKind, ConversationNetEvent,
+    ConversationStore, GroupTopicHistory,
 };
+use boru_core::group_id::GroupId;
 use boru_core::discovery_backend::MainlineDhtBackend;
 use boru_core::discovery_secret::DiscoverySecret;
 use boru_core::download_limits::DownloadLimitsConfig;
@@ -315,7 +326,7 @@ impl<'a> From<BoruLogo<'a>> for iced::Element<'a, AppMessage> {
         let font = crate::fonts::raleway_extra_bold();
         let mut t = text("BORU").font(font).size(font_size);
         if let Some(c) = logo.color {
-            t = t.style(move |_t| text::Style { color: Some(c) });
+            t = t.style(move |t| text::Style { color: Some(c) });
         }
         t.into()
     }
@@ -631,6 +642,7 @@ pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../assets/icons/luci
 pub(crate) const ICON_UNREAD: &[u8] =
     include_bytes!("../../assets/icons/lucide/message-circle-fill.svg");
 pub(crate) const ICON_SWEEP: &[u8] = include_bytes!("../../assets/icons/lucide/trash-2.svg");
+pub(crate) const ICON_USER_PLUS: &[u8] = include_bytes!("../../assets/icons/lucide/user-plus.svg");
 
 // ── SVG icon helper ──────────────────────────────────────────────────
 /// Create an SVG icon widget from embedded Lucide icon bytes.
@@ -2276,6 +2288,14 @@ pub struct IcedChat {
     /// Structured list of join-request items exposed to the main-menu ViewModel.
     /// Rebuilt after every state change; deduplicated by request ID.
     join_request_list: Vec<JoinRequestItem>,
+    /// Notification service — handles filtering, rendering, and dispatch of
+    /// desktop notifications. Wired into NetEvent and WhisperEvent handlers.
+    #[expect(dead_code)]
+    notification_service: NotificationService,
+    /// Window focus tracker — tracks app visibility for notification suppression.
+    #[expect(dead_code)]
+    window_focus_tracker: WindowFocusTracker,
+
     /// Search/input text for the peer public key in the friend requests screen.
     friend_request_search_input: String,
     /// Error message shown in the friend requests screen.
@@ -2340,8 +2360,16 @@ pub struct IcedChat {
     room_trackers: HashMap<TopicId, SharedTracker>,
     /// Whether the create-room dialog is currently shown.
     show_create_room_dialog: bool,
-    /// Whether the \"Add\" menu dropdown in the sidebar header is open.
+    /// Whether the \\\"Add\\\" menu dropdown in the sidebar header is open.
     show_add_menu: bool,
+    /// Whether the group creation dialog is currently shown.
+    show_create_group_dialog: bool,
+    /// Group name text input in the group creation dialog.
+    create_group_name: String,
+    /// Group description text input in the group creation dialog.
+    create_group_description: String,
+    /// Set of friend public keys selected as group members.
+    create_group_selected_members: HashSet<PublicKey>,
     /// Reusable advanced connection-details dialog state.
     connection_details_dialog: Option<ConnectionDetailsDialogState>,
     /// Accessible status announcement shown after copying from the dialog.
@@ -2488,6 +2516,12 @@ pub struct IcedChat {
     link_preview_fetch_index: Option<usize>,
     /// Whether the chat options popover is open.
     show_chat_options: bool,
+    /// Whether the group member list overlay is shown.
+    show_member_list: bool,
+    /// Whether the invite member dialog is shown.
+    show_invite_member_dialog: bool,
+    /// Selected friends to invite in the invite member dialog.
+    invite_member_selected: HashSet<PublicKey>,
     /// Whether the right-side details panel is open.
     details_panel_open: bool,
 
@@ -2563,11 +2597,13 @@ struct SidebarChatsRow {
     topic: TopicId,
     name: String,
     preview: String,
+    preview_sender: String,
     unread: u64,
     last_seen_at_unix_ms: u64,
     online: bool,
     avatar: SidebarAvatarHandle,
     profile_version: u64,
+    is_group: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2795,6 +2831,30 @@ pub enum AppMessage {
     ImportFriendFromFile,
     /// A file was selected for importing a friend's public key.
     ImportFriendFromFilePicked(String),
+    // ── Group creation ──
+    /// Show the group creation dialog.
+    ShowCreateGroupDialog,
+    /// Hide/cancel the group creation dialog.
+    HideCreateGroupDialog,
+    /// Update the group name input.
+    CreateGroupNameChanged(String),
+    /// Update the group description input.
+    CreateGroupDescriptionChanged(String),
+    /// Toggle a friend in the member selection.
+    CreateGroupMemberToggled(PublicKey),
+    /// Confirm and execute group creation.
+    ConfirmCreateGroup,
+    /// A group was created and is ready to join.
+    GroupCreated {
+        sender: Box<GossipSender>,
+        topic: TopicId,
+        ticket: String,
+        entry: Box<ConversationEntry>,
+        group_id: GroupId,
+        name: String,
+        description: String,
+        members: Vec<PublicKey>,
+    },
     // ── ChatList ──
     JoinTicketInputChanged(String),
     NewChatCreated,
@@ -2811,6 +2871,8 @@ pub enum AppMessage {
     ClearConversation,
     /// Toggle the right-side details panel.
     ToggleDetailsPanel,
+    /// Toggle the group member list overlay (group conversations only).
+    ToggleMemberList,
     OpenSettings,
     CloseSettings,
     /// Open the friend requests management screen.
@@ -2898,6 +2960,17 @@ pub enum AppMessage {
     OpenConnectionDetails,
     /// Close the reusable connection-details dialog.
     CloseConnectionDetails,
+    // ── Invite Member ──
+    /// Show the invite member dialog for the current group.
+    ShowInviteMemberDialog,
+    /// Hide the invite member dialog.
+    HideInviteMemberDialog,
+    /// Toggle a friend in the invite member selection.
+    InviteMemberToggled(PublicKey),
+    /// Confirm and send the group invite to selected members.
+    ConfirmInviteMember,
+    // ── End Invite Member ──
+
     /// Copy the support-safe connection-details summary to the clipboard.
     CopyConnectionDetails,
     /// Copy one redacted connection-details value to the clipboard.
@@ -3693,7 +3766,7 @@ fn view_local_profile_block(
         .center_y(Length::Fill)
         .width(Length::Fixed(AVATAR_SM))
         .height(Length::Fixed(AVATAR_SM))
-        .style(move |_t| container::Style {
+        .style(move |t| container::Style {
             background: Some(Background::Color(avatar_color)),
             border: Border {
                 radius: (AVATAR_SM / 2.0).into(),
@@ -4061,6 +4134,9 @@ impl IcedChat {
             composer_text: String::new(),
             help_visible: false,
             show_chat_options: false,
+            show_member_list: false,
+            show_invite_member_dialog: false,
+            invite_member_selected: HashSet::new(),
             details_panel_open: false,
             pending_file: None,
             pending_offline_ids: HashMap::new(),
@@ -4202,6 +4278,10 @@ impl IcedChat {
             friend_id_copied: false,
             show_invite_menu: false,
             invite_whisper_input: String::new(),
+            show_create_group_dialog: false,
+            create_group_name: String::new(),
+            create_group_description: String::new(),
+            create_group_selected_members: HashSet::new(),
             dht,
             private_dht_disabled,
             create_room_dht_enabled: true,
@@ -4261,6 +4341,9 @@ impl IcedChat {
             last_snapshot_at: std::time::Instant::now(),
             gui_snapshot_throttle_ms: 0, // no throttle by default; main.rs sets 125ms
             gui_snapshot_pending: false,
+            // ── Notification system ──
+            notification_service: NotificationService::new(),
+            window_focus_tracker: WindowFocusTracker::new(),
             recent_activity: VecDeque::with_capacity(50),
             window_width: 1200.0,
             link_preview_cache: Arc::new(StdMutex::new(link_preview::LinkPreviewCache::new())),
@@ -5375,6 +5458,10 @@ impl IcedChat {
             AppMessage::CopyPeerId(_) => "CopyPeerId",
             AppMessage::OpenConnectionDetails => "OpenConnectionDetails",
             AppMessage::CloseConnectionDetails => "CloseConnectionDetails",
+            AppMessage::ShowInviteMemberDialog => "ShowInviteMemberDialog",
+            AppMessage::HideInviteMemberDialog => "HideInviteMemberDialog",
+            AppMessage::InviteMemberToggled(_) => "InviteMemberToggled",
+            AppMessage::ConfirmInviteMember => "ConfirmInviteMember",
             AppMessage::CopyConnectionDetails => "CopyConnectionDetails",
             AppMessage::CopyConnectionDetailsValue { .. } => "CopyConnectionDetailsValue",
             AppMessage::DismissToast => "DismissToast",
@@ -5472,6 +5559,13 @@ impl IcedChat {
                 Shortcut::QuickCommand => "Shortcut(QuickCommand)",
             },
             AppMessage::DownloadProgress(_) => "DownloadProgress",
+            AppMessage::ShowCreateGroupDialog => "ShowCreateGroupDialog",
+            AppMessage::HideCreateGroupDialog => "HideCreateGroupDialog",
+            AppMessage::CreateGroupNameChanged(_) => "CreateGroupNameChanged",
+            AppMessage::CreateGroupDescriptionChanged(_) => "CreateGroupDescriptionChanged",
+            AppMessage::CreateGroupMemberToggled(_) => "CreateGroupMemberToggled",
+            AppMessage::ConfirmCreateGroup => "ConfirmCreateGroup",
+            AppMessage::GroupCreated { .. } => "GroupCreated",
             AppMessage::OpenConversation(_) => "OpenConversation",
             AppMessage::SelectConversation(_) => "SelectConversation",
             AppMessage::CloseConversation(_) => "CloseConversation",
@@ -5501,6 +5595,7 @@ impl IcedChat {
             AppMessage::DeleteDirectoryRoom(_) => "DeleteDirectoryRoom",
             AppMessage::DirectoryRoomUpdate(..) => "DirectoryRoomUpdate",
             AppMessage::ToggleDetailsPanel => "ToggleDetailsPanel",
+            AppMessage::ToggleMemberList => "ToggleMemberList",
         }
     }
 }
@@ -6322,6 +6417,202 @@ impl IcedChat {
                 self.show_create_room_dialog = false;
                 self.complete_close_dialog_action();
                 iced::Task::none()
+            }
+
+            AppMessage::ShowCreateGroupDialog => {
+                self.show_create_group_dialog = true;
+                self.create_group_name = String::new();
+                self.create_group_description = String::new();
+                self.create_group_selected_members.clear();
+                iced::Task::none()
+            }
+            AppMessage::HideCreateGroupDialog => {
+                self.show_create_group_dialog = false;
+                iced::Task::none()
+            }
+            AppMessage::CreateGroupNameChanged(name) => {
+                self.create_group_name = name;
+                iced::Task::none()
+            }
+            AppMessage::CreateGroupDescriptionChanged(desc) => {
+                self.create_group_description = desc;
+                iced::Task::none()
+            }
+            AppMessage::CreateGroupMemberToggled(peer) => {
+                if self.create_group_selected_members.contains(&peer) {
+                    self.create_group_selected_members.remove(&peer);
+                } else {
+                    self.create_group_selected_members.insert(peer);
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::ConfirmCreateGroup => {
+                let group_name = std::mem::take(&mut self.create_group_name);
+                let group_description = std::mem::take(&mut self.create_group_description);
+                let selected_members: Vec<PublicKey> =
+                    self.create_group_selected_members.drain().collect();
+                self.show_create_group_dialog = false;
+
+                if group_name.trim().is_empty() || selected_members.is_empty() {
+                    self.push_system("Group name and at least one member are required.".to_string());
+                    return iced::Task::none();
+                }
+
+                // ── Generate group identifiers ────────────────────────
+                let group_id = GroupId::generate();
+                let epoch = 1u64;
+                let topic = TopicId::from_bytes(rand::random());
+                let gossip = self.gossip.clone();
+                let net_tx = self.net_tx.clone();
+                let sk = self.secret_key.clone();
+                let label = self.local_label.clone();
+                let forward_handle_slot = self.forward_handle_slot.clone();
+                let data_dir = self.data_dir.clone();
+                let endpoint = self.endpoint.clone();
+                let share_direct_addresses = self.share_direct_addresses;
+                let friend_keys: Vec<PublicKey> = selected_members;
+                let display_name = group_name.trim().to_string();
+                let description = group_description.trim().to_string();
+
+                // Show a loading spinner while the gossip subscription is in flight.
+                self.room_loading = true;
+
+                iced::Task::perform(
+                    async move {
+                        // Step 1: Subscribe to the new group topic
+                        let sub = gossip
+                            .subscribe(topic, vec![])
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let (sender, receiver) = sub.split();
+                        let neighbor_ids: Vec<PublicKey> = receiver.neighbors().collect();
+                        let neighbor_count = neighbor_ids.len();
+                        let local_peer_addr = invitation_endpoint_addr(
+                            endpoint.watch_addr().get(),
+                            share_direct_addresses,
+                        );
+
+                        // Step 2: Create room metadata (name + description)
+                        let meta_name = if display_name.is_empty() {
+                            None
+                        } else {
+                            Some(display_name.clone())
+                        };
+                        let meta_desc = if description.is_empty() {
+                            None
+                        } else {
+                            Some(description.clone())
+                        };
+                        let metadata_doc = room_docs::create_metadata_doc(
+                            topic,
+                            &sender,
+                            RoomMetadata {
+                                name: meta_name,
+                                description: meta_desc,
+                                rules: None,
+                            },
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                        // Step 3: Create roster doc with creator as member
+                        let roster_doc = room_docs::create_roster_doc(
+                            topic,
+                            &sender,
+                            sk.public().to_string(),
+                            label.clone(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                        // Step 4: Start conversation forwarder
+                        let forward_handle = spawn_conversation_forwarder(
+                            topic,
+                            metadata_doc,
+                            roster_doc,
+                            receiver,
+                            net_tx,
+                            None,
+                        );
+                        *forward_handle_slot.lock().unwrap() = Some(forward_handle);
+
+                        // Step 5: Broadcast creator presence
+                        let msg = SignedMessage::sign_and_encode(
+                            &sk,
+                            &crate::Message::AboutMe {
+                                name: label,
+                                profile_image_ticket: None,
+                            },
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let _ = sender.broadcast(msg).await;
+                        let presence =
+                            SignedMessage::sign_and_encode(&sk, &crate::Message::Presence)
+                                .map_err(|e| e.to_string())?;
+                        let _ = sender.broadcast(presence).await;
+
+                        // Step 6: Persist room store
+                        let mut room =
+                            RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);
+                        room.discovery_secret = None;
+
+                        // Step 7: Create conversation entry for the group
+                        let entry = ConversationEntry::new_group_epoch(
+                            group_id,
+                            epoch,
+                            topic,
+                            display_name.clone(),
+                        );
+
+                        // Step 8: Build the ticket string for invitation
+                        let ticket_str = Ticket {
+                            topic,
+                            peers: vec![invitation_endpoint_addr(
+                                endpoint.watch_addr().get(),
+                                share_direct_addresses,
+                            )],
+                            discovery_secret: None,
+                        }
+                        .to_string();
+
+                        Ok::<_, String>((
+                            sender,
+                            topic,
+                            ticket_str,
+                            entry,
+                            group_id,
+                            display_name,
+                            description,
+                            friend_keys,
+                        ))
+                    },
+                    move |result| match result {
+                        Ok((
+                            sender,
+                            topic_id,
+                            ticket_str,
+                            entry,
+                            group_id,
+                            display_name,
+                            description,
+                            friend_keys,
+                        )) => {
+                            // These are applied in the next update cycle
+                            AppMessage::GroupCreated {
+                                sender: Box::new(sender),
+                                topic: topic_id,
+                                ticket: ticket_str,
+                                entry: Box::new(entry),
+                                group_id,
+                                name: display_name,
+                                description,
+                                members: friend_keys,
+                            }
+                        }
+                        Err(e) => AppMessage::RoomJoinFailed(e),
+                    },
+                )
             }
 
             // ── Add Menu ──
@@ -8193,6 +8484,46 @@ impl IcedChat {
 
             AppMessage::RoomSelected(topic) => iced::Task::done(AppMessage::OpenRoom(topic)),
 
+            // ── Group Creation ───────────────────────────────────────
+            AppMessage::GroupCreated {
+                sender,
+                topic,
+                ticket: ticket_str,
+                entry,
+                group_id,
+                name: display_name,
+                description,
+                members: friend_keys,
+            } => {
+                // Apply the gossip sender for the new group room
+                self.sender = Some(*sender);
+                self.room_loading = false;
+
+                // Persist the conversation entry
+                self.conversation_store.upsert(*entry);
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                let _ = self.send_save_conversations();
+
+                // Set member count on room history entry (includes self + selected members)
+                let total_members = friend_keys.len() as u32 + 1; // +1 for self (creator)
+                self.room_history.upsert(topic, display_name.clone(), true);
+                self.room_history.update_member_count(&topic, total_members);
+                self.room_history_dirty = true;
+
+                // Navigate to the group room - emulate RoomOpened
+                self.topic = topic;
+                self.ticket_str = ticket_str.clone();
+                self.screen = Screen::Chat { topic };
+                self.push_system(format!(
+                    "Group \"{}\" created with {} member(s). Share the ticket to invite more:\n{}",
+                    display_name,
+                    friend_keys.len(),
+                    ticket_str,
+                ));
+
+                iced::Task::none()
+            }
+
             // ── ChatList ─────────────────────────────────────────────
             AppMessage::JoinTicketInputChanged(text) => {
                 self.join_ticket_input = text;
@@ -8830,6 +9161,10 @@ impl IcedChat {
                 self.details_panel_open = !self.details_panel_open;
                 iced::Task::none()
             }
+            AppMessage::ToggleMemberList => {
+                self.show_member_list = !self.show_member_list;
+                iced::Task::none()
+            }
 
             // ── Invite menu ────────────────────────────────────────
             AppMessage::ToggleInviteMenu => {
@@ -8890,6 +9225,8 @@ impl IcedChat {
                 if self.show_invite_menu {
                     self.show_invite_menu = false;
                     self.invite_whisper_input.clear();
+                } else if self.show_create_group_dialog {
+                    self.show_create_group_dialog = false;
                 } else if self.show_add_menu {
                     self.show_add_menu = false;
                 } else if self.help_visible {
@@ -9188,6 +9525,13 @@ impl IcedChat {
                     // NeighborUp/Down) are filtered from the chat log and
                     // should not increment the badge counter.
                     let should_count = Self::_is_user_visible_event(&event);
+                    // Emit a notification for user-visible messages on inactive
+                    // conversations — includes group-aware rendering.
+                    if should_count {
+                        if let NetEvent::Message { from, message, .. } = &event {
+                            self.emit_message_notification(&topic, from, message);
+                        }
+                    }
                     conversation.pending_events.push_back(event);
                     // Cap the pending queue to prevent unbounded memory growth
                     // and Iced event-loop starvation during replay.  When the
@@ -9283,6 +9627,20 @@ impl IcedChat {
                                             self.requests_sidebar_revision.wrapping_add(1);
                                         self.refresh_sidebar_counts();
                                         self.send_save_friend_requests();
+                                        // Emit notification for incoming friend request
+                                        let focus = self.window_focus_tracker.to_focus_state();
+                                        let display_name = name
+                                            .clone()
+                                            .unwrap_or_else(|| sender.fmt_short().to_string());
+                                        let fr_event = NotificationEvent::new(
+                                            NotificationEventKind::FriendRequest,
+                                            Some(sender),
+                                            None,
+                                            display_name,
+                                            "wants to connect",
+                                            Some(NotificationActionTarget::OpenFriendRequests),
+                                        );
+                                        self.notification_service.handle_event(&fr_event, &focus);
                                     }
                                     Err(FriendRequestError::DuplicatePending { existing_id }) => {
                                         info!(
@@ -9447,13 +9805,60 @@ impl IcedChat {
                                     .map(|r| r.display_name())
                                     .unwrap_or_else(|| {
                                         let hex = ticket.topic.to_string();
-                                        format!("room {}", &hex[..8])
+                                        format!("room {hex}", &hex[..8])
                                     });
                                 self.push_system(format!("{label} invited you to {room_label}"));
                             } else {
                                 self.push_system(format!(
                                     "{label} opened a private chat with you."
                                 ));
+                            }
+                        }
+
+                        // ── Group invite parsing ────────────────────────
+                        let is_group_invite = text.starts_with("INVITE:");
+                        if is_group_invite {
+                            let parts: Vec<&str> = text.split(':').collect();
+                            if parts.len() >= 5 && parts[0] == "INVITE" {
+                                let invite_id_hex = parts[1];
+                                let inviter_pk_str = parts[2];
+                                let _group_id_hex = parts[3];
+                                let group_name = parts[4];
+
+                                // Decode invite_id from hex
+                                use data_encoding::HEXLOWER;
+                                let mut invite_id = [0u8; 32];
+                                if let Ok(decoded) = HEXLOWER.decode(invite_id_hex.as_bytes()) {
+                                    if decoded.len() == 32 {
+                                        invite_id.copy_from_slice(&decoded);
+                                    }
+                                }
+
+                                if let Ok(inviter_pk) = PublicKey::from_str(inviter_pk_str) {
+                                    self.push_system(format!(
+                                        "{label} invited you to group \"{group_name}\" (scroll down to INVITES section to join)"
+                                    ));
+
+                                    // Persist in local invite inbox
+                                    if let Some(ref st) = self.storage {
+                                        let now_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis() as u64;
+                                        let expire_ms = now_ms + 7 * 24 * 60 * 60 * 1000;
+                                        let invite_row = boru_core::storage::GroupInviteRow {
+                                            invite_id,
+                                            group_id: [0u8; 32], // will be filled during accept
+                                            inviter_public_key: inviter_pk.to_vec(),
+                                            recipient_public_key: self.secret_key.public().to_vec(),
+                                            epoch: 1,
+                                            status: "Pending".into(),
+                                            created_at_ms: now_ms,
+                                            expires_at_ms: expire_ms,
+                                        };
+                                        let _ = st.create_group_invite(&invite_row);
+                                    }
+                                }
                             }
                         }
 
@@ -11019,6 +11424,111 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::CloseConnectionDetails => self.close_connection_details_dialog(),
+            // ── Invite Member ──
+            AppMessage::ShowInviteMemberDialog => {
+                self.show_invite_member_dialog = true;
+                self.invite_member_selected.clear();
+                iced::Task::none()
+            }
+            AppMessage::HideInviteMemberDialog => {
+                self.show_invite_member_dialog = false;
+                self.invite_member_selected.clear();
+                iced::Task::none()
+            }
+            AppMessage::InviteMemberToggled(peer) => {
+                if self.invite_member_selected.contains(&peer) {
+                    self.invite_member_selected.remove(&peer);
+                } else {
+                    self.invite_member_selected.insert(peer);
+                }
+                iced::Task::none()
+            }
+            AppMessage::ConfirmInviteMember => {
+                let selected: Vec<PublicKey> = self.invite_member_selected.drain().collect();
+                self.show_invite_member_dialog = false;
+
+                if selected.is_empty() {
+                    self.push_system("Select at least one friend to invite.".to_string());
+                    return iced::Task::none();
+                }
+
+                let topic = self.topic;
+                let room_history = &self.room_history;
+                let room_entry = room_history.find(&topic);
+
+                let group_id_bytes = match room_entry {
+                    Some(entry) => {
+                        // Derive group ID bytes from topic
+                        let topic_str = topic.to_string();
+                        let mut bytes = [0u8; 32];
+                        let topic_bytes = topic_str.as_bytes();
+                        let len = topic_bytes.len().min(32);
+                        bytes[..len].copy_from_slice(&topic_bytes[..len]);
+                        bytes
+                    }
+                    None => {
+                        self.push_system("Group not found. Cannot send invite.".to_string());
+                        return iced::Task::none();
+                    }
+                };
+
+                let group_name = room_entry
+                    .map(|e| e.name.clone())
+                    .unwrap_or_else(|| "Group".to_string());
+                let inviter_pk = self.secret_key.public();
+                let inviter_name = self.local_label.clone();
+                let whisper_handle = self.whisper_handle.clone();
+                let storage = self.storage.clone();
+                let data_dir = self.data_dir.clone();
+                let sk = self.secret_key.clone();
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let expire_ms = now_ms + 7 * 24 * 60 * 60 * 1000; // 7 days
+
+                iced::Task::perform(
+                    async move {
+                        let invite_id: [u8; 32] = rand::random();
+                        let inviter_pk_bytes = inviter_pk.to_vec();
+
+                        for peer_key in &selected {
+                            // 1. Persist GroupInviteRow in storage
+                            let recipient_pk_bytes = peer_key.to_vec();
+                            if let Some(ref st) = storage {
+                                let invite_row = boru_core::storage::GroupInviteRow {
+                                    invite_id,
+                                    group_id: group_id_bytes,
+                                    inviter_public_key: inviter_pk_bytes.clone(),
+                                    recipient_public_key: recipient_pk_bytes,
+                                    epoch: 1,
+                                    status: "Pending".into(),
+                                    created_at_ms: now_ms,
+                                    expires_at_ms: expire_ms,
+                                };
+                                let _ = st.create_group_invite(&invite_row);
+                            }
+
+                            // 2. Send invite as DM via whisper - using INVITE prefix + base64
+                            // invite_id + group_id (each 32 bytes) encoded as hex via data-encoding
+                            use data_encoding::HEXLOWER;
+                            let invite_id_hex = HEXLOWER.encode(&invite_id);
+                            let group_id_hex = HEXLOWER.encode(&group_id_bytes);
+                            let invite_text = format!(
+                                "INVITE:{invite_id_hex}:{inviter_pk}:{group_id_hex}:{group_name}"
+                            );
+                            let _ = whisper_handle.send_dm(*peer_key, invite_text).await;
+                        }
+
+                        let count = selected.len();
+                        AppMessage::SystemMsg(format!(
+                            "Group invite sent to {count} friend(s) for \"{group_name}\"."
+                        ))
+                    },
+                    |msg| msg,
+                )
+            }
+            // ── End Invite Member ──
             AppMessage::CopyConnectionDetails => {
                 if self.connection_details_dialog.is_some() {
                     if let Some(summary) =
@@ -13585,7 +14095,7 @@ impl IcedChat {
 
     fn update_room_preview(&mut self, topic: &TopicId, event: &NetEvent) {
         if let NetEvent::Message {
-            from: _,
+            from,
             message: Message::Message { text },
             ..
         } = event
@@ -13595,7 +14105,35 @@ impl IcedChat {
             } else {
                 text.clone()
             };
-            self.room_history.update_preview(topic, &preview);
+
+            // Check if this is a group conversation to capture sender name
+            let is_group = self
+                .conversation_store
+                .find(topic)
+                .map(|entry| matches!(entry.kind, boru_core::conversations::ConversationKind::Group))
+                .unwrap_or(false);
+
+            if is_group {
+                // Look up sender display name from friends or profile cache
+                let sender_name = if *from == self.local_public {
+                    self.local_label.clone()
+                } else {
+                    let fid = FriendId::from_public_key(*from);
+                    self.friends
+                        .get(&fid)
+                        .map(|record| record.display_label(&fid, from))
+                        .unwrap_or_else(|| {
+                            self.profile_cache
+                                .get(from)
+                                .map(|p| p.display_name.clone())
+                                .unwrap_or_else(|| from.fmt_short().to_string())
+                        })
+                };
+                self.room_history
+                    .update_preview_with_sender(topic, &sender_name, &preview);
+            } else {
+                self.room_history.update_preview(topic, &preview);
+            }
             self.room_history_dirty = true;
         }
     }
@@ -13625,6 +14163,59 @@ impl IcedChat {
             // NeighborUp/Down, Closed, Error are never user messages.
             _ => false,
         }
+    }
+
+    /// Build and emit a notification event for a user-visible NetEvent.
+    ///
+    /// For group conversations the title is the group name and the body is
+    /// "Sender: message preview". For direct conversations the title is the
+    /// sender's display name and the body is the message preview.
+    fn emit_message_notification(&mut self, topic: &TopicId, from: &PublicKey, message: &crate::Message) {
+        if !self.notification_service.preferences.messages {
+            return;
+        }
+
+        // Determine conversation type and display names
+        let is_group = self
+            .conversation_store
+            .find(topic)
+            .map(|entry| entry.kind == ConversationKind::Group)
+            .unwrap_or(false);
+
+        let sender_name = self.resolve_name(from);
+        let body_text = match message {
+            crate::Message::Message { text } => text.clone(),
+            crate::Message::FileShare { name, .. } => format!("📎 {}", name),
+            crate::Message::ImageShare { .. } => "🖼️ Image".to_string(),
+            _ => "New message".to_string(),
+        };
+        // Limit preview length for notification bodies
+        let preview = body_text.chars().take(200).collect::<String>();
+
+        let (title, body) = if is_group {
+            // Group notification: title = group name, body = "Sender: message"
+            let group_name = self
+                .conversation_store
+                .find(topic)
+                .map(|e| e.name.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| "Group".to_string());
+            (group_name, format!("{}: {}", sender_name, preview))
+        } else {
+            // Direct notification: title = sender, body = message preview
+            (sender_name, preview)
+        };
+
+        let focus = self.window_focus_tracker.to_focus_state();
+        let event = NotificationEvent::new(
+            NotificationEventKind::NewMessage,
+            Some(*from),
+            Some(*topic),
+            title,
+            body,
+            Some(NotificationActionTarget::OpenConversation(*topic)),
+        );
+        self.notification_service.handle_event(&event, &focus);
     }
 
     fn process_net_event_sync(
@@ -14380,6 +14971,41 @@ impl ChatCallbacks for IcedChat {
         self.entries_push(entry);
     }
 
+    fn persist_remote_message(
+        &mut self,
+        topic: Option<boru_core::proto::TopicId>,
+        peer: PublicKey,
+        hash: MessageHash,
+        sent_at: u64,
+        text: &str,
+        signed_bytes: Option<Vec<u8>>,
+    ) {
+        // Gossip and backfill both converge on handle_net_event, so this one
+        // callback makes received messages durable across process restarts.
+        let Some(topic) = topic else {
+            warn!("received message without topic; skipping durable persistence");
+            return;
+        };
+        let store_path = self.data_dir.join("message_store.db");
+        match MessageStore::open(&store_path).and_then(|store| {
+            store.insert_chat_message(
+                &hash,
+                topic.as_bytes(),
+                &peer.as_bytes(),
+                sent_at.saturating_mul(1000),
+                "text",
+                text,
+                signed_bytes.as_deref(),
+                None,
+                &self.local_public.as_bytes(),
+            )
+        }) {
+            Ok(true) => trace!(peer = %peer.fmt_short(), "persisted received message"),
+            Ok(false) => trace!(peer = %peer.fmt_short(), "received message already persisted"),
+            Err(err) => warn!(error = %err, "failed to persist received message"),
+        }
+    }
+
     fn set_pending_file(
         &mut self,
         name: String,
@@ -14805,17 +15431,17 @@ impl IcedChat {
             // Version or tagline
             text("private peer-to-peer chat")
                 .size(14)
-                .style(move |_t| text::Style {
+                .style(move |t| text::Style {
                     color: Some(muted_color)
                 }),
             Space::new().height(Length::Fixed(40.0)),
             // Spinner with "Loading…"
             row![
-                text(spinner).size(24).style(move |_t| text::Style {
+                text(spinner).size(24).style(move |t| text::Style {
                     color: Some(muted_color)
                 }),
                 Space::new().width(Length::Fixed(12.0)),
-                text("Loading…").size(16).style(move |_t| text::Style {
+                text("Loading…").size(16).style(move |t| text::Style {
                     color: Some(muted_color)
                 }),
             ]
@@ -14916,6 +15542,10 @@ impl IcedChat {
             self.view_connection_details_dialog(base)
         } else if self.show_create_room_dialog {
             self.view_create_room_dialog(base)
+        } else if self.show_create_group_dialog {
+            self.view_create_group_dialog(base)
+        } else if self.show_invite_member_dialog {
+            self.view_invite_member_dialog(base)
         } else if self.show_add_menu {
             self.view_sidebar_add_menu(base)
         } else if let Some(entry_index) = self.lightbox_image {
@@ -14993,7 +15623,7 @@ impl IcedChat {
         let overlay = container(backdrop)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(move |_t| iced::widget::container::Style {
+            .style(move |t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(Color::from_rgba(
                     0.0, 0.0, 0.0, 0.9,
                 ))),
@@ -15057,10 +15687,10 @@ impl IcedChat {
 
         let future_items = vec![
             MenuItem {
-                icon: include_bytes!("../../assets/icons/lucide/minus.svg"),
+                icon: ICON_FRIEND,
                 label: "Create Group Chat",
-                action: None,
-                disabled: true,
+                action: Some(AppMessage::ShowCreateGroupDialog),
+                disabled: false,
             },
             MenuItem {
                 icon: include_bytes!("../../assets/icons/lucide/smartphone.svg"),
@@ -15136,7 +15766,7 @@ impl IcedChat {
             container(
                 container(Space::new().height(1.0))
                     .width(Length::Fill)
-                    .style(move |_t| iced::widget::container::Style {
+                    .style(move |t| iced::widget::container::Style {
                         background: Some(iced::Background::Color(sep_color)),
                         ..Default::default()
                     }),
@@ -15261,7 +15891,207 @@ impl IcedChat {
             .width(Length::Fixed(320.0))
             .height(Length::Shrink)
             .padding(24)
-            .style(move |_t| iced::widget::container::Style {
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(
+                    0.15, 0.15, 0.15, 0.95,
+                ))),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    width: 1.0,
+                    color: iced::Color::from_rgb(0.4, 0.4, 0.4),
+                },
+                ..Default::default()
+            });
+
+        iced::widget::stack![
+            base,
+            container(overlay)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        ]
+        .into()
+    }
+
+    /// Dialog for creating a new group with name, description, and member selection.
+    fn view_create_group_dialog<'a>(
+        &'a self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, checkbox, column, container, scrollable, text, text_input, Column, Row};
+        use iced::{Alignment, Length};
+
+        let theme = Self::theme_from_dark(self.dark_mode);
+
+        // Build member selection list from friends
+        let mut members_list = Column::new().spacing(SPACE_4).padding(SPACE_8);
+
+        for (fid, record) in self.friends.iter() {
+            if !record.relationship.can_message() {
+                continue;
+            }
+            let peer = match fid.parse_public_key() {
+                Ok(pk) => pk,
+                Err(_) => continue,
+            };
+            let label = record.display_label(fid, &peer);
+            let is_selected = self.create_group_selected_members.contains(&peer);
+            let checkbox = checkbox(is_selected)
+                .label(label)
+                .on_toggle(move |_| AppMessage::CreateGroupMemberToggled(peer));
+
+            members_list = members_list.push(checkbox);
+        }
+
+        let dialog = column![]
+            .push(text("Create Group Chat").size(18))
+            .push(text_input("Group name…", &self.create_group_name)
+                .on_input(AppMessage::CreateGroupNameChanged)
+                .width(Length::Fill))
+            .push(text_input("Description (optional)…", &self.create_group_description)
+                .on_input(AppMessage::CreateGroupDescriptionChanged)
+                .width(Length::Fill))
+            .push(
+                container(
+                    scrollable(
+                        container(members_list)
+                            .width(Length::Fill)
+                            .padding(SPACE_4),
+                    )
+                    .height(Length::Fixed(200.0)),
+                )
+                .width(Length::Fill)
+                .style(move |t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(0.2, 0.2, 0.2, 0.3))),
+                    border: iced::Border {
+                        radius: SPACE_4.into(),
+                        width: 1.0,
+                        color: border_muted(t),
+                    },
+                    ..Default::default()
+                }),
+            )
+            .push(
+                iced::widget::row![]
+                    .push(
+                        button(text("Cancel"))
+                            .on_press(AppMessage::HideCreateGroupDialog)
+                            .padding(8),
+                    )
+                    .push(
+                        button(text("Create"))
+                            .on_press(AppMessage::ConfirmCreateGroup)
+                            .padding(8),
+                    )
+                    .spacing(12),
+            )
+            .spacing(12)
+            .align_x(Alignment::Center);
+
+        let overlay = container(dialog)
+            .width(Length::Fixed(360.0))
+            .height(Length::Shrink)
+            .padding(24)
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(
+                    0.15, 0.15, 0.15, 0.95,
+                ))),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    width: 1.0,
+                    color: iced::Color::from_rgb(0.4, 0.4, 0.4),
+                },
+                ..Default::default()
+            });
+
+        iced::widget::stack![
+            base,
+            container(overlay)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        ]
+        .into()
+    }
+
+    /// Dialog for inviting members to the current group — shows a friend picker.
+    fn view_invite_member_dialog<'a>(
+        &'a self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, checkbox, column, container, scrollable, text, Column, Row};
+        use iced::{Alignment, Length};
+
+        let theme = Self::theme_from_dark(self.dark_mode);
+
+        // Build friend selection list
+        let mut friends_list = Column::new().spacing(SPACE_4).padding(SPACE_8);
+
+        for (fid, record) in self.friends.iter() {
+            if !record.relationship.can_message() {
+                continue;
+            }
+            let peer = match fid.parse_public_key() {
+                Ok(pk) => pk,
+                Err(_) => continue,
+            };
+            let label = record.display_label(fid, &peer);
+            let is_selected = self.invite_member_selected.contains(&peer);
+            let cb = checkbox(is_selected)
+                .label(label)
+                .on_toggle(move |_| AppMessage::InviteMemberToggled(peer));
+            friends_list = friends_list.push(cb);
+        }
+
+        let dialog = column![]
+            .push(text("Invite to Group").size(18))
+            .push(text("Select friends to invite:").size(TYPO_XS).style(move |t| iced::widget::text::Style {
+                color: Some(text_secondary(t)),
+            }))
+            .push(
+                container(
+                    scrollable(
+                        container(friends_list)
+                            .width(Length::Fill)
+                            .padding(SPACE_4),
+                    )
+                    .height(Length::Fixed(250.0)),
+                )
+                .width(Length::Fill)
+                .style(move |t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(0.2, 0.2, 0.2, 0.3))),
+                    border: iced::Border {
+                        radius: SPACE_4.into(),
+                        width: 1.0,
+                        color: border_muted(t),
+                    },
+                    ..Default::default()
+                }),
+            )
+            .push(
+                iced::widget::row![]
+                    .push(
+                        button(text("Cancel"))
+                            .on_press(AppMessage::HideInviteMemberDialog)
+                            .padding(8),
+                    )
+                    .push(
+                        button(text("Send Invite"))
+                            .on_press(AppMessage::ConfirmInviteMember)
+                            .padding(8),
+                    )
+                    .spacing(12),
+            )
+            .spacing(12)
+            .align_x(Alignment::Center);
+
+        let overlay = container(dialog)
+            .width(Length::Fixed(360.0))
+            .height(Length::Shrink)
+            .padding(24)
+            .style(move |t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(iced::Color::from_rgba(
                     0.15, 0.15, 0.15, 0.95,
                 ))),
@@ -15502,6 +16332,7 @@ impl IcedChat {
                 } else {
                     PublicKey::from_str(&entry.peer_id).ok()
                 };
+                let is_group = matches!(entry.kind, boru_core::conversations::ConversationKind::Group);
                 let online = peer_pk
                     .map(|pk| self.friend_online_cache.contains(&pk))
                     .unwrap_or(false);
@@ -15513,12 +16344,11 @@ impl IcedChat {
                 let profile_version = peer_pk
                     .and_then(|pk| self.friend_profile_versions.get(&pk).copied())
                     .unwrap_or(0);
+                let room_entry = self.room_history.find(&entry.topic);
                 SidebarChatsRow {
                     topic: entry.topic,
                     name: entry.display_name().to_string(),
-                    preview: self
-                        .room_history
-                        .find(&entry.topic)
+                    preview: room_entry
                         .and_then(|r| {
                             if r.last_preview.is_empty() {
                                 None
@@ -15526,6 +16356,9 @@ impl IcedChat {
                                 Some(r.last_preview.clone())
                             }
                         })
+                        .unwrap_or_default(),
+                    preview_sender: room_entry
+                        .map(|r| r.last_sender_name.clone())
                         .unwrap_or_default(),
                     unread: self
                         .conversations
@@ -15536,6 +16369,7 @@ impl IcedChat {
                     online,
                     avatar: Self::sidebar_avatar_handle(avatar),
                     profile_version,
+                    is_group,
                 }
             })
             .collect();
@@ -15662,12 +16496,14 @@ impl IcedChat {
                 row.topic,
                 row.name.clone(),
                 row.preview.clone(),
+                row.preview_sender.clone(),
                 row.unread,
                 selected_topic.clone(),
                 row.last_seen_at_unix_ms,
                 row.online,
                 row.avatar.clone(),
                 delete_confirm,
+                row.is_group,
             ));
         }
 
@@ -15753,19 +16589,44 @@ impl IcedChat {
         topic: TopicId,
         name: String,
         preview: String,
+        preview_sender: String,
         unread: u64,
         selected_topic: Rc<Cell<Option<TopicId>>>,
         last_seen_at_unix_ms: u64,
         online: bool,
         avatar: SidebarAvatarHandle,
         delete_confirm_topic: Option<TopicId>,
+        is_group: bool,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, image, text, Column, Row, Space};
         use iced::{Alignment, Background, Border, Length};
 
         // ── Avatar (32px circle) ────────────────────────────────────
-        let avatar_element: iced::Element<'static, AppMessage> = if let Some(handle) = avatar.handle
-        {
+        let avatar_element: iced::Element<'static, AppMessage> = if is_group {
+            // Group avatar: deterministic initials (two letters) from group name
+            let initials = crate::presentation::initials(&name);
+            let display_initials = if initials.is_empty() {
+                "G".to_string()
+            } else {
+                initials
+            };
+            let theme = Self::theme_from_dark(dark_mode);
+            let letter_color = crate::presentation::initials_color(&name, matches!(theme, iced::Theme::Dark));
+            container(text(display_initials).size(TYPO_XS).color(letter_color))
+                .center_y(Length::Fill)
+                .center_x(Length::Fixed(32.0))
+                .width(Length::Fixed(32.0))
+                .height(Length::Fixed(32.0))
+                .style(move |t| container::Style {
+                    background: Some(Background::Color(bg_surface_secondary(&theme))),
+                    border: Border {
+                        radius: 16.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+        } else if let Some(handle) = avatar.handle {
             image(handle)
                 .width(Length::Fixed(32.0))
                 .height(Length::Fixed(32.0))
@@ -15792,7 +16653,7 @@ impl IcedChat {
             .center_y(Length::Fill)
             .width(Length::Fixed(32.0))
             .height(Length::Fixed(32.0))
-            .style(move |_t| container::Style {
+            .style(move |t| container::Style {
                 background: Some(Background::Color(avatar_color)),
                 border: Border {
                     radius: 16.0.into(),
@@ -15804,8 +16665,9 @@ impl IcedChat {
         };
 
         // ── Online indicator dot (overlaid on avatar) ─────────────
+        // (groups never show online dot on sidebar avatar)
         let avatar_with_dot: iced::Element<'static, AppMessage> =
-            if online {
+            if online && !is_group {
                 use iced::widget::Stack;
                 Stack::new()
                     .push(avatar_element)
@@ -15845,6 +16707,8 @@ impl IcedChat {
         // ── Preview text (single line, truncated) ──────────────────
         let preview_text = if preview.is_empty() {
             String::new()
+        } else if is_group && !preview_sender.is_empty() {
+            format!("{}: {}", preview_sender, format_preview(&preview))
         } else {
             format_preview(&preview)
         };
@@ -16043,7 +16907,7 @@ impl IcedChat {
         let selected_for_unread = selected_topic.clone();
         container(btn)
             .width(Length::Fill)
-            .style(move |_t| {
+            .style(move |t| {
                 let is_selected = selected_for_unread.get() == Some(topic);
                 if unread > 0 && !is_selected {
                     container::Style {
@@ -16333,7 +17197,7 @@ impl IcedChat {
         .center_y(Length::Fill)
         .width(Length::Fixed(24.0))
         .height(Length::Fixed(24.0))
-        .style(move |_t| container::Style {
+        .style(move |t| container::Style {
             background: Some(Background::Color(avatar_color)),
             border: Border {
                 radius: 12.0.into(),
@@ -17355,6 +18219,37 @@ impl IcedChat {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
+        } else if self.show_member_list {
+            use iced::widget::Stack;
+            use iced::Color;
+            let chat_layer = inner;
+
+            let backdrop = widget::button(widget::Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .on_press(AppMessage::ToggleMemberList)
+                .style(move |t, _status| iced::widget::button::Style {
+                    background: Some(iced::Background::Color(if matches!(t, iced::Theme::Dark) {
+                        Color::from_rgba(0.0, 0.0, 0.0, 0.45)
+                    } else {
+                        Color::from_rgba(0.0, 0.0, 0.0, 0.25)
+                    })),
+                    ..Default::default()
+                });
+
+            let member_list_panel = widget::container(self.view_group_member_list())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill);
+
+            Stack::new()
+                .push(chat_layer)
+                .push(backdrop)
+                .push(member_list_panel)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
         } else {
             inner.into()
         }
@@ -17376,74 +18271,136 @@ impl IcedChat {
         let room_name = conversation
             .map(|entry| entry.display_name())
             .unwrap_or_else(|| format!("Room {short_topic}"));
+        let is_group = conversation
+            .as_ref()
+            .map(|entry| matches!(entry.kind, boru_core::conversations::ConversationKind::Group))
+            .unwrap_or(false);
         let peer = conversation.and_then(|entry| PublicKey::from_str(&entry.peer_id).ok());
         let online = peer.is_some_and(|key| self.friend_online_cache.contains(&key));
-        let status_text = if online { "Online" } else { "Offline" };
 
-        let avatar: iced::Element<'_, AppMessage> = peer
-            .and_then(|key| self.friend_image_handles.get(&key).and_then(|h| h.clone()))
-            .map(|handle| {
-                iced::widget::image(handle)
-                    .content_fit(iced::ContentFit::ScaleDown)
-                    .width(Length::Fixed(30.0))
-                    .height(Length::Fixed(30.0))
-                    .into()
-            })
-            .unwrap_or_else(|| {
-                let initials = crate::presentation::initials(&room_name);
-                let theme_for_initials = self.theme();
-                let is_dark = matches!(theme_for_initials, iced::Theme::Dark);
-                let letter_color = crate::presentation::initials_color(&room_name, is_dark);
-                container(text(initials).size(TYPO_SM).color(letter_color))
-                    .width(Length::Fixed(30.0))
-                    .height(Length::Fixed(30.0))
-                    .center_x(Length::Fixed(30.0))
-                    .center_y(Length::Fixed(30.0))
-                    .style(move |_t| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(bg_surface_secondary(
-                            &theme_for_initials,
-                        ))),
-                        border: iced::Border {
-                            radius: SPACE_8.into(),
-                            ..Default::default()
-                        },
+        // Group chat header: show name + member count
+        // Direct chat header: show name + online/offline status
+        let (avatar, identity) = if is_group {
+            // Group avatar: initials from group name
+            let initials = crate::presentation::initials(&room_name);
+            let display_initials = if initials.is_empty() {
+                "G".to_string()
+            } else {
+                initials
+            };
+            let theme_for_initials = self.theme();
+            let is_dark = matches!(theme_for_initials, iced::Theme::Dark);
+            let letter_color = crate::presentation::initials_color(&room_name, is_dark);
+            let group_avatar = container(text(display_initials).size(TYPO_SM).color(letter_color))
+                .width(Length::Fixed(30.0))
+                .height(Length::Fixed(30.0))
+                .center_x(Length::Fixed(30.0))
+                .center_y(Length::Fixed(30.0))
+                .style(move |t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(bg_surface_secondary(&theme_for_initials))),
+                    border: iced::Border {
+                        radius: SPACE_8.into(),
                         ..Default::default()
-                    })
-                    .into()
-            });
+                    },
+                    ..Default::default()
+                })
+                .into();
 
-        let status_dot = icon_svg(if online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_XS).style(
-            move |t, _| iced::widget::svg::Style {
-                color: Some(if online {
-                    accent_green(t)
-                } else {
-                    text_muted(t)
-                }),
-            },
-        );
+            let member_count = self
+                .room_history
+                .find(&self.topic)
+                .map(|r| r.member_count)
+                .unwrap_or(0);
+            let member_label = if member_count > 0 {
+                format!("{member_count} member{}", if member_count == 1 { "" } else { "s" })
+            } else {
+                "Group".to_string()
+            };
 
-        let identity = column![
-            text(room_name.clone())
-                .size(TYPO_SM)
-                .width(Length::Fill)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
-            row![
-                status_dot,
-                text(status_text)
+            let group_identity = column![
+                text(room_name.clone())
+                    .size(TYPO_SM)
+                    .width(Length::Fill)
+                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                text(member_label)
                     .size(TYPO_XS)
                     .style(move |t| iced::widget::text::Style {
-                        color: Some(if online {
-                            accent_green(t)
-                        } else {
-                            text_muted(t)
-                        }),
+                        color: Some(text_secondary(t)),
                     }),
             ]
-            .spacing(SPACE_4)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(SPACE_2)
-        .width(Length::Fill);
+            .spacing(SPACE_2)
+            .width(Length::Fill);
+
+            (group_avatar, group_identity)
+        } else {
+            let peer_avatar: iced::Element<'_, AppMessage> = peer
+                .and_then(|key| self.friend_image_handles.get(&key).and_then(|h| h.clone()))
+                .map(|handle| {
+                    iced::widget::image(handle)
+                        .content_fit(iced::ContentFit::ScaleDown)
+                        .width(Length::Fixed(30.0))
+                        .height(Length::Fixed(30.0))
+                        .into()
+                })
+                .unwrap_or_else(|| {
+                    let initials = crate::presentation::initials(&room_name);
+                    let theme_for_initials = self.theme();
+                    let is_dark = matches!(theme_for_initials, iced::Theme::Dark);
+                    let letter_color = crate::presentation::initials_color(&room_name, is_dark);
+                    container(text(initials).size(TYPO_SM).color(letter_color))
+                        .width(Length::Fixed(30.0))
+                        .height(Length::Fixed(30.0))
+                        .center_x(Length::Fixed(30.0))
+                        .center_y(Length::Fixed(30.0))
+                        .style(move |t| iced::widget::container::Style {
+                            background: Some(iced::Background::Color(bg_surface_secondary(
+                                &theme_for_initials,
+                            ))),
+                            border: iced::Border {
+                                radius: SPACE_8.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
+                        .into()
+                });
+
+            let status_text = if online { "Online" } else { "Offline" };
+            let status_dot = icon_svg(if online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_XS).style(
+                move |t, _| iced::widget::svg::Style {
+                    color: Some(if online {
+                        accent_green(t)
+                    } else {
+                        text_muted(t)
+                    }),
+                },
+            );
+
+            let peer_identity = column![
+                text(room_name.clone())
+                    .size(TYPO_SM)
+                    .width(Length::Fill)
+                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                row![
+                    status_dot,
+                    text(status_text)
+                        .size(TYPO_XS)
+                        .style(move |t| iced::widget::text::Style {
+                            color: Some(if online {
+                                accent_green(t)
+                            } else {
+                                text_muted(t)
+                            }),
+                        }),
+                ]
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(SPACE_2)
+            .width(Length::Fill);
+
+            (peer_avatar, peer_identity)
+        };
 
         let search = iced::widget::tooltip::Tooltip::new(
             button(icon_svg(ICON_SEARCH, TYPO_SM))
@@ -17479,6 +18436,23 @@ impl IcedChat {
             iced::widget::tooltip::Position::Bottom,
         );
 
+        // Member list button — only shown for group conversations.
+        let members_button: iced::Element<'_, AppMessage> = if is_group {
+            iced::widget::tooltip::Tooltip::new(
+                button(text("Members").size(TYPO_XS))
+                    .on_press(AppMessage::ToggleMemberList)
+                    .padding([SPACE_4, SPACE_6])
+                    .style(BUTTON_ICON),
+                text("Group members").size(TYPO_XS),
+                iced::widget::tooltip::Position::Bottom,
+            )
+            .into()
+        } else {
+            iced::widget::Space::new()
+                .width(Length::Fixed(0.0))
+                .into()
+        };
+
         let more = iced::widget::tooltip::Tooltip::new(
             button(icon_svg(ICON_MORE, TYPO_MD))
                 .on_press(AppMessage::ToggleChatOptions)
@@ -17501,6 +18475,7 @@ impl IcedChat {
                 sweep,
                 shared,
                 details_toggle,
+                members_button,
                 more,
             ]
             .spacing(SPACE_4)
@@ -17511,6 +18486,144 @@ impl IcedChat {
         .padding([SPACE_6, SPACE_10])
         .style(container_header)
         .into()
+    }
+
+    /// Render the group member list overlay — showing avatar, display name, role, and presence.
+    fn view_group_member_list(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, scrollable, text, Space};
+        use iced::{Alignment, Length};
+
+        // Resolve the group via conversation store -> group_id -> storage -> list_group_members.
+        let group_members: Option<Vec<(String, String, bool)>> = (|| {
+            let conversation = self.conversation_store.active_iter().into_iter().find(|e| e.topic == self.topic)?;
+            if !matches!(conversation.kind, boru_core::conversations::ConversationKind::Group) {
+                return None;
+            }
+            let group_id = conversation.group_id?;
+            let storage = self.storage.as_ref()?;
+            let rows = storage.list_group_members(group_id.as_bytes()).ok()?;
+            Some(
+                rows.iter()
+                    .filter(|r| r.state == "Active" || r.state == "Member" || r.state == "Owner")
+                    .map(|r| {
+                        let pk_opt: Option<iroh::PublicKey> = if r.public_key.len() == 32 {
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&r.public_key);
+                            iroh::PublicKey::from_bytes(&arr).ok()
+                        } else {
+                            None
+                        };
+                        let display_name = pk_opt.as_ref().map(|pk| {
+                            self.names.get(pk).cloned().unwrap_or_else(|| {
+                                let pk_str = pk.to_string();
+                                self.conversation_store.active_iter().into_iter().find_map(|e| {
+                                    if e.peer_id == pk_str { Some(e.name.clone()) } else { None }
+                                }).unwrap_or_else(|| {
+                                    let s = pk.to_string();
+                                    format!("{}..{}", &s[..6], &s[s.len()-4..])
+                                })
+                            })
+                        }).unwrap_or_else(|| "Unknown".to_string());
+                        let role = r.role.clone();
+                        let online = pk_opt.is_some_and(|k| self.neighbors.contains(&k));
+                        (display_name, role, online)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })();
+
+        let theme = self.theme();
+        let dark = matches!(theme, iced::Theme::Dark);
+        let bg = bg_surface(&theme);
+
+        let header = row![
+            text("Group Members")
+                .size(TYPO_SM)
+                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+            Space::new().width(Length::Fill),
+            button(icon_svg(ICON_CLOSE, TYPO_SM))
+                .on_press(AppMessage::ToggleMemberList)
+                .padding([SPACE_4, SPACE_6])
+                .style(BUTTON_ICON),
+        ]
+        .spacing(SPACE_4)
+        .align_y(Alignment::Center)
+        .padding([SPACE_8, SPACE_10]);
+
+        let list_body: iced::Element<'_, AppMessage> = match group_members {
+            Some(members) if !members.is_empty() => {
+                let member_rows: Vec<iced::Element<'_, AppMessage>> = members.into_iter().map(|(name, role, online)| {
+                    let initials = crate::presentation::initials(&name);
+                    let display_initials = if initials.is_empty() { "?".to_string() } else { initials };
+                    let letter_color = crate::presentation::initials_color(&name, dark);
+
+                    let avatar = container(text(display_initials).size(TYPO_XS).color(letter_color))
+                        .width(Length::Fixed(28.0))
+                        .height(Length::Fixed(28.0))
+                        .center_x(Length::Fixed(28.0))
+                        .center_y(Length::Fixed(28.0))
+                        .style(move |t| iced::widget::container::Style {
+                            background: Some(iced::Background::Color(bg_surface_secondary(&t))),
+                            border: iced::Border { radius: SPACE_6.into(), ..Default::default() },
+                            ..Default::default()
+                        });
+
+                    let status_dot = icon_svg(if online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_XS).style(
+                        move |t, _| iced::widget::svg::Style {
+                            color: Some(if online { accent_green(&t) } else { text_muted(&t) }),
+                        },
+                    );
+
+                    let role_label = if role == "Owner" { "Owner" } else { "" };
+
+                    row![
+                        avatar,
+                        text(name)
+                            .size(TYPO_SM)
+                            .width(Length::FillPortion(3)),
+                        text(role_label)
+                            .size(TYPO_XS)
+                            .style(move |t| iced::widget::text::Style { color: Some(text_secondary(t)) })
+                            .width(Length::FillPortion(1)),
+                        status_dot,
+                    ]
+                    .spacing(SPACE_6)
+                    .align_y(Alignment::Center)
+                    .padding([SPACE_4, SPACE_10])
+                    .into()
+                }).collect::<Vec<iced::Element<'_, AppMessage>>>();
+
+                scrollable(column(member_rows).spacing(SPACE_2))
+                    .height(Length::Fill)
+                    .into()
+            }
+            _ => {
+                text("No members found")
+                    .size(TYPO_SM)
+                    .style(move |t| iced::widget::text::Style { color: Some(text_secondary(t)) })
+                    .width(Length::Fill)
+                    .into()
+            }
+        };
+
+        container(column![header, list_body].spacing(SPACE_4))
+            .width(Length::Fixed(300.0))
+            .height(Length::FillPortion(3))
+            .max_height(500.0)
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg)),
+                border: iced::Border {
+                    radius: SPACE_12.into(),
+                    ..Default::default()
+                },
+                shadow: iced::Shadow {
+                    color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                    offset: iced::Vector::new(0.0, 4.0),
+                    blur_radius: 24.0,
+                },
+                ..Default::default()
+            })
+            .into()
     }
 
     /// Build the chat options popover — a compact card with room info,
@@ -17662,7 +18775,263 @@ impl IcedChat {
     }
 
     /// Right-side details panel — shows conversation metadata and actions.
+    /// For direct conversations: contact info, connection, security, tools.
+    /// For groups: group info panel with name, description, members, actions.
     fn view_details_panel(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, scrollable, text, Space};
+        use iced::{Alignment, Length};
+
+        let theme = self.theme();
+
+        // ── Look up current conversation entry ──
+        let conversation = self.conversation_store.find(&self.topic);
+        let is_direct = conversation
+            .as_ref()
+            .map(|entry| entry.kind == boru_core::conversations::ConversationKind::Direct)
+            .unwrap_or(true);
+
+        if is_direct {
+            return self.view_details_panel_direct();
+        }
+
+        // ── Group details panel ─────────────────────────────────────────
+        let display_name = conversation
+            .as_ref()
+            .map(|entry| entry.display_name())
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        let member_count = self.neighbors.len();
+
+        // Common badge
+        let kind_badge = container(
+            text("Group")
+                .size(TYPO_XXS)
+                .color(accent_primary(&theme)),
+        )
+        .padding([SPACE_2, SPACE_8])
+        .style(move |t| container::Style {
+            background: Some(iced::Background::Color({
+                let mut c = accent_primary(t);
+                c.a = 0.12;
+                c
+            })),
+            border: iced::Border {
+                color: {
+                    let mut c = accent_primary(t);
+                    c.a = 0.25;
+                    c
+                },
+                width: 1.0,
+                radius: SPACE_12.into(),
+            },
+            ..Default::default()
+        });
+
+        // ── Group info section ──
+        let mut info_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        // Display name with badge
+        let dn = display_name.clone();
+        info_items.push(
+            row![
+                text(dn)
+                    .size(TYPO_SM)
+                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                Space::new().width(Length::Fixed(SPACE_8)),
+                kind_badge,
+            ]
+            .align_y(Alignment::Center)
+            .into(),
+        );
+
+        // Member count
+        info_items.push(
+            row![
+                icon_svg(ICON_ONLINE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                    color: Some(text_muted(t))
+                }),
+                Space::new().width(Length::Fixed(SPACE_4)),
+                text(format!("Members · {}", member_count))
+                    .size(TYPO_SM)
+                    .color(text_secondary(&theme)),
+            ]
+            .align_y(Alignment::Center)
+            .into(),
+        );
+
+        // ── Members section ──
+        let mut member_rows: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        // Sort neighbors for stable order — use fmt_short for display
+        let mut sorted_neighbors: Vec<PublicKey> = self.neighbors.iter().copied().collect();
+        sorted_neighbors.sort_by(|a, b| a.fmt_short().cmp(&b.fmt_short()));
+
+        for neighbor in sorted_neighbors.iter().take(12) {
+            let short_name = neighbor.fmt_short().to_string();
+            let display_label = boru_core::peer_names::resolve_peer_name(
+                neighbor,
+                None,
+                None,
+                None,
+                None,
+            );
+            let is_friend = self.friend_online_cache.contains(neighbor);
+
+            let row_element = row![
+                // Avatar dot
+                container(Space::new())
+                    .width(Length::Fixed(8.0))
+                    .height(Length::Fixed(8.0))
+                    .style(move |_t| container::Style {
+                        background: Some(iced::Background::Color(
+                            if is_friend { accent_green(&theme) } else { text_muted(&theme) }
+                        )),
+                        border: iced::Border {
+                            radius: 4.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                Space::new().width(Length::Fixed(SPACE_8)),
+                text(&display_label)
+                    .size(TYPO_SM)
+                    .width(Length::Fill),
+                text(&short_name)
+                    .size(TYPO_XS)
+                    .color(text_muted(&theme)),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+            member_rows.push(row_element.into());
+        }
+
+        if self.neighbors.len() > 12 {
+            member_rows.push(
+                text(format!("+ {} more", self.neighbors.len() - 12))
+                    .size(TYPO_XS)
+                    .color(text_muted(&theme))
+                    .into(),
+            );
+        }
+
+        // Invite member button
+        let invite_btn = button(
+            row![
+                icon_svg(ICON_USER_PLUS, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                    color: Some(accent_primary(t))
+                }),
+                text("Invite member")
+                    .size(TYPO_SM)
+                    .color(accent_primary(&theme)),
+            ]
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::ToggleInviteMenu)
+        .padding([SPACE_6, SPACE_12])
+        .width(Length::Fill)
+        .style(BUTTON_OUTLINE);
+
+        // ── Settings section ──
+        let settings_items: Vec<iced::Element<'_, AppMessage>> = vec![
+            row![
+                icon_svg(ICON_NOTIFICATION, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                    color: Some(text_secondary(t))
+                }),
+                Space::new().width(Length::Fixed(SPACE_8)),
+                text("Notifications")
+                    .size(TYPO_SM),
+                Space::new().width(Length::Fill),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into(),
+            row![
+                icon_svg(ICON_FILES, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                    color: Some(text_secondary(t))
+                }),
+                Space::new().width(Length::Fixed(SPACE_8)),
+                text("Shared files")
+                    .size(TYPO_SM),
+                Space::new().width(Length::Fill),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into(),
+            row![
+                icon_svg(ICON_MORE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                    color: Some(text_secondary(t))
+                }),
+                Space::new().width(Length::Fixed(SPACE_8)),
+                text("Group information")
+                    .size(TYPO_SM),
+                Space::new().width(Length::Fill),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into(),
+        ];
+
+        // ── Leave Group button (owner view would additionally show Edit group, Manage members) ──
+        let leave_btn = button(
+            row![
+                text("Leave Group")
+                    .size(TYPO_SM),
+            ]
+            .align_y(Alignment::Center),
+        )
+        .padding([SPACE_6, SPACE_12])
+        .width(Length::Fill)
+        .style(BUTTON_DANGER);
+
+        // ── Assemble the panel ──
+        let panel_body = column![
+            // Heading
+            text("Details")
+                .size(TYPO_SM)
+                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+            Space::new().height(Length::Fixed(SPACE_8)),
+            // Info section
+            text("Group info")
+                .size(TYPO_XS)
+                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .color(text_secondary(&theme)),
+            Space::new().height(Length::Fixed(SPACE_2)),
+            column(info_items).spacing(SPACE_4),
+            divider(&theme),
+            // Members section
+            text("Members")
+                .size(TYPO_XS)
+                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .color(text_secondary(&theme)),
+            Space::new().height(Length::Fixed(SPACE_2)),
+            column(member_rows).spacing(SPACE_8),
+            Space::new().height(Length::Fixed(SPACE_4)),
+            invite_btn,
+            divider(&theme),
+            // Settings section
+            column(settings_items).spacing(SPACE_10),
+            divider(&theme),
+            // Leave
+            leave_btn,
+            Space::new().height(Length::Fill),
+        ]
+        .spacing(SPACE_4);
+
+        container(scrollable(panel_body))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding([SPACE_8, SPACE_8])
+            .style(container_surface)
+            .into()
+    }
+
+    /// Direct-chat details panel — contact info, connection, security, tools.
+    fn view_details_panel_direct(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, column, container, row, scrollable, text, Space};
         use iced::{Alignment, Length};
 
@@ -17674,13 +19043,6 @@ impl IcedChat {
             .as_ref()
             .and_then(|entry| entry.peer_id.parse::<PublicKey>().ok());
         let is_online = peer.is_some_and(|key| self.friend_online_cache.contains(&key));
-        let is_direct = conversation
-            .as_ref()
-            .map(|entry| match &entry.kind {
-                boru_core::conversations::ConversationKind::Direct => true,
-                _ => false,
-            })
-            .unwrap_or(true);
         let display_name = conversation
             .as_ref()
             .map(|entry| entry.display_name())
@@ -17743,10 +19105,9 @@ impl IcedChat {
             .into(),
         );
 
-        // Kind badge (Direct / Group)
-        let kind_label = if is_direct { "Direct" } else { "Group" };
+        // Kind badge
         let kind_badge = container(
-            text(kind_label)
+            text("Direct")
                 .size(TYPO_XXS)
                 .color(accent_primary(&theme)),
         )
@@ -17853,41 +19214,27 @@ impl IcedChat {
         conn_items.push(conn_state_row.into());
 
         conn_items.push(
-            info_row(
-                "Connection".to_string(),
-                connection_type.to_string(),
-                &theme,
-            )
-            .into(),
+            info_row("Connection".to_string(), connection_type.to_string(), &theme).into(),
         );
 
-        // Relay mode (global, but relevant context for the peer)
+        // Relay mode
         let relay_label = fmt_relay_mode(&self.relay_mode);
         conn_items.push(info_row("Relay".to_string(), relay_label, &theme).into());
 
-        // Latency to this peer (if available)
+        // Latency
         if let Some(pk) = peer {
             if let Some(latency) = self.peer_latencies.get(&pk) {
                 let ms = latency.as_millis();
-                let latency_text = format!("{ms} ms");
-                conn_items.push(info_row("Latency".to_string(), latency_text, &theme).into());
+                conn_items.push(info_row("Latency".to_string(), format!("{ms} ms"), &theme).into());
             }
         }
 
         // ── Section: Security ──
         let mut security_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
-
-        // All iroh QUIC connections are encrypted
         security_items.push(
-            info_row(
-                "Encryption".to_string(),
-                "QUIC (encrypted)".to_string(),
-                &theme,
-            )
-            .into(),
+            info_row("Encryption".to_string(), "QUIC (encrypted)".to_string(), &theme).into(),
         );
 
-        // Peer public key with copy button
         if let Some(pk) = peer {
             let fingerprint = pk.fmt_short().to_string();
             let full_key = pk.to_string();
@@ -17898,9 +19245,7 @@ impl IcedChat {
                 .style(BUTTON_GHOST_BG);
 
             let key_row = row![
-                text("Key fingerprint")
-                    .size(TYPO_SM)
-                    .color(text_secondary(&theme)),
+                text("Key fingerprint").size(TYPO_SM).color(text_secondary(&theme)),
                 Space::new().width(Length::Fill),
                 text(fpr)
                     .size(TYPO_SM)
@@ -17917,16 +19262,13 @@ impl IcedChat {
         // ── Section: Tools ──
         let mut tool_btns: Vec<iced::Element<'_, AppMessage>> = Vec::new();
 
-        // Browse shared files (only for direct conversations with a peer)
         if let Some(pk) = peer {
             let shared_files_btn = button(
                 row![
                     icon_svg(ICON_FILES, TYPO_SM).style(|t, _| iced::widget::svg::Style {
                         color: Some(accent_primary(t))
                     }),
-                    text("Shared files")
-                        .size(TYPO_SM)
-                        .color(accent_primary(&theme)),
+                    text("Shared files").size(TYPO_SM).color(accent_primary(&theme)),
                 ]
                 .spacing(SPACE_6)
                 .align_y(Alignment::Center),
@@ -17943,9 +19285,7 @@ impl IcedChat {
                 icon_svg(ICON_ACTIVITY, TYPO_SM).style(|t, _| iced::widget::svg::Style {
                     color: Some(accent_primary(t))
                 }),
-                text("Connection details")
-                    .size(TYPO_SM)
-                    .color(accent_primary(&theme)),
+                text("Connection details").size(TYPO_SM).color(accent_primary(&theme)),
             ]
             .spacing(SPACE_6)
             .align_y(Alignment::Center),
@@ -17958,12 +19298,10 @@ impl IcedChat {
 
         // ── Assemble the panel ──
         let panel_body = column![
-            // Heading
             text("Details")
                 .size(TYPO_SM)
                 .font(crate::fonts::inter(iced::font::Weight::Semibold)),
             Space::new().height(Length::Fixed(SPACE_8)),
-            // Contact section
             text("Contact")
                 .size(TYPO_XS)
                 .font(crate::fonts::inter(iced::font::Weight::Semibold))
@@ -17971,7 +19309,6 @@ impl IcedChat {
             Space::new().height(Length::Fixed(SPACE_2)),
             column(contact_items).spacing(SPACE_4),
             divider(&theme),
-            // Connection section
             text("Connection")
                 .size(TYPO_XS)
                 .font(crate::fonts::inter(iced::font::Weight::Semibold))
@@ -17979,7 +19316,6 @@ impl IcedChat {
             Space::new().height(Length::Fixed(SPACE_2)),
             column(conn_items).spacing(SPACE_4),
             divider(&theme),
-            // Security section
             text("Security")
                 .size(TYPO_XS)
                 .font(crate::fonts::inter(iced::font::Weight::Semibold))
@@ -17987,7 +19323,6 @@ impl IcedChat {
             Space::new().height(Length::Fixed(SPACE_2)),
             column(security_items).spacing(SPACE_4),
             divider(&theme),
-            // Tools section
             text("Tools")
                 .size(TYPO_XS)
                 .font(crate::fonts::inter(iced::font::Weight::Semibold))
@@ -17999,6 +19334,250 @@ impl IcedChat {
         .spacing(SPACE_4);
 
         container(scrollable(panel_body))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding([SPACE_8, SPACE_8])
+            .style(container_surface)
+            .into()
+    }
+
+    /// Right-side group info panel — shown when the active conversation is a group.
+    fn view_group_info_panel(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, scrollable, text, Space};
+        use iced::{Alignment, Length};
+
+        let theme = self.theme();
+        let conversation = self.conversation_store.find(&self.topic);
+        let display_name = conversation
+            .as_ref()
+            .map(|entry| entry.display_name())
+            .unwrap_or_else(|| "Group".to_string());
+        let room_entry = self.room_history.find(&self.topic);
+        let description = room_entry
+            .and_then(|r| {
+                // Use room metadata description from room_history or room_docs
+                // For now derive it (stored in room history through the group creation path)
+                None::<String>
+            })
+            .unwrap_or_default();
+
+        let member_count = room_entry.map(|r| r.member_count).unwrap_or(0);
+        let is_owner = room_entry.map(|r| r.is_owner).unwrap_or(true);
+
+        // ── Section: Group Info ──
+        let mut info_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        // Group name
+        info_items.push(
+            row![
+                text(display_name.clone())
+                    .size(TYPO_SM)
+                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                text("Group")
+                    .size(TYPO_XXS)
+                    .color(accent_primary(&theme)),
+            ]
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+
+        // Member count
+        let member_label = if member_count > 0 {
+            format!("{} member{}", member_count, if member_count == 1 { "" } else { "s" })
+        } else {
+            "Group".to_string()
+        };
+        info_items.push(info_row("Members".to_string(), member_label, &theme).into());
+
+        if is_owner {
+            info_items.push(info_row("Role".to_string(), "Owner".to_string(), &theme).into());
+        }
+
+        // ── Section: Members ──
+        let mut member_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        // List the local user
+        let local_label = format!("{} (you)", self.local_label.clone());
+        member_items.push(
+            row![
+                text(local_label)
+                    .size(TYPO_SM),
+                Space::new().width(Length::Fill),
+                text(if is_owner { "Owner" } else { "Member" })
+                    .size(TYPO_XXS)
+                    .color(text_secondary(&theme)),
+            ]
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into(),
+        );
+
+        // List friends who are in the group (from selected_members during creation)
+        // For now show a minimal members list — full roster requires RosterDoc handle
+        member_items.push(
+            row![
+                text(format!("{} online", self.neighbors.len()))
+                    .size(TYPO_XXS)
+                    .color(text_muted(&theme)),
+            ]
+            .into(),
+        );
+
+        // ── Section: Advanced ──
+        let topic_hex = self.topic.to_string();
+        let short_topic = if topic_hex.len() > 16 {
+            format!("{}…", &topic_hex[..16])
+        } else {
+            topic_hex.clone()
+        };
+
+        let mut advanced_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+        advanced_items.push(
+            info_row("Group ID".to_string(), short_topic, &theme).into(),
+        );
+
+        // ── Owner-only controls ──
+        let mut owner_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+        if is_owner {
+            owner_items.push(
+                container(text("Owner Controls")
+                    .size(TYPO_XS)
+                    .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                    .color(text_secondary(&theme)))
+                .padding([SPACE_4, 0.0])
+                .into(),
+            );
+        }
+
+        // ── Actions ──
+        let mut action_items: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        // Invite member button (owner only)
+        let invite_btn = button(
+            row![
+                icon_svg(ICON_PLUS, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                    color: Some(accent_primary(t))
+                }),
+                text("Invite Member")
+                    .size(TYPO_SM)
+                    .color(accent_primary(&theme)),
+            ]
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::ShowInviteMemberDialog)
+        .padding([SPACE_6, SPACE_12])
+        .width(Length::Fill)
+        .style(BUTTON_OUTLINE);
+        action_items.push(invite_btn.into());
+
+        // Leave group button (wired but actual leave logic in Phase 16)
+        let leave_btn = button(
+            row![
+                icon_svg(ICON_CLOSE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                    color: Some(color_error(t))
+                }),
+                text("Leave Group")
+                    .size(TYPO_SM)
+                    .color(color_error(&theme)),
+            ]
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center),
+        )
+        .padding([SPACE_6, SPACE_12])
+        .width(Length::Fill)
+        .style(move |t: &iced::Theme, _s| iced::widget::button::Style {
+            border: iced::Border {
+                color: {
+                    let mut c = color_error(t);
+                    c.a = 0.3;
+                    c
+                },
+                width: 1.0,
+                radius: SPACE_6.into(),
+            },
+            ..iced::widget::button::Style::default()
+        });
+        action_items.push(leave_btn.into());
+
+        // Connection details button
+        let connection_btn = button(
+            row![
+                icon_svg(ICON_ACTIVITY, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                    color: Some(accent_primary(t))
+                }),
+                text("Connection details")
+                    .size(TYPO_SM)
+                    .color(accent_primary(&theme)),
+            ]
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::OpenConnectionDetails)
+        .padding([SPACE_6, SPACE_12])
+        .width(Length::Fill)
+        .style(BUTTON_OUTLINE);
+        action_items.push(connection_btn.into());
+
+        // ── Assemble the panel ──
+        let panel_body = column![
+            // Heading
+            text("Group Info")
+                .size(TYPO_SM)
+                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+            Space::new().height(Length::Fixed(SPACE_8)),
+            // Group Info section
+            text("About")
+                .size(TYPO_XS)
+                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .color(text_secondary(&theme)),
+            Space::new().height(Length::Fixed(SPACE_2)),
+            column(info_items).spacing(SPACE_4),
+            divider(&theme),
+            // Members section
+            text("Members")
+                .size(TYPO_XS)
+                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .color(text_secondary(&theme)),
+            Space::new().height(Length::Fixed(SPACE_2)),
+            column(member_items).spacing(SPACE_4),
+            divider(&theme),
+            // Advanced section
+            text("Advanced")
+                .size(TYPO_XS)
+                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .color(text_secondary(&theme)),
+            Space::new().height(Length::Fixed(SPACE_2)),
+            column(advanced_items).spacing(SPACE_4),
+        ]
+        .spacing(SPACE_4);
+
+        // Build the full panel with owner controls and actions at the bottom
+        let mut full_panel = column![panel_body].spacing(0);
+
+        if !owner_items.is_empty() {
+            full_panel = full_panel.push(divider(&theme));
+            full_panel = full_panel.push(column(owner_items).spacing(SPACE_4));
+        }
+
+        full_panel = full_panel.push(divider(&theme));
+        full_panel = full_panel.push(
+            column![
+                text("Actions")
+                    .size(TYPO_XS)
+                    .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                    .color(text_secondary(&theme)),
+                Space::new().height(Length::Fixed(SPACE_2)),
+                column(action_items).spacing(SPACE_4),
+            ]
+            .spacing(SPACE_4),
+        );
+
+        full_panel = full_panel.push(Space::new().height(Length::Fill));
+
+        container(scrollable(full_panel))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding([SPACE_8, SPACE_8])
@@ -20903,7 +22482,7 @@ impl IcedChat {
                     bottom: SPACE_8,
                     left: SPACE_16,
                 })
-                .style(move |_t| iced::widget::container::Style {
+                .style(move |t| iced::widget::container::Style {
                     background: Some(iced::Background::Color(iced::Color::from_rgba(
                         0.1, 0.1, 0.1, 0.85,
                     ))),

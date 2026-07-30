@@ -1171,6 +1171,28 @@ impl Storage {
     /// Return the newest epoch for a group.
     pub fn get_current_group_epoch(&self, group_id:&[u8;32]) -> Result<Option<GroupEpochRow>> { let conn=self.conn.lock().unwrap(); conn.query_row("SELECT group_id,epoch,topic_id,discovery_secret,created_at_ms FROM group_epochs WHERE group_id=?1 ORDER BY epoch DESC LIMIT 1",[group_id.as_slice()],|r|{let b:Vec<u8>=r.get(0)?;let mut id=[0u8;32];id.copy_from_slice(&b);let t:Vec<u8>=r.get(2)?;let mut topic=[0u8;32];topic.copy_from_slice(&t);Ok(GroupEpochRow{group_id:id,epoch:r.get::<_,i64>(1)? as u64,topic_id:topic.into(),discovery_secret:r.get(3)?,created_at_ms:r.get::<_,i64>(4)? as u64})}).optional().std_context("get current group epoch") }
 
+    /// Look up the group for a given epoch topic, using the unique topic→group index.
+    pub fn find_group_by_topic(&self, topic_id: &TopicId) -> Result<Option<GroupRow>> {
+        let conn = self.conn.lock().unwrap();
+        let topic_bytes: &[u8] = topic_id.as_ref();
+        let group_id: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT group_id FROM group_epochs WHERE topic_id=?1 LIMIT 1",
+                [topic_bytes],
+                |r| r.get(0),
+            )
+            .optional()
+            .std_context("find group epoch by topic")?;
+        match group_id {
+            Some(bytes) => {
+                let mut id = [0u8; 32];
+                id.copy_from_slice(&bytes);
+                self.get_group(&id)
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Insert an invitation idempotently.
     pub fn create_group_invite(&self, invite:&GroupInviteRow) -> Result<()> { let conn=self.conn.lock().unwrap(); conn.execute("INSERT OR IGNORE INTO group_invites(invite_id,group_id,inviter_public_key,recipient_public_key,epoch,status,created_at_ms,expires_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![invite.invite_id.as_slice(),invite.group_id.as_slice(),invite.inviter_public_key,invite.recipient_public_key,invite.epoch as i64,invite.status,invite.created_at_ms as i64,invite.expires_at_ms as i64]).std_context("create group invite")?; Ok(()) }
 

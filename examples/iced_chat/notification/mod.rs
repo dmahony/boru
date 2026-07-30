@@ -6,4 +6,6 @@
 
 pub mod backend;
 pub mod event;
+pub mod focus;
+pub mod render;
 pub mod service;

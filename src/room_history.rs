@@ -45,6 +45,12 @@ pub struct RoomHistoryEntry {
     pub last_seen: u64,
     /// Optional last message preview (first few chars of latest message).
     pub last_preview: String,
+    /// Sender display name for the last message preview (used by group sidebar).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_sender_name: String,
+    /// Number of members in this room (0 for direct chats, populated for groups).
+    #[serde(default)]
+    pub member_count: u32,
     /// Whether the user created this room (vs. joined someone else's).
     pub is_owner: bool,
 }
@@ -57,6 +63,8 @@ impl RoomHistoryEntry {
             name: name.into(),
             last_seen: default_now(),
             last_preview: String::new(),
+            last_sender_name: String::new(),
+            member_count: 0,
             is_owner,
         }
     }
@@ -198,6 +206,26 @@ impl RoomHistoryStore {
     pub fn update_preview(&mut self, topic: &TopicId, preview: impl Into<String>) {
         if let Some(entry) = self.find_mut(topic) {
             entry.last_preview = preview.into();
+        }
+    }
+
+    /// Update the last message preview with sender name for a room.
+    pub fn update_preview_with_sender(
+        &mut self,
+        topic: &TopicId,
+        sender: impl Into<String>,
+        preview: impl Into<String>,
+    ) {
+        if let Some(entry) = self.find_mut(topic) {
+            entry.last_sender_name = sender.into();
+            entry.last_preview = preview.into();
+        }
+    }
+
+    /// Update the member count for a room.
+    pub fn update_member_count(&mut self, topic: &TopicId, count: u32) {
+        if let Some(entry) = self.find_mut(topic) {
+            entry.member_count = count;
         }
     }
 

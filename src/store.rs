@@ -2975,4 +2975,48 @@ mod tests {
         // Dead message should not
         assert!(store.get_inbox(&msg_dead).unwrap().is_none());
     }
+
+    #[test]
+    fn received_message_survives_store_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "boru-message-store-durability-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let hash = [7u8; 32];
+        let topic = [8u8; 32];
+        let sender = [9u8; 32];
+        let local = [0u8; 32];
+        {
+            let store = MessageStore::open(&path).unwrap();
+            assert!(store
+                .insert_chat_message(
+                    &hash,
+                    &topic,
+                    &sender,
+                    42_000,
+                    "text",
+                    "received group message",
+                    Some(b"authenticated-wire-payload"),
+                    None,
+                    &local,
+                )
+                .unwrap());
+        }
+        {
+            let reopened = MessageStore::open(&path).unwrap();
+            let row = reopened.find_message_by_hash(&hash).unwrap().unwrap();
+            assert_eq!(row.body, "received group message");
+            assert_eq!(row.topic, topic);
+            assert_eq!(row.sender, sender);
+            assert_eq!(
+                row.signed_bytes.as_deref(),
+                Some(b"authenticated-wire-payload".as_slice())
+            );
+        }
+        let _ = std::fs::remove_file(path);
+    }
 }

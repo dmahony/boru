@@ -1449,6 +1449,21 @@ pub fn take_signed_message(
         .and_then(|mut cache| cache.remove(&(from, hash, sent_at)))
 }
 
+/// Return the raw signed payload without removing it from the transport cache.
+/// Frontends use this while handling a decoded event to persist authenticated
+/// bytes in durable history; the backfill responder uses `take_signed_message`
+/// when it needs ownership of the payload.
+pub fn get_signed_message(
+    from: PublicKey,
+    hash: MessageHash,
+    sent_at: u64,
+) -> Option<Vec<u8>> {
+    SIGNED_MESSAGE_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&(from, hash, sent_at)).cloned())
+}
+
 /// Prune entries older than [`DEDUP_TTL`] from the seen-messages set.
 fn prune_seen_messages() {
     let now = Instant::now();
@@ -1772,6 +1787,14 @@ pub fn handle_net_event_for_topic(
                 }
                 Message::Message { text } => {
                     if from != cb.local_public() {
+                        cb.persist_remote_message(
+                            topic,
+                            from,
+                            incoming_hash,
+                            sent_at,
+                            &text,
+                            get_signed_message(from, incoming_hash, sent_at),
+                        );
                         // Record diagnostic event for real chat messages from
                         // remote peers, subject to the per-key cooldown.
                         if !diag_had_hash {

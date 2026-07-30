@@ -221,6 +221,20 @@ pub trait ChatCallbacks {
         sent_at: Option<u64>,
     );
 
+    /// Persist an authenticated incoming text message in durable history.
+    /// Frontends that own a MessageStore should override this; lightweight
+    /// headless/test callbacks may use the default no-op implementation.
+    fn persist_remote_message(
+        &mut self,
+        _topic: Option<crate::proto::TopicId>,
+        _peer: PublicKey,
+        _hash: MessageHash,
+        _sent_at: u64,
+        _text: &str,
+        _signed_bytes: Option<Vec<u8>>,
+    ) {
+    }
+
     /// Record a pending file download: `(filename, ticket_string, size_in_bytes, thumbnail_bytes)`.
     fn set_pending_file(
         &mut self,
