@@ -16,6 +16,8 @@
 //!   - `downloads`          — durable download state machine
 //!   - `profile_manifest_state` — manifest revision tracking
 //!
+//! Version 13 — per-group encryption state (`group_encryption_state` table).
+//!
 //! # Design rules
 //!
 //!  1. Chat attachments belong to messages (`message_attachments`).
@@ -46,7 +48,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 12;
+const CURRENT_SCHEMA_VERSION: u32 = 13;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -694,6 +696,7 @@ impl Storage {
                 10 => self.migrate_v10(&conn)?,
                 11 => self.migrate_v11(&conn)?,
                 12 => self.migrate_v12(&conn)?,
+                13 => self.migrate_v13(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -1096,6 +1099,21 @@ impl Storage {
             CREATE INDEX IF NOT EXISTS idx_group_invites_group ON group_invites(group_id);",
         )
         .std_context("migrate v12 groups")?;
+        Ok(())
+    }
+
+    /// V13: per-group encryption state for end-to-end encrypted messaging.
+    fn migrate_v13(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS group_encryption_state (
+                group_id BLOB PRIMARY KEY,
+                state BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            ",
+        )
+        .std_context("migrate v13 group_encryption_state")?;
         Ok(())
     }
 

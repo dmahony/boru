@@ -32,6 +32,7 @@ use crate::chat_history::DeliveryState;
 use crate::diagnostics::{DiagnosticEventKind, Diagnostics, ReceivedProbe};
 use crate::discovery_secret::DiscoverySecret;
 use crate::friends::{FriendId, FriendsStore};
+use crate::group_encryption::message::EncryptedGroupEnvelope;
 use crate::proto::TopicId;
 use crate::public_room_safety::PublicRoomSafety;
 use crate::transfer_telemetry::TransferTelemetry;
@@ -985,6 +986,15 @@ pub enum Message {
     },
     /// Publish the sender's profile and metadata over gossip.
     ProfileUpdate(UserProfile),
+    /// End-to-end encrypted group message using p2panda's forward-secure
+    /// message encryption scheme.  The envelope is serialised via postcard
+    /// and authenticated by the gossip-layer signature mechanism.
+    EncryptedGroupMessage {
+        /// The 32-byte group identifier.
+        group_id: [u8; 32],
+        /// Forward-secure encrypted group message envelope.
+        envelope: EncryptedGroupEnvelope,
+    },
 }
 
 /// A room advertisement broadcast into the directory topic.
@@ -1959,6 +1969,10 @@ pub fn handle_net_event_for_topic(
                 }
                 Message::RoomAdvertisement { .. } => {
                     // Room advertisements are handled at the frontend layer.
+                }
+                Message::EncryptedGroupMessage { .. } => {
+                    // Encrypted group messages are handled at the group encryption
+                    // layer once the membership/ordering modules are wired in.
                 }
             }
         }

@@ -372,6 +372,14 @@ pub mod transfer_telemetry;
 /// new CWD fallback).  Always available (no feature gate).
 pub mod data_dir;
 
+/// Group encryption — p2panda-based end-to-end encrypted group messaging.
+///
+/// Provides type bridges between iroh and p2panda cryptographic types,
+/// newtype wrappers for peer/operation identities, and the scaffolding
+/// for key management, message encryption, and membership tracking.
+#[cfg(feature = "net")]
+pub mod group_encryption;
+
 /// Bounded blocking file hasher — wraps blake3 hashing in
 /// [`tokio::task::spawn_blocking`] with configurable concurrency.
 ///

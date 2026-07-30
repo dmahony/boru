@@ -568,7 +568,7 @@ dependencies = [
  "log",
  "num-rational",
  "num-traits",
- "pastey",
+ "pastey 0.1.1",
  "rayon",
  "thiserror 2.0.19",
  "v_frame",
@@ -846,7 +846,7 @@ dependencies = [
  "data-encoding",
  "derive_more",
  "distributed-topic-tracker",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0-rc.0",
  "futures-concurrency",
  "getrandom 0.3.4",
  "hex",
@@ -867,6 +867,8 @@ dependencies = [
  "n0-tracing-test",
  "notify",
  "open",
+ "p2panda-core",
+ "p2panda-encryption",
  "parking_lot",
  "postcard",
  "profiling",
@@ -1368,6 +1370,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-models"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "657f625ff361906f779745d08375ae3cc9fef87a35fba5f22874cf773010daf4"
+dependencies = [
+ "hax-lib",
+ "pastey 0.2.3",
+ "rand 0.9.5",
+]
+
+[[package]]
 name = "core_maths"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1635,6 +1648,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "curve25519-dalek-derive",
+ "digest 0.10.7",
  "fiat-crypto 0.2.9",
  "rustc_version",
  "subtle",
@@ -1846,7 +1860,7 @@ dependencies = [
  "actor-helper",
  "anyhow",
  "chrono",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0-rc.0",
  "ed25519-dalek-hpke",
  "futures-lite",
  "getrandom 0.4.3",
@@ -1916,13 +1930,38 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ed25519"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
+dependencies = [
+ "pkcs8 0.10.2",
+ "signature 2.2.0",
+]
+
+[[package]]
+name = "ed25519"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29fcf32e6c73d1079f83ab4d782de2d81620346a5f38c6237a86a22f8368980a"
 dependencies = [
- "pkcs8",
+ "pkcs8 0.11.0",
  "serdect",
- "signature",
+ "signature 3.0.0",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
+dependencies = [
+ "curve25519-dalek 4.1.3",
+ "ed25519 2.2.3",
+ "rand_core 0.6.4",
+ "serde",
+ "sha2 0.10.9",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -1932,11 +1971,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b011170fe4f04665565b4110afef66774fe9ffff278f3eb5b81cc73d26e27d60"
 dependencies = [
  "curve25519-dalek 5.0.0",
- "ed25519",
+ "ed25519 3.0.0",
  "rand_core 0.10.1",
  "serde",
  "sha2 0.11.0",
- "signature",
+ "signature 3.0.0",
  "subtle",
  "zeroize",
 ]
@@ -1947,7 +1986,7 @@ version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3553f25a4e38b5ca64b26c54f34e1dd5092d18a5dea03797ac235baab53eaf8f"
 dependencies = [
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0-rc.0",
  "hpke",
  "rand 0.9.5",
  "x25519-dalek",
@@ -2818,6 +2857,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "hax-lib"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "543f93241d32b3f00569201bfce9d7a93c92c6421b23c77864ac929dc947b9fc"
+dependencies = [
+ "hax-lib-macros",
+ "num-bigint",
+ "num-traits",
+]
+
+[[package]]
+name = "hax-lib-macros"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8755751e760b11021765bb04cb4a6c4e24742688d9f3aa14c2079638f537b0f"
+dependencies = [
+ "hax-lib-macros-types",
+ "proc-macro-error2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "hax-lib-macros-types"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f177c9ae8ea456e2f71ff3c1ea47bf4464f772a05133fcbba56cd5ba169035a2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "heapless"
 version = "0.7.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2854,6 +2930,9 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "hexf-parse"
@@ -2971,6 +3050,53 @@ dependencies = [
  "hmac",
  "p256",
  "rand_core 0.9.5",
+ "sha2 0.10.9",
+ "subtle",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "hpke-rs"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6ad6a58eb3e0ee30be8bfc7a9770ae98adcfa1d9bc820a5847732ce84f70837"
+dependencies = [
+ "hpke-rs-crypto",
+ "libcrux-sha3",
+ "log",
+ "rand_core 0.9.5",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "hpke-rs-crypto"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a73a99d9008010d73289f41335a3f6e14fb8c04eaf60e9111b450463b1bbc7f"
+dependencies = [
+ "rand_core 0.9.5",
+ "zeroize",
+]
+
+[[package]]
+name = "hpke-rs-rust-crypto"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14b28be6cba9081c7feda2651d51c2a900029798e78b4c1e093e792f4571a870"
+dependencies = [
+ "aes-gcm",
+ "chacha20poly1305",
+ "hkdf",
+ "hpke-rs-crypto",
+ "k256",
+ "p256",
+ "p384",
+ "rand 0.8.7",
+ "rand_chacha 0.3.1",
+ "rand_core 0.10.1",
+ "rand_core 0.6.4",
  "sha2 0.10.9",
  "subtle",
  "x25519-dalek",
@@ -3590,7 +3716,7 @@ dependencies = [
  "ctutils",
  "data-encoding",
  "derive_more",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0-rc.0",
  "futures-util",
  "getrandom 0.4.3",
  "hickory-resolver",
@@ -3638,7 +3764,7 @@ dependencies = [
  "data-encoding",
  "data-encoding-macro",
  "derive_more",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0-rc.0",
  "getrandom 0.4.3",
  "n0-error",
  "rand 0.10.2",
@@ -4062,6 +4188,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "k256"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6e3919bbaa2945715f0bb6d3934a173d1e9a59ac23767fbaaef277265a7411b"
+dependencies = [
+ "cfg-if",
+ "elliptic-curve",
+]
+
+[[package]]
 name = "kamadak-exif"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4145,6 +4281,56 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libcrux-intrinsics"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1b5db005ff8001e026b73a6842ee81bbef8ec5ff0e1915a67ae65fd2a9fafa5"
+dependencies = [
+ "core-models",
+ "hax-lib",
+]
+
+[[package]]
+name = "libcrux-platform"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d9e21d7ed31a92ac539bd69a8c970b183ee883872d2d19ce27036e24cb8ecc4"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "libcrux-secrets"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ce650f3041b44ba40d4263852347d007cd2cd9d1cc856a6f6c8b2e10c3fd40b"
+dependencies = [
+ "hax-lib",
+]
+
+[[package]]
+name = "libcrux-sha3"
+version = "0.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1ae0b7d0e1cc4793a609fd0ff2ca3b3a3fabae523770c619a3d4bc86417b0d7"
+dependencies = [
+ "hax-lib",
+ "libcrux-intrinsics",
+ "libcrux-platform",
+ "libcrux-traits",
+]
+
+[[package]]
+name = "libcrux-traits"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "812e4fa89f3f5e34b47f928b22b1b78395a0d4ec23b1f583db635f128159d65f"
+dependencies = [
+ "libcrux-secrets",
+ "rand 0.9.5",
+]
 
 [[package]]
 name = "libfuzzer-sys"
@@ -4314,7 +4500,7 @@ dependencies = [
  "crc",
  "document-features",
  "dyn-clone",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0-rc.0",
  "flume",
  "futures-lite",
  "getrandom 0.4.3",
@@ -4536,7 +4722,7 @@ version = "0.5.0"
 dependencies = [
  "crc",
  "dyn-clone",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0-rc.0",
  "futures-core",
  "lru 0.18.1",
  "n0-error",
@@ -5452,6 +5638,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "p2panda-core"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd0ba9bb72d4eef6a6d1e835cff545ebadac1f5fea79241e9c47bfdccad17bdf"
+dependencies = [
+ "blake3",
+ "ciborium",
+ "ed25519-dalek 2.2.0",
+ "hex",
+ "rand 0.8.7",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "p2panda-encryption"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3879eb55a2d3c0fa3f7d4ba341c79932d039d9c59921644da74c4134ca66c83"
+dependencies = [
+ "chacha20poly1305",
+ "curve25519-dalek 4.1.3",
+ "hex",
+ "hkdf",
+ "hpke-rs",
+ "hpke-rs-crypto",
+ "hpke-rs-rust-crypto",
+ "p2panda-core",
+ "rand_chacha 0.9.0",
+ "serde",
+ "serde_bytes",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.19",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "p384"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe42f1670a52a47d448f14b6a5c61dd78fce51856e68edaa38f7ae3a46b8d6b6"
+dependencies = [
+ "elliptic-curve",
+ "primeorder",
+]
+
+[[package]]
 name = "papaya"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5501,6 +5737,12 @@ name = "pastey"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
+
+[[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pem"
@@ -5588,12 +5830,22 @@ dependencies = [
 
 [[package]]
 name = "pkcs8"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
+dependencies = [
+ "der 0.7.10",
+ "spki 0.7.3",
+]
+
+[[package]]
+name = "pkcs8"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
 dependencies = [
  "der 0.8.1",
- "spki",
+ "spki 0.8.0",
 ]
 
 [[package]]
@@ -5886,6 +6138,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-error-attr2"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96de42df36bb9bba5542fe9f1a054b8cc87e172759a1868aa05c1f3acc89dfc5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
+name = "proc-macro-error2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802"
+dependencies = [
+ "proc-macro-error-attr2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "proc-macro-hack"
 version = "0.5.20+deprecated"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6065,11 +6339,22 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
+version = "0.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
+dependencies = [
+ "libc",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
- "rand_chacha",
+ "rand_chacha 0.9.0",
  "rand_core 0.9.5",
 ]
 
@@ -6082,6 +6367,16 @@ dependencies = [
  "chacha20 0.10.1",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -6180,7 +6475,7 @@ dependencies = [
  "paste",
  "profiling",
  "rand 0.9.5",
- "rand_chacha",
+ "rand_chacha 0.9.0",
  "simd_helpers",
  "thiserror 2.0.19",
  "v_frame",
@@ -7070,6 +7365,15 @@ dependencies = [
 
 [[package]]
 name = "signature"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
+dependencies = [
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "signature"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
@@ -7341,6 +7645,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eda41003dc44290527a59b13432d4a0379379fa074b70174882adfbdfd917844"
 dependencies = [
  "bitflags 2.13.1",
+]
+
+[[package]]
+name = "spki"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
+dependencies = [
+ "base64ct",
+ "der 0.7.10",
 ]
 
 [[package]]

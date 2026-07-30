@@ -6462,10 +6462,8 @@ impl IcedChat {
                     self.create_group_selected_members.drain().collect();
                 self.show_create_group_dialog = false;
 
-                if group_name.trim().is_empty() || selected_members.is_empty() {
-                    self.push_system(
-                        "Group name and at least one member are required.".to_string(),
-                    );
+                if group_name.trim().is_empty() {
+                    self.push_system("Group name is required.".to_string());
                     return iced::Task::none();
                 }
 

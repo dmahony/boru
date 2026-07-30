@@ -277,6 +277,21 @@ impl MessageStore {
             );
             CREATE INDEX IF NOT EXISTS idx_group_epoch_topics_group
                 ON group_epoch_topics(group_id, epoch);
+
+            -- Encryption key registry: maps PeerId -> serialized OneTimeKeyBundle.
+            -- Added by group encryption Phase 2.
+            CREATE TABLE IF NOT EXISTS identity_registry (
+                peer_id BLOB PRIMARY KEY,
+                key_bundle BLOB NOT NULL
+            );
+
+            -- One-time pre-key registry: unconsumed pre-key bundles per peer.
+            -- Added by group encryption Phase 2.
+            CREATE TABLE IF NOT EXISTS prekey_registry (
+                peer_id BLOB NOT NULL,
+                pre_key BLOB NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0
+            );
             ",
         )
         .std_context("init schema")?;
