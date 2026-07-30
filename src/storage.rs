@@ -5032,6 +5032,130 @@ impl Storage {
             updated_at_ms: row.get::<_, i64>(7)? as u64,
         })
     }
+
+    // ── Chat message history (backfill) ────────────────────────────────
+
+    /// Insert a chat message into the history table for backfill.
+    ///
+    /// Returns `true` if a new row was inserted, `false` if a duplicate
+    /// (same msg_hash) was silently ignored.
+    pub fn insert_chat_message(
+        &self,
+        msg_hash: &[u8; 32],
+        topic: &TopicId,
+        sender: &[u8; 32],
+        timestamp_ms: u64,
+        signed_bytes: &[u8],
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .execute(
+                "INSERT OR IGNORE INTO chat_messages
+                 (msg_hash, topic, sender, timestamp_ms, signed_bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    msg_hash.as_slice(),
+                    topic.as_bytes(),
+                    sender,
+                    timestamp_ms as i64,
+                    signed_bytes,
+                ],
+            )
+            .std_context("insert chat message")?;
+        Ok(rows > 0)
+    }
+
+    /// Return up to `count` of the most recent chat messages across all topics,
+    /// sorted oldest-first.  Each entry is `(timestamp_ms, signed_bytes)`.
+    pub fn get_recent_chat_messages(
+        &self,
+        count: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp_ms, signed_bytes FROM chat_messages
+                 ORDER BY id DESC
+                 LIMIT ?1",
+            )
+            .std_context("prepare get_recent_chat_messages")?;
+        let rows = stmt
+            .query_map([count as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, Vec<u8>>(1)?,
+                ))
+            })
+            .std_context("query get_recent_chat_messages")?;
+        let mut results: Vec<(u64, Vec<u8>)> = Vec::new();
+        for row in rows {
+            results.push(row.std_context("read chat message row")?);
+        }
+        results.reverse(); // restore chronological order
+        Ok(results)
+    }
+
+    /// Return up to `count` of the most recent chat messages for a specific
+    /// topic, sorted oldest-first.  Each entry is `(timestamp_ms, signed_bytes)`.
+    pub fn get_recent_chat_messages_for_topic(
+        &self,
+        topic: &TopicId,
+        count: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let topic_bytes = topic.as_bytes();
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp_ms, signed_bytes FROM chat_messages
+                 WHERE topic = ?1
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )
+            .std_context("prepare get_recent_chat_messages_for_topic")?;
+        let rows = stmt
+            .query_map(params![topic_bytes, count as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, Vec<u8>>(1)?,
+                ))
+            })
+            .std_context("query get_recent_chat_messages_for_topic")?;
+        let mut results: Vec<(u64, Vec<u8>)> = Vec::new();
+        for row in rows {
+            results.push(row.std_context("read chat message row")?);
+        }
+        results.reverse(); // restore chronological order
+        Ok(results)
+    }
+
+    /// Count the total number of chat messages across all topics.
+    pub fn total_chat_message_count(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_messages", [], |row| row.get(0))
+            .std_context("count chat messages")?;
+        Ok(count as usize)
+    }
+
+    /// Count the number of chat messages for a specific topic.
+    pub fn count_chat_messages_for_topic(&self, topic: &TopicId) -> Result<usize> {
+        let topic_bytes = topic.as_bytes();
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE topic = ?1",
+                params![topic_bytes],
+                |row| row.get(0),
+            )
+            .std_context("count chat messages for topic")?;
+        Ok(count as usize)
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

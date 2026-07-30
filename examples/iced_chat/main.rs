@@ -809,7 +809,7 @@ fn main() -> Result<()> {
         }
 
         // ── Backfill handler ──────────────────────────────────────────
-        let backfill_handler = BackfillProtocolHandler::new(chat_history.clone());
+        let backfill_handler = BackfillProtocolHandler::new(storage.clone());
 
         // ── Whisper protocol ──────────────────────────────────────────
         // Direct QUIC channels for private 1:1 messaging and file transfer.

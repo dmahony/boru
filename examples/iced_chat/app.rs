@@ -2211,7 +2211,6 @@ pub struct IcedChat {
     #[allow(dead_code)]
     download_manager: Option<Arc<std::sync::Mutex<DownloadManager>>>,
     /// Whether chat history has unsaved changes.
-    chat_history_dirty: bool,
     /// Number of entries that have already been saved to chat_history
     /// for the current room. Used to avoid re-saving the same entries
     /// on every room-navigation event.
@@ -4251,7 +4250,6 @@ impl IcedChat {
             chat_history,
             storage,
             download_manager,
-            chat_history_dirty: false,
             history_saved_count: 0,
             history_confirm_clear: false,
             history_clear_pending: false,
@@ -4508,13 +4506,7 @@ impl IcedChat {
     // All legacy JSON stores have been replaced by SQLite unified storage.
     // These methods are retained as stubs to avoid changing call sites.
 
-    /// Legacy no-op — conversation data is in SQLite.
-    fn send_save_conversations(&self) {}
 
-    /// Legacy no-op — chat history is in SQLite.
-    fn send_save_chat_history(&self) {
-        // Legacy no-op — chat history is in SQLite.
-    }
 
     /// Persist the friends store in a background thread to avoid blocking
     /// the GUI event loop.  Uses [`atomic_write_json`] for crash-safe writes.
@@ -4540,8 +4532,6 @@ impl IcedChat {
         settings.save(&self.data_dir);
     }
 
-    /// Legacy no-op — profile data is in SQLite.
-    fn send_save_profile(&self) {}
 
     /// Persist the friend request store in a background thread.
     fn send_save_friend_requests(&self) {
@@ -5425,7 +5415,6 @@ impl IcedChat {
                 HistoryEntry::new(topic, local_hex, encoded.to_vec(), "text", text.to_string());
             let id = store.push_with_id(entry);
             drop(store);
-            self.send_save_chat_history();
             id
         };
         if let Some(storage) = &self.storage {
@@ -5728,7 +5717,6 @@ impl IcedChat {
             self.active_download_transfer_id = None;
             self.transfer_id_to_index.clear();
             self.history_saved_count = 0;
-            self.chat_history_dirty = false;
             if report.room_history_updated {
                 self.room_history_dirty = false;
             }
@@ -5930,8 +5918,6 @@ impl IcedChat {
             self.chat_history.lock().unwrap().push(history_entry);
         }
         self.history_saved_count = current_count;
-        self.chat_history_dirty = true;
-        self.try_save_chat_history();
     }
 }
 
@@ -6443,7 +6429,6 @@ impl IcedChat {
                 }
                 self.room_history_dirty = true;
                 self.persist_room_history();
-                self.try_save_chat_history();
 
                 // Going back to the chat list only changes the UI screen.
                 // Keep the room subscription alive so returning is instant
@@ -6764,7 +6749,6 @@ impl IcedChat {
                     entry.archived = true;
                     self.conversation_store.upsert(entry);
                     self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
-                    let _ = self.send_save_conversations();
                     // Upsert into the local directory store so the creator
                     // sees their own room in the PUBLIC ROOMS sidebar.
                     {
@@ -7185,7 +7169,6 @@ impl IcedChat {
                     self.room_history.update_preview(&self.topic, &preview);
                 }
                 self.room_history_dirty = true;
-                self.try_save_chat_history();
                 self.leave_current_room();
 
                 let gossip = self.gossip.clone();
@@ -7574,7 +7557,6 @@ impl IcedChat {
                     if entry.archived {
                         entry.archived = false;
                         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
-                        let _ = self.send_save_conversations();
                     }
                 }
 
@@ -7780,7 +7762,6 @@ impl IcedChat {
                                 }
                             }
                         }
-                        self.send_save_chat_history();
                     }
                 }
 
@@ -7808,7 +7789,6 @@ impl IcedChat {
                             .unwrap()
                             .update_delivery_state(*id, DeliveryState::Sent);
                     }
-                    self.send_save_chat_history();
                     // After delivering, try the next pending
                     task::spawn(async move {
                         for (_, bytes) in replay {
@@ -7839,7 +7819,6 @@ impl IcedChat {
                 self.room_history.upsert(topic, &self.local_label, true);
                 self.room_history_dirty = true;
                 self.persist_room_history();
-                self.try_save_chat_history();
 
                 if self
                     .pending_open_room_action
@@ -7968,7 +7947,6 @@ impl IcedChat {
                 self.chat_list_error = "Joining room…".to_string();
                 self.save_room_to_history();
                 self.persist_room_history();
-                self.try_save_chat_history();
                 self.leave_current_room();
                 let gossip = self.gossip.clone();
                 let runtime_handle = self.runtime_handle.clone();
@@ -8482,7 +8460,6 @@ impl IcedChat {
                     record.display_label(&fid, &peer),
                 ));
                 self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
-                let _ = self.send_save_conversations();
                 let _room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                 self.try_save_friends();
                 let action = ContactAction::ConversationInvite {
@@ -8573,7 +8550,6 @@ impl IcedChat {
                 // Persist the conversation entry
                 self.conversation_store.upsert(*entry);
                 self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
-                let _ = self.send_save_conversations();
 
                 // Set member count on room history entry (includes self + selected members)
                 let total_members = friend_keys.len() as u32 + 1; // +1 for self (creator)
@@ -8793,9 +8769,7 @@ impl IcedChat {
                     self.room_history.remove(&topic);
                     self.room_history_dirty = true;
                     self.chat_history.lock().unwrap().remove_topic(&topic);
-                    self.chat_history_dirty = true;
                     self.persist_room_history();
-                    self.try_save_chat_history();
                     // Leave the room and go back to chat list
                     self.leave_current_room();
                     self.screen = Screen::ChatList;
@@ -9295,7 +9269,6 @@ impl IcedChat {
                     let _ =
                         clear_room_history(topic, &mut self.room_history, &mut chat_history, None);
                 }
-                self.send_save_chat_history();
 
                 // Clear from SQLite outgoing_messages
                 if let Some(storage) = &self.storage {
@@ -9878,7 +9851,6 @@ impl IcedChat {
                                 ));
                                 self.chats_sidebar_revision =
                                     self.chats_sidebar_revision.wrapping_add(1);
-                                let _ = self.send_save_conversations();
                                 let _room =
                                     RoomStore::with_peers(&self.data_dir, topic, persisted_addrs);
                                 self.try_save_friends();
@@ -10417,7 +10389,6 @@ impl IcedChat {
                             }
                         }
                     }
-                    self.send_save_chat_history();
                 }
                 if changed {
                     self.layout_cache.borrow_mut().clear();
@@ -10478,7 +10449,6 @@ impl IcedChat {
                 // Update chat_history.json for backward compat
                 let mut store = self.chat_history.lock().unwrap();
                 let _ = store.update_delivery_state(event_id, DeliveryState::Queued);
-                self.send_save_chat_history();
                 iced::Task::none()
             }
 
@@ -11028,7 +10998,6 @@ impl IcedChat {
                         .shared_files_mut()
                         .retain(|file| file.id != profile_file.id);
                     self.profile_store.add_shared_file(profile_file);
-                    self.send_save_profile();
                 }
                 if self.has_message(&message_hash) {
                     return self.start_next_pending_image_download();
@@ -11073,7 +11042,6 @@ impl IcedChat {
                         HistoryEntry::new(topic, local_hex, Vec::new(), "image", name.clone());
                     store.push_with_id(hist_entry);
                 }
-                self.send_save_chat_history();
                 self.start_next_pending_image_download()
             }
             AppMessage::ProfileImageDownloaded(peer, image_bytes) => {
@@ -13090,7 +13058,6 @@ impl IcedChat {
                     }
                 }
                 if !discovered_room_tasks.is_empty() {
-                    let _ = self.send_save_conversations();
                 }
                 tasks.extend(discovered_room_tasks);
                 self.public_rooms_sidebar_revision =
@@ -14068,7 +14035,6 @@ impl IcedChat {
                 self.conversations.remove(&topic);
                 self.conversation_store.remove(&topic);
                 self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
-                self.send_save_conversations();
                 self.refresh_sidebar_counts();
                 // Also remove from the SQLite message store so the chat
                 // messages and conversation metadata don't linger on disk.
@@ -14136,7 +14102,6 @@ impl IcedChat {
                         peer.to_string(),
                         peer.fmt_short().to_string(),
                     ));
-                let _ = self.send_save_conversations();
                 self.try_save_friends();
                 iced::Task::done(AppMessage::OpenRoom(topic))
             }
@@ -14159,7 +14124,6 @@ impl IcedChat {
                     entry.archived = true;
                     self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                 }
-                let _ = self.send_save_conversations();
                 // If this was the displayed conversation, go back to chat list
                 if topic == self.topic {
                     self.screen = Screen::ChatList;
@@ -14347,9 +14311,6 @@ impl IcedChat {
         // The cleanup helper mutates the stores first; persist each store whose
         // contents changed so a restart cannot resurrect the deleted room data.
         if report.chat_entries_removed > 0 {
-            self.chat_history_dirty = true;
-            self.send_save_chat_history();
-            self.chat_history_dirty = false;
         }
         if report.friend_records_updated > 0 {
             self.mark_friends_sidebar_dirty();
@@ -14364,13 +14325,7 @@ impl IcedChat {
     }
 
     fn persist_room_history(&mut self) {
-        if self.room_history_dirty {
-            self.room_history_dirty = false;
-            let store = self.room_history.clone();
-            let _ = std::thread::spawn(move || {
-                let _ = store.save();
-            });
-        }
+        self.room_history_dirty = false;
     }
 
     fn update_room_preview(&mut self, topic: &TopicId, event: &NetEvent) {
@@ -14590,7 +14545,6 @@ impl IcedChat {
             self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         }
         self.update_room_preview(topic, event);
-        self.send_save_conversations();
         let safety = self.public_room_safety.clone();
         if let Err(err) = handle_net_event_with_safety_for_topic(
             event.clone(),
@@ -14615,7 +14569,6 @@ impl IcedChat {
                                 let mut store = self.chat_history.lock().unwrap();
                                 let _ =
                                     store.update_delivery_state(event_id, DeliveryState::Delivered);
-                                self.send_save_chat_history();
                                 // Keep SQLite outgoing_messages in sync
                                 if let Some(storage) = &self.storage {
                                     let _ = storage
@@ -14735,7 +14688,6 @@ impl IcedChat {
         };
 
         self.try_save_friends();
-        self.try_save_chat_history();
         // Combine tasks: if both read_receipt and latency_pong exist, chain them.
         // Otherwise return whichever is Some.
         match (read_receipt_task, latency_pong_task) {
@@ -14950,18 +14902,7 @@ impl IcedChat {
         }
     }
 
-    fn try_save_chat_history(&mut self) {
-        if self.chat_history_dirty {
-            self.chat_history_dirty = false;
-            self.send_save_chat_history();
-        }
-    }
 
-    /// Persist the conversation store if it has changes.
-    #[expect(dead_code)]
-    fn try_save_conversation_store(&mut self) {
-        self.send_save_conversations();
-    }
 }
 
 // ── Net event handling ────────────────────────────────────────────────

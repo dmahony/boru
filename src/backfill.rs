@@ -9,7 +9,7 @@
 //! 1. Requester opens a bi-directional QUIC stream to the responder using
 //!    [`BACKFILL_ALPN`].
 //! 2. Requester sends a length-prefixed, postcard-encoded [`BackfillRequest`].
-//! 3. Responder reads the request, queries its [`ChatHistoryStore`], and replies
+//! 3. Responder reads the request, queries its [`Storage`], and replies
 //!    with a length-prefixed, postcard-encoded [`BackfillResponse`] containing
 //!    the raw signed message bytes.
 //! 4. Requester decodes each message through
@@ -53,9 +53,9 @@ use tracing::{debug, trace, warn};
 const BACKFILL_TIMEOUT_MSG: &str = "backfill timed out";
 
 use crate::chat_core::{filter_net_event_with_safety, NetEvent, SignedMessage};
-use crate::chat_history::ChatHistoryStore;
 use crate::proto::TopicId;
 use crate::public_room_safety::PublicRoomSafety;
+use crate::storage::Storage;
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -118,7 +118,7 @@ pub struct BackfillRequest {
 /// Response containing backfilled message bytes — sent by the responder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackfillResponse {
-    /// Raw signed message bytes from [`ChatHistoryStore`].
+    /// Raw signed message bytes from the history store.
     ///
     /// Each element is a valid [`SignedMessage`] encoding that the requester
     /// can pass through [`SignedMessage::verify_and_decode`].
@@ -182,8 +182,8 @@ impl BackfillRateLimit {
 /// ```
 #[derive(Debug, Clone)]
 pub struct BackfillProtocolHandler {
-    /// Shared chat history store — used to respond to backfill requests.
-    history_store: Arc<Mutex<ChatHistoryStore>>,
+    /// Shared storage — used to respond to backfill requests.
+    storage: Arc<Storage>,
     /// Per-peer rate-limiting state.
     rate_limit: Arc<Mutex<BackfillRateLimit>>,
     /// Global concurrency cap on backfill serve tasks.
@@ -192,10 +192,10 @@ pub struct BackfillProtocolHandler {
 }
 
 impl BackfillProtocolHandler {
-    /// Create a new handler that reads history from the given store.
-    pub fn new(history_store: Arc<Mutex<ChatHistoryStore>>) -> Self {
+    /// Create a new handler that reads history from the given storage.
+    pub fn new(storage: Arc<Storage>) -> Self {
         Self {
-            history_store,
+            storage,
             rate_limit: Arc::new(Mutex::new(BackfillRateLimit::default())),
             backfill_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_BACKFILLS)),
         }
@@ -224,7 +224,7 @@ impl ProtocolHandler for BackfillProtocolHandler {
             }
         };
 
-        let store = self.history_store.clone();
+        let store = self.storage.clone();
         let rate_limit = self.rate_limit.clone();
 
         tokio::task::spawn(async move {
@@ -267,7 +267,7 @@ impl ProtocolHandler for BackfillProtocolHandler {
 /// Uses the bi-directional stream in the already-accepted connection.
 /// The entire exchange is bounded by [`BACKFILL_REQUEST_TIMEOUT`] — a slow
 /// or stuck peer cannot hold resources indefinitely.
-async fn serve_backfill(connection: Connection, store: &Mutex<ChatHistoryStore>) -> Result<()> {
+async fn serve_backfill(connection: Connection, storage: &Storage) -> Result<()> {
     // Enforce a hard timeout on the entire backfill exchange.
     tokio::time::timeout(BACKFILL_REQUEST_TIMEOUT, async {
         // accept_bi() returns (SendStream, RecvStream) — accepts the
@@ -302,28 +302,28 @@ async fn serve_backfill(connection: Connection, store: &Mutex<ChatHistoryStore>)
             "backfill: received request"
         );
 
-        // Query history store for recent messages.
+        // Query storage for recent messages.
         let topic_filter = request.topic;
         let (resp_bytes, count) = {
-            let store = store.lock().unwrap();
-
             // Determine the total available count for accurate `skipped`.
             let total_available = match topic_filter.as_ref() {
-                Some(t) => store.count_for_topic(t),
-                None => store.len(),
+                Some(t) => storage.count_chat_messages_for_topic(t).unwrap_or(0),
+                None => storage.total_chat_message_count().unwrap_or(0),
             };
 
             // Collect entries — use bounded queries where possible.
             let entries: Vec<_> = match topic_filter {
-                Some(ref t) => store
-                    .get_recent_messages_for_topic(t, max_messages as usize)
+                Some(ref t) => storage
+                    .get_recent_chat_messages_for_topic(t, max_messages as usize)
+                    .unwrap_or_default()
                     .into_iter()
-                    .cloned()
+                    .map(|(ts, bytes)| (ts, bytes))
                     .collect(),
-                None => store
-                    .get_recent_messages(max_messages as usize)
+                None => storage
+                    .get_recent_chat_messages(max_messages as usize)
+                    .unwrap_or_default()
                     .into_iter()
-                    .cloned()
+                    .map(|(ts, bytes)| (ts, bytes))
                     .collect(),
             };
 
@@ -331,10 +331,10 @@ async fn serve_backfill(connection: Connection, store: &Mutex<ChatHistoryStore>)
             // for relevance, then oldest-first in the response).
             let mut filtered: Vec<Bytes> = entries
                 .into_iter()
-                .filter(|entry| request.since_ms == 0 || entry.timestamp >= request.since_ms)
+                .filter(|(timestamp, _)| request.since_ms == 0 || *timestamp >= request.since_ms)
                 .rev() // newest-first so we keep the most recent within the cap
                 .take(max_messages as usize)
-                .map(|entry| Bytes::from(entry.signed_bytes)) // entry is owned — move
+                .map(|(_, signed_bytes)| Bytes::from(signed_bytes))
                 .collect();
             filtered.reverse(); // back to chronological order
 
@@ -820,30 +820,21 @@ mod tests {
     /// Used to test timeout behaviour.
     #[derive(Debug, Clone)]
     struct DelayedBackfillHandler {
-        history_store: Arc<Mutex<ChatHistoryStore>>,
+        storage: Arc<Storage>,
         delay: Duration,
     }
 
     impl ProtocolHandler for DelayedBackfillHandler {
         async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-            let store = self.history_store.clone();
+            let storage = self.storage.clone();
             let delay = self.delay;
             tokio::task::spawn(async move {
                 // Add the configured delay before processing
                 tokio::time::sleep(delay).await;
-                let _result = serve_backfill(connection, &store).await;
+                let _result = serve_backfill(connection, &storage).await;
             });
             Ok(())
         }
-    }
-
-    /// Helper: create a fresh temp directory for a ChatHistoryStore.
-    fn temp_store_path(name: &str) -> std::path::PathBuf {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("backfill_test_{}", name));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     /// Test that a slow peer triggers a timeout on the client side.
@@ -864,16 +855,11 @@ mod tests {
             .await
             .expect("bind responder endpoint");
 
-        // Empty history store — we never get to query it anyway because
+        // Empty SQLite storage — we never get to query it anyway because
         // the delay fires first on the server side.
-        let data_dir = temp_store_path("slow_timeout");
-        let history_store = ChatHistoryStore::empty_at(&data_dir);
-        // Write the store file directly since save() is a no-op on deprecated stores.
-        let json = serde_json::to_string(&history_store).unwrap();
-        std::fs::write(history_store.file_path(), &json).ok();
-        let store = Arc::new(Mutex::new(history_store));
+        let storage = Arc::new(Storage::memory().unwrap());
         let slow_handler = DelayedBackfillHandler {
-            history_store: store.clone(),
+            storage: storage.clone(),
             // Delay long enough that the client timeout fires first.
             // With paused tokio time, this is virtual time — instant in wall-clock.
             delay: Duration::from_secs(7),
@@ -932,11 +918,10 @@ mod tests {
             .await
             .expect("bind responder endpoint");
 
-        // Set up an empty history store.
-        let data_dir = temp_store_path("normal_success");
-        let store = Arc::new(Mutex::new(ChatHistoryStore::empty_at(data_dir.clone())));
+        // Set up an empty SQLite storage.
+        let storage = Arc::new(Storage::memory().unwrap());
 
-        let handler = BackfillProtocolHandler::new(store.clone());
+        let handler = BackfillProtocolHandler::new(storage.clone());
 
         let _router = iroh::protocol::Router::builder(ep_responder.clone())
             .accept(BACKFILL_ALPN, handler)
