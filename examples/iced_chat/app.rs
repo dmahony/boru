@@ -8545,13 +8545,12 @@ impl IcedChat {
                 self.ticket_str = ticket_str.clone();
                 self.screen = Screen::Chat { topic };
                 self.push_system(format!(
-                    "Group \"{}\" created with {} member(s). Share the ticket to invite more:\n{}",
-                    display_name,
+                    "Group \"{display_name}\" created with {} member(s). Ticket copied to clipboard — share it to invite others.",
                     friend_keys.len(),
-                    ticket_str,
                 ));
 
-                iced::Task::none()
+                // Copy ticket to clipboard so user can paste it immediately
+                return iced::clipboard::write(ticket_str);
             }
 
             // ── ChatList ─────────────────────────────────────────────
