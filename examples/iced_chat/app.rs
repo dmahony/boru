@@ -8454,6 +8454,9 @@ impl IcedChat {
                     .unwrap_or_default();
                 let record = self.friends.ensure_friend(fid.clone());
                 record.set_direct_conversation(topic, DirectConversationState::Active);
+                // An explicit Chat click is a mutual friendship signal — set the
+                // relationship so the peer appears in the FRIENDS sidebar immediately.
+                record.relationship = FriendRelationship::Friends;
                 self.conversation_store.upsert(ConversationEntry::new(
                     topic,
                     peer.to_string(),
@@ -8461,6 +8464,8 @@ impl IcedChat {
                 ));
                 self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                 let _room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
+                self.mark_friends_sidebar_dirty();
+                self.discovered_sidebar_revision = self.discovered_sidebar_revision.wrapping_add(1);
                 self.try_save_friends();
                 let action = ContactAction::ConversationInvite {
                     topic,
