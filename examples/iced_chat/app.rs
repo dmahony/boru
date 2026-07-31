@@ -8615,6 +8615,7 @@ impl IcedChat {
                                         created_at_ms: now_ms,
                                         expires_at_ms: expire_ms,
                                         ticket: ticket_str.clone(),
+                                        group_name: group_name.clone(),
                                     };
                                     let _ = st.create_group_invite(&invite_row);
                                 }
@@ -10012,6 +10013,7 @@ impl IcedChat {
                                             created_at_ms: now_ms,
                                             expires_at_ms: expire_ms,
                                             ticket: ticket_str.to_string(),
+                                            group_name: group_name.to_string(),
                                         };
                                         let _ = st.create_group_invite(&invite_row);
                                     }
@@ -10025,7 +10027,12 @@ impl IcedChat {
                         }
 
                         let fid = FriendId::from_public_key(from);
-                        let should_open_private = is_invite || self.friends.get(&fid).is_some();
+                        // Don't auto-open a private chat for group invites —
+                        // the user should explicitly accept the invite from the
+                        // REQUESTS sidebar to join the actual group room.
+                        let should_open_private =
+                            is_invite
+                                || (self.friends.get(&fid).is_some() && !is_group_invite);
                         if should_open_private {
                             let private_topic = private_topic(&self.local_public, &from);
                             if let Some(ticket) = invite_ticket {
@@ -11705,6 +11712,7 @@ impl IcedChat {
                                     created_at_ms: now_ms,
                                     expires_at_ms: expire_ms,
                                     ticket: ticket_str.clone(),
+                                    group_name: group_name.clone(),
                                 };
                                 let _ = st.create_group_invite(&invite_row);
                             }
@@ -11760,6 +11768,25 @@ impl IcedChat {
 
                 if let Some(inv) = invite {
                     if !inv.ticket.is_empty() {
+                        // Create the group ConversationEntry NOW so RoomOpened
+                        // can find and unarchive it after JoinFromTicket succeeds.
+                        // RoomOpened only unarchives — it never creates entries.
+                        let group_name = if inv.group_name.is_empty() {
+                            "Group".to_string()
+                        } else {
+                            inv.group_name.clone()
+                        };
+                        if let Ok(ticket) = RoomInvitation::parse(&inv.ticket) {
+                            let topic = ticket.topic();
+                            let group_id = GroupId::from_bytes(inv.group_id);
+                            let entry = ConversationEntry::new_group_epoch(
+                                group_id, inv.epoch, topic, &group_name,
+                            );
+                            self.conversation_store.upsert(entry);
+                            self.chats_sidebar_revision =
+                                self.chats_sidebar_revision.wrapping_add(1);
+                        }
+
                         self.join_ticket_input = inv.ticket.clone();
                         // Mark the invite as accepted
                         let mut id = [0u8; 32];
@@ -24174,6 +24201,7 @@ mod tests {
             created_at_ms: now_ms,
             expires_at_ms: expire_ms,
             ticket: String::new(),
+            group_name: "Test Group".to_string(),
         };
         app.storage
             .as_ref()
