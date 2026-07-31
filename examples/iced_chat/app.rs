@@ -4153,6 +4153,27 @@ impl IcedChat {
 
         let cached_friend_count = friends.iter().filter(|(_, r)| r.relationship.can_message()).count();
 
+        let conversation_store = {
+            let mut store = if let Some(ref st) = storage {
+                ConversationStore::load_from_sqlite(st, &data_dir)
+            } else {
+                ConversationStore::load_or_default(&data_dir)
+            };
+            if store.is_empty() {
+                let json_store = ConversationStore::load_or_default(&data_dir);
+                if !json_store.is_empty() {
+                    if let Some(ref st) = storage {
+                        let _ = json_store.save_to_sqlite(st);
+                    }
+                    json_store
+                } else {
+                    store
+                }
+            } else {
+                store
+            }
+        };
+
         Self {
             screen: Screen::ChatList,
             splash_start_time: std::time::Instant::now(),
@@ -4307,7 +4328,7 @@ impl IcedChat {
             last_download_progress_at: None,
             last_download_progress_bytes: 0,
             public_room_safety: None,
-            conversation_store: ConversationStore::load_or_default(&data_dir),
+            conversation_store,
             discovered_peers: Vec::new(),
             discovered_online_cache: HashSet::new(),
             continuous_tracker,
@@ -4525,6 +4546,24 @@ impl IcedChat {
             // Fallback: save to JSON
             if let Err(err) = store.save() {
                 tracing::warn!("failed to save friends store to JSON: {err}");
+            }
+        });
+    }
+
+    /// Persist the conversation store to SQLite and JSON in a background thread.
+    fn send_save_conversations(&self) {
+        let store = self.conversation_store.clone();
+        let storage = self.storage.clone();
+        std::thread::spawn(move || {
+            // Primary: save to SQLite
+            if let Some(ref storage) = storage {
+                if let Err(err) = store.save_to_sqlite(storage) {
+                    tracing::warn!("failed to save conversation store to SQLite: {err}");
+                }
+            }
+            // Fallback: save to JSON
+            if let Err(err) = store.save() {
+                tracing::warn!("failed to save conversation store to JSON: {err}");
             }
         });
     }
@@ -14357,6 +14396,7 @@ impl IcedChat {
         if report.friend_records_updated > 0 {
             self.mark_friends_sidebar_dirty();
             self.send_save_friends();
+            self.send_save_conversations();
             self.friends_dirty = false;
         }
 
@@ -14908,6 +14948,7 @@ impl IcedChat {
             // message and leave a newly accepted contact unauthorized.
             self.friends_dirty = false;
             self.send_save_friends();
+            self.send_save_conversations();
         }
     }
 
