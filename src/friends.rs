@@ -16,6 +16,7 @@ use crate::chat_core::atomic_write::atomic_write_json;
 use crate::chat_core::Ticket;
 use crate::mailbox::MailboxPublicKey;
 use crate::proto::TopicId;
+use crate::storage::Storage;
 use iroh::{EndpointAddr, PublicKey};
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
@@ -463,6 +464,42 @@ impl FriendsStore {
         atomic_write_json(&path, self, "friends store")?;
         debug!(path = %path.display(), "friends store saved");
         Ok(path)
+    }
+
+    /// Save the friends store to SQLite as a JSON blob.
+    pub fn save_to_sqlite(&self, storage: &Storage) -> Result<()> {
+        let value = serde_json::to_string(self)
+            .with_std_context(|_| "serialise friends store for SQLite")?;
+        storage.kv_set("friends", &value)
+    }
+
+    /// Load the friends store from SQLite, falling back to empty if not found.
+    pub fn load_from_sqlite(storage: &Storage, data_dir: impl Into<PathBuf>) -> Self {
+        match storage.kv_get("friends") {
+            Ok(Some(value)) => {
+                match serde_json::from_str::<Self>(&value) {
+                    Ok(store) => store,
+                    Err(err) => {
+                        tracing::warn!(
+                            "failed to parse friends store from SQLite: {err}; \
+                             falling back to empty store"
+                        );
+                        Self::empty_at(data_dir)
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::debug!("no friends store in SQLite, starting empty");
+                Self::empty_at(data_dir)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "failed to read friends store from SQLite: {err}; \
+                     falling back to empty store"
+                );
+                Self::empty_at(data_dir)
+            }
+        }
     }
 
     /// Number of friends in the store.

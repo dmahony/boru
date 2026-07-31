@@ -481,6 +481,51 @@ struct RecoveryRow {
 }
 
 impl Storage {
+    // ── Key-value store (lazy table creation) ─────────────────────────
+
+    /// Ensure the key-value table exists (idempotent).
+    fn ensure_kv_table(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS kv_store (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );",
+        )
+        .std_context("create kv_store table")
+    }
+
+    /// Read a value from the key-value store.
+    pub fn kv_get(&self, key: &str) -> Result<Option<String>> {
+        self.ensure_kv_table()?;
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM kv_store WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .std_context("kv_get")
+    }
+
+    /// Write a value to the key-value store, upserting if the key exists.
+    pub fn kv_set(&self, key: &str, value: &str) -> Result<()> {
+        self.ensure_kv_table()?;
+        let conn = self.conn.lock().unwrap();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        conn.execute(
+            "INSERT INTO kv_store (key, value, updated_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at_ms = ?3",
+            rusqlite::params![key, value, now_ms],
+        )
+        .std_context("kv_set")?;
+        Ok(())
+    }
+
     // ── Open / init ───────────────────────────────────────────────────
 
     /// Open (or create) the database at `data_dir / `[`DB_FILE_NAME`]`.

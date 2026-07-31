@@ -517,6 +517,40 @@ impl ConversationStore {
         Ok(path)
     }
 
+    /// Save the conversation store to SQLite as a JSON blob.
+    pub fn save_to_sqlite(&self, storage: &crate::storage::Storage) -> n0_error::Result<()> {
+        let value = serde_json::to_string(self)
+            .with_std_context(|_| "serialise conversation store for SQLite")?;
+        storage.kv_set("conversations", &value)
+    }
+
+    /// Load the conversation store from SQLite, falling back to empty if not found.
+    pub fn load_from_sqlite(storage: &crate::storage::Storage, data_dir: impl Into<PathBuf>) -> Self {
+        match storage.kv_get("conversations") {
+            Ok(Some(value)) => match serde_json::from_str::<Self>(&value) {
+                Ok(store) => store,
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to parse conversation store from SQLite: {err}; \
+                         falling back to empty store"
+                    );
+                    Self::empty_at(data_dir)
+                }
+            },
+            Ok(None) => {
+                tracing::debug!("no conversation store in SQLite, starting empty");
+                Self::empty_at(data_dir)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "failed to read conversation store from SQLite: {err}; \
+                     falling back to empty store"
+                );
+                Self::empty_at(data_dir)
+            }
+        }
+    }
+
     /// Number of conversations in the store.
     pub fn len(&self) -> usize {
         self.conversations.len()

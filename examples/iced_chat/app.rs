@@ -4511,12 +4511,20 @@ impl IcedChat {
 
 
     /// Persist the friends store in a background thread to avoid blocking
-    /// the GUI event loop.  Uses [`atomic_write_json`] for crash-safe writes.
+    /// the GUI event loop.  Saves to both SQLite (primary) and JSON (fallback).
     fn send_save_friends(&self) {
         let store = self.friends.clone();
+        let storage = self.storage.clone();
         std::thread::spawn(move || {
+            // Primary: save to SQLite
+            if let Some(ref storage) = storage {
+                if let Err(err) = store.save_to_sqlite(storage) {
+                    tracing::warn!("failed to save friends store to SQLite: {err}");
+                }
+            }
+            // Fallback: save to JSON
             if let Err(err) = store.save() {
-                tracing::warn!("failed to save friends store: {err}");
+                tracing::warn!("failed to save friends store to JSON: {err}");
             }
         });
     }

@@ -880,7 +880,20 @@ fn main() -> Result<()> {
         splash_send("Inbox protocol ready");
 
         // ── Friends list (needed before router for CatalogueHandler) ───
-        let friends = FriendsStore::load_or_default(&data_dir);
+        let friends = FriendsStore::load_from_sqlite(&storage, &data_dir);
+        // Fall back to JSON if SQLite was empty
+        let friends = if friends.is_empty() {
+            let json_store = FriendsStore::load_or_default(&data_dir);
+            if !json_store.is_empty() {
+                // Migrate from JSON to SQLite
+                let _ = json_store.save_to_sqlite(&storage);
+                json_store
+            } else {
+                friends
+            }
+        } else {
+            friends
+        };
         splash_send(&format!("Loaded {} friends", friends.len()));
         if !friends.is_empty() {
             info!("> loaded {} friend(s) from disk", friends.len());
