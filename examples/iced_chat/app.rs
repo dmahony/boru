@@ -13259,6 +13259,9 @@ impl IcedChat {
                     store.evict_stale(Duration::from_secs(120));
                 }
 
+                // ── Periodic chat history persistence ──
+                self.send_save_chat_history();
+
                 if tasks.is_empty() {
                     iced::Task::none()
                 } else {
