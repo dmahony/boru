@@ -7625,6 +7625,43 @@ impl IcedChat {
                 // and MCP room-membership checks reflect the active subscription.
                 DIAGNOSTICS.record(Some(topic), DiagnosticEventKind::RoomJoined);
 
+                // ── Replay local chat history for this topic ──────────
+                // Load entries persisted in chat_history.json so they
+                // appear immediately when the room opens, without waiting
+                // for a backfill request.
+                {
+                    let store = self.chat_history.lock().unwrap();
+                    let entries: Vec<_> = store
+                        .entries
+                        .iter()
+                        .filter(|e| e.topic == topic)
+                        .cloned()
+                        .collect();
+                    drop(store);
+                    for entry in &entries {
+                        // Skip entries that don't have a valid event_id
+                        if entry.event_id == 0 {
+                            continue;
+                        }
+                        if let Some(mut ui_entry) = self.history_entry_to_chat_entry(
+                            entry,
+                            &topic,
+                            &self.local_public.to_string(),
+                        ) {
+                            ui_entry.event_id = entry.event_id;
+                            ui_entry.delivery_state = entry.delivery_state.clone();
+                            self.entries_push(ui_entry);
+                        }
+                    }
+                    if !entries.is_empty() {
+                        info!(
+                            topic = %topic,
+                            count = entries.len(),
+                            "replayed chat history for topic"
+                        );
+                    }
+                }
+
                 self.screen = Screen::Chat { topic };
                 self.topic = topic;
                 self.ticket_str = ticket.clone();
