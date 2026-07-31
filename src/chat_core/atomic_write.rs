@@ -118,12 +118,9 @@ where
     }
 
     // ── 5. Replace the old file atomically ──────────────────────────
-    if path.exists() {
-        fs::remove_file(path).with_std_context(|_| {
-            format!("failed to remove old file for {label}: {}", path.display())
-        })?;
-    }
-
+    // On Linux/macOS, rename(2) atomically replaces the destination.
+    // Removing the old file first is destructive — if the rename fails,
+    // both files are lost.  Let rename handle the replacement.
     fs::rename(&tmp_path, path)
         .with_std_context(|_| format!("failed to replace file for {label}: {}", path.display()))?;
 
