@@ -800,37 +800,6 @@ fn main() -> Result<()> {
             ChatHistoryStore::load_or_default(&data_dir),
         ));
 
-        // Load chat history from the SQLite message store (replays
-        // messages persisted by the durable storage layer).
-        {
-            let store_path = data_dir.join("message_store.db");
-            if let Ok(store) = boru_core::store::MessageStore::open(&store_path) {
-                if let Ok(messages) = store.get_all_messages() {
-                    if !messages.is_empty() {
-                        let mut history = chat_history.lock().unwrap();
-                        for msg in &messages {
-                            let signed_bytes = msg.signed_bytes.clone().unwrap_or_default();
-                            let sender_str = iroh::PublicKey::from_bytes(&msg.sender)
-                                .map(|pk| pk.to_string())
-                                .unwrap_or_else(|_| hex::encode(msg.sender));
-                            let entry = boru_core::chat_history::HistoryEntry::new(
-                                TopicId::from_bytes(msg.topic),
-                                &sender_str,
-                                signed_bytes,
-                                &msg.kind,
-                                &msg.body,
-                            );
-                            history.push_with_id(entry);
-                        }
-                        info!(
-                            "loaded {} messages from SQLite message store",
-                            messages.len()
-                        );
-                    }
-                }
-            }
-        }
-
         // Sync ChatHistoryStore's next_event_id with the SQLite
         // outgoing_messages table so that new event_ids never collide
         // with rows already in SQLite (e.g. after a crash where JSON

@@ -4568,6 +4568,18 @@ impl IcedChat {
         });
     }
 
+    /// Persist chat history to JSON in a background thread.
+    fn send_save_chat_history(&self) {
+        let history = self.chat_history.clone();
+        std::thread::spawn(move || {
+            if let Ok(store) = history.lock() {
+                if let Err(err) = store.save() {
+                    tracing::warn!("failed to save chat history: {err}");
+                }
+            }
+        });
+    }
+
     /// Save AppSettings directly (not a legacy JSON store — still active).
     #[expect(dead_code)]
     fn send_save_settings(&self) {
@@ -14397,6 +14409,7 @@ impl IcedChat {
             self.mark_friends_sidebar_dirty();
             self.send_save_friends();
             self.send_save_conversations();
+            self.send_save_chat_history();
             self.friends_dirty = false;
         }
 
@@ -14949,6 +14962,7 @@ impl IcedChat {
             self.friends_dirty = false;
             self.send_save_friends();
             self.send_save_conversations();
+            self.send_save_chat_history();
         }
     }
 
