@@ -30,7 +30,7 @@ use std::{
 
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::debug;
 
 use crate::group_id::GroupId;
 use crate::peer_names;
@@ -502,20 +502,18 @@ impl ConversationStore {
 
     /// Persist the store atomically to `conversations.json`.
     ///
-    /// **DEPRECATED:** conversation data is now in the SQLite unified
-    /// storage. This method logs a warning and returns the legacy path
-    /// without writing to disk.
-    #[deprecated(
-        since = "0.21.0",
-        note = "SQLite conversation_meta table replaces conversations.json writes"
-    )]
+    /// Uses [`atomic_write_json`] for crash-safe writes: serialise →
+    /// round-trip validation → fsync → atomic rename.
     pub fn save(&self) -> Result<PathBuf> {
+        let data_dir = self.data_dir();
+        if data_dir.as_os_str().is_empty() {
+            return Err(n0_error::anyerr!(
+                "conversation store has no data directory bound to it",
+            ));
+        }
         let path = self.file_path();
-        warn!(
-            path = %path.display(),
-            "save() called on deprecated JSON conversation store — no data written; \
-             use SQLite conversation_meta table instead"
-        );
+        crate::chat_core::atomic_write::atomic_write_json(&path, self, "conversation store")?;
+        debug!(path = %path.display(), "conversation store saved");
         Ok(path)
     }
 

@@ -4151,6 +4151,8 @@ impl IcedChat {
             }
         }
 
+        let cached_friend_count = friends.iter().filter(|(_, r)| r.relationship.can_message()).count();
+
         Self {
             screen: Screen::ChatList,
             splash_start_time: std::time::Instant::now(),
@@ -4256,14 +4258,14 @@ impl IcedChat {
             history_clear_feedback: None,
             history_clear_feedback_is_error: false,
             friend_online_cache,
-            friends_sidebar_revision: 0,
+            friends_sidebar_revision: 1,
             chats_sidebar_revision: 0,
             discovered_sidebar_revision: 0,
             public_rooms_sidebar_revision: 0,
             requests_sidebar_revision: 0,
             cached_chat_count: 0, // Recalculated on first ConnMonitorTick
             cached_group_count: 0,
-            cached_friend_count: 0, // Will be set below after friends init
+            cached_friend_count, // Pre-computed from loaded friends
             cached_discover_count: 0,
             cached_public_room_count: 0,
             cached_request_count: 0,
