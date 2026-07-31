@@ -414,7 +414,30 @@ impl FriendsStore {
     pub fn load_or_default(data_dir: impl AsRef<Path>) -> Self {
         let data_dir = data_dir.as_ref();
         match Self::load(data_dir) {
-            Ok(store) => store,
+            Ok(mut store) => {
+                // Upgrade any record that has an active direct conversation to
+                // Friends relationship.  Prior to July 2026, OpenFriendChat
+                // (clicking "Chat" on a discovered peer) saved the record with
+                // the default NotFriend relationship, so these peers were lost
+                // from the FRIENDS sidebar on restart.
+                let mut upgraded = 0usize;
+                for record in store.friends.values_mut() {
+                    if record.direct_conversation.is_some()
+                        && record.relationship != FriendRelationship::Friends
+                    {
+                        record.relationship = FriendRelationship::Friends;
+                        upgraded += 1;
+                    }
+                }
+                if upgraded > 0 {
+                    tracing::info!(upgraded, "upgraded friends.json records to Friends");
+                    // Persist the migration immediately so the next startup
+                    // doesn't repeat it.  Failure is non-fatal — the upgrade
+                    // is in-memory regardless.
+                    let _ = store.save();
+                }
+                store
+            }
             Err(err) => {
                 eprintln!(
                     "warning: starting with an empty friends list; failed to load {}: {err}",
