@@ -1306,6 +1306,27 @@ impl MessageStore {
         Ok(results)
     }
 
+    /// Return ALL messages ordered by timestamp (oldest first).
+    pub fn get_all_messages(&self) -> Result<Vec<ChatMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT msg_hash, topic, sender, timestamp_ms, kind, body,
+                        signed_bytes, delivery_state, image_identifier, id
+                 FROM messages
+                 ORDER BY timestamp_ms ASC",
+            )
+            .std_context("prepare get_all_messages")?;
+        let mut rows = stmt
+            .query([])
+            .std_context("query get_all_messages")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next row")? {
+            results.push(row_to_chat_message(row)?);
+        }
+        Ok(results)
+    }
+
     // ── Deletion and tombstone methods (Step 12) ──────────────────────
 
     /// Locally delete a single message: insert a local tombstone to prevent
