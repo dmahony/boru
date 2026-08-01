@@ -13954,7 +13954,7 @@ impl IcedChat {
                 let task = iced::Task::perform(
                     async move {
                         // GIPHY search API
-                        const API_KEY: &str = "0lut0y48A3Q2mEbqWWXXoDv6gPyNY0We";
+                        const API_KEY: &str = "GlVGYHkr3WSBnllca54iNt0yFbjz7L65";
                         // Simple URL encode for the query
                         let encoded_query: String = query
                             .chars()
@@ -13985,7 +13985,10 @@ impl IcedChat {
                     },
                     |result| match result {
                         Some(results) => AppMessage::GifSearchResults(results),
-                        None => AppMessage::Noop,
+                        None => {
+                            tracing::warn!("GIPHY search failed or returned no results");
+                            AppMessage::Noop
+                        }
                     },
                 );
                 return task;
@@ -18927,7 +18930,7 @@ impl IcedChat {
                                 .padding(iced::Padding {
                                     top: 0.0,
                                     right: SPACE_16,
-                                    bottom: SPACE_8,
+                                    bottom: 48.0,
                                     left: 0.0,
                                 })
                                 .align_x(iced::alignment::Horizontal::Right)
@@ -18948,7 +18951,7 @@ impl IcedChat {
                                 .padding(iced::Padding {
                                     top: 0.0,
                                     right: SPACE_16,
-                                    bottom: SPACE_8,
+                                    bottom: 48.0,
                                     left: 0.0,
                                 })
                                 .align_x(iced::alignment::Horizontal::Right)
