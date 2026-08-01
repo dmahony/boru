@@ -6281,7 +6281,13 @@ impl IcedChat {
 
     #[cfg(feature = "video-playback")]
     pub(crate) fn has_inline_video(&self) -> bool {
-        self.inline_video.is_some()
+        // A preparation session has no decoder to advance or repaint.  Avoid
+        // subscribing to the 250 ms UI tick until the backend has actually
+        // produced a player; viewport cleanup still runs from the existing
+        // connection/scroll events.
+        self.inline_video
+            .as_ref()
+            .is_some_and(|session| session.video.is_some())
     }
 
     fn leave_current_room(&mut self) {
@@ -11869,7 +11875,11 @@ impl IcedChat {
             }
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoTick => {
-                if self.inline_video.is_some() {
+                if self
+                    .inline_video
+                    .as_ref()
+                    .is_some_and(|session| session.video.is_some())
+                {
                     self.layout_cache.borrow_mut().clear();
                 }
                 iced::Task::none()
@@ -11962,6 +11972,10 @@ impl IcedChat {
                                 }
                             }
                             self.inline_video = None;
+                            // The error card remains available for retry, but
+                            // the failed player must no longer reserve the
+                            // coordinator's active slot.
+                            self.playback_coordinator.clear(Some(&key));
                             self.inline_video_seek = None;
                             self.inline_video_expanded = false;
                             self.layout_cache.borrow_mut().clear();
