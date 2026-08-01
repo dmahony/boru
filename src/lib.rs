@@ -25,6 +25,8 @@ pub mod discovery_record;
 #[cfg(feature = "net")]
 pub mod discovery_validation;
 pub mod metrics;
+/// Conservative classification for attachment rendering.
+pub mod media_classification;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod proto;
