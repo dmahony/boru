@@ -118,6 +118,7 @@ rayon = { version = "1.10.0", optional = true }
 comfy-table = { version = "7.1.4", optional = true }
 
 iced = { version = "0.14", default-features = false, features = ["tokio", "x11", "wayland", "tiny-skia", "image", "lazy", "wgpu", "svg"], optional = true }
+iced_video_player = { version = "0.6.0", optional = true }
 regex = { version = "1", optional = true }
 open = { version = "5", optional = true }
 url = { version = "2", optional = true }
@@ -197,6 +198,7 @@ simulator = [
 metrics = ["iroh-metrics/metrics"]
 examples = ["net"]
 gui = ["net", "dep:iced", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest"]
+video-playback = ["gui", "dep:iced_video_player"]
 
 
 [[test]]
@@ -221,6 +223,10 @@ required-features = ["examples"]
 name = "boru"
 required-features = ["gui"]
 path = "examples/iced_chat/main.rs"
+
+[[example]]
+name = "video_backend_probe"
+required-features = ["video-playback"]
 
 [[example]]
 name = "doctor"
