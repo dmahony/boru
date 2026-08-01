@@ -121,7 +121,7 @@ iced = { version = "0.14", default-features = false, features = ["tokio", "x11",
 regex = { version = "1", optional = true }
 open = { version = "5", optional = true }
 url = { version = "2", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 mimalloc = { version = "0.1", optional = true }
 profiling = { version = "1", default-features = false, features = [

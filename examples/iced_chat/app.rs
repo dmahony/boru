@@ -2560,6 +2560,8 @@ pub struct IcedChat {
     show_gif_picker: bool,
     /// Search text for the GIF picker.
     gif_search_text: String,
+    /// GIF search results: (title, download_url).
+    gif_results: Vec<(String, String)>,
     /// Whether the invite member dialog is shown.
     show_invite_member_dialog: bool,
     /// Selected friends to invite in the invite member dialog.
@@ -3136,6 +3138,10 @@ pub enum AppMessage {
     GifSearchChanged(String),
     /// Send a GIF by URL as an image attachment.
     SendGifUrl(String),
+    /// Trigger a GIF search against the GIPHY API.
+    GifSearchSubmit,
+    /// GIF search results arrived.
+    GifSearchResults(Vec<(String, String)>),
     /// Copy the user's own friend ID (public key) to the clipboard with visual feedback.
     CopyFriendId,
     /// Clear the "Copied!" visual feedback after copy.
@@ -4234,6 +4240,7 @@ impl IcedChat {
             show_emoji_picker: false,
             show_gif_picker: false,
             gif_search_text: String::new(),
+            gif_results: Vec::new(),
             show_invite_member_dialog: false,
             invite_member_selected: HashSet::new(),
             details_panel_open: false,
@@ -5666,6 +5673,8 @@ impl IcedChat {
             AppMessage::ToggleGifPicker => "ToggleGifPicker",
             AppMessage::GifSearchChanged(_) => "GifSearchChanged",
             AppMessage::SendGifUrl(_) => "SendGif",
+            AppMessage::GifSearchSubmit => "GifSearchSubmit",
+            AppMessage::GifSearchResults(_) => "GifSearchResults",
             AppMessage::CopyFriendId => "CopyFriendId",
             AppMessage::FriendIdCopiedClear => "FriendIdCopiedClear",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
@@ -13937,6 +13946,56 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::GifSearchSubmit => {
+                let query = self.gif_search_text.clone();
+                if query.is_empty() {
+                    return iced::Task::none();
+                }
+                let task = iced::Task::perform(
+                    async move {
+                        // GIPHY search API
+                        const API_KEY: &str = "0lut0y48A3Q2mEbqWWXXoDv6gPyNY0We";
+                        // Simple URL encode for the query
+                        let encoded_query: String = query
+                            .chars()
+                            .map(|c| match c {
+                                ' ' => "%20".to_string(),
+                                '!'..='~' if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~'
+                                    => c.to_string(),
+                                _ => format!("%{:02X}", c as u8),
+                            })
+                            .collect();
+                        let url = format!(
+                            "https://api.giphy.com/v1/gifs/search?api_key={}&q={}&limit=20&rating=g&lang=en",
+                            API_KEY, encoded_query,
+                        );
+                        let client = reqwest::Client::new();
+                        let resp = client.get(&url).send().await.ok()?;
+                        let body: serde_json::Value = resp.json().await.ok()?;
+                        let results: Vec<(String, String)> = body["data"]
+                            .as_array()?
+                            .iter()
+                            .filter_map(|gif| {
+                                let title = gif["title"].as_str().unwrap_or("").to_string();
+                                let url = gif["images"]["original"]["url"].as_str()?.to_string();
+                                Some((title, url))
+                            })
+                            .collect();
+                        Some(results)
+                    },
+                    |result| match result {
+                        Some(results) => AppMessage::GifSearchResults(results),
+                        None => AppMessage::Noop,
+                    },
+                );
+                return task;
+            }
+
+            AppMessage::GifSearchResults(results) => {
+                self.gif_results = results;
+                iced::Task::none()
+            }
+
             AppMessage::SendGifUrl(url) => {
                 let url_clone = url.clone();
                 self.show_gif_picker = false;
@@ -19038,69 +19097,68 @@ impl IcedChat {
         use iced::widget::{button, column, container, row, text, text_input, Scrollable};
 
         let theme = self.theme();
-        const GIFS: &[(&str, &str)] = &[
-            ("👋 Wave", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbmJ4OHU5eHIyM21pYmRhMjA2Mmh3eXh6c3N6Zjd4bjlyeG52ZndmMiZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7abrAiUoJ7O/giphy.gif"),
-            ("👍 Thumbs Up", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExMWF2ZXZ6N2oxdnNrMngxenhudDBpbTQ5dGNyNHZyMXR1M3BsOGZqcSZlcD12MV9naWZzX3NlYXJjaCZjdD1n/XreQmk7ETCak0/giphy.gif"),
-            ("🎉 Party", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExcmhjeGE2b28xaXI3cGFpbnVtdTgxMXNyMmdkZXdpc2t6YWN2cmF6ZSZlcD12MV9naWZzX3NlYXJjaCZjdD1n/l0MYt5jPR6QW5pnBe/giphy.gif"),
-            ("😂 Laugh", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdm9ibjJ1OHR5b3FobGJtMnF6Z2trdXB0aHZ0M2N2eTI0a3pvZnpkcyZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o6Zt6KHxJTbC/giphy.gif"),
-            ("❤️ Love", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExeDQzbWZsZnRnc3QydHgwdzlmMWZqOXZzazZ5OTE5eHEwMmI3cXQ4bCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/l3q2K5jinAlChoCLS/giphy.gif"),
-            ("🤔 Think", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExeTQ0bTAza2c3eHI5d2F2YnBzaHAwaDR4aWlrNXN5amxhNHBqdzR3dyZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7TKTDn976rzTg49C/giphy.gif"),
-            ("😱 Shocked", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExMmJobDJtajUyaXBzczRpbXJzMWYxbG85aGdpZmNyZ3piYmh1MnBwbCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7TKSj8roRKfLv1qU/giphy.gif"),
-            ("👏 Clap", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbmN1NnkxeTR5ZmdidTk1NGR6bnVlOGNvbmppbXc2Mm91Y2ZzZ2Z4diZlcD12MV9naWZzX3NlYXJjaCZjdD1n/l4q8D5hXbH8VdFV3a/giphy.gif"),
-            ("🙄 Eye Roll", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExcmNxZHVnNW9kd21ydXpkOGhka3VkaWkxOGp4M2tjOWp2dDRlamNpYiZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7btY3miPcehXZzTu/giphy.gif"),
-            ("💤 Sleep", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExMWpvejltcjhxb2djYm95aDV4NGxoMjN3cHJ1aXJ3bXBmOTMxc2R6dCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7TKGKQUzMkTNXo2k/giphy.gif"),
-            ("🔥 Fire", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbDQ3ZXZiM29wMWsyeWZ3bnBxcXQ0dWFpMzlnMGRjbmFxNzlkc211NiZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7TKP9c5n3TZuT1sA/giphy.gif"),
-            ("😢 Cry", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExcjB2eThxdHJra3l0cm04andrN3RkMnVhaWd3OXNhYXLnZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7TKSj8roRKfLv1qU/giphy.gif"),
-        ];
-
         let close_btn = button(text("✕").size(TYPO_XS).color(text_muted(&theme)))
             .on_press(AppMessage::ToggleGifPicker)
             .padding([SPACE_2, SPACE_4])
             .style(|_t, _s| iced::widget::button::Style::default());
 
         let header = row![
-            text("GIFs").size(TYPO_SM).color(text_muted(&theme)),
+            text("GIF Search").size(TYPO_SM).color(text_muted(&theme)),
             iced::widget::Space::new().width(iced::Length::Fill),
             close_btn,
         ]
         .spacing(SPACE_4)
         .align_y(iced::Alignment::Center);
 
-        // URL input for custom GIF
-        let url_input = text_input("Paste GIF URL…", &self.gif_search_text)
+        // Search input
+        let search_input = text_input("Search GIFs…", &self.gif_search_text)
             .on_input(AppMessage::GifSearchChanged)
+            .on_submit(AppMessage::GifSearchSubmit)
             .size(TYPO_SM)
             .padding([SPACE_4, SPACE_6]);
 
-        let send_btn = button(text("Send").size(TYPO_SM))
+        let search_btn = button(text("Search").size(TYPO_SM))
             .on_press_maybe(if !self.gif_search_text.is_empty() {
-                Some(AppMessage::SendGifUrl(self.gif_search_text.clone()))
+                Some(AppMessage::GifSearchSubmit)
             } else {
                 None
             })
             .padding([SPACE_4, SPACE_8]);
 
-        let url_row = row![url_input, send_btn].spacing(SPACE_4).align_y(iced::Alignment::Center);
+        let search_row = row![search_input, search_btn].spacing(SPACE_4).align_y(iced::Alignment::Center);
 
-        let mut grid = column![].spacing(SPACE_4);
-        for chunk in GIFS.chunks(2) {
-            let mut r = row![].spacing(SPACE_4);
-            for &(label, url) in chunk {
-                r = r.push(
-                    button(text(label).size(TYPO_SM))
-                        .on_press(AppMessage::SendGifUrl(url.to_string()))
-                        .padding([SPACE_4, SPACE_8])
-                        .style(|_t, _s| iced::widget::button::Style::default())
-                        .width(iced::Length::Fill),
+        // Results list
+        let mut results_col = column![].spacing(SPACE_2);
+        if self.gif_results.is_empty() {
+            results_col = results_col.push(
+                text("Type a search term and press Enter or Search")
+                    .size(TYPO_SM)
+                    .color(text_muted(&theme)),
+            );
+        } else {
+            for (title, url) in &self.gif_results {
+                let url = url.clone();
+                let label = if title.is_empty() { "[GIF]" } else { title.as_str() };
+                results_col = results_col.push(
+                    button(
+                        row![
+                            text(label).size(TYPO_SM).width(iced::Length::Fill),
+                            text("Send").size(TYPO_XS).color(text_muted(&theme)),
+                        ]
+                        .spacing(SPACE_4)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .on_press(AppMessage::SendGifUrl(url))
+                    .padding([SPACE_4, SPACE_8])
+                    .style(|_t, _s| iced::widget::button::Style::default())
+                    .width(iced::Length::Fill),
                 );
             }
-            grid = grid.push(r);
         }
 
-        let scroll = Scrollable::new(column![url_row, grid].spacing(SPACE_8))
-            .height(iced::Length::Fixed(200.0));
+        let scroll = Scrollable::new(results_col).height(iced::Length::Fixed(240.0));
 
-        container(column![header, scroll].spacing(SPACE_4).padding(SPACE_8))
+        container(column![header, search_row, scroll].spacing(SPACE_6).padding(SPACE_8))
             .style(move |t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(bg_surface(t))),
                 border: iced::Border {
