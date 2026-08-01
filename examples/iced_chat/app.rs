@@ -2115,6 +2115,21 @@ pub enum Screen {
     Groups,
 }
 
+// ── State-safety snapshots ─────────────────────────────────────────────
+
+/// Atomic snapshot of the room a join was initiated for, captured when the
+/// async subscription task is spawned. Mirrors telepathy's
+/// `CallSlotSnapshot { state, direct_peer, generation }`: the `generation`
+/// token is bumped on every room-join initiation, so a stale completion
+/// (e.g. `RoomOpened` delivered for a room the user has since left or
+/// switched away from) can be detected in debug builds before it clobbers
+/// the newer room's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomSnapshot {
+    pub topic: TopicId,
+    pub generation: u64,
+}
+
 // ── Per-conversation runtime state ─────────────────────────────────────
 
 /// Runtime state for a single live conversation (active or background).
@@ -2270,6 +2285,22 @@ pub struct IcedChat {
     /// True while the async gossip subscription for a room is in flight.
     /// Shows a spinner in the chat view instead of an empty panel.
     pub room_loading: bool,
+    /// Monotonic ownership token for the active room. Bumped on every room
+    /// join initiation (OpenRoom slow path, JoinFromTicket, private-room
+    /// creation, group creation). Async subscription completions carry the
+    /// generation they were spawned under; handlers assert the current
+    /// generation still matches before applying the result, so a stale
+    /// completion for a room the user has since left or switched away from
+    /// is detected in debug builds instead of clobbering the newer room.
+    room_generation: u64,
+    /// Monotonic ownership token for the active conversation. Bumped on
+    /// every active-conversation switch (`switch_to_conversation` and the
+    /// `RoomOpened` apply path). Async completions that mutate the active
+    /// conversation's display (e.g. `ImageDownloaded`) carry the generation
+    /// they were started under; the handler asserts it still matches before
+    /// applying, so a completion that resolves after a room switch cannot
+    /// silently mutate the wrong conversation's entries.
+    conversation_generation: u64,
     /// Screen to return to when closing the settings page.
     settings_return_to: Option<Screen>,
 
@@ -3132,6 +3163,11 @@ pub enum AppMessage {
         /// Used to emit diagnostic events retroactively when NeighborUp was
         /// missed (emitted before the forwarder started).
         neighbor_ids: Vec<PublicKey>,
+        /// Room generation captured when this join was initiated. The
+        /// handler asserts the current generation still matches before
+        /// applying, so a stale completion for a room the user has since
+        /// left or switched away from is caught in debug builds.
+        generation: u64,
     },
     /// Finished creating a new room (random topic).
     CreateNewRoom,
@@ -3148,7 +3184,14 @@ pub enum AppMessage {
     /// Join a room from a ticket string.
     JoinFromTicket,
     /// The room switch / join failed.
-    RoomJoinFailed(String),
+    RoomJoinFailed {
+        error: String,
+        /// Room generation at join-initiation time; the handler asserts the
+        /// current generation still matches before showing the error, so a
+        /// stale failure for a superseded join does not yank the UI out of a
+        /// newer room.
+        generation: u64,
+    },
 
     /// Open the file picker to select a file containing a friend's public key.
     ImportFriendFromFile,
@@ -3177,6 +3220,10 @@ pub enum AppMessage {
         name: String,
         description: String,
         members: Vec<PublicKey>,
+        /// Room generation at group-creation initiation; the handler asserts
+        /// the current generation still matches before navigating, so a stale
+        /// creation cannot yank the UI out of a newer room.
+        generation: u64,
     },
     // ── ChatList ──
     JoinTicketInputChanged(String),
@@ -3358,6 +3405,11 @@ pub enum AppMessage {
         /// ImageStore identifier pre-saved by the async download task.
         /// None if the save failed (error is set on the chat entry instead).
         image_identifier: Option<String>,
+        /// Conversation generation captured when the download was started.
+        /// The handler asserts the current generation still matches before
+        /// applying, so a download that resolves after a room switch cannot
+        /// silently mutate the wrong conversation's entries.
+        generation: u64,
     },
     FriendAdded {
         fid: String,
@@ -4528,6 +4580,8 @@ impl IcedChat {
             lightbox_image: None,
             pending_topic: None,
             room_loading: false,
+            room_generation: 0,
+            conversation_generation: 0,
             room_history,
             room_history_dirty: false,
             join_ticket_input: String::new(),
@@ -5073,6 +5127,11 @@ impl IcedChat {
         let Some((name, hash, sender_pk)) = self.pending_image.pop_front() else {
             return iced::Task::none();
         };
+        // Capture the conversation ownership token when the download starts.
+        // If the user switches rooms while the download is in flight, the
+        // completion generation will not match and the stale entry is caught
+        // in debug builds instead of landing in the wrong conversation.
+        let generation = self.conversation_generation;
         let blob_store = self.blob_store.clone();
         let endpoint = self.endpoint.clone();
         let neighbors = self.neighbors.clone();
@@ -5124,6 +5183,7 @@ impl IcedChat {
                     image_bytes: data,
                     message_hash: hash,
                     image_identifier: id,
+                    generation,
                 },
                 Err(e) => AppMessage::ErrorMsg(e),
             },
@@ -5980,7 +6040,7 @@ impl IcedChat {
             AppMessage::CreateNewRoomNameChanged(..) => "CreateNewRoomNameChanged",
             AppMessage::CreateNewRoomAdvertiseToggled(..) => "CreateNewRoomAdvertiseToggled",
             AppMessage::JoinFromTicket => "JoinFromTicket",
-            AppMessage::RoomJoinFailed(_) => "RoomJoinFailed",
+            AppMessage::RoomJoinFailed { .. } => "RoomJoinFailed",
             AppMessage::JoinTicketInputChanged(_) => "JoinTicketInputChanged",
             AppMessage::NewChatCreated => "NewChatCreated",
             AppMessage::RoomSelected(_) => "RoomSelected",
@@ -6449,6 +6509,11 @@ impl IcedChat {
             self.viewport_height = conversation.viewport_height;
 
             self.layout_cache.borrow_mut().invalidate_all();
+
+            // The active conversation changed — bump the ownership token so
+            // in-flight async completions (e.g. image downloads) started for
+            // the previously active conversation are detected as stale.
+            self.conversation_generation = self.conversation_generation.wrapping_add(1);
 
             // Keep the pending queue in the runtime map so it can be drained
             // incrementally by `ReplayPendingEvents`.  Draining the entire
@@ -7152,6 +7217,11 @@ impl IcedChat {
                 let group_id = GroupId::generate();
                 let epoch = 1u64;
                 let topic = TopicId::from_bytes(rand::random());
+                // Bump the room generation so a stale group-creation
+                // completion cannot navigate the UI away from a room the
+                // user opened while creation was in flight.
+                self.room_generation = self.room_generation.wrapping_add(1);
+                let creation_generation = self.room_generation;
                 let gossip = self.gossip.clone();
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
@@ -7297,9 +7367,13 @@ impl IcedChat {
                                 name: display_name,
                                 description,
                                 members: friend_keys,
+                                generation: creation_generation,
                             }
                         }
-                        Err(e) => AppMessage::RoomJoinFailed(e),
+                        Err(e) => AppMessage::RoomJoinFailed {
+                            error: e,
+                            generation: creation_generation,
+                        },
                     },
                 )
             }
@@ -7522,6 +7596,14 @@ impl IcedChat {
                 }
 
                 let topic = TopicId::from_bytes(rand::random());
+                // Bump the room generation so a stale private-room creation
+                // completion cannot clobber a newer room the user opened
+                // while subscription was in flight.
+                self.room_generation = self.room_generation.wrapping_add(1);
+                let room_snapshot = RoomSnapshot {
+                    topic,
+                    generation: self.room_generation,
+                };
                 let gossip = self.gossip.clone();
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
@@ -7703,7 +7785,7 @@ impl IcedChat {
                             neighbor_ids,
                         ))
                     },
-                    |result| match result {
+                    move |result| match result {
                         Ok((
                             sender,
                             topic,
@@ -7718,8 +7800,12 @@ impl IcedChat {
                             room_tracker,
                             neighbor_count,
                             neighbor_ids,
+                            generation: room_snapshot.generation,
                         },
-                        Err(e) => AppMessage::RoomJoinFailed(e),
+                        Err(e) => AppMessage::RoomJoinFailed {
+                            error: e,
+                            generation: room_snapshot.generation,
+                        },
                     },
                 )
             }
@@ -7787,6 +7873,14 @@ impl IcedChat {
                     return iced::Task::none();
                 }
                 self.pending_topic = Some(topic);
+                // Bump the room generation so a stale RoomOpened from an
+                // earlier join cannot clobber a newer room the user opened
+                // while this subscription was in flight.
+                self.room_generation = self.room_generation.wrapping_add(1);
+                let room_snapshot = RoomSnapshot {
+                    topic,
+                    generation: self.room_generation,
+                };
 
                 // Save the current room first
                 self.save_room_to_history();
@@ -8069,7 +8163,7 @@ impl IcedChat {
                             neighbor_ids,
                         ))
                     },
-                    |result| match result {
+                    move |result| match result {
                         Ok((
                             sender,
                             topic,
@@ -8084,8 +8178,12 @@ impl IcedChat {
                             room_tracker,
                             neighbor_count,
                             neighbor_ids,
+                            generation: room_snapshot.generation,
                         },
-                        Err(e) => AppMessage::RoomJoinFailed(e),
+                        Err(e) => AppMessage::RoomJoinFailed {
+                            error: e,
+                            generation: room_snapshot.generation,
+                        },
                     },
                 )
             }
@@ -8097,8 +8195,25 @@ impl IcedChat {
                 room_tracker,
                 neighbor_count,
                 neighbor_ids,
+                generation,
             } => {
                 info!("RoomOpened FIRED topic={topic} neighbor_count={neighbor_count}");
+                // State-safety: this completion was spawned under
+                // `generation`. If the user has since initiated a newer
+                // join (which bumps `room_generation`), this is a stale
+                // completion for a superseded room — catch it in debug
+                // builds before it clobbers the newer room's state.
+                debug_assert_eq!(
+                    self.room_generation,
+                    generation,
+                    "stale RoomOpened for {topic}: completion generation {generation} \
+                     != current room generation {}",
+                    self.room_generation,
+                );
+                // A new active conversation is being applied — bump the
+                // conversation ownership token so in-flight image downloads
+                // started for the previous conversation are detected.
+                self.conversation_generation = self.conversation_generation.wrapping_add(1);
                 self.pending_topic = None;
                 self.room_loading = false;
                 self.sender = Some(sender.clone());
@@ -8588,7 +8703,17 @@ impl IcedChat {
                 }
             }
 
-            AppMessage::RoomJoinFailed(e) => {
+            AppMessage::RoomJoinFailed { error, generation } => {
+                // State-safety: a stale join failure for a superseded room
+                // must not yank the UI out of a newer room the user opened
+                // while the failed join was in flight. Detect in debug builds.
+                debug_assert_eq!(
+                    self.room_generation,
+                    generation,
+                    "stale RoomJoinFailed: completion generation {generation} \
+                     != current room generation {}",
+                    self.room_generation,
+                );
                 self.pending_topic = None;
                 self.room_loading = false;
                 if let Some((action_id, expected_topic)) = self.pending_open_room_action.take() {
@@ -8596,14 +8721,14 @@ impl IcedChat {
                         &action_id,
                         GuiActionError::new(
                             GuiActionErrorCode::InternalError,
-                            format!("Failed to open room {expected_topic}: {e}"),
+                            format!("Failed to open room {expected_topic}: {error}"),
                         ),
                     );
                     let _ = self
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::Failed);
                 }
-                self.chat_list_error = format!("Failed to join room: {e}");
+                self.chat_list_error = format!("Failed to join room: {error}");
                 self.screen = Screen::ChatList;
                 iced::Task::none()
             }
@@ -8640,6 +8765,14 @@ impl IcedChat {
                 self.save_room_to_history();
                 self.persist_room_history();
                 self.leave_current_room();
+                // Bump the room generation so a stale join completion for a
+                // superseded ticket cannot clobber a newer room the user
+                // opened while the join was in flight.
+                self.room_generation = self.room_generation.wrapping_add(1);
+                let room_snapshot = RoomSnapshot {
+                    topic: ticket.topic,
+                    generation: self.room_generation,
+                };
                 let gossip = self.gossip.clone();
                 let runtime_handle = self.runtime_handle.clone();
                 let net_tx = self.net_tx.clone();
@@ -8862,7 +8995,7 @@ impl IcedChat {
                             neighbor_ids,
                         ))
                     },
-                    |result| match result {
+                    move |result| match result {
                         Ok((
                             sender,
                             topic,
@@ -8877,8 +9010,12 @@ impl IcedChat {
                             room_tracker,
                             neighbor_count,
                             neighbor_ids,
+                            generation: room_snapshot.generation,
                         },
-                        Err(e) => AppMessage::RoomJoinFailed(e),
+                        Err(e) => AppMessage::RoomJoinFailed {
+                            error: e,
+                            generation: room_snapshot.generation,
+                        },
                     },
                 )
             }
@@ -9227,7 +9364,19 @@ impl IcedChat {
                 name: display_name,
                 description,
                 members: friend_keys,
+                generation,
             } => {
+                // State-safety: if the user opened another room while the
+                // group-creation task was in flight, this completion is stale
+                // and must not navigate the UI away from that room. Detect in
+                // debug builds.
+                debug_assert_eq!(
+                    self.room_generation,
+                    generation,
+                    "stale GroupCreated: completion generation {generation} \
+                     != current room generation {}",
+                    self.room_generation,
+                );
                 info!(
                     ?group_id,
                     name = %display_name,
@@ -9258,6 +9407,10 @@ impl IcedChat {
                 self.topic = topic;
                 self.ticket_str = ticket_str.clone();
                 self.screen = Screen::Chat { topic };
+                // A new active conversation is being applied — bump the
+                // conversation ownership token so in-flight image downloads
+                // started for the previous conversation are detected.
+                self.conversation_generation = self.conversation_generation.wrapping_add(1);
 
                 // Build task list: clipboard write + invite DMs if members selected
                 let mut tasks: Vec<iced::Task<AppMessage>> =
@@ -11288,6 +11441,11 @@ impl IcedChat {
                 let abs_path = parts[1].to_string();
                 self.pending_image_upload = Some(filename.clone());
                 self.image_upload_spinner_frame = 0;
+                // Capture the conversation ownership token when the upload
+                // starts. If the user switches rooms while it is in flight,
+                // the completion's generation will not match and the stale
+                // local entry is caught in debug builds.
+                let generation = self.conversation_generation;
 
                 let blob_store = self.blob_store.clone();
                 let storage = self.storage.clone();
@@ -11389,7 +11547,7 @@ impl IcedChat {
                         }
                         Ok((local_pk, fname, display_name, opt_bytes, hash))
                     },
-                    |r: Result<(PublicKey, String, String, Vec<u8>, MessageHash), String>| match r {
+                    move |r: Result<(PublicKey, String, String, Vec<u8>, MessageHash), String>| match r {
                         Ok((sender_pk, name, display_name, bytes, hash)) => {
                             AppMessage::ImageDownloaded {
                                 sender: sender_pk,
@@ -11398,6 +11556,7 @@ impl IcedChat {
                                 image_bytes: bytes,
                                 message_hash: hash,
                                 image_identifier: None,
+                                generation,
                             }
                         }
                         Err(e) => AppMessage::ImageUploadFailed(e),
@@ -12036,7 +12195,19 @@ impl IcedChat {
                 image_bytes,
                 message_hash,
                 image_identifier,
+                generation,
             } => {
+                // State-safety: an image download started in a previous
+                // conversation must not push its entry into the currently
+                // active conversation's display. Detect stale completions in
+                // debug builds before entries_push mutates the wrong room.
+                debug_assert_eq!(
+                    self.conversation_generation,
+                    generation,
+                    "stale ImageDownloaded for {name}: completion generation {generation} \
+                     != current conversation generation {}",
+                    self.conversation_generation,
+                );
                 info!(
                     ?sender,
                     name = %name,
