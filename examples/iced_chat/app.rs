@@ -5307,8 +5307,11 @@ impl IcedChat {
                 && session.key.attachment_id == attachment.name
         });
         #[cfg(feature = "video-playback")]
-        let player =
-            active_player.and_then(|session| session.video.as_ref().map(|video| video.as_ref()));
+        let player = if self.inline_video_expanded {
+            None
+        } else {
+            active_player.and_then(|session| session.video.as_ref().map(|video| video.as_ref()))
+        };
         #[cfg(feature = "video-playback")]
         let preparing = active_player.is_some_and(|session| session.video.is_none());
         #[cfg(feature = "video-playback")]
@@ -6078,6 +6081,15 @@ impl IcedChat {
         let Some(key) = self.inline_video.as_ref().map(|session| session.key.clone()) else {
             return;
         };
+        if !self.entries.iter().any(|entry| {
+            entry.event_id == key.message_id
+                && entry.download.as_ref().is_some_and(|download| {
+                    download.name == key.attachment_id
+                })
+        }) {
+            self.stop_inline_video();
+            return;
+        }
         if self.inline_video_near_viewport(&key) {
             if let Some(session) = self.inline_video.as_mut() {
                 session.last_near_viewport = Instant::now();
@@ -9865,6 +9877,12 @@ impl IcedChat {
             // ── Global keyboard shortcuts ───────────────────────────
             AppMessage::Shortcut(Shortcut::Escape) => {
                 // Close any open overlay/dialog, outermost first.
+                #[cfg(feature = "video-playback")]
+                if self.inline_video_expanded {
+                    self.inline_video_expanded = false;
+                    self.layout_cache.borrow_mut().clear();
+                    return iced::Task::none();
+                }
                 if self.lightbox_image.is_some() {
                     return iced::Task::done(AppMessage::CloseImageLightbox);
                 }
@@ -16898,6 +16916,11 @@ impl IcedChat {
                 .height(iced::Length::Fill)
         };
 
+        #[cfg(feature = "video-playback")]
+        if self.inline_video_expanded {
+            return self.view_expanded_inline_video(base);
+        }
+
         if self.connection_details_dialog.is_some() {
             self.view_connection_details_dialog(base)
         } else if self.show_create_room_dialog {
@@ -16911,6 +16934,81 @@ impl IcedChat {
         } else {
             base.into()
         }
+    }
+
+    #[cfg(feature = "video-playback")]
+    fn view_expanded_inline_video<'a>(
+        &'a self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, column, container, stack, text};
+        use iced::{Color, Length};
+
+        let Some(session) = self.inline_video.as_ref() else {
+            return base.into();
+        };
+        let Some(video) = session.video.as_ref() else {
+            return base.into();
+        };
+        let Some((entry_index, entry)) = self.entries.iter().enumerate().find(|(_, entry)| {
+            entry.event_id == session.key.message_id
+                && entry.download.as_ref().is_some_and(|download| {
+                    download.name == session.key.attachment_id
+                })
+        }) else {
+            return base.into();
+        };
+        let Some(attachment) = entry.download.as_ref() else {
+            return base.into();
+        };
+        let player = crate::download_progress_view::view_download_progress_with_player(
+            entry_index,
+            attachment,
+            self.dark_mode,
+            Some(video.as_ref()),
+            false,
+            self.inline_video_seek,
+            true,
+        );
+        let panel = container(
+            column![
+                iced::widget::row![
+                    text("Expanded video").size(TYPO_SM),
+                    iced::widget::Space::new().width(Length::Fill),
+                    button(text("Close expanded video"))
+                        .on_press(AppMessage::InlineVideoToggleExpanded)
+                        .padding([SPACE_6, SPACE_10]),
+                ]
+                .align_y(iced::Alignment::Center),
+                player,
+            ]
+            .spacing(SPACE_8),
+        )
+        .width(Length::FillPortion(9))
+        .height(Length::FillPortion(9))
+        .padding(SPACE_12)
+        .style(|t| iced::widget::container::Style {
+            background: Some(iced::Background::Color(bg_surface(t))),
+            border: iced::Border {
+                color: border_muted(t),
+                width: 1.0,
+                radius: SPACE_10.into(),
+            },
+            ..Default::default()
+        });
+        let overlay = container(panel)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .padding(SPACE_16)
+            .style(|_t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    0.0, 0.0, 0.0, 0.82,
+                ))),
+                ..Default::default()
+            });
+        stack![base, overlay].into()
     }
 
     /// Wrap the base layout in an overlay showing the advanced connection details.
