@@ -4503,7 +4503,8 @@ impl IcedChat {
             history_clear_pending: false,
             history_clear_feedback: None,
             history_clear_feedback_is_error: false,
-            friend_online_cache,
+            peer_presence_map,
+            presence_away_peers: HashSet::new(),
             friends_sidebar_revision: 1,
             chats_sidebar_revision: 0,
             discovered_sidebar_revision: 0,
@@ -8905,7 +8906,7 @@ impl IcedChat {
                     self.try_save_friends();
 
                     // Show the accepted friend immediately in the sidebar.
-                    self.friend_online_cache.insert(peer);
+                    self.peer_presence_map.insert(peer, now_ms().max(0) as u64);
                     self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                     self.mark_friends_sidebar_dirty();
 
@@ -10323,7 +10324,7 @@ impl IcedChat {
                                     conversation.state = DirectConversationState::Active;
                                 }
                                 // Show the accepted friend immediately in the sidebar.
-                                self.friend_online_cache.insert(sender);
+                                self.peer_presence_map.insert(sender, now_ms().max(0) as u64);
                                 self.chats_sidebar_revision =
                                     self.chats_sidebar_revision.wrapping_add(1);
                                 self.mark_friends_sidebar_dirty();
@@ -16014,7 +16015,7 @@ impl IcedChat {
                     FriendStatus::Online => {
                         self.friends.mark_online(fid);
                         self.mark_friends_sidebar_dirty();
-                        self.friend_online_cache.insert(peer);
+                        self.peer_presence_map.insert(peer, now_ms().max(0) as u64);
                         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                         if has_been_seen {
                             self.push_system(format!("Friend {label} is now ONLINE"));
@@ -16024,7 +16025,7 @@ impl IcedChat {
                     FriendStatus::Offline => {
                         self.friends.mark_offline(fid);
                         self.mark_friends_sidebar_dirty();
-                        self.friend_online_cache.remove(&peer);
+                        self.peer_presence_map.remove(&peer);
                         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                         if has_been_seen {
                             self.push_system(format!("Friend {label} is now offline"));
@@ -16377,7 +16378,7 @@ impl ChatCallbacks for IcedChat {
 
     fn on_neighbor_up(&mut self, peer: PublicKey) {
         self.neighbors.insert(peer);
-        self.friend_online_cache.insert(peer);
+        self.peer_presence_map.insert(peer, now_ms().max(0) as u64);
         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.needs_conn_refresh = true;
 
@@ -16404,7 +16405,7 @@ impl ChatCallbacks for IcedChat {
 
     fn on_neighbor_down(&mut self, peer: PublicKey) {
         self.neighbors.remove(&peer);
-        self.friend_online_cache.remove(&peer);
+        self.peer_presence_map.remove(&peer);
         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.needs_conn_refresh = true;
         self.peer_latencies.remove(&peer);
@@ -16413,7 +16414,7 @@ impl ChatCallbacks for IcedChat {
     fn record_activity(&mut self, peer: PublicKey) {
         // Update mesh health timestamp for this peer so the mesh
         // watchdog doesn't falsely flag them as stale.
-        self.friend_online_cache.insert(peer);
+        self.peer_presence_map.insert(peer, now_ms().max(0) as u64);
         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.neighbors.insert(peer);
     }
@@ -16423,7 +16424,7 @@ impl ChatCallbacks for IcedChat {
         // connected.  Update the online cache so the friend list
         // shows them as online, and ensure they're tracked as a
         // neighbor for mesh health purposes.
-        self.friend_online_cache.insert(peer);
+        self.peer_presence_map.insert(peer, now_ms().max(0) as u64);
         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.neighbors.insert(peer);
     }
