@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::link_preview;
 use crate::notification::backend::NoopBackend;
@@ -121,6 +121,10 @@ struct InlineVideoSession {
     key: VideoInstanceKey,
     video: Option<Arc<Video>>,
     error: Option<String>,
+    /// Last position retained when lifecycle management pauses this player.
+    resume_position: Duration,
+    /// Keeps a paused decoder warm briefly while the user scrolls nearby.
+    last_near_viewport: Instant,
 }
 
 #[cfg(feature = "video-playback")]
@@ -2174,6 +2178,10 @@ pub struct IcedChat {
     inline_video_seek: Option<f32>,
     #[cfg(feature = "video-playback")]
     inline_video_expanded: bool,
+    #[cfg(feature = "video-playback")]
+    /// Position retained after an off-screen player is evicted. This is
+    /// lightweight UI state; it never owns or removes the attachment file.
+    inline_video_resume: Option<(VideoInstanceKey, Duration)>,
     /// TransferId → entry index cache for O(1) progress update lookups.
     /// Populated lazily in handle_download_progress; cleared on room switch.
     transfer_id_to_index: HashMap<TransferId, usize>,
@@ -4375,6 +4383,8 @@ impl IcedChat {
             inline_video_seek: None,
             #[cfg(feature = "video-playback")]
             inline_video_expanded: false,
+            #[cfg(feature = "video-playback")]
+            inline_video_resume: None,
             transfer_id_to_index: HashMap::new(),
             names: HashMap::new(),
             topic: initial_topic,
@@ -5989,6 +5999,65 @@ impl IcedChat {
 
 impl IcedChat {
     #[cfg(feature = "video-playback")]
+    const INLINE_VIDEO_RELEASE_AFTER: Duration = Duration::from_secs(10);
+
+    /// The chat renderer already computes an overscanned virtualized window.
+    /// Reuse that range as the lifecycle viewport: a player is considered
+    /// nearby while its card is in the rendered window (800 px overscan), so
+    /// scrolling does not make playback thrash at the viewport edge.
+    #[cfg(feature = "video-playback")]
+    fn inline_video_near_viewport(&self, key: &VideoInstanceKey) -> bool {
+        let Some(entry_index) = self.entries.iter().position(|entry| {
+            entry.event_id == key.message_id
+                && entry.download.as_ref().is_some_and(|download| {
+                    download.name == key.attachment_id
+                })
+        }) else {
+            return false;
+        };
+        let layout = &mut *self.layout_cache.borrow_mut();
+        layout.ensure(&self.entries, self.chat_text_size);
+        let (first, last, _, _) = layout.window(self.scroll_offset, self.viewport_height);
+        (first..=last).contains(&entry_index)
+    }
+
+    /// Pause immediately when the active card leaves the overscanned window,
+    /// then release the decoder after a 10-second grace period. This keeps
+    /// rapid scrolling responsive without constructing players for visible
+    /// cards, while retaining enough state for an intentional resume.
+    #[cfg(feature = "video-playback")]
+    fn reconcile_inline_video_viewport(&mut self) {
+        let Some(key) = self.inline_video.as_ref().map(|session| session.key.clone()) else {
+            return;
+        };
+        if self.inline_video_near_viewport(&key) {
+            if let Some(session) = self.inline_video.as_mut() {
+                session.last_near_viewport = Instant::now();
+            }
+            return;
+        }
+
+        let should_release = if let Some(session) = self.inline_video.as_mut() {
+            if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
+                session.resume_position = video.position();
+                video.set_paused(true);
+            }
+            session.last_near_viewport.elapsed() >= Self::INLINE_VIDEO_RELEASE_AFTER
+        } else {
+            false
+        };
+        if should_release {
+            if let Some(session) = self.inline_video.take() {
+                self.inline_video_resume = Some((session.key.clone(), session.resume_position));
+                self.playback_coordinator.clear(Some(&session.key));
+                self.inline_video_seek = None;
+                self.inline_video_expanded = false;
+                self.layout_cache.borrow_mut().clear();
+            }
+        }
+    }
+
+    #[cfg(feature = "video-playback")]
     fn stop_inline_video(&mut self) {
         if let Some(session) = self.inline_video.as_mut() {
             if let Some(video) = session.video.as_mut() {
@@ -5998,6 +6067,7 @@ impl IcedChat {
             }
         }
         self.inline_video = None;
+        self.inline_video_resume = None;
         self.playback_coordinator.clear(None);
         self.layout_cache.borrow_mut().clear();
     }
@@ -11477,21 +11547,27 @@ impl IcedChat {
                         VideoInstanceKey::new(self.topic, entry.event_id, download.name.clone());
                     if self.playback_coordinator.active_video() == Some(&key) {
                         if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
-                            if let Some(video) = session.video.as_mut() {
-                                if let Some(video) = Arc::get_mut(video) {
-                                    video.set_paused(!video.paused());
-                                    self.layout_cache.borrow_mut().clear();
-                                }
+                            if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
+                                video.set_paused(!video.paused());
+                                self.layout_cache.borrow_mut().clear();
+                                return iced::Task::none();
                             }
                         }
-                        return iced::Task::none();
                     }
                     let _previous = self.playback_coordinator.request_play(key.clone());
                     self.inline_video = Some(InlineVideoSession {
                         key: key.clone(),
                         video: None,
                         error: None,
+                        resume_position: self
+                            .inline_video_resume
+                            .as_ref()
+                            .filter(|(resume_key, _)| resume_key == &key)
+                            .map(|(_, position)| *position)
+                            .unwrap_or_default(),
+                        last_near_viewport: Instant::now(),
                     });
+                    self.inline_video_resume = None;
                     self.layout_cache.borrow_mut().invalidate_from(entry_index);
                     let path = path.clone();
                     return iced::Task::perform(
@@ -11604,6 +11680,14 @@ impl IcedChat {
                 match event {
                     InlineVideoEvent::Loaded { key, video } => {
                         if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
+                            let resume_position = session.resume_position;
+                            let mut video = video;
+                            if let Some(video) = Arc::get_mut(&mut video) {
+                                if resume_position > Duration::ZERO {
+                                    let _ = video.seek(resume_position, false);
+                                }
+                                video.set_paused(false);
+                            }
                             session.video = Some(video);
                             session.error = None;
                             self.layout_cache.borrow_mut().clear();
@@ -13318,6 +13402,9 @@ impl IcedChat {
                 // online/offline transitions into one visible update per tick.
                 self.flush_pending_neighbor_status();
 
+                #[cfg(feature = "video-playback")]
+                self.reconcile_inline_video_viewport();
+
                 // Auto-dismiss toast after ~2 seconds (120 ticks at 60fps → ~120 frames,
                 // but ConnMonitorTick fires at 1 Hz, so effectively ~120 seconds would be too
                 // long. We tick at 1 Hz here, so ~2 ticks = ~2 seconds for a 120-counter toast.
@@ -14390,6 +14477,8 @@ impl IcedChat {
                 } else if total > 0.0 {
                     self.follow_latest = false;
                 }
+                #[cfg(feature = "video-playback")]
+                self.reconcile_inline_video_viewport();
                 iced::Task::none()
             }
 
