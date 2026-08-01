@@ -81,6 +81,7 @@ use boru_core::store::MessageStore;
 use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
 use boru_core::video_playback::{
     validate_attachment_filename, verify_local_attachment, PlaybackCoordinator, VideoInstanceKey,
+    VideoJitterBuffer,
 };
 #[cfg(feature = "video-playback")]
 use boru_core::video_runtime::VideoRuntimeCapability;
@@ -125,6 +126,10 @@ struct InlineVideoSession {
     key: VideoInstanceKey,
     video: Option<Arc<Video>>,
     error: Option<String>,
+    /// Deadline-driven playout scheduler (telepathy `AudioJitterBuffer` pattern).
+    /// Gates frame presentation on source-timed deadlines instead of a fixed
+    /// timer, tracks the talkspurt anchor / keepalive floor, and counts loss.
+    jitter: VideoJitterBuffer,
     /// Last position retained when lifecycle management pauses this player.
     resume_position: Duration,
     /// Keeps a paused decoder warm briefly while the user scrolls nearby.
@@ -6399,6 +6404,14 @@ impl IcedChat {
             if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
                 session.resume_position = video.position();
                 video.set_paused(true);
+                // Pausing ends the current talkspurt: raise the keepalive
+                // floor so stale frames from before the pause are dropped
+                // when playback resumes.
+                let framerate = video.framerate();
+                if framerate.is_finite() && framerate > 0.0 {
+                    let floor = (session.resume_position.as_secs_f64() * framerate).floor() as u32;
+                    session.jitter.reset_after_keepalive(floor);
+                }
             }
             session.last_near_viewport.elapsed() >= Self::INLINE_VIDEO_RELEASE_AFTER
         } else {
@@ -6422,6 +6435,15 @@ impl IcedChat {
                 if let Some(video) = Arc::get_mut(video) {
                     video.set_paused(true);
                 }
+            }
+            // Report total playout losses for this session (deadlines that
+            // passed before the decoder delivered the frame).
+            if session.jitter.total_losses() > 0 {
+                tracing::info!(
+                    message_id = session.key.message_id,
+                    losses = session.jitter.total_losses(),
+                    "inline video playout finished with lost frames"
+                );
             }
         }
         self.inline_video = None;
@@ -12060,6 +12082,19 @@ impl IcedChat {
                         if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
                             if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
                                 video.set_paused(!video.paused());
+                                if video.paused() {
+                                    // Manual pause ends the current talkspurt:
+                                    // raise the keepalive floor so stale frames
+                                    // from before the pause are dropped on
+                                    // resume.
+                                    let framerate = video.framerate();
+                                    if framerate.is_finite() && framerate > 0.0 {
+                                        let position = video.position();
+                                        let floor =
+                                            (position.as_secs_f64() * framerate).floor() as u32;
+                                        session.jitter.reset_after_keepalive(floor);
+                                    }
+                                }
                                 self.layout_cache.borrow_mut().clear();
                                 return iced::Task::none();
                             }
@@ -12070,6 +12105,9 @@ impl IcedChat {
                         key: key.clone(),
                         video: None,
                         error: None,
+                        // Fresh talkspurt: the first observed frame anchors
+                        // playout after the default jitter delay.
+                        jitter: VideoJitterBuffer::default(),
                         resume_position: self
                             .inline_video_resume
                             .as_ref()
@@ -12132,12 +12170,47 @@ impl IcedChat {
             }
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoTick => {
-                if self
-                    .inline_video
-                    .as_ref()
-                    .is_some_and(|session| session.video.is_some())
-                {
-                    self.layout_cache.borrow_mut().clear();
+                let now = Instant::now();
+                if let Some(session) = self.inline_video.as_mut() {
+                    if let Some(video) = session.video.as_ref() {
+                        // While paused the playhead is frozen; the pause path
+                        // already raised the keepalive floor, so there is
+                        // nothing to schedule until playback resumes.
+                        if !video.paused() {
+                            // Feed the playhead into the deadline-driven
+                            // jitter buffer.  The first frame of a talkspurt
+                            // (start, resume, or seek) anchors playout after
+                            // the jitter delay; every later frame is scheduled
+                            // relative to that anchor using the source frame
+                            // duration.
+                            let framerate = video.framerate();
+                            if framerate.is_finite() && framerate > 0.0 {
+                                let position = video.position();
+                                let seq = (position.as_secs_f64() * framerate).floor() as u32;
+                                session.jitter.observe_playhead(seq, now);
+                            }
+                            // Present every frame whose wall-clock deadline
+                            // has arrived.  Losses (deadline passed without
+                            // the frame) are counted by the buffer; only
+                            // repaint when a frame is actually due instead of
+                            // on a fixed timer.
+                            let mut present = false;
+                            while let Some(due) = session.jitter.pop_due(now) {
+                                match due {
+                                    Some(_seq) => present = true,
+                                    None => {
+                                        tracing::debug!(
+                                            losses = session.jitter.total_losses(),
+                                            "inline video frame deadline missed"
+                                        );
+                                    }
+                                }
+                            }
+                            if present {
+                                self.layout_cache.borrow_mut().clear();
+                            }
+                        }
+                    }
                 }
                 iced::Task::none()
             }
@@ -12155,6 +12228,10 @@ impl IcedChat {
                         let duration = video.duration();
                         let target = duration.mul_f32(position.clamp(0.0, 1.0));
                         let _ = video.seek(target, false);
+                        // A seek starts a fresh talkspurt: drop the previous
+                        // anchor, floor, and buffered frames so the first
+                        // frame at the target anchors new playout.
+                        session.jitter.reset();
                     }
                 }
                 iced::Task::none()
@@ -12203,6 +12280,14 @@ impl IcedChat {
                                     let _ = video.seek(resume_position, false);
                                 }
                                 video.set_paused(false);
+                            }
+                            // Adopt the real source frame duration once the
+                            // decoder reports its framerate.
+                            let framerate = video.framerate();
+                            if framerate.is_finite() && framerate > 0.0 {
+                                session
+                                    .jitter
+                                    .set_frame_duration(Duration::from_secs_f64(1.0 / framerate));
                             }
                             session.video = Some(video);
                             session.error = None;
