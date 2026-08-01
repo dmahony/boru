@@ -166,6 +166,13 @@ impl PlaybackCoordinator {
         self.active_video.replace(key)
     }
 
+    /// Request playback for `key`, returning the key that must be paused first.
+    /// Repeating a request for the already-active key is intentionally a no-op;
+    /// the UI owns pause/resume toggling for that player.
+    pub fn request_play(&mut self, key: VideoInstanceKey) -> Option<VideoInstanceKey> {
+        self.activate(key)
+    }
+
     /// Clear the active video, optionally only when it matches `key`.
     pub fn clear(&mut self, key: Option<&VideoInstanceKey>) {
         if key.is_none() || self.active_video.as_ref() == key {
@@ -204,6 +211,21 @@ mod tests {
         assert_eq!(coordinator.activate(key(1, "a")), None);
         assert_eq!(coordinator.activate(key(2, "b")), Some(key(1, "a")));
         coordinator.clear(Some(&key(2, "b")));
+        assert_eq!(coordinator.active_video(), None);
+    }
+
+    #[test]
+    fn repeated_requests_are_idempotent_and_stale_clear_cannot_wipe_new_video() {
+        let mut coordinator = PlaybackCoordinator::new();
+        let first = key(1, "a");
+        let second = key(2, "b");
+
+        assert_eq!(coordinator.request_play(first.clone()), None);
+        assert_eq!(coordinator.request_play(first.clone()), None);
+        assert_eq!(coordinator.request_play(second.clone()), Some(first.clone()));
+        coordinator.clear(Some(&first));
+        assert_eq!(coordinator.active_video(), Some(&second));
+        coordinator.clear(Some(&second));
         assert_eq!(coordinator.active_video(), None);
     }
 }

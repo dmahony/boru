@@ -79,7 +79,7 @@ use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::{SharedFileRow, Storage};
 use boru_core::store::MessageStore;
 use boru_core::video_poster;
-use boru_core::video_playback::VideoInstanceKey;
+use boru_core::video_playback::{PlaybackCoordinator, VideoInstanceKey};
 use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
@@ -2154,6 +2154,8 @@ pub struct IcedChat {
     active_download_transfer_id: Option<TransferId>,
     #[cfg(feature = "video-playback")]
     inline_video: Option<InlineVideoSession>,
+    #[cfg(feature = "video-playback")]
+    playback_coordinator: PlaybackCoordinator,
     /// TransferId → entry index cache for O(1) progress update lookups.
     /// Populated lazily in handle_download_progress; cleared on room switch.
     transfer_id_to_index: HashMap<TransferId, usize>,
@@ -4334,6 +4336,8 @@ impl IcedChat {
             active_download_transfer_id: None,
             #[cfg(feature = "video-playback")]
             inline_video: None,
+            #[cfg(feature = "video-playback")]
+            playback_coordinator: PlaybackCoordinator::new(),
             transfer_id_to_index: HashMap::new(),
             names: HashMap::new(),
             topic: initial_topic,
@@ -5926,11 +5930,27 @@ impl IcedChat {
 // ── Room switching helpers ───────────────────────────────────────────
 
 impl IcedChat {
+    #[cfg(feature = "video-playback")]
+    fn stop_inline_video(&mut self) {
+        if let Some(session) = self.inline_video.as_mut() {
+            if let Some(video) = session.video.as_mut() {
+                if let Some(video) = Arc::get_mut(video) {
+                    video.set_paused(true);
+                }
+            }
+        }
+        self.inline_video = None;
+        self.playback_coordinator.clear(None);
+        self.layout_cache.borrow_mut().clear();
+    }
+
     fn leave_current_room(&mut self) {
         // A room switch changes only the selected view. Keep the sender and
         // forwarder alive in the per-conversation map so incoming events are
         // not lost while another conversation is selected.
         let topic = self.topic;
+        #[cfg(feature = "video-playback")]
+        self.stop_inline_video();
         let mut conversation = self
             .conversations
             .remove(&topic)
@@ -9584,6 +9604,8 @@ impl IcedChat {
             }
             AppMessage::ClearConversation => {
                 let topic = self.topic;
+                #[cfg(feature = "video-playback")]
+                self.stop_inline_video();
                 // Clear screen entries and indexes
                 self.entries.clear();
                 self.event_id_to_index.clear();
@@ -11361,6 +11383,18 @@ impl IcedChat {
                         return iced::Task::none();
                     }
                     let key = VideoInstanceKey::new(self.topic, entry.event_id, download.name.clone());
+                    if self.playback_coordinator.active_video() == Some(&key) {
+                        if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
+                            if let Some(video) = session.video.as_mut() {
+                                if let Some(video) = Arc::get_mut(video) {
+                                    video.set_paused(!video.paused());
+                                    self.layout_cache.borrow_mut().clear();
+                                }
+                            }
+                        }
+                        return iced::Task::none();
+                    }
+                    let _previous = self.playback_coordinator.request_play(key.clone());
                     self.inline_video = Some(InlineVideoSession {
                         key: key.clone(),
                         video: None,
@@ -11409,8 +11443,7 @@ impl IcedChat {
             AppMessage::CloseInlineVideo => {
                 #[cfg(feature = "video-playback")]
                 {
-                    self.inline_video = None;
-                    self.layout_cache.borrow_mut().clear();
+                    self.stop_inline_video();
                 }
                 iced::Task::none()
             }
@@ -11427,14 +11460,12 @@ impl IcedChat {
                     InlineVideoEvent::Failed { key, error } | InlineVideoEvent::Error { key, error } => {
                         if self.inline_video.as_ref().is_some_and(|s| s.key == key) {
                             self.push_system(format!("Video playback failed: {error}"));
-                            self.inline_video = None;
-                            self.layout_cache.borrow_mut().clear();
+                            self.stop_inline_video();
                         }
                     }
                     InlineVideoEvent::Ended { key } => {
                         if self.inline_video.as_ref().is_some_and(|s| s.key == key) {
-                            self.inline_video = None;
-                            self.layout_cache.borrow_mut().clear();
+                            self.stop_inline_video();
                         }
                     }
                 }
@@ -13045,6 +13076,10 @@ impl IcedChat {
             }
 
             AppMessage::DeleteRoom(topic) => {
+                #[cfg(feature = "video-playback")]
+                if self.topic == topic {
+                    self.stop_inline_video();
+                }
                 // Shutdown continuous DHT tracker for this room if one exists.
                 if let Some(tracker) = self.room_trackers.remove(&topic) {
                     tracker.shutdown_shared();
@@ -15997,6 +16032,17 @@ impl ChatCallbacks for IcedChat {
 
     fn delete_message(&mut self, hash: &MessageHash) {
         if let Some(&index) = self.message_hash_to_index.get(hash) {
+            #[cfg(feature = "video-playback")]
+            if self
+                .inline_video
+                .as_ref()
+                .is_some_and(|session| self.entries.get(index).is_some_and(|entry| {
+                    session.key.conversation_id == self.topic
+                        && session.key.message_id == entry.event_id
+                }))
+            {
+                self.stop_inline_video();
+            }
             if let Some(entry) = self.entries.get_mut(index) {
                 entry.body = "[message deleted]".to_string();
                 entry.edited = false;
