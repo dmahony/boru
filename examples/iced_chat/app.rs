@@ -1562,6 +1562,10 @@ pub struct ChatEntry {
     /// Original image pixel height, extracted from image bytes at construction time.
     /// Used to compute the display size (scale-to-fit) during rendering.
     image_height: Option<u32>,
+    /// Animated GIF frames (PNG-encoded frame bytes, delay in milliseconds).
+    gif_frames: Option<std::sync::Arc<Vec<(Vec<u8>, u32)>>>,
+    /// Current frame index into gif_frames (0 = first frame / static).
+    gif_frame_idx: usize,
     /// Unix epoch milliseconds when this message was sent (protocol sent_at
     /// for remote messages, local creation time for system/local messages).
     timestamp: Option<i64>,
@@ -1591,6 +1595,43 @@ pub struct ChatEntry {
     parsed_segments: Option<Vec<link_preview::TextSegment>>,
 }
 
+/// Decode an animated GIF into individual frames as PNG-encoded bytes.
+/// Returns None if the image is not a GIF or has only one frame.
+fn decode_gif_frames(image_bytes: &[u8]) -> Option<std::sync::Arc<Vec<(Vec<u8>, u32)>>> {
+    use image::codecs::gif::GifDecoder;
+    use image::AnimationDecoder;
+    use std::io::Cursor;
+
+    let cursor = Cursor::new(image_bytes);
+    let decoder = match GifDecoder::new(cursor) {
+        Ok(d) => d,
+        Err(_) => return None,
+    };
+    let frames = decoder.into_frames();
+
+    let mut result: Vec<(Vec<u8>, u32)> = Vec::new();
+    for frame_result in frames {
+        let frame = match frame_result {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let delay_ms = frame.delay().numer_denom_ms().0;
+        let buffer = frame.into_buffer();
+        // Encode as PNG
+        let mut png_bytes = Vec::new();
+        if buffer.write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png).is_err() {
+            continue;
+        }
+        result.push((png_bytes, delay_ms));
+    }
+
+    if result.len() <= 1 {
+        None
+    } else {
+        Some(std::sync::Arc::new(result))
+    }
+}
+
 impl ChatEntry {
     fn system(text: impl Into<String>) -> Self {
         let mut s = Self {
@@ -1607,6 +1648,8 @@ impl ChatEntry {
             image_error: None,
             image_width: None,
             image_height: None,
+            gif_frames: None,
+            gif_frame_idx: 0,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -1641,6 +1684,8 @@ impl ChatEntry {
             image_error: None,
             image_width: None,
             image_height: None,
+            gif_frames: None,
+            gif_frame_idx: 0,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -1677,6 +1722,8 @@ impl ChatEntry {
             image_error: None,
             image_width: None,
             image_height: None,
+            gif_frames: None,
+            gif_frame_idx: 0,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -1724,11 +1771,13 @@ impl ChatEntry {
             reactions: Vec::new(),
             image_handle: Some(iced::widget::image::Handle::from_bytes(image_bytes.clone())),
             avatar_handle: None,
-            image_bytes: Some(image_bytes), // Keep for session history/replay
+            image_bytes: Some(image_bytes.clone()), // Keep for session history/replay
             image_identifier,
             image_error,
             image_width: img_w,
             image_height: img_h,
+            gif_frames: decode_gif_frames(&image_bytes),
+            gif_frame_idx: 0,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -1767,6 +1816,8 @@ impl ChatEntry {
             image_error: None,
             image_width: None,
             image_height: None,
+            gif_frames: None,
+            gif_frame_idx: 0,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -2024,12 +2075,23 @@ impl ConversationLive {
 
 // ── Application state ─────────────────────────────────────────────────
 
-/// Kind of entry for the right-click context menu.
+/// Kind of entry for right-click context menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextMenuKind {
     Text,
     Image,
 }
+
+/// A GIF search result with preview thumbnail bytes.
+#[derive(Debug, Clone)]
+struct GifResult {
+    title: String,
+    full_url: String,
+    /// Downloaded preview GIF bytes for thumbnail display.
+    preview_bytes: Vec<u8>,
+}
+
+// ── Application state ────────────────────────────────────────────
 
 pub struct IcedChat {
     // ── Navigation ──
@@ -2560,8 +2622,8 @@ pub struct IcedChat {
     show_gif_picker: bool,
     /// Search text for the GIF picker.
     gif_search_text: String,
-    /// GIF search results: (title, download_url).
-    gif_results: Vec<(String, String)>,
+    /// GIF search results with preview thumbnails.
+    gif_results: Vec<GifResult>,
     /// Whether the invite member dialog is shown.
     show_invite_member_dialog: bool,
     /// Selected friends to invite in the invite member dialog.
@@ -3141,7 +3203,9 @@ pub enum AppMessage {
     /// Trigger a GIF search against the GIPHY API.
     GifSearchSubmit,
     /// GIF search results arrived.
-    GifSearchResults(Vec<(String, String)>),
+    GifSearchResults(Vec<GifResult>),
+    /// Advance animated GIF frames for all active GIF entries.
+    AdvanceGifFrames,
     /// Copy the user's own friend ID (public key) to the clipboard with visual feedback.
     CopyFriendId,
     /// Clear the "Copied!" visual feedback after copy.
@@ -5171,6 +5235,8 @@ impl IcedChat {
                 image_error: None,
                 image_width: None,
                 image_height: None,
+            gif_frames: None,
+            gif_frame_idx: 0,
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
@@ -5200,6 +5266,8 @@ impl IcedChat {
                 image_error: None,
                 image_width: None,
                 image_height: None,
+            gif_frames: None,
+            gif_frame_idx: 0,
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
@@ -5272,6 +5340,8 @@ impl IcedChat {
             image_error: None,
             image_width: None,
             image_height: None,
+            gif_frames: None,
+            gif_frame_idx: 0,
             timestamp: Some(row.timestamp_ms),
             event_id: row.id as u64,
             delivery_state,
@@ -5675,6 +5745,7 @@ impl IcedChat {
             AppMessage::SendGifUrl(_) => "SendGif",
             AppMessage::GifSearchSubmit => "GifSearchSubmit",
             AppMessage::GifSearchResults(_) => "GifSearchResults",
+            AppMessage::AdvanceGifFrames => "AdvanceGifFrames",
             AppMessage::CopyFriendId => "CopyFriendId",
             AppMessage::FriendIdCopiedClear => "FriendIdCopiedClear",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
@@ -13972,15 +14043,21 @@ impl IcedChat {
                         let client = reqwest::Client::new();
                         let resp = client.get(&url).send().await.ok()?;
                         let body: serde_json::Value = resp.json().await.ok()?;
-                        let results: Vec<(String, String)> = body["data"]
-                            .as_array()?
-                            .iter()
-                            .filter_map(|gif| {
-                                let title = gif["title"].as_str().unwrap_or("").to_string();
-                                let url = gif["images"]["original"]["url"].as_str()?.to_string();
-                                Some((title, url))
-                            })
-                            .collect();
+                        let mut results: Vec<GifResult> = Vec::new();
+                        for gif in body["data"].as_array()? {
+                            let title = gif["title"].as_str().unwrap_or("").to_string();
+                            let full_url = gif["images"]["original"]["url"].as_str()?.to_string();
+                            let preview_url = gif["images"]["fixed_height"]["url"].as_str().unwrap_or(&full_url);
+                            // Download preview thumbnail
+                            let preview_bytes = {
+                                let resp = client.get(preview_url).send().await;
+                                match resp {
+                                    Ok(r) => r.bytes().await.map(|b| b.to_vec()).unwrap_or_default(),
+                                    Err(_) => Vec::new(),
+                                }
+                            };
+                            results.push(GifResult { title, full_url, preview_bytes });
+                        }
                         Some(results)
                     },
                     |result| match result {
@@ -13996,6 +14073,20 @@ impl IcedChat {
 
             AppMessage::GifSearchResults(results) => {
                 self.gif_results = results;
+                iced::Task::none()
+            }
+
+            AppMessage::AdvanceGifFrames => {
+                for entry in &mut self.entries {
+                    if let Some(ref frames) = entry.gif_frames {
+                        if frames.len() > 1 {
+                            entry.gif_frame_idx = (entry.gif_frame_idx + 1) % frames.len();
+                            // Update image_handle to current frame
+                            let (ref frame_bytes, _delay) = frames[entry.gif_frame_idx];
+                            entry.image_handle = Some(iced::widget::image::Handle::from_bytes(frame_bytes.clone()));
+                        }
+                    }
+                }
                 iced::Task::none()
             }
 
@@ -19130,8 +19221,8 @@ impl IcedChat {
 
         let search_row = row![search_input, search_btn].spacing(SPACE_4).align_y(iced::Alignment::Center);
 
-        // Results list
-        let mut results_col = column![].spacing(SPACE_2);
+        // Results grid with image thumbnails
+        let mut results_col = column![].spacing(SPACE_4);
         if self.gif_results.is_empty() {
             results_col = results_col.push(
                 text("Type a search term and press Enter or Search")
@@ -19139,27 +19230,52 @@ impl IcedChat {
                     .color(text_muted(&theme)),
             );
         } else {
-            for (title, url) in &self.gif_results {
-                let url = url.clone();
-                let label = if title.is_empty() { "[GIF]" } else { title.as_str() };
-                results_col = results_col.push(
-                    button(
-                        row![
-                            text(label).size(TYPO_SM).width(iced::Length::Fill),
-                            text("Send").size(TYPO_XS).color(text_muted(&theme)),
+            // Render in rows of 2 thumbnails each
+            for chunk in self.gif_results.chunks(2) {
+                let mut row_widgets = row![].spacing(SPACE_4);
+                for gif in chunk {
+                    let url = gif.full_url.clone();
+                    let title = if gif.title.is_empty() { "GIF" } else { &gif.title };
+                    let has_preview = !gif.preview_bytes.is_empty();
+                    
+                    let thumbnail: iced::Element<'_, AppMessage> = if has_preview {
+                        let handle = iced::widget::image::Handle::from_bytes(gif.preview_bytes.clone());
+                        iced::widget::image(handle)
+                            .width(iced::Length::Fixed(150.0))
+                            .height(iced::Length::Fixed(100.0))
+                            .into()
+                    } else {
+                        container(text("...").size(TYPO_XS).color(text_muted(&theme)))
+                            .width(150.0)
+                            .height(100.0)
+                            .center_x(iced::Length::Fill)
+                            .center_y(iced::Length::Fill)
+                            .style(move |t| iced::widget::container::Style {
+                                background: Some(iced::Background::Color(bg_surface_secondary(t))),
+                                ..Default::default()
+                            })
+                            .into()
+                    };
+
+                    let card = button(
+                        column![
+                            thumbnail,
+                            text(title).size(TYPO_XS).color(text_muted(&theme)),
                         ]
-                        .spacing(SPACE_4)
-                        .align_y(iced::Alignment::Center),
+                        .spacing(SPACE_2)
+                        .width(iced::Length::Fixed(150.0)),
                     )
                     .on_press(AppMessage::SendGifUrl(url))
-                    .padding([SPACE_4, SPACE_8])
-                    .style(|_t, _s| iced::widget::button::Style::default())
-                    .width(iced::Length::Fill),
-                );
+                    .padding(SPACE_4)
+                    .style(|_t, _s| iced::widget::button::Style::default());
+
+                    row_widgets = row_widgets.push(card);
+                }
+                results_col = results_col.push(row_widgets);
             }
         }
 
-        let scroll = Scrollable::new(results_col).height(iced::Length::Fixed(240.0));
+        let scroll = Scrollable::new(results_col).height(iced::Length::Fixed(300.0));
 
         container(column![header, search_row, scroll].spacing(SPACE_6).padding(SPACE_8))
             .style(move |t| iced::widget::container::Style {
@@ -22368,6 +22484,8 @@ impl IcedChat {
                 .map(|_| AppMessage::MeshWatchdogTick),
             iced::time::every(std::time::Duration::from_secs(30))
                 .map(|_| AppMessage::OutboxRetryTick),
+            iced::time::every(std::time::Duration::from_millis(100))
+                .map(|_| AppMessage::AdvanceGifFrames),
             iced::window::resize_events()
                 .map(|(_id, size)| AppMessage::WindowResized(size.width as f32)),
         ];
@@ -24359,6 +24477,8 @@ mod tests {
             parsed_segments: None,
             image_width: None,
             image_height: None,
+            gif_frames: None,
+            gif_frame_idx: 0,
         };
         assert_eq!(e.body, "hello");
         assert_eq!(e.label, "peer");

@@ -122,7 +122,7 @@ regex = { version = "1", optional = true }
 open = { version = "5", optional = true }
 url = { version = "2", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 mimalloc = { version = "0.1", optional = true }
 profiling = { version = "1", default-features = false, features = [
     "tracy-client",
@@ -163,7 +163,7 @@ n0-tracing-test = "0.3"
 tempfile = "3"
 url = "2.4.0"
 rand = { version = "0.10", features = ["chacha"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 rusqlite = { version = "0.39", features = ["bundled"] }
 criterion = "0.5"
 
