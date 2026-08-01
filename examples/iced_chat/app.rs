@@ -2256,6 +2256,11 @@ pub struct IcedChat {
     pub friend_events_rx: Arc<Mutex<Receiver<FriendEvent>>>,
     /// Set of peer PublicKeys currently connected as gossip neighbors.
     neighbors: HashSet<PublicKey>,
+    /// Peers we've already announced as newly-seen this session (via a
+    /// presence heartbeat or a neighbor-up).  Prevents duplicate "joined"
+    /// / "is online" system messages per peer; cleared on room leave so
+    /// re-entering a room announces its peers fresh again.
+    known_peers: HashSet<PublicKey>,
     /// Number of gossip neighbors for each subscribed room.
     room_neighbor_counts: HashMap<TopicId, u32>,
     /// Number of peers reachable via a direct (hole-punched) connection.
@@ -4449,6 +4454,7 @@ impl IcedChat {
             friend_mgr,
             friend_events_rx,
             neighbors: HashSet::new(),
+            known_peers: HashSet::new(),
             room_neighbor_counts: HashMap::new(),
             direct_peers: 0,
             relayed_peers: 0,
@@ -6164,6 +6170,9 @@ impl IcedChat {
         // neighbors preserved across room switches so discovered-peers and
         // friend-online caches don't appear empty after switching rooms.
         self.history_saved_count = 0;
+        // Clear the new-peer announcement set so re-entering this room (or
+        // entering a different one) announces its peers fresh again.
+        self.known_peers.clear();
     }
 
     #[expect(dead_code)]
@@ -15974,6 +15983,32 @@ fn confirmed_direct_invite_addrs(
 }
 
 impl IcedChat {
+    /// Decide whether a first-seen `peer` should trigger a "new peer" system
+    /// message.
+    ///
+    /// Guards (mirrors the `new_starters` pattern):
+    /// - Never announce our own node.
+    /// - Never announce a peer more than once per room (dedup via
+    ///   [`IcedChat::known_peers`], cleared on room leave).
+    /// - Only announce friends, or peers that are part of the current room's
+    ///   gossip mesh.  Random lobby participants who are not friends stay
+    ///   silent — the lobby churns with strangers and would spam the log.
+    fn should_announce_new_peer(&self, peer: &PublicKey) -> bool {
+        if *peer == self.local_public {
+            return false;
+        }
+        if self.known_peers.contains(peer) {
+            return false;
+        }
+        if self.is_friend(peer) {
+            return true;
+        }
+        if self.topic == Self::default_lobby_topic() {
+            return false;
+        }
+        self.neighbors.contains(peer)
+    }
+
     /// Resolve a peer identifier (public key string or friend alias) to a [`PublicKey`].
     fn resolve_peer_key(&self, target: &str) -> Option<PublicKey> {
         if let Ok(pk) = target.parse::<PublicKey>() {
@@ -16378,6 +16413,15 @@ impl ChatCallbacks for IcedChat {
         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.needs_conn_refresh = true;
 
+        // Announce genuinely-new peers (first seen this session/room).
+        // `should_announce_new_peer` filters out our own node, duplicates,
+        // and non-friend lobby strangers.
+        if self.should_announce_new_peer(&peer) {
+            self.known_peers.insert(peer);
+            let name = self.resolve_name(&peer);
+            self.push_system(format!("🟢 {name} joined"));
+        }
+
         // For each pending backfill topic, check if we still need history
         // (the count may have been satisfied by a previous backfill) and
         // spawn a request if not.  Retain topics that still need backfill
@@ -16417,12 +16461,21 @@ impl ChatCallbacks for IcedChat {
 
     fn record_presence(&mut self, peer: PublicKey) {
         // A Presence heartbeat proves the peer is still alive and
-        // connected.  Update the online cache so the friend list
+        // connected.  Update the presence map so the friend list
         // shows them as online, and ensure they're tracked as a
         // neighbor for mesh health purposes.
         self.peer_presence_map.insert(peer, now_ms().max(0) as u64);
         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.neighbors.insert(peer);
+
+        // Announce genuinely-new peers (first presence seen this
+        // session/room).  Same guard as on_neighbor_up: no self, no
+        // duplicates, no non-friend lobby strangers.
+        if self.should_announce_new_peer(&peer) {
+            self.known_peers.insert(peer);
+            let name = self.resolve_name(&peer);
+            self.push_system(format!("🟢 {name} is online"));
+        }
     }
 
     fn store_peer_ticket(&mut self, peer: PublicKey, ticket: Ticket) -> bool {
@@ -20074,14 +20127,10 @@ impl IcedChat {
                         .into()
                 });
 
-            let status_text = if online { "Online" } else { "Offline" };
-            let status_dot = icon_svg(if online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_XS)
+            let status_text = presence.label();
+            let status_dot = icon_svg(presence.icon(), TYPO_XS)
                 .style(move |t, _| iced::widget::svg::Style {
-                    color: Some(if online {
-                        accent_green(t)
-                    } else {
-                        text_muted(t)
-                    }),
+                    color: Some(presence.color(t)),
                 });
 
             let peer_identity = column![
@@ -20094,11 +20143,7 @@ impl IcedChat {
                     text(status_text)
                         .size(TYPO_XS)
                         .style(move |t| iced::widget::text::Style {
-                            color: Some(if online {
-                                accent_green(t)
-                            } else {
-                                text_muted(t)
-                            }),
+                            color: Some(presence.color(t))
                         }),
                 ]
                 .spacing(SPACE_4)
@@ -23796,7 +23841,7 @@ impl IcedChat {
         use iced::widget::{button, container, row, scrollable, text, text_input, Column, Space};
         use iced::{Alignment, Length};
 
-        let _theme = self.theme();
+        let theme = self.theme();
         let dark_mode = self.dark_mode;
 
         // ── Gather data ──
@@ -23938,22 +23983,10 @@ impl IcedChat {
             });
 
         // ── Status section ──
-        let is_online_status = is_online;
-        let status_color = if is_online {
-            Color::from_rgb(0.2, 0.8, 0.2)
-        } else {
-            Self::muted_color(dark_mode)
-        };
+        let status_color = presence.color(&theme);
         let status_row = row![]
             .push(
-                icon_svg(
-                    if is_online_status {
-                        ICON_ONLINE
-                    } else {
-                        ICON_OFFLINE
-                    },
-                    TYPO_SM,
-                )
+                icon_svg(presence.icon(), TYPO_SM)
                 .style(move |_t, _s| iced::widget::svg::Style {
                     color: Some(status_color),
                 }),
