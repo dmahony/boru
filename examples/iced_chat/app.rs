@@ -2849,7 +2849,7 @@ struct SidebarFriendRow {
     peer: PublicKey,
     label: String,
     avatar: SidebarAvatarHandle,
-    online: bool,
+    presence: PeerPresence,
     profile_version: u64,
 }
 
@@ -10385,7 +10385,7 @@ impl IcedChat {
                                 let _room =
                                     RoomStore::with_peers(&self.data_dir, topic, persisted_addrs);
                                 self.try_save_friends();
-                                self.friend_online_cache.insert(sender);
+                                self.peer_presence_map.insert(sender, now_ms().max(0) as u64);
                                 self.chats_sidebar_revision =
                                     self.chats_sidebar_revision.wrapping_add(1);
                                 self.mark_friends_sidebar_dirty();
@@ -17500,7 +17500,7 @@ impl IcedChat {
                     boru_core::conversations::ConversationKind::Group
                 );
                 let online = peer_pk
-                    .map(|pk| self.friend_online_cache.contains(&pk))
+                    .map(|pk| self.peer_presence(&pk) != PeerPresence::Offline)
                     .unwrap_or(false);
                 let avatar = peer_pk.and_then(|pk| {
                     self.friend_image_handles
@@ -18519,7 +18519,7 @@ impl IcedChat {
                             .get(&peer)
                             .and_then(|avatar| avatar.as_ref()),
                     ),
-                    online: self.friend_online_cache.contains(&peer),
+                    presence: self.peer_presence(&peer),
                     profile_version: self
                         .friend_profile_versions
                         .get(&peer)
@@ -18920,7 +18920,7 @@ impl IcedChat {
                 fid.parse_public_key()
                     .ok()
                     .map(|pk| {
-                        self.friend_online_cache.contains(&pk) && self.names.contains_key(&pk)
+                        self.peer_presence(&pk) != PeerPresence::Offline && self.names.contains_key(&pk)
                     })
                     .unwrap_or(false)
             })
@@ -19246,7 +19246,7 @@ impl IcedChat {
                 .iter()
                 .filter_map(|(fid, _)| {
                     let pk = fid.parse_public_key().ok()?;
-                    if self.friend_online_cache.contains(&pk) {
+                    if self.peer_presence(&pk) != PeerPresence::Offline {
                         self.names.get(&pk).cloned().map(|n| (pk, n))
                     } else {
                         None
@@ -19983,7 +19983,9 @@ impl IcedChat {
             })
             .unwrap_or(false);
         let peer = conversation.and_then(|entry| PublicKey::from_str(&entry.peer_id).ok());
-        let online = peer.is_some_and(|key| self.friend_online_cache.contains(&key));
+        let presence = peer
+            .map(|key| self.peer_presence(&key))
+            .unwrap_or(PeerPresence::Offline);
 
         // Group chat header: show name + member count
         // Direct chat header: show name + online/offline status
@@ -20408,7 +20410,7 @@ impl IcedChat {
             "—".to_string()
         };
 
-        let online_peers = self.friend_online_cache.len();
+        let online_peers = self.peer_presence_map.len();
         let is_advertised = self.advertised_rooms.contains(&self.topic);
 
         let content = column![
@@ -20611,7 +20613,7 @@ impl IcedChat {
             let short_name = neighbor.fmt_short().to_string();
             let display_label =
                 boru_core::peer_names::resolve_peer_name(neighbor, None, None, None, None);
-            let is_friend = self.friend_online_cache.contains(neighbor);
+            let is_friend = self.peer_presence(neighbor) != PeerPresence::Offline;
 
             let row_element = row![
                 // Avatar dot
@@ -20774,7 +20776,10 @@ impl IcedChat {
         let peer = conversation
             .as_ref()
             .and_then(|entry| entry.peer_id.parse::<PublicKey>().ok());
-        let is_online = peer.is_some_and(|key| self.friend_online_cache.contains(&key));
+        let presence = peer
+            .map(|key| self.peer_presence(&key))
+            .unwrap_or(PeerPresence::Offline);
+        let is_online = presence != PeerPresence::Offline;
         let display_name = conversation
             .as_ref()
             .map(|entry| entry.display_name())
@@ -21497,7 +21502,7 @@ impl IcedChat {
             let label_text = entry.label_text.as_deref().unwrap_or(&entry.label);
             let is_friend_online = entry
                 .sender_key
-                .map_or(false, |k| self.friend_online_cache.contains(&k));
+                .map_or(false, |k| self.peer_presence(&k) != PeerPresence::Offline);
             let label_el: iced::Element<'_, AppMessage> =
                 if matches!(entry.kind, ChatKind::System) && entry.download.is_none() {
                     // System notices have no label — just the centred text
@@ -23809,7 +23814,8 @@ impl IcedChat {
             .or_else(|| friend_record.map(|r| r.display_label(&fid, &peer)))
             .unwrap_or_else(|| "Unknown Friend".to_string());
 
-        let is_online = self.friend_online_cache.contains(&peer);
+        let presence = self.peer_presence(&peer);
+        let is_online = presence != PeerPresence::Offline;
         let has_addrs = friend_record
             .map(|r| !r.known_addrs.is_empty())
             .unwrap_or(false);
