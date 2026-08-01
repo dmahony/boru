@@ -78,9 +78,9 @@ use boru_core::room_docs::{self, RoomMetadata};
 use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::{SharedFileRow, Storage};
 use boru_core::store::MessageStore;
-use boru_core::video_poster;
-use boru_core::video_playback::{PlaybackCoordinator, VideoInstanceKey};
 use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
+use boru_core::video_playback::{PlaybackCoordinator, VideoInstanceKey};
+use boru_core::video_poster;
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
     address_lookup::memory::MemoryLookup, EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher,
@@ -126,10 +126,21 @@ struct InlineVideoSession {
 #[cfg(feature = "video-playback")]
 #[derive(Debug, Clone)]
 enum InlineVideoEvent {
-    Loaded { key: VideoInstanceKey, video: Arc<Video> },
-    Failed { key: VideoInstanceKey, error: String },
-    Ended { key: VideoInstanceKey },
-    Error { key: VideoInstanceKey, error: String },
+    Loaded {
+        key: VideoInstanceKey,
+        video: Arc<Video>,
+    },
+    Failed {
+        key: VideoInstanceKey,
+        error: String,
+    },
+    Ended {
+        key: VideoInstanceKey,
+    },
+    Error {
+        key: VideoInstanceKey,
+        error: String,
+    },
 }
 
 // ── Shared ContinuousTracker wrapper ─────────────────────────────────
@@ -1651,7 +1662,10 @@ fn decode_gif_frames(image_bytes: &[u8]) -> Option<std::sync::Arc<Vec<(Vec<u8>, 
         let buffer = frame.into_buffer();
         // Encode as PNG
         let mut png_bytes = Vec::new();
-        if buffer.write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png).is_err() {
+        if buffer
+            .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .is_err()
+        {
             continue;
         }
         result.push((png_bytes, delay_ms));
@@ -2156,6 +2170,10 @@ pub struct IcedChat {
     inline_video: Option<InlineVideoSession>,
     #[cfg(feature = "video-playback")]
     playback_coordinator: PlaybackCoordinator,
+    #[cfg(feature = "video-playback")]
+    inline_video_seek: Option<f32>,
+    #[cfg(feature = "video-playback")]
+    inline_video_expanded: bool,
     /// TransferId → entry index cache for O(1) progress update lookups.
     /// Populated lazily in handle_download_progress; cleared on room switch.
     transfer_id_to_index: HashMap<TransferId, usize>,
@@ -2495,7 +2513,7 @@ pub struct IcedChat {
     /// Right-click context menu state: (entry_index, x, y) when visible.
     context_menu: Option<(usize, f32, f32, ContextMenuKind)>,
     /// Peer whose shared files we hide from UI and ignore in ProfileUpdate.
-        blocked_sharers: HashSet<PublicKey>,
+    blocked_sharers: HashSet<PublicKey>,
     /// Cached profile data received from peers via ProfileUpdate gossip.
     profile_cache: HashMap<PublicKey, PeerProfileData>,
     /// Set of (content_hash, peer_public_key) pairs that have a download
@@ -3037,6 +3055,18 @@ pub enum AppMessage {
     OpenDownloadedFile(String),
     /// Start verified inline playback for a completed video attachment.
     PlayInlineVideo(usize),
+    #[cfg(feature = "video-playback")]
+    InlineVideoTick,
+    #[cfg(feature = "video-playback")]
+    InlineVideoSeekChanged(f32),
+    #[cfg(feature = "video-playback")]
+    InlineVideoSeekReleased,
+    #[cfg(feature = "video-playback")]
+    InlineVideoToggleMute,
+    #[cfg(feature = "video-playback")]
+    InlineVideoSetVolume(f32),
+    #[cfg(feature = "video-playback")]
+    InlineVideoToggleExpanded,
     /// Close the active inline player and restore its poster.
     CloseInlineVideo,
     #[cfg(feature = "video-playback")]
@@ -4274,7 +4304,10 @@ impl IcedChat {
             }
         }
 
-        let cached_friend_count = friends.iter().filter(|(_, r)| r.relationship.can_message()).count();
+        let cached_friend_count = friends
+            .iter()
+            .filter(|(_, r)| r.relationship.can_message())
+            .count();
 
         let conversation_store = {
             let mut store = if let Some(ref st) = storage {
@@ -4338,6 +4371,10 @@ impl IcedChat {
             inline_video: None,
             #[cfg(feature = "video-playback")]
             playback_coordinator: PlaybackCoordinator::new(),
+            #[cfg(feature = "video-playback")]
+            inline_video_seek: None,
+            #[cfg(feature = "video-playback")]
+            inline_video_expanded: false,
             transfer_id_to_index: HashMap::new(),
             names: HashMap::new(),
             topic: initial_topic,
@@ -4664,8 +4701,6 @@ impl IcedChat {
     // All legacy JSON stores have been replaced by SQLite unified storage.
     // These methods are retained as stubs to avoid changing call sites.
 
-
-
     /// Persist the friends store in a background thread to avoid blocking
     /// the GUI event loop.  Saves to both SQLite (primary) and JSON (fallback).
     fn send_save_friends(&self) {
@@ -4727,7 +4762,6 @@ impl IcedChat {
         };
         settings.save(&self.data_dir);
     }
-
 
     /// Persist the friend request store in a background thread.
     fn send_save_friend_requests(&self) {
@@ -4990,11 +5024,9 @@ impl IcedChat {
                     );
                 }
             }
-            TransferProgress::Completed {
-                id,
-                kind,
-                name,
-            } if matches!(kind, TransferKind::File | TransferKind::Video) => {
+            TransferProgress::Completed { id, kind, name }
+                if matches!(kind, TransferKind::File | TransferKind::Video) =>
+            {
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -5048,11 +5080,9 @@ impl IcedChat {
                 }
                 clear_active_transfer = true;
             }
-            TransferProgress::Cancelled {
-                id,
-                kind,
-                ..
-            } if matches!(kind, TransferKind::File | TransferKind::Video) => {
+            TransferProgress::Cancelled { id, kind, .. }
+                if matches!(kind, TransferKind::File | TransferKind::Video) =>
+            {
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -5204,18 +5234,20 @@ impl IcedChat {
         attachment: &DownloadAttachment,
     ) -> iced::Element<'_, AppMessage> {
         #[cfg(feature = "video-playback")]
-        let active_player = self
-            .inline_video
-            .as_ref()
-            .filter(|session| {
-                session.key.conversation_id == self.topic
-                    && session.key.message_id == self.entries[entry_index].event_id
-                    && session.key.attachment_id == attachment.name
-            });
+        let active_player = self.inline_video.as_ref().filter(|session| {
+            session.key.conversation_id == self.topic
+                && session.key.message_id == self.entries[entry_index].event_id
+                && session.key.attachment_id == attachment.name
+        });
         #[cfg(feature = "video-playback")]
-        let player = active_player.and_then(|session| session.video.as_ref().map(|video| video.as_ref()));
+        let player =
+            active_player.and_then(|session| session.video.as_ref().map(|video| video.as_ref()));
         #[cfg(feature = "video-playback")]
         let preparing = active_player.is_some_and(|session| session.video.is_none());
+        #[cfg(feature = "video-playback")]
+        let seek_position = self.inline_video_seek;
+        #[cfg(feature = "video-playback")]
+        let expanded = self.inline_video_expanded;
         #[cfg(feature = "video-playback")]
         return crate::download_progress_view::view_download_progress_with_player(
             entry_index,
@@ -5223,6 +5255,8 @@ impl IcedChat {
             self.dark_mode,
             player,
             preparing,
+            seek_position,
+            expanded,
         );
         #[cfg(not(feature = "video-playback"))]
         let dependency = (entry_index, attachment.clone(), self.dark_mode);
@@ -5230,7 +5264,7 @@ impl IcedChat {
         return iced::widget::lazy(dependency, |(entry_index, attachment, dark_mode)| {
             Self::view_download_attachment_content(*entry_index, attachment, *dark_mode)
         })
-        .into()
+        .into();
     }
 
     #[cfg(not(feature = "video-playback"))]
@@ -5242,9 +5276,12 @@ impl IcedChat {
     ) -> iced::Element<'static, AppMessage> {
         #[cfg(feature = "video-playback")]
         return crate::download_progress_view::view_download_progress_with_player(
-            entry_index, attachment, dark_mode, player,
- preparing,
- );
+            entry_index,
+            attachment,
+            dark_mode,
+            player,
+            preparing,
+        );
         #[cfg(not(feature = "video-playback"))]
         crate::download_progress_view::view_download_progress(entry_index, attachment, dark_mode)
     }
@@ -5317,8 +5354,8 @@ impl IcedChat {
                 image_error: None,
                 image_width: None,
                 image_height: None,
-            gif_frames: None,
-            gif_frame_idx: 0,
+                gif_frames: None,
+                gif_frame_idx: 0,
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
@@ -5348,8 +5385,8 @@ impl IcedChat {
                 image_error: None,
                 image_width: None,
                 image_height: None,
-            gif_frames: None,
-            gif_frame_idx: 0,
+                gif_frames: None,
+                gif_frame_idx: 0,
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
@@ -5746,6 +5783,18 @@ impl IcedChat {
             AppMessage::DownloadFailed(_) => "DownloadFailed",
             AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
             AppMessage::PlayInlineVideo(_) => "PlayInlineVideo",
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoTick => "InlineVideoTick",
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoSeekChanged(_) => "InlineVideoSeekChanged",
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoSeekReleased => "InlineVideoSeekReleased",
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoToggleMute => "InlineVideoToggleMute",
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoSetVolume(_) => "InlineVideoSetVolume",
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoToggleExpanded => "InlineVideoToggleExpanded",
             AppMessage::CloseInlineVideo => "CloseInlineVideo",
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoEvent(_) => "InlineVideoEvent",
@@ -5942,6 +5991,11 @@ impl IcedChat {
         self.inline_video = None;
         self.playback_coordinator.clear(None);
         self.layout_cache.borrow_mut().clear();
+    }
+
+    #[cfg(feature = "video-playback")]
+    pub(crate) fn has_inline_video(&self) -> bool {
+        self.inline_video.is_some()
     }
 
     fn leave_current_room(&mut self) {
@@ -10375,8 +10429,7 @@ impl IcedChat {
                         // the user should explicitly accept the invite from the
                         // REQUESTS sidebar to join the actual group room.
                         let should_open_private =
-                            is_invite
-                                || (self.friends.get(&fid).is_some() && !is_group_invite);
+                            is_invite || (self.friends.get(&fid).is_some() && !is_group_invite);
                         if should_open_private {
                             let private_topic = private_topic(&self.local_public, &from);
                             if let Some(ticket) = invite_ticket {
@@ -11210,10 +11263,15 @@ impl IcedChat {
                 let completed_idx = self
                     .entries
                     .iter()
-                    .position(|entry| entry.download.as_ref().is_some_and(|download| {
-                        download.name == name
-                            && matches!(download.state, DownloadState::Active { .. } | DownloadState::Completed { .. })
-                    }))
+                    .position(|entry| {
+                        entry.download.as_ref().is_some_and(|download| {
+                            download.name == name
+                                && matches!(
+                                    download.state,
+                                    DownloadState::Active { .. } | DownloadState::Completed { .. }
+                                )
+                        })
+                    })
                     .or(self.download_entry_index);
                 if let Some(idx) = completed_idx {
                     if let Some(entry) = self.entries.get_mut(idx) {
@@ -11374,7 +11432,11 @@ impl IcedChat {
                     let Some(download) = entry.download.as_ref() else {
                         return iced::Task::none();
                     };
-                    let DownloadState::Completed { saved_path: Some(path), .. } = &download.state else {
+                    let DownloadState::Completed {
+                        saved_path: Some(path),
+                        ..
+                    } = &download.state
+                    else {
                         self.push_system("Video is not ready to play yet.");
                         return iced::Task::none();
                     };
@@ -11382,7 +11444,8 @@ impl IcedChat {
                         self.push_system("Video file is no longer available.");
                         return iced::Task::none();
                     }
-                    let key = VideoInstanceKey::new(self.topic, entry.event_id, download.name.clone());
+                    let key =
+                        VideoInstanceKey::new(self.topic, entry.event_id, download.name.clone());
                     if self.playback_coordinator.active_video() == Some(&key) {
                         if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
                             if let Some(video) = session.video.as_mut() {
@@ -11425,7 +11488,10 @@ impl IcedChat {
                                     video: Arc::new(video),
                                 })
                             }
-                            Err(error) => AppMessage::InlineVideoEvent(InlineVideoEvent::Failed { key, error }),
+                            Err(error) => AppMessage::InlineVideoEvent(InlineVideoEvent::Failed {
+                                key,
+                                error,
+                            }),
                         },
                     );
                 }
@@ -11448,6 +11514,63 @@ impl IcedChat {
                 iced::Task::none()
             }
             #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoTick => {
+                if self.inline_video.is_some() {
+                    self.layout_cache.borrow_mut().clear();
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoSeekChanged(value) => {
+                self.inline_video_seek = Some(value.clamp(0.0, 1.0));
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoSeekReleased => {
+                if let (Some(position), Some(session)) =
+                    (self.inline_video_seek.take(), self.inline_video.as_mut())
+                {
+                    if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
+                        let duration = video.duration();
+                        let target = duration.mul_f32(position.clamp(0.0, 1.0));
+                        let _ = video.seek(target, false);
+                    }
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoToggleMute => {
+                if let Some(video) = self
+                    .inline_video
+                    .as_mut()
+                    .and_then(|s| s.video.as_mut())
+                    .and_then(Arc::get_mut)
+                {
+                    video.set_muted(!video.muted());
+                    self.layout_cache.borrow_mut().clear();
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoSetVolume(value) => {
+                if let Some(video) = self
+                    .inline_video
+                    .as_mut()
+                    .and_then(|s| s.video.as_mut())
+                    .and_then(Arc::get_mut)
+                {
+                    video.set_volume(value.clamp(0.0, 1.0) as f64);
+                    self.layout_cache.borrow_mut().clear();
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoToggleExpanded => {
+                self.inline_video_expanded = !self.inline_video_expanded;
+                self.layout_cache.borrow_mut().clear();
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoEvent(event) => {
                 match event {
                     InlineVideoEvent::Loaded { key, video } => {
@@ -11457,7 +11580,8 @@ impl IcedChat {
                             self.layout_cache.borrow_mut().clear();
                         }
                     }
-                    InlineVideoEvent::Failed { key, error } | InlineVideoEvent::Error { key, error } => {
+                    InlineVideoEvent::Failed { key, error }
+                    | InlineVideoEvent::Error { key, error } => {
                         if self.inline_video.as_ref().is_some_and(|s| s.key == key) {
                             self.push_system(format!("Video playback failed: {error}"));
                             self.stop_inline_video();
@@ -12321,7 +12445,10 @@ impl IcedChat {
                             let topic = ticket.topic();
                             let group_id = GroupId::from_bytes(inv.group_id);
                             let entry = ConversationEntry::new_group_epoch(
-                                group_id, inv.epoch, topic, &group_name,
+                                group_id,
+                                inv.epoch,
+                                topic,
+                                &group_name,
                             );
                             self.conversation_store.upsert(entry);
                             self.chats_sidebar_revision =
@@ -13635,8 +13762,7 @@ impl IcedChat {
                         }
                     }
                 }
-                if !discovered_room_tasks.is_empty() {
-                }
+                if !discovered_room_tasks.is_empty() {}
                 tasks.extend(discovered_room_tasks);
                 self.public_rooms_sidebar_revision =
                     self.public_rooms_sidebar_revision.wrapping_add(1);
@@ -14328,8 +14454,15 @@ impl IcedChat {
                             .chars()
                             .map(|c| match c {
                                 ' ' => "%20".to_string(),
-                                '!'..='~' if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~'
-                                    => c.to_string(),
+                                '!'..='~'
+                                    if c.is_alphanumeric()
+                                        || c == '-'
+                                        || c == '_'
+                                        || c == '.'
+                                        || c == '~' =>
+                                {
+                                    c.to_string()
+                                }
                                 _ => format!("%{:02X}", c as u8),
                             })
                             .collect();
@@ -14344,16 +14477,24 @@ impl IcedChat {
                         for gif in body["data"].as_array()? {
                             let title = gif["title"].as_str().unwrap_or("").to_string();
                             let full_url = gif["images"]["original"]["url"].as_str()?.to_string();
-                            let preview_url = gif["images"]["fixed_height"]["url"].as_str().unwrap_or(&full_url);
+                            let preview_url = gif["images"]["fixed_height"]["url"]
+                                .as_str()
+                                .unwrap_or(&full_url);
                             // Download preview thumbnail
                             let preview_bytes = {
                                 let resp = client.get(preview_url).send().await;
                                 match resp {
-                                    Ok(r) => r.bytes().await.map(|b| b.to_vec()).unwrap_or_default(),
+                                    Ok(r) => {
+                                        r.bytes().await.map(|b| b.to_vec()).unwrap_or_default()
+                                    }
                                     Err(_) => Vec::new(),
                                 }
                             };
-                            results.push(GifResult { title, full_url, preview_bytes });
+                            results.push(GifResult {
+                                title,
+                                full_url,
+                                preview_bytes,
+                            });
                         }
                         Some(results)
                     },
@@ -14380,7 +14521,8 @@ impl IcedChat {
                             entry.gif_frame_idx = (entry.gif_frame_idx + 1) % frames.len();
                             // Update image_handle to current frame
                             let (ref frame_bytes, _delay) = frames[entry.gif_frame_idx];
-                            entry.image_handle = Some(iced::widget::image::Handle::from_bytes(frame_bytes.clone()));
+                            entry.image_handle =
+                                Some(iced::widget::image::Handle::from_bytes(frame_bytes.clone()));
                         }
                     }
                 }
@@ -14396,10 +14538,17 @@ impl IcedChat {
                 let task = iced::Task::perform(
                     async move {
                         let client = reqwest::Client::new();
-                        let resp = client.get(&url_clone).send().await.map_err(|e| format!("{e}"))?;
+                        let resp = client
+                            .get(&url_clone)
+                            .send()
+                            .await
+                            .map_err(|e| format!("{e}"))?;
                         let bytes = resp.bytes().await.map_err(|e| format!("{e}"))?;
-                        let tmp = std::env::temp_dir().join(format!("boru_gif_{}.gif", std::process::id()));
-                        tokio::fs::write(&tmp, &bytes).await.map_err(|e| format!("{e}"))?;
+                        let tmp = std::env::temp_dir()
+                            .join(format!("boru_gif_{}.gif", std::process::id()));
+                        tokio::fs::write(&tmp, &bytes)
+                            .await
+                            .map_err(|e| format!("{e}"))?;
                         let abs_path = tmp.to_string_lossy().to_string();
                         Ok::<String, String>(format!("gif.gif|{abs_path}|"))
                     },
@@ -15046,8 +15195,7 @@ impl IcedChat {
 
         // The cleanup helper mutates the stores first; persist each store whose
         // contents changed so a restart cannot resurrect the deleted room data.
-        if report.chat_entries_removed > 0 {
-        }
+        if report.chat_entries_removed > 0 {}
         if report.friend_records_updated > 0 {
             self.mark_friends_sidebar_dirty();
             self.send_save_friends();
@@ -15641,8 +15789,6 @@ impl IcedChat {
             }
         }
     }
-
-
 }
 
 // ── Net event handling ────────────────────────────────────────────────
@@ -16033,14 +16179,12 @@ impl ChatCallbacks for IcedChat {
     fn delete_message(&mut self, hash: &MessageHash) {
         if let Some(&index) = self.message_hash_to_index.get(hash) {
             #[cfg(feature = "video-playback")]
-            if self
-                .inline_video
-                .as_ref()
-                .is_some_and(|session| self.entries.get(index).is_some_and(|entry| {
+            if self.inline_video.as_ref().is_some_and(|session| {
+                self.entries.get(index).is_some_and(|entry| {
                     session.key.conversation_id == self.topic
                         && session.key.message_id == entry.event_id
-                }))
-            {
+                })
+            }) {
                 self.stop_inline_video();
             }
             if let Some(entry) = self.entries.get_mut(index) {
@@ -19409,19 +19553,17 @@ impl IcedChat {
             }
         }
 
-        let header = container(
-            iced::widget::row![
-                text(match kind {
-                    ContextMenuKind::Text => "Message",
-                    ContextMenuKind::Image => "Image",
-                })
-                .size(TYPO_SM)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold))
-                .color(text_muted(&theme)),
-                iced::widget::Space::new().width(iced::Length::Fill),
-                close_btn,
-            ],
-        )
+        let header = container(iced::widget::row![
+            text(match kind {
+                ContextMenuKind::Text => "Message",
+                ContextMenuKind::Image => "Image",
+            })
+            .size(TYPO_SM)
+            .font(crate::fonts::inter(iced::font::Weight::Semibold))
+            .color(text_muted(&theme)),
+            iced::widget::Space::new().width(iced::Length::Fill),
+            close_btn,
+        ])
         .padding([SPACE_4, SPACE_8]);
 
         container(column![header, col])
@@ -19444,10 +19586,9 @@ impl IcedChat {
 
         let theme = self.theme();
         const EMOJIS: &[&str] = &[
-            "😀", "😂", "🤣", "😊", "😍", "🥰", "😘", "😜", "🤔", "🙄",
-            "😢", "😭", "😤", "😡", "🥺", "😎", "🤩", "👍", "👎", "👏",
-            "🙌", "💪", "🤝", "❤️", "🔥", "⭐", "🎉", "✨", "💯", "✅",
-            "❌", "⚠️", "💡", "📌", "🎵", "🌈", "🍕", "☕", "🕐", "💤",
+            "😀", "😂", "🤣", "😊", "😍", "🥰", "😘", "😜", "🤔", "🙄", "😢", "😭", "😤", "😡",
+            "🥺", "😎", "🤩", "👍", "👎", "👏", "🙌", "💪", "🤝", "❤️", "🔥", "⭐", "🎉", "✨",
+            "💯", "✅", "❌", "⚠️", "💡", "📌", "🎵", "🌈", "🍕", "☕", "🕐", "💤",
         ];
 
         let close_btn = button(text("✕").size(TYPO_XS).color(text_muted(&theme)))
@@ -19527,7 +19668,9 @@ impl IcedChat {
             })
             .padding([SPACE_4, SPACE_8]);
 
-        let search_row = row![search_input, search_btn].spacing(SPACE_4).align_y(iced::Alignment::Center);
+        let search_row = row![search_input, search_btn]
+            .spacing(SPACE_4)
+            .align_y(iced::Alignment::Center);
 
         // Results grid with image thumbnails
         let mut results_col = column![].spacing(SPACE_4);
@@ -19543,11 +19686,16 @@ impl IcedChat {
                 let mut row_widgets = row![].spacing(SPACE_4);
                 for gif in chunk {
                     let url = gif.full_url.clone();
-                    let title = if gif.title.is_empty() { "GIF" } else { &gif.title };
+                    let title = if gif.title.is_empty() {
+                        "GIF"
+                    } else {
+                        &gif.title
+                    };
                     let has_preview = !gif.preview_bytes.is_empty();
-                    
+
                     let thumbnail: iced::Element<'_, AppMessage> = if has_preview {
-                        let handle = iced::widget::image::Handle::from_bytes(gif.preview_bytes.clone());
+                        let handle =
+                            iced::widget::image::Handle::from_bytes(gif.preview_bytes.clone());
                         iced::widget::image(handle)
                             .width(iced::Length::Fixed(150.0))
                             .height(iced::Length::Fixed(100.0))
@@ -19585,18 +19733,22 @@ impl IcedChat {
 
         let scroll = Scrollable::new(results_col).height(iced::Length::Fixed(300.0));
 
-        container(column![header, search_row, scroll].spacing(SPACE_6).padding(SPACE_8))
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(bg_surface(t))),
-                border: iced::Border {
-                    color: border_muted(t),
-                    width: 1.0,
-                    radius: (8.0_f32).into(),
-                },
-                ..Default::default()
-            })
-            .width(320.0)
-            .into()
+        container(
+            column![header, search_row, scroll]
+                .spacing(SPACE_6)
+                .padding(SPACE_8),
+        )
+        .style(move |t| iced::widget::container::Style {
+            background: Some(iced::Background::Color(bg_surface(t))),
+            border: iced::Border {
+                color: border_muted(t),
+                width: 1.0,
+                radius: (8.0_f32).into(),
+            },
+            ..Default::default()
+        })
+        .width(320.0)
+        .into()
     }
 
     fn view_chat_header(&self) -> iced::Element<'_, AppMessage> {
