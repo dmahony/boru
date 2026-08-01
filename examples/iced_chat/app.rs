@@ -8,6 +8,7 @@ use boru_core::abuse_controls::{
 };
 use boru_core::catalogue_client::fetch_paginated_remote_catalogue;
 use boru_core::catalogue_model::RemoteSharedFile;
+use boru_core::media_classification::{classify_attachment, MediaKind};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -1840,18 +1841,9 @@ impl ChatEntry {
         }
     }
 
-    /// Returns true if the filename has a known video extension.
+    /// Returns true when conservative attachment classification identifies a video.
     fn is_video_file(name: &str) -> bool {
-        let lower = name.to_lowercase();
-        lower.ends_with(".mov")
-            || lower.ends_with(".mp4")
-            || lower.ends_with(".avi")
-            || lower.ends_with(".mkv")
-            || lower.ends_with(".webm")
-            || lower.ends_with(".m4v")
-            || lower.ends_with(".wmv")
-            || lower.ends_with(".flv")
-            || lower.ends_with(".3gp")
+        classify_attachment(None, name) == MediaKind::Video
     }
 
     /// Generate a JPEG thumbnail from a video file via ffmpeg.
@@ -15693,7 +15685,7 @@ impl ChatCallbacks for IcedChat {
         // download button, not just a system notification.  The download
         // entry index is set so ExecuteDownloadAt can find the entry.
         self.download_entry_index = Some(self.entries.len());
-        let xfer_kind = if thumbnail.is_some() {
+        let xfer_kind = if classify_attachment(None, &name) == MediaKind::Video {
             TransferKind::Video
         } else {
             TransferKind::File

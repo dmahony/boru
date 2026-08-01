@@ -361,26 +361,29 @@ pub fn view_download_progress(
     // ── Assemble the card ───────────────────────────────────────────────
     let mut body = Column::new().push(title_row).spacing(SPACE_6);
 
-    // ── Thumbnail preview for video files ───────────────────────────────
-    if let Some(ref thumb_bytes) = attachment.thumbnail {
-        let handle = iced::widget::image::Handle::from_bytes(thumb_bytes.clone());
-        body = body.push(
-            iced::widget::image(handle)
-                .content_fit(iced::ContentFit::ScaleDown)
+    // ── Temporary inline-video branch ───────────────────────────────────
+    // Playback is intentionally deferred; the generic download/open actions
+    // remain available for every attachment.
+    if attachment.kind == super::app::TransferKind::Video {
+        if let Some(ref thumb_bytes) = attachment.thumbnail {
+            let handle = iced::widget::image::Handle::from_bytes(thumb_bytes.clone());
+            body = body.push(
+                iced::widget::image(handle)
+                    .content_fit(iced::ContentFit::ScaleDown)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(180.0)),
+            );
+        } else {
+            body = body.push(
+                container(
+                    text("Video preview will be available after download.")
+                        .size(TYPO_XS)
+                        .color(muted),
+                )
                 .width(Length::Fill)
-                .height(Length::Fixed(180.0)),
-        );
-    }
-
-    // ── Thumbnail preview for video files ───────────────────────────────
-    if let Some(ref thumb_bytes) = attachment.thumbnail {
-        let handle = iced::widget::image::Handle::from_bytes(thumb_bytes.clone());
-        body = body.push(
-            iced::widget::image(handle)
-                .content_fit(iced::ContentFit::ScaleDown)
-                .width(Length::Fill)
-                .height(Length::Fixed(180.0)),
-        );
+                .padding(SPACE_8),
+            );
+        }
     }
 
     if let Some(src) = source_row {
