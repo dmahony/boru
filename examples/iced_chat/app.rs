@@ -4847,7 +4847,16 @@ impl IcedChat {
                 .await
                 {
                     Ok(buf) => {
-                        let thumb = compress_image(&buf);
+                        // Preserve GIF animation: skip JPEG re-encoding so
+                        // decode_gif_frames on the receiver can extract
+                        // individual frames.  All other image types get a
+                        // lightweight display thumbnail for the preview card.
+                        let is_gif = name.to_lowercase().ends_with(".gif");
+                        let thumb = if is_gif {
+                            buf.clone()
+                        } else {
+                            compress_image(&buf)
+                        };
                         // Save to the per-user image store in the background task,
                         // avoiding blake3 hashing and file I/O on the UI thread.
                         let user = sender_pk.to_string();
@@ -10964,31 +10973,51 @@ impl IcedChat {
                         let full_bytes = tokio::fs::read(&path_buf)
                             .await
                             .map_err(|e| format!("Failed to read image: {e}"))?;
-                        // Convert to WebP: resize, strip metadata, encode as
-                        // WebP at quality 80.  Errors are reported to the user
-                        // rather than silently falling back to the original bytes,
-                        // because the original may be many MiB.
-                        let (opt_bytes, orig_size, webp_size) =
-                            optimize_chat_image_to_webp(&full_bytes)
-                                .map_err(|e| format!("WebP conversion failed: {e}"))?;
-                        // Append compression ratio to the image card label
-                        let compression_note = if orig_size > 0 && webp_size < orig_size {
-                            let saved_pct = (1.0 - webp_size as f64 / orig_size as f64) * 100.0;
-                            format!(" ({saved_pct:.0}% smaller)")
+                        // Detect GIF files: skip WebP conversion to preserve
+                        // animation frames.  The receiver-side decode_gif_frames
+                        // path handles both animated and static GIFs correctly.
+                        let is_gif = filename
+                            .to_lowercase()
+                            .ends_with(".gif");
+                        let (opt_bytes, wire_name, mime_type, compression_note) = if is_gif {
+                            // Transmit GIF bytes unchanged — only enforce the
+                            // size cap.  Animated frames survive end-to-end.
+                            (
+                                full_bytes.clone(),
+                                filename.clone(),
+                                "image/gif",
+                                String::new(),
+                            )
                         } else {
-                            String::new()
-                        };
-                        // Rename the file with .webp extension
-                        let webp_name = {
-                            let path = std::path::Path::new(&filename);
-                            if let Some(stem) = path.file_stem() {
-                                format!("{}.webp", stem.to_string_lossy())
+                            // Convert to WebP: resize, strip metadata, encode as
+                            // lossless WebP.  Errors are reported to the user
+                            // rather than silently falling back to the original bytes,
+                            // because the original may be many MiB.
+                            let orig_size = full_bytes.len();
+                            let (opt_bytes, _orig_size, webp_size) =
+                                optimize_chat_image_to_webp(&full_bytes)
+                                    .map_err(|e| format!("WebP conversion failed: {e}"))?;
+                            // Append compression ratio to the image card label
+                            let compression_note = if orig_size > 0 && webp_size < orig_size {
+                                let saved_pct =
+                                    (1.0 - webp_size as f64 / orig_size as f64) * 100.0;
+                                format!(" ({saved_pct:.0}% smaller)")
                             } else {
-                                format!("{filename}.webp")
-                            }
+                                String::new()
+                            };
+                            // Rename the file with .webp extension
+                            let webp_name = {
+                                let path = std::path::Path::new(&filename);
+                                if let Some(stem) = path.file_stem() {
+                                    format!("{}.webp", stem.to_string_lossy())
+                                } else {
+                                    format!("{filename}.webp")
+                                }
+                            };
+                            (opt_bytes, webp_name, "image/webp", compression_note)
                         };
-                        let fname = webp_name.clone();
-                        let display_name = format!("{webp_name}{compression_note}");
+                        let fname = wire_name.clone();
+                        let display_name = format!("{wire_name}{compression_note}");
                         // Add to blob store.  Both the sender's preview and the
                         // receiver's inline display use these bytes.
                         let tag = blob_store
@@ -11003,14 +11032,14 @@ impl IcedChat {
                             storage
                                 .register_chat_upload(
                                     &local_pk.to_string(),
-                                    &webp_name,
-                                    "image/webp",
+                                    &wire_name,
+                                    mime_type,
                                     &opt_bytes,
                                 )
                                 .map_err(|e| format!("Failed to add image to profile: {e}"))?;
                         }
                         let msg = crate::Message::ImageShare {
-                            name: webp_name.clone(),
+                            name: wire_name.clone(),
                             hash,
                         };
                         let encoded = SignedMessage::sign_and_encode(&secret_key, &msg)
