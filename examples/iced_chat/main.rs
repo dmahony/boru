@@ -23,6 +23,7 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+use bytes::Bytes;
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::io::Write;
@@ -53,7 +54,7 @@ use clap::Parser;
 use iroh::{
     address_lookup::{memory::MemoryLookup, AddrFilter, DnsAddressLookup, PkarrResolver},
     endpoint::presets,
-    Endpoint, EndpointAddr, RelayMode, RelayUrl, SecretKey,
+    Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl, SecretKey,
 };
 use iroh_blobs::{store::fs::FsStore, BlobsProtocol};
 
@@ -1155,10 +1156,30 @@ fn main() -> Result<()> {
             let dir_sender_for_mcp = directory_sender.clone();
             if let Some(ref relay_url) = relay_url_for_directory {
                 let dir_topic = boru_core::directory::directory_topic(relay_url);
-                if let Ok(sub) = gossip.subscribe(dir_topic, Vec::new()).await {
+                // Bootstrap the directory mesh with known friend identities.
+                let bootstrap_peers: Vec<PublicKey> = friends
+                    .iter()
+                    .filter_map(|(id, _)| id.parse_public_key().ok())
+                    .filter(|pk| *pk != local_public)
+                    .collect();
+                info!(dir_topic=%dir_topic, bootstrap_count=bootstrap_peers.len(),
+                    "subscribing to directory topic with friend bootstrap");
+                if let Ok(sub) = gossip.subscribe(dir_topic, bootstrap_peers).await {
                     splash_send("Joining directory...");
                     let (sender, mut receiver) = sub.split();
+                    let heartbeat_sender = sender.clone();
                     *dir_sender_for_mcp.lock().unwrap() = Some(sender);
+                    tokio::spawn(async move {
+                        let marker = Bytes::from_static(b"\x01");
+                        loop {
+                            tokio::time::sleep(Duration::from_secs(15)).await;
+                            if let Err(e) = heartbeat_sender.broadcast(marker.clone()).await {
+                                warn!("directory heartbeat failed: {e}");
+                            } else {
+                                debug!("directory heartbeat sent");
+                            }
+                        }
+                    });
                     let dir_tx = directory_room_tx.clone();
                     tokio::spawn(async move {
                         use n0_future::StreamExt;

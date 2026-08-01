@@ -4559,7 +4559,7 @@ impl IcedChat {
     /// Stable personal room advertised by this identity.
     fn personal_room_topic(&self) -> TopicId {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"iroh-gossip-chat/personal-room/v1");
+        hasher.update(b"boru-chat/public-room-directory/v1");
         hasher.update(self.local_public.as_bytes());
         TopicId::from_bytes(*hasher.finalize().as_bytes())
     }
