@@ -54,6 +54,30 @@ terminated). This verifies construction, decoding startup, resize event
 routing, and cleanup on process termination. Audio output itself remains a
 manual check because Xvfb has no real audio sink.
 
+## Security boundary and residual risk
+
+Inline playback is an additional attack surface: GStreamer and its plugin
+libraries parse peer-originated media bytes. Boru never passes a peer URL to
+the decoder. A play request is admitted only for a completed attachment under
+the Boru-managed `downloads` directory; the path is canonicalised, checked for
+symlink/path escape, bounded in size, and re-hashed against the blob-ticket
+content identity immediately before `Video::new`. The same checks run again in
+the blocking decoder worker to detect replacement or partial-file races.
+
+Peer-controlled names are rejected unless they are a single ordinary local
+filename, so traversal, absolute paths, and URL-shaped values cannot select a
+decoder source. Poster generation is optional and bounded separately (512 MiB
+input, 512 KiB output, bounded dimensions, one ffmpeg thread, and a ten-second
+CPU limit); poster failure never authorizes playback.
+
+GStreamer, `iced_video_player`, FFmpeg/libav, and image-decoder runtime
+libraries remain Cargo-managed dependencies. Updates must go through the
+project's normal dependency-update review and CI, including the
+`Cargo.lock` diff and the video feature build; do not vendor or replace runtime
+libraries ad hoc. Remaining risks include vulnerabilities in a codec plugin
+that is installed on the host and resource exhaustion within a valid bounded
+file, so unsupported/corrupt media is surfaced as a recoverable playback error.
+
 ## Current host verification
 
 The build host was missing GStreamer headers/tools initially. Installing the

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 pub const MAX_POSTER_BYTES: usize = 512 * 1024;
 /// Maximum poster edge sent to the GUI/image decoder.
 pub const MAX_POSTER_EDGE: u32 = 320;
+/// Maximum input size allowed for the optional poster probe.
+pub const MAX_POSTER_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// A cached poster and its decoded dimensions.
@@ -28,10 +30,13 @@ pub fn cache_key(content: &[u8]) -> String {
 /// This function is intentionally blocking; callers must run it in a
 /// `spawn_blocking` task so media probing never runs in the Iced update loop.
 pub fn generate(path: &Path, cache_dir: &Path) -> Result<Poster, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read video: {e}"))?;
-    if bytes.is_empty() {
-        return Err("video is empty".to_string());
+    let input_size = std::fs::metadata(path)
+        .map_err(|e| format!("inspect video: {e}"))?
+        .len();
+    if input_size == 0 || input_size > MAX_POSTER_INPUT_BYTES {
+        return Err("video is outside the poster probe size limit".to_string());
     }
+    let bytes = std::fs::read(path).map_err(|e| format!("read video: {e}"))?;
     let key = cache_key(&bytes);
     let cache_path = cache_dir.join(format!("{key}.jpg"));
     if let Ok(cached) = std::fs::read(&cache_path) {
@@ -59,6 +64,10 @@ pub fn generate(path: &Path, cache_dir: &Path) -> Result<Poster, String> {
             "mjpeg",
             "-q:v",
             "6",
+            "-threads",
+            "1",
+            "-timelimit",
+            "10",
             "-v",
             "error",
             "-",
@@ -83,11 +92,16 @@ pub fn generate(path: &Path, cache_dir: &Path) -> Result<Poster, String> {
 }
 
 fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    image::ImageReader::new(std::io::Cursor::new(bytes))
+    let dimensions = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?
         .into_dimensions()
-        .ok()
+        .ok()?;
+    (dimensions.0 > 0
+        && dimensions.1 > 0
+        && dimensions.0 <= MAX_POSTER_EDGE * 4
+        && dimensions.1 <= MAX_POSTER_EDGE * 4)
+        .then_some(dimensions)
 }
 
 #[cfg(test)]
@@ -104,5 +118,6 @@ mod tests {
     fn poster_limits_are_bounded() {
         assert_eq!(MAX_POSTER_EDGE, 320);
         assert_eq!(MAX_POSTER_BYTES, 512 * 1024);
+        assert_eq!(MAX_POSTER_INPUT_BYTES, 512 * 1024 * 1024);
     }
 }

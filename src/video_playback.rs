@@ -5,9 +5,86 @@
 //! and playback position deliberately do not belong here: they are process
 //! local and are represented by [`PlayerState`] and [`PlaybackCoordinator`].
 
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 use crate::proto::TopicId;
+
+/// Maximum local video size admitted to the inline decoder path.
+pub const MAX_INLINE_VIDEO_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Reject peer-controlled names before they are joined to the downloads root.
+pub fn validate_attachment_filename(name: &str) -> Result<(), String> {
+    let path = Path::new(name);
+    if name.is_empty()
+        || name.contains('\0')
+        || name.chars().any(char::is_control)
+        || path.is_absolute()
+        || path.components().count() != 1
+        || path.file_name().and_then(|n| n.to_str()) != Some(name)
+        || matches!(name, "." | "..")
+    {
+        return Err("attachment filename is not a safe local name".to_string());
+    }
+    Ok(())
+}
+
+/// Revalidate a completed attachment immediately before decoder creation.
+///
+/// The caller supplies the Boru-managed downloads root and the content hash
+/// from the signed/blob ticket.  The path is canonicalised to prevent a
+/// replaced symlink from escaping the managed directory, then hashed from the
+/// local file; extension, MIME, and display names are never used as identity.
+pub fn verify_local_attachment(
+    path: &Path,
+    managed_root: &Path,
+    expected_hash: &str,
+    expected_size: Option<u64>,
+) -> Result<PathBuf, String> {
+    if expected_hash.len() != 64 || !expected_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("attachment has no valid content identity".to_string());
+    }
+    let canonical_root = managed_root
+        .canonicalize()
+        .map_err(|e| format!("managed downloads directory unavailable: {e}"))?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("attachment file is missing: {e}"))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err("attachment path escapes the managed downloads directory".to_string());
+    }
+    let metadata =
+        std::fs::metadata(&canonical).map_err(|e| format!("cannot inspect attachment: {e}"))?;
+    if !metadata.is_file() {
+        return Err("attachment is not a regular file".to_string());
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_INLINE_VIDEO_BYTES {
+        return Err("attachment size is outside the inline playback limit".to_string());
+    }
+    if expected_size.is_some_and(|size| size != metadata.len()) {
+        return Err("attachment size does not match its verified identity".to_string());
+    }
+    let mut file =
+        std::fs::File::open(&canonical).map_err(|e| format!("cannot open attachment: {e}"))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("cannot verify attachment: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = hasher.finalize().to_hex().to_string();
+    if !actual.eq_ignore_ascii_case(expected_hash) {
+        return Err("attachment content identity does not match the verified hash".to_string());
+    }
+    Ok(canonical)
+}
 
 /// Media classification recorded with an attachment when it is known.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +260,8 @@ impl PlaybackCoordinator {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     fn key(message_id: u64, attachment: &str) -> VideoInstanceKey {
@@ -222,10 +301,55 @@ mod tests {
 
         assert_eq!(coordinator.request_play(first.clone()), None);
         assert_eq!(coordinator.request_play(first.clone()), None);
-        assert_eq!(coordinator.request_play(second.clone()), Some(first.clone()));
+        assert_eq!(
+            coordinator.request_play(second.clone()),
+            Some(first.clone())
+        );
         coordinator.clear(Some(&first));
         assert_eq!(coordinator.active_video(), Some(&second));
         coordinator.clear(Some(&second));
         assert_eq!(coordinator.active_video(), None);
+    }
+
+    #[test]
+    fn rejects_peer_controlled_filenames() {
+        for name in [
+            "../clip.mp4",
+            "subdir/clip.mp4",
+            "/tmp/clip.mp4",
+            "https://evil/video",
+        ] {
+            assert!(
+                validate_attachment_filename(name).is_err(),
+                "accepted {name:?}"
+            );
+        }
+        assert!(validate_attachment_filename("clip.mp4").is_ok());
+    }
+
+    #[test]
+    fn rejects_missing_and_partial_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("clip.mp4");
+        let hash = blake3::hash(b"complete").to_hex().to_string();
+        assert!(verify_local_attachment(&path, root.path(), &hash, None).is_err());
+        fs::write(&path, b"partial").unwrap();
+        assert!(verify_local_attachment(&path, root.path(), &hash, Some(8)).is_err());
+    }
+
+    #[test]
+    fn rejects_content_identity_mismatch_and_accepts_verified_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("clip.mp4");
+        fs::write(&path, b"verified bytes").unwrap();
+        let expected = blake3::hash(b"verified bytes").to_hex().to_string();
+        assert!(verify_local_attachment(&path, root.path(), &expected, Some(14)).is_ok());
+        assert!(verify_local_attachment(
+            &path,
+            root.path(),
+            &blake3::hash(b"replaced").to_hex().to_string(),
+            None
+        )
+        .is_err());
     }
 }

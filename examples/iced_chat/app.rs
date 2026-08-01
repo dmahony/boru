@@ -79,7 +79,9 @@ use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::{SharedFileRow, Storage};
 use boru_core::store::MessageStore;
 use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
-use boru_core::video_playback::{PlaybackCoordinator, VideoInstanceKey};
+use boru_core::video_playback::{
+    validate_attachment_filename, verify_local_attachment, PlaybackCoordinator, VideoInstanceKey,
+};
 use boru_core::video_poster;
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
@@ -1520,6 +1522,9 @@ pub(crate) struct DownloadAttachment {
     /// data from the view function.
     pub(crate) poster_dimensions: Option<(u32, u32)>,
     pub(crate) playback_error: Option<InlinePlaybackError>,
+    /// Content identity extracted from the blob ticket; never inferred from
+    /// the peer-controlled filename or MIME metadata.
+    pub(crate) expected_content_hash: Option<String>,
 }
 
 impl DownloadAttachment {
@@ -1530,6 +1535,11 @@ impl DownloadAttachment {
         source_peer: impl Into<String>,
         thumbnail: Option<Vec<u8>>,
     ) -> Self {
+        let ticket = ticket.into();
+        let expected_content_hash = ticket
+            .parse::<iroh_blobs::ticket::BlobTicket>()
+            .ok()
+            .map(|ticket| hex::encode(ticket.hash().as_bytes()));
         let poster_dimensions = thumbnail.as_deref().and_then(|bytes| {
             image::ImageReader::new(std::io::Cursor::new(bytes))
                 .with_guessed_format()
@@ -1539,7 +1549,7 @@ impl DownloadAttachment {
         Self {
             kind,
             name: name.into(),
-            ticket: ticket.into(),
+            ticket,
             transfer_id: None,
             state: DownloadState::Ready { total: None },
             source_peer: source_peer.into(),
@@ -1547,6 +1557,7 @@ impl DownloadAttachment {
             thumbnail,
             poster_dimensions,
             playback_error: None,
+            expected_content_hash,
         }
     }
 
@@ -11394,6 +11405,11 @@ impl IcedChat {
                 if !matches!(dl.state, DownloadState::Ready { .. }) {
                     return iced::Task::none();
                 }
+                if let Err(error) = validate_attachment_filename(&dl.name) {
+                    return iced::Task::done(AppMessage::ErrorMsg(format!(
+                        "Download rejected: {error}"
+                    )));
+                }
                 if let Some(e) = self.entries.get_mut(entry_index) {
                     if let Some(ref mut d) = e.download {
                         // Carry forward the total from Ready so the progress
@@ -11719,6 +11735,7 @@ impl IcedChat {
                     };
                     let DownloadState::Completed {
                         saved_path: Some(path),
+                        total_size,
                         ..
                     } = &download.state
                     else {
@@ -11726,10 +11743,25 @@ impl IcedChat {
                         return iced::Task::none();
                     };
                     let path = path.clone();
+                    let Some(expected_hash) = download.expected_content_hash.clone() else {
+                        self.push_system("Video cannot be played because its content identity is missing.");
+                        return iced::Task::none();
+                    };
+                    let expected_size = *total_size;
+                    let downloads_root = self.data_dir.join("downloads");
                     let message_id = entry.event_id;
                     let attachment_id = download.name.clone();
-                    if !path.is_file() {
-                        self.push_system("Video file is no longer available.");
+                    if let Err(error) = validate_attachment_filename(&download.name) {
+                        self.push_system(format!("Video verification failed: {error}"));
+                        return iced::Task::none();
+                    }
+                    if let Err(error) = verify_local_attachment(
+                        &path,
+                        &downloads_root,
+                        &expected_hash,
+                        expected_size,
+                    ) {
+                        self.push_system(format!("Video verification failed: {error}"));
                         return iced::Task::none();
                     }
                     if let Some(download) = self
@@ -11770,10 +11802,12 @@ impl IcedChat {
                     return iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
-                                let canonical = path.canonicalize().map_err(|e| e.to_string())?;
-                                if !canonical.is_file() {
-                                    return Err("verified path is not a file".to_string());
-                                }
+                                let canonical = verify_local_attachment(
+                                    &path,
+                                    &downloads_root,
+                                    &expected_hash,
+                                    expected_size,
+                                )?;
                                 let uri = url::Url::from_file_path(&canonical)
                                     .map_err(|()| "cannot create file URI".to_string())?;
                                 Video::new(&uri).map_err(|e| e.to_string())
