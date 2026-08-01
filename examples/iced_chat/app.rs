@@ -7329,18 +7329,29 @@ impl IcedChat {
                                         .await
                                         .map_err(|e| e.to_string())
                                 } else {
-                                    tokio::time::timeout(Duration::from_secs(30), async {
-                                        gossip.subscribe_and_join(topic, bootstrap_peers).await
+                                    let peers = bootstrap_peers.clone();
+                                    match tokio::time::timeout(Duration::from_secs(30), async {
+                                        gossip.subscribe_and_join(topic, peers).await
                                     })
                                     .await
-                                    .map_err(|_| {
-                                        "timed out waiting for a peer to join the room — \
-                                         the saved addresses may be stale; the room is \
-                                         still subscribed, so any peer that connects \
-                                         later will work"
-                                            .to_string()
-                                    })
-                                    .and_then(|result| result.map_err(|e| e.to_string()))
+                                    {
+                                        Ok(Ok(sub)) => Ok(sub),
+                                        Ok(Err(e)) => Err(e.to_string()),
+                                        Err(_elapsed) => {
+                                            // subscribe_and_join timed out — fall
+                                            // back to basic subscribe so the room
+                                            // is at least open.  Peers can join the
+                                            // mesh later via NeighborUp events.
+                                            info!(
+                                                topic = %topic,
+                                                "subscribe_and_join timed out; falling back to subscribe"
+                                            );
+                                            gossip
+                                                .subscribe(topic, bootstrap_peers)
+                                                .await
+                                                .map_err(|e| e.to_string())
+                                        }
+                                    }
                                 }
                             })
                             .await
