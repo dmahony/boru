@@ -3941,16 +3941,16 @@ struct SettingsCachedKey {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct SidebarIdentityCacheKey {
     local_label: String,
-    is_online: bool,
+    presence: PeerPresence,
     dark_mode: bool,
     has_profile_image: bool,
 }
 
 /// Renders the local-user profile block in the sidebar: avatar (profile image
-/// or generated initials circle), display name, online/offline status, and a settings gear button.
+/// or generated initials circle), display name, online/away/offline status, and a settings gear button.
 fn view_local_profile_block(
     local_label: String,
-    is_online: bool,
+    presence: PeerPresence,
     dark_mode: bool,
     local_public: PublicKey,
     profile_image_handle: Option<iced::widget::image::Handle>,
@@ -3964,17 +3964,8 @@ fn view_local_profile_block(
     } else {
         iced::Theme::Light
     };
-    let online_color = accent_green(&theme);
-    let status_label = if is_online { "Online" } else { "Offline" };
-    let status_color = if is_online {
-        online_color
-    } else {
-        if dark_mode {
-            text_muted(&theme)
-        } else {
-            text_muted(&theme)
-        }
-    };
+    let status_label = presence.label();
+    let status_color = presence.color(&theme);
     let display_name = if local_label.is_empty() {
         "My Profile".to_string()
     } else {
@@ -17343,15 +17334,19 @@ impl IcedChat {
             ))
             .align_y(Alignment::Center);
 
-        let is_online = !matches!(self.mesh_health, MeshHealth::Offline(_));
+        let local_presence = match &self.mesh_health {
+            MeshHealth::Good => PeerPresence::Online,
+            MeshHealth::Degraded(_) => PeerPresence::Away,
+            MeshHealth::Offline(_) => PeerPresence::Offline,
+        };
         let identity_key = SidebarIdentityCacheKey {
             local_label: self.local_label.clone(),
-            is_online,
+            presence: local_presence,
             dark_mode: self.dark_mode,
             has_profile_image: self.profile_image_handle.is_some(),
         };
         let identity_label = self.local_label.clone();
-        let identity_online = is_online;
+        let identity_presence = local_presence;
         let identity_dark = self.dark_mode;
         let identity_pk = self.local_public;
         let identity_profile_image = self.profile_image_handle.clone();
@@ -17359,7 +17354,7 @@ impl IcedChat {
             iced::widget::lazy(identity_key, move |_| {
                 view_local_profile_block(
                     identity_label.clone(),
-                    identity_online,
+                    identity_presence,
                     identity_dark,
                     identity_pk,
                     identity_profile_image.clone(),
