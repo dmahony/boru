@@ -168,10 +168,9 @@ pub fn render_group_summary(title: &str, count: usize, conversations: usize) -> 
 mod tests {
     use super::*;
     use crate::notification::event::NotificationEvent;
-    use std::str::FromStr;
 
     fn test_peer() -> iroh::PublicKey {
-        iroh::PublicKey::from_str("z3emgk36rht3zv2k4mnu6gh5yu2bhvwz7xkemhl6ckqxw3vgvnga").unwrap()
+        iroh::SecretKey::generate().public()
     }
 
     fn make_text_event(body: &str) -> NotificationEvent {
@@ -258,7 +257,8 @@ mod tests {
     fn test_sanitize_preview_truncates() {
         let long = "a".repeat(300);
         let result = sanitize_preview(&long);
-        assert!(result.len() <= 201);
+        // Truncates to MAX_PREVIEW_LEN (200) chars plus the ellipsis char.
+        assert!(result.chars().count() <= 201);
         assert!(result.ends_with('…'));
     }
 

@@ -2294,6 +2294,22 @@ pub struct IcedChat {
     /// Set by on_neighbor_up/on_neighbor_down when a connection count refresh
     /// is needed outside the normal ~60s cycle.
     needs_conn_refresh: bool,
+    /// Extra gossip neighbors whose addressing info is embedded in the
+    /// regenerated room ticket as additional bootstrap nodes. Populated
+    /// asynchronously from [`Self::pending_ticket_peers`] via
+    /// `endpoint.remote_info()` inside ConnMonitorTick.
+    ticket_extra_peers: Vec<EndpointAddr>,
+    /// Neighbor PublicKeys whose addressing info has not yet been resolved.
+    /// Resolution is deferred because `endpoint.remote_info()` is async while
+    /// `on_neighbor_up` is sync; ConnMonitorTick resolves them and moves the
+    /// results into [`Self::ticket_extra_peers`].
+    pending_ticket_peers: Vec<PublicKey>,
+    /// Set when the mesh membership changed (neighbor up/down or a pending
+    /// peer resolved) so the next presence broadcast regenerates the room
+    /// ticket with the latest extra bootstrap peers.
+    ticket_needs_regeneration: bool,
+    /// Guards against overlapping async ticket-peer resolution tasks.
+    ticket_resolve_in_flight: bool,
     /// Maps protocol message hashes to event_ids for delivery state resolution.
     self_sent_events: HashMap<MessageHash, u64>,
     /// Maintained indexes into the active conversation's entries.
@@ -3400,6 +3416,14 @@ pub enum AppMessage {
         direct: usize,
         relayed: usize,
     },
+    /// Async result from resolving pending ticket peers into concrete
+    /// [`EndpointAddr`]s via `endpoint.remote_info()` inside ConnMonitorTick.
+    /// `unresolved` are peers whose addressing info was not available yet;
+    /// they are re-queued for a later resolution attempt.
+    TicketPeersResolved {
+        resolved: Vec<EndpointAddr>,
+        unresolved: Vec<PublicKey>,
+    },
     /// Async result from the /connections debug command.
     ConnectionsResult(Vec<String>),
     /// Send a friend request to a peer.
@@ -4473,6 +4497,10 @@ impl IcedChat {
             peer_latencies: HashMap::new(),
             conn_refresh_in_flight: false,
             needs_conn_refresh: false,
+            ticket_extra_peers: Vec::new(),
+            pending_ticket_peers: Vec::new(),
+            ticket_needs_regeneration: false,
+            ticket_resolve_in_flight: false,
             self_sent_events: HashMap::new(),
             event_id_to_index: HashMap::new(),
             message_hash_to_index: HashMap::new(),
@@ -4655,13 +4683,23 @@ impl IcedChat {
         self.perf.borrow().snapshot()
     }
 
-    fn room_ticket(&self, topic: TopicId) -> Ticket {
+    fn room_ticket(&self, topic: TopicId, extra_peers: &[EndpointAddr]) -> Ticket {
+        let mut peers = vec![invitation_endpoint_addr(
+            self.endpoint.watch_addr().get(),
+            self.share_direct_addresses,
+        )];
+        // Append extra bootstrap peers (e.g. peers that joined the mesh
+        // after this ticket was first created). The same direct-address
+        // policy is applied so tickets never leak direct IPs unless the
+        // user opted in to sharing them.
+        for extra in extra_peers {
+            if extra.id != self.local_public {
+                peers.push(invitation_endpoint_addr(extra.clone(), self.share_direct_addresses));
+            }
+        }
         Ticket {
             topic,
-            peers: vec![invitation_endpoint_addr(
-                self.endpoint.watch_addr().get(),
-                self.share_direct_addresses,
-            )],
+            peers,
             discovery_secret: None,
         }
     }
@@ -4701,7 +4739,8 @@ impl IcedChat {
     }
 
     fn personal_room_ticket(&self) -> String {
-        self.room_ticket(self.personal_room_topic()).to_string()
+        self.room_ticket(self.personal_room_topic(), &self.ticket_extra_peers)
+            .to_string()
     }
 
     /// Refresh the displayed room ticket when iroh learns a new relay or
@@ -4712,7 +4751,7 @@ impl IcedChat {
             return false;
         }
 
-        let current_ticket = self.room_ticket(self.topic).to_string();
+        let current_ticket = self.room_ticket(self.topic, &self.ticket_extra_peers).to_string();
         if current_ticket == self.ticket_str {
             return false;
         }
@@ -5968,6 +6007,7 @@ impl IcedChat {
             AppMessage::MailboxReplayed { .. } => "MailboxReplayed",
             AppMessage::Scrolled(..) => "Scrolled",
             AppMessage::ConnCountsResult { .. } => "ConnCountsResult",
+            AppMessage::TicketPeersResolved { .. } => "TicketPeersResolved",
             AppMessage::ConnectionsResult(_) => "ConnectionsResult",
             AppMessage::SendFriendRequest(_) => "SendFriendRequest",
             AppMessage::FriendRequestSent { .. } => "FriendRequestSent",
@@ -6175,7 +6215,6 @@ impl IcedChat {
         self.known_peers.clear();
     }
 
-    #[expect(dead_code)]
     fn clear_current_room_history_runtime(
         &mut self,
         topic: TopicId,
@@ -7198,7 +7237,9 @@ impl IcedChat {
                 // ── Public room: advertise without auto-joining ──────
                 if advertise {
                     let topic = TopicId::from_bytes(rand::random());
-                    let ticket = self.room_ticket(topic);
+                    // Brand-new room: no mesh neighbors are subscribed to
+                    // this topic yet, so no extra bootstrap peers apply.
+                    let ticket = self.room_ticket(topic, &[]);
                     let ticket_str = ticket.to_string();
                     // Persist a minimal RoomStore entry so the room and its
                     // ticket survive restarts (needed for periodic re-advertise).
@@ -12318,7 +12359,7 @@ impl IcedChat {
                             .get(&topic)
                             .copied()
                             .unwrap_or_default();
-                        let ticket = self.room_ticket(topic).to_string();
+                        let ticket = self.room_ticket(topic, &[]).to_string();
                         iced::Task::perform(
                             async move {
                                 let ad = boru_core::chat_core::RoomAdvertisement {
@@ -13646,6 +13687,33 @@ impl IcedChat {
                     self.conn_refresh_counter -= 1;
                 }
 
+                // Resolve pending ticket peers (deferred from on_neighbor_up
+                // because `endpoint.remote_info()` is async) into concrete
+                // EndpointAddrs so the next presence broadcast can embed them
+                // as extra bootstrap nodes in the regenerated room ticket.
+                if !self.pending_ticket_peers.is_empty() && !self.ticket_resolve_in_flight {
+                    self.ticket_resolve_in_flight = true;
+                    let pending: Vec<PublicKey> = std::mem::take(&mut self.pending_ticket_peers);
+                    let endpoint = self.endpoint.clone();
+                    tasks.push(iced::Task::perform(
+                        async move {
+                            let mut resolved = Vec::new();
+                            let mut unresolved = Vec::new();
+                            for peer in &pending {
+                                match endpoint.remote_info(*peer).await {
+                                    Some(info) => resolved.push(EndpointAddr::from_parts(
+                                        info.id(),
+                                        info.into_addrs().map(|a| a.into_addr()),
+                                    )),
+                                    None => unresolved.push(*peer),
+                                }
+                            }
+                            AppMessage::TicketPeersResolved { resolved, unresolved }
+                        },
+                        |msg| msg,
+                    ));
+                }
+
                 // Relay selection and direct addresses are learned asynchronously.
                 // Keep the room ticket shown in the UI (and therefore copied to the
                 // clipboard) aligned with the endpoint's current address.
@@ -13669,6 +13737,11 @@ impl IcedChat {
                 }
                 if self.presence_counter == 0 {
                     self.presence_counter = 5;
+                    // Mesh membership changed (neighbor up/down or a pending
+                    // peer resolved) → regenerate the room ticket with the
+                    // latest extra bootstrap peers before broadcasting.
+                    // personal_room_ticket() reads ticket_extra_peers live.
+                    self.ticket_needs_regeneration = false;
                     if let Some(ref sender) = self.sender {
                         let sk = self.secret_key.clone();
                         let ticket = self.personal_room_ticket();
@@ -13796,7 +13869,7 @@ impl IcedChat {
                                             .copied()
                                             .unwrap_or_default();
                                         // Build a join ticket for the room
-                                        let ticket = self.room_ticket(topic).to_string();
+                                        let ticket = self.room_ticket(topic, &[]).to_string();
                                         Some((topic, name, topic, ticket, neighbor_count))
                                     })
                                     .collect();
@@ -14061,6 +14134,29 @@ impl IcedChat {
                     ));
                 }
                 self.conn_refresh_in_flight = false;
+                iced::Task::none()
+            }
+
+            AppMessage::TicketPeersResolved { resolved, unresolved } => {
+                self.ticket_resolve_in_flight = false;
+                // Merge resolved peer addressing info into the ticket's extra
+                // bootstrap list (dedupe by endpoint id), then flag the ticket
+                // for regeneration on the next presence broadcast.
+                for addr in resolved {
+                    if addr.id != self.local_public
+                        && !self.ticket_extra_peers.iter().any(|e| e.id == addr.id)
+                    {
+                        self.ticket_extra_peers.push(addr);
+                    }
+                }
+                // Re-queue peers whose addressing info was not available yet;
+                // the next ConnMonitorTick will retry the lookup.
+                for peer in unresolved {
+                    if !self.pending_ticket_peers.contains(&peer) {
+                        self.pending_ticket_peers.push(peer);
+                    }
+                }
+                self.ticket_needs_regeneration = true;
                 iced::Task::none()
             }
 
@@ -15047,12 +15143,18 @@ impl IcedChat {
             }
 
             AppMessage::ClearHistoryFinished {
-                topic: _,
+                topic,
                 room_history: _,
-                report: _,
+                report,
             } => {
                 self.history_clear_pending = false;
                 self.history_confirm_clear = false;
+                self.history_clear_feedback_is_error = false;
+                self.history_clear_feedback = Some(format!(
+                    "Cleared {} messages from this chat.",
+                    report.chat_entries_removed
+                ));
+                self.clear_current_room_history_runtime(topic, &report);
                 iced::Task::none()
             }
 
@@ -16422,6 +16524,16 @@ impl ChatCallbacks for IcedChat {
             self.push_system(format!("🟢 {name} joined"));
         }
 
+        // Queue the new neighbor for ticket regeneration. The actual
+        // `endpoint.remote_info()` lookup is deferred to ConnMonitorTick
+        // because this callback is sync; once resolved, the peer's
+        // addressing info is embedded in the room ticket as an extra
+        // bootstrap node.
+        if !self.pending_ticket_peers.contains(&peer) {
+            self.pending_ticket_peers.push(peer);
+        }
+        self.ticket_needs_regeneration = true;
+
         // For each pending backfill topic, check if we still need history
         // (the count may have been satisfied by a previous backfill) and
         // spawn a request if not.  Retain topics that still need backfill
@@ -16449,6 +16561,13 @@ impl ChatCallbacks for IcedChat {
         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.needs_conn_refresh = true;
         self.peer_latencies.remove(&peer);
+
+        // Remove the peer from the ticket's extra bootstrap nodes (both
+        // the resolved list and any pending resolution) and flag the ticket
+        // for regeneration.
+        self.ticket_extra_peers.retain(|addr| addr.id != peer);
+        self.pending_ticket_peers.retain(|p| *p != peer);
+        self.ticket_needs_regeneration = true;
     }
 
     fn record_activity(&mut self, peer: PublicKey) {
@@ -25099,6 +25218,10 @@ mod tests {
                 image_bytes: Some(image_data.clone()),
                 image_identifier: None,
                 image_error: None,
+                image_width: None,
+                image_height: None,
+                gif_frames: None,
+                gif_frame_idx: 0,
                 timestamp: Some(i as i64),
                 event_id: 0,
                 delivery_state: DeliveryState::default(),
@@ -25209,7 +25332,7 @@ mod tests {
 
     #[test]
     fn download_attachment_state_helpers_cover_all_states() {
-        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "");
+        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "", None);
         assert_eq!(attachment.action_label(), "Download");
         assert_eq!(attachment.status_label(), "Ready to download");
         assert!(attachment.progress_fraction().is_none());
@@ -27042,7 +27165,7 @@ mod tests {
     #[test]
     fn download_lifecycle_started_progress_completed() {
         let entry =
-            ChatEntry::system_download("system msg", TransferKind::File, "test.doc", "ticket", "");
+            ChatEntry::system_download("system msg", TransferKind::File, "test.doc", "ticket", "" , None);
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(1);
 
@@ -27124,6 +27247,7 @@ mod tests {
             "corrupt.zip",
             "ticket",
             "",
+            None,
         );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(2);
@@ -27165,7 +27289,7 @@ mod tests {
     #[test]
     fn download_lifecycle_started_cancelled() {
         let entry =
-            ChatEntry::system_download("file share", TransferKind::File, "large.iso", "ticket", "");
+            ChatEntry::system_download("file share", TransferKind::File, "large.iso", "ticket", "" , None);
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(3);
 
@@ -27199,6 +27323,7 @@ mod tests {
             "report.pdf",
             "ticket",
             "",
+            None,
         );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(4);
@@ -27260,7 +27385,7 @@ mod tests {
     fn download_transfer_id_anchoring_survives_entry_reorder() {
         let id = TransferId::new(5);
         let mut entry =
-            ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket", "");
+            ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket", "" , None);
         entry.download.as_mut().unwrap().transfer_id = Some(id);
 
         // Simulate entries: a text entry inserted before the download entry,
@@ -27298,7 +27423,7 @@ mod tests {
     #[test]
     fn download_anchoring_falls_back_to_index_when_no_transfer_id() {
         let entry =
-            ChatEntry::system_download("file", TransferKind::File, "archive.tar.gz", "ticket", "");
+            ChatEntry::system_download("file", TransferKind::File, "archive.tar.gz", "ticket", "" , None);
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(6);
 
@@ -27324,9 +27449,9 @@ mod tests {
     #[test]
     fn download_multiple_attachments_update_correct_row() {
         let entry_a =
-            ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a", "");
+            ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a", "", None);
         let entry_b =
-            ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b", "");
+            ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b", "", None);
         let mut mgr = TestDownloadManager::new(vec![entry_a, entry_b], Some(0));
         let id_a = TransferId::new(10);
         let id_b = TransferId::new(11);
@@ -27386,7 +27511,7 @@ mod tests {
     #[test]
     fn download_unknown_total_shows_size_unknown() {
         let entry =
-            ChatEntry::system_download("stream", TransferKind::File, "live.mp4", "ticket", "");
+            ChatEntry::system_download("stream", TransferKind::File, "live.mp4", "ticket", "" , None);
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(7);
 
@@ -27443,6 +27568,7 @@ mod tests {
             "screenshot.png",
             "ticket",
             "",
+            None,
         );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(8);
@@ -27470,7 +27596,7 @@ mod tests {
     #[test]
     fn download_zero_total_edge_case() {
         let entry =
-            ChatEntry::system_download("empty", TransferKind::File, "empty.txt", "ticket", "");
+            ChatEntry::system_download("empty", TransferKind::File, "empty.txt", "ticket", "" , None);
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(9);
 
@@ -27505,10 +27631,10 @@ mod tests {
     /// tolerances for each download state.
     #[test]
     fn download_estimated_height_fits_each_state() {
-        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "");
+        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "", None);
 
         // Ready
-        assert!((attachment.estimated_height() - 92.0).abs() < 1.0);
+        assert!((attachment.estimated_height() - 84.0).abs() < 1.0);
 
         // Active with known total
         attachment.state = DownloadState::Active {
@@ -27516,8 +27642,8 @@ mod tests {
             total: Some(1000),
         };
         assert!(
-            (attachment.estimated_height() - 152.0).abs() < 1.0,
-            "active+total height expected ~152, got {}",
+            (attachment.estimated_height() - 112.0).abs() < 1.0,
+            "active+total height expected ~112, got {}",
             attachment.estimated_height()
         );
 
@@ -27526,7 +27652,7 @@ mod tests {
             bytes: 500,
             total: None,
         };
-        assert!((attachment.estimated_height() - 144.0).abs() < 1.0);
+        assert!((attachment.estimated_height() - 176.0).abs() < 1.0);
 
         // Completed
         attachment.state = DownloadState::Completed {
@@ -27534,7 +27660,7 @@ mod tests {
             saved_path: None,
             total_size: None,
         };
-        assert!((attachment.estimated_height() - 100.0).abs() < 1.0);
+        assert!((attachment.estimated_height() - 92.0).abs() < 1.0);
 
         // Failed
         attachment.state = DownloadState::Failed {
@@ -27546,7 +27672,7 @@ mod tests {
 
         // Cancelled
         attachment.state = DownloadState::Cancelled;
-        assert!((attachment.estimated_height() - 92.0).abs() < 1.0);
+        assert!((attachment.estimated_height() - 84.0).abs() < 1.0);
     }
 
     // ── Performance baseline benchmarks ─────────────────────────────────
@@ -27776,11 +27902,11 @@ mod tests {
         // Setup three download entries at indices 0, 1, 2,
         // plus a text entry at index 3 that should never be touched.
         let entry_a =
-            ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a", "");
+            ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a", "", None);
         let entry_b =
-            ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b", "");
+            ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b", "", None);
         let entry_c =
-            ChatEntry::system_download("file c", TransferKind::File, "c.zip", "ticket_c", "");
+            ChatEntry::system_download("file c", TransferKind::File, "c.zip", "ticket_c", "" , None);
         let text_entry = ChatEntry::remote("peer", "hello", None, None, None);
         let mut mgr = TestDownloadManager::new(
             vec![entry_a, entry_b, entry_c, text_entry],
