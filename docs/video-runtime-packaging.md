@@ -58,6 +58,10 @@ The helper `scripts/check_video_runtime.sh` performs the Linux prerequisite and
 core-element checks; it intentionally exits non-zero when the runtime is absent
 so CI/package jobs cannot silently advertise inline playback.
 
+Current repository state: no Windows installer project/configuration file was
+discovered, so the Windows policy above remains documentation-only until a real
+installer is added.
+
 ## Licensing and notices
 
 Redistributed GStreamer and plugin binaries remain under their upstream licenses.

@@ -30,18 +30,20 @@ cargo test --example boru --features video-playback inline_playback
 cargo check --example video_backend_probe --features video-playback
 ```
 
-The runtime script was also exercised on the development host:
+Clean packaged-runtime checks:
 
 ```text
 ./scripts/check_video_runtime.sh
 ```
 
-On this host, `cargo test --lib video_runtime` passed (2 tests),
-`cargo check --example video_backend_probe --features video-playback` passed,
-and `./scripts/check_video_runtime.sh` passed with GStreamer 1.24.2. The
-feature-enabled `cargo test --example boru --features video-playback
-inline_playback` build reached the test-binary stage but exceeded the 600-second
-execution limit before reporting a result; it is not counted as a passing test.
+On the clean Ubuntu 24.04 container used for release validation, the documented
+GStreamer runtime packages were installed, `./scripts/check_video_runtime.sh`
+reported GStreamer 1.24.2 / runtime available, and `gst-launch-1.0 -q playbin`
+successfully played generated `sample.mp4`, `sample.webm`, and `sample.mkv`
+fixtures through `fakesink` sinks. The release binary's no-runtime smoke is
+wired to the per-user log file at `<data_dir>/logs/boru.log` and checks for the
+fallback warning that keeps Download and external-open actions available.
+
 For a release candidate, record CPU, RSS, thread count, and open file
 descriptors for the GUI process before and after: 50 inactive cards, first
 startup, steady playback, seek, rapid scroll, player switch, close, and process
