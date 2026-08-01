@@ -6128,6 +6128,7 @@ impl IcedChat {
         }
         self.inline_video = None;
         self.inline_video_resume = None;
+        self.inline_video_expanded = false;
         self.playback_coordinator.clear(None);
         self.layout_cache.borrow_mut().clear();
     }
