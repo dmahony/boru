@@ -78,6 +78,7 @@ use boru_core::room_docs::{self, RoomMetadata};
 use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::{SharedFileRow, Storage};
 use boru_core::store::MessageStore;
+use boru_core::video_poster;
 use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
@@ -1856,28 +1857,6 @@ impl ChatEntry {
         classify_attachment(None, name) == MediaKind::Video
     }
 
-    /// Generate a JPEG thumbnail from a video file via ffmpeg.
-    fn generate_video_thumbnail(path: &std::path::Path) -> Option<Vec<u8>> {
-        std::process::Command::new("ffmpeg")
-            .arg("-i")
-            .arg(path)
-            .arg("-vframes")
-            .arg("1")
-            .arg("-vf")
-            .arg("scale=320:-1")
-            .arg("-f")
-            .arg("image2pipe")
-            .arg("-q:v")
-            .arg("5")
-            .arg("-v")
-            .arg("quiet")
-            .arg("-")
-            .output()
-            .ok()
-            .filter(|out| out.status.success() && !out.stdout.is_empty())
-            .map(|out| out.stdout)
-    }
-
     #[expect(dead_code)]
     fn estimated_height(&self) -> f32 {
         LayoutCache::compute_height(self, None, TYPO_SM)
@@ -3024,6 +3003,11 @@ pub enum AppMessage {
     /// File downloaded from a peer's shared profile — carries the saved path
     /// for the "Open" button.
     DownloadDonePeerFile(String, PathBuf),
+    /// Result of probing a verified local video for an asynchronous poster.
+    PosterGenerated {
+        name: String,
+        poster: Result<(Vec<u8>, Option<(u32, u32)>), String>,
+    },
     DownloadFailed(String),
     OpenDownloadedFile(String),
     OpenDownloadsFolder,
@@ -5692,6 +5676,7 @@ impl IcedChat {
             AppMessage::FileSent(_) => "FileSent",
             AppMessage::DownloadDone(..) => "DownloadDone",
             AppMessage::DownloadDonePeerFile(..) => "DownloadDonePeerFile",
+            AppMessage::PosterGenerated { .. } => "PosterGenerated",
             AppMessage::DownloadFailed(_) => "DownloadFailed",
             AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
             AppMessage::OpenDownloadsFolder => "OpenDownloadsFolder",
@@ -10750,13 +10735,7 @@ impl IcedChat {
                 self.pending_file_upload = Some((filename.clone(), file_size));
                 self.file_upload_spinner_frame = 0;
 
-                // Generate video thumbnail if this is a video file
                 let is_video = ChatEntry::is_video_file(&filename);
-                let thumbnail_bytes = if is_video {
-                    ChatEntry::generate_video_thumbnail(&abs_path_buf)
-                } else {
-                    None
-                };
                 let transfer_kind = if is_video {
                     TransferKind::Video
                 } else {
@@ -10791,6 +10770,7 @@ impl IcedChat {
                 let sender = self.sender.clone();
                 let secret_key = self.secret_key.clone();
                 let endpoint_addr = self.endpoint.addr();
+                let poster_cache_dir = self.data_dir.join("cache").join("video-posters");
                 let _local_label = self.local_label.clone();
                 let _local_pk = self.local_public;
                 // Cap large file uploads with a generous timeout so a stuck
@@ -10818,6 +10798,23 @@ impl IcedChat {
                                 .map_err(|e| format!("Failed to store file: {e}"))?;
                             let ticket_str =
                                 blob_ticket_string(endpoint_addr, tag.hash, tag.format);
+                            // The local file is the sender's verified selection. Probe it
+                            // off the Iced update loop; failure only omits the optional
+                            // thumbnail and must not fail the upload.
+                            let thumbnail_bytes = if is_video {
+                                let poster_path = path_buf.clone();
+                                let cache_dir = poster_cache_dir.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    video_poster::generate(&poster_path, &cache_dir)
+                                        .ok()
+                                        .map(|poster| poster.bytes)
+                                })
+                                .await
+                                .ok()
+                                .flatten()
+                            } else {
+                                None
+                            };
                             let msg = crate::Message::FileShare {
                                 name: filename.clone(),
                                 ticket: ticket_str.clone(),
@@ -11120,6 +11117,8 @@ impl IcedChat {
             }
             AppMessage::DownloadDone(name, path) => {
                 self.push_system(format!("*{name}* is complete"));
+                let poster_path = path.clone();
+                let mut is_video = false;
                 let completed_idx = self
                     .entries
                     .iter()
@@ -11131,6 +11130,7 @@ impl IcedChat {
                 if let Some(idx) = completed_idx {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
+                            is_video = download.kind == TransferKind::Video;
                             let total_size = match &download.state {
                                 DownloadState::Active { total, .. } => *total,
                                 _ => None,
@@ -11145,6 +11145,23 @@ impl IcedChat {
                     }
                 }
                 self.pending_file = None;
+                if is_video {
+                    let cache_dir = self.data_dir.join("cache").join("video-posters");
+                    return iced::Task::perform(
+                        async move {
+                            match tokio::task::spawn_blocking(move || {
+                                video_poster::generate(&poster_path, &cache_dir)
+                                    .map(|poster| (poster.bytes, poster.dimensions))
+                            })
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => Err(format!("poster worker failed: {error}")),
+                            }
+                        },
+                        move |poster| AppMessage::PosterGenerated { name, poster },
+                    );
+                }
                 iced::Task::none()
             }
             AppMessage::DownloadDonePeerFile(name, path) => {
@@ -11161,9 +11178,12 @@ impl IcedChat {
                         CatalogueDownloadState::Completed { path: path.clone() },
                     );
                 }
+                let poster_path = path.clone();
+                let mut is_video = false;
                 if let Some(idx) = self.download_entry_index {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
+                            is_video = download.kind == TransferKind::Video;
                             let total_size = match &download.state {
                                 DownloadState::Active { total, .. } => *total,
                                 _ => None,
@@ -11175,6 +11195,44 @@ impl IcedChat {
                             };
                             self.layout_cache.borrow_mut().invalidate_from(idx);
                         }
+                    }
+                }
+                if is_video {
+                    let cache_dir = self.data_dir.join("cache").join("video-posters");
+                    return iced::Task::perform(
+                        async move {
+                            match tokio::task::spawn_blocking(move || {
+                                video_poster::generate(&poster_path, &cache_dir)
+                                    .map(|poster| (poster.bytes, poster.dimensions))
+                            })
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => Err(format!("poster worker failed: {error}")),
+                            }
+                        },
+                        move |poster| AppMessage::PosterGenerated { name, poster },
+                    );
+                }
+                iced::Task::none()
+            }
+            AppMessage::PosterGenerated { name, poster } => {
+                match poster {
+                    Ok((bytes, dimensions)) => {
+                        if let Some(entry) = self.entries.iter_mut().find(|entry| {
+                            entry.download.as_ref().is_some_and(|download| {
+                                download.name == name && download.kind == TransferKind::Video
+                            })
+                        }) {
+                            if let Some(download) = entry.download.as_mut() {
+                                download.poster_dimensions = dimensions;
+                                download.thumbnail = Some(bytes);
+                                self.layout_cache.borrow_mut().clear();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(file = %name, %error, "video poster generation failed; keeping video playable");
                     }
                 }
                 iced::Task::none()
