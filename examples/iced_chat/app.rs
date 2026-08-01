@@ -82,6 +82,8 @@ use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
 use boru_core::video_playback::{
     validate_attachment_filename, verify_local_attachment, PlaybackCoordinator, VideoInstanceKey,
 };
+#[cfg(feature = "video-playback")]
+use boru_core::video_runtime::VideoRuntimeCapability;
 use boru_core::video_poster;
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
@@ -2327,6 +2329,8 @@ pub struct IcedChat {
     /// Position retained after an off-screen player is evicted. This is
     /// lightweight UI state; it never owns or removes the attachment file.
     inline_video_resume: Option<(VideoInstanceKey, Duration)>,
+    #[cfg(feature = "video-playback")]
+    video_runtime: VideoRuntimeCapability,
     /// TransferId → entry index cache for O(1) progress update lookups.
     /// Populated lazily in handle_download_progress; cleared on room switch.
     transfer_id_to_index: HashMap<TransferId, usize>,
@@ -4560,6 +4564,16 @@ impl IcedChat {
             inline_video_expanded: false,
             #[cfg(feature = "video-playback")]
             inline_video_resume: None,
+            #[cfg(feature = "video-playback")]
+            video_runtime: {
+                let capability = VideoRuntimeCapability::detect();
+                if capability.available {
+                    tracing::info!(detail = %capability.detail, "inline video runtime detected");
+                } else {
+                    tracing::warn!(detail = %capability.detail, "inline video runtime unavailable; retaining download and external-open actions");
+                }
+                capability
+            },
             transfer_id_to_index: HashMap::new(),
             names: HashMap::new(),
             topic: initial_topic,
@@ -11727,6 +11741,10 @@ impl IcedChat {
             AppMessage::PlayInlineVideo(entry_index) => {
                 #[cfg(feature = "video-playback")]
                 {
+                    if !self.video_runtime.available {
+                        self.push_system(self.video_runtime.unavailable_message());
+                        return iced::Task::none();
+                    }
                     let Some(entry) = self.entries.get(entry_index) else {
                         return iced::Task::none();
                     };

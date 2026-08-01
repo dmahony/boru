@@ -9,6 +9,11 @@
 #   ./scripts/install.sh                       # debug build
 #   ./scripts/install.sh --release             # release build
 #   ./scripts/install.sh --release --features gui   # release with GUI
+#   ./scripts/install.sh --release --features video-playback # GUI + inline video
+#
+# Inline video packaging and clean-machine validation are documented in
+# docs/video-runtime-packaging.md. This script never modifies PATH or installs
+# a developer GStreamer SDK implicitly.
 set -euo pipefail
 
 PROFILE="${1:-debug}"

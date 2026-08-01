@@ -29,6 +29,8 @@ pub mod metrics;
 pub mod media_classification;
 /// Durable video metadata and process-local inline-player coordination.
 pub mod video_playback;
+/// Optional GStreamer runtime capability detection for inline video playback.
+pub mod video_runtime;
 /// Content-addressed, bounded poster generation for verified local videos.
 pub mod video_poster;
 #[cfg(feature = "net")]
