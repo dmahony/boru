@@ -1354,7 +1354,7 @@ pub(crate) struct DownloadAttachment {
 }
 
 impl DownloadAttachment {
-    fn new(
+    pub(crate) fn new(
         kind: TransferKind,
         name: impl Into<String>,
         ticket: impl Into<String>,
@@ -4878,15 +4878,15 @@ impl IcedChat {
         match progress {
             TransferProgress::Started {
                 id,
-                kind: TransferKind::File,
+                kind,
                 name,
                 total,
                 ..
-            } => {
+            } if matches!(kind, TransferKind::File | TransferKind::Video) => {
                 self.active_download_transfer_id = Some(id);
                 let row_for_name = self.entries.iter().position(|entry| {
                     entry.download.as_ref().is_some_and(|download| {
-                        download.kind == TransferKind::File
+                        download.kind == kind
                             && download.name == name
                             && download.transfer_id.is_none()
                     })
@@ -4914,12 +4914,12 @@ impl IcedChat {
             }
             TransferProgress::Progress {
                 id,
-                kind: TransferKind::File,
+                kind,
                 bytes,
                 total,
                 name,
                 ..
-            } => {
+            } if matches!(kind, TransferKind::File | TransferKind::Video) => {
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -4973,9 +4973,9 @@ impl IcedChat {
             }
             TransferProgress::Completed {
                 id,
-                kind: TransferKind::File,
+                kind,
                 name,
-            } => {
+            } if matches!(kind, TransferKind::File | TransferKind::Video) => {
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -5031,9 +5031,9 @@ impl IcedChat {
             }
             TransferProgress::Cancelled {
                 id,
-                kind: TransferKind::File,
+                kind,
                 ..
-            } => {
+            } if matches!(kind, TransferKind::File | TransferKind::Video) => {
                 if let Some(idx) = self.current_download_entry_index(Some(id)) {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -5143,6 +5143,33 @@ impl IcedChat {
             } else {
                 Err(format!("Open file exited with {status}"))
             }
+        }
+    }
+
+    /// Reconcile completed attachment rows with the filesystem. A deleted
+    /// local file must not leave an apparently playable video card behind.
+    fn refresh_missing_downloads(&mut self) {
+        let mut first_changed = None;
+        for (idx, entry) in self.entries.iter_mut().enumerate() {
+            let Some(download) = entry.download.as_mut() else {
+                continue;
+            };
+            let missing = match &download.state {
+                DownloadState::Completed {
+                    saved_path: Some(path),
+                    ..
+                } => !path.exists(),
+                _ => false,
+            };
+            if missing {
+                download.state = DownloadState::Failed {
+                    failure: DownloadFailure::FileRemoved,
+                };
+                first_changed.get_or_insert(idx);
+            }
+        }
+        if let Some(idx) = first_changed {
+            self.layout_cache.borrow_mut().invalidate_from(idx);
         }
     }
 
@@ -11093,7 +11120,15 @@ impl IcedChat {
             }
             AppMessage::DownloadDone(name, path) => {
                 self.push_system(format!("*{name}* is complete"));
-                if let Some(idx) = self.download_entry_index {
+                let completed_idx = self
+                    .entries
+                    .iter()
+                    .position(|entry| entry.download.as_ref().is_some_and(|download| {
+                        download.name == name
+                            && matches!(download.state, DownloadState::Active { .. } | DownloadState::Completed { .. })
+                    }))
+                    .or(self.download_entry_index);
+                if let Some(idx) = completed_idx {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
                             let total_size = match &download.state {
@@ -12860,6 +12895,7 @@ impl IcedChat {
                         self.public_rooms_sidebar_revision.wrapping_add(1);
                 }
                 self.save_directory_store();
+                self.refresh_missing_downloads();
                 if self.pending_image_upload.is_some() {
                     self.image_upload_spinner_frame = (self.image_upload_spinner_frame + 1) % 10;
                 }

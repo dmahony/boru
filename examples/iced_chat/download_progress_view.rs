@@ -94,6 +94,28 @@ fn inline_video_preview_height(dimensions: Option<(u32, u32)>) -> f32 {
     (360.0 / (width / height)).clamp(120.0, 280.0)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VideoPresentationState {
+    Remote,
+    Downloading,
+    Verifying,
+    Ready,
+    Failed,
+    Missing,
+}
+
+fn video_presentation_state(attachment: &DownloadAttachment) -> VideoPresentationState {
+    match &attachment.state {
+        DownloadState::Ready { .. } | DownloadState::Cancelled => VideoPresentationState::Remote,
+        DownloadState::Active { .. } | DownloadState::Paused { .. } => VideoPresentationState::Downloading,
+        DownloadState::Completed { saved_path: None, .. } => VideoPresentationState::Verifying,
+        DownloadState::Completed { saved_path: Some(path), .. } if path.exists() => VideoPresentationState::Ready,
+        DownloadState::Completed { .. } => VideoPresentationState::Missing,
+        DownloadState::Failed { failure } if matches!(failure, super::app::DownloadFailure::FileRemoved) => VideoPresentationState::Missing,
+        DownloadState::Failed { .. } => VideoPresentationState::Failed,
+    }
+}
+
 // ── State badge pill ─────────────────────────────────────────────────────
 
 fn state_badge(state: &DownloadState, tone: Color) -> iced::widget::Container<'static, AppMessage> {
@@ -315,7 +337,7 @@ pub fn view_download_progress(
     };
 
     // ── Row 4: Action buttons ───────────────────────────────────────────
-    let action_row = action_buttons(entry_index, state, &name_str);
+    let action_row = action_buttons(entry_index, attachment.kind, state, &name_str);
 
     // ── Row 5: Failure reason (only in Failed state) ────────────────────
     let error_row = match &state {
@@ -375,6 +397,7 @@ pub fn view_download_progress(
     // control establish the final footprint while the existing download,
     // retry, cancel, and open actions remain available below it.
     if attachment.kind == super::app::TransferKind::Video {
+        let presentation = video_presentation_state(attachment);
         let preview_height = inline_video_preview_height(attachment.poster_dimensions);
         let poster: iced::Element<'static, AppMessage> = if let Some(ref bytes) = attachment.thumbnail {
             iced::widget::image(iced::widget::image::Handle::from_bytes(bytes.clone()))
@@ -397,9 +420,9 @@ pub fn view_download_progress(
             .into()
         };
         let play = button(text("▶").size(28.0).color(Color::WHITE))
-            // Static affordance only for this pre-decoder step; it does not
-            // instantiate a decoder or autoplay media.
-            .on_press(AppMessage::Noop)
+            .on_press_maybe((presentation == VideoPresentationState::Ready).then(|| {
+                AppMessage::OpenDownloadedFile(attachment.name.clone())
+            }))
             .padding([SPACE_8, SPACE_12])
             .style(|_theme, _status| widget::button::Style {
                 background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.62))),
@@ -425,13 +448,13 @@ pub fn view_download_progress(
             }
             _ => String::new(),
         };
-        let status = match &attachment.state {
-            DownloadState::Completed { .. } => "Ready to open",
-            DownloadState::Active { .. } => "Downloading video…",
-            DownloadState::Failed { .. } => "Download failed",
-            DownloadState::Paused { .. } => "Download paused",
-            DownloadState::Cancelled => "Download cancelled",
-            DownloadState::Ready { .. } => "Static preview · playback after download",
+        let status = match presentation {
+            VideoPresentationState::Ready => "Ready to play",
+            VideoPresentationState::Downloading => "Downloading video…",
+            VideoPresentationState::Verifying => "Verifying video…",
+            VideoPresentationState::Failed => "Download failed",
+            VideoPresentationState::Missing => "Local file missing · download again",
+            VideoPresentationState::Remote => "Static preview · download to play",
         };
         body = body
             .push(preview)
@@ -593,43 +616,57 @@ fn progress_section<'a>(
 /// Build the action-button row according to the current state.
 fn action_buttons<'a>(
     entry_index: usize,
+    kind: super::app::TransferKind,
     state: &DownloadState,
     name: &str,
 ) -> iced::Element<'a, AppMessage> {
     use AppMessage::*;
 
-    let buttons: Vec<iced::Element<'a, AppMessage>> = match state {
-        DownloadState::Ready { .. } => {
+    let buttons: Vec<iced::Element<'a, AppMessage>> = match (kind, state) {
+        (super::app::TransferKind::Video, DownloadState::Completed { saved_path: None, .. }) => {
+            vec![text_button("Verifying…", AppMessage::Noop).into()]
+        }
+        (super::app::TransferKind::Video, DownloadState::Completed { saved_path: Some(path), .. })
+            if !path.exists() =>
+        {
             vec![action_button("Download", ExecuteDownloadAt(entry_index)).into()]
         }
-        DownloadState::Active { .. } => {
+        (super::app::TransferKind::Video, DownloadState::Failed { failure })
+            if matches!(failure, super::app::DownloadFailure::FileRemoved) =>
+        {
+            vec![action_button("Download", ExecuteDownloadAt(entry_index)).into()]
+        }
+        (_, DownloadState::Ready { .. }) => {
+            vec![action_button("Download", ExecuteDownloadAt(entry_index)).into()]
+        }
+        (_, DownloadState::Active { .. }) => {
             vec![
                 action_button("Pause", PauseDownloadAt(entry_index)).into(),
                 text_button("Cancel", CancelDownloadAt(entry_index)).into(),
             ]
         }
-        DownloadState::Paused { .. } => {
+        (_, DownloadState::Paused { .. }) => {
             vec![
                 action_button("Resume", ResumeDownloadAt(entry_index)).into(),
                 text_button("Cancel", CancelDownloadAt(entry_index)).into(),
             ]
         }
-        DownloadState::Completed { .. } => {
+        (_, DownloadState::Completed { .. }) => {
             vec![
                 action_button("Open", OpenDownloadedFile(name.to_string())).into(),
                 text_button("Re-share", ReshareFile(entry_index)).into(),
             ]
         }
-        DownloadState::Failed { failure } if failure.retry_available() => {
+        (_, DownloadState::Failed { failure }) if failure.retry_available() => {
             vec![
                 action_button("Retry", ExecuteDownloadAt(entry_index)).into(),
                 text_button("Remove", CancelDownloadAt(entry_index)).into(),
             ]
         }
-        DownloadState::Failed { .. } => {
+        (_, DownloadState::Failed { .. }) => {
             vec![text_button("Remove", CancelDownloadAt(entry_index)).into()]
         }
-        DownloadState::Cancelled => {
+        (_, DownloadState::Cancelled) => {
             vec![
                 action_button("Retry", ExecuteDownloadAt(entry_index)).into(),
                 text_button("Remove", CancelDownloadAt(entry_index)).into(),
@@ -642,7 +679,9 @@ fn action_buttons<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::inline_video_preview_height;
+    use super::{inline_video_preview_height, video_presentation_state, VideoPresentationState};
+    use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
+    use std::path::PathBuf;
 
     #[test]
     fn unknown_aspect_ratio_uses_bounded_widescreen_default() {
@@ -654,5 +693,49 @@ mod tests {
         assert_eq!(inline_video_preview_height(Some((100, 1000))), 280.0);
         assert_eq!(inline_video_preview_height(Some((3840, 2160))), 202.5);
         assert_eq!(inline_video_preview_height(Some((1000, 100))), 120.0);
+    }
+
+    #[test]
+    fn video_state_mapping_requires_verified_local_path() {
+        let mut attachment = DownloadAttachment::new(
+            TransferKind::Video,
+            "clip.mp4",
+            "ticket",
+            "peer",
+            None,
+        );
+        assert_eq!(video_presentation_state(&attachment), VideoPresentationState::Remote);
+        attachment.state = DownloadState::Active {
+            bytes: 10,
+            total: Some(100),
+        };
+        assert_eq!(video_presentation_state(&attachment), VideoPresentationState::Downloading);
+        attachment.state = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: None,
+            total_size: Some(100),
+        };
+        assert_eq!(video_presentation_state(&attachment), VideoPresentationState::Verifying);
+    }
+
+    #[test]
+    fn video_state_mapping_recovers_from_missing_local_file() {
+        let mut attachment = DownloadAttachment::new(
+            TransferKind::Video,
+            "clip.mp4",
+            "ticket",
+            "peer",
+            None,
+        );
+        attachment.state = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: Some(PathBuf::from("/definitely/missing/clip.mp4")),
+            total_size: Some(100),
+        };
+        assert_eq!(video_presentation_state(&attachment), VideoPresentationState::Missing);
+        attachment.state = DownloadState::Failed {
+            failure: DownloadFailure::FileRemoved,
+        };
+        assert_eq!(video_presentation_state(&attachment), VideoPresentationState::Missing);
     }
 }
