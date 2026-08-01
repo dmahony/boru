@@ -11143,13 +11143,23 @@ impl IcedChat {
                     entry.bump_gen();
                 }
                 self.entries_push(entry);
-                // Persist to chat_history so images survive restarts
+                // Persist to chat_history so images survive restarts.
+                // Store image_bytes (in-memory, #[serde(skip)]) and
+                // image_identifier (persisted) so history replay can
+                // reconstruct a renderable ChatEntry.
                 {
                     let topic = self.topic;
                     let local_hex = hex::encode(self.local_public.as_bytes());
                     let mut store = self.chat_history.lock().unwrap();
-                    let hist_entry =
+                    let mut hist_entry =
                         HistoryEntry::new(topic, local_hex, Vec::new(), "image", name.clone());
+                    // Reference the just-pushed entry's stored bytes and
+                    // identifier so the HistoryEntry carries enough data for
+                    // history_entry_to_chat_entry to produce a renderable entry.
+                    if let Some(last) = self.entries.last() {
+                        hist_entry.image_bytes = last.image_bytes.clone();
+                        hist_entry.image_identifier = last.image_identifier.clone();
+                    }
                     store.push_with_id(hist_entry);
                 }
                 self.start_next_pending_image_download()

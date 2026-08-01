@@ -412,6 +412,18 @@ impl ConversationStore {
             self.rebuild_index();
             Some(old)
         } else {
+            // Safety net: if by_topic was stale (e.g. after a deserialisation
+            // that forgot to call rebuild_index), scan the Vec for an existing
+            // entry with the same topic before inserting a duplicate.
+            if let Some(pos) = self
+                .conversations
+                .iter()
+                .position(|existing| existing.topic == entry.topic)
+            {
+                let old = std::mem::replace(&mut self.conversations[pos], entry);
+                self.rebuild_index();
+                return Some(old);
+            }
             // Insert at the correct sorted position (most-recent-first)
             let pos = self
                 .conversations
@@ -528,7 +540,10 @@ impl ConversationStore {
     pub fn load_from_sqlite(storage: &crate::storage::Storage, data_dir: impl Into<PathBuf>) -> Self {
         match storage.kv_get("conversations") {
             Ok(Some(value)) => match serde_json::from_str::<Self>(&value) {
-                Ok(store) => store,
+                Ok(mut store) => {
+                    store.rebuild_index();
+                    store
+                }
                 Err(err) => {
                     tracing::warn!(
                         "failed to parse conversation store from SQLite: {err}; \
