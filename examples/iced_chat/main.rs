@@ -666,6 +666,20 @@ fn main() -> Result<()> {
         Arc::new(Mutex::new(None));
     let mcp_dir_sender_for_block = mcp_directory_sender.clone();
 
+    // Shared directory store created before block_on so both MCP
+    // (inside) and IcedChat (outside) share the same Arc.
+    let shared_directory_store = Arc::new(std::sync::Mutex::new(
+        boru_core::directory::DirectoryStore::new(),
+    ));
+    if let Ok(storage) = boru_core::storage::Storage::open(&data_dir) {
+        let _ = storage.with_conn(|conn| {
+            Ok(shared_directory_store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("directory store mutex poisoned"))?
+                .load_from_db(conn)?)
+        });
+    }
+
     let (
         endpoint,
         memory_lookup,
@@ -1412,20 +1426,7 @@ fn main() -> Result<()> {
             )),
             gui_state_rx: Some(_gui_state_rx.clone()),
             storage: boru_core::storage::Storage::open(&data_dir).ok(),
-            directory_store: {
-                let store = Arc::new(std::sync::Mutex::new(
-                    boru_core::directory::DirectoryStore::new(),
-                ));
-                if let Ok(storage) = boru_core::storage::Storage::open(&data_dir) {
-                    let _ = storage.with_conn(|conn| {
-                        Ok(store
-                            .lock()
-                            .map_err(|_| anyhow::anyhow!("directory store mutex poisoned"))?
-                            .load_from_db(conn)?)
-                    });
-                }
-                store
-            },
+            directory_store: shared_directory_store.clone(),
             directory_sender: mcp_directory_sender,
         };
 
@@ -1482,6 +1483,7 @@ fn main() -> Result<()> {
             // so rapidly changing GUI state (composer text, unread counts)
             // doesn't flood the watch channel and MCP consumers.
             app.gui_snapshot_throttle_ms = 125;
+            app.directory_store = shared_directory_store;
             app
         },
         initial_topic,

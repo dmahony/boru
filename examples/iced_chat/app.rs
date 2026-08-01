@@ -2648,7 +2648,7 @@ pub struct IcedChat {
     /// create-room dialog.
     create_room_advertise: bool,
     /// Received room advertisements from the directory gossip topic.
-    directory_store: Arc<StdMutex<DirectoryStore>>,
+    pub(crate) directory_store: Arc<StdMutex<DirectoryStore>>,
     /// Channel for receiving room advertisements from the background directory
     /// subscription task.
     directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>,
