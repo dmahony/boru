@@ -413,6 +413,80 @@ pub fn version_tag() -> String {
     }
 }
 
+/// Operating system name for diagnostics.
+fn os_name() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "Linux"
+    } else if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(target_os = "windows") {
+        "Windows"
+    } else {
+        std::env::consts::OS
+    }
+}
+
+/// Profile name (debug or release).
+fn profile_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
+}
+
+/// Build the pre-filled GitHub issue URL for bug reports.
+///
+/// Includes version, OS, profile, and the last ~100 lines of
+/// the app log (if available).  The user fills in the description
+/// and steps in the browser.
+fn report_bug_url(data_dir: &std::path::Path) -> String {
+    let version = version_tag();
+    let os = os_name();
+    let profile = profile_name();
+
+    // Capture the tail of the log file (last 100 lines, ~8 KB max).
+    let log_tail = {
+        let log_path = crate::log_viewer::log_file_path(data_dir);
+        match std::fs::read_to_string(&log_path) {
+            Ok(content) => {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = lines.len().saturating_sub(100);
+                lines[start..].join("\n")
+            }
+            Err(_) => "(log file not available)".to_string(),
+        }
+    };
+
+    let body = format!(
+        "### Environment\n\
+         - Version: {version}\n\
+         - OS: {os}\n\
+         - Profile: {profile}\n\
+         \n\
+         ### What happened\n\
+         <!-- describe the bug here -->\n\
+         \n\
+         ### Steps to reproduce\n\
+         1. \n\
+         2. \n\
+         3. \n\
+         \n\
+         ### Recent logs\n\
+         ```\n\
+         {log_tail}\n\
+         ```\n"
+    );
+
+    let encoded = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("title", &format!("[bug] "))
+        .append_pair("body", &body)
+        .append_pair("labels", "bug")
+        .finish();
+
+    format!("https://github.com/dmahony/iroh-gossip-chat/issues/new?{encoded}")
+}
+
 /// Build the wire representation used for all GUI file shares.
 ///
 /// A content hash by itself is insufficient: the receiver also needs the
@@ -3712,6 +3786,10 @@ pub enum AppMessage {
         Option<Arc<StdMutex<Option<n0_future::task::JoinHandle<()>>>>>,
     ),
 
+    // ── Bug reporting ──
+    /// Open the pre-filled GitHub bug report in the system browser.
+    ReportBug,
+
     // ── Link preview ──
     /// Open a detected URL in the system default browser.
     OpenUrl(String),
@@ -6084,6 +6162,7 @@ impl IcedChat {
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoEvent(_) => "InlineVideoEvent",
             AppMessage::OpenDownloadsFolder => "OpenDownloadsFolder",
+            AppMessage::ReportBug => "ReportBug",
             AppMessage::OpenUrl(_) => "OpenUrl",
             AppMessage::LinkPreviewLoaded(..) => "LinkPreviewLoaded",
             AppMessage::ErrorMsg(_) => "ErrorMsg",
@@ -14736,6 +14815,20 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::ReportBug => {
+                let url = report_bug_url(&self.data_dir);
+                let url2 = url.clone();
+                iced::Task::perform(
+                    async move {
+                        let result = open::that(&url2);
+                        if let Err(e) = result {
+                            tracing::warn!(url = %url2, error = %e, "failed to open bug report URL");
+                        }
+                    },
+                    |_| AppMessage::Noop,
+                )
+            }
+
             AppMessage::OpenUrl(url) => {
                 // Open the URL in the system default browser.
                 // Use xdg-open on Linux, open on macOS, etc.
@@ -22653,9 +22746,30 @@ impl IcedChat {
             .push(text("Click Remove on a room in the chat list to remove it.").size(TYPO_SM));
 
         // ── Footer ──
-        let footer = text("Press Esc to close")
-            .size(TYPO_XS)
-            .style(text_muted_style);
+        let report_bug_btn = button(text("Report Bug").size(TYPO_SM))
+            .on_press(AppMessage::ReportBug)
+            .padding([SPACE_6, SPACE_12])
+            .style(|t, status| iced::widget::button::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: 1.0,
+                    radius: SPACE_8.into(),
+                },
+                text_color: text_muted_style(t)
+                    .color
+                    .unwrap_or(iced::Color::from_rgb(0.6, 0.6, 0.6)),
+                ..Default::default()
+            });
+
+        let footer = Column::new()
+            .push(report_bug_btn)
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(
+                text("Press Esc to close")
+                    .size(TYPO_XS)
+                    .style(text_muted_style),
+            );
 
         let dialog_content = Column::new()
             .push(header)
