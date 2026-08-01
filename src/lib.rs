@@ -25,6 +25,13 @@ pub mod discovery_record;
 #[cfg(feature = "net")]
 pub mod discovery_validation;
 pub mod metrics;
+/// Zero-allocation byte-buffer pooling for repeated message construction.
+///
+/// A [`BufferPool`](buffer_pool::BufferPool) recycles cleared byte buffers
+/// through [`PooledBuffer`](buffer_pool::PooledBuffer) /
+/// [`PooledBytes`](buffer_pool::PooledBytes) instead of re-allocating on every
+/// message.
+pub mod buffer_pool;
 /// Conservative classification for attachment rendering.
 pub mod media_classification;
 /// Durable video metadata and process-local inline-player coordination.
