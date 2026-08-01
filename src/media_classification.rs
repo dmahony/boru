@@ -88,6 +88,32 @@ mod tests {
             classify_attachment(None, "archive.unknown"),
             MediaKind::NonVideo
         );
-        assert_eq!(classify_attachment(Some(""), "archive"), MediaKind::NonVideo);
+        assert_eq!(
+            classify_attachment(Some(""), "archive"),
+            MediaKind::NonVideo
+        );
+    }
+
+    #[test]
+    fn video_mime_with_supported_extension_accepts_whitespace_and_case() {
+        assert_eq!(
+            classify_attachment(Some("  VIDEO/WEBM  "), "clip.WeBm"),
+            MediaKind::Video
+        );
+    }
+
+    #[test]
+    fn video_mime_with_unknown_extension_is_not_promoted_to_inline_video() {
+        assert_eq!(
+            classify_attachment(Some("video/mp4"), "clip.custom"),
+            MediaKind::NonVideo
+        );
+    }
+
+    #[test]
+    fn filenames_without_a_real_extension_remain_generic_without_mime() {
+        for filename in ["clip", "clip.", "clip.tar.mp4.txt"] {
+            assert_eq!(classify_attachment(None, filename), MediaKind::NonVideo);
+        }
     }
 }

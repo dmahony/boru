@@ -24801,7 +24801,20 @@ mod tests {
             InlinePlaybackError::from_backend("permission denied").kind,
             InlinePlaybackErrorKind::PermissionDenied
         ));
+        assert!(matches!(
+            InlinePlaybackError::from_backend("attachment not found").kind,
+            InlinePlaybackErrorKind::MissingFile
+        ));
+        assert!(matches!(
+            InlinePlaybackError::from_backend("player init failed").kind,
+            InlinePlaybackErrorKind::Initialization
+        ));
+        assert!(matches!(
+            InlinePlaybackError::from_backend("unexpected backend failure").kind,
+            InlinePlaybackErrorKind::Unknown
+        ));
         assert!(InlinePlaybackError::from_backend("player init failed").retry_available());
+        assert!(!InlinePlaybackError::from_backend("permission denied").retry_available());
     }
 
     #[test]
@@ -24810,6 +24823,15 @@ mod tests {
         assert_eq!(error.title(), "Video player could not start");
         assert!(!error.message().contains("/private/user"));
         assert_eq!(error.detail, "open failed at <path>");
+    }
+
+    #[test]
+    fn inline_playback_error_details_are_bounded_and_redact_all_path_tokens() {
+        let raw = format!("decoder failed /tmp/{}", "x".repeat(500));
+        let error = InlinePlaybackError::from_backend(raw);
+        assert!(error.detail.len() <= 240);
+        assert!(!error.detail.contains("/tmp/"));
+        assert_eq!(error.title(), "Video format not supported");
     }
 
     #[test]

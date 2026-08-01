@@ -278,6 +278,32 @@ mod tests {
     }
 
     #[test]
+    fn metadata_defaults_include_generic_media_type() {
+        let metadata = MediaMetadata::default();
+        assert_eq!(metadata.media_type, MediaType::default());
+        assert_eq!(
+            metadata.media_type,
+            MediaType::Other("application/octet-stream".into())
+        );
+        assert_eq!(metadata.probe_status, ProbeStatus::Unknown);
+    }
+
+    #[test]
+    fn metadata_round_trip_preserves_known_video_fields() {
+        let metadata = MediaMetadata {
+            duration_ms: Some(1_250),
+            width: Some(1920),
+            height: Some(1080),
+            poster_reference: Some("blake3:poster".into()),
+            media_type: MediaType::Video,
+            probe_status: ProbeStatus::Ready,
+        };
+        let encoded = serde_json::to_string(&metadata).unwrap();
+        let decoded: MediaMetadata = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, metadata);
+    }
+
+    #[test]
     fn key_distinguishes_messages_and_attachments() {
         assert_ne!(key(1, "a"), key(2, "a"));
         assert_ne!(key(1, "a"), key(1, "b"));
@@ -309,6 +335,36 @@ mod tests {
         assert_eq!(coordinator.active_video(), Some(&second));
         coordinator.clear(Some(&second));
         assert_eq!(coordinator.active_video(), None);
+    }
+
+    #[test]
+    fn player_states_have_stable_default_and_recoverable_failure_shape() {
+        assert_eq!(PlayerState::default(), PlayerState::Idle);
+        let states = [
+            PlayerState::Idle,
+            PlayerState::Preparing,
+            PlayerState::Playing,
+            PlayerState::Paused,
+            PlayerState::Ended,
+            PlayerState::Failed {
+                error: "decoder unavailable".into(),
+            },
+        ];
+        assert!(states
+            .iter()
+            .any(|state| matches!(state, PlayerState::Preparing)));
+        assert!(states
+            .iter()
+            .any(|state| matches!(state, PlayerState::Playing)));
+        assert!(states
+            .iter()
+            .any(|state| matches!(state, PlayerState::Paused)));
+        assert!(states
+            .iter()
+            .any(|state| matches!(state, PlayerState::Ended)));
+        assert!(states.iter().any(
+            |state| matches!(state, PlayerState::Failed { error } if error == "decoder unavailable")
+        ));
     }
 
     #[test]
