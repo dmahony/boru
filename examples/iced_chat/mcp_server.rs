@@ -5696,6 +5696,10 @@ mod tests {
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
             storage: None,
+            directory_store: Arc::new(std::sync::Mutex::new(
+                boru_core::directory::DirectoryStore::new(),
+            )),
+            directory_sender: Arc::new(std::sync::Mutex::new(None)),
         };
 
         let result = spawn_mcp_server(config, state).await;
@@ -5755,6 +5759,10 @@ mod tests {
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
             storage: None,
+            directory_store: Arc::new(std::sync::Mutex::new(
+                boru_core::directory::DirectoryStore::new(),
+            )),
+            directory_sender: Arc::new(std::sync::Mutex::new(None)),
         };
 
         let result = spawn_mcp_server(config, state).await;

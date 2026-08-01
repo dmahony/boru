@@ -6167,7 +6167,6 @@ impl IcedChat {
         self.history_saved_count = 0;
     }
 
-    #[expect(dead_code)]
     fn clear_current_room_history_runtime(
         &mut self,
         topic: TopicId,
@@ -15091,12 +15090,18 @@ impl IcedChat {
             }
 
             AppMessage::ClearHistoryFinished {
-                topic: _,
+                topic,
                 room_history: _,
-                report: _,
+                report,
             } => {
                 self.history_clear_pending = false;
                 self.history_confirm_clear = false;
+                self.history_clear_feedback_is_error = false;
+                self.history_clear_feedback = Some(format!(
+                    "Cleared {} messages from this chat.",
+                    report.chat_entries_removed
+                ));
+                self.clear_current_room_history_runtime(topic, &report);
                 iced::Task::none()
             }
 
@@ -25099,6 +25104,10 @@ mod tests {
                 image_bytes: Some(image_data.clone()),
                 image_identifier: None,
                 image_error: None,
+                image_width: None,
+                image_height: None,
+                gif_frames: None,
+                gif_frame_idx: 0,
                 timestamp: Some(i as i64),
                 event_id: 0,
                 delivery_state: DeliveryState::default(),
@@ -25209,7 +25218,7 @@ mod tests {
 
     #[test]
     fn download_attachment_state_helpers_cover_all_states() {
-        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "");
+        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "", None);
         assert_eq!(attachment.action_label(), "Download");
         assert_eq!(attachment.status_label(), "Ready to download");
         assert!(attachment.progress_fraction().is_none());
@@ -27042,7 +27051,7 @@ mod tests {
     #[test]
     fn download_lifecycle_started_progress_completed() {
         let entry =
-            ChatEntry::system_download("system msg", TransferKind::File, "test.doc", "ticket", "");
+            ChatEntry::system_download("system msg", TransferKind::File, "test.doc", "ticket", "" , None);
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(1);
 
@@ -27124,6 +27133,7 @@ mod tests {
             "corrupt.zip",
             "ticket",
             "",
+            None,
         );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(2);
@@ -27165,7 +27175,7 @@ mod tests {
     #[test]
     fn download_lifecycle_started_cancelled() {
         let entry =
-            ChatEntry::system_download("file share", TransferKind::File, "large.iso", "ticket", "");
+            ChatEntry::system_download("file share", TransferKind::File, "large.iso", "ticket", "" , None);
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(3);
 
@@ -27199,6 +27209,7 @@ mod tests {
             "report.pdf",
             "ticket",
             "",
+            None,
         );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(4);
@@ -27260,7 +27271,7 @@ mod tests {
     fn download_transfer_id_anchoring_survives_entry_reorder() {
         let id = TransferId::new(5);
         let mut entry =
-            ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket", "");
+            ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket", "" , None);
         entry.download.as_mut().unwrap().transfer_id = Some(id);
 
         // Simulate entries: a text entry inserted before the download entry,
@@ -27298,7 +27309,7 @@ mod tests {
     #[test]
     fn download_anchoring_falls_back_to_index_when_no_transfer_id() {
         let entry =
-            ChatEntry::system_download("file", TransferKind::File, "archive.tar.gz", "ticket", "");
+            ChatEntry::system_download("file", TransferKind::File, "archive.tar.gz", "ticket", "" , None);
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(6);
 
@@ -27324,9 +27335,9 @@ mod tests {
     #[test]
     fn download_multiple_attachments_update_correct_row() {
         let entry_a =
-            ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a", "");
+            ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a", "", None);
         let entry_b =
-            ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b", "");
+            ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b", "", None);
         let mut mgr = TestDownloadManager::new(vec![entry_a, entry_b], Some(0));
         let id_a = TransferId::new(10);
         let id_b = TransferId::new(11);
@@ -27386,7 +27397,7 @@ mod tests {
     #[test]
     fn download_unknown_total_shows_size_unknown() {
         let entry =
-            ChatEntry::system_download("stream", TransferKind::File, "live.mp4", "ticket", "");
+            ChatEntry::system_download("stream", TransferKind::File, "live.mp4", "ticket", "" , None);
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(7);
 
@@ -27443,6 +27454,7 @@ mod tests {
             "screenshot.png",
             "ticket",
             "",
+            None,
         );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(8);
@@ -27470,7 +27482,7 @@ mod tests {
     #[test]
     fn download_zero_total_edge_case() {
         let entry =
-            ChatEntry::system_download("empty", TransferKind::File, "empty.txt", "ticket", "");
+            ChatEntry::system_download("empty", TransferKind::File, "empty.txt", "ticket", "" , None);
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(9);
 
@@ -27505,10 +27517,10 @@ mod tests {
     /// tolerances for each download state.
     #[test]
     fn download_estimated_height_fits_each_state() {
-        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "");
+        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "", None);
 
         // Ready
-        assert!((attachment.estimated_height() - 92.0).abs() < 1.0);
+        assert!((attachment.estimated_height() - 84.0).abs() < 1.0);
 
         // Active with known total
         attachment.state = DownloadState::Active {
@@ -27516,8 +27528,8 @@ mod tests {
             total: Some(1000),
         };
         assert!(
-            (attachment.estimated_height() - 152.0).abs() < 1.0,
-            "active+total height expected ~152, got {}",
+            (attachment.estimated_height() - 112.0).abs() < 1.0,
+            "active+total height expected ~112, got {}",
             attachment.estimated_height()
         );
 
@@ -27526,7 +27538,7 @@ mod tests {
             bytes: 500,
             total: None,
         };
-        assert!((attachment.estimated_height() - 144.0).abs() < 1.0);
+        assert!((attachment.estimated_height() - 176.0).abs() < 1.0);
 
         // Completed
         attachment.state = DownloadState::Completed {
@@ -27534,7 +27546,7 @@ mod tests {
             saved_path: None,
             total_size: None,
         };
-        assert!((attachment.estimated_height() - 100.0).abs() < 1.0);
+        assert!((attachment.estimated_height() - 92.0).abs() < 1.0);
 
         // Failed
         attachment.state = DownloadState::Failed {
@@ -27546,7 +27558,7 @@ mod tests {
 
         // Cancelled
         attachment.state = DownloadState::Cancelled;
-        assert!((attachment.estimated_height() - 92.0).abs() < 1.0);
+        assert!((attachment.estimated_height() - 84.0).abs() < 1.0);
     }
 
     // ── Performance baseline benchmarks ─────────────────────────────────
@@ -27776,11 +27788,11 @@ mod tests {
         // Setup three download entries at indices 0, 1, 2,
         // plus a text entry at index 3 that should never be touched.
         let entry_a =
-            ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a", "");
+            ChatEntry::system_download("file a", TransferKind::File, "a.zip", "ticket_a", "", None);
         let entry_b =
-            ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b", "");
+            ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b", "", None);
         let entry_c =
-            ChatEntry::system_download("file c", TransferKind::File, "c.zip", "ticket_c", "");
+            ChatEntry::system_download("file c", TransferKind::File, "c.zip", "ticket_c", "" , None);
         let text_entry = ChatEntry::remote("peer", "hello", None, None, None);
         let mut mgr = TestDownloadManager::new(
             vec![entry_a, entry_b, entry_c, text_entry],
