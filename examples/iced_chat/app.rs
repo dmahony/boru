@@ -2252,6 +2252,22 @@ pub struct IcedChat {
     /// Set by on_neighbor_up/on_neighbor_down when a connection count refresh
     /// is needed outside the normal ~60s cycle.
     needs_conn_refresh: bool,
+    /// Extra gossip neighbors whose addressing info is embedded in the
+    /// regenerated room ticket as additional bootstrap nodes. Populated
+    /// asynchronously from [`Self::pending_ticket_peers`] via
+    /// `endpoint.remote_info()` inside ConnMonitorTick.
+    ticket_extra_peers: Vec<EndpointAddr>,
+    /// Neighbor PublicKeys whose addressing info has not yet been resolved.
+    /// Resolution is deferred because `endpoint.remote_info()` is async while
+    /// `on_neighbor_up` is sync; ConnMonitorTick resolves them and moves the
+    /// results into [`Self::ticket_extra_peers`].
+    pending_ticket_peers: Vec<PublicKey>,
+    /// Set when the mesh membership changed (neighbor up/down or a pending
+    /// peer resolved) so the next presence broadcast regenerates the room
+    /// ticket with the latest extra bootstrap peers.
+    ticket_needs_regeneration: bool,
+    /// Guards against overlapping async ticket-peer resolution tasks.
+    ticket_resolve_in_flight: bool,
     /// Maps protocol message hashes to event_ids for delivery state resolution.
     self_sent_events: HashMap<MessageHash, u64>,
     /// Maintained indexes into the active conversation's entries.
@@ -3350,6 +3366,14 @@ pub enum AppMessage {
         direct: usize,
         relayed: usize,
     },
+    /// Async result from resolving pending ticket peers into concrete
+    /// [`EndpointAddr`]s via `endpoint.remote_info()` inside ConnMonitorTick.
+    /// `unresolved` are peers whose addressing info was not available yet;
+    /// they are re-queued for a later resolution attempt.
+    TicketPeersResolved {
+        resolved: Vec<EndpointAddr>,
+        unresolved: Vec<PublicKey>,
+    },
     /// Async result from the /connections debug command.
     ConnectionsResult(Vec<String>),
     /// Send a friend request to a peer.
@@ -4429,6 +4453,10 @@ impl IcedChat {
             peer_latencies: HashMap::new(),
             conn_refresh_in_flight: false,
             needs_conn_refresh: false,
+            ticket_extra_peers: Vec::new(),
+            pending_ticket_peers: Vec::new(),
+            ticket_needs_regeneration: false,
+            ticket_resolve_in_flight: false,
             self_sent_events: HashMap::new(),
             event_id_to_index: HashMap::new(),
             message_hash_to_index: HashMap::new(),
@@ -4610,13 +4638,23 @@ impl IcedChat {
         self.perf.borrow().snapshot()
     }
 
-    fn room_ticket(&self, topic: TopicId) -> Ticket {
+    fn room_ticket(&self, topic: TopicId, extra_peers: &[EndpointAddr]) -> Ticket {
+        let mut peers = vec![invitation_endpoint_addr(
+            self.endpoint.watch_addr().get(),
+            self.share_direct_addresses,
+        )];
+        // Append extra bootstrap peers (e.g. peers that joined the mesh
+        // after this ticket was first created). The same direct-address
+        // policy is applied so tickets never leak direct IPs unless the
+        // user opted in to sharing them.
+        for extra in extra_peers {
+            if extra.id != self.local_public {
+                peers.push(invitation_endpoint_addr(extra.clone(), self.share_direct_addresses));
+            }
+        }
         Ticket {
             topic,
-            peers: vec![invitation_endpoint_addr(
-                self.endpoint.watch_addr().get(),
-                self.share_direct_addresses,
-            )],
+            peers,
             discovery_secret: None,
         }
     }
@@ -4656,7 +4694,8 @@ impl IcedChat {
     }
 
     fn personal_room_ticket(&self) -> String {
-        self.room_ticket(self.personal_room_topic()).to_string()
+        self.room_ticket(self.personal_room_topic(), &self.ticket_extra_peers)
+            .to_string()
     }
 
     /// Refresh the displayed room ticket when iroh learns a new relay or
@@ -4667,7 +4706,7 @@ impl IcedChat {
             return false;
         }
 
-        let current_ticket = self.room_ticket(self.topic).to_string();
+        let current_ticket = self.room_ticket(self.topic, &self.ticket_extra_peers).to_string();
         if current_ticket == self.ticket_str {
             return false;
         }
@@ -5923,6 +5962,7 @@ impl IcedChat {
             AppMessage::MailboxReplayed { .. } => "MailboxReplayed",
             AppMessage::Scrolled(..) => "Scrolled",
             AppMessage::ConnCountsResult { .. } => "ConnCountsResult",
+            AppMessage::TicketPeersResolved { .. } => "TicketPeersResolved",
             AppMessage::ConnectionsResult(_) => "ConnectionsResult",
             AppMessage::SendFriendRequest(_) => "SendFriendRequest",
             AppMessage::FriendRequestSent { .. } => "FriendRequestSent",
@@ -7150,7 +7190,9 @@ impl IcedChat {
                 // ── Public room: advertise without auto-joining ──────
                 if advertise {
                     let topic = TopicId::from_bytes(rand::random());
-                    let ticket = self.room_ticket(topic);
+                    // Brand-new room: no mesh neighbors are subscribed to
+                    // this topic yet, so no extra bootstrap peers apply.
+                    let ticket = self.room_ticket(topic, &[]);
                     let ticket_str = ticket.to_string();
                     // Persist a minimal RoomStore entry so the room and its
                     // ticket survive restarts (needed for periodic re-advertise).
@@ -12270,7 +12312,7 @@ impl IcedChat {
                             .get(&topic)
                             .copied()
                             .unwrap_or_default();
-                        let ticket = self.room_ticket(topic).to_string();
+                        let ticket = self.room_ticket(topic, &[]).to_string();
                         iced::Task::perform(
                             async move {
                                 let ad = boru_core::chat_core::RoomAdvertisement {
@@ -13593,6 +13635,33 @@ impl IcedChat {
                     self.conn_refresh_counter -= 1;
                 }
 
+                // Resolve pending ticket peers (deferred from on_neighbor_up
+                // because `endpoint.remote_info()` is async) into concrete
+                // EndpointAddrs so the next presence broadcast can embed them
+                // as extra bootstrap nodes in the regenerated room ticket.
+                if !self.pending_ticket_peers.is_empty() && !self.ticket_resolve_in_flight {
+                    self.ticket_resolve_in_flight = true;
+                    let pending: Vec<PublicKey> = std::mem::take(&mut self.pending_ticket_peers);
+                    let endpoint = self.endpoint.clone();
+                    tasks.push(iced::Task::perform(
+                        async move {
+                            let mut resolved = Vec::new();
+                            let mut unresolved = Vec::new();
+                            for peer in &pending {
+                                match endpoint.remote_info(*peer).await {
+                                    Some(info) => resolved.push(EndpointAddr::from_parts(
+                                        info.id(),
+                                        info.into_addrs().map(|a| a.into_addr()),
+                                    )),
+                                    None => unresolved.push(*peer),
+                                }
+                            }
+                            AppMessage::TicketPeersResolved { resolved, unresolved }
+                        },
+                        |msg| msg,
+                    ));
+                }
+
                 // Relay selection and direct addresses are learned asynchronously.
                 // Keep the room ticket shown in the UI (and therefore copied to the
                 // clipboard) aligned with the endpoint's current address.
@@ -13616,6 +13685,11 @@ impl IcedChat {
                 }
                 if self.presence_counter == 0 {
                     self.presence_counter = 5;
+                    // Mesh membership changed (neighbor up/down or a pending
+                    // peer resolved) → regenerate the room ticket with the
+                    // latest extra bootstrap peers before broadcasting.
+                    // personal_room_ticket() reads ticket_extra_peers live.
+                    self.ticket_needs_regeneration = false;
                     if let Some(ref sender) = self.sender {
                         let sk = self.secret_key.clone();
                         let ticket = self.personal_room_ticket();
@@ -13743,7 +13817,7 @@ impl IcedChat {
                                             .copied()
                                             .unwrap_or_default();
                                         // Build a join ticket for the room
-                                        let ticket = self.room_ticket(topic).to_string();
+                                        let ticket = self.room_ticket(topic, &[]).to_string();
                                         Some((topic, name, topic, ticket, neighbor_count))
                                     })
                                     .collect();
@@ -14008,6 +14082,29 @@ impl IcedChat {
                     ));
                 }
                 self.conn_refresh_in_flight = false;
+                iced::Task::none()
+            }
+
+            AppMessage::TicketPeersResolved { resolved, unresolved } => {
+                self.ticket_resolve_in_flight = false;
+                // Merge resolved peer addressing info into the ticket's extra
+                // bootstrap list (dedupe by endpoint id), then flag the ticket
+                // for regeneration on the next presence broadcast.
+                for addr in resolved {
+                    if addr.id != self.local_public
+                        && !self.ticket_extra_peers.iter().any(|e| e.id == addr.id)
+                    {
+                        self.ticket_extra_peers.push(addr);
+                    }
+                }
+                // Re-queue peers whose addressing info was not available yet;
+                // the next ConnMonitorTick will retry the lookup.
+                for peer in unresolved {
+                    if !self.pending_ticket_peers.contains(&peer) {
+                        self.pending_ticket_peers.push(peer);
+                    }
+                }
+                self.ticket_needs_regeneration = true;
                 iced::Task::none()
             }
 
@@ -16334,6 +16431,16 @@ impl ChatCallbacks for IcedChat {
         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.needs_conn_refresh = true;
 
+        // Queue the new neighbor for ticket regeneration. The actual
+        // `endpoint.remote_info()` lookup is deferred to ConnMonitorTick
+        // because this callback is sync; once resolved, the peer's
+        // addressing info is embedded in the room ticket as an extra
+        // bootstrap node.
+        if !self.pending_ticket_peers.contains(&peer) {
+            self.pending_ticket_peers.push(peer);
+        }
+        self.ticket_needs_regeneration = true;
+
         // For each pending backfill topic, check if we still need history
         // (the count may have been satisfied by a previous backfill) and
         // spawn a request if not.  Retain topics that still need backfill
@@ -16361,6 +16468,13 @@ impl ChatCallbacks for IcedChat {
         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
         self.needs_conn_refresh = true;
         self.peer_latencies.remove(&peer);
+
+        // Remove the peer from the ticket's extra bootstrap nodes (both
+        // the resolved list and any pending resolution) and flag the ticket
+        // for regeneration.
+        self.ticket_extra_peers.retain(|addr| addr.id != peer);
+        self.pending_ticket_peers.retain(|p| *p != peer);
+        self.ticket_needs_regeneration = true;
     }
 
     fn record_activity(&mut self, peer: PublicKey) {
