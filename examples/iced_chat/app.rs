@@ -20823,8 +20823,10 @@ impl IcedChat {
         let last_seen = conversation
             .as_ref()
             .map(|entry| {
-                if is_online {
+                if presence == PeerPresence::Online {
                     "Online now".to_string()
+                } else if presence == PeerPresence::Away {
+                    "Away".to_string()
                 } else if entry.last_seen_at_unix_ms > 0 {
                     format_last_seen(Some(entry.last_seen_at_unix_ms))
                 } else {
@@ -20854,23 +20856,15 @@ impl IcedChat {
         // Presence row: status dot + label
         contact_items.push(
             row![
-                icon_svg(if is_online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_SM,).style(
+                icon_svg(presence.icon(), TYPO_SM,).style(
                     move |t, _| iced::widget::svg::Style {
-                        color: Some(if is_online {
-                            accent_green(t)
-                        } else {
-                            text_muted(t)
-                        })
+                        color: Some(presence.color(t))
                     }
                 ),
-                text(if is_online { "Online" } else { "Offline" })
+                text(presence.label())
                     .size(TYPO_SM)
                     .style(move |t| iced::widget::text::Style {
-                        color: Some(if is_online {
-                            accent_green(t)
-                        } else {
-                            text_muted(t)
-                        })
+                        color: Some(presence.color(t))
                     }),
             ]
             .spacing(SPACE_6)
