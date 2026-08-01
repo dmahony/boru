@@ -18635,28 +18635,24 @@ impl IcedChat {
 
         let has_friends = !dep.friends.is_empty();
         for friend in &dep.friends {
-            let is_online = friend.online;
+            let presence = friend.presence;
             let row_el = Row::new()
                 .push(Self::peer_avatar_block(friend.avatar.clone(), friend.peer))
                 .push(
                     Row::new()
                         .push(
-                            icon_svg(if is_online { ICON_ONLINE } else { ICON_OFFLINE }, TYPO_SM)
+                            icon_svg(presence.icon(), TYPO_SM)
                                 .style({
                                     let dm = dep.dark_mode;
                                     move |t, _| iced::widget::svg::Style {
-                                        color: Some(if is_online {
-                                            accent_green(t)
-                                        } else {
-                                            Self::muted_color(dm)
-                                        }),
+                                        color: Some(presence.color(&Self::theme_from_dark(dm))),
                                     }
                                 }),
                         )
                         .push(
                             text(friend.label.clone())
                                 .size(TYPO_SM)
-                                .color(if is_online {
+                                .color(if presence != PeerPresence::Offline {
                                     text_remote_body(&theme)
                                 } else {
                                     Self::muted_color(dep.dark_mode)
