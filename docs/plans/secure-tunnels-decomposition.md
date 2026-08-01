@@ -94,7 +94,8 @@ Notes:
 - All 28 tasks were created with `initial_status=blocked` (prevents the dispatcher from
   claiming them), then moved to `scheduled` via `hermes kanban schedule <id>` — visible on
   the dashboard with a ⏱ marker, intentionally not dispatchable.
-- Cron job `unblock-boru-tunnels-6am` (no_agent script) fires at `2026-08-02T06:00:00` and
+- Cron job `76a9a02dd45e` ("Unblock Boru Secure Tunnels tasks (6AM)", no_agent) fires at
+  `2026-08-02T06:00:00` and runs `~/.hermes/scripts/unblock_boru_tunnels_6am.py`, which
   runs `hermes kanban unblock <all 28 ids>`; the dispatcher then promotes per the parent
   graph (Phase 1 → ready, the rest → todo until their parents complete).
 
