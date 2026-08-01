@@ -79,6 +79,7 @@ use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::{SharedFileRow, Storage};
 use boru_core::store::MessageStore;
 use boru_core::video_poster;
+use boru_core::video_playback::VideoInstanceKey;
 use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
@@ -111,6 +112,25 @@ use boru_core::diagnostics::IcedStateSnapshot;
 use boru_core::diagnostics::DEFAULT_ACTION_STATE_TIMEOUT_MS;
 use boru_core::directory::DirectoryStore;
 use iced::Color;
+#[cfg(feature = "video-playback")]
+use iced_video_player::Video;
+
+#[cfg(feature = "video-playback")]
+#[derive(Debug, Clone)]
+struct InlineVideoSession {
+    key: VideoInstanceKey,
+    video: Option<Arc<Video>>,
+    error: Option<String>,
+}
+
+#[cfg(feature = "video-playback")]
+#[derive(Debug, Clone)]
+enum InlineVideoEvent {
+    Loaded { key: VideoInstanceKey, video: Arc<Video> },
+    Failed { key: VideoInstanceKey, error: String },
+    Ended { key: VideoInstanceKey },
+    Error { key: VideoInstanceKey, error: String },
+}
 
 // ── Shared ContinuousTracker wrapper ─────────────────────────────────
 /// Wraps [`PrivateContinuousTracker`] so it can be stored in the Clone-derived
@@ -2132,6 +2152,8 @@ pub struct IcedChat {
     /// Transfer ID for the active download, used to keep updates attached to
     /// the correct row even if the view is recreated.
     active_download_transfer_id: Option<TransferId>,
+    #[cfg(feature = "video-playback")]
+    inline_video: Option<InlineVideoSession>,
     /// TransferId → entry index cache for O(1) progress update lookups.
     /// Populated lazily in handle_download_progress; cleared on room switch.
     transfer_id_to_index: HashMap<TransferId, usize>,
@@ -3009,7 +3031,14 @@ pub enum AppMessage {
         poster: Result<(Vec<u8>, Option<(u32, u32)>), String>,
     },
     DownloadFailed(String),
+    /// Open a downloaded file with the platform default application.
     OpenDownloadedFile(String),
+    /// Start verified inline playback for a completed video attachment.
+    PlayInlineVideo(usize),
+    /// Close the active inline player and restore its poster.
+    CloseInlineVideo,
+    #[cfg(feature = "video-playback")]
+    InlineVideoEvent(InlineVideoEvent),
     OpenDownloadsFolder,
     ErrorMsg(String),
     ExecuteFileSend(String),
@@ -4303,6 +4332,8 @@ impl IcedChat {
             file_upload_spinner_frame: 0,
             download_entry_index: None,
             active_download_transfer_id: None,
+            #[cfg(feature = "video-playback")]
+            inline_video: None,
             transfer_id_to_index: HashMap::new(),
             names: HashMap::new(),
             topic: initial_topic,
@@ -5168,18 +5199,49 @@ impl IcedChat {
         entry_index: usize,
         attachment: &DownloadAttachment,
     ) -> iced::Element<'_, AppMessage> {
+        #[cfg(feature = "video-playback")]
+        let active_player = self
+            .inline_video
+            .as_ref()
+            .filter(|session| {
+                session.key.conversation_id == self.topic
+                    && session.key.message_id == self.entries[entry_index].event_id
+                    && session.key.attachment_id == attachment.name
+            });
+        #[cfg(feature = "video-playback")]
+        let player = active_player.and_then(|session| session.video.as_ref().map(|video| video.as_ref()));
+        #[cfg(feature = "video-playback")]
+        let preparing = active_player.is_some_and(|session| session.video.is_none());
+        #[cfg(feature = "video-playback")]
+        return crate::download_progress_view::view_download_progress_with_player(
+            entry_index,
+            attachment,
+            self.dark_mode,
+            player,
+            preparing,
+        );
+        #[cfg(not(feature = "video-playback"))]
         let dependency = (entry_index, attachment.clone(), self.dark_mode);
-        iced::widget::lazy(dependency, |(entry_index, attachment, dark_mode)| {
+        #[cfg(not(feature = "video-playback"))]
+        return iced::widget::lazy(dependency, |(entry_index, attachment, dark_mode)| {
             Self::view_download_attachment_content(*entry_index, attachment, *dark_mode)
         })
         .into()
     }
 
+    #[cfg(not(feature = "video-playback"))]
     fn view_download_attachment_content(
         entry_index: usize,
         attachment: &DownloadAttachment,
         dark_mode: bool,
+        #[cfg(feature = "video-playback")] player: Option<Arc<Video>>,
     ) -> iced::Element<'static, AppMessage> {
+        #[cfg(feature = "video-playback")]
+        return crate::download_progress_view::view_download_progress_with_player(
+            entry_index, attachment, dark_mode, player,
+ preparing,
+ );
+        #[cfg(not(feature = "video-playback"))]
         crate::download_progress_view::view_download_progress(entry_index, attachment, dark_mode)
     }
 
@@ -5679,6 +5741,10 @@ impl IcedChat {
             AppMessage::PosterGenerated { .. } => "PosterGenerated",
             AppMessage::DownloadFailed(_) => "DownloadFailed",
             AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
+            AppMessage::PlayInlineVideo(_) => "PlayInlineVideo",
+            AppMessage::CloseInlineVideo => "CloseInlineVideo",
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoEvent(_) => "InlineVideoEvent",
             AppMessage::OpenDownloadsFolder => "OpenDownloadsFolder",
             AppMessage::OpenUrl(_) => "OpenUrl",
             AppMessage::LinkPreviewLoaded(..) => "LinkPreviewLoaded",
@@ -11275,6 +11341,103 @@ impl IcedChat {
             }
             AppMessage::DownloadProgress(progress) => {
                 self.handle_download_progress(progress);
+                iced::Task::none()
+            }
+            AppMessage::PlayInlineVideo(entry_index) => {
+                #[cfg(feature = "video-playback")]
+                {
+                    let Some(entry) = self.entries.get(entry_index) else {
+                        return iced::Task::none();
+                    };
+                    let Some(download) = entry.download.as_ref() else {
+                        return iced::Task::none();
+                    };
+                    let DownloadState::Completed { saved_path: Some(path), .. } = &download.state else {
+                        self.push_system("Video is not ready to play yet.");
+                        return iced::Task::none();
+                    };
+                    if !path.is_file() {
+                        self.push_system("Video file is no longer available.");
+                        return iced::Task::none();
+                    }
+                    let key = VideoInstanceKey::new(self.topic, entry.event_id, download.name.clone());
+                    self.inline_video = Some(InlineVideoSession {
+                        key: key.clone(),
+                        video: None,
+                        error: None,
+                    });
+                    self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                    let path = path.clone();
+                    return iced::Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+                                if !canonical.is_file() {
+                                    return Err("verified path is not a file".to_string());
+                                }
+                                let uri = url::Url::from_file_path(&canonical)
+                                    .map_err(|()| "cannot create file URI".to_string())?;
+                                Video::new(&uri).map_err(|e| e.to_string())
+                            })
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|result| result)
+                        },
+                        move |result| match result {
+                            Ok(mut video) => {
+                                video.set_paused(false);
+                                AppMessage::InlineVideoEvent(InlineVideoEvent::Loaded {
+                                    key,
+                                    video: Arc::new(video),
+                                })
+                            }
+                            Err(error) => AppMessage::InlineVideoEvent(InlineVideoEvent::Failed { key, error }),
+                        },
+                    );
+                }
+                #[cfg(not(feature = "video-playback"))]
+                {
+                    let Some(entry) = self.entries.get(entry_index) else {
+                        return iced::Task::none();
+                    };
+                    if let Some(download) = entry.download.as_ref() {
+                        return self.update(AppMessage::OpenDownloadedFile(download.name.clone()));
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::CloseInlineVideo => {
+                #[cfg(feature = "video-playback")]
+                {
+                    self.inline_video = None;
+                    self.layout_cache.borrow_mut().clear();
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoEvent(event) => {
+                match event {
+                    InlineVideoEvent::Loaded { key, video } => {
+                        if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
+                            session.video = Some(video);
+                            session.error = None;
+                            self.layout_cache.borrow_mut().clear();
+                        }
+                    }
+                    InlineVideoEvent::Failed { key, error } | InlineVideoEvent::Error { key, error } => {
+                        if self.inline_video.as_ref().is_some_and(|s| s.key == key) {
+                            self.push_system(format!("Video playback failed: {error}"));
+                            self.inline_video = None;
+                            self.layout_cache.borrow_mut().clear();
+                        }
+                    }
+                    InlineVideoEvent::Ended { key } => {
+                        if self.inline_video.as_ref().is_some_and(|s| s.key == key) {
+                            self.inline_video = None;
+                            self.layout_cache.borrow_mut().clear();
+                        }
+                    }
+                }
                 iced::Task::none()
             }
             AppMessage::OpenDownloadedFile(name) => {

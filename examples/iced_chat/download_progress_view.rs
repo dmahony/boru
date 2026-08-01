@@ -17,6 +17,8 @@ use iced::font::Weight;
 use iced::widget::text::Wrapping;
 use iced::widget::{self, button, container, row, text, Column, Row};
 use iced::{Alignment, Color, Length};
+#[cfg(feature = "video-playback")]
+use iced_video_player::{Video, VideoPlayer};
 
 use super::app::{
     icon_svg, AppMessage, DownloadAttachment, DownloadState, ICON_ACTIVITY, ICON_FILES,
@@ -215,6 +217,35 @@ pub fn view_download_progress(
     attachment: &DownloadAttachment,
     dark_mode: bool,
 ) -> iced::Element<'static, AppMessage> {
+    #[cfg(feature = "video-playback")]
+    {
+        view_download_progress_inner(entry_index, attachment, dark_mode, None, false)
+    }
+    #[cfg(not(feature = "video-playback"))]
+    {
+        view_download_progress_inner(entry_index, attachment, dark_mode, (), false)
+    }
+}
+
+#[cfg(feature = "video-playback")]
+pub fn view_download_progress_with_player<'a>(
+    entry_index: usize,
+    attachment: &DownloadAttachment,
+    dark_mode: bool,
+    player: Option<&'a Video>,
+    preparing: bool,
+) -> iced::Element<'a, AppMessage> {
+    view_download_progress_inner(entry_index, attachment, dark_mode, player, preparing)
+}
+
+fn view_download_progress_inner<'a>(
+    entry_index: usize,
+    attachment: &DownloadAttachment,
+    dark_mode: bool,
+    #[cfg(feature = "video-playback")] player: Option<&'a Video>,
+    #[cfg(not(feature = "video-playback"))] _player: (),
+    preparing: bool,
+) -> iced::Element<'a, AppMessage> {
     let state = &attachment.state;
     let theme = resolve_theme(dark_mode);
     let tone = state_badge_color(state, &theme);
@@ -419,10 +450,18 @@ pub fn view_download_progress(
             .center_y(Length::Fill)
             .into()
         };
-        let play = button(text("▶").size(28.0).color(Color::WHITE))
-            .on_press_maybe((presentation == VideoPresentationState::Ready).then(|| {
+        let play_message = {
+            #[cfg(feature = "video-playback")]
+            {
+                AppMessage::PlayInlineVideo(entry_index)
+            }
+            #[cfg(not(feature = "video-playback"))]
+            {
                 AppMessage::OpenDownloadedFile(attachment.name.clone())
-            }))
+            }
+        };
+        let play = button(text("▶").size(28.0).color(Color::WHITE))
+            .on_press_maybe((presentation == VideoPresentationState::Ready && !preparing).then_some(play_message))
             .padding([SPACE_8, SPACE_12])
             .style(|_theme, _status| widget::button::Style {
                 background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.62))),
@@ -439,6 +478,22 @@ pub fn view_download_progress(
                 border: iced::Border { color: border_muted(t), width: 1.0, radius: SPACE_10.into() },
                 ..Default::default()
             });
+        #[cfg(feature = "video-playback")]
+        let preview = if let Some(video) = player {
+            container(VideoPlayer::new(&video)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .content_fit(iced::ContentFit::Contain)
+                .on_end_of_stream(AppMessage::CloseInlineVideo)
+                .on_error(|_error| AppMessage::CloseInlineVideo))
+                .width(Length::Fill)
+                .max_width(360.0)
+                .height(Length::Fixed(preview_height))
+                .clip(true)
+                .into()
+        } else {
+            preview
+        };
         let size_label = match &attachment.state {
             DownloadState::Ready { total: Some(total) }
             | DownloadState::Active { total: Some(total), .. }
@@ -448,13 +503,17 @@ pub fn view_download_progress(
             }
             _ => String::new(),
         };
-        let status = match presentation {
+        let status = if preparing {
+            "Preparing video…"
+        } else {
+            match presentation {
             VideoPresentationState::Ready => "Ready to play",
             VideoPresentationState::Downloading => "Downloading video…",
             VideoPresentationState::Verifying => "Verifying video…",
             VideoPresentationState::Failed => "Download failed",
             VideoPresentationState::Missing => "Local file missing · download again",
             VideoPresentationState::Remote => "Static preview · download to play",
+            }
         };
         body = body
             .push(preview)
