@@ -1126,6 +1126,101 @@ enum ChatKind {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) enum InlinePlaybackErrorKind {
+    UnsupportedCodec,
+    CorruptFile,
+    MissingFile,
+    PermissionDenied,
+    Initialization,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct InlinePlaybackError {
+    pub(crate) kind: InlinePlaybackErrorKind,
+    /// Short backend detail retained for diagnostics; never shown as a path.
+    pub(crate) detail: String,
+}
+
+impl InlinePlaybackError {
+    pub(crate) fn from_backend(error: impl Into<String>) -> Self {
+        let raw_detail = error.into();
+        let lower = raw_detail.to_ascii_lowercase();
+        let kind = if lower.contains("codec")
+            || lower.contains("decoder")
+            || lower.contains("not-negotiated")
+            || lower.contains("cannot decode")
+        {
+            InlinePlaybackErrorKind::UnsupportedCodec
+        } else if lower.contains("not found")
+            || lower.contains("missing")
+            || lower.contains("no such file")
+        {
+            InlinePlaybackErrorKind::MissingFile
+        } else if lower.contains("permission") || lower.contains("access denied") {
+            InlinePlaybackErrorKind::PermissionDenied
+        } else if lower.contains("corrupt")
+            || lower.contains("invalid")
+            || lower.contains("parse")
+            || lower.contains("malformed")
+        {
+            InlinePlaybackErrorKind::CorruptFile
+        } else if lower.contains("init")
+            || lower.contains("construct")
+            || lower.contains("open")
+            || lower.contains("resource")
+        {
+            InlinePlaybackErrorKind::Initialization
+        } else {
+            InlinePlaybackErrorKind::Unknown
+        };
+        // Backend messages can contain local paths or peer-controlled names.
+        // Keep a bounded diagnostic without carrying those values into logs.
+        let detail = raw_detail
+            .split_whitespace()
+            .map(|token| {
+                if token.contains('/') || token.contains('\\') {
+                    "<path>"
+                } else {
+                    token
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self {
+            kind,
+            detail: detail.chars().take(240).collect(),
+        }
+    }
+
+    pub(crate) fn title(&self) -> &'static str {
+        match self.kind {
+            InlinePlaybackErrorKind::UnsupportedCodec => "Video format not supported",
+            InlinePlaybackErrorKind::CorruptFile => "Video file appears damaged",
+            InlinePlaybackErrorKind::MissingFile => "Video file is missing",
+            InlinePlaybackErrorKind::PermissionDenied => "Video cannot be opened",
+            InlinePlaybackErrorKind::Initialization => "Video player could not start",
+            InlinePlaybackErrorKind::Unknown => "Video playback failed",
+        }
+    }
+
+    pub(crate) fn message(&self) -> &'static str {
+        match self.kind {
+            InlinePlaybackErrorKind::UnsupportedCodec => "This packaged player cannot decode this video's format.",
+            InlinePlaybackErrorKind::CorruptFile => "The attachment is not a valid playable video.",
+            InlinePlaybackErrorKind::MissingFile => "The saved attachment is no longer on this device.",
+            InlinePlaybackErrorKind::PermissionDenied => "The saved attachment could not be accessed.",
+            InlinePlaybackErrorKind::Initialization => "Try again without downloading the attachment again.",
+            InlinePlaybackErrorKind::Unknown => "The attachment is still available for saving or opening externally.",
+        }
+    }
+
+    pub(crate) fn retry_available(&self) -> bool {
+        matches!(self.kind, InlinePlaybackErrorKind::Initialization | InlinePlaybackErrorKind::Unknown)
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum DownloadFailure {
     PermissionDenied,
     FileRemoved,
@@ -1424,6 +1519,7 @@ pub(crate) struct DownloadAttachment {
     /// Poster dimensions preserve a known aspect ratio without probing video
     /// data from the view function.
     pub(crate) poster_dimensions: Option<(u32, u32)>,
+    pub(crate) playback_error: Option<InlinePlaybackError>,
 }
 
 impl DownloadAttachment {
@@ -1450,6 +1546,7 @@ impl DownloadAttachment {
             speed_bytes_per_sec: None,
             thumbnail,
             poster_dimensions,
+            playback_error: None,
         }
     }
 
@@ -11628,12 +11725,24 @@ impl IcedChat {
                         self.push_system("Video is not ready to play yet.");
                         return iced::Task::none();
                     };
+                    let path = path.clone();
+                    let message_id = entry.event_id;
+                    let attachment_id = download.name.clone();
                     if !path.is_file() {
                         self.push_system("Video file is no longer available.");
                         return iced::Task::none();
                     }
+                    if let Some(download) = self
+                        .entries
+                        .get_mut(entry_index)
+                        .and_then(|entry| entry.download.as_mut())
+                    {
+                        // Retry only recreates the decoder; the verified local
+                        // attachment is not downloaded again.
+                        download.playback_error = None;
+                    }
                     let key =
-                        VideoInstanceKey::new(self.topic, entry.event_id, download.name.clone());
+                        VideoInstanceKey::new(self.topic, message_id, attachment_id);
                     if self.playback_coordinator.active_video() == Some(&key) {
                         if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
                             if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
@@ -11658,7 +11767,6 @@ impl IcedChat {
                     });
                     self.inline_video_resume = None;
                     self.layout_cache.borrow_mut().invalidate_from(entry_index);
-                    let path = path.clone();
                     return iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -11785,8 +11893,26 @@ impl IcedChat {
                     InlineVideoEvent::Failed { key, error }
                     | InlineVideoEvent::Error { key, error } => {
                         if self.inline_video.as_ref().is_some_and(|s| s.key == key) {
-                            self.push_system(format!("Video playback failed: {error}"));
-                            self.stop_inline_video();
+                            let playback_error = InlinePlaybackError::from_backend(&error);
+                            tracing::warn!(
+                                message_id = key.message_id,
+                                attachment_id = %key.attachment_id,
+                                category = ?playback_error.kind,
+                                diagnostic = %playback_error.detail,
+                                "inline video playback failed"
+                            );
+                            if let Some(entry) = self.entries.iter_mut().find(|entry| {
+                                entry.event_id == key.message_id
+                                    && entry.download.as_ref().is_some_and(|d| d.kind == TransferKind::Video)
+                            }) {
+                                if let Some(download) = entry.download.as_mut() {
+                                    download.playback_error = Some(playback_error);
+                                }
+                            }
+                            self.inline_video = None;
+                            self.inline_video_seek = None;
+                            self.inline_video_expanded = false;
+                            self.layout_cache.borrow_mut().clear();
                         }
                     }
                     InlineVideoEvent::Ended { key } => {
@@ -24626,6 +24752,31 @@ fn format_file_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use chrono::{FixedOffset, TimeZone, Utc};
+
+    #[test]
+    fn inline_playback_errors_map_to_recoverable_categories() {
+        assert!(matches!(
+            InlinePlaybackError::from_backend("GStreamer: missing decoder for H265 codec").kind,
+            InlinePlaybackErrorKind::UnsupportedCodec
+        ));
+        assert!(matches!(
+            InlinePlaybackError::from_backend("invalid / corrupt container").kind,
+            InlinePlaybackErrorKind::CorruptFile
+        ));
+        assert!(matches!(
+            InlinePlaybackError::from_backend("permission denied").kind,
+            InlinePlaybackErrorKind::PermissionDenied
+        ));
+        assert!(InlinePlaybackError::from_backend("player init failed").retry_available());
+    }
+
+    #[test]
+    fn inline_playback_error_keeps_technical_detail_out_of_user_copy() {
+        let error = InlinePlaybackError::from_backend("open failed at /private/user/video.mp4");
+        assert_eq!(error.title(), "Video player could not start");
+        assert!(!error.message().contains("/private/user"));
+        assert_eq!(error.detail, "open failed at <path>");
+    }
 
     #[test]
     fn discovered_peer_updates_remove_expired_peers_and_deduplicate_additions() {

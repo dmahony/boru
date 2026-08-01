@@ -398,6 +398,12 @@ fn view_download_progress_inner<'a>(
 
     // ── Row 4: Action buttons ───────────────────────────────────────────
     let action_row = action_buttons(entry_index, attachment.kind, state, &name_str);
+    let playback_action_row: Option<iced::Element<'a, AppMessage>> =
+        attachment.playback_error.as_ref().and_then(|error| {
+        error.retry_available().then(|| {
+            action_button("Retry player", AppMessage::PlayInlineVideo(entry_index)).into()
+        })
+    });
 
     // ── Row 5: Failure reason (only in Failed state) ────────────────────
     let error_row = match &state {
@@ -510,11 +516,27 @@ fn view_download_progress_inner<'a>(
                 },
                 ..Default::default()
             });
+        let error_preview = attachment.playback_error.as_ref().map(|error| {
+            container(
+                Column::new()
+                    .push(text(error.title()).size(TYPO_SM).color(error_color))
+                    .push(text(error.message()).size(TYPO_XS).color(muted))
+                    .push(text("The original attachment is still available below.").size(TYPO_XXS).color(muted))
+                    .spacing(SPACE_4)
+                    .align_x(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+        });
         let preview = container(widget::stack![
             poster,
-            container(play)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
+            error_preview.unwrap_or_else(|| {
+                container(play)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+            })
         ])
         .width(Length::Fill)
         .max_width(360.0)
@@ -530,7 +552,9 @@ fn view_download_progress_inner<'a>(
             ..Default::default()
         });
         #[cfg(feature = "video-playback")]
-        let preview = if let Some(video) = player {
+        let preview = if attachment.playback_error.is_some() {
+            preview
+        } else if let Some(video) = player {
             let duration = video.duration();
             let position = video.position().min(duration);
             let duration_secs = duration.as_secs_f32().max(f32::EPSILON);
@@ -649,6 +673,9 @@ fn view_download_progress_inner<'a>(
         body = body.push(speed_detail);
     }
     body = body.push(action_row);
+    if let Some(playback_actions) = playback_action_row {
+        body = body.push(playback_actions);
+    }
     // "Open folder" link — always visible below the action buttons
     body = body.push(
         button(
