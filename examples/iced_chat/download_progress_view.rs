@@ -85,6 +85,15 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Keep inline video previews bounded while retaining their known aspect ratio.
+fn inline_video_preview_height(dimensions: Option<(u32, u32)>) -> f32 {
+    let (width, height) = dimensions
+        .filter(|(width, height)| *width > 0 && *height > 0)
+        .map(|(width, height)| (width as f32, height as f32))
+        .unwrap_or((16.0, 9.0));
+    (360.0 / (width / height)).clamp(120.0, 280.0)
+}
+
 // ── State badge pill ─────────────────────────────────────────────────────
 
 fn state_badge(state: &DownloadState, tone: Color) -> iced::widget::Container<'static, AppMessage> {
@@ -361,29 +370,72 @@ pub fn view_download_progress(
     // ── Assemble the card ───────────────────────────────────────────────
     let mut body = Column::new().push(title_row).spacing(SPACE_6);
 
-    // ── Temporary inline-video branch ───────────────────────────────────
-    // Playback is intentionally deferred; the generic download/open actions
-    // remain available for every attachment.
+    // ── Static inline-video card ────────────────────────────────────────
+    // Playback is intentionally deferred. The bounded poster and central
+    // control establish the final footprint while the existing download,
+    // retry, cancel, and open actions remain available below it.
     if attachment.kind == super::app::TransferKind::Video {
-        if let Some(ref thumb_bytes) = attachment.thumbnail {
-            let handle = iced::widget::image::Handle::from_bytes(thumb_bytes.clone());
-            body = body.push(
-                iced::widget::image(handle)
-                    .content_fit(iced::ContentFit::ScaleDown)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(180.0)),
-            );
-        } else {
-            body = body.push(
-                container(
-                    text("Video preview will be available after download.")
-                        .size(TYPO_XS)
-                        .color(muted),
-                )
+        let preview_height = inline_video_preview_height(attachment.poster_dimensions);
+        let poster: iced::Element<'static, AppMessage> = if let Some(ref bytes) = attachment.thumbnail {
+            iced::widget::image(iced::widget::image::Handle::from_bytes(bytes.clone()))
+                .content_fit(iced::ContentFit::Cover)
                 .width(Length::Fill)
-                .padding(SPACE_8),
-            );
-        }
+                .height(Length::Fill)
+                .into()
+        } else {
+            container(
+                Column::new()
+                    .push(text("VIDEO").size(TYPO_SM).color(muted))
+                    .push(text("Preview available after download").size(TYPO_XS).color(muted))
+                    .spacing(SPACE_4)
+                    .align_x(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into()
+        };
+        let play = button(text("▶").size(28.0).color(Color::WHITE))
+            // Static affordance only for this pre-decoder step; it does not
+            // instantiate a decoder or autoplay media.
+            .on_press(AppMessage::Noop)
+            .padding([SPACE_8, SPACE_12])
+            .style(|_theme, _status| widget::button::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.62))),
+                border: iced::Border { radius: 24.0.into(), ..Default::default() },
+                ..Default::default()
+            });
+        let preview = container(widget::stack![poster, container(play).center_x(Length::Fill).center_y(Length::Fill)])
+            .width(Length::Fill)
+            .max_width(360.0)
+            .height(Length::Fixed(preview_height))
+            .clip(true)
+            .style(|t| widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border { color: border_muted(t), width: 1.0, radius: SPACE_10.into() },
+                ..Default::default()
+            });
+        let size_label = match &attachment.state {
+            DownloadState::Ready { total: Some(total) }
+            | DownloadState::Active { total: Some(total), .. }
+            | DownloadState::Paused { total: Some(total), .. }
+            | DownloadState::Completed { total_size: Some(total), .. } if *total > 0 => {
+                human_size(*total)
+            }
+            _ => String::new(),
+        };
+        let status = match &attachment.state {
+            DownloadState::Completed { .. } => "Ready to open",
+            DownloadState::Active { .. } => "Downloading video…",
+            DownloadState::Failed { .. } => "Download failed",
+            DownloadState::Paused { .. } => "Download paused",
+            DownloadState::Cancelled => "Download cancelled",
+            DownloadState::Ready { .. } => "Static preview · playback after download",
+        };
+        body = body
+            .push(preview)
+            .push(text(format!("{size_label} · {status}")).size(TYPO_XXS).color(muted));
     }
 
     if let Some(src) = source_row {
@@ -586,4 +638,21 @@ fn action_buttons<'a>(
     };
 
     Row::with_children(buttons).spacing(SPACE_8).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inline_video_preview_height;
+
+    #[test]
+    fn unknown_aspect_ratio_uses_bounded_widescreen_default() {
+        assert_eq!(inline_video_preview_height(None), 202.5);
+    }
+
+    #[test]
+    fn portrait_and_landscape_previews_are_bounded() {
+        assert_eq!(inline_video_preview_height(Some((100, 1000))), 280.0);
+        assert_eq!(inline_video_preview_height(Some((3840, 2160))), 202.5);
+        assert_eq!(inline_video_preview_height(Some((1000, 100))), 120.0);
+    }
 }
