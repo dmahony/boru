@@ -13450,6 +13450,11 @@ impl IcedChat {
                 // online/offline transitions into one visible update per tick.
                 self.flush_pending_neighbor_status();
 
+                // Peer presence: downgrade peers whose last-seen timestamp
+                // has gone stale (> AWAY_THRESHOLD_MS) to Away.  They stay in
+                // the presence map — removal happens on NeighborDown only.
+                self.refresh_peer_presence();
+
                 #[cfg(feature = "video-playback")]
                 self.reconcile_inline_video_viewport();
 
@@ -16452,6 +16457,43 @@ impl ChatCallbacks for IcedChat {
 }
 
 impl IcedChat {
+    /// Presence state for a peer, derived from the presence map's last-seen
+    /// timestamp. Absent from the map → Offline; stale timestamp →
+    /// Away; fresh timestamp → Online.
+    fn peer_presence(&self, peer: &PublicKey) -> PeerPresence {
+        match self.peer_presence_map.get(peer) {
+            None => PeerPresence::Offline,
+            Some(&last_seen) => {
+                let now = now_ms().max(0) as u64;
+                if now.saturating_sub(last_seen) > AWAY_THRESHOLD_MS {
+                    PeerPresence::Away
+                } else {
+                    PeerPresence::Online
+                }
+            }
+        }
+    }
+
+    /// Downgrade stale peers to Away. Called on each ConnMonitorTick:
+    /// peers whose last-seen is older than AWAY_THRESHOLD_MS are marked
+    /// Away (but stay in the map — removal happens on NeighborDown only).
+    /// Bumps sidebar revisions when the away set changes so the UI
+    /// re-renders the Online → Away transition.
+    fn refresh_peer_presence(&mut self) {
+        let now = now_ms().max(0) as u64;
+        let mut away: HashSet<PublicKey> = HashSet::new();
+        for (peer, &last_seen) in &self.peer_presence_map {
+            if now.saturating_sub(last_seen) > AWAY_THRESHOLD_MS {
+                away.insert(*peer);
+            }
+        }
+        if away != self.presence_away_peers {
+            self.presence_away_peers = away;
+            self.mark_friends_sidebar_dirty();
+            self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+        }
+    }
+
     /// Recompute all cached sidebar counts from the underlying store data.
     /// Call this when a sidebar revision counter changes so the next
     /// `view_sidebar()` render uses up-to-date cached values.
