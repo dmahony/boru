@@ -2023,6 +2023,13 @@ impl ConversationLive {
 
 // ── Application state ─────────────────────────────────────────────────
 
+/// Kind of entry for the right-click context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextMenuKind {
+    Text,
+    Image,
+}
+
 pub struct IcedChat {
     // ── Navigation ──
     pub screen: Screen,
@@ -2417,8 +2424,10 @@ pub struct IcedChat {
     toast_message: Option<String>,
     /// Counter to auto-dismiss the toast after a few render ticks.
     toast_counter: u32,
-    /// Peers whose shared files we hide from UI and ignore in ProfileUpdate.
-    blocked_sharers: HashSet<PublicKey>,
+    /// Right-click context menu state: (entry_index, x, y) when visible.
+    context_menu: Option<(usize, f32, f32, ContextMenuKind)>,
+    /// Peer whose shared files we hide from UI and ignore in ProfileUpdate.
+        blocked_sharers: HashSet<PublicKey>,
     /// Cached profile data received from peers via ProfileUpdate gossip.
     profile_cache: HashMap<PublicKey, PeerProfileData>,
     /// Set of (content_hash, peer_public_key) pairs that have a download
@@ -3100,6 +3109,16 @@ pub enum AppMessage {
     CopyToClipboard(String),
     /// Copy a chat message body to the clipboard with visual feedback.
     CopyMessage(usize),
+    /// Right-click on a text message to open a context menu.
+    RightClickText(usize),
+    /// Right-click on an image to open a context menu.
+    RightClickImage(usize),
+    /// Copy text from context menu.
+    ContextCopyText(usize),
+    /// Copy image data from context menu.
+    ContextCopyImage(usize),
+    /// Dismiss the context menu overlay.
+    CloseContextMenu,
     /// Copy the user's own friend ID (public key) to the clipboard with visual feedback.
     CopyFriendId,
     /// Clear the "Copied!" visual feedback after copy.
@@ -4359,6 +4378,7 @@ impl IcedChat {
             friend_block_confirm: false,
             toast_message: None,
             toast_counter: 0,
+            context_menu: None,
 
             blocked_sharers: HashSet::new(),
             profile_cache: HashMap::new(),
@@ -5616,6 +5636,11 @@ impl IcedChat {
             AppMessage::SharedFileRemoved(_) => "SharedFileRemoved",
             AppMessage::CopyToClipboard(_) => "CopyToClipboard",
             AppMessage::CopyMessage(_) => "CopyMessage",
+            AppMessage::RightClickText(_) => "RightClickText",
+            AppMessage::RightClickImage(_) => "RightClickImage",
+            AppMessage::ContextCopyText(_) => "ContextCopyText",
+            AppMessage::ContextCopyImage(_) => "ContextCopyImage",
+            AppMessage::CloseContextMenu => "CloseContextMenu",
             AppMessage::CopyFriendId => "CopyFriendId",
             AppMessage::FriendIdCopiedClear => "FriendIdCopiedClear",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
@@ -13829,6 +13854,43 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::RightClickText(idx) => {
+                self.context_menu = Some((idx, 0.0, 0.0, ContextMenuKind::Text));
+                iced::Task::none()
+            }
+
+            AppMessage::RightClickImage(idx) => {
+                self.context_menu = Some((idx, 0.0, 0.0, ContextMenuKind::Image));
+                iced::Task::none()
+            }
+
+            AppMessage::ContextCopyText(idx) => {
+                self.context_menu = None;
+                if let Some(entry) = self.entries.get(idx) {
+                    let preview: String = if entry.body.len() > 60 {
+                        format!("{}…", &entry.body[..60])
+                    } else {
+                        entry.body.clone()
+                    };
+                    self.toast_message = Some(format!("Copied: {preview}"));
+                    return iced::clipboard::write(entry.body.clone());
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::ContextCopyImage(idx) => {
+                self.context_menu = None;
+                // Image copy not yet implemented for system clipboard;
+                // the context menu still appears for future wiring.
+                self.toast_message = Some("Image copy not yet supported".to_string());
+                iced::Task::none()
+            }
+
+            AppMessage::CloseContextMenu => {
+                self.context_menu = None;
+                iced::Task::none()
+            }
+
             AppMessage::CopyFriendId => {
                 let pk = self.local_public.to_string();
                 self.friend_id_copied = true;
@@ -18701,11 +18763,105 @@ impl IcedChat {
                 .height(Length::Fill)
                 .into()
         } else {
-            inner.into()
+            // ── Right-click context menu overlay ────────────────────
+            if let Some((idx, _, _, kind)) = self.context_menu {
+                use iced::widget::Stack;
+                let menu = self.view_context_menu(idx, kind);
+                Stack::new()
+                    .push(inner)
+                    .push(
+                        // Position near top-right of chat area
+                        widget::container(menu)
+                            .width(Length::Fill)
+                            .padding(iced::Padding {
+                                top: SPACE_8,
+                                right: SPACE_16,
+                                bottom: 0.0,
+                                left: 0.0,
+                            })
+                            .align_x(iced::alignment::Horizontal::Right)
+                            .align_y(iced::alignment::Vertical::Top),
+                    )
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            } else {
+                inner.into()
+            }
         }
     }
 
     // ── Chat screen view ─────────────────────────────────────────────
+
+    /// Render the right-click context menu overlay.
+    fn view_context_menu(
+        &self,
+        idx: usize,
+        kind: ContextMenuKind,
+    ) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, text};
+
+        let theme = self.theme();
+        let close_btn = button(text("✕").size(TYPO_XS).color(text_muted(&theme)))
+            .on_press(AppMessage::CloseContextMenu)
+            .padding([SPACE_2, SPACE_6])
+            .style(|_t, _s| iced::widget::button::Style::default());
+
+        let mut col = column![].spacing(0).width(180.0);
+
+        match kind {
+            ContextMenuKind::Text => {
+                let copy_btn = button(text("Copy Text").size(TYPO_SM))
+                    .on_press(AppMessage::ContextCopyText(idx))
+                    .padding([SPACE_4, SPACE_8])
+                    .style(|_t, _s| iced::widget::button::Style::default());
+                col = col.push(
+                    container(copy_btn)
+                        .padding(SPACE_2)
+                        .width(iced::Length::Fill),
+                );
+            }
+            ContextMenuKind::Image => {
+                let copy_img = button(text("Copy Image").size(TYPO_SM))
+                    .on_press(AppMessage::ContextCopyImage(idx))
+                    .padding([SPACE_4, SPACE_8])
+                    .style(|_t, _s| iced::widget::button::Style::default());
+                col = col.push(
+                    container(copy_img)
+                        .padding(SPACE_2)
+                        .width(iced::Length::Fill),
+                );
+            }
+        }
+
+        let header = container(
+            iced::widget::row![
+                text(match kind {
+                    ContextMenuKind::Text => "Message",
+                    ContextMenuKind::Image => "Image",
+                })
+                .size(TYPO_SM)
+                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .color(text_muted(&theme)),
+                iced::widget::Space::new().width(iced::Length::Fill),
+                close_btn,
+            ],
+        )
+        .padding([SPACE_4, SPACE_8]);
+
+        container(column![header, col])
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: 1.0,
+                    radius: (8.0_f32).into(),
+                },
+                ..Default::default()
+            })
+            .width(200.0)
+            .into()
+    }
 
     fn view_chat_header(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, column, container, row, text, Space};
@@ -20385,13 +20541,18 @@ impl IcedChat {
 
             // Wrap non-system bubbles in a button so clicking copies the
             // message body to the clipboard with a toast confirmation.
+            // Also wrap in a mouse_area so right-click opens a context menu.
             let clickable_bubble: iced::Element<'_, AppMessage> =
                 if !matches!(entry.kind, ChatKind::System) && !entry.body.is_empty() {
-                    button(bubble)
-                        .on_press(AppMessage::CopyMessage(i))
-                        .padding(0)
-                        .style(|_t, _s| iced::widget::button::Style::default())
-                        .into()
+                    let idx = i;
+                    iced::widget::mouse_area(
+                        button(bubble)
+                            .on_press(AppMessage::CopyMessage(i))
+                            .padding(0)
+                            .style(|_t, _s| iced::widget::button::Style::default()),
+                    )
+                    .on_right_press(AppMessage::RightClickText(idx))
+                    .into()
                 } else {
                     bubble.into()
                 };
@@ -20605,7 +20766,9 @@ impl IcedChat {
                     .on_press(AppMessage::OpenImageLightbox(i))
                     .padding(0)
                     .style(|_t, _s| iced::widget::button::Style::default());
-                col = col.push(thumbnail);
+                let thumb_with_right_click = iced::widget::mouse_area(thumbnail)
+                    .on_right_press(AppMessage::RightClickImage(i));
+                col = col.push(thumb_with_right_click);
             } else if entry.image_error.is_some() || entry.image_identifier.is_some() {
                 use iced::widget::{container, text, Column};
                 let error_text = entry
