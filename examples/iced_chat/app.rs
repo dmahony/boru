@@ -1081,6 +1081,43 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// A peer is considered Away when no presence/activity has refreshed its
+/// last-seen timestamp for this long (10 seconds).
+const AWAY_THRESHOLD_MS: u64 = 10_000;
+
+/// Presence state shown in contact displays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PeerPresence {
+    Online,
+    Away,
+    Offline,
+}
+
+impl PeerPresence {
+    fn label(&self) -> &'static str {
+        match self {
+            PeerPresence::Online => "Online",
+            PeerPresence::Away => "Away",
+            PeerPresence::Offline => "Offline",
+        }
+    }
+
+    fn color(&self, theme: &iced::Theme) -> Color {
+        match self {
+            PeerPresence::Online => accent_green(theme),
+            PeerPresence::Away => color_warning(theme),
+            PeerPresence::Offline => text_muted(theme),
+        }
+    }
+
+    fn icon(&self) -> &'static [u8] {
+        match self {
+            PeerPresence::Online | PeerPresence::Away => ICON_ONLINE,
+            PeerPresence::Offline => ICON_OFFLINE,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChatKind {
     System,
@@ -2320,8 +2357,16 @@ pub struct IcedChat {
     scroll_offset: f32,
     /// Current viewport height of the chat log, in pixels.
     viewport_height: f32,
-    /// Cache of friend PublicKey -> is_online for quick lookup in the UI.
-    friend_online_cache: HashSet<PublicKey>,
+    /// Per-peer presence tracking: PublicKey -> last-seen unix milliseconds.
+    /// A peer stays in the map while connected; removal happens on
+    /// NeighborDown only. Presence is derived from the timestamp:
+    /// Online when fresh, Away when stale (> AWAY_THRESHOLD_MS), Offline
+    /// when absent from the map.
+    peer_presence_map: HashMap<PublicKey, u64>,
+    /// Peers currently classified as Away (last-seen older than
+    /// AWAY_THRESHOLD_MS), recomputed by ConnMonitorTick so the UI can
+    /// re-render when peers transition between Online and Away.
+    presence_away_peers: HashSet<PublicKey>,
     /// Revision counter for the friends sidebar cache.
     friends_sidebar_revision: u64,
     /// Revision counter for the chats sidebar cache.
@@ -2446,7 +2491,7 @@ pub struct IcedChat {
     /// "Discovered Peers" sidebar section.
     discovered_peers: Vec<PublicKey>,
     /// PublicKey -> online indicator cache (populated from neighbors set).
-    /// Separate from friend_online_cache to avoid conflating friend vs
+    /// Separate from peer_presence_map to avoid conflating friend vs
     /// discovered-peer online status.
     discovered_online_cache: HashSet<PublicKey>,
     /// Handle to the continuous DHT discovery & publication tracker.
@@ -4172,12 +4217,14 @@ impl IcedChat {
     ) -> Self {
         let (initial_topic, initial_bootstrap) =
             initial_room.unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
-        // Seed the online cache from persisted friends who were online at last save,
-        // so they show the correct status immediately instead of starting as offline.
-        let friend_online_cache: HashSet<PublicKey> = friends
+        // Seed the presence map from persisted friends who were online at last
+        // save, so they show the correct status immediately instead of starting
+        // as offline. Timestamps default to "now".
+        let peer_presence_map: HashMap<PublicKey, u64> = friends
             .iter()
             .filter(|(_, record)| record.status.online)
             .filter_map(|(id, _)| id.parse_public_key().ok())
+            .map(|pk| (pk, now_ms().max(0) as u64))
             .collect();
         // Initialise per-user image storage. The files root defaults to
         // `<data_dir>/files` but can be overridden via
