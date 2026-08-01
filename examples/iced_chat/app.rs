@@ -638,6 +638,7 @@ pub(crate) const ICON_ONLINE: &[u8] = include_bytes!("../../assets/icons/lucide/
 pub(crate) const ICON_OFFLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle.svg");
 pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
 pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../assets/icons/lucide/paperclip.svg");
+pub(crate) const ICON_EMOJI: &str = "😊";
 #[expect(dead_code)]
 pub(crate) const ICON_UNREAD: &[u8] =
     include_bytes!("../../assets/icons/lucide/message-circle-fill.svg");
@@ -2553,6 +2554,12 @@ pub struct IcedChat {
     show_chat_options: bool,
     /// Whether the group member list overlay is shown.
     show_member_list: bool,
+    /// Whether the emoji picker panel is currently visible.
+    show_emoji_picker: bool,
+    /// Whether the GIF picker panel is currently visible.
+    show_gif_picker: bool,
+    /// Search text for the GIF picker.
+    gif_search_text: String,
     /// Whether the invite member dialog is shown.
     show_invite_member_dialog: bool,
     /// Selected friends to invite in the invite member dialog.
@@ -3119,6 +3126,16 @@ pub enum AppMessage {
     ContextCopyImage(usize),
     /// Dismiss the context menu overlay.
     CloseContextMenu,
+    /// Toggle the emoji picker panel visibility.
+    ToggleEmojiPicker,
+    /// Insert an emoji character into the composer.
+    InsertEmoji(char),
+    /// Toggle the GIF picker panel.
+    ToggleGifPicker,
+    /// Search text changed in the GIF picker.
+    GifSearchChanged(String),
+    /// Send a GIF by URL as an image attachment.
+    SendGifUrl(String),
     /// Copy the user's own friend ID (public key) to the clipboard with visual feedback.
     CopyFriendId,
     /// Clear the "Copied!" visual feedback after copy.
@@ -4214,6 +4231,9 @@ impl IcedChat {
             help_visible: false,
             show_chat_options: false,
             show_member_list: false,
+            show_emoji_picker: false,
+            show_gif_picker: false,
+            gif_search_text: String::new(),
             show_invite_member_dialog: false,
             invite_member_selected: HashSet::new(),
             details_panel_open: false,
@@ -5641,6 +5661,11 @@ impl IcedChat {
             AppMessage::ContextCopyText(_) => "ContextCopyText",
             AppMessage::ContextCopyImage(_) => "ContextCopyImage",
             AppMessage::CloseContextMenu => "CloseContextMenu",
+            AppMessage::ToggleEmojiPicker => "ToggleEmojiPicker",
+            AppMessage::InsertEmoji(_) => "InsertEmoji",
+            AppMessage::ToggleGifPicker => "ToggleGifPicker",
+            AppMessage::GifSearchChanged(_) => "GifSearchChanged",
+            AppMessage::SendGifUrl(_) => "SendGif",
             AppMessage::CopyFriendId => "CopyFriendId",
             AppMessage::FriendIdCopiedClear => "FriendIdCopiedClear",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
@@ -13891,6 +13916,51 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::ToggleEmojiPicker => {
+                self.show_emoji_picker = !self.show_emoji_picker;
+                iced::Task::none()
+            }
+
+            AppMessage::InsertEmoji(ch) => {
+                // Insert the emoji at the current cursor position
+                self.composer_text.push(ch);
+                iced::Task::none()
+            }
+
+            AppMessage::ToggleGifPicker => {
+                self.show_gif_picker = !self.show_gif_picker;
+                iced::Task::none()
+            }
+
+            AppMessage::GifSearchChanged(text) => {
+                self.gif_search_text = text;
+                iced::Task::none()
+            }
+
+            AppMessage::SendGifUrl(url) => {
+                let url_clone = url.clone();
+                self.show_gif_picker = false;
+                self.gif_search_text.clear();
+                self.toast_counter = self.toast_counter.wrapping_add(1);
+                self.toast_message = Some("Downloading GIF...".to_string());
+                let task = iced::Task::perform(
+                    async move {
+                        let client = reqwest::Client::new();
+                        let resp = client.get(&url_clone).send().await.map_err(|e| format!("{e}"))?;
+                        let bytes = resp.bytes().await.map_err(|e| format!("{e}"))?;
+                        let tmp = std::env::temp_dir().join(format!("boru_gif_{}.gif", std::process::id()));
+                        tokio::fs::write(&tmp, &bytes).await.map_err(|e| format!("{e}"))?;
+                        let abs_path = tmp.to_string_lossy().to_string();
+                        Ok::<String, String>(format!("gif.gif|{abs_path}|"))
+                    },
+                    |result| match result {
+                        Ok(encoded) => AppMessage::ExecuteImageSend(encoded),
+                        Err(_e) => AppMessage::Noop,
+                    },
+                );
+                return task;
+            }
+
             AppMessage::CopyFriendId => {
                 let pk = self.local_public.to_string();
                 self.friend_id_copied = true;
@@ -18786,7 +18856,51 @@ impl IcedChat {
                     .height(Length::Fill)
                     .into()
             } else {
-                inner.into()
+                // ── Emoji picker overlay ──────────────────────────
+                if self.show_emoji_picker {
+                    use iced::widget::Stack;
+                    let picker = self.view_emoji_picker();
+                    Stack::new()
+                        .push(inner)
+                        .push(
+                            widget::container(picker)
+                                .width(Length::Fill)
+                                .padding(iced::Padding {
+                                    top: 0.0,
+                                    right: SPACE_16,
+                                    bottom: SPACE_8,
+                                    left: 0.0,
+                                })
+                                .align_x(iced::alignment::Horizontal::Right)
+                                .align_y(iced::alignment::Vertical::Bottom),
+                        )
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .into()
+                } else if self.show_gif_picker {
+                    // ── GIF picker overlay ──────────────────────────
+                    use iced::widget::Stack;
+                    let picker = self.view_gif_picker();
+                    Stack::new()
+                        .push(inner)
+                        .push(
+                            widget::container(picker)
+                                .width(Length::Fill)
+                                .padding(iced::Padding {
+                                    top: 0.0,
+                                    right: SPACE_16,
+                                    bottom: SPACE_8,
+                                    left: 0.0,
+                                })
+                                .align_x(iced::alignment::Horizontal::Right)
+                                .align_y(iced::alignment::Vertical::Bottom),
+                        )
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .into()
+                } else {
+                    inner.into()
+                }
             }
         }
     }
@@ -18860,6 +18974,143 @@ impl IcedChat {
                 ..Default::default()
             })
             .width(200.0)
+            .into()
+    }
+
+    /// Render the emoji picker panel with commonly used emojis.
+    fn view_emoji_picker(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text, Scrollable};
+
+        let theme = self.theme();
+        const EMOJIS: &[&str] = &[
+            "😀", "😂", "🤣", "😊", "😍", "🥰", "😘", "😜", "🤔", "🙄",
+            "😢", "😭", "😤", "😡", "🥺", "😎", "🤩", "👍", "👎", "👏",
+            "🙌", "💪", "🤝", "❤️", "🔥", "⭐", "🎉", "✨", "💯", "✅",
+            "❌", "⚠️", "💡", "📌", "🎵", "🌈", "🍕", "☕", "🕐", "💤",
+        ];
+
+        let close_btn = button(text("✕").size(TYPO_XS).color(text_muted(&theme)))
+            .on_press(AppMessage::ToggleEmojiPicker)
+            .padding([SPACE_2, SPACE_4])
+            .style(|_t, _s| iced::widget::button::Style::default());
+
+        let header = row![
+            text("Emojis").size(TYPO_SM).color(text_muted(&theme)),
+            iced::widget::Space::new().width(iced::Length::Fill),
+            close_btn,
+        ]
+        .spacing(SPACE_4)
+        .align_y(iced::Alignment::Center);
+
+        let mut grid = column![].spacing(SPACE_2);
+        for chunk in EMOJIS.chunks(8) {
+            let mut r = row![].spacing(SPACE_2);
+            for &emoji in chunk {
+                let c = emoji.chars().next().unwrap();
+                r = r.push(
+                    button(text(emoji).size(20.0))
+                        .on_press(AppMessage::InsertEmoji(c))
+                        .padding([SPACE_2, SPACE_4])
+                        .style(|_t, _s| iced::widget::button::Style::default()),
+                );
+            }
+            grid = grid.push(r);
+        }
+
+        let scroll = Scrollable::new(grid).height(iced::Length::Fixed(160.0));
+
+        container(column![header, scroll].spacing(SPACE_4).padding(SPACE_8))
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: 1.0,
+                    radius: (8.0_f32).into(),
+                },
+                ..Default::default()
+            })
+            .width(280.0)
+            .into()
+    }
+
+    /// Render the GIF picker panel with common GIF URLs and search/custom input.
+    fn view_gif_picker(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text, text_input, Scrollable};
+
+        let theme = self.theme();
+        const GIFS: &[(&str, &str)] = &[
+            ("👋 Wave", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbmJ4OHU5eHIyM21pYmRhMjA2Mmh3eXh6c3N6Zjd4bjlyeG52ZndmMiZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7abrAiUoJ7O/giphy.gif"),
+            ("👍 Thumbs Up", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExMWF2ZXZ6N2oxdnNrMngxenhudDBpbTQ5dGNyNHZyMXR1M3BsOGZqcSZlcD12MV9naWZzX3NlYXJjaCZjdD1n/XreQmk7ETCak0/giphy.gif"),
+            ("🎉 Party", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExcmhjeGE2b28xaXI3cGFpbnVtdTgxMXNyMmdkZXdpc2t6YWN2cmF6ZSZlcD12MV9naWZzX3NlYXJjaCZjdD1n/l0MYt5jPR6QW5pnBe/giphy.gif"),
+            ("😂 Laugh", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdm9ibjJ1OHR5b3FobGJtMnF6Z2trdXB0aHZ0M2N2eTI0a3pvZnpkcyZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o6Zt6KHxJTbC/giphy.gif"),
+            ("❤️ Love", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExeDQzbWZsZnRnc3QydHgwdzlmMWZqOXZzazZ5OTE5eHEwMmI3cXQ4bCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/l3q2K5jinAlChoCLS/giphy.gif"),
+            ("🤔 Think", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExeTQ0bTAza2c3eHI5d2F2YnBzaHAwaDR4aWlrNXN5amxhNHBqdzR3dyZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7TKTDn976rzTg49C/giphy.gif"),
+            ("😱 Shocked", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExMmJobDJtajUyaXBzczRpbXJzMWYxbG85aGdpZmNyZ3piYmh1MnBwbCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7TKSj8roRKfLv1qU/giphy.gif"),
+            ("👏 Clap", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbmN1NnkxeTR5ZmdidTk1NGR6bnVlOGNvbmppbXc2Mm91Y2ZzZ2Z4diZlcD12MV9naWZzX3NlYXJjaCZjdD1n/l4q8D5hXbH8VdFV3a/giphy.gif"),
+            ("🙄 Eye Roll", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExcmNxZHVnNW9kd21ydXpkOGhka3VkaWkxOGp4M2tjOWp2dDRlamNpYiZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7btY3miPcehXZzTu/giphy.gif"),
+            ("💤 Sleep", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExMWpvejltcjhxb2djYm95aDV4NGxoMjN3cHJ1aXJ3bXBmOTMxc2R6dCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7TKGKQUzMkTNXo2k/giphy.gif"),
+            ("🔥 Fire", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbDQ3ZXZiM29wMWsyeWZ3bnBxcXQ0dWFpMzlnMGRjbmFxNzlkc211NiZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7TKP9c5n3TZuT1sA/giphy.gif"),
+            ("😢 Cry", "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExcjB2eThxdHJra3l0cm04andrN3RkMnVhaWd3OXNhYXLnZlcD12MV9naWZzX3NlYXJjaCZjdD1n/3o7TKSj8roRKfLv1qU/giphy.gif"),
+        ];
+
+        let close_btn = button(text("✕").size(TYPO_XS).color(text_muted(&theme)))
+            .on_press(AppMessage::ToggleGifPicker)
+            .padding([SPACE_2, SPACE_4])
+            .style(|_t, _s| iced::widget::button::Style::default());
+
+        let header = row![
+            text("GIFs").size(TYPO_SM).color(text_muted(&theme)),
+            iced::widget::Space::new().width(iced::Length::Fill),
+            close_btn,
+        ]
+        .spacing(SPACE_4)
+        .align_y(iced::Alignment::Center);
+
+        // URL input for custom GIF
+        let url_input = text_input("Paste GIF URL…", &self.gif_search_text)
+            .on_input(AppMessage::GifSearchChanged)
+            .size(TYPO_SM)
+            .padding([SPACE_4, SPACE_6]);
+
+        let send_btn = button(text("Send").size(TYPO_SM))
+            .on_press_maybe(if !self.gif_search_text.is_empty() {
+                Some(AppMessage::SendGifUrl(self.gif_search_text.clone()))
+            } else {
+                None
+            })
+            .padding([SPACE_4, SPACE_8]);
+
+        let url_row = row![url_input, send_btn].spacing(SPACE_4).align_y(iced::Alignment::Center);
+
+        let mut grid = column![].spacing(SPACE_4);
+        for chunk in GIFS.chunks(2) {
+            let mut r = row![].spacing(SPACE_4);
+            for &(label, url) in chunk {
+                r = r.push(
+                    button(text(label).size(TYPO_SM))
+                        .on_press(AppMessage::SendGifUrl(url.to_string()))
+                        .padding([SPACE_4, SPACE_8])
+                        .style(|_t, _s| iced::widget::button::Style::default())
+                        .width(iced::Length::Fill),
+                );
+            }
+            grid = grid.push(r);
+        }
+
+        let scroll = Scrollable::new(column![url_row, grid].spacing(SPACE_8))
+            .height(iced::Length::Fixed(200.0));
+
+        container(column![header, scroll].spacing(SPACE_4).padding(SPACE_8))
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: 1.0,
+                    radius: (8.0_f32).into(),
+                },
+                ..Default::default()
+            })
+            .width(320.0)
             .into()
     }
 
@@ -20913,6 +21164,18 @@ impl IcedChat {
             .style(BUTTON_ICON)
             .padding([SPACE_4, SPACE_6]);
 
+        // ── Emoji picker toggle button ── sits next to attach
+        let emoji_btn = button(text(ICON_EMOJI).size(TYPO_SM))
+            .on_press(AppMessage::ToggleEmojiPicker)
+            .style(BUTTON_ICON)
+            .padding([SPACE_4, SPACE_6]);
+
+        // ── GIF picker toggle button ── sits next to emoji
+        let gif_btn = button(text("GIF").size(TYPO_SM))
+            .on_press(AppMessage::ToggleGifPicker)
+            .style(BUTTON_ICON)
+            .padding([SPACE_4, SPACE_6]);
+
         // ── Center: expandable message input ── transparent bg, fills space
         let input = text_input("Type a message…", &self.composer_text)
             .id(COMPOSER_INPUT)
@@ -20965,8 +21228,8 @@ impl IcedChat {
         }
 
         // ── Composer row ──
-        //  text input (fill) | attach | send
-        let composer_bar = row![input, attach_btn, send_btn]
+        //  text input (fill) | gif | emoji | attach | send
+        let composer_bar = row![input, gif_btn, emoji_btn, attach_btn, send_btn]
             .spacing(SPACE_6)
             .align_y(Alignment::Center)
             .padding(Padding::new(SPACE_4));
