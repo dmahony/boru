@@ -662,8 +662,7 @@ fn main() -> Result<()> {
 
     // ── Directory gossip sender (shared between main.rs receiver and MCP) ──
     // Created outside block_on so it survives after IcedChat.run() returns.
-    let mcp_directory_sender: Arc<Mutex<Option<GossipSender>>> =
-        Arc::new(Mutex::new(None));
+    let mcp_directory_sender: Arc<Mutex<Option<GossipSender>>> = Arc::new(Mutex::new(None));
     let mcp_dir_sender_for_block = mcp_directory_sender.clone();
 
     // Shared directory store created before block_on so both MCP
@@ -1559,6 +1558,14 @@ fn main() -> Result<()> {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(100))
                     .map(|_| app::AppMessage::SplashTick),
+            );
+        }
+
+        #[cfg(feature = "video-playback")]
+        if state.has_inline_video() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(250))
+                    .map(|_| app::AppMessage::InlineVideoTick),
             );
         }
 

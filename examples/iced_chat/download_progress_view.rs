@@ -87,6 +87,12 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+#[cfg(feature = "video-playback")]
+fn format_media_time(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
 /// Keep inline video previews bounded while retaining their known aspect ratio.
 fn inline_video_preview_height(dimensions: Option<(u32, u32)>) -> f32 {
     let (width, height) = dimensions
@@ -109,11 +115,22 @@ pub(crate) enum VideoPresentationState {
 fn video_presentation_state(attachment: &DownloadAttachment) -> VideoPresentationState {
     match &attachment.state {
         DownloadState::Ready { .. } | DownloadState::Cancelled => VideoPresentationState::Remote,
-        DownloadState::Active { .. } | DownloadState::Paused { .. } => VideoPresentationState::Downloading,
-        DownloadState::Completed { saved_path: None, .. } => VideoPresentationState::Verifying,
-        DownloadState::Completed { saved_path: Some(path), .. } if path.exists() => VideoPresentationState::Ready,
+        DownloadState::Active { .. } | DownloadState::Paused { .. } => {
+            VideoPresentationState::Downloading
+        }
+        DownloadState::Completed {
+            saved_path: None, ..
+        } => VideoPresentationState::Verifying,
+        DownloadState::Completed {
+            saved_path: Some(path),
+            ..
+        } if path.exists() => VideoPresentationState::Ready,
         DownloadState::Completed { .. } => VideoPresentationState::Missing,
-        DownloadState::Failed { failure } if matches!(failure, super::app::DownloadFailure::FileRemoved) => VideoPresentationState::Missing,
+        DownloadState::Failed { failure }
+            if matches!(failure, super::app::DownloadFailure::FileRemoved) =>
+        {
+            VideoPresentationState::Missing
+        }
         DownloadState::Failed { .. } => VideoPresentationState::Failed,
     }
 }
@@ -219,7 +236,7 @@ pub fn view_download_progress(
 ) -> iced::Element<'static, AppMessage> {
     #[cfg(feature = "video-playback")]
     {
-        view_download_progress_inner(entry_index, attachment, dark_mode, None, false)
+        view_download_progress_inner(entry_index, attachment, dark_mode, None, false, None, false)
     }
     #[cfg(not(feature = "video-playback"))]
     {
@@ -234,8 +251,18 @@ pub fn view_download_progress_with_player<'a>(
     dark_mode: bool,
     player: Option<&'a Video>,
     preparing: bool,
+    seek_position: Option<f32>,
+    expanded: bool,
 ) -> iced::Element<'a, AppMessage> {
-    view_download_progress_inner(entry_index, attachment, dark_mode, player, preparing)
+    view_download_progress_inner(
+        entry_index,
+        attachment,
+        dark_mode,
+        player,
+        preparing,
+        seek_position,
+        expanded,
+    )
 }
 
 fn view_download_progress_inner<'a>(
@@ -245,6 +272,8 @@ fn view_download_progress_inner<'a>(
     #[cfg(feature = "video-playback")] player: Option<&'a Video>,
     #[cfg(not(feature = "video-playback"))] _player: (),
     preparing: bool,
+    #[cfg(feature = "video-playback")] seek_position: Option<f32>,
+    #[cfg(feature = "video-playback")] expanded: bool,
 ) -> iced::Element<'a, AppMessage> {
     let state = &attachment.state;
     let theme = resolve_theme(dark_mode);
@@ -430,26 +459,31 @@ fn view_download_progress_inner<'a>(
     if attachment.kind == super::app::TransferKind::Video {
         let presentation = video_presentation_state(attachment);
         let preview_height = inline_video_preview_height(attachment.poster_dimensions);
-        let poster: iced::Element<'static, AppMessage> = if let Some(ref bytes) = attachment.thumbnail {
-            iced::widget::image(iced::widget::image::Handle::from_bytes(bytes.clone()))
-                .content_fit(iced::ContentFit::Cover)
+        let poster: iced::Element<'static, AppMessage> =
+            if let Some(ref bytes) = attachment.thumbnail {
+                iced::widget::image(iced::widget::image::Handle::from_bytes(bytes.clone()))
+                    .content_fit(iced::ContentFit::Cover)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            } else {
+                container(
+                    Column::new()
+                        .push(text("VIDEO").size(TYPO_SM).color(muted))
+                        .push(
+                            text("Preview available after download")
+                                .size(TYPO_XS)
+                                .color(muted),
+                        )
+                        .spacing(SPACE_4)
+                        .align_x(Alignment::Center),
+                )
                 .width(Length::Fill)
                 .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
                 .into()
-        } else {
-            container(
-                Column::new()
-                    .push(text("VIDEO").size(TYPO_SM).color(muted))
-                    .push(text("Preview available after download").size(TYPO_XS).color(muted))
-                    .spacing(SPACE_4)
-                    .align_x(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into()
-        };
+            };
         let play_message = {
             #[cfg(feature = "video-playback")]
             {
@@ -461,63 +495,148 @@ fn view_download_progress_inner<'a>(
             }
         };
         let play = button(text("▶").size(28.0).color(Color::WHITE))
-            .on_press_maybe((presentation == VideoPresentationState::Ready && !preparing).then_some(play_message))
+            .on_press_maybe(
+                (presentation == VideoPresentationState::Ready && !preparing)
+                    .then_some(play_message),
+            )
             .padding([SPACE_8, SPACE_12])
             .style(|_theme, _status| widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.62))),
-                border: iced::Border { radius: 24.0.into(), ..Default::default() },
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    0.0, 0.0, 0.0, 0.62,
+                ))),
+                border: iced::Border {
+                    radius: 24.0.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
             });
-        let preview = container(widget::stack![poster, container(play).center_x(Length::Fill).center_y(Length::Fill)])
-            .width(Length::Fill)
-            .max_width(360.0)
-            .height(Length::Fixed(preview_height))
-            .clip(true)
-            .style(|t| widget::container::Style {
-                background: Some(iced::Background::Color(bg_surface(t))),
-                border: iced::Border { color: border_muted(t), width: 1.0, radius: SPACE_10.into() },
-                ..Default::default()
-            });
+        let preview = container(widget::stack![
+            poster,
+            container(play)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+        ])
+        .width(Length::Fill)
+        .max_width(360.0)
+        .height(Length::Fixed(preview_height))
+        .clip(true)
+        .style(|t| widget::container::Style {
+            background: Some(iced::Background::Color(bg_surface(t))),
+            border: iced::Border {
+                color: border_muted(t),
+                width: 1.0,
+                radius: SPACE_10.into(),
+            },
+            ..Default::default()
+        });
         #[cfg(feature = "video-playback")]
         let preview = if let Some(video) = player {
-            container(VideoPlayer::new(&video)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .content_fit(iced::ContentFit::Contain)
-                .on_end_of_stream(AppMessage::CloseInlineVideo)
-                .on_error(|_error| AppMessage::CloseInlineVideo))
-                .width(Length::Fill)
-                .max_width(360.0)
-                .height(Length::Fixed(preview_height))
-                .clip(true)
-                .into()
+            let duration = video.duration();
+            let position = video.position().min(duration);
+            let duration_secs = duration.as_secs_f32().max(f32::EPSILON);
+            let fraction =
+                seek_position.unwrap_or((position.as_secs_f32() / duration_secs).clamp(0.0, 1.0));
+            let controls = Column::new()
+                .push(
+                    iced::widget::slider(0.0..=1.0, fraction, AppMessage::InlineVideoSeekChanged)
+                        .on_release(AppMessage::InlineVideoSeekReleased)
+                        .step(0.001_f32)
+                        .width(Length::Fill),
+                )
+                .push(
+                    Row::new()
+                        .push(action_button(
+                            if video.paused() { "Play" } else { "Pause" },
+                            AppMessage::PlayInlineVideo(entry_index),
+                        ))
+                        .push(
+                            text(format!(
+                                "{} / {}",
+                                format_media_time(position),
+                                format_media_time(duration),
+                            ))
+                            .size(TYPO_XS)
+                            .color(Color::WHITE),
+                        )
+                        .push(action_button(
+                            if video.muted() { "Unmute" } else { "Mute" },
+                            AppMessage::InlineVideoToggleMute,
+                        ))
+                        .push(
+                            iced::widget::slider(
+                                0.0..=1.0,
+                                video.volume() as f32,
+                                AppMessage::InlineVideoSetVolume,
+                            )
+                            .step(0.01_f32)
+                            .width(Length::Fixed(90.0)),
+                        )
+                        .push(action_button(
+                            if expanded { "Collapse" } else { "Expand" },
+                            AppMessage::InlineVideoToggleExpanded,
+                        ))
+                        .spacing(SPACE_6)
+                        .align_y(Alignment::Center),
+                );
+            container(
+                Column::new()
+                    .push(
+                        VideoPlayer::new(&video)
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .content_fit(iced::ContentFit::Contain)
+                            .on_end_of_stream(AppMessage::CloseInlineVideo)
+                            .on_error(|_error| AppMessage::CloseInlineVideo),
+                    )
+                    .push(
+                        container(controls)
+                            .padding([SPACE_6, SPACE_8])
+                            .style(|_theme| widget::container::Style {
+                                background: Some(iced::Background::Color(Color::from_rgba(
+                                    0.0, 0.0, 0.0, 0.76,
+                                ))),
+                                ..Default::default()
+                            }),
+                    ),
+            )
+            .width(Length::Fill)
+            .max_width(if expanded { 720.0 } else { 360.0 })
+            .clip(true)
+            .into()
         } else {
             preview
         };
         let size_label = match &attachment.state {
             DownloadState::Ready { total: Some(total) }
-            | DownloadState::Active { total: Some(total), .. }
-            | DownloadState::Paused { total: Some(total), .. }
-            | DownloadState::Completed { total_size: Some(total), .. } if *total > 0 => {
-                human_size(*total)
+            | DownloadState::Active {
+                total: Some(total), ..
             }
+            | DownloadState::Paused {
+                total: Some(total), ..
+            }
+            | DownloadState::Completed {
+                total_size: Some(total),
+                ..
+            } if *total > 0 => human_size(*total),
             _ => String::new(),
         };
         let status = if preparing {
             "Preparing video…"
         } else {
             match presentation {
-            VideoPresentationState::Ready => "Ready to play",
-            VideoPresentationState::Downloading => "Downloading video…",
-            VideoPresentationState::Verifying => "Verifying video…",
-            VideoPresentationState::Failed => "Download failed",
-            VideoPresentationState::Missing => "Local file missing · download again",
-            VideoPresentationState::Remote => "Static preview · download to play",
+                VideoPresentationState::Ready => "Ready to play",
+                VideoPresentationState::Downloading => "Downloading video…",
+                VideoPresentationState::Verifying => "Verifying video…",
+                VideoPresentationState::Failed => "Download failed",
+                VideoPresentationState::Missing => "Local file missing · download again",
+                VideoPresentationState::Remote => "Static preview · download to play",
             }
         };
-        body = body
-            .push(preview)
-            .push(text(format!("{size_label} · {status}")).size(TYPO_XXS).color(muted));
+        body = body.push(preview).push(
+            text(format!("{size_label} · {status}"))
+                .size(TYPO_XXS)
+                .color(muted),
+        );
     }
 
     if let Some(src) = source_row {
@@ -682,12 +801,21 @@ fn action_buttons<'a>(
     use AppMessage::*;
 
     let buttons: Vec<iced::Element<'a, AppMessage>> = match (kind, state) {
-        (super::app::TransferKind::Video, DownloadState::Completed { saved_path: None, .. }) => {
+        (
+            super::app::TransferKind::Video,
+            DownloadState::Completed {
+                saved_path: None, ..
+            },
+        ) => {
             vec![text_button("Verifying…", AppMessage::Noop).into()]
         }
-        (super::app::TransferKind::Video, DownloadState::Completed { saved_path: Some(path), .. })
-            if !path.exists() =>
-        {
+        (
+            super::app::TransferKind::Video,
+            DownloadState::Completed {
+                saved_path: Some(path),
+                ..
+            },
+        ) if !path.exists() => {
             vec![action_button("Download", ExecuteDownloadAt(entry_index)).into()]
         }
         (super::app::TransferKind::Video, DownloadState::Failed { failure })
@@ -756,45 +884,50 @@ mod tests {
 
     #[test]
     fn video_state_mapping_requires_verified_local_path() {
-        let mut attachment = DownloadAttachment::new(
-            TransferKind::Video,
-            "clip.mp4",
-            "ticket",
-            "peer",
-            None,
+        let mut attachment =
+            DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "peer", None);
+        assert_eq!(
+            video_presentation_state(&attachment),
+            VideoPresentationState::Remote
         );
-        assert_eq!(video_presentation_state(&attachment), VideoPresentationState::Remote);
         attachment.state = DownloadState::Active {
             bytes: 10,
             total: Some(100),
         };
-        assert_eq!(video_presentation_state(&attachment), VideoPresentationState::Downloading);
+        assert_eq!(
+            video_presentation_state(&attachment),
+            VideoPresentationState::Downloading
+        );
         attachment.state = DownloadState::Completed {
             saved_name: "clip.mp4".into(),
             saved_path: None,
             total_size: Some(100),
         };
-        assert_eq!(video_presentation_state(&attachment), VideoPresentationState::Verifying);
+        assert_eq!(
+            video_presentation_state(&attachment),
+            VideoPresentationState::Verifying
+        );
     }
 
     #[test]
     fn video_state_mapping_recovers_from_missing_local_file() {
-        let mut attachment = DownloadAttachment::new(
-            TransferKind::Video,
-            "clip.mp4",
-            "ticket",
-            "peer",
-            None,
-        );
+        let mut attachment =
+            DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "peer", None);
         attachment.state = DownloadState::Completed {
             saved_name: "clip.mp4".into(),
             saved_path: Some(PathBuf::from("/definitely/missing/clip.mp4")),
             total_size: Some(100),
         };
-        assert_eq!(video_presentation_state(&attachment), VideoPresentationState::Missing);
+        assert_eq!(
+            video_presentation_state(&attachment),
+            VideoPresentationState::Missing
+        );
         attachment.state = DownloadState::Failed {
             failure: DownloadFailure::FileRemoved,
         };
-        assert_eq!(video_presentation_state(&attachment), VideoPresentationState::Missing);
+        assert_eq!(
+            video_presentation_state(&attachment),
+            VideoPresentationState::Missing
+        );
     }
 }
