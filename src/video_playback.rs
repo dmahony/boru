@@ -5,8 +5,10 @@
 //! and playback position deliberately do not belong here: they are process
 //! local and are represented by [`PlayerState`] and [`PlaybackCoordinator`].
 
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -255,6 +257,435 @@ impl PlaybackCoordinator {
         if key.is_none() || self.active_video.as_ref() == key {
             self.active_video = None;
         }
+    }
+}
+
+// ── Deadline-driven playout scheduling ─────────────────────────────────
+//
+// Adopted from telepathy's `AudioJitterBuffer`
+// (rust/telepathy-core/src/internal/connections.rs).  Each video frame is
+// assigned a monotonically increasing sequence number derived from the
+// source playhead.  The first frame after a gap (start, resume, seek)
+// becomes the talkspurt anchor; playout of that frame starts
+// `jitter_delay` after it is observed, and every later frame is scheduled
+// relative to the anchor using the source frame duration.  Frames are only
+// presented once their wall-clock deadline has arrived, which tracks
+// variable frame rates instead of a fixed timer.  A keepalive floor drops
+// frames made obsolete by a pause or source disconnect, and frames whose
+// deadline passes without the playhead reaching them are counted as lost.
+
+/// True when `a` is older than `b` under u32 sequence-number wraparound.
+pub fn seq_before(a: u32, b: u32) -> bool {
+    a != b && a.wrapping_sub(b) > 0x8000_0000
+}
+
+/// Default playout delay before the first frame of a talkspurt is shown.
+pub const DEFAULT_JITTER_DELAY: Duration = Duration::from_millis(75);
+
+/// Fallback frame duration used until the source framerate is known (~30fps).
+const DEFAULT_FRAME_DURATION: Duration = Duration::from_millis(33);
+
+/// A sequence jump larger than this is treated as a new talkspurt (e.g. a
+/// seek) instead of counting hundreds of fake frame losses.
+const MAX_BUFFERED_FRAMES: u32 = 250;
+
+/// Deadline-driven playout scheduler for inline video frames.
+///
+/// Mirrors telepathy's `AudioJitterBuffer` (connections.rs): frames carry a
+/// monotonic sequence number; the first frame after a gap anchors playout at
+/// `now + jitter_delay`, and every later frame is scheduled relative to that
+/// anchor using the source frame duration.  Frames are presented only when
+/// their wall-clock deadline has arrived, which tracks variable frame rates
+/// instead of a fixed timer.  A keepalive floor drops frames made obsolete
+/// by a pause or source disconnect, and frames whose deadline passes without
+/// being delivered are counted as lost.
+#[derive(Clone, Debug)]
+pub struct VideoJitterBuffer {
+    /// Sequence numbers delivered by the source but not yet presented.
+    arrived: BTreeSet<u32>,
+    /// Next frame sequence we want to present.
+    next_seq: Option<u32>,
+    /// Sequence used to map frame sequence to wall-clock playout time.
+    anchor_seq: u32,
+    /// Wall-clock time when `anchor_seq` should be presented.
+    anchor_deadline: Option<Instant>,
+    /// Anything before this has been made obsolete by playout or keepalive.
+    min_seq: Option<u32>,
+    /// Delay before the first frame of a talkspurt is presented.
+    jitter_delay: Duration,
+    /// Nominal duration of one frame, derived from the source framerate.
+    frame_duration: Duration,
+    /// Highest sequence number the source has delivered so far.
+    last_seq: Option<u32>,
+    /// Total frames whose deadline passed before the frame was delivered.
+    total_losses: u64,
+}
+
+impl Default for VideoJitterBuffer {
+    fn default() -> Self {
+        Self::new(DEFAULT_JITTER_DELAY, DEFAULT_FRAME_DURATION)
+    }
+}
+
+impl VideoJitterBuffer {
+    /// Create a buffer with an explicit jitter delay and frame duration.
+    pub fn new(jitter_delay: Duration, frame_duration: Duration) -> Self {
+        Self {
+            arrived: BTreeSet::new(),
+            next_seq: None,
+            anchor_seq: 0,
+            anchor_deadline: None,
+            min_seq: None,
+            jitter_delay,
+            frame_duration,
+            last_seq: None,
+            total_losses: 0,
+        }
+    }
+
+    /// Update the nominal frame duration once the source framerate is known.
+    pub fn set_frame_duration(&mut self, frame_duration: Duration) {
+        self.frame_duration = frame_duration;
+    }
+
+    /// Total frames whose playout deadline passed before they were available.
+    pub fn total_losses(&self) -> u64 {
+        self.total_losses
+    }
+
+    fn advance_min_seq(&mut self, candidate: u32) {
+        if self
+            .min_seq
+            .is_none_or(|min_seq| seq_before(min_seq, candidate))
+        {
+            self.min_seq = Some(candidate);
+        }
+    }
+
+    /// Advance the keepalive floor, dropping frames from a prior talkspurt.
+    ///
+    /// Ignore stale keepalives from a talkspurt that is still ahead of the
+    /// floor; otherwise clear the talkspurt and raise `min_seq` so the next
+    /// observed frame anchors a fresh playout.
+    pub fn reset_after_keepalive(&mut self, sequence_floor: u32) {
+        if let Some(next_seq) = self.next_seq {
+            if !seq_before(next_seq, sequence_floor) {
+                return;
+            }
+        }
+        self.arrived.clear();
+        self.next_seq = None;
+        self.anchor_deadline = None;
+        self.last_seq = None;
+        self.advance_min_seq(sequence_floor);
+    }
+
+    /// Record a single frame arrival at `seq`.
+    ///
+    /// Used by the unit tests and by callers that observe explicit frame
+    /// delivery.  The first frame of a talkspurt (after a gap, pause, or
+    /// seek) becomes the playout anchor.  Returns `false` when the frame is
+    /// stale (before the floor or already played) so the caller can skip it.
+    pub fn observe_frame(&mut self, seq: u32, now: Instant) -> bool {
+        self.observe_impl(seq, now, false)
+    }
+
+    /// Record that the playhead has advanced to `seq`, delivering every frame
+    /// in `(last_seq, seq]` contiguously (the local-decoder reality).
+    ///
+    /// Returns `false` when nothing new was delivered (stale/duplicate).
+    pub fn observe_playhead(&mut self, seq: u32, now: Instant) -> bool {
+        self.observe_impl(seq, now, true)
+    }
+
+    fn observe_impl(&mut self, seq: u32, now: Instant, fill_gap: bool) -> bool {
+        if let Some(min_seq) = self.min_seq {
+            if seq_before(seq, min_seq) {
+                return false;
+            }
+        }
+
+        let is_new = match self.last_seq {
+            Some(last) => seq_before(last, seq),
+            None => true,
+        };
+        if !is_new {
+            return false;
+        }
+
+        // Talkspurt start: the first observed frame anchors playout.  Frames
+        // before it are already past and must not be backfilled — the anchor
+        // is the earliest frame we can actually present.
+        if self.next_seq.is_none() {
+            self.next_seq = Some(seq);
+            self.anchor_seq = seq;
+            self.anchor_deadline = Some(now + self.jitter_delay);
+            self.arrived.insert(seq);
+            self.last_seq = Some(seq);
+            return true;
+        }
+
+        let next_seq = self.next_seq.unwrap();
+
+        // Already played or skipped.
+        if seq_before(seq, next_seq) {
+            return false;
+        }
+
+        let ahead = seq.wrapping_sub(next_seq);
+
+        // Huge jump usually means a seek or a new source: restart the
+        // talkspurt instead of letting one frame force fake losses.
+        if ahead > MAX_BUFFERED_FRAMES {
+            self.arrived.clear();
+            self.arrived.insert(seq);
+            self.next_seq = Some(seq);
+            self.anchor_seq = seq;
+            self.anchor_deadline = Some(now + self.jitter_delay);
+            self.last_seq = Some(seq);
+            return true;
+        }
+
+        if fill_gap {
+            // Mid-talkspurt the playhead advancing means every intermediate
+            // frame arrived too (a local decoder never delivers out of order).
+            let from = self.last_seq.map_or(seq, |last| last.wrapping_add(1));
+            let mut s = from;
+            loop {
+                self.arrived.insert(s);
+                if s == seq {
+                    break;
+                }
+                s = s.wrapping_add(1);
+            }
+        } else {
+            self.arrived.insert(seq);
+        }
+        self.last_seq = Some(seq);
+
+        true
+    }
+
+    /// Wall-clock deadline at which frame `seq` should be presented.
+    pub fn deadline_for(&self, seq: u32) -> Option<Instant> {
+        let anchor_deadline = self.anchor_deadline?;
+        let offset_frames = seq.wrapping_sub(self.anchor_seq);
+        Some(anchor_deadline + self.frame_duration.saturating_mul(offset_frames))
+    }
+
+    /// Deadline of the next frame to present, if playout is active.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.next_seq.and_then(|seq| self.deadline_for(seq))
+    }
+
+    /// Emit frames whose playout deadline has arrived.
+    ///
+    /// Returns:
+    /// - `None`: not time to present anything yet
+    /// - `Some(Some(seq))`: present frame `seq` now
+    /// - `Some(None)`: the deadline for the next frame passed without the
+    ///   frame being delivered; counted as lost and `next_seq` advanced
+    pub fn pop_due(&mut self, now: Instant) -> Option<Option<u32>> {
+        let next_seq = self.next_seq?;
+        let deadline = self.deadline_for(next_seq)?;
+
+        if now < deadline {
+            return None;
+        }
+
+        let delivered = self.arrived.remove(&next_seq);
+        let following = next_seq.wrapping_add(1);
+        self.next_seq = Some(following);
+        self.advance_min_seq(following);
+
+        // Go idle when nothing is buffered ahead — a stalled or paused
+        // source must not count as infinite frame loss.
+        if self.arrived.is_empty() {
+            self.next_seq = None;
+            self.anchor_deadline = None;
+        }
+
+        if delivered {
+            Some(Some(next_seq))
+        } else {
+            self.total_losses += 1;
+            Some(None)
+        }
+    }
+
+    /// Full reset (seek, new source): drop talkspurt state and the floor so
+    /// the first observed frame after the seek anchors fresh playout.
+    pub fn reset(&mut self) {
+        self.arrived.clear();
+        self.next_seq = None;
+        self.anchor_deadline = None;
+        self.min_seq = None;
+        self.last_seq = None;
+    }
+}
+
+#[cfg(test)]
+mod jitter_tests {
+    use super::*;
+
+    const FRAME: Duration = Duration::from_millis(33);
+    const JITTER: Duration = Duration::from_millis(75);
+
+    #[test]
+    fn seq_before_handles_wraparound() {
+        assert!(seq_before(0, 1));
+        assert!(!seq_before(1, 0));
+        assert!(!seq_before(5, 5));
+        // Wrap: u32::MAX is older than 0.
+        assert!(seq_before(u32::MAX, 0));
+        assert!(!seq_before(0, u32::MAX));
+        // Exactly half-range forward is ambiguous and treated as "not before".
+        assert!(!seq_before(100, 100 + 0x8000_0000));
+        // Just under half-range forward is before.
+        assert!(seq_before(100, 100 + 0x8000_0000 - 1));
+        // Just past half-range forward is after (b is older).
+        assert!(!seq_before(100, 100 + 0x8000_0000 + 1));
+    }
+
+    #[test]
+    fn first_frame_anchors_playout_after_jitter_delay() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        assert!(jitter.observe_frame(0, t0));
+        assert_eq!(jitter.next_deadline(), Some(t0 + JITTER));
+        assert_eq!(jitter.deadline_for(1), Some(t0 + JITTER + FRAME));
+    }
+
+    #[test]
+    fn pop_due_waits_until_deadline() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        jitter.observe_frame(0, t0);
+        assert_eq!(jitter.pop_due(t0 + JITTER - Duration::from_millis(1)), None);
+        assert_eq!(jitter.pop_due(t0 + JITTER), Some(Some(0)));
+    }
+
+    #[test]
+    fn pop_due_advances_through_available_frames() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        // Playhead advances 0 → 1 → 2, delivering each frame contiguously.
+        assert!(jitter.observe_playhead(0, t0));
+        assert!(jitter.observe_playhead(1, t0));
+        assert!(jitter.observe_playhead(2, t0));
+        let now = t0 + JITTER + FRAME * 2;
+        assert_eq!(jitter.pop_due(now), Some(Some(0)));
+        assert_eq!(jitter.pop_due(now), Some(Some(1)));
+        assert_eq!(jitter.pop_due(now), Some(Some(2)));
+        // Buffer drained → idle, not an endless loss stream.
+        assert_eq!(jitter.pop_due(now), None);
+        assert_eq!(jitter.total_losses(), 0);
+    }
+
+    #[test]
+    fn pop_due_counts_missing_frame_as_loss_when_later_frame_buffered() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        // Frame 1 never arrives, but frame 2 does — a real hole.
+        jitter.observe_frame(0, t0);
+        jitter.observe_frame(2, t0);
+        let now = t0 + JITTER + FRAME * 2;
+        assert_eq!(jitter.pop_due(now), Some(Some(0)));
+        assert_eq!(jitter.pop_due(now), Some(None)); // frame 1 lost
+        assert_eq!(jitter.pop_due(now), Some(Some(2)));
+        assert_eq!(jitter.pop_due(now), None);
+        assert_eq!(jitter.total_losses(), 1);
+    }
+
+    #[test]
+    fn stale_keepalive_rejects_restarted_sequence_number() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        jitter.reset_after_keepalive(80);
+        assert!(!jitter.observe_frame(0, t0));
+    }
+
+    #[test]
+    fn keepalive_accepts_equal_floor_sequence_number() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        jitter.reset_after_keepalive(80);
+        assert!(jitter.observe_frame(80, t0));
+    }
+
+    #[test]
+    fn stale_keepalive_accepts_continued_sequence_number() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        jitter.reset_after_keepalive(80);
+        assert!(jitter.observe_frame(81, t0));
+    }
+
+    #[test]
+    fn huge_jump_restarts_talkspurt_instead_of_fake_losses() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        jitter.observe_frame(0, t0);
+        let jumped = 0 + MAX_BUFFERED_FRAMES + 10;
+        jitter.observe_frame(jumped, t0 + FRAME);
+        // The jump re-anchors at the new frame; no loss is counted for the
+        // gap, and playout starts from the new anchor.
+        assert_eq!(jitter.next_deadline(), Some(t0 + FRAME + JITTER));
+        assert_eq!(jitter.pop_due(t0 + FRAME + JITTER), Some(Some(jumped)));
+        assert_eq!(jitter.total_losses(), 0);
+    }
+
+    #[test]
+    fn reset_clears_talkspurt_and_floor() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        jitter.observe_frame(0, t0);
+        jitter.reset();
+        assert_eq!(jitter.next_deadline(), None);
+        // Old frame is accepted again after a reset (fresh floor).
+        assert!(jitter.observe_frame(0, t0 + FRAME));
+        assert_eq!(jitter.next_deadline(), Some(t0 + FRAME + JITTER));
+    }
+
+    #[test]
+    fn losses_accumulate_across_stalls() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        // Playhead advances to frame 3, delivering frames contiguously.
+        assert!(jitter.observe_playhead(0, t0));
+        assert!(jitter.observe_playhead(1, t0));
+        assert!(jitter.observe_playhead(2, t0));
+        assert!(jitter.observe_playhead(3, t0));
+        let now = t0 + JITTER + FRAME * 3;
+        assert_eq!(jitter.pop_due(now), Some(Some(0)));
+        assert_eq!(jitter.pop_due(now), Some(Some(1)));
+        assert_eq!(jitter.pop_due(now), Some(Some(2)));
+        assert_eq!(jitter.pop_due(now), Some(Some(3)));
+        assert_eq!(jitter.pop_due(now), None);
+        assert_eq!(jitter.total_losses(), 0);
+    }
+
+    #[test]
+    fn keepalive_floor_drops_stale_buffered_frames_on_resume() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        assert!(jitter.observe_playhead(0, t0));
+        assert!(jitter.observe_playhead(50, t0));
+        let now = t0 + JITTER + FRAME * 50;
+        assert_eq!(jitter.pop_due(now), Some(Some(0)));
+        // A pause arrives; the keepalive floor advances to the current head.
+        jitter.reset_after_keepalive(50);
+        assert!(!jitter.observe_frame(10, now));
+        assert!(jitter.observe_frame(50, now));
+    }
+
+    #[test]
+    fn playhead_reobservation_is_idempotent() {
+        let t0 = Instant::now();
+        let mut jitter = VideoJitterBuffer::new(JITTER, FRAME);
+        assert!(jitter.observe_playhead(5, t0));
+        assert!(!jitter.observe_playhead(5, t0));
+        assert!(!jitter.observe_playhead(4, t0));
     }
 }
 
