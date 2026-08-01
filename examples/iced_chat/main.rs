@@ -659,6 +659,12 @@ fn main() -> Result<()> {
 
     // ── Build the endpoint, gossip, and router (no topic subscription yet) ──
 
+    // ── Directory gossip sender (shared between main.rs receiver and MCP) ──
+    // Created outside block_on so it survives after IcedChat.run() returns.
+    let mcp_directory_sender: Arc<Mutex<Option<GossipSender>>> =
+        Arc::new(Mutex::new(None));
+    let mcp_dir_sender_for_block = mcp_directory_sender.clone();
+
     let (
         endpoint,
         memory_lookup,
@@ -1144,8 +1150,7 @@ fn main() -> Result<()> {
         //
         // The sender is shared with the MCP server so boru_create_public_room
         // can broadcast new ads immediately.
-        let directory_sender: Arc<Mutex<Option<GossipSender>>> =
-            Arc::new(Mutex::new(None));
+        let directory_sender = mcp_dir_sender_for_block;
         {
             let dir_sender_for_mcp = directory_sender.clone();
             if let Some(ref relay_url) = relay_url_for_directory {
@@ -1157,13 +1162,17 @@ fn main() -> Result<()> {
                     let dir_tx = directory_room_tx.clone();
                     tokio::spawn(async move {
                         use n0_future::StreamExt;
+                        let mut event_count: u64 = 0;
                         while let Some(event) = receiver.next().await {
+                            event_count += 1;
                             let Ok(boru_core::api::Event::Received(msg)) = event else {
+                                debug!("directory event #{event_count}: non-Received");
                                 continue;
                             };
                             // Skip room-doc markers (metadata 0xFE, roster 0xFF)
                             if let Some(&marker) = msg.content.first() {
                                 if marker == 0xFE || marker == 0xFF {
+                                    debug!("directory event #{event_count}: doc marker");
                                     continue;
                                 }
                             }
@@ -1171,12 +1180,19 @@ fn main() -> Result<()> {
                                 SignedMessage::verify_and_decode(&msg.content)
                             {
                                 if let Message::RoomAdvertisement { ad, .. } = message {
+                                    info!(from=%from, topic=%ad.topic, name=%ad.room_name,
+                                        "received room advertisement");
                                     let _ = dir_tx.try_send(app::DirectoryRoomUpdate(ad, from));
+                                } else {
+                                    debug!(?message, "directory: non-ad message");
                                 }
+                            } else {
+                                debug!("directory event #{event_count}: verify failed");
                             }
                         }
+                        info!("directory receiver loop exited after {event_count} events");
                     });
-                    info!("subscribed to directory topic");
+                    info!("subscribed to directory topic {dir_topic}");
                     splash_send("Directory joined");
                 } else {
                     warn!("failed to subscribe to directory topic");
@@ -1351,27 +1367,10 @@ fn main() -> Result<()> {
         let mcp_diagnostics = boru_core::chat_core::DIAGNOSTICS.clone();
 
         // ── Directory gossip sender (shared with MCP) ──
-        let directory_sender: Arc<Mutex<Option<GossipSender>>> = Arc::new(Mutex::new(None));
-        {
-            let dir_sender = directory_sender.clone();
-            let dir_gossip = gossip.clone();
-            let dir_relay = relay_url_for_directory.clone();
-            runtime.spawn(async move {
-                if let Some(ref relay_url) = dir_relay {
-                    let topic = boru_core::directory::directory_topic(relay_url);
-                    match dir_gossip.subscribe(topic, Vec::new()).await {
-                        Ok(gt) => {
-                            let (sender, _rx) = gt.split();
-                            *dir_sender.lock().unwrap() = Some(sender);
-                            info!("MCP directory gossip topic subscribed: {topic}");
-                        }
-                        Err(e) => {
-                            warn!("MCP directory gossip subscription failed: {e}");
-                        }
-                    }
-                }
-            });
-        }
+        // The main.rs directory receiver (inside block_on above) has already
+        // subscribed to the directory gossip topic and stored its sender in
+        // mcp_directory_sender. Reuse that sender instead of creating a second
+        // subscription with no receiver loop.
 
         let mcp_state = mcp_server::McpAppState {
             diagnostics: mcp_diagnostics,
@@ -1406,7 +1405,7 @@ fn main() -> Result<()> {
                 }
                 store
             },
-            directory_sender,
+            directory_sender: mcp_directory_sender,
         };
 
         if let Err(e) = runtime.block_on(mcp_server::spawn_mcp_server(mcp_config, mcp_state)) {

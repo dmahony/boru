@@ -4578,8 +4578,11 @@ impl IcedChat {
     /// enabling discovery of advertised public rooms without an
     /// out-of-band rendezvous point.
     pub fn derive_directory_topic_from_relay(relay_url: &str) -> TopicId {
+        // Must match the domain separator used by boru_core::directory::directory_topic()
+        // so that IcedChat, the main.rs directory receiver, and the MCP broadcast
+        // all share the same gossip mesh.
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"iroh-gossip-chat/directory/v1");
+        hasher.update(b"boru-chat/public-room-directory/v1");
         hasher.update(relay_url.as_bytes());
         TopicId::from_bytes(*hasher.finalize().as_bytes())
     }

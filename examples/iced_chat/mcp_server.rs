@@ -698,39 +698,53 @@ fn handle_create_public_room(req: &JsonRpcRequest, state: &McpAppState) -> Resul
 
     // Broadcast the new ad on the directory gossip topic so other peers
     // discover it without waiting for the periodic tick.
-    // Subscribe ephemerally, send, then drop the subscription.
+    // Prefer the persistent directory_sender (already has mesh neighbors)
+    // over an ephemeral subscribe-broadcast-drop (races mesh formation).
     {
-        let relay_url = state
-            .endpoint
-            .addr()
-            .relay_urls()
-            .next()
-            .map(|u| u.to_string());
-        if let Some(relay_url) = relay_url {
-            let topic = boru_core::directory::directory_topic(&relay_url);
-            let sk = state.secret_key.clone();
-            let gossip = state.gossip.clone();
-            let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
-            let signature = sk.sign(&ad_bytes);
-            let msg = Message::RoomAdvertisement {
-                ad,
-                signature: signature.to_bytes().to_vec(),
-            };
-            let encoded =
-                SignedMessage::sign_and_encode(&sk, &msg).map_err(|e| format!("sign ad: {e}"))?;
+        let sk = state.secret_key.clone();
+        let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
+        let signature = sk.sign(&ad_bytes);
+        let msg = Message::RoomAdvertisement {
+            ad,
+            signature: signature.to_bytes().to_vec(),
+        };
+        let encoded =
+            SignedMessage::sign_and_encode(&sk, &msg).map_err(|e| format!("sign ad: {e}"))?;
+
+        // Try the persistent sender first — it has established mesh neighbors.
+        if let Some(ref sender) = *state.directory_sender.lock().unwrap() {
+            let sender = sender.clone();
             tokio::spawn(async move {
-                match gossip.subscribe(topic, Vec::new()).await {
-                    Ok(sub) => {
-                        let (sender, _rx) = sub.split();
-                        if let Err(e) = sender.broadcast(encoded).await {
-                            warn!("failed to broadcast directory ad: {e}");
-                        }
-                    }
-                    Err(e) => {
-                        warn!("failed to subscribe to directory topic for broadcast: {e}");
-                    }
+                if let Err(e) = sender.broadcast(encoded).await {
+                    warn!("failed to broadcast directory ad via persistent sender: {e}");
                 }
             });
+        } else {
+            // Fallback: ephemeral subscribe-broadcast-drop (may race mesh formation).
+            warn!("directory_sender not yet available, falling back to ephemeral broadcast");
+            let relay_url = state
+                .endpoint
+                .addr()
+                .relay_urls()
+                .next()
+                .map(|u| u.to_string());
+            if let Some(relay_url) = relay_url {
+                let topic = boru_core::directory::directory_topic(&relay_url);
+                let gossip = state.gossip.clone();
+                tokio::spawn(async move {
+                    match gossip.subscribe(topic, Vec::new()).await {
+                        Ok(sub) => {
+                            let (sender, _rx) = sub.split();
+                            if let Err(e) = sender.broadcast(encoded).await {
+                                warn!("failed to broadcast directory ad (ephemeral): {e}");
+                            }
+                        }
+                        Err(e) => {
+                            warn!("failed to subscribe to directory topic for broadcast: {e}");
+                        }
+                    }
+                });
+            }
         }
     }
 
