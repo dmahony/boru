@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chat_core::atomic_write::atomic_write_json;
 use crate::proto::TopicId;
+use crate::video_playback::MediaMetadata;
 
 /// Current schema version — bump on breaking format changes.
 const SCHEMA_VERSION: u32 = 1;
@@ -201,6 +202,11 @@ pub struct HistoryEntry {
     /// filesystem path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_identifier: Option<String>,
+    /// Optional durable metadata for a video or other media attachment.
+    /// Missing in older history files and intentionally separate from player
+    /// handles, widget state, playback position, and filesystem paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_metadata: Option<MediaMetadata>,
 }
 
 impl HistoryEntry {
@@ -230,6 +236,7 @@ impl HistoryEntry {
             delivery_state: DeliveryState::Queued,
             image_bytes: None,
             image_identifier: None,
+            media_metadata: None,
         }
     }
 
@@ -586,6 +593,35 @@ mod tests {
             "text",
             format!("hello {idx}"),
         )
+    }
+
+    #[test]
+    fn older_history_without_media_metadata_still_loads() {
+        let dir = temp_dir("legacy-video-fields");
+        fs::create_dir_all(&dir).unwrap();
+        let entry = make_entry(make_topic(0xA1), 1);
+        let mut json = serde_json::to_value(ChatHistoryStore {
+            schema_version: SCHEMA_VERSION,
+            entries: vec![entry],
+            data_dir: PathBuf::new(),
+            next_event_id: 2,
+        })
+        .unwrap();
+        json["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("media_metadata");
+        fs::write(
+            dir.join(HISTORY_FILE_NAME),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = ChatHistoryStore::load(&dir).unwrap().unwrap();
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].media_metadata, None);
+        assert_eq!(loaded.entries[0].text_preview, "hello 1");
+        let _ = fs::remove_dir_all(dir);
     }
 
     // ── DeliveryState tests ─────────────────────────────────────────────

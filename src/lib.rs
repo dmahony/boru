@@ -27,6 +27,8 @@ pub mod discovery_validation;
 pub mod metrics;
 /// Conservative classification for attachment rendering.
 pub mod media_classification;
+/// Durable video metadata and process-local inline-player coordination.
+pub mod video_playback;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod proto;
