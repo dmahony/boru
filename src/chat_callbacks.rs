@@ -241,7 +241,7 @@ pub trait ChatCallbacks {
         name: String,
         ticket: String,
         size: u64,
-        thumbnail: Option<Vec<u8>>,
+        thumbnail_hash: Option<MessageHash>,
     );
 
     /// Record a pending image download: `(filename, blob_hash, sender_pk)`.

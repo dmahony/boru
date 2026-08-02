@@ -539,7 +539,6 @@ fn view_download_progress_inner<'a>(
             })
         ])
         .width(Length::Fill)
-        .max_width(360.0)
         .height(Length::Fixed(preview_height))
         .clip(true)
         .style(|t| widget::container::Style {
@@ -606,8 +605,6 @@ fn view_download_progress_inner<'a>(
                 Column::new()
                     .push(
                         VideoPlayer::new(&video)
-                            .width(Length::Fill)
-                            .height(Length::Fill)
                             .content_fit(iced::ContentFit::Contain)
                             .on_end_of_stream(AppMessage::CloseInlineVideo)
                             .on_error(|_error| AppMessage::CloseInlineVideo),
@@ -623,8 +620,7 @@ fn view_download_progress_inner<'a>(
                             }),
                     ),
             )
-            .width(Length::Fill)
-            .max_width(if expanded { 720.0 } else { 360.0 })
+            .width(Length::Shrink)
             .clip(true)
             .into()
         } else {
