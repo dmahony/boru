@@ -24,24 +24,134 @@ pub const TUNNEL_PROTOCOL_VERSION: u16 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TunnelId(pub [u8; 32]);
 
-/// Opaque capability material carried by the handshake.
+/// Version of the signed capability contract.
+pub const TUNNEL_CAPABILITY_VERSION: u16 = 1;
+
+/// A recipient-bound, expiring authorisation to open one tunnel.
 ///
-/// Capability creation and verification are intentionally deferred to the
-/// capability phase.  Keeping this field in the wire format now prevents a
-/// later protocol-breaking change while ensuring the handshake cannot grant
-/// access based on peer identity alone.
+/// The signature covers every field except `signature`.  No target address or
+/// other network metadata is included: possession of this token authorises
+/// only the named tunnel for the named peer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TunnelCapability(Vec<u8>);
+pub struct TunnelCapability {
+    /// Capability contract version.
+    pub version: u16,
+    /// Tunnel this token authorises.
+    pub tunnel_id: TunnelId,
+    /// Endpoint identity of the tunnel owner and signer.
+    pub owner_endpoint_id: iroh::PublicKey,
+    /// The only endpoint identity permitted to present this token.
+    pub allowed_peer_endpoint_id: iroh::PublicKey,
+    /// Unix epoch milliseconds at which the token becomes valid.
+    pub created_at_ms: u64,
+    /// Unix epoch milliseconds after which the token is invalid.
+    pub expires_at_ms: u64,
+    /// Unpredictable per-capability nonce preventing token reuse as a forgery.
+    pub nonce: [u8; 32],
+    signature: Vec<u8>,
+}
+
+/// Reason a received tunnel capability was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityVerificationError {
+    /// The Ed25519 signature is invalid or malformed.
+    InvalidSignature,
+    /// The signer is not the configured tunnel owner.
+    OwnerMismatch,
+    /// The requesting endpoint is not the intended recipient.
+    RecipientMismatch,
+    /// The capability names a different tunnel.
+    TunnelMismatch,
+    /// The capability expiry has passed.
+    Expired,
+    /// The capability is from the future.
+    NotYetValid,
+    /// The capability contract version is unsupported.
+    UnsupportedVersion,
+    /// The configured tunnel is not currently active.
+    TunnelInactive,
+}
 
 impl TunnelCapability {
-    /// Construct capability material for wire transport.
-    pub fn from_bytes(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+    /// Create and sign a fresh capability. The nonce is generated internally.
+    pub fn sign(
+        owner: &iroh::SecretKey,
+        allowed_peer_endpoint_id: iroh::PublicKey,
+        tunnel_id: TunnelId,
+        created_at_ms: u64,
+        expires_at_ms: u64,
+    ) -> Self {
+        let mut capability = Self {
+            version: TUNNEL_CAPABILITY_VERSION,
+            tunnel_id,
+            owner_endpoint_id: owner.public(),
+            allowed_peer_endpoint_id,
+            created_at_ms,
+            expires_at_ms,
+            nonce: rand::random(),
+            signature: vec![0; 64],
+        };
+        capability.signature = owner.sign(&capability.signing_bytes()).to_bytes().to_vec();
+        capability
     }
 
-    /// Borrow the opaque capability bytes.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+    /// Verify a received capability against the connection and local tunnel.
+    pub fn verify_for(
+        &self,
+        expected_owner: &iroh::PublicKey,
+        requesting_peer: &iroh::PublicKey,
+        expected_tunnel: TunnelId,
+        now_ms: u64,
+        tunnel_active: bool,
+    ) -> Result<(), CapabilityVerificationError> {
+        if self.version != TUNNEL_CAPABILITY_VERSION {
+            return Err(CapabilityVerificationError::UnsupportedVersion);
+        }
+        if &self.owner_endpoint_id != expected_owner {
+            return Err(CapabilityVerificationError::OwnerMismatch);
+        }
+        if &self.allowed_peer_endpoint_id != requesting_peer {
+            return Err(CapabilityVerificationError::RecipientMismatch);
+        }
+        if self.tunnel_id != expected_tunnel {
+            return Err(CapabilityVerificationError::TunnelMismatch);
+        }
+        if !tunnel_active {
+            return Err(CapabilityVerificationError::TunnelInactive);
+        }
+        if now_ms < self.created_at_ms {
+            return Err(CapabilityVerificationError::NotYetValid);
+        }
+        if now_ms > self.expires_at_ms {
+            return Err(CapabilityVerificationError::Expired);
+        }
+        let signature_bytes: [u8; 64] = self
+            .signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| CapabilityVerificationError::InvalidSignature)?;
+        let signature = iroh::Signature::from_bytes(&signature_bytes);
+        self.owner_endpoint_id
+            .verify(&self.signing_bytes(), &signature)
+            .map_err(|_| CapabilityVerificationError::InvalidSignature)
+    }
+
+    fn signing_bytes(&self) -> Vec<u8> {
+        postcard::to_stdvec(&(
+            self.version,
+            self.tunnel_id,
+            self.owner_endpoint_id,
+            self.allowed_peer_endpoint_id,
+            self.created_at_ms,
+            self.expires_at_ms,
+            self.nonce,
+        ))
+        .expect("postcard capability encoding cannot fail")
+    }
+
+    #[cfg(test)]
+    fn signature_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.signature
     }
 }
 
@@ -167,10 +277,27 @@ mod tests {
     use tokio::time::timeout;
 
     use super::{
-        reject_for_protocol_version, TunnelCapability, TunnelId, TunnelProtocol,
-        TunnelRejectReason, TunnelRequest, TunnelResponse, BORU_TUNNEL_ALPN,
+        reject_for_protocol_version, CapabilityVerificationError, TunnelCapability, TunnelId,
+        TunnelProtocol, TunnelRejectReason, TunnelRequest, TunnelResponse, BORU_TUNNEL_ALPN,
         TUNNEL_PROTOCOL_VERSION,
     };
+
+    fn capability_fixture() -> (iroh::SecretKey, iroh::SecretKey, TunnelId, TunnelCapability) {
+        let owner = iroh::SecretKey::generate();
+        let recipient = iroh::SecretKey::generate();
+        let tunnel_id = TunnelId([7; 32]);
+        let capability = TunnelCapability::sign(&owner, recipient.public(), tunnel_id, 100, 200);
+        (owner, recipient, tunnel_id, capability)
+    }
+
+    fn verify_fixture(
+        capability: &TunnelCapability,
+        owner: &iroh::SecretKey,
+        recipient: &iroh::SecretKey,
+        tunnel_id: TunnelId,
+    ) -> Result<(), CapabilityVerificationError> {
+        capability.verify_for(&owner.public(), &recipient.public(), tunnel_id, 150, true)
+    }
 
     #[test]
     fn tunnel_alpn_is_stable() {
@@ -179,14 +306,100 @@ mod tests {
 
     #[test]
     fn tunnel_request_round_trips_through_postcard() {
-        let request = TunnelRequest::open(
-            TunnelId([7; 32]),
-            TunnelCapability::from_bytes(vec![1, 2, 3]),
-        );
+        let (_owner, _recipient, tunnel_id, capability) = capability_fixture();
+        let request = TunnelRequest::open(tunnel_id, capability);
         let bytes = postcard::to_stdvec(&request).expect("serialize request");
         let decoded: TunnelRequest = postcard::from_bytes(&bytes).expect("deserialize request");
         assert_eq!(request, decoded);
         assert_eq!(request.protocol_version(), TUNNEL_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn valid_capability_verifies() {
+        let (owner, recipient, tunnel_id, capability) = capability_fixture();
+        assert_eq!(
+            verify_fixture(&capability, &owner, &recipient, tunnel_id),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn tampered_capability_is_rejected() {
+        let (owner, recipient, tunnel_id, mut capability) = capability_fixture();
+        capability.expires_at_ms += 1;
+        assert_eq!(
+            verify_fixture(&capability, &owner, &recipient, tunnel_id),
+            Err(CapabilityVerificationError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn wrong_recipient_is_rejected() {
+        let (owner, _recipient, tunnel_id, capability) = capability_fixture();
+        let other = iroh::SecretKey::generate();
+        assert_eq!(
+            capability.verify_for(&owner.public(), &other.public(), tunnel_id, 150, true),
+            Err(CapabilityVerificationError::RecipientMismatch)
+        );
+    }
+
+    #[test]
+    fn wrong_owner_is_rejected() {
+        let (_owner, recipient, tunnel_id, capability) = capability_fixture();
+        let other = iroh::SecretKey::generate();
+        assert_eq!(
+            capability.verify_for(&other.public(), &recipient.public(), tunnel_id, 150, true),
+            Err(CapabilityVerificationError::OwnerMismatch)
+        );
+    }
+
+    #[test]
+    fn expired_capability_is_rejected() {
+        let (owner, recipient, tunnel_id, capability) = capability_fixture();
+        assert_eq!(
+            capability.verify_for(&owner.public(), &recipient.public(), tunnel_id, 201, true),
+            Err(CapabilityVerificationError::Expired)
+        );
+    }
+
+    #[test]
+    fn wrong_tunnel_id_is_rejected() {
+        let (owner, recipient, _tunnel_id, capability) = capability_fixture();
+        assert_eq!(
+            capability.verify_for(
+                &owner.public(),
+                &recipient.public(),
+                TunnelId([8; 32]),
+                150,
+                true
+            ),
+            Err(CapabilityVerificationError::TunnelMismatch)
+        );
+    }
+
+    #[test]
+    fn corrupted_signature_is_rejected() {
+        let (owner, recipient, tunnel_id, mut capability) = capability_fixture();
+        capability.signature_mut()[0] ^= 1;
+        assert_eq!(
+            verify_fixture(&capability, &owner, &recipient, tunnel_id),
+            Err(CapabilityVerificationError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn unsupported_version_and_inactive_tunnel_are_rejected() {
+        let (owner, recipient, tunnel_id, mut capability) = capability_fixture();
+        capability.version += 1;
+        assert_eq!(
+            verify_fixture(&capability, &owner, &recipient, tunnel_id),
+            Err(CapabilityVerificationError::UnsupportedVersion)
+        );
+        let capability = TunnelCapability::sign(&owner, recipient.public(), tunnel_id, 100, 200);
+        assert_eq!(
+            capability.verify_for(&owner.public(), &recipient.public(), tunnel_id, 150, false),
+            Err(CapabilityVerificationError::TunnelInactive)
+        );
     }
 
     #[test]
