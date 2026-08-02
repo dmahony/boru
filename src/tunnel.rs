@@ -357,7 +357,7 @@ pub const TUNNEL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum time a tunnel may remain completely idle.
 pub const TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-pub(crate) pub(crate) async fn write_frame<T: Serialize>(
+pub(crate) async fn write_frame<T: Serialize>(
     send: &mut iroh::endpoint::SendStream,
     value: &T,
 ) -> anyhow::Result<()> {
@@ -371,7 +371,7 @@ pub(crate) pub(crate) async fn write_frame<T: Serialize>(
     Ok(())
 }
 
-pub(crate) pub(crate) async fn read_frame<T: for<'de> Deserialize<'de>>(
+pub(crate) async fn read_frame<T: for<'de> Deserialize<'de>>(
     recv: &mut iroh::endpoint::RecvStream,
 ) -> anyhow::Result<T> {
     let length = recv.read_u32().await? as usize;
