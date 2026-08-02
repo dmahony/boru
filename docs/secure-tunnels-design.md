@@ -1,6 +1,6 @@
 # Boru Secure Tunnels: integration design note
 
-Status: architecture investigation only (Phase 1). This note records the existing integration points and the transport concepts worth reusing from `n0-computer/dumbpipe`; it does not implement the tunnel protocol.
+Status: implementation design (Phase 12 complete). This note records the existing integration points, the transport concepts worth reusing from `n0-computer/dumbpipe`, and the persistence decision for secure tunnels.
 
 ## Existing Boru networking architecture
 
@@ -113,6 +113,32 @@ Add a focused `tunnel` module (protocol, capability validation, service, and for
 - add protocol, forwarding, cancellation, and resource-limit tests before GUI work.
 
 The first implementation milestone should be a raw Boru-to-Boru authenticated bidirectional stream. TCP forwarding and GUI flows should be layered on only after that transport path is tested.
+
+## Persistence decision (Phase 12)
+
+Tunnel definitions are ephemeral in v1. A `TunnelService` owns its definitions in process memory, including the tunnel ID, owner and allowed peer identities, loopback target, expiry, lifecycle status, connection limits, and cancellation state. Creating a tunnel therefore does not write a capability, tunnel definition, target, or active-connection record to Boru's SQLite stores. Dropping the service (normally when Boru exits) removes all active definitions; a subsequent process starts with an empty tunnel service.
+
+This is intentional rather than an accidental limitation:
+
+- a capability is an authorisation secret and should not be copied into durable storage without a clear recovery and access-control design;
+- an ephemeral definition cannot survive a restart with stale expiry, peer authorisation, or a target that the owner no longer intends to expose;
+- revocation and shutdown have a simple meaning while all active state is owned by one service instance; and
+- existing SQLite persistence remains unchanged and is not coupled to tunnel lifecycle operations.
+
+Capability material must not be written to logs. Diagnostics and future UI status may expose non-secret metadata (for example a redacted tunnel ID, lifecycle state, expiry state, and counts), but must never print the capability token or serialized handshake containing it.
+
+### Future persistence migration (design only; not implemented)
+
+If restart survival becomes a product requirement, it must be introduced as a dedicated, reviewed SQLite migration rather than by adding writes to the v1 tunnel service. That migration should:
+
+1. define a versioned table for encrypted or otherwise protected tunnel records, with explicit ownership and authorization fields;
+2. specify key management and recovery before storing any capability secret (including what happens when the local identity changes);
+3. store only the minimum required metadata, with expiry and revocation state, and never store plaintext capability material unless a security review explicitly approves it;
+4. make startup restoration opt-in and reject expired, malformed, owner-mismatched, or revoked records;
+5. define atomic revocation/deletion and migration rollback behaviour; and
+6. add migration, restart, expiry, revocation, and secret-redaction tests before enabling the feature.
+
+Until that migration exists, callers must treat tunnel definitions and capabilities as process-lifetime state and recreate them explicitly after restart.
 
 ## Invariants
 
