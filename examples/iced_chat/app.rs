@@ -29,6 +29,8 @@ use crate::notification::service::{
     ConversationMute, DoNotDisturb, NotificationPreferences, NotificationService, PreviewMode,
     WindowFocusState,
 };
+#[cfg(feature = "terminal")]
+use crate::terminal_view::TerminalTab;
 use boru_core::api::{GossipSender, GossipTopic};
 use boru_core::backfill::{BackfillHandle, BACKFILL_TRIGGER_THRESHOLD};
 pub(crate) use boru_core::chat_callbacks::TransferKind;
@@ -2217,6 +2219,9 @@ pub enum Screen {
     Discover,
     /// Group list — shows known groups and a create-group button.
     Groups,
+    /// Embedded terminal tab (feature `terminal`).
+    #[cfg(feature = "terminal")]
+    Terminal,
 }
 
 // ── State-safety snapshots ─────────────────────────────────────────────
@@ -2381,6 +2386,10 @@ struct GifResult {
 pub struct IcedChat {
     // ── Navigation ──
     pub screen: Screen,
+    /// Embedded terminal tab (feature `terminal`). Spawned eagerly with the
+    /// user's `$SHELL` so the tab is ready the first time it is opened.
+    #[cfg(feature = "terminal")]
+    pub terminal: TerminalTab,
     /// Track which image is currently shown in the full-screen lightbox overlay.
     lightbox_image: Option<usize>,
     /// Pending topic we're connecting to (used during the async handoff
@@ -3854,6 +3863,14 @@ pub enum AppMessage {
     DeleteDirectoryRoom(TopicId),
     /// A room advertisement was received from the directory gossip topic.
     DirectoryRoomUpdate(RoomAdvertisement, PublicKey),
+
+    // ── Terminal tab ──
+    /// Event from the embedded terminal backend (feature `terminal`).
+    #[cfg(feature = "terminal")]
+    TerminalEvent(iced_term::Event),
+    /// Open the embedded terminal tab (feature `terminal`).
+    #[cfg(feature = "terminal")]
+    OpenTerminal,
 }
 
 /// Map semantic GUI navigation commands to the same application messages used
@@ -4689,6 +4706,9 @@ impl IcedChat {
 
         Self {
             screen: Screen::ChatList,
+            #[cfg(feature = "terminal")]
+            terminal: TerminalTab::new()
+                .expect("failed to create embedded terminal"),
             splash_start_time: std::time::Instant::now(),
             splash_has_rendered: false,
             splash_spinner_frame: 0,
@@ -6397,6 +6417,10 @@ impl IcedChat {
             AppMessage::DirectoryRoomUpdate(..) => "DirectoryRoomUpdate",
             AppMessage::ToggleDetailsPanel => "ToggleDetailsPanel",
             AppMessage::ToggleMemberList => "ToggleMemberList",
+            #[cfg(feature = "terminal")]
+            AppMessage::TerminalEvent(_) => "TerminalEvent",
+            #[cfg(feature = "terminal")]
+            AppMessage::OpenTerminal => "OpenTerminal",
         }
     }
 }
@@ -7052,6 +7076,8 @@ impl IcedChat {
             Screen::ChatList => "Chat list open".to_string(),
             Screen::Discover => "Discover".to_string(),
             Screen::Groups => "Groups".to_string(),
+            #[cfg(feature = "terminal")]
+            Screen::Terminal => "Terminal open".to_string(),
         };
 
         let mesh_state = match &self.mesh_health {
@@ -7283,6 +7309,8 @@ impl IcedChat {
             Screen::FriendProfile(_) => ("FriendProfile", None),
             Screen::Discover => ("Discover", None),
             Screen::Groups => ("Groups", None),
+            #[cfg(feature = "terminal")]
+            Screen::Terminal => ("Terminal", None),
         };
         let snapshot = IcedStateSnapshot {
             node_id: self.local_public.to_string(),
@@ -10500,6 +10528,27 @@ impl IcedChat {
 
             AppMessage::CloseSettings => {
                 self.screen = self.settings_return_to.take().unwrap_or(Screen::ChatList);
+                iced::Task::none()
+            }
+
+            #[cfg(feature = "terminal")]
+            AppMessage::OpenTerminal => {
+                self.screen = Screen::Terminal;
+                iced::Task::none()
+            }
+
+            #[cfg(feature = "terminal")]
+            AppMessage::TerminalEvent(iced_term::Event::BackendCall(_, cmd)) => {
+                match self.terminal.update(cmd) {
+                    iced_term::actions::Action::Shutdown => {
+                        // The embedded shell exited — leave the terminal tab.
+                        if matches!(self.screen, Screen::Terminal) {
+                            self.screen = Screen::ChatList;
+                        }
+                    }
+                    iced_term::actions::Action::ChangeTitle(_)
+                    | iced_term::actions::Action::Ignore => {}
+                }
                 iced::Task::none()
             }
 
@@ -17907,6 +17956,8 @@ impl IcedChat {
             Screen::FriendProfile(peer) => self.view_friend_profile(*peer),
             Screen::Discover => self.view_discover(),
             Screen::Groups => self.view_sidebar_groups(),
+            #[cfg(feature = "terminal")]
+            Screen::Terminal => self.terminal.view().map(AppMessage::TerminalEvent),
         };
 
         let content = row![
@@ -18469,9 +18520,23 @@ impl IcedChat {
         use iced::widget::{button, container, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
-        let header = Row::new()
+        let mut header = Row::new()
             .push(boru_logo(LogoSize::Small).into_element())
-            .push(Space::new().width(Length::Fill))
+            .push(Space::new().width(Length::Fill));
+
+        #[cfg(feature = "terminal")]
+        {
+            header = header.push(iced::widget::tooltip::Tooltip::new(
+                button(text(">_").font(iced::Font::MONOSPACE).size(TYPO_MD))
+                    .on_press(AppMessage::OpenTerminal)
+                    .padding([SPACE_6, SPACE_8])
+                    .style(BUTTON_ICON),
+                text("Terminal").size(TYPO_XS),
+                iced::widget::tooltip::Position::Bottom,
+            ));
+        }
+
+        let header = header
             .push(iced::widget::tooltip::Tooltip::new(
                 button(icon_svg(ICON_SETTINGS, TYPO_MD))
                     .on_press(AppMessage::OpenSettings)

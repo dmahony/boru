@@ -17,6 +17,8 @@ mod mcp_server;
 mod notification;
 mod perf_tracker;
 mod presentation;
+#[cfg(feature = "terminal")]
+mod terminal_view;
 
 use mimalloc::MiMalloc;
 
@@ -1580,6 +1582,14 @@ fn main() -> Result<()> {
                     .map(|_| app::AppMessage::InlineVideoTick),
             );
         }
+
+        #[cfg(feature = "terminal")]
+        subs.push(
+            state
+                .terminal
+                .subscription()
+                .map(app::AppMessage::TerminalEvent),
+        );
 
         subs.extend(vec![
             IcedChat::subscription(
