@@ -1064,6 +1064,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_service_handshake_is_dropped_without_stopping_later_requests(
+    ) -> anyhow::Result<()> {
+        let owner = iroh::SecretKey::generate();
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let service = Arc::new(crate::tunnel::service::TunnelService::new());
+        let configured_id = TunnelId([101; 32]);
+        service
+            .create_tunnel(
+                configured_id,
+                owner.public(),
+                crate::tunnel::service::TunnelTarget::tcp("127.0.0.1".parse()?, 9),
+                client.id(),
+                0,
+                u64::MAX,
+            )
+            .map_err(|error| anyhow::anyhow!("create test tunnel: {error:?}"))?;
+        let tunnel = TunnelProtocol::with_service(Arc::clone(&service), owner.public());
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, tunnel)
+            .spawn();
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await?;
+
+        let (mut malformed_send, mut malformed_recv) = connection.open_bi().await?;
+        malformed_send.write_u32(1).await?;
+        malformed_send.write_all(&[0xff]).await?;
+        malformed_send.finish()?;
+        assert!(
+            timeout(Duration::from_secs(2), malformed_recv.read_to_end(1024))
+                .await??
+                .is_empty()
+        );
+
+        let unknown_id = TunnelId([102; 32]);
+        let capability = TunnelCapability::sign(&owner, client.id(), unknown_id, 0, u64::MAX);
+        let (mut send, mut recv) = connection.open_bi().await?;
+        super::write_frame(&mut send, &TunnelRequest::open(unknown_id, capability)).await?;
+        let response = timeout(
+            Duration::from_secs(2),
+            super::read_frame::<TunnelResponse>(&mut recv),
+        )
+        .await??;
+        assert_eq!(
+            response,
+            TunnelResponse::rejected(TunnelRejectReason::UnknownTunnel)
+        );
+
+        router.shutdown().await?;
+        client.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn valid_capability_forwards_to_loopback_service() -> anyhow::Result<()> {
         let tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
         let target_addr = tcp_listener.local_addr()?;
