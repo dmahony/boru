@@ -1700,6 +1700,14 @@ pub(crate) enum DownloadState {
         /// Total file size preserved from last Active state, if known.
         total_size: Option<u64>,
     },
+    /// File was shared by the local user — the file resides at the given
+    /// path and requires no download.  Rendered like Completed but without
+    /// the green "download done" accent.
+    Shared {
+        name: String,
+        path: std::path::PathBuf,
+        size: Option<u64>,
+    },
     Failed {
         failure: DownloadFailure,
     },
@@ -1712,7 +1720,7 @@ impl DownloadState {
     fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled
+            Self::Completed { .. } | Self::Shared { .. } | Self::Failed { .. } | Self::Cancelled
         )
     }
 }
@@ -4089,8 +4097,9 @@ pub enum AppMessage {
     FileDownloaded {
         name: String,
         ticket: String,
-        /// JPEG thumbnail bytes generated during video upload (None for non-video).
         thumbnail: Option<Vec<u8>>,
+        /// Absolute path to the local file (set only for the uploader).
+        local_path: Option<String>,
     },
     /// A thumbnail blob hash was resolved; update the download card with the bytes.
     ThumbnailFetched {
@@ -5871,12 +5880,16 @@ impl IcedChat {
                         ..
                     } => {
                         if d.name == name {
-                            // Use the already-resolved saved path
                             let p_clone = p.clone();
-                            // But verify it still exists
                             if p_clone.exists() {
                                 return Some(p_clone);
                             }
+                        }
+                        None
+                    }
+                    DownloadState::Shared { ref path, .. } => {
+                        if d.name == name && path.exists() {
+                            return Some(path.clone());
                         }
                         None
                     }
@@ -12096,7 +12109,7 @@ impl IcedChat {
                                     ),
                                 }
                             }
-                            Ok::<_, String>((filename, ticket_str, thumbnail_bytes))
+                            Ok::<_, String>((filename, ticket_str, thumbnail_bytes, abs_path))
                         })
                         .await;
                         match result {
@@ -12105,11 +12118,12 @@ impl IcedChat {
                             Err(_elapsed) => Err("Upload timed out after 1 hour.".to_string()),
                         }
                     },
-                    |r: Result<(String, String, Option<Vec<u8>>), String>| match r {
-                        Ok((name, ticket, thumbnail)) => AppMessage::FileDownloaded {
+                    |r: Result<(String, String, Option<Vec<u8>>, String), String>| match r {
+                        Ok((name, ticket, thumbnail, local_path)) => AppMessage::FileDownloaded {
                             name,
                             ticket,
                             thumbnail,
+                            local_path: Some(local_path),
                         },
                         Err(e) => AppMessage::FileUploadFailed(e),
                     },
@@ -13265,10 +13279,12 @@ impl IcedChat {
                             dl.thumbnail_handle = thumbnail.as_deref().map(|bytes| {
                                 iced::widget::image::Handle::from_bytes(bytes.to_vec())
                             });
-                            dl.state = DownloadState::Completed {
-                                saved_name: name.clone(),
-                                saved_path: None,
-                                total_size: None,
+                            dl.state = DownloadState::Shared {
+                                name: name.clone(),
+                                path: std::path::PathBuf::from(
+                                    local_path.unwrap_or_default(),
+                                ),
+                                size: None,
                             };
                         }
                         entry.body = format!("Shared: {name} ✓");

@@ -48,6 +48,7 @@ fn state_badge_color(state: &DownloadState, theme: &iced::Theme) -> Color {
         | DownloadState::Active { .. }
         | DownloadState::Paused { .. } => accent_primary(theme),
         DownloadState::Completed { .. } => accent_green(theme),
+        DownloadState::Shared { .. } => accent_primary(theme),
         DownloadState::Failed { failure } => match failure.stability_label() {
             "Temporary" => Color::from_rgb(0.78, 0.58, 0.16),
             "Terminal" | "Permanent" => color_error(theme),
@@ -64,6 +65,7 @@ fn state_badge_label(state: &DownloadState) -> String {
         DownloadState::Active { .. } => "Downloading".to_string(),
         DownloadState::Paused { .. } => "Paused".to_string(),
         DownloadState::Completed { .. } => "Complete".to_string(),
+        DownloadState::Shared { .. } => "Shared".to_string(),
         DownloadState::Failed { failure } => failure.stability_label().to_string(),
         DownloadState::Cancelled => "Cancelled".to_string(),
     }
@@ -126,6 +128,10 @@ fn video_presentation_state(attachment: &DownloadAttachment) -> VideoPresentatio
             ..
         } if path.exists() => VideoPresentationState::Ready,
         DownloadState::Completed { .. } => VideoPresentationState::Missing,
+        DownloadState::Shared { ref path, .. } if path.exists() => {
+            VideoPresentationState::Ready
+        }
+        DownloadState::Shared { .. } => VideoPresentationState::Missing,
         DownloadState::Failed { failure }
             if matches!(failure, super::app::DownloadFailure::FileRemoved) =>
         {
@@ -308,6 +314,9 @@ fn view_download_progress_inner<'a>(
         DownloadState::Paused { bytes, .. } => {
             format!("{} received", human_size(*bytes))
         }
+        DownloadState::Shared {
+            size: Some(s), ..
+        } if *s > 0 => human_size(*s),
         _ => String::new(),
     };
 
@@ -866,6 +875,12 @@ fn action_buttons<'a>(
             ]
         }
         (_, DownloadState::Completed { .. }) => {
+            vec![
+                action_button("Open", OpenDownloadedFile(name.to_string())).into(),
+                text_button("Re-share", ReshareFile(entry_index)).into(),
+            ]
+        }
+        (_, DownloadState::Shared { .. }) => {
             vec![
                 action_button("Open", OpenDownloadedFile(name.to_string())).into(),
                 text_button("Re-share", ReshareFile(entry_index)).into(),
