@@ -1610,6 +1610,23 @@ pub(crate) struct DownloadAttachment {
     pub(crate) expected_content_hash: Option<String>,
 }
 
+impl std::hash::Hash for DownloadAttachment {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        self.name.hash(state);
+        self.ticket.hash(state);
+        self.transfer_id.hash(state);
+        self.state.hash(state);
+        self.source_peer.hash(state);
+        self.speed_bytes_per_sec.hash(state);
+        self.thumbnail.hash(state);
+        // thumbnail_handle is a cached rendering artifact — not part of logical identity
+        self.poster_dimensions.hash(state);
+        self.playback_error.hash(state);
+        self.expected_content_hash.hash(state);
+    }
+}
+
 impl DownloadAttachment {
     pub(crate) fn new(
         kind: TransferKind,
