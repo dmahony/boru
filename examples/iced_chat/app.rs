@@ -3245,10 +3245,23 @@ pub enum OutgoingRequestState {
 /// A recent event shown in the landing-page activity feed.
 #[derive(Debug, Clone)]
 pub struct RecentActivityEvent {
-    /// Human-readable description, e.g. "Alice came online" or "Bob shared photo.jpg".
+    /// Human-readable description.
     pub description: String,
     /// When the event occurred.
     pub timestamp: SystemTime,
+    /// Kind of activity — drives the icon selection in the home screen.
+    pub kind: ActivityKind,
+}
+
+/// Categorises a recent-activity event so the home screen can show a
+/// context-appropriate icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ActivityKind {
+    Online,
+    Offline,
+    FileShared,
+    Message,
+    Generic,
 }
 
 impl RecentActivityEvent {
@@ -3256,6 +3269,7 @@ impl RecentActivityEvent {
         Self {
             description: description.into(),
             timestamp: SystemTime::now(),
+            kind: ActivityKind::Generic,
         }
     }
 }
@@ -6305,12 +6319,12 @@ impl IcedChat {
     }
 
     /// Push a recent activity event for the landing page (ring buffer, newest first).
-    fn push_activity(&mut self, description: impl Into<String>) {
+    fn push_activity(&mut self, description: impl Into<String>, kind: ActivityKind) {
         if self.recent_activity.len() >= 50 {
             self.recent_activity.pop_back();
         }
         self.recent_activity
-            .push_front(RecentActivityEvent::new(description));
+            .push_front(RecentActivityEvent::with_kind(description, kind));
     }
 
     /// Rebuild both entry indexes after bulk mutations (room switch, load, eviction).
@@ -17835,9 +17849,9 @@ impl IcedChat {
             }
             let name = self.resolve_name(peer);
             if *online {
-                self.push_activity(format!("{name} came online"));
+                self.push_activity(format!("{name} came online"), ActivityKind::Online);
             } else {
-                self.push_activity(format!("{name} went offline"));
+                self.push_activity(format!("{name} went offline"), ActivityKind::Offline);
             }
         }
     }
@@ -17991,7 +18005,7 @@ impl IcedChat {
                         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                         if has_been_seen {
                             self.push_system(format!("Friend {label} is now ONLINE"));
-                            self.push_activity(format!("{label} came online"));
+                            self.push_activity(format!("{label} came online"), ActivityKind::Online);
                         }
                     }
                     FriendStatus::Offline => {
@@ -18001,7 +18015,7 @@ impl IcedChat {
                         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                         if has_been_seen {
                             self.push_system(format!("Friend {label} is now offline"));
-                            self.push_activity(format!("{label} went offline"));
+                            self.push_activity(format!("{label} went offline"), ActivityKind::Offline);
                         }
                     }
                     FriendStatus::Unknown => {}
@@ -21618,11 +21632,22 @@ impl IcedChat {
                             }
                         })
                         .unwrap_or_else(|_| "recently".to_string());
+                    let activity_icon = match event.kind {
+                        ActivityKind::Online => ICON_ONLINE,
+                        ActivityKind::Offline => ICON_OFFLINE,
+                        ActivityKind::FileShared => ICON_FILES,
+                        ActivityKind::Message => ICON_CHAT,
+                        ActivityKind::Generic => ICON_ACTIVITY,
+                    };
                     container(
                         row![
-                            icon_svg(ICON_ACTIVITY, TYPO_SM).style(|t, _| {
+                            icon_svg(activity_icon, TYPO_SM).style(move |t, _| {
                                 iced::widget::svg::Style {
-                                    color: Some(text_muted(t)),
+                                    color: Some(if event.kind == ActivityKind::Online {
+                                        accent_green(t)
+                                    } else {
+                                        text_muted(t)
+                                    }),
                                 }
                             }),
                             text(&event.description)
