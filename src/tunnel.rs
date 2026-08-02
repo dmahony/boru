@@ -28,7 +28,10 @@ use iroh::{
 };
 
 pub(crate) mod forwarding;
+mod local_listener;
 pub mod service;
+
+pub use local_listener::LocalTunnelListener;
 
 use service::{TunnelService, TunnelStatus, TunnelTarget};
 
