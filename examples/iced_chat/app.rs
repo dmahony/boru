@@ -1166,6 +1166,32 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Human-readable remaining tunnel lifetime, e.g. "38 minutes remaining".
+fn tunnel_remaining_label(expires_at_ms: u64) -> String {
+    let remaining = expires_at_ms.saturating_sub(now_ms() as u64);
+    if remaining >= 24 * 60 * 60 * 1_000 {
+        format!("{} days remaining", remaining / (24 * 60 * 60 * 1_000))
+    } else if remaining >= 60 * 60 * 1_000 {
+        format!("{} hours remaining", remaining / (60 * 60 * 1_000))
+    } else if remaining >= 60 * 1_000 {
+        format!("{} minutes remaining", remaining / (60 * 1_000))
+    } else if remaining > 0 {
+        "less than a minute remaining".to_string()
+    } else {
+        "Expired".to_string()
+    }
+}
+
+/// Render a tunnel target's TCP host:port in user-friendly form, using
+/// `localhost` when the target is loopback.
+fn tunnel_target_label(host: std::net::IpAddr, port: u16) -> String {
+    if host.is_loopback() {
+        format!("localhost:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 /// Format a connected received-tunnel loopback address for display.
 ///
 /// Only an explicitly HTTP-identified service gets the `http://` scheme
@@ -2890,6 +2916,13 @@ pub struct IcedChat {
     /// listener once the user connects, so the GUI can show the loopback
     /// address and offer Open / Copy Address / Disconnect actions.
     received_tunnels: HashMap<boru_core::tunnel::TunnelId, ReceivedTunnelState>,
+    /// Display metadata for tunnels this user is sharing, keyed by tunnel id.
+    ///
+    /// Populated when the user shares a local service; removed when they stop
+    /// sharing.  Lifecycle state (expiry, active connections, revocation)
+    /// stays in the backend [`boru_core::tunnel::service::TunnelService`] and
+    /// is read live for the Settings → Secure Tunnels section.
+    shared_tunnels: HashMap<boru_core::tunnel::TunnelId, SharedTunnelState>,
     /// Whether the "Block Friend" confirmation dialog is shown.
     friend_block_confirm: bool,
     /// Optional toast message displayed briefly at the top of the friend profile.
@@ -3324,6 +3357,20 @@ struct ReceivedTunnelState {
     cancellation: Option<tokio_util::sync::CancellationToken>,
 }
 
+/// GUI-side display metadata for a tunnel this user is sharing.
+///
+/// The backend [`boru_core::tunnel::service::TunnelService`] owns lifecycle
+/// state (expiry, connections, revocation); the GUI keeps the human-readable
+/// service name and HTTP flag alongside so the Settings → Secure Tunnels
+/// section can render a live SHARING list.
+#[derive(Debug, Clone)]
+struct SharedTunnelState {
+    /// Human-readable service name chosen when sharing.
+    service_name: String,
+    /// Whether the sharer explicitly identified the service as HTTP.
+    is_http: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum AppMessage {
     // ── Navigation ──
@@ -3591,6 +3638,8 @@ pub enum AppMessage {
     },
     /// Disconnect a connected received tunnel (cancels its listener task).
     DisconnectReceivedTunnel(boru_core::tunnel::TunnelId),
+    /// Stop sharing a locally-shared tunnel (revokes it in the backend).
+    StopSharingTunnel(boru_core::tunnel::TunnelId),
     /// Open the connected received tunnel's loopback address in a browser.
     OpenReceivedTunnel(boru_core::tunnel::TunnelId),
     /// Copy the connected received tunnel's loopback address to the clipboard.
@@ -5069,6 +5118,7 @@ impl IcedChat {
             ]),
             share_service_is_http: true,
             received_tunnels: HashMap::new(),
+            shared_tunnels: HashMap::new(),
             toast_message: None,
             toast_counter: 0,
             context_menu: None,
@@ -6420,6 +6470,7 @@ impl IcedChat {
             AppMessage::ReceivedTunnelConnected { .. } => "ReceivedTunnelConnected",
             AppMessage::ReceivedTunnelConnectFailed { .. } => "ReceivedTunnelConnectFailed",
             AppMessage::DisconnectReceivedTunnel(_) => "DisconnectReceivedTunnel",
+            AppMessage::StopSharingTunnel(_) => "StopSharingTunnel",
             AppMessage::OpenReceivedTunnel(_) => "OpenReceivedTunnel",
             AppMessage::CopyReceivedTunnelAddress(_) => "CopyReceivedTunnelAddress",
             AppMessage::TunnelOfferSent => "TunnelOfferSent",
@@ -13299,6 +13350,13 @@ impl IcedChat {
                 match result {
                     Ok(def) => {
                         self.share_local_service_open = false;
+                        self.shared_tunnels.insert(
+                            tunnel_id,
+                            SharedTunnelState {
+                                service_name: service_name.clone(),
+                                is_http: self.share_service_is_http,
+                            },
+                        );
                         let offer = boru_core::tunnel::TunnelOffer {
                             tunnel_id,
                             capability: boru_core::tunnel::TunnelCapability::sign(
@@ -13460,6 +13518,32 @@ impl IcedChat {
                     }
                     state.connected = false;
                     state.local_addr = None;
+                }
+                iced::Task::none()
+            }
+            AppMessage::StopSharingTunnel(tunnel_id) => {
+                // Revoke the tunnel through the shared backend service; this
+                // also cancels any live forwarding streams immediately.
+                let name = self
+                    .shared_tunnels
+                    .get(&tunnel_id)
+                    .map(|state| state.service_name.clone())
+                    .unwrap_or_else(|| "service".to_string());
+                let revoked = self
+                    .tunnel_service
+                    .revoke_tunnel_with_termination(tunnel_id, true);
+                self.shared_tunnels.remove(&tunnel_id);
+                match revoked {
+                    Ok(_) => {
+                        self.toast_message = Some(format!("Stopped sharing {name}"));
+                        self.toast_counter = 160;
+                    }
+                    Err(error) => {
+                        self.toast_message = Some(format!(
+                            "Could not stop sharing {name}: {error:?}"
+                        ));
+                        self.toast_counter = 160;
+                    }
                 }
                 iced::Task::none()
             }
@@ -24022,6 +24106,165 @@ impl IcedChat {
 
         let shared_files_card = section_card("SHARED FILES", shared_file_rows);
 
+        // ── Secure Tunnels section ──────────────────────────────────
+        // Two groups: SHARING (tunnels this user created locally, live
+        // metadata from the backend TunnelService) and CONNECTED (received
+        // tunnel offers the user has connected a local listener to).
+        let mut tunnel_rows: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+
+        let now = now_ms().max(0) as u64;
+        let mut sharing = self
+            .tunnel_service
+            .list_tunnels()
+            .into_iter()
+            .filter(|def| {
+                def.owner == self.local_public
+                    && def.status != boru_core::tunnel::service::TunnelStatus::Revoked
+                    && def.expires_at_ms > now
+            })
+            .collect::<Vec<_>>();
+        sharing.sort_by_key(|def| def.expires_at_ms);
+        let sharing_empty = sharing.is_empty();
+
+        if sharing_empty {
+            tunnel_rows.push(
+                text("No services currently shared.")
+                    .size(TYPO_XS)
+                    .style(text_muted_style)
+                    .into(),
+            );
+        } else {
+            tunnel_rows.push(
+                text("SHARING")
+                    .size(TYPO_XS)
+                    .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                    .style(text_muted_style)
+                    .into(),
+            );
+            for def in sharing {
+                let name = self
+                    .shared_tunnels
+                    .get(&def.id)
+                    .map(|state| state.service_name.clone())
+                    .unwrap_or_else(|| "Shared service".to_string());
+                let friend = self.resolve_name(&def.allowed_peer);
+                let target = match def.target {
+                    boru_core::tunnel::service::TunnelTarget::Tcp { host, port } => {
+                        tunnel_target_label(host, port)
+                    }
+                };
+                let remaining = tunnel_remaining_label(def.expires_at_ms);
+                let connections = if def.active_connections == 1 {
+                    "1 active connection".to_string()
+                } else {
+                    format!("{} active connections", def.active_connections)
+                };
+                let tunnel_id = def.id;
+                let row = Row::new()
+                    .push(
+                        Column::new()
+                            .push(text(name).size(TYPO_SM))
+                            .push(
+                                text(format!("With {friend}"))
+                                    .size(TYPO_XS)
+                                    .style(text_muted_style),
+                            )
+                            .push(
+                                text(format!("{target}  ·  {remaining}  ·  {connections}"))
+                                    .size(TYPO_XS)
+                                    .style(text_muted_style),
+                            )
+                            .spacing(SPACE_2)
+                            .width(Length::Fill)
+                            .align_x(Alignment::Start),
+                    )
+                    .push(
+                        button(text("Stop Sharing").size(TYPO_XS))
+                            .on_press(AppMessage::StopSharingTunnel(tunnel_id))
+                            .padding([SPACE_2, SPACE_8])
+                            .style(|t, _status| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(
+                                    if matches!(t, iced::Theme::Dark) {
+                                        Color::from_rgb(0.55, 0.18, 0.18)
+                                    } else {
+                                        Color::from_rgb(0.88, 0.32, 0.32)
+                                    },
+                                )),
+                                text_color: Color::WHITE,
+                                border: iced::Border {
+                                    radius: SPACE_4.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }),
+                    )
+                    .spacing(SPACE_8)
+                    .align_y(Alignment::Center);
+                tunnel_rows.push(row.into());
+            }
+        }
+
+        let mut connected = self
+            .received_tunnels
+            .values()
+            .filter(|state| state.connected)
+            .collect::<Vec<_>>();
+        connected.sort_by_key(|state| state.offer.expires_at_ms);
+        let connected_empty = connected.is_empty();
+
+        if !connected_empty {
+            tunnel_rows.push(
+                text("CONNECTED")
+                    .size(TYPO_XS)
+                    .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                    .style(text_muted_style)
+                    .into(),
+            );
+            for state in connected {
+                let tunnel_id = state.offer.tunnel_id;
+                let label = format!(
+                    "{} — {}",
+                    state.sharer_label, state.offer.service_name
+                );
+                let address = state
+                    .local_addr
+                    .map(|addr| tunnel_local_address(&state.offer, addr))
+                    .unwrap_or_else(|| "connecting…".to_string());
+                let row = Row::new()
+                    .push(
+                        Column::new()
+                            .push(text(label).size(TYPO_SM))
+                            .push(
+                                text(address)
+                                    .size(TYPO_XS)
+                                    .style(text_muted_style),
+                            )
+                            .spacing(SPACE_2)
+                            .width(Length::Fill)
+                            .align_x(Alignment::Start),
+                    )
+                    .push(
+                        button(text("Disconnect").size(TYPO_XS))
+                            .on_press(AppMessage::DisconnectReceivedTunnel(tunnel_id))
+                            .padding([SPACE_2, SPACE_8]),
+                    )
+                    .spacing(SPACE_8)
+                    .align_y(Alignment::Center);
+                tunnel_rows.push(row.into());
+            }
+        }
+
+        if sharing_empty && connected_empty {
+            tunnel_rows.push(
+                text("Share a local service from a friend's profile to see it here.")
+                    .size(TYPO_XS)
+                    .style(text_muted_style)
+                    .into(),
+            );
+        }
+
+        let secure_tunnels_card = section_card("SECURE TUNNELS", tunnel_rows);
+
         // ── Body (scrollable) ──
         let body = column![
             identity_card,
@@ -24029,6 +24272,8 @@ impl IcedChat {
             cached_sections,
             Space::new().height(Length::Fixed(SPACE_12)),
             shared_files_card,
+            Space::new().height(Length::Fixed(SPACE_12)),
+            secure_tunnels_card,
             Space::new().height(Length::Fixed(SPACE_24)),
         ]
         .spacing(SPACE_6)
