@@ -80,6 +80,7 @@ use boru_core::room_docs::{self, RoomMetadata};
 use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::{SharedFileRow, Storage};
 use boru_core::store::MessageStore;
+use boru_core::tunnel::service::{TunnelDefinition, TunnelStatus};
 use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
 use boru_core::video_playback::{
     validate_attachment_filename, verify_local_attachment, PlaybackCoordinator, VideoInstanceKey,
@@ -1298,7 +1299,7 @@ fn tunnel_status_color(
     theme: &iced::Theme,
     def: &boru_core::tunnel::service::TunnelDefinition,
 ) -> iced::Color {
-    use boru_core::tunnel::service::TunnelStatus;
+    use boru_core::tunnel::service::{TunnelDefinition, TunnelStatus};
     let now = now_ms().max(0) as u64;
     if def.status != TunnelStatus::Revoked && def.expires_at_ms <= now {
         return text_muted(theme);
@@ -3270,6 +3271,14 @@ impl RecentActivityEvent {
             description: description.into(),
             timestamp: SystemTime::now(),
             kind: ActivityKind::Generic,
+        }
+    }
+
+    fn with_kind(description: impl Into<String>, kind: ActivityKind) -> Self {
+        Self {
+            description: description.into(),
+            timestamp: SystemTime::now(),
+            kind,
         }
     }
 }
