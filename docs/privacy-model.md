@@ -58,6 +58,52 @@ even when the catalogue was previously cached.
 
 ---
 
+## Secure-tunnel privacy
+
+### What a tunnel offer exposes
+
+When a user shares a local service, the recipient receives a signed
+`TunnelOffer` over the authenticated contact channel. The offer exposes
+**display metadata only**:
+
+- the tunnel identifier (opaque 32-byte ID; not a path or address),
+- the human-readable service name chosen by the sharer,
+- an `is_http` flag chosen by the sharer,
+- the sharer's current endpoint address (relay URLs and any published direct
+  addresses — the same information Boru already exchanges for chat),
+- the expiry timestamp.
+
+The offer does **not** expose the local target host/port, the local
+filesystem, or any capability secret beyond the recipient-bound token itself.
+The capability authorises only the named recipient to open the named tunnel;
+it is not a general-purpose credential.
+
+### Loopback-only exposure
+
+Tunnel listeners bind **loopback addresses only** (`127.0.0.1`). A shared
+service is not exposed to the LAN or the internet at large; it is reachable
+only by the selected friend through the authenticated tunnel. The local
+target chosen by the owner is never sent to the remote peer.
+
+### In transit
+
+Tunnel traffic is **encrypted in transit by Iroh/QUIC (TLS 1.3)**. The
+forwarded bytes are opaque to relay operators and network observers; they can
+see that two peers communicate and how much traffic flows, but not the
+payloads.
+
+### Ephemeral state
+
+Tunnel definitions and capabilities are held in process memory only and are
+not written to SQLite. A restart removes all tunnel state, so no tunnel
+metadata (including who had access) persists on disk.
+
+See [`secure-tunnels.md`](secure-tunnels.md) for the full tunnel
+documentation and [`security-model.md`](security-model.md) for the tunnel
+security properties.
+
+---
+
 ## Storage privacy
 
 ### At rest
@@ -94,5 +140,6 @@ The following data is stored as plaintext in the SQLite database or on disk:
 | Node secret key | `secret_key.txt` | Plaintext hex — must be protected by `0o600` permissions |
 
 See [`security-model.md`](security-model.md) for the cryptographic security
-properties and [`message-storage-design.md`](message-storage-design.md) for
-the full storage architecture.
+properties, [`message-storage-design.md`](message-storage-design.md) for
+the full storage architecture, and [`secure-tunnels.md`](secure-tunnels.md)
+for the secure-tunnel privacy and security model.

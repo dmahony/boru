@@ -93,6 +93,58 @@ peer input. See [`catalogue-limits.md`](catalogue-limits.md) and
 
 ---
 
+## Secure-tunnel security
+
+### Transport
+
+Secure-tunnel traffic is **encrypted in transit by Iroh/QUIC (TLS 1.3)**,
+exactly like all other Boru peer-to-peer traffic. Tunnel bytes, handshake
+frames, and capabilities travel over the same mutually authenticated QUIC
+channel as chat and file traffic; an attacker on the network path cannot read
+or modify forwarded bytes.
+
+### Authorisation
+
+Tunnel access is controlled by **recipient-bound, expiring, signed
+capabilities** (`TunnelCapability`):
+
+- The owner signs the capability with its Ed25519 identity key. The signature
+  covers the capability version, tunnel ID, owner and allowed-peer endpoint
+  IDs, creation/expiry timestamps, and a random nonce. Any tampering is
+  rejected.
+- The capability names exactly one allowed peer. The `/boru-tunnel/1` handler
+  verifies that the authenticated requesting peer matches the named recipient
+  before forwarding any stream.
+- Capabilities expire; expired or not-yet-valid capabilities are rejected.
+- Capability material is never written to logs or persisted to SQLite.
+
+### Scope of access
+
+Sharing a local service **deliberately grants the selected peer network-level
+access to that specific service** while the tunnel is active. The grant is
+bounded by the owner-chosen target (loopback-only, enforced at creation), the
+tunnel's expiry, per-tunnel/global connection limits, and owner revocation.
+The remote peer can never select an arbitrary destination — requests name only
+an existing tunnel.
+
+### Revocation and expiry
+
+Owners can revoke a tunnel at any time. Plain revocation blocks new
+connections; revocation with termination cancels in-flight streams. Expired
+tunnels reject new connections.
+
+### Resource exhaustion controls
+
+Tunnel limits bound work derived from peer input: max shared tunnels (32),
+max simultaneously received streams (32), default per-tunnel connection limit
+(16), per-peer connection-attempt rate limit (8 per 60 seconds), handshake
+size bound (64 KiB), and connection/handshake/idle timeouts.
+
+See [`secure-tunnels.md`](secure-tunnels.md) for the full tunnel security and
+threat model.
+
+---
+
 ## What this model does not claim
 
 - The database is not encrypted at the SQLite file level. Files imported into
@@ -102,6 +154,12 @@ peer input. See [`catalogue-limits.md`](catalogue-limits.md) and
 - DM message plaintext is stored unencrypted in the `dm_messages` table.
 - Secret keys are stored in a plaintext hex file protected only by filesystem
   permissions.
+- Tunnel encryption protects the traffic path, not the shared service itself:
+  a tunnel deliberately grants the recipient network-level access to the
+  shared local service, and the service must be treated as exposed to that
+  peer for the tunnel's lifetime.
+- Tunnel traffic is not anonymised: relay operators and network observers can
+  see that two peers communicate and how much traffic flows (encrypted).
 
 ---
 
@@ -114,3 +172,8 @@ peer input. See [`catalogue-limits.md`](catalogue-limits.md) and
 - [`remote-file-sharing.md`](remote-file-sharing.md) — end-to-end file
   sharing protocol
 - [`catalogue-limits.md`](catalogue-limits.md) — resource usage bounds
+- [`secure-tunnels.md`](secure-tunnels.md) — secure-tunnel protocol, security
+  model, threat model, sharing/connecting, expiration, revocation, and
+  limitations
+- [`secure-tunnels-design.md`](secure-tunnels-design.md) — tunnel integration
+  design and future-use-cases boundary

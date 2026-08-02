@@ -52,6 +52,9 @@ Boru is a Rust library (`boru_core`) and example GUI application
 - **Friend management** — signed contact and friend-request negotiation
 - **File sharing** — content-addressed file attachments, profile-offered files
   with signed, requester-filtered catalogues and per-peer permissions
+- **Secure tunnels** — share a local TCP service with one selected friend
+  through an encrypted Iroh/QUIC tunnel; recipient-bound, expiring, and
+  revocable access with loopback-only targets
 - **Relational storage** — SQLite-based persistence with managed migrations
 
 ## Storage
@@ -166,6 +169,26 @@ See [`docs/remote-file-sharing.md`](docs/remote-file-sharing.md),
 [`docs/security-model.md`](docs/security-model.md), and
 [`docs/privacy-model.md`](docs/privacy-model.md) for the protocol workflow,
 security properties, privacy guarantees, storage behavior, and manual tests.
+
+## Secure tunnels
+
+Boru can share a local TCP service (for example a development web server on
+`127.0.0.1:3000`) with one selected friend through an encrypted tunnel.
+Traffic is encrypted in transit by Iroh/QUIC, and the friend reaches the
+service through a loopback address on their own machine — no port forwarding,
+no public inbound port, no extra server.
+
+Sharing is a deliberate access grant: while a tunnel is active, the selected
+friend has network-level access to that specific local service and nothing
+else on the machine. Access is recipient-bound (only the chosen friend can
+connect), time-limited (10 minutes to 8 hours, or until Boru exits), and can
+be revoked at any time. Tunnel definitions are ephemeral — they exist for the
+life of the Boru process and are not persisted.
+
+See [`docs/secure-tunnels.md`](docs/secure-tunnels.md) for the full
+documentation: how tunnels work, the security and threat model, direct vs
+relay connections, sharing and connecting to services, expiration,
+revocation, and current limitations.
 
 ## Discovery
 
