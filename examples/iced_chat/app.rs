@@ -13261,12 +13261,14 @@ impl IcedChat {
                 name,
                 ticket,
                 thumbnail,
+                local_path,
             } => {
                 self.pending_file_upload = None;
                 tracing::info!(
                     name = %name,
                     has_ticket = !ticket.is_empty(),
                     has_thumbnail = thumbnail.is_some(),
+                    has_local_path = local_path.is_some(),
                     thumbnail_len = thumbnail.as_ref().map(|b| b.len()).unwrap_or(0),
                     "FileDownloaded"
                 );

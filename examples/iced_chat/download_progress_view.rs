@@ -555,9 +555,13 @@ fn view_download_progress_inner<'a>(
         let preview = container(widget::stack![
             poster,
             error_preview.unwrap_or_else(|| {
-                container(play)
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill)
+                if presentation == VideoPresentationState::Ready {
+                    container(play)
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill)
+                } else {
+                    container(iced::widget::Space::new(0, 0))
+                }
             })
         ])
         .width(Length::Fixed(preview_width))
