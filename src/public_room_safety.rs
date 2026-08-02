@@ -941,7 +941,7 @@ mod tests {
                     name: "file.bin".into(),
                     ticket: "ticket123".into(),
                     size: 1024,
-                    thumbnail: None,
+                    thumbnail_hash: None,
                 },
                 sent_at: 1000,
             };
@@ -956,7 +956,7 @@ mod tests {
                 name: "extra.bin".into(),
                 ticket: "ticket456".into(),
                 size: 2048,
-                thumbnail: None,
+                thumbnail_hash: None,
             },
             sent_at: 1000,
         };
