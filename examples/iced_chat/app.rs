@@ -2505,6 +2505,10 @@ pub struct IcedChat {
     runtime_handle: tokio::runtime::Handle,
     pub net_rx: Arc<Mutex<Receiver<ConversationNetEvent>>>,
     net_tx: Sender<ConversationNetEvent>,
+    /// Secure-tunnel service handle shared with the tunnel protocol handler.
+    /// The GUI uses this to create local-service tunnels via the friend
+    /// profile "Share local service" dialog.
+    tunnel_service: Arc<boru_core::tunnel::service::TunnelService>,
     backfill_handle: boru_core::backfill::BackfillHandle,
     friends: FriendsStore,
     friends_dirty: bool,
@@ -2834,6 +2838,17 @@ pub struct IcedChat {
     friend_profile_renaming: bool,
     /// Whether the "Remove Friend" confirmation dialog is shown.
     friend_remove_confirm: bool,
+    /// Whether the "Share local service" dialog is open.
+    share_local_service_open: bool,
+    /// Service name entered in the share dialog.
+    share_service_name: String,
+    /// Local TCP port entered in the share dialog.
+    share_service_port: String,
+    /// Expiry duration selected in the share dialog.
+    share_service_expiry: boru_core::tunnel::service::TunnelDuration,
+    /// Combo box state for the expiry picker in the share dialog.
+    share_expiry_combo:
+        iced::widget::combo_box::State<boru_core::tunnel::service::TunnelDuration>,
     /// Whether the "Block Friend" confirmation dialog is shown.
     friend_block_confirm: bool,
     /// Optional toast message displayed briefly at the top of the friend profile.
@@ -3462,6 +3477,29 @@ pub enum AppMessage {
     CloseFriendProfile,
     /// Toggle the three-dot context menu in the friend profile.
     ToggleFriendProfileMenu,
+    /// Open the "Share local service" dialog for the friend whose profile is open.
+    OpenShareLocalService,
+    /// Service name changed in the share dialog.
+    ShareLocalServiceNameChanged(String),
+    /// Local port changed in the share dialog.
+    ShareLocalServicePortChanged(String),
+    /// Expiry duration selected in the share dialog.
+    ShareLocalServiceExpiryChanged(boru_core::tunnel::service::TunnelDuration),
+    /// Confirm the share dialog and create the tunnel.
+    ConfirmShareLocalService,
+    /// Cancel the share dialog.
+    CancelShareLocalService,
+    /// A local service tunnel was created successfully.
+    TunnelShared {
+        /// Display name of the shared service.
+        name: String,
+        /// Display name of the friend the tunnel is shared with.
+        friend: String,
+        /// Absolute expiry timestamp (unix ms).
+        expires_at_ms: u64,
+    },
+    /// Creating a local service tunnel failed.
+    TunnelShareFailed { message: String },
     /// Text input changed for inline rename of a friend's display name.
     FriendRenameInputChanged(String),
     /// Confirm the inline rename of a friend's display name.
@@ -4533,6 +4571,7 @@ impl IcedChat {
         gui_state_tx: tokio::sync::watch::Sender<IcedStateSnapshot>,
         gui_action_history: GuiActionHistory,
         storage: Option<Storage>,
+        tunnel_service: Arc<boru_core::tunnel::service::TunnelService>,
     ) -> Self {
         let (initial_topic, initial_bootstrap) =
             initial_room.unwrap_or_else(|| (TopicId::from_bytes([0u8; 32]), vec![]));
@@ -4922,6 +4961,17 @@ impl IcedChat {
             friend_profile_renaming: false,
             friend_remove_confirm: false,
             friend_block_confirm: false,
+            share_local_service_open: false,
+            share_service_name: "Development Server".to_string(),
+            share_service_port: "3000".to_string(),
+            share_service_expiry: boru_core::tunnel::service::TunnelDuration::OneHour,
+            share_expiry_combo: iced::widget::combo_box::State::new(vec![
+                boru_core::tunnel::service::TunnelDuration::TenMinutes,
+                boru_core::tunnel::service::TunnelDuration::ThirtyMinutes,
+                boru_core::tunnel::service::TunnelDuration::OneHour,
+                boru_core::tunnel::service::TunnelDuration::EightHours,
+                boru_core::tunnel::service::TunnelDuration::UntilExit,
+            ]),
             toast_message: None,
             toast_counter: 0,
             context_menu: None,
@@ -4987,6 +5037,7 @@ impl IcedChat {
             directory_store,
             directory_room_rx,
             auto_subscribed_rooms: HashSet::new(),
+            tunnel_service: Arc::new(boru_core::tunnel::service::TunnelService::new()),
         }
     }
 
@@ -6259,6 +6310,14 @@ impl IcedChat {
             AppMessage::OpenFriendProfile(..) => "OpenFriendProfile",
             AppMessage::CloseFriendProfile => "CloseFriendProfile",
             AppMessage::ToggleFriendProfileMenu => "ToggleFriendProfileMenu",
+            AppMessage::OpenShareLocalService => "OpenShareLocalService",
+            AppMessage::ShareLocalServiceNameChanged(_) => "ShareLocalServiceNameChanged",
+            AppMessage::ShareLocalServicePortChanged(_) => "ShareLocalServicePortChanged",
+            AppMessage::ShareLocalServiceExpiryChanged(_) => "ShareLocalServiceExpiryChanged",
+            AppMessage::ConfirmShareLocalService => "ConfirmShareLocalService",
+            AppMessage::CancelShareLocalService => "CancelShareLocalService",
+            AppMessage::TunnelShared { .. } => "TunnelShared",
+            AppMessage::TunnelShareFailed { .. } => "TunnelShareFailed",
             AppMessage::FriendRenameInputChanged(_) => "FriendRenameInputChanged",
             AppMessage::FriendRenameConfirm => "FriendRenameConfirm",
             AppMessage::CopyPeerId(_) => "CopyPeerId",
@@ -13059,6 +13118,109 @@ impl IcedChat {
             }
             AppMessage::ToggleFriendProfileMenu => {
                 self.friend_profile_menu_open = !self.friend_profile_menu_open;
+                iced::Task::none()
+            }
+            AppMessage::OpenShareLocalService => {
+                self.friend_profile_menu_open = false;
+                self.share_local_service_open = true;
+                self.share_service_name = "Development Server".to_string();
+                self.share_service_port = "3000".to_string();
+                self.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
+                iced::Task::none()
+            }
+            AppMessage::ShareLocalServiceNameChanged(value) => {
+                self.share_service_name = value;
+                iced::Task::none()
+            }
+            AppMessage::ShareLocalServicePortChanged(value) => {
+                self.share_service_port = value;
+                iced::Task::none()
+            }
+            AppMessage::ShareLocalServiceExpiryChanged(value) => {
+                self.share_service_expiry = value;
+                iced::Task::none()
+            }
+            AppMessage::CancelShareLocalService => {
+                self.share_local_service_open = false;
+                iced::Task::none()
+            }
+            AppMessage::ConfirmShareLocalService => {
+                let Screen::FriendProfile(peer) = &self.screen else {
+                    self.share_local_service_open = false;
+                    return iced::Task::none();
+                };
+                // Validate the local port.
+                let Ok(port) = self.share_service_port.trim().parse::<u16>() else {
+                    self.toast_message =
+                        Some("Enter a valid local port (1-65535) to share.".to_string());
+                    self.toast_counter = 120;
+                    return iced::Task::none();
+                };
+                if port == 0 {
+                    self.toast_message =
+                        Some("Enter a valid local port (1-65535) to share.".to_string());
+                    self.toast_counter = 120;
+                    return iced::Task::none();
+                }
+                let service_name = self.share_service_name.trim().to_string();
+                let service_name = if service_name.is_empty() {
+                    "Development Server".to_string()
+                } else {
+                    service_name
+                };
+                let friend_label = self.resolve_name(peer);
+                let expiry = self.share_service_expiry;
+                let tunnel_id = boru_core::tunnel::TunnelId(rand::random());
+                let target = boru_core::tunnel::service::TunnelTarget::tcp(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    port,
+                );
+                let result = self.tunnel_service.create_tunnel_for_duration(
+                    tunnel_id,
+                    self.local_public,
+                    target,
+                    *peer,
+                    expiry,
+                );
+                match result {
+                    Ok(def) => {
+                        self.share_local_service_open = false;
+                        iced::Task::done(AppMessage::TunnelShared {
+                            name: service_name,
+                            friend: friend_label,
+                            expires_at_ms: def.expires_at_ms,
+                        })
+                    }
+                    Err(err) => iced::Task::done(AppMessage::TunnelShareFailed {
+                        message: format!("{err:?}"),
+                    }),
+                }
+            }
+            AppMessage::TunnelShared {
+                name,
+                friend,
+                expires_at_ms,
+            } => {
+                let remaining = expires_at_ms.saturating_sub(now_ms() as u64);
+                let when = if remaining >= 24 * 60 * 60 * 1_000 {
+                    format!("{} days", remaining / (24 * 60 * 60 * 1_000))
+                } else if remaining >= 60 * 60 * 1_000 {
+                    format!("{} hours", remaining / (60 * 60 * 1_000))
+                } else if remaining >= 60 * 1_000 {
+                    format!("{} minutes", remaining / (60 * 1_000))
+                } else {
+                    "less than a minute".to_string()
+                };
+                self.toast_message = Some(format!(
+                    "Sharing {name} with {friend} (expires in {when})"
+                ));
+                self.toast_counter = 160;
+                iced::Task::none()
+            }
+            AppMessage::TunnelShareFailed { message } => {
+                self.toast_message =
+                    Some(format!("Could not share service: {message}"));
+                self.toast_counter = 160;
                 iced::Task::none()
             }
             AppMessage::FriendRenameInputChanged(value) => {
@@ -25373,6 +25535,7 @@ impl IcedChat {
                 ("View Profile", AppMessage::ToggleFriendProfileMenu),
                 ("Browse Files", AppMessage::BrowsePeerCatalogue(peer)),
                 ("Rename Friend", AppMessage::ShowRenameFriendInput),
+                ("Share local service", AppMessage::OpenShareLocalService),
                 ("Copy Public Key", AppMessage::CopyPeerId(peer)),
                 ("Remove Friend", AppMessage::ShowRemoveFriendConfirm),
                 ("Block Friend", AppMessage::ShowBlockFriendConfirm),
@@ -25457,6 +25620,9 @@ impl IcedChat {
         if self.friend_block_confirm {
             return self.view_block_confirm_overlay(peer, &display_name, base);
         }
+        if self.share_local_service_open {
+            return self.view_share_local_service_dialog(peer, display_name.clone(), base);
+        }
 
         // ── Toast overlay ──
         if let Some(msg) = &self.toast_message {
@@ -25494,6 +25660,107 @@ impl IcedChat {
         }
 
         base.into()
+    }
+
+    /// Dialog for sharing a local service with a friend via a secure tunnel.
+    fn view_share_local_service_dialog<'a>(
+        &'a self,
+        _peer: PublicKey,
+        display_name: String,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::combo_box::ComboBox;
+        use iced::widget::{button, column, container, row, text, text_input};
+        use iced::{Alignment, Length};
+
+        let theme = Self::theme_from_dark(self.dark_mode);
+        let warning = text(format!(
+            "{display_name} will be able to connect to this local service while the tunnel is active."
+        ))
+        .size(TYPO_XS)
+        .color(text_remote_body(&theme));
+
+        let expiry_combo = ComboBox::new(
+            &self.share_expiry_combo,
+            "Expires after…",
+            Some(&self.share_service_expiry),
+            AppMessage::ShareLocalServiceExpiryChanged,
+        )
+        .width(Length::Fill);
+
+        let dialog = column![
+            text("Share Local Service").size(18),
+            text("Service name")
+                .size(TYPO_SM)
+                .color(text_remote_body(&theme)),
+            text_input("Service name…", &self.share_service_name)
+                .on_input(AppMessage::ShareLocalServiceNameChanged)
+                .width(Length::Fill),
+            text("Local port")
+                .size(TYPO_SM)
+                .color(text_remote_body(&theme)),
+            text_input("3000", &self.share_service_port)
+                .on_input(AppMessage::ShareLocalServicePortChanged)
+                .width(Length::Fill),
+            text("Share with")
+                .size(TYPO_SM)
+                .color(text_remote_body(&theme)),
+            text(display_name).size(TYPO_SM),
+            text("Expires after")
+                .size(TYPO_SM)
+                .color(text_remote_body(&theme)),
+            expiry_combo,
+            container(warning)
+                .width(Length::Fill)
+                .padding(SPACE_8)
+                .style(move |_t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.85, 0.75, 0.45, 0.18,
+                    ))),
+                    border: iced::Border {
+                        radius: SPACE_4.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            row![
+                button(text("Cancel"))
+                    .on_press(AppMessage::CancelShareLocalService)
+                    .padding([SPACE_4, SPACE_12]),
+                button(text("Share"))
+                    .on_press(AppMessage::ConfirmShareLocalService)
+                    .padding([SPACE_4, SPACE_12]),
+            ]
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(SPACE_6)
+        .align_x(Alignment::Start)
+        .width(Length::Fill);
+
+        let overlay = container(dialog)
+            .width(Length::Fixed(360.0))
+            .height(Length::Shrink)
+            .padding(SPACE_24)
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    radius: RADIUS_LG.into(),
+                    width: 1.0,
+                    color: border_muted(t),
+                },
+                ..Default::default()
+            });
+
+        iced::widget::stack![
+            base,
+            container(overlay)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        ]
+        .into()
     }
 
     /// Confirmation overlay for removing a friend.
