@@ -413,7 +413,7 @@ async fn handle_incoming_stream(
             &requesting_peer,
             tunnel_id,
             unix_epoch_ms(),
-            definition.status == TunnelStatus::Active,
+            definition.status != TunnelStatus::Revoked,
         )
         .is_err()
     {
@@ -425,12 +425,34 @@ async fn handle_incoming_stream(
         send.finish()?;
         anyhow::bail!("invalid tunnel capability");
     }
+    let _reservation = match service.try_acquire_connection(tunnel_id) {
+        Ok(reservation) => reservation,
+        Err(service::TunnelServiceError::ConnectionLimitReached) => {
+            write_frame(
+                &mut send,
+                &TunnelResponse::rejected(TunnelRejectReason::Busy),
+            )
+            .await?;
+            send.finish()?;
+            anyhow::bail!("tunnel connection limit reached");
+        }
+        Err(_) => {
+            write_frame(
+                &mut send,
+                &TunnelResponse::rejected(TunnelRejectReason::InvalidCapability),
+            )
+            .await?;
+            send.finish()?;
+            anyhow::bail!("tunnel is not available");
+        }
+    };
     let (host, port) = match definition.target {
         TunnelTarget::Tcp { host, port } => (host, port),
     };
     let local = match TcpStream::connect((host, port)).await {
         Ok(local) => local,
         Err(_) => {
+            service.release_connection(tunnel_id);
             write_frame(
                 &mut send,
                 &TunnelResponse::rejected(TunnelRejectReason::TargetUnavailable),
@@ -441,13 +463,11 @@ async fn handle_incoming_stream(
         }
     };
     service
-        .connect_tunnel(tunnel_id)
-        .map_err(|_| anyhow::anyhow!("tunnel state changed"))?;
-    service
         .mark_connected(tunnel_id)
         .map_err(|_| anyhow::anyhow!("tunnel state changed"))?;
     write_frame(&mut send, &TunnelResponse::Accepted).await?;
     forwarding::forward_bidirectional(local, send, recv, CancellationToken::new()).await;
+    service.release_connection(tunnel_id);
     Ok(())
 }
 

@@ -1,12 +1,21 @@
 //! Loopback TCP listeners that open Boru tunnels for local applications.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+};
 
-use iroh::{Endpoint, EndpointAddr};
-use tokio::net::{TcpListener, TcpStream};
+use iroh::{endpoint::Connection, Endpoint, EndpointAddr};
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpListener, TcpStream},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
+};
 use tokio_util::sync::CancellationToken;
 
 use super::{forwarding, open_tunnel, TunnelCapability, TunnelId};
+
+const DEFAULT_MAX_CONNECTIONS: usize = 16;
 
 /// A local loopback listener for one configured tunnel.
 #[derive(Debug)]
@@ -16,6 +25,8 @@ pub struct LocalTunnelListener {
     owner: EndpointAddr,
     tunnel_id: TunnelId,
     capability: TunnelCapability,
+    max_connections: Arc<Semaphore>,
+    peer_connection: Arc<Mutex<Option<Connection>>>,
 }
 
 impl LocalTunnelListener {
@@ -31,10 +42,31 @@ impl LocalTunnelListener {
         capability: TunnelCapability,
         bind_addr: SocketAddr,
     ) -> anyhow::Result<Self> {
+        Self::bind_with_limit(
+            endpoint,
+            owner,
+            tunnel_id,
+            capability,
+            bind_addr,
+            DEFAULT_MAX_CONNECTIONS,
+        )
+        .await
+    }
+
+    /// Bind a listener with a finite per-tunnel connection limit.
+    pub async fn bind_with_limit(
+        endpoint: Endpoint,
+        owner: EndpointAddr,
+        tunnel_id: TunnelId,
+        capability: TunnelCapability,
+        bind_addr: SocketAddr,
+        max_connections: usize,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             bind_addr.ip().is_loopback(),
             "local tunnel listeners must bind to a loopback address"
         );
+        anyhow::ensure!(max_connections > 0, "maximum connections must be positive");
         let listener = TcpListener::bind(bind_addr).await?;
         Ok(Self {
             listener,
@@ -42,6 +74,8 @@ impl LocalTunnelListener {
             owner,
             tunnel_id,
             capability,
+            max_connections: Arc::new(Semaphore::new(max_connections)),
+            peer_connection: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -54,12 +88,33 @@ impl LocalTunnelListener {
         capability: TunnelCapability,
         port: u16,
     ) -> anyhow::Result<Self> {
-        Self::bind(
+        Self::bind_loopback_with_limit(
+            endpoint,
+            owner,
+            tunnel_id,
+            capability,
+            port,
+            DEFAULT_MAX_CONNECTIONS,
+        )
+        .await
+    }
+
+    /// Bind to loopback with a finite per-tunnel connection limit.
+    pub async fn bind_loopback_with_limit(
+        endpoint: Endpoint,
+        owner: EndpointAddr,
+        tunnel_id: TunnelId,
+        capability: TunnelCapability,
+        port: u16,
+        max_connections: usize,
+    ) -> anyhow::Result<Self> {
+        Self::bind_with_limit(
             endpoint,
             owner,
             tunnel_id,
             capability,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            max_connections,
         )
         .await
     }
@@ -74,7 +129,12 @@ impl LocalTunnelListener {
     /// configured tunnel until either side closes.
     pub async fn accept_once(&self) -> anyhow::Result<()> {
         let (local, _) = self.listener.accept().await?;
-        self.route(local).await
+        let permit = self
+            .max_connections
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| anyhow::anyhow!("tunnel connection limit reached"))?;
+        self.route(local, permit).await
     }
 
     /// Run the listener until cancellation, routing each application
@@ -86,12 +146,31 @@ impl LocalTunnelListener {
                 accepted = self.listener.accept() => accepted?,
             };
             let (local, _) = accepted;
+            let permit = match self.max_connections.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    let mut local = local;
+                    let _ = local.shutdown().await;
+                    tracing::debug!("local tunnel connection limit reached");
+                    continue;
+                }
+            };
             let endpoint = self.endpoint.clone();
             let owner = self.owner.clone();
             let tunnel_id = self.tunnel_id;
             let capability = self.capability.clone();
+            let peer_connection = Arc::clone(&self.peer_connection);
             tokio::spawn(async move {
-                let result = Self::route_with(endpoint, owner, tunnel_id, capability, local).await;
+                let result = Self::route_with(
+                    endpoint,
+                    owner,
+                    tunnel_id,
+                    capability,
+                    peer_connection,
+                    local,
+                    permit,
+                )
+                .await;
                 if let Err(error) = result {
                     tracing::debug!(%error, "local tunnel connection stopped");
                 }
@@ -99,13 +178,15 @@ impl LocalTunnelListener {
         }
     }
 
-    async fn route(&self, local: TcpStream) -> anyhow::Result<()> {
+    async fn route(&self, local: TcpStream, permit: OwnedSemaphorePermit) -> anyhow::Result<()> {
         Self::route_with(
             self.endpoint.clone(),
             self.owner.clone(),
             self.tunnel_id,
             self.capability.clone(),
+            Arc::clone(&self.peer_connection),
             local,
+            permit,
         )
         .await
     }
@@ -115,9 +196,20 @@ impl LocalTunnelListener {
         owner: EndpointAddr,
         tunnel_id: TunnelId,
         capability: TunnelCapability,
+        peer_connection: Arc<Mutex<Option<Connection>>>,
         local: TcpStream,
+        _permit: OwnedSemaphorePermit,
     ) -> anyhow::Result<()> {
-        let connection = endpoint.connect(owner, super::BORU_TUNNEL_ALPN).await?;
+        let connection = {
+            let mut shared = peer_connection.lock().await;
+            if let Some(connection) = shared.as_ref() {
+                connection.clone()
+            } else {
+                let connection = endpoint.connect(owner, super::BORU_TUNNEL_ALPN).await?;
+                *shared = Some(connection.clone());
+                connection
+            }
+        };
         let (send, recv) = open_tunnel(&connection, tunnel_id, capability).await?;
         forwarding::forward_bidirectional(local, send, recv, CancellationToken::new()).await;
         Ok(())
@@ -194,10 +286,19 @@ mod tests {
         let target_listener = TcpListener::bind("127.0.0.1:0").await?;
         let target_addr = target_listener.local_addr()?;
         let target_task = tokio::spawn(async move {
-            let (mut socket, _) = target_listener.accept().await?;
-            let mut request = [0; 4];
-            socket.read_exact(&mut request).await?;
-            socket.write_all(b"pong").await?;
+            let mut handlers = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = target_listener.accept().await?;
+                handlers.push(tokio::spawn(async move {
+                    let mut request = [0; 4];
+                    socket.read_exact(&mut request).await?;
+                    socket.write_all(b"pong").await?;
+                    anyhow::Ok(())
+                }));
+            }
+            for handler in handlers {
+                handler.await??;
+            }
             anyhow::Ok(())
         });
 
@@ -240,12 +341,25 @@ mod tests {
         let addr = listener.local_addr()?;
         let cancellation = CancellationToken::new();
         let running = tokio::spawn(listener.run(cancellation.clone()));
-        let mut app = TcpStream::connect(addr).await?;
-        app.write_all(b"ping").await?;
-        let mut response = [0; 4];
-        timeout(Duration::from_secs(2), app.read_exact(&mut response)).await??;
-        assert_eq!(&response, b"pong");
-        app.shutdown().await?;
+        let mut apps = Vec::new();
+        for _ in 0..2 {
+            let addr = addr;
+            apps.push(tokio::spawn(async move {
+                let mut app = TcpStream::connect(addr).await?;
+                app.write_all(b"ping").await?;
+                let mut response = [0; 4];
+                timeout(Duration::from_secs(2), app.read_exact(&mut response)).await??;
+                anyhow::ensure!(&response == b"pong");
+                app.shutdown().await?;
+                anyhow::Ok(())
+            }));
+        }
+        for (index, app) in apps.into_iter().enumerate() {
+            let result = app
+                .await
+                .map_err(|error| anyhow::anyhow!("app task {index}: {error}"))?;
+            result.map_err(|error| anyhow::anyhow!("app {index}: {error}"))?;
+        }
         target_task.await??;
         cancellation.cancel();
         timeout(Duration::from_secs(2), running).await???;

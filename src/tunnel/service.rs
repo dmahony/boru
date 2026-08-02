@@ -64,6 +64,10 @@ pub struct TunnelDefinition {
     pub expires_at_ms: u64,
     /// Current lifecycle state.
     pub status: TunnelStatus,
+    /// Maximum number of simultaneous connections for this tunnel.
+    pub max_connections: usize,
+    /// Number of connections currently using this tunnel.
+    pub active_connections: usize,
 }
 
 /// Errors returned by [`TunnelService`] lifecycle operations.
@@ -79,6 +83,10 @@ pub enum TunnelServiceError {
     InvalidState,
     /// The target is not a loopback address.
     NonLoopbackTarget,
+    /// The configured simultaneous connection limit has been reached.
+    ConnectionLimitReached,
+    /// The configured simultaneous connection limit is invalid.
+    InvalidConnectionLimit,
 }
 
 /// In-memory owner of configured tunnel metadata.
@@ -103,11 +111,36 @@ impl TunnelService {
         created_at_ms: u64,
         expires_at_ms: u64,
     ) -> Result<TunnelDefinition, TunnelServiceError> {
+        self.create_tunnel_with_limit(
+            id,
+            owner,
+            target,
+            allowed_peer,
+            created_at_ms,
+            expires_at_ms,
+            16,
+        )
+    }
+
+    /// Register a tunnel with an explicit simultaneous connection limit.
+    pub fn create_tunnel_with_limit(
+        &self,
+        id: TunnelId,
+        owner: iroh::PublicKey,
+        target: TunnelTarget,
+        allowed_peer: iroh::PublicKey,
+        created_at_ms: u64,
+        expires_at_ms: u64,
+        max_connections: usize,
+    ) -> Result<TunnelDefinition, TunnelServiceError> {
         if !target.is_loopback() {
             return Err(TunnelServiceError::NonLoopbackTarget);
         }
         if expires_at_ms <= created_at_ms {
             return Err(TunnelServiceError::InvalidExpiry);
+        }
+        if max_connections == 0 {
+            return Err(TunnelServiceError::InvalidConnectionLimit);
         }
 
         let definition = TunnelDefinition {
@@ -118,6 +151,8 @@ impl TunnelService {
             created_at_ms,
             expires_at_ms,
             status: TunnelStatus::Active,
+            max_connections,
+            active_connections: 0,
         };
         let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
         if tunnels.contains_key(&id) {
@@ -172,11 +207,42 @@ impl TunnelService {
     pub fn mark_connected(&self, id: TunnelId) -> Result<TunnelDefinition, TunnelServiceError> {
         let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
         let definition = tunnels.get_mut(&id).ok_or(TunnelServiceError::NotFound)?;
-        if definition.status != TunnelStatus::Connecting {
+        if !matches!(
+            definition.status,
+            TunnelStatus::Connecting | TunnelStatus::Connected
+        ) {
             return Err(TunnelServiceError::InvalidState);
         }
         definition.status = TunnelStatus::Connected;
         Ok(definition.clone())
+    }
+
+    /// Reserve one connection slot, allowing multiple streams on one tunnel.
+    pub fn try_acquire_connection(
+        &self,
+        id: TunnelId,
+    ) -> Result<TunnelDefinition, TunnelServiceError> {
+        let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
+        let definition = tunnels.get_mut(&id).ok_or(TunnelServiceError::NotFound)?;
+        if definition.active_connections >= definition.max_connections {
+            return Err(TunnelServiceError::ConnectionLimitReached);
+        }
+        definition.active_connections += 1;
+        if definition.status == TunnelStatus::Active {
+            definition.status = TunnelStatus::Connecting;
+        }
+        Ok(definition.clone())
+    }
+
+    /// Release a previously reserved connection slot.
+    pub fn release_connection(&self, id: TunnelId) {
+        let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
+        if let Some(definition) = tunnels.get_mut(&id) {
+            definition.active_connections = definition.active_connections.saturating_sub(1);
+            if definition.active_connections == 0 && definition.status == TunnelStatus::Connected {
+                definition.status = TunnelStatus::Active;
+            }
+        }
     }
 }
 
@@ -271,6 +337,92 @@ mod tests {
             200,
         );
         assert_eq!(result, Err(TunnelServiceError::NonLoopbackTarget));
+    }
+
+    #[test]
+    fn connection_limit_is_enforced_and_released() {
+        let (service, owner, peer, id) = fixture();
+        service
+            .create_tunnel_with_limit(
+                id,
+                owner,
+                TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                peer,
+                100,
+                200,
+                2,
+            )
+            .unwrap();
+
+        assert_eq!(
+            service
+                .try_acquire_connection(id)
+                .unwrap()
+                .active_connections,
+            1
+        );
+        assert_eq!(
+            service
+                .try_acquire_connection(id)
+                .unwrap()
+                .active_connections,
+            2
+        );
+        assert_eq!(
+            service.try_acquire_connection(id),
+            Err(TunnelServiceError::ConnectionLimitReached)
+        );
+        service.release_connection(id);
+        assert_eq!(
+            service
+                .try_acquire_connection(id)
+                .unwrap()
+                .active_connections,
+            2
+        );
+    }
+
+    #[test]
+    fn zero_connection_limit_is_rejected() {
+        let (service, owner, peer, id) = fixture();
+        assert_eq!(
+            service.create_tunnel_with_limit(
+                id,
+                owner,
+                TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                peer,
+                100,
+                200,
+                0,
+            ),
+            Err(TunnelServiceError::InvalidConnectionLimit)
+        );
+    }
+
+    #[test]
+    fn connect_and_release_preserve_existing_lifecycle_api() {
+        let (service, owner, peer, id) = fixture();
+        service
+            .create_tunnel_with_limit(
+                id,
+                owner,
+                TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                peer,
+                100,
+                200,
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            service.connect_tunnel(id).unwrap().status,
+            TunnelStatus::Connecting
+        );
+        assert_eq!(
+            service.mark_connected(id).unwrap().status,
+            TunnelStatus::Connected
+        );
+        service.release_connection(id);
+        assert_eq!(service.get_tunnel(id).unwrap().status, TunnelStatus::Active);
     }
 
     #[test]
