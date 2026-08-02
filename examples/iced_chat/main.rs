@@ -50,6 +50,7 @@ use boru_core::protocol_version::CATALOGUE_ALPN;
 use boru_core::room::RoomStore;
 use boru_core::room_history::RoomHistoryStore;
 use boru_core::storage::Storage;
+use boru_core::tunnel::{TunnelProtocol, BORU_TUNNEL_ALPN};
 use clap::Parser;
 use iroh::{
     address_lookup::{memory::MemoryLookup, AddrFilter, DnsAddressLookup, PkarrResolver},
@@ -946,6 +947,8 @@ fn main() -> Result<()> {
             Arc::new(blob_store.clone().into()),
         );
 
+        let tunnel_handler = TunnelProtocol::new();
+
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol.clone())
@@ -955,6 +958,7 @@ fn main() -> Result<()> {
             .accept(INBOX_ALPN, inbox_protocol)
             .accept(CATALOGUE_ALPN, catalogue_handler)
             .accept(boru_core::net::FILE_ACCESS_ALPN, file_access_handler)
+            .accept(BORU_TUNNEL_ALPN, tunnel_handler)
             .spawn();
         splash_send("Protocol router ready");
 

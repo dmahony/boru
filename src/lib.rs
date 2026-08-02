@@ -221,6 +221,10 @@ pub mod inbox;
 #[cfg(feature = "net")]
 pub mod backfill;
 
+/// Secure tunnel transport protocol and its dedicated ALPN handler.
+#[cfg(feature = "net")]
+pub mod tunnel;
+
 /// Per-user profile settings and sharing controls.
 ///
 /// Owns the on-disk `user_profile.json` that lives beside `secret_key.txt`.

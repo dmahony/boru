@@ -1802,6 +1802,7 @@ pub(crate) mod tests {
         &[crate::backfill::BACKFILL_ALPN],
         &[crate::whisper::WHISPER_ALPN],
         &[crate::chat_core::friend_ping::FRIEND_PING_ALPN],
+        &[crate::tunnel::BORU_TUNNEL_ALPN],
     ];
 
     #[test]
@@ -1819,6 +1820,15 @@ pub(crate) mod tests {
             super::FILE_ACCESS_ALPN,
             b"/boru-file-access/1",
             "FILE_ACCESS_ALPN must not change without updating all peers"
+        );
+    }
+
+    #[test]
+    fn tunnel_alpn_has_expected_value() {
+        assert_eq!(
+            crate::tunnel::BORU_TUNNEL_ALPN,
+            b"/boru-tunnel/1",
+            "BORU_TUNNEL_ALPN must not change without updating all peers"
         );
     }
 
