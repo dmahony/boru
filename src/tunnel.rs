@@ -35,6 +35,10 @@ pub use local_listener::LocalTunnelListener;
 
 use service::{TunnelService, TunnelStatus, TunnelTarget};
 
+fn tunnel_id_label(id: TunnelId) -> String {
+    id.0[..8].iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Current version of the tunnel handshake wire messages.
 pub const TUNNEL_PROTOCOL_VERSION: u16 = 1;
 
@@ -320,12 +324,13 @@ impl ProtocolHandler for TunnelProtocol {
         let _connection_permit = match self.active_connections.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                tracing::debug!("maximum active received tunnels reached");
+                tracing::warn!(peer = %connection.remote_id().fmt_short(), "tunnel connection rejected: active connection limit reached");
                 return Ok(());
             }
         };
         self.accepted.fetch_add(1, Ordering::AcqRel);
         let remote_peer = connection.remote_id();
+        tracing::info!(peer = %remote_peer.fmt_short(), "tunnel connection accepted");
         loop {
             let stream = connection.accept_bi().await.map_err(AcceptError::from)?;
             if let (Some(service), Some(owner)) = (&self.service, self.owner) {
@@ -394,8 +399,14 @@ pub async fn open_tunnel(
     .await
     .map_err(|_| anyhow::anyhow!("tunnel handshake timed out"))??
     {
-        TunnelResponse::Accepted => Ok((send, recv)),
-        TunnelResponse::Rejected(reason) => anyhow::bail!("tunnel rejected: {reason:?}"),
+        TunnelResponse::Accepted => {
+            tracing::info!(tunnel = %tunnel_id_label(tunnel_id), "tunnel connected");
+            Ok((send, recv))
+        }
+        TunnelResponse::Rejected(reason) => {
+            tracing::warn!(tunnel = %tunnel_id_label(tunnel_id), reason = ?reason, "tunnel rejected");
+            anyhow::bail!("tunnel rejected: {reason:?}")
+        }
     }
 }
 
@@ -416,12 +427,15 @@ async fn handle_incoming_stream(
         tunnel_id,
         capability,
     } = request;
+    let tunnel_label = tunnel_id_label(tunnel_id);
     if protocol_version != TUNNEL_PROTOCOL_VERSION {
+        tracing::warn!(peer = %requesting_peer.fmt_short(), tunnel = %tunnel_label, "tunnel rejected: protocol mismatch");
         write_frame(&mut send, &reject_for_protocol_version(protocol_version)).await?;
         send.finish()?;
         anyhow::bail!("protocol mismatch");
     }
     if service.record_connection_attempt(requesting_peer).is_err() {
+        tracing::warn!(peer = %requesting_peer.fmt_short(), tunnel = %tunnel_label, "tunnel rejected: connection attempt rate limit reached");
         write_frame(
             &mut send,
             &TunnelResponse::rejected(TunnelRejectReason::Busy),
@@ -433,6 +447,7 @@ async fn handle_incoming_stream(
     let definition = match service.get_tunnel(tunnel_id) {
         Some(definition) => definition,
         None => {
+            tracing::warn!(peer = %requesting_peer.fmt_short(), tunnel = %tunnel_label, "tunnel rejected: unknown tunnel");
             write_frame(
                 &mut send,
                 &TunnelResponse::rejected(TunnelRejectReason::UnknownTunnel),

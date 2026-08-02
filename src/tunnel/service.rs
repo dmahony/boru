@@ -210,12 +210,15 @@ impl TunnelService {
         max_connections: usize,
     ) -> Result<TunnelDefinition, TunnelServiceError> {
         if !target.is_loopback() {
+            tracing::warn!(tunnel = %super::tunnel_id_label(id), "tunnel rejected: target is not loopback");
             return Err(TunnelServiceError::NonLoopbackTarget);
         }
         if expires_at_ms <= created_at_ms {
+            tracing::warn!(tunnel = %super::tunnel_id_label(id), "tunnel rejected: invalid expiry");
             return Err(TunnelServiceError::InvalidExpiry);
         }
         if max_connections == 0 {
+            tracing::warn!(tunnel = %super::tunnel_id_label(id), "tunnel rejected: invalid connection limit");
             return Err(TunnelServiceError::InvalidConnectionLimit);
         }
 
@@ -232,9 +235,11 @@ impl TunnelService {
         };
         let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
         if tunnels.contains_key(&id) {
+            tracing::warn!(tunnel = %super::tunnel_id_label(id), "tunnel rejected: already exists");
             return Err(TunnelServiceError::AlreadyExists);
         }
         if tunnels.len() >= MAX_ACTIVE_SHARED_TUNNELS {
+            tracing::warn!(tunnel = %super::tunnel_id_label(id), "tunnel rejected: tunnel limit reached");
             return Err(TunnelServiceError::TunnelLimitReached);
         }
         tunnels.insert(id, definition.clone());
@@ -242,6 +247,7 @@ impl TunnelService {
             .write()
             .expect("tunnel cancellation lock poisoned")
             .insert(id, CancellationToken::new());
+        tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel created");
         Ok(definition)
     }
 
@@ -314,12 +320,14 @@ impl TunnelService {
         let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
         let definition = tunnels.get_mut(&id).ok_or(TunnelServiceError::NotFound)?;
         if unix_epoch_ms() > definition.expires_at_ms {
+            tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel expired");
             return Err(TunnelServiceError::Expired);
         }
         if definition.status != TunnelStatus::Active {
             return Err(TunnelServiceError::InvalidState);
         }
         definition.status = TunnelStatus::Connecting;
+        tracing::debug!(tunnel = %super::tunnel_id_label(id), "tunnel connection started");
         Ok(definition.clone())
     }
 
@@ -334,6 +342,7 @@ impl TunnelService {
             return Err(TunnelServiceError::InvalidState);
         }
         definition.status = TunnelStatus::Connected;
+        tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel connected");
         Ok(definition.clone())
     }
 
@@ -349,6 +358,7 @@ impl TunnelService {
         }
         let definition = tunnels.get_mut(&id).ok_or(TunnelServiceError::NotFound)?;
         if unix_epoch_ms() > definition.expires_at_ms {
+            tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel expired");
             return Err(TunnelServiceError::Expired);
         }
         if definition.active_connections >= definition.max_connections {
@@ -369,6 +379,7 @@ impl TunnelService {
             if definition.active_connections == 0 && definition.status == TunnelStatus::Connected {
                 definition.status = TunnelStatus::Active;
             }
+            tracing::debug!(tunnel = %super::tunnel_id_label(id), active_connections = definition.active_connections, "tunnel connection closed");
         }
     }
 
