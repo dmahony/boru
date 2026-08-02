@@ -67,6 +67,24 @@ pub enum TunnelStatus {
     Connected,
     /// The tunnel was revoked and is no longer connectable.
     Revoked,
+    /// A connection attempt failed.
+    Failed,
+    /// The tunnel was disconnected by the user.
+    Disconnected,
+}
+
+impl TunnelStatus {
+    /// Human-readable label for the GUI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Active => "Available",
+            Self::Connecting => "Connecting",
+            Self::Connected => "Connected",
+            Self::Revoked => "Revoked",
+            Self::Failed => "Failed",
+            Self::Disconnected => "Disconnected",
+        }
+    }
 }
 
 /// Best-effort route classification for a live tunnel connection.
@@ -528,6 +546,33 @@ impl TunnelService {
         }
         definition.status = TunnelStatus::Connected;
         tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel connected");
+        Ok(definition.clone())
+    }
+
+    /// Record that a connection attempt failed.
+    pub fn mark_failed(&self, id: TunnelId) -> Result<TunnelDefinition, TunnelServiceError> {
+        let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
+        let definition = tunnels.get_mut(&id).ok_or(TunnelServiceError::NotFound)?;
+        if !matches!(
+            definition.status,
+            TunnelStatus::Connecting | TunnelStatus::Connected
+        ) {
+            return Err(TunnelServiceError::InvalidState);
+        }
+        definition.status = TunnelStatus::Failed;
+        tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel connection failed");
+        Ok(definition.clone())
+    }
+
+    /// Record that a connected tunnel was explicitly disconnected by the user.
+    pub fn mark_disconnected(&self, id: TunnelId) -> Result<TunnelDefinition, TunnelServiceError> {
+        let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
+        let definition = tunnels.get_mut(&id).ok_or(TunnelServiceError::NotFound)?;
+        if definition.status != TunnelStatus::Connected {
+            return Err(TunnelServiceError::InvalidState);
+        }
+        definition.status = TunnelStatus::Disconnected;
+        tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel disconnected");
         Ok(definition.clone())
     }
 

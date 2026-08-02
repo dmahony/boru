@@ -500,11 +500,9 @@ impl Storage {
     pub fn kv_get(&self, key: &str) -> Result<Option<String>> {
         self.ensure_kv_table()?;
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT value FROM kv_store WHERE key = ?1",
-            [key],
-            |row| row.get(0),
-        )
+        conn.query_row("SELECT value FROM kv_store WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
         .optional()
         .std_context("kv_get")
     }
@@ -5127,10 +5125,7 @@ impl Storage {
 
     /// Return up to `count` of the most recent chat messages across all topics,
     /// sorted oldest-first.  Each entry is `(timestamp_ms, signed_bytes)`.
-    pub fn get_recent_chat_messages(
-        &self,
-        count: usize,
-    ) -> Result<Vec<(u64, Vec<u8>)>> {
+    pub fn get_recent_chat_messages(&self, count: usize) -> Result<Vec<(u64, Vec<u8>)>> {
         if count == 0 {
             return Ok(Vec::new());
         }
@@ -5144,10 +5139,7 @@ impl Storage {
             .std_context("prepare get_recent_chat_messages")?;
         let rows = stmt
             .query_map([count as i64], |row| {
-                Ok((
-                    row.get::<_, i64>(0)? as u64,
-                    row.get::<_, Vec<u8>>(1)?,
-                ))
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?))
             })
             .std_context("query get_recent_chat_messages")?;
         let mut results: Vec<(u64, Vec<u8>)> = Vec::new();
@@ -5180,10 +5172,7 @@ impl Storage {
             .std_context("prepare get_recent_chat_messages_for_topic")?;
         let rows = stmt
             .query_map(params![topic_bytes, count as i64], |row| {
-                Ok((
-                    row.get::<_, i64>(0)? as u64,
-                    row.get::<_, Vec<u8>>(1)?,
-                ))
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?))
             })
             .std_context("query get_recent_chat_messages_for_topic")?;
         let mut results: Vec<(u64, Vec<u8>)> = Vec::new();

@@ -537,7 +537,10 @@ impl ConversationStore {
     }
 
     /// Load the conversation store from SQLite, falling back to empty if not found.
-    pub fn load_from_sqlite(storage: &crate::storage::Storage, data_dir: impl Into<PathBuf>) -> Self {
+    pub fn load_from_sqlite(
+        storage: &crate::storage::Storage,
+        data_dir: impl Into<PathBuf>,
+    ) -> Self {
         match storage.kv_get("conversations") {
             Ok(Some(value)) => match serde_json::from_str::<Self>(&value) {
                 Ok(mut store) => {

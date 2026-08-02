@@ -818,12 +818,8 @@ impl Actor {
             // Reset PeerState to Pending so the dialer will re-dial.
             // Without this, the dead active_send_tx stays in
             // PeerState::Active and all future sends silently fail.
-            self.peers.insert(
-                peer_id,
-                PeerState::Pending {
-                    queue: Vec::new(),
-                },
-            );
+            self.peers
+                .insert(peer_id, PeerState::Pending { queue: Vec::new() });
         }
     }
 

@@ -256,9 +256,7 @@ async fn serve_file_range(
         match file.read(&mut buf[..chunk_size]) {
             Ok(0) => {
                 // EOF — check if file has grown
-                let current_size = std::fs::metadata(file_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let current_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
                 let expected_offset = range_start + bytes_sent;
 
                 if current_size >= total_size || expected_offset >= total_size {

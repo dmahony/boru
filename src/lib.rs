@@ -18,13 +18,6 @@ pub use net::GOSSIP_ALPN as ALPN;
 
 #[cfg(feature = "net")]
 pub mod api;
-#[cfg(feature = "net")]
-pub mod discovery_backend;
-#[cfg(feature = "net")]
-pub mod discovery_record;
-#[cfg(feature = "net")]
-pub mod discovery_validation;
-pub mod metrics;
 /// Zero-allocation byte-buffer pooling for repeated message construction.
 ///
 /// A [`BufferPool`](buffer_pool::BufferPool) recycles cleared byte buffers
@@ -32,16 +25,15 @@ pub mod metrics;
 /// [`PooledBytes`](buffer_pool::PooledBytes) instead of re-allocating on every
 /// message.
 pub mod buffer_pool;
+#[cfg(feature = "net")]
+pub mod discovery_backend;
+#[cfg(feature = "net")]
+pub mod discovery_record;
+#[cfg(feature = "net")]
+pub mod discovery_validation;
 /// Conservative classification for attachment rendering.
 pub mod media_classification;
-/// Durable video metadata and process-local inline-player coordination.
-pub mod video_playback;
-/// Optional GStreamer runtime capability detection for inline video playback.
-pub mod video_runtime;
-/// Content-addressed, bounded poster generation for verified local videos.
-pub mod video_poster;
-/// Lightweight HTTP streaming server for progressive video playback.
-pub mod streaming_server;
+pub mod metrics;
 #[cfg(feature = "net")]
 pub mod net;
 /// Optional network diagnostics over the shared tunnel raw-stream transport.
@@ -64,6 +56,14 @@ pub mod public_room_config;
 /// an mpsc channel for the caller to join.
 #[cfg(feature = "net")]
 pub mod public_room_continuous;
+/// Lightweight HTTP streaming server for progressive video playback.
+pub mod streaming_server;
+/// Durable video metadata and process-local inline-player coordination.
+pub mod video_playback;
+/// Content-addressed, bounded poster generation for verified local videos.
+pub mod video_poster;
+/// Optional GStreamer runtime capability detection for inline video playback.
+pub mod video_runtime;
 
 /// Public-room directory — topic derivation, advertisement store, and
 /// gossip subscription for discovering public rooms on the same relay.

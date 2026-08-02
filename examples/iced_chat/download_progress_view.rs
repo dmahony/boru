@@ -400,10 +400,10 @@ fn view_download_progress_inner<'a>(
     let action_row = action_buttons(entry_index, attachment.kind, state, &name_str);
     let playback_action_row: Option<iced::Element<'a, AppMessage>> =
         attachment.playback_error.as_ref().and_then(|error| {
-        error.retry_available().then(|| {
-            action_button("Retry player", AppMessage::PlayInlineVideo(entry_index)).into()
-        })
-    });
+            error.retry_available().then(|| {
+                action_button("Retry player", AppMessage::PlayInlineVideo(entry_index)).into()
+            })
+        });
 
     // ── Row 5: Failure reason (only in Failed state) ────────────────────
     let error_row = match &state {
@@ -521,7 +521,11 @@ fn view_download_progress_inner<'a>(
                 Column::new()
                     .push(text(error.title()).size(TYPO_SM).color(error_color))
                     .push(text(error.message()).size(TYPO_XS).color(muted))
-                    .push(text("The original attachment is still available below.").size(TYPO_XXS).color(muted))
+                    .push(
+                        text("The original attachment is still available below.")
+                            .size(TYPO_XXS)
+                            .color(muted),
+                    )
                     .spacing(SPACE_4)
                     .align_x(Alignment::Center),
             )

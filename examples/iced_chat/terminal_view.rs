@@ -26,8 +26,7 @@ impl TerminalTab {
     /// immediately creates the PTY and starts the shell's event loop, so the
     /// shell process exists even before the tab is first shown.
     pub fn new() -> std::io::Result<Self> {
-        let system_shell =
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let system_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         let settings = iced_term::settings::Settings {
             font: iced_term::settings::FontSettings::default(),
             theme: iced_term::settings::ThemeSettings::default(),
@@ -50,10 +49,7 @@ impl TerminalTab {
     /// Forward a backend command produced by the view or the subscription
     /// stream into the terminal. Returns the resulting action so the caller
     /// can react (e.g. shell exited → `Shutdown`).
-    pub fn update(
-        &mut self,
-        cmd: iced_term::BackendCommand,
-    ) -> iced_term::actions::Action {
+    pub fn update(&mut self, cmd: iced_term::BackendCommand) -> iced_term::actions::Action {
         self.term.handle(iced_term::Command::ProxyToBackend(cmd))
     }
 

@@ -476,18 +476,16 @@ impl FriendsStore {
     /// Load the friends store from SQLite, falling back to empty if not found.
     pub fn load_from_sqlite(storage: &Storage, data_dir: impl Into<PathBuf>) -> Self {
         match storage.kv_get("friends") {
-            Ok(Some(value)) => {
-                match serde_json::from_str::<Self>(&value) {
-                    Ok(store) => store,
-                    Err(err) => {
-                        tracing::warn!(
-                            "failed to parse friends store from SQLite: {err}; \
+            Ok(Some(value)) => match serde_json::from_str::<Self>(&value) {
+                Ok(store) => store,
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to parse friends store from SQLite: {err}; \
                              falling back to empty store"
-                        );
-                        Self::empty_at(data_dir)
-                    }
+                    );
+                    Self::empty_at(data_dir)
                 }
-            }
+            },
             Ok(None) => {
                 tracing::debug!("no friends store in SQLite, starting empty");
                 Self::empty_at(data_dir)

@@ -85,9 +85,9 @@ use boru_core::video_playback::{
     validate_attachment_filename, verify_local_attachment, PlaybackCoordinator, VideoInstanceKey,
     VideoJitterBuffer,
 };
+use boru_core::video_poster;
 #[cfg(feature = "video-playback")]
 use boru_core::video_runtime::VideoRuntimeCapability;
-use boru_core::video_poster;
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
     address_lookup::memory::MemoryLookup, EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher,
@@ -1280,6 +1280,39 @@ fn tunnel_connection_info_label(info: boru_core::tunnel::service::TunnelConnecti
     parts.join("  ·  ")
 }
 
+/// Human-readable tunnel status for the GUI, mapping backend states to
+/// user-friendly labels: "Available", "Connecting", "Connected", "Failed",
+/// "Disconnected", "Expired", "Revoked".
+fn tunnel_status_label(def: &boru_core::tunnel::service::TunnelDefinition) -> &'static str {
+    let now = now_ms().max(0) as u64;
+    // Expired tunnels (past their expiry) show as Expired regardless of
+    // their lifecycle state, unless they were already revoked.
+    if def.status != boru_core::tunnel::service::TunnelStatus::Revoked && def.expires_at_ms <= now {
+        return "Expired";
+    }
+    def.status.label()
+}
+
+/// Return a themed color for a tunnel status badge.
+fn tunnel_status_color(
+    theme: &iced::Theme,
+    def: &boru_core::tunnel::service::TunnelDefinition,
+) -> iced::Color {
+    use boru_core::tunnel::service::TunnelStatus;
+    let now = now_ms().max(0) as u64;
+    if def.status != TunnelStatus::Revoked && def.expires_at_ms <= now {
+        return text_muted(theme);
+    }
+    match def.status {
+        TunnelStatus::Active => accent_primary(theme),
+        TunnelStatus::Connecting => color_warning(theme),
+        TunnelStatus::Connected => accent_green(theme),
+        TunnelStatus::Revoked => text_muted(theme),
+        TunnelStatus::Failed => color_error(theme),
+        TunnelStatus::Disconnected => text_muted(theme),
+    }
+}
+
 /// Presence state shown in contact displays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PeerPresence {
@@ -1401,17 +1434,30 @@ impl InlinePlaybackError {
 
     pub(crate) fn message(&self) -> &'static str {
         match self.kind {
-            InlinePlaybackErrorKind::UnsupportedCodec => "This packaged player cannot decode this video's format.",
+            InlinePlaybackErrorKind::UnsupportedCodec => {
+                "This packaged player cannot decode this video's format."
+            }
             InlinePlaybackErrorKind::CorruptFile => "The attachment is not a valid playable video.",
-            InlinePlaybackErrorKind::MissingFile => "The saved attachment is no longer on this device.",
-            InlinePlaybackErrorKind::PermissionDenied => "The saved attachment could not be accessed.",
-            InlinePlaybackErrorKind::Initialization => "Try again without downloading the attachment again.",
-            InlinePlaybackErrorKind::Unknown => "The attachment is still available for saving or opening externally.",
+            InlinePlaybackErrorKind::MissingFile => {
+                "The saved attachment is no longer on this device."
+            }
+            InlinePlaybackErrorKind::PermissionDenied => {
+                "The saved attachment could not be accessed."
+            }
+            InlinePlaybackErrorKind::Initialization => {
+                "Try again without downloading the attachment again."
+            }
+            InlinePlaybackErrorKind::Unknown => {
+                "The attachment is still available for saving or opening externally."
+            }
         }
     }
 
     pub(crate) fn retry_available(&self) -> bool {
-        matches!(self.kind, InlinePlaybackErrorKind::Initialization | InlinePlaybackErrorKind::Unknown)
+        matches!(
+            self.kind,
+            InlinePlaybackErrorKind::Initialization | InlinePlaybackErrorKind::Unknown
+        )
     }
 }
 
@@ -3414,6 +3460,8 @@ struct ReceivedTunnelState {
     /// Settings → Secure Tunnels section can display the Iroh-reported route
     /// and lightweight transfer metrics.
     live_info: Option<std::sync::Arc<boru_core::tunnel::service::TunnelLiveInfo>>,
+    /// Whether the most recent connection attempt failed.
+    connection_failed: bool,
 }
 
 /// GUI-side display metadata for a tunnel this user is sharing.
@@ -4951,8 +4999,7 @@ impl IcedChat {
         Self {
             screen: Screen::ChatList,
             #[cfg(feature = "terminal")]
-            terminal: TerminalTab::new()
-                .expect("failed to create embedded terminal"),
+            terminal: TerminalTab::new().expect("failed to create embedded terminal"),
             splash_start_time: std::time::Instant::now(),
             splash_has_rendered: false,
             splash_spinner_frame: 0,
@@ -5267,7 +5314,10 @@ impl IcedChat {
         // user opted in to sharing them.
         for extra in extra_peers {
             if extra.id != self.local_public {
-                peers.push(invitation_endpoint_addr(extra.clone(), self.share_direct_addresses));
+                peers.push(invitation_endpoint_addr(
+                    extra.clone(),
+                    self.share_direct_addresses,
+                ));
             }
         }
         Ticket {
@@ -5324,7 +5374,9 @@ impl IcedChat {
             return false;
         }
 
-        let current_ticket = self.room_ticket(self.topic, &self.ticket_extra_peers).to_string();
+        let current_ticket = self
+            .room_ticket(self.topic, &self.ticket_extra_peers)
+            .to_string();
         if current_ticket == self.ticket_str {
             return false;
         }
@@ -6716,9 +6768,10 @@ impl IcedChat {
     fn inline_video_near_viewport(&self, key: &VideoInstanceKey) -> bool {
         let Some(entry_index) = self.entries.iter().position(|entry| {
             entry.event_id == key.message_id
-                && entry.download.as_ref().is_some_and(|download| {
-                    download.name == key.attachment_id
-                })
+                && entry
+                    .download
+                    .as_ref()
+                    .is_some_and(|download| download.name == key.attachment_id)
         }) else {
             return false;
         };
@@ -6734,14 +6787,19 @@ impl IcedChat {
     /// cards, while retaining enough state for an intentional resume.
     #[cfg(feature = "video-playback")]
     fn reconcile_inline_video_viewport(&mut self) {
-        let Some(key) = self.inline_video.as_ref().map(|session| session.key.clone()) else {
+        let Some(key) = self
+            .inline_video
+            .as_ref()
+            .map(|session| session.key.clone())
+        else {
             return;
         };
         if !self.entries.iter().any(|entry| {
             entry.event_id == key.message_id
-                && entry.download.as_ref().is_some_and(|download| {
-                    download.name == key.attachment_id
-                })
+                && entry
+                    .download
+                    .as_ref()
+                    .is_some_and(|download| download.name == key.attachment_id)
         }) {
             self.stop_inline_video();
             return;
@@ -6839,8 +6897,14 @@ impl IcedChat {
             return None;
         }
         // If already downloaded, just open it.
-        if let DownloadState::Completed { saved_path: Some(_), .. } = &download.state {
-            return Some(iced::Task::done(AppMessage::OpenDownloadedFile(download.name.clone())));
+        if let DownloadState::Completed {
+            saved_path: Some(_),
+            ..
+        } = &download.state
+        {
+            return Some(iced::Task::done(AppMessage::OpenDownloadedFile(
+                download.name.clone(),
+            )));
         }
         let name = download.name.clone();
         let data_dir = self.data_dir.clone();
@@ -9262,8 +9326,7 @@ impl IcedChat {
                 // must not yank the UI out of a newer room the user opened
                 // while the failed join was in flight. Detect in debug builds.
                 debug_assert_eq!(
-                    self.room_generation,
-                    generation,
+                    self.room_generation, generation,
                     "stale RoomJoinFailed: completion generation {generation} \
                      != current room generation {}",
                     self.room_generation,
@@ -9925,8 +9988,7 @@ impl IcedChat {
                 // and must not navigate the UI away from that room. Detect in
                 // debug builds.
                 debug_assert_eq!(
-                    self.room_generation,
-                    generation,
+                    self.room_generation, generation,
                     "stale GroupCreated: completion generation {generation} \
                      != current room generation {}",
                     self.room_generation,
@@ -11227,7 +11289,8 @@ impl IcedChat {
                                     conversation.state = DirectConversationState::Active;
                                 }
                                 // Show the accepted friend immediately in the sidebar.
-                                self.peer_presence_map.insert(sender, now_ms().max(0) as u64);
+                                self.peer_presence_map
+                                    .insert(sender, now_ms().max(0) as u64);
                                 self.chats_sidebar_revision =
                                     self.chats_sidebar_revision.wrapping_add(1);
                                 self.mark_friends_sidebar_dirty();
@@ -11288,7 +11351,8 @@ impl IcedChat {
                                 let _room =
                                     RoomStore::with_peers(&self.data_dir, topic, persisted_addrs);
                                 self.try_save_friends();
-                                self.peer_presence_map.insert(sender, now_ms().max(0) as u64);
+                                self.peer_presence_map
+                                    .insert(sender, now_ms().max(0) as u64);
                                 self.chats_sidebar_revision =
                                     self.chats_sidebar_revision.wrapping_add(1);
                                 self.mark_friends_sidebar_dirty();
@@ -11897,7 +11961,10 @@ impl IcedChat {
             AppMessage::ExecuteFileSend(encoded) => {
                 let parts: Vec<&str> = encoded.splitn(3, '|').collect();
                 if parts.len() < 3 {
-                    tracing::warn!("ExecuteFileSend: invalid encoded payload ({} parts)", parts.len());
+                    tracing::warn!(
+                        "ExecuteFileSend: invalid encoded payload ({} parts)",
+                        parts.len()
+                    );
                     return iced::Task::none();
                 }
                 let filename = parts[0].to_string();
@@ -12039,7 +12106,11 @@ impl IcedChat {
                         }
                     },
                     |r: Result<(String, String, Option<Vec<u8>>), String>| match r {
-                        Ok((name, ticket, thumbnail)) => AppMessage::FileDownloaded { name, ticket, thumbnail },
+                        Ok((name, ticket, thumbnail)) => AppMessage::FileDownloaded {
+                            name,
+                            ticket,
+                            thumbnail,
+                        },
                         Err(e) => AppMessage::FileUploadFailed(e),
                     },
                 )
@@ -12087,9 +12158,7 @@ impl IcedChat {
                         // Detect GIF files: skip WebP conversion to preserve
                         // animation frames.  The receiver-side decode_gif_frames
                         // path handles both animated and static GIFs correctly.
-                        let is_gif = filename
-                            .to_lowercase()
-                            .ends_with(".gif");
+                        let is_gif = filename.to_lowercase().ends_with(".gif");
                         let (opt_bytes, wire_name, mime_type, compression_note) = if is_gif {
                             // Transmit GIF bytes unchanged — only enforce the
                             // size cap.  Animated frames survive end-to-end.
@@ -12110,8 +12179,7 @@ impl IcedChat {
                                     .map_err(|e| format!("WebP conversion failed: {e}"))?;
                             // Append compression ratio to the image card label
                             let compression_note = if orig_size > 0 && webp_size < orig_size {
-                                let saved_pct =
-                                    (1.0 - webp_size as f64 / orig_size as f64) * 100.0;
+                                let saved_pct = (1.0 - webp_size as f64 / orig_size as f64) * 100.0;
                                 format!(" ({saved_pct:.0}% smaller)")
                             } else {
                                 String::new()
@@ -12160,19 +12228,21 @@ impl IcedChat {
                         }
                         Ok((local_pk, fname, display_name, opt_bytes, hash))
                     },
-                    move |r: Result<(PublicKey, String, String, Vec<u8>, MessageHash), String>| match r {
-                        Ok((sender_pk, name, display_name, bytes, hash)) => {
-                            AppMessage::ImageDownloaded {
-                                sender: sender_pk,
-                                name,
-                                display_name,
-                                image_bytes: bytes,
-                                message_hash: hash,
-                                image_identifier: None,
-                                generation,
+                    move |r: Result<(PublicKey, String, String, Vec<u8>, MessageHash), String>| {
+                        match r {
+                            Ok((sender_pk, name, display_name, bytes, hash)) => {
+                                AppMessage::ImageDownloaded {
+                                    sender: sender_pk,
+                                    name,
+                                    display_name,
+                                    image_bytes: bytes,
+                                    message_hash: hash,
+                                    image_identifier: None,
+                                    generation,
+                                }
                             }
+                            Err(e) => AppMessage::ImageUploadFailed(e),
                         }
-                        Err(e) => AppMessage::ImageUploadFailed(e),
                     },
                 )
             }
@@ -12552,114 +12622,107 @@ impl IcedChat {
                         "PlayInlineVideo: download state",
                     );
                     // Determine play source: only play from a fully downloaded file.
-                    let (play_path, play_total_size) =
-                        if let DownloadState::Completed {
-                            saved_path: Some(path),
-                            total_size,
-                            ..
-                        } = &download.state
-                        {
-                            (path.clone(), *total_size)
-                        } else if !download.ticket.is_empty() {
-                            // Not yet downloaded — start the download and
-                            // inform the user to click play again when
-                            // complete.  We intentionally avoid streaming
-                            // the file over a local HTTP server because that
-                            // machinery adds fragility; download-then-play is
-                            // simpler and avoids breaking the gossip
-                            // transport with oversized messages.
-                            let total_size = match &download.state {
-                                DownloadState::Ready { total } => total.unwrap_or(0),
-                                DownloadState::Active { total, .. } => total.unwrap_or(0),
-                                DownloadState::Completed {
-                                    total_size, ..
-                                } => total_size.unwrap_or(0),
-                                _ => 0,
-                            };
-                            if total_size == 0 {
-                                self.push_system(
-                                    "Cannot download video: unknown size.",
-                                );
-                                return iced::Task::none();
-                            }
-                            // If a download is already active, just inform
-                            // the user to wait.
-                            if matches!(download.state, DownloadState::Active { .. }) {
-                                self.push_system(
-                                    "Download in progress — click play again when complete.",
-                                );
-                                return iced::Task::none();
-                            }
-                            let name = download.name.clone();
-                            let data_dir = self.data_dir.clone();
-                            let blob_store = self.blob_store.clone();
-                            let endpoint = self.endpoint.clone();
-                            let neighbors = self.neighbors.clone();
-                            let progress_queue =
-                                self.download_progress_queue.clone();
-                            let kind = download.kind;
-                            let ticket = download.ticket.clone();
-
-                            // Mark download as Active so the UI shows progress.
-                            if let Some(download) = self
-                                .entries
-                                .get_mut(entry_index)
-                                .and_then(|entry| entry.download.as_mut())
-                            {
-                                download.state = DownloadState::Active {
-                                    bytes: 0,
-                                    total: Some(total_size),
-                                };
-                            }
-                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
-
-                            tokio::spawn(async move {
-                                let dl_dir = data_dir.join("downloads");
-                                let _ = tokio::fs::create_dir_all(&dl_dir).await;
-                                let save_path = dl_dir.join(&name);
-
-                                let parsed: iroh_blobs::ticket::BlobTicket =
-                                    match ticket.parse() {
-                                        Ok(t) => t,
-                                        Err(e) => {
-                                            tracing::error!("Invalid ticket: {e}");
-                                            return;
-                                        }
-                                    };
-                                let (addr, hash, _format) = parsed.into_parts();
-                                let candidates = download_candidates(addr.id, &neighbors);
-
-                                let _ = download_blob_to_file(
-                                    &blob_store,
-                                    &endpoint,
-                                    hash,
-                                    candidates,
-                                    name,
-                                    kind,
-                                    &save_path,
-                                    move |ev| {
-                                        if let Ok(mut q) = progress_queue.lock() {
-                                            q.push_back(ev);
-                                        }
-                                    },
-                                    Some(total_size),
-                                )
-                                .await;
-                            });
-
+                    let (play_path, play_total_size) = if let DownloadState::Completed {
+                        saved_path: Some(path),
+                        total_size,
+                        ..
+                    } = &download.state
+                    {
+                        (path.clone(), *total_size)
+                    } else if !download.ticket.is_empty() {
+                        // Not yet downloaded — start the download and
+                        // inform the user to click play again when
+                        // complete.  We intentionally avoid streaming
+                        // the file over a local HTTP server because that
+                        // machinery adds fragility; download-then-play is
+                        // simpler and avoids breaking the gossip
+                        // transport with oversized messages.
+                        let total_size = match &download.state {
+                            DownloadState::Ready { total } => total.unwrap_or(0),
+                            DownloadState::Active { total, .. } => total.unwrap_or(0),
+                            DownloadState::Completed { total_size, .. } => total_size.unwrap_or(0),
+                            _ => 0,
+                        };
+                        if total_size == 0 {
+                            self.push_system("Cannot download video: unknown size.");
+                            return iced::Task::none();
+                        }
+                        // If a download is already active, just inform
+                        // the user to wait.
+                        if matches!(download.state, DownloadState::Active { .. }) {
                             self.push_system(
+                                "Download in progress — click play again when complete.",
+                            );
+                            return iced::Task::none();
+                        }
+                        let name = download.name.clone();
+                        let data_dir = self.data_dir.clone();
+                        let blob_store = self.blob_store.clone();
+                        let endpoint = self.endpoint.clone();
+                        let neighbors = self.neighbors.clone();
+                        let progress_queue = self.download_progress_queue.clone();
+                        let kind = download.kind;
+                        let ticket = download.ticket.clone();
+
+                        // Mark download as Active so the UI shows progress.
+                        if let Some(download) = self
+                            .entries
+                            .get_mut(entry_index)
+                            .and_then(|entry| entry.download.as_mut())
+                        {
+                            download.state = DownloadState::Active {
+                                bytes: 0,
+                                total: Some(total_size),
+                            };
+                        }
+                        self.layout_cache.borrow_mut().invalidate_from(entry_index);
+
+                        tokio::spawn(async move {
+                            let dl_dir = data_dir.join("downloads");
+                            let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                            let save_path = dl_dir.join(&name);
+
+                            let parsed: iroh_blobs::ticket::BlobTicket = match ticket.parse() {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    tracing::error!("Invalid ticket: {e}");
+                                    return;
+                                }
+                            };
+                            let (addr, hash, _format) = parsed.into_parts();
+                            let candidates = download_candidates(addr.id, &neighbors);
+
+                            let _ = download_blob_to_file(
+                                &blob_store,
+                                &endpoint,
+                                hash,
+                                candidates,
+                                name,
+                                kind,
+                                &save_path,
+                                move |ev| {
+                                    if let Ok(mut q) = progress_queue.lock() {
+                                        q.push_back(ev);
+                                    }
+                                },
+                                Some(total_size),
+                            )
+                            .await;
+                        });
+
+                        self.push_system(
                                 "Download started — click play again when the progress bar reaches 100%.",
                             );
-                            return iced::Task::none();
-                        } else {
-                            self.push_system(
-                                "Video is not ready to play yet.",
-                            );
-                            return iced::Task::none();
-                        };
+                        return iced::Task::none();
+                    } else {
+                        self.push_system("Video is not ready to play yet.");
+                        return iced::Task::none();
+                    };
                     let path = play_path.clone();
                     let Some(expected_hash) = download.expected_content_hash.clone() else {
-                        self.push_system("Video cannot be played because its content identity is missing.");
+                        self.push_system(
+                            "Video cannot be played because its content identity is missing.",
+                        );
                         return iced::Task::none();
                     };
                     let expected_size = play_total_size;
@@ -12688,8 +12751,7 @@ impl IcedChat {
                         // attachment is not downloaded again.
                         download.playback_error = None;
                     }
-                    let key =
-                        VideoInstanceKey::new(self.topic, message_id, attachment_id);
+                    let key = VideoInstanceKey::new(self.topic, message_id, attachment_id);
                     if self.playback_coordinator.active_video() == Some(&key) {
                         if let Some(session) = self.inline_video.as_mut().filter(|s| s.key == key) {
                             if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
@@ -12772,18 +12834,15 @@ impl IcedChat {
                     };
                     // If already downloaded, open externally
                     if let DownloadState::Completed {
-                        saved_path: Some(_), ..
+                        saved_path: Some(_),
+                        ..
                     } = &download.state
                     {
-                        return self.update(AppMessage::OpenDownloadedFile(
-                            download.name.clone(),
-                        ));
+                        return self.update(AppMessage::OpenDownloadedFile(download.name.clone()));
                     }
                     // If undownloaded but has ticket, stream it
                     if !download.ticket.is_empty() {
-                        if let Some(task) =
-                            self.stream_for_external_play(entry_index, download)
-                        {
+                        if let Some(task) = self.stream_for_external_play(entry_index, download) {
                             return task;
                         }
                     }
@@ -12944,7 +13003,10 @@ impl IcedChat {
                             );
                             if let Some(entry) = self.entries.iter_mut().find(|entry| {
                                 entry.event_id == key.message_id
-                                    && entry.download.as_ref().is_some_and(|d| d.kind == TransferKind::Video)
+                                    && entry
+                                        .download
+                                        .as_ref()
+                                        .is_some_and(|d| d.kind == TransferKind::Video)
                             }) {
                                 if let Some(download) = entry.download.as_mut() {
                                     download.playback_error = Some(playback_error);
@@ -13022,8 +13084,7 @@ impl IcedChat {
                 // active conversation's display. Detect stale completions in
                 // debug builds before entries_push mutates the wrong room.
                 debug_assert_eq!(
-                    self.conversation_generation,
-                    generation,
+                    self.conversation_generation, generation,
                     "stale ImageDownloaded for {name}: completion generation {generation} \
                      != current conversation generation {}",
                     self.conversation_generation,
@@ -13182,7 +13243,11 @@ impl IcedChat {
                 self.push_system(format!("File upload failed: {error}"));
                 iced::Task::none()
             }
-            AppMessage::FileDownloaded { name, ticket, thumbnail } => {
+            AppMessage::FileDownloaded {
+                name,
+                ticket,
+                thumbnail,
+            } => {
                 self.pending_file_upload = None;
                 tracing::info!(
                     name = %name,
@@ -13197,8 +13262,9 @@ impl IcedChat {
                         if let Some(dl) = entry.download.as_mut() {
                             dl.ticket = ticket.clone();
                             dl.thumbnail = thumbnail.clone();
-                            dl.thumbnail_handle = thumbnail.as_deref()
-                                .map(|bytes| iced::widget::image::Handle::from_bytes(bytes.to_vec()));
+                            dl.thumbnail_handle = thumbnail.as_deref().map(|bytes| {
+                                iced::widget::image::Handle::from_bytes(bytes.to_vec())
+                            });
                             dl.state = DownloadState::Completed {
                                 saved_name: name.clone(),
                                 saved_path: None,
@@ -13213,17 +13279,19 @@ impl IcedChat {
                 self.pending_file = Some((name, ticket));
                 iced::Task::none()
             }
-            AppMessage::ThumbnailFetched { entry_index, thumbnail_bytes } => {
+            AppMessage::ThumbnailFetched {
+                entry_index,
+                thumbnail_bytes,
+            } => {
                 if !thumbnail_bytes.is_empty() {
                     if let Some(entry) = self.entries.get_mut(entry_index) {
                         if let Some(dl) = entry.download.as_mut() {
                             dl.thumbnail = Some(thumbnail_bytes.clone());
-                            dl.thumbnail_handle = Some(
-                                iced::widget::image::Handle::from_bytes(thumbnail_bytes),
-                            );
-                            dl.poster_dimensions = image::ImageReader::new(
-                                std::io::Cursor::new(&dl.thumbnail.as_ref().unwrap()),
-                            )
+                            dl.thumbnail_handle =
+                                Some(iced::widget::image::Handle::from_bytes(thumbnail_bytes));
+                            dl.poster_dimensions = image::ImageReader::new(std::io::Cursor::new(
+                                &dl.thumbnail.as_ref().unwrap(),
+                            ))
                             .with_guessed_format()
                             .ok()
                             .and_then(|reader| reader.into_dimensions().ok());
@@ -13564,6 +13632,7 @@ impl IcedChat {
                     state.local_addr = Some(local_addr);
                     state.cancellation = Some(cancellation);
                     state.live_info = Some(live_info);
+                    state.connection_failed = false;
                 }
                 iced::Task::none()
             }
@@ -13572,6 +13641,7 @@ impl IcedChat {
                     state.connected = false;
                     state.local_addr = None;
                     state.cancellation = None;
+                    state.connection_failed = true;
                 }
                 self.toast_message =
                     Some(format!("Could not connect to shared service: {message}"));
@@ -13586,6 +13656,7 @@ impl IcedChat {
                     state.connected = false;
                     state.local_addr = None;
                     state.live_info = None;
+                    state.connection_failed = false;
                 }
                 iced::Task::none()
             }
@@ -13607,9 +13678,8 @@ impl IcedChat {
                         self.toast_counter = 160;
                     }
                     Err(error) => {
-                        self.toast_message = Some(format!(
-                            "Could not stop sharing {name}: {error:?}"
-                        ));
+                        self.toast_message =
+                            Some(format!("Could not stop sharing {name}: {error:?}"));
                         self.toast_counter = 160;
                     }
                 }
@@ -15235,7 +15305,10 @@ impl IcedChat {
                                     None => unresolved.push(*peer),
                                 }
                             }
-                            AppMessage::TicketPeersResolved { resolved, unresolved }
+                            AppMessage::TicketPeersResolved {
+                                resolved,
+                                unresolved,
+                            }
                         },
                         |msg| msg,
                     ));
@@ -15664,7 +15737,10 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::TicketPeersResolved { resolved, unresolved } => {
+            AppMessage::TicketPeersResolved {
+                resolved,
+                unresolved,
+            } => {
                 self.ticket_resolve_in_flight = false;
                 // Merge resolved peer addressing info into the ticket's extra
                 // bootstrap list (dedupe by endpoint id), then flag the ticket
@@ -17707,6 +17783,7 @@ impl IcedChat {
                 local_addr: None,
                 cancellation: None,
                 live_info: None,
+                connection_failed: false,
             },
         );
         self.toast_message = Some(format!(
@@ -18694,9 +18771,10 @@ impl IcedChat {
         };
         let Some((entry_index, entry)) = self.entries.iter().enumerate().find(|(_, entry)| {
             entry.event_id == session.key.message_id
-                && entry.download.as_ref().is_some_and(|download| {
-                    download.name == session.key.attachment_id
-                })
+                && entry
+                    .download
+                    .as_ref()
+                    .is_some_and(|download| download.name == session.key.attachment_id)
         }) else {
             return base.into();
         };
@@ -20450,15 +20528,12 @@ impl IcedChat {
                 .push(Self::peer_avatar_block(friend.avatar.clone(), friend.peer))
                 .push(
                     Row::new()
-                        .push(
-                            icon_svg(presence.icon(), TYPO_SM)
-                                .style({
-                                    let dm = dep.dark_mode;
-                                    move |t, _| iced::widget::svg::Style {
-                                        color: Some(presence.color(&Self::theme_from_dark(dm))),
-                                    }
-                                }),
-                        )
+                        .push(icon_svg(presence.icon(), TYPO_SM).style({
+                            let dm = dep.dark_mode;
+                            move |t, _| iced::widget::svg::Style {
+                                color: Some(presence.color(&Self::theme_from_dark(dm))),
+                            }
+                        }))
                         .push(
                             text(friend.label.clone())
                                 .size(TYPO_SM)
@@ -20774,7 +20849,8 @@ impl IcedChat {
                 fid.parse_public_key()
                     .ok()
                     .map(|pk| {
-                        self.peer_presence(&pk) != PeerPresence::Offline && self.names.contains_key(&pk)
+                        self.peer_presence(&pk) != PeerPresence::Offline
+                            && self.names.contains_key(&pk)
                     })
                     .unwrap_or(false)
             })
@@ -21934,8 +22010,8 @@ impl IcedChat {
                 });
 
             let status_text = presence.label();
-            let status_dot = icon_svg(presence.icon(), TYPO_XS)
-                .style(move |t, _| iced::widget::svg::Style {
+            let status_dot =
+                icon_svg(presence.icon(), TYPO_XS).style(move |t, _| iced::widget::svg::Style {
                     color: Some(presence.color(t)),
                 });
 
@@ -22666,11 +22742,9 @@ impl IcedChat {
         // Presence row: status dot + label
         contact_items.push(
             row![
-                icon_svg(presence.icon(), TYPO_SM,).style(
-                    move |t, _| iced::widget::svg::Style {
-                        color: Some(presence.color(t))
-                    }
-                ),
+                icon_svg(presence.icon(), TYPO_SM,).style(move |t, _| iced::widget::svg::Style {
+                    color: Some(presence.color(t))
+                }),
                 text(presence.label())
                     .size(TYPO_SM)
                     .style(move |t| iced::widget::text::Style {
@@ -24058,6 +24132,8 @@ impl IcedChat {
         };
         use iced::{Alignment, Length};
 
+        let theme = Self::theme_from_dark(self.dark_mode);
+
         // ── Header row ──────────────────────────────────────────────
         let back_btn = button(text("←").size(TYPO_MD))
             .on_press(AppMessage::CloseSettings)
@@ -24189,10 +24265,14 @@ impl IcedChat {
             .filter(|def| {
                 def.owner == self.local_public
                     && def.status != boru_core::tunnel::service::TunnelStatus::Revoked
-                    && def.expires_at_ms > now
             })
             .collect::<Vec<_>>();
-        sharing.sort_by_key(|def| def.expires_at_ms);
+        sharing.sort_by_key(|def| {
+            // Show active/available first, then expired, then failed
+            let expired = def.expires_at_ms <= now;
+            let failed = def.status == boru_core::tunnel::service::TunnelStatus::Failed;
+            (expired as u8 * 2 + failed as u8, def.expires_at_ms)
+        });
         let sharing_empty = sharing.is_empty();
 
         if sharing_empty {
@@ -24222,26 +24302,33 @@ impl IcedChat {
                         tunnel_target_label(host, port)
                     }
                 };
+                let status = tunnel_status_label(&def);
+                let status_color = tunnel_status_color(&theme, &def);
                 let remaining = tunnel_remaining_label(def.expires_at_ms);
-                let connections = if def.active_connections == 1 {
-                    "1 active connection".to_string()
-                } else {
-                    format!("{} active connections", def.active_connections)
-                };
                 let connection_info = self
                     .tunnel_service
                     .connection_info(def.id)
                     .map(tunnel_connection_info_label);
                 let tunnel_id = def.id;
                 let mut info_column = Column::new()
-                    .push(text(name).size(TYPO_SM))
+                    .push(
+                        Row::new()
+                            .push(text(name.clone()).size(TYPO_SM))
+                            .push(
+                                text(format!(" · {status}"))
+                                    .size(TYPO_XS)
+                                    .color(status_color),
+                            )
+                            .spacing(SPACE_4)
+                            .align_y(Alignment::Center),
+                    )
                     .push(
                         text(format!("With {friend}"))
                             .size(TYPO_XS)
                             .style(text_muted_style),
                     )
                     .push(
-                        text(format!("{target}  ·  {remaining}  ·  {connections}"))
+                        text(format!("{target}  ·  {remaining}"))
                             .size(TYPO_XS)
                             .style(text_muted_style),
                     )
@@ -24258,14 +24345,8 @@ impl IcedChat {
                         button(text("Stop Sharing").size(TYPO_XS))
                             .on_press(AppMessage::StopSharingTunnel(tunnel_id))
                             .padding([SPACE_2, SPACE_8])
-                            .style(|t, _status| iced::widget::button::Style {
-                                background: Some(iced::Background::Color(
-                                    if matches!(t, iced::Theme::Dark) {
-                                        Color::from_rgb(0.55, 0.18, 0.18)
-                                    } else {
-                                        Color::from_rgb(0.88, 0.32, 0.32)
-                                    },
-                                )),
+                            .style(move |t, _status| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(color_error(t))),
                                 text_color: Color::WHITE,
                                 border: iced::Border {
                                     radius: SPACE_4.into(),
@@ -24298,25 +24379,41 @@ impl IcedChat {
             );
             for state in connected {
                 let tunnel_id = state.offer.tunnel_id;
-                let label = format!(
-                    "{} — {}",
-                    state.sharer_label, state.offer.service_name
-                );
+                let label = format!("{} — {}", state.sharer_label, state.offer.service_name);
                 let address = state
                     .local_addr
                     .map(|addr| tunnel_local_address(&state.offer, addr))
-                    .unwrap_or_else(|| "connecting…".to_string());
+                    .unwrap_or_else(|| "Connecting…".to_string());
+                let route_label = state
+                    .live_info
+                    .as_ref()
+                    .map(|live| {
+                        let snapshot = live.snapshot();
+                        tunnel_route_label(snapshot.route)
+                    })
+                    .unwrap_or("");
                 let connection_info = state
                     .live_info
                     .as_ref()
                     .map(|live| tunnel_connection_info_label(live.snapshot()));
+
                 let mut info_column = Column::new()
-                    .push(text(label).size(TYPO_SM))
                     .push(
-                        text(address)
-                            .size(TYPO_XS)
-                            .style(text_muted_style),
+                        Row::new()
+                            .push(text(label).size(TYPO_SM))
+                            .push(
+                                text(if !route_label.is_empty() {
+                                    format!(" · {route_label}")
+                                } else {
+                                    String::new()
+                                })
+                                .size(TYPO_XS)
+                                .color(accent_green(&theme)),
+                            )
+                            .spacing(SPACE_4)
+                            .align_y(Alignment::Center),
                     )
+                    .push(text(address).size(TYPO_XS).style(text_muted_style))
                     .spacing(SPACE_2)
                     .width(Length::Fill)
                     .align_x(Alignment::Start);
@@ -25981,12 +26078,11 @@ impl IcedChat {
         // ── Status section ──
         let status_color = presence.color(&theme);
         let status_row = row![]
-            .push(
-                icon_svg(presence.icon(), TYPO_SM)
-                .style(move |_t, _s| iced::widget::svg::Style {
+            .push(icon_svg(presence.icon(), TYPO_SM).style(move |_t, _s| {
+                iced::widget::svg::Style {
                     color: Some(status_color),
-                }),
-            )
+                }
+            }))
             .push(
                 text(last_seen_str.clone())
                     .size(TYPO_SM)
@@ -26172,14 +26268,29 @@ impl IcedChat {
                 let service_name = state.offer.service_name.clone();
                 let sharer_label = state.sharer_label.clone();
                 let is_http = state.offer.is_http;
+                let expired = state.offer.expires_at_ms <= now_ms().max(0) as u64;
                 let expiry = tunnel_expiry_label(state.offer.expires_at_ms);
                 let mut card = Column::new().spacing(SPACE_4);
 
-                if state.connected {
+                // Status badge: Connected (direct/relay), Failed, or Expired
+                if expired {
+                    card = card.push(text("Expired").size(TYPO_XS).color(text_muted(&theme)));
+                } else if state.connection_failed {
+                    card = card.push(text("Failed").size(TYPO_XS).color(color_error(&theme)));
+                } else if state.connected {
+                    let route = state.live_info.as_ref().map(|live| {
+                        let snapshot = live.snapshot();
+                        tunnel_route_label(snapshot.route)
+                    });
                     card = card.push(
-                        text("Connected")
-                            .size(TYPO_XS)
-                            .color(accent_primary(&theme)),
+                        text(match route {
+                            Some("Direct") => "Connected · Direct".to_string(),
+                            Some("Relay") => "Connected · Relay".to_string(),
+                            Some(other) if !other.is_empty() => format!("Connected · {other}"),
+                            _ => "Connected".to_string(),
+                        })
+                        .size(TYPO_XS)
+                        .color(accent_green(&theme)),
                     );
                 }
                 card = card.push(text(sharer_label).size(TYPO_XS).style(text_muted_style));
@@ -26188,12 +26299,22 @@ impl IcedChat {
                 if let Some(local_addr) = state.local_addr {
                     let display = tunnel_local_address(&state.offer, local_addr);
                     card = card.push(
-                        text(format!("Local address: {display}"))
+                        text(format!("Available at: {display}"))
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    );
+                } else if !expired {
+                    card = card.push(
+                        text(format!("{expiry}"))
                             .size(TYPO_XS)
                             .style(text_muted_style),
                     );
                 } else {
-                    card = card.push(text(expiry).size(TYPO_XS).style(text_muted_style));
+                    card = card.push(
+                        text("This shared service has expired.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    );
                 }
 
                 let mut actions = row![].spacing(SPACE_6).align_y(Alignment::Center);
@@ -26224,7 +26345,7 @@ impl IcedChat {
                             .on_press(AppMessage::DisconnectReceivedTunnel(tunnel_id))
                             .padding([SPACE_2, SPACE_8]),
                     );
-                } else {
+                } else if !expired {
                     actions = actions.push(
                         button(text("Connect").size(TYPO_XS))
                             .on_press(AppMessage::ConnectReceivedTunnel(tunnel_id))
@@ -27481,7 +27602,8 @@ mod tests {
 
     #[test]
     fn download_attachment_state_helpers_cover_all_states() {
-        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "", None);
+        let mut attachment =
+            DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "", None);
         assert_eq!(attachment.action_label(), "Download");
         assert_eq!(attachment.status_label(), "Ready to download");
         assert!(attachment.progress_fraction().is_none());
@@ -29315,8 +29437,14 @@ mod tests {
     /// Lifecycle: Started → Progress → Completed.
     #[test]
     fn download_lifecycle_started_progress_completed() {
-        let entry =
-            ChatEntry::system_download("system msg", TransferKind::File, "test.doc", "ticket", "" , None);
+        let entry = ChatEntry::system_download(
+            "system msg",
+            TransferKind::File,
+            "test.doc",
+            "ticket",
+            "",
+            None,
+        );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(1);
 
@@ -29439,8 +29567,14 @@ mod tests {
     /// Lifecycle: Started → Cancelled.
     #[test]
     fn download_lifecycle_started_cancelled() {
-        let entry =
-            ChatEntry::system_download("file share", TransferKind::File, "large.iso", "ticket", "" , None);
+        let entry = ChatEntry::system_download(
+            "file share",
+            TransferKind::File,
+            "large.iso",
+            "ticket",
+            "",
+            None,
+        );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(3);
 
@@ -29536,7 +29670,7 @@ mod tests {
     fn download_transfer_id_anchoring_survives_entry_reorder() {
         let id = TransferId::new(5);
         let mut entry =
-            ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket", "" , None);
+            ChatEntry::system_download("img", TransferKind::File, "photo.jpg", "ticket", "", None);
         entry.download.as_mut().unwrap().transfer_id = Some(id);
 
         // Simulate entries: a text entry inserted before the download entry,
@@ -29573,8 +29707,14 @@ mod tests {
     /// the entry has a transfer_id).
     #[test]
     fn download_anchoring_falls_back_to_index_when_no_transfer_id() {
-        let entry =
-            ChatEntry::system_download("file", TransferKind::File, "archive.tar.gz", "ticket", "" , None);
+        let entry = ChatEntry::system_download(
+            "file",
+            TransferKind::File,
+            "archive.tar.gz",
+            "ticket",
+            "",
+            None,
+        );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(6);
 
@@ -29661,8 +29801,14 @@ mod tests {
     /// Unknown total downloads (total: None) must display correctly.
     #[test]
     fn download_unknown_total_shows_size_unknown() {
-        let entry =
-            ChatEntry::system_download("stream", TransferKind::File, "live.mp4", "ticket", "" , None);
+        let entry = ChatEntry::system_download(
+            "stream",
+            TransferKind::File,
+            "live.mp4",
+            "ticket",
+            "",
+            None,
+        );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(7);
 
@@ -29746,8 +29892,14 @@ mod tests {
     /// Full lifecycle with zero-total progress edge case.
     #[test]
     fn download_zero_total_edge_case() {
-        let entry =
-            ChatEntry::system_download("empty", TransferKind::File, "empty.txt", "ticket", "" , None);
+        let entry = ChatEntry::system_download(
+            "empty",
+            TransferKind::File,
+            "empty.txt",
+            "ticket",
+            "",
+            None,
+        );
         let mut mgr = TestDownloadManager::new(vec![entry], Some(0));
         let id = TransferId::new(9);
 
@@ -29782,7 +29934,8 @@ mod tests {
     /// tolerances for each download state.
     #[test]
     fn download_estimated_height_fits_each_state() {
-        let mut attachment = DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "", None);
+        let mut attachment =
+            DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "", None);
 
         // Ready
         assert!((attachment.estimated_height() - 84.0).abs() < 1.0);
@@ -30057,7 +30210,7 @@ mod tests {
         let entry_b =
             ChatEntry::system_download("file b", TransferKind::File, "b.zip", "ticket_b", "", None);
         let entry_c =
-            ChatEntry::system_download("file c", TransferKind::File, "c.zip", "ticket_c", "" , None);
+            ChatEntry::system_download("file c", TransferKind::File, "c.zip", "ticket_c", "", None);
         let text_entry = ChatEntry::remote("peer", "hello", None, None, None);
         let mut mgr = TestDownloadManager::new(
             vec![entry_a, entry_b, entry_c, text_entry],
