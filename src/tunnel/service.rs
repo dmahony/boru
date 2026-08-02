@@ -93,6 +93,19 @@ impl TunnelDuration {
     }
 }
 
+impl std::fmt::Display for TunnelDuration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::TenMinutes => "10 minutes",
+            Self::ThirtyMinutes => "30 minutes",
+            Self::OneHour => "1 hour",
+            Self::EightHours => "8 hours",
+            Self::UntilExit => "Until Boru exits",
+        };
+        f.write_str(label)
+    }
+}
+
 /// Metadata for one configured tunnel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TunnelDefinition {

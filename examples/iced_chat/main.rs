@@ -702,6 +702,7 @@ fn main() -> Result<()> {
         directory_room_rx,
         continuous_tracker,
         dht_for_private,
+        tunnel_service,
     ) = runtime.block_on(async {
         let memory_lookup = MemoryLookup::new();
         use std::net::{Ipv4Addr, SocketAddrV4};
@@ -947,7 +948,8 @@ fn main() -> Result<()> {
             Arc::new(blob_store.clone().into()),
         );
 
-        let tunnel_handler = TunnelProtocol::new();
+        let tunnel_service = Arc::new(boru_core::tunnel::service::TunnelService::new());
+        let tunnel_handler = TunnelProtocol::with_service(Arc::clone(&tunnel_service), local_public);
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
@@ -1331,6 +1333,7 @@ fn main() -> Result<()> {
             directory_room_rx,
             continuous_tracker,
             room_discovery_dht,
+            tunnel_service,
         ))
     })?;
 
@@ -1489,6 +1492,7 @@ fn main() -> Result<()> {
                 gui_state_tx,
                 gui_action_history,
                 Some((*storage).clone()),
+                Arc::clone(&tunnel_service),
             );
             // Enable snapshot throttle: max ~8 updates/sec (125ms gap)
             // so rapidly changing GUI state (composer text, unread counts)
