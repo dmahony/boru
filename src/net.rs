@@ -112,6 +112,9 @@ const MAX_DIAL_RETRIES: usize = 3;
 const RETRY_BASE_DELAY_S: u64 = 5;
 /// Maximum delay (seconds) for exponential backoff on dial retry.
 const RETRY_MAX_DELAY_S: u64 = 60;
+/// Cooldown period (seconds) after retries exhaust before resetting the counter.
+/// This prevents permanently giving up on peers that are temporarily unreachable.
+const RETRY_COOLDOWN_S: u64 = 60;
 /// How often the stale-dial cleanup timer fires (seconds).
 const STALE_DIAL_CHECK_INTERVAL_S: u64 = 10;
 /// Dials older than this (seconds) are considered stale and aborted.
@@ -665,13 +668,25 @@ impl Actor {
                 let _ = local_tx.try_send(msg);
             });
         } else {
+            // After exhausting retries, disconnect from the protocol and
+            // schedule a cooldown retry.  This prevents permanently giving
+            // up on peers that are temporarily unreachable (e.g., after a
+            // restart) while still allowing the protocol to clean up.
             warn!(
                 peer = %peer_id.fmt_short(),
-                "dial retries exhausted ({MAX_DIAL_RETRIES}), giving up",
+                "dial retries exhausted ({MAX_DIAL_RETRIES}), scheduling cooldown re-attempt in {RETRY_COOLDOWN_S}s",
             );
-            self.retry_map.remove(&peer_id);
             self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
                 .await;
+            // Reset the counter so the next attempt starts fresh.
+            self.retry_map.remove(&peer_id);
+            let local_tx = self.local_tx.clone();
+            let alpn = self.alpn.clone();
+            tokio::task::spawn(async move {
+                n0_future::time::sleep(Duration::from_secs(RETRY_COOLDOWN_S)).await;
+                let msg = LocalActorMessage::RetryDial(addr, alpn);
+                let _ = local_tx.try_send(msg);
+            });
         }
     }
 

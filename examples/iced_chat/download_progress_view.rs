@@ -466,8 +466,8 @@ fn view_download_progress_inner<'a>(
         let presentation = video_presentation_state(attachment);
         let preview_height = inline_video_preview_height(attachment.poster_dimensions);
         let poster: iced::Element<'static, AppMessage> =
-            if let Some(ref bytes) = attachment.thumbnail {
-                iced::widget::image(iced::widget::image::Handle::from_bytes(bytes.clone()))
+            if let Some(ref handle) = attachment.thumbnail_handle {
+                iced::widget::image(handle.clone())
                     .content_fit(iced::ContentFit::Cover)
                     .width(Length::Fill)
                     .height(Length::Fill)
