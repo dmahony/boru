@@ -745,37 +745,85 @@ impl Actor {
         &mut self,
         peer_id: EndpointId,
         conn: Connection,
-        _task_result: Result<(), ConnectionLoopError>,
+        task_result: Result<(), ConnectionLoopError>,
     ) {
-        if let Some(PeerState::Active {
-            active_conn_id,
-            other_conns,
-            ..
-        }) = self.peers.get_mut(&peer_id)
-        {
-            if conn.stable_id() == *active_conn_id {
-                debug!("active send connection closed, mark peer as disconnected");
+        // Log the failure reason so connection deaths (especially WriteError::TooLarge
+        // from oversized gossip messages) are visible in logs.
+        if let Err(ref err) = task_result {
+            warn!(peer = %peer_id.fmt_short(), "connection loop ended: {err:#}");
+        }
+
+        // Extract the backup connection before mutating self.peers further.
+        // This avoids a double mutable borrow when we need to update the peer
+        // state after popping from other_conns.
+        let backup_conn = match self.peers.get_mut(&peer_id) {
+            Some(PeerState::Active {
+                active_conn_id,
+                other_conns,
+                ..
+            }) => {
+                if conn.stable_id() == *active_conn_id {
+                    // Active connection died — pop a backup if available.
+                    other_conns.pop()
+                } else {
+                    // Backup connection finished — just remove it from tracking.
+                    other_conns.retain(|(id, _)| *id != conn.stable_id());
+                    debug!(
+                        "backup connection task finished, {} backup(s) remaining",
+                        other_conns.len()
+                    );
+                    return;
+                }
+            }
+            _ => {
+                debug!("peer already marked as disconnected");
                 if conn.close_reason().is_none() {
                     conn.close(0u32.into(), b"close from disconnect");
                 }
-                self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
-                    .await;
-            } else {
-                // Backup/redundant connection — do NOT close the QUIC connection
-                // because the remote peer may be using it as their active connection.
-                // Just remove our tracking of it; the sender is dropped here, causing
-                // the idle connection_loop to finally terminate naturally.
-                other_conns.retain(|(id, _)| *id != conn.stable_id());
-                debug!(
-                    "backup connection task finished, {} backup(s) remaining",
-                    other_conns.len()
-                );
+                return;
             }
+        };
+
+        // If we get here, the active connection died.
+        debug!("active send connection closed");
+        if conn.close_reason().is_none() {
+            conn.close(0u32.into(), b"close from disconnect");
+        }
+
+        if let Some((backup_conn_id, backup_tx)) = backup_conn {
+            // Promote the backup connection to active.  This keeps the peer
+            // reachable and prevents the "dead sender" stuck state where
+            // PeerState::Active holds a closed active_send_tx but no new
+            // dial is triggered.
+            info!(
+                peer = %peer_id.fmt_short(),
+                "promoting backup connection to active after active failure"
+            );
+            if let Some(PeerState::Active {
+                active_send_tx,
+                active_conn_id,
+                active_conn_origin,
+                ..
+            }) = self.peers.get_mut(&peer_id)
+            {
+                *active_send_tx = backup_tx;
+                *active_conn_id = backup_conn_id;
+                *active_conn_origin = ConnOrigin::Accept; // backup was an Accept
+            }
+            // Do NOT fire PeerDisconnected — the peer is still
+            // reachable via the promoted backup connection.
         } else {
-            debug!("peer already marked as disconnected");
-            if conn.close_reason().is_none() {
-                conn.close(0u32.into(), b"close from disconnect");
-            }
+            self.handle_in_event(InEvent::PeerDisconnected(peer_id), Instant::now())
+                .await;
+            // Reset PeerState to Pending so the dialer will re-dial.
+            // Without this, the dead active_send_tx stays in
+            // PeerState::Active and all future sends silently fail.
+            self.peers.insert(
+                peer_id,
+                PeerState::Pending {
+                    queue: Vec::new(),
+                },
+            );
         }
     }
 

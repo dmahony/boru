@@ -86,7 +86,6 @@ use boru_core::video_playback::{
 #[cfg(feature = "video-playback")]
 use boru_core::video_runtime::VideoRuntimeCapability;
 use boru_core::video_poster;
-use boru_core::streaming_server::StreamingServer;
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
     address_lookup::memory::MemoryLookup, EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher,
@@ -2447,8 +2446,6 @@ pub struct IcedChat {
     inline_video_resume: Option<(VideoInstanceKey, Duration)>,
     #[cfg(feature = "video-playback")]
     video_runtime: VideoRuntimeCapability,
-    /// Optional streaming server for progressive video playback.
-    streaming_server: Arc<StdMutex<Option<StreamingServer>>>,
     /// TransferId → entry index cache for O(1) progress update lookups.
     /// Populated lazily in handle_download_progress; cleared on room switch.
     transfer_id_to_index: HashMap<TransferId, usize>,
@@ -3387,11 +3384,9 @@ pub enum AppMessage {
     InlineVideoSetVolume(f32),
     #[cfg(feature = "video-playback")]
     InlineVideoToggleExpanded,
+    #[cfg(feature = "video-playback")]
     /// Close the active inline player and restore its poster.
     CloseInlineVideo,
-    #[cfg(feature = "video-playback")]
-    /// Playback via streaming server is ready — contains the entry index and HTTP URL.
-    StreamingPlay(usize, url::Url),
     /// A video stream URL is ready for external playback (no video-playback feature).
     StreamUrl(String),
     #[cfg(feature = "video-playback")]
@@ -4726,7 +4721,6 @@ impl IcedChat {
                 }
                 capability
             },
-            streaming_server: Arc::new(StdMutex::new(None)),
             transfer_id_to_index: HashMap::new(),
             names: HashMap::new(),
             topic: initial_topic,
@@ -6196,10 +6190,9 @@ impl IcedChat {
             AppMessage::InlineVideoSetVolume(_) => "InlineVideoSetVolume",
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoToggleExpanded => "InlineVideoToggleExpanded",
+            #[cfg(feature = "video-playback")]
             AppMessage::CloseInlineVideo => "CloseInlineVideo",
             AppMessage::StreamUrl(_) => "StreamUrl",
-            #[cfg(feature = "video-playback")]
-            AppMessage::StreamingPlay(..) => "StreamingPlay",
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoEvent(_) => "InlineVideoEvent",
             AppMessage::OpenDownloadsFolder => "OpenDownloadsFolder",
@@ -6482,10 +6475,6 @@ impl IcedChat {
         self.inline_video_expanded = false;
         self.playback_coordinator.clear(None);
         self.layout_cache.borrow_mut().clear();
-        // Stop any active streaming server
-        if let Ok(mut slot) = self.streaming_server.lock() {
-            *slot = None;
-        }
     }
 
     /// Map a filename extension to a MIME content type for HTTP streaming.
@@ -6506,8 +6495,8 @@ impl IcedChat {
         .to_string()
     }
 
-    /// Start streaming a video for external playback (no GStreamer required).
-    /// Returns a task that produces the stream URL for the user.
+    /// Start downloading a video for external playback (no streaming server).
+    /// Returns a task that waits for the download to finish, then opens the file.
     fn stream_for_external_play(
         &self,
         _entry_index: usize,
@@ -6522,8 +6511,11 @@ impl IcedChat {
         if total_size == 0 {
             return None;
         }
+        // If already downloaded, just open it.
+        if let DownloadState::Completed { saved_path: Some(_), .. } = &download.state {
+            return Some(iced::Task::done(AppMessage::OpenDownloadedFile(download.name.clone())));
+        }
         let name = download.name.clone();
-        let content_type = Self::content_type_for_filename(&name);
         let data_dir = self.data_dir.clone();
         let blob_store = self.blob_store.clone();
         let endpoint = self.endpoint.clone();
@@ -6531,7 +6523,6 @@ impl IcedChat {
         let progress_queue = self.download_progress_queue.clone();
         let kind = download.kind;
         let ticket = download.ticket.clone();
-        let server_slot = self.streaming_server.clone();
 
         Some(iced::Task::perform(
             async move {
@@ -6544,43 +6535,28 @@ impl IcedChat {
                 let (addr, hash, _format) = parsed.into_parts();
                 let candidates = download_candidates(addr.id, &neighbors);
 
-                let dl_path = save_path.clone();
-                let dl_blob = blob_store;
-                let dl_ep = endpoint;
-                let dl_name = name.clone();
-                let dl_queue = progress_queue;
-                tokio::spawn(async move {
-                    let _ = download_blob_to_file(
-                        &dl_blob,
-                        &dl_ep,
-                        hash,
-                        candidates,
-                        dl_name,
-                        kind,
-                        &dl_path,
-                        move |ev| {
-                            if let Ok(mut q) = dl_queue.lock() {
-                                q.push_back(ev);
-                            }
-                        },
-                        Some(total_size),
-                    )
-                    .await;
-                });
+                download_blob_to_file(
+                    &blob_store,
+                    &endpoint,
+                    hash,
+                    candidates,
+                    name.clone(),
+                    kind,
+                    &save_path,
+                    move |ev| {
+                        if let Ok(mut q) = progress_queue.lock() {
+                            q.push_back(ev);
+                        }
+                    },
+                    Some(total_size),
+                )
+                .await
+                .map_err(|e| format!("Download failed: {e}"))?;
 
-                let server = StreamingServer::start(save_path, total_size, content_type)
-                    .await
-                    .map_err(|e| format!("Streaming server: {e}"))?;
-                let http_url = server.url().to_string();
-
-                if let Ok(mut slot) = server_slot.lock() {
-                    *slot = Some(server);
-                }
-
-                Ok::<_, String>(http_url)
+                Ok::<_, String>(name)
             },
             |result| match result {
-                Ok(url) => AppMessage::StreamUrl(url),
+                Ok(name) => AppMessage::OpenDownloadedFile(name),
                 Err(e) => AppMessage::ErrorMsg(e),
             },
         ))
@@ -12191,7 +12167,7 @@ impl IcedChat {
                         has_hash=download.expected_content_hash.is_some(),
                         "PlayInlineVideo: download state",
                     );
-                    // Determine play source: downloaded file or streaming
+                    // Determine play source: only play from a fully downloaded file.
                     let (play_path, play_total_size) =
                         if let DownloadState::Completed {
                             saved_path: Some(path),
@@ -12201,7 +12177,13 @@ impl IcedChat {
                         {
                             (path.clone(), *total_size)
                         } else if !download.ticket.is_empty() {
-                            // Not yet downloaded — start streaming
+                            // Not yet downloaded — start the download and
+                            // inform the user to click play again when
+                            // complete.  We intentionally avoid streaming
+                            // the file over a local HTTP server because that
+                            // machinery adds fragility; download-then-play is
+                            // simpler and avoids breaking the gossip
+                            // transport with oversized messages.
                             let total_size = match &download.state {
                                 DownloadState::Ready { total } => total.unwrap_or(0),
                                 DownloadState::Active { total, .. } => total.unwrap_or(0),
@@ -12212,13 +12194,19 @@ impl IcedChat {
                             };
                             if total_size == 0 {
                                 self.push_system(
-                                    "Cannot stream video: unknown size.",
+                                    "Cannot download video: unknown size.",
+                                );
+                                return iced::Task::none();
+                            }
+                            // If a download is already active, just inform
+                            // the user to wait.
+                            if matches!(download.state, DownloadState::Active { .. }) {
+                                self.push_system(
+                                    "Download in progress — click play again when complete.",
                                 );
                                 return iced::Task::none();
                             }
                             let name = download.name.clone();
-                            let content_type =
-                                Self::content_type_for_filename(&name);
                             let data_dir = self.data_dir.clone();
                             let blob_store = self.blob_store.clone();
                             let endpoint = self.endpoint.clone();
@@ -12227,93 +12215,58 @@ impl IcedChat {
                                 self.download_progress_queue.clone();
                             let kind = download.kind;
                             let ticket = download.ticket.clone();
-                            let server_slot =
-                                self.streaming_server.clone();
 
-                            return iced::Task::perform(
-                                async move {
-                                    let dl_dir =
-                                        data_dir.join("downloads");
-                                    let _ = tokio::fs::create_dir_all(
-                                        &dl_dir,
-                                    )
-                                    .await;
-                                    let save_path =
-                                        dl_dir.join(&name);
+                            // Mark download as Active so the UI shows progress.
+                            if let Some(download) = self
+                                .entries
+                                .get_mut(entry_index)
+                                .and_then(|entry| entry.download.as_mut())
+                            {
+                                download.state = DownloadState::Active {
+                                    bytes: 0,
+                                    total: Some(total_size),
+                                };
+                            }
+                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
 
-                                    // Parse ticket
-                                    let parsed: iroh_blobs::ticket::BlobTicket = ticket.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
-                                    let (addr, hash, _format) =
-                                        parsed.into_parts();
-                                    let candidates =
-                                        download_candidates(
-                                            addr.id, &neighbors,
-                                        );
+                            tokio::spawn(async move {
+                                let dl_dir = data_dir.join("downloads");
+                                let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                                let save_path = dl_dir.join(&name);
 
-                                    // Start background download
-                                    let dl_path =
-                                        save_path.clone();
-                                    let dl_blob = blob_store;
-                                    let dl_ep = endpoint;
-                                    let dl_name = name.clone();
-                                    let dl_queue = progress_queue;
-                                    tokio::spawn(async move {
-                                        let _ = download_blob_to_file(
-                                            &dl_blob,
-                                            &dl_ep,
-                                            hash,
-                                            candidates,
-                                            dl_name,
-                                            kind,
-                                            &dl_path,
-                                            move |ev| {
-                                                if let Ok(mut q) =
-                                                    dl_queue.lock()
-                                                {
-                                                    q.push_back(ev);
-                                                }
-                                            },
-                                            Some(total_size),
-                                        )
-                                        .await;
-                                    });
+                                let parsed: iroh_blobs::ticket::BlobTicket =
+                                    match ticket.parse() {
+                                        Ok(t) => t,
+                                        Err(e) => {
+                                            tracing::error!("Invalid ticket: {e}");
+                                            return;
+                                        }
+                                    };
+                                let (addr, hash, _format) = parsed.into_parts();
+                                let candidates = download_candidates(addr.id, &neighbors);
 
-                                    // Start streaming server
-                                    let server =
-                                        StreamingServer::start(
-                                            save_path,
-                                            total_size,
-                                            content_type,
-                                        )
-                                        .await
-                                        .map_err(|e| {
-                                            format!(
-                                                "Streaming server: {e}"
-                                            )
-                                        })?;
-                                    let http_url = server.url();
+                                let _ = download_blob_to_file(
+                                    &blob_store,
+                                    &endpoint,
+                                    hash,
+                                    candidates,
+                                    name,
+                                    kind,
+                                    &save_path,
+                                    move |ev| {
+                                        if let Ok(mut q) = progress_queue.lock() {
+                                            q.push_back(ev);
+                                        }
+                                    },
+                                    Some(total_size),
+                                )
+                                .await;
+                            });
 
-                                    // Store server for cleanup
-                                    if let Ok(mut slot) =
-                                        server_slot.lock()
-                                    {
-                                        *slot = Some(server);
-                                    }
-
-                                    Ok::<_, String>(http_url)
-                                },
-                                move |result| match result {
-                                    Ok(http_url) => {
-                                        AppMessage::StreamingPlay(
-                                            entry_index,
-                                            http_url,
-                                        )
-                                    }
-                                    Err(e) => {
-                                        AppMessage::ErrorMsg(e)
-                                    }
-                                },
+                            self.push_system(
+                                "Download started — click play again when the progress bar reaches 100%.",
                             );
+                            return iced::Task::none();
                         } else {
                             self.push_system(
                                 "Video is not ready to play yet.",
@@ -12460,88 +12413,13 @@ impl IcedChat {
                 ));
                 iced::Task::none()
             }
+            #[cfg(feature = "video-playback")]
             AppMessage::CloseInlineVideo => {
                 #[cfg(feature = "video-playback")]
                 {
                     self.stop_inline_video();
                 }
                 iced::Task::none()
-            }
-            #[cfg(feature = "video-playback")]
-            AppMessage::StreamingPlay(entry_index, http_url) => {
-                let (message_id, attachment_id) =
-                    if let Some(entry) = self.entries.get(entry_index) {
-                        (entry.event_id, entry.download.as_ref().map(|d| d.name.clone()).unwrap_or_default())
-                    } else {
-                        return iced::Task::none();
-                    };
-                let key = VideoInstanceKey::new(
-                    self.topic,
-                    message_id,
-                    attachment_id,
-                );
-                if self.playback_coordinator.active_video() == Some(&key) {
-                    if let Some(session) =
-                        self.inline_video.as_mut().filter(|s| s.key == key)
-                    {
-                        if let Some(video) =
-                            session.video.as_mut().and_then(Arc::get_mut)
-                        {
-                            video.set_paused(!video.paused());
-                            self.layout_cache.borrow_mut().clear();
-                            return iced::Task::none();
-                        }
-                    }
-                }
-                let _previous =
-                    self.playback_coordinator.request_play(key.clone());
-                self.inline_video = Some(InlineVideoSession {
-                    key: key.clone(),
-                    video: None,
-                    error: None,
-                    jitter: VideoJitterBuffer::default(),
-                    resume_position: self
-                        .inline_video_resume
-                        .as_ref()
-                        .filter(|(resume_key, _)| resume_key == &key)
-                        .map(|(_, position)| *position)
-                        .unwrap_or_default(),
-                    last_near_viewport: Instant::now(),
-                });
-                self.inline_video_resume = None;
-                self.layout_cache
-                    .borrow_mut()
-                    .invalidate_from(entry_index);
-                return iced::Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            Video::new(&http_url)
-                                .map_err(|e| e.to_string())
-                        })
-                        .await
-                        .map_err(|e| e.to_string())
-                        .and_then(|result| result)
-                    },
-                    move |result| match result {
-                        Ok(mut video) => {
-                            video.set_paused(false);
-                            AppMessage::InlineVideoEvent(
-                                InlineVideoEvent::Loaded {
-                                    key,
-                                    video: Arc::new(video),
-                                },
-                            )
-                        }
-                        Err(error) => {
-                            AppMessage::InlineVideoEvent(
-                                InlineVideoEvent::Failed {
-                                    key,
-                                    error,
-                                },
-                            )
-                        }
-                    },
-                );
             }
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoTick => {
@@ -27852,7 +27730,9 @@ mod tests {
                 .expect("bind endpoint");
             endpoint.online().await;
 
-            let gossip = boru_core::net::Gossip::builder().spawn(endpoint.clone());
+            let gossip = boru_core::net::Gossip::builder()
+                .max_message_size(64 * 1024) // 64 KiB — room for video thumbnails in FileShare
+                .spawn(endpoint.clone());
             let router = iroh::protocol::Router::builder(endpoint.clone())
                 .accept(boru_core::net::GOSSIP_ALPN, gossip.clone())
                 .spawn();

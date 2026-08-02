@@ -69,9 +69,8 @@ impl StreamingServer {
     }
 
     /// The HTTP URL for GStreamer playbin.
-    pub fn url(&self) -> url::Url {
-        url::Url::parse(&format!("http://127.0.0.1:{}/video", self.port))
-            .expect("hardcoded URL is valid")
+    pub fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/video", self.port)
     }
 }
 

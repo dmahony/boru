@@ -12,7 +12,7 @@ pub const MAX_POSTER_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// A cached poster and its decoded dimensions.
 pub struct Poster {
-    /// Bounded JPEG bytes suitable for an Iced image handle.
+    /// Bounded WebP bytes suitable for an Iced image handle.
     pub bytes: Vec<u8>,
     /// Dimensions decoded from the poster, when available.
     pub dimensions: Option<(u32, u32)>,
@@ -25,7 +25,7 @@ pub fn cache_key(content: &[u8]) -> String {
     blake3::hash(content).to_hex().to_string()
 }
 
-/// Probe a verified local file and cache one bounded JPEG poster.
+/// Probe a verified local file and cache one bounded WebP poster.
 ///
 /// This function is intentionally blocking; callers must run it in a
 /// `spawn_blocking` task so media probing never runs in the Iced update loop.
@@ -38,7 +38,7 @@ pub fn generate(path: &Path, cache_dir: &Path) -> Result<Poster, String> {
     }
     let bytes = std::fs::read(path).map_err(|e| format!("read video: {e}"))?;
     let key = cache_key(&bytes);
-    let cache_path = cache_dir.join(format!("{key}.jpg"));
+    let cache_path = cache_dir.join(format!("{key}.webp"));
     if let Ok(cached) = std::fs::read(&cache_path) {
         if !cached.is_empty() && cached.len() <= MAX_POSTER_BYTES {
             return Ok(Poster {
@@ -60,10 +60,10 @@ pub fn generate(path: &Path, cache_dir: &Path) -> Result<Poster, String> {
             "scale='min(320,iw)':-2",
             "-f",
             "image2pipe",
-            "-vcodec",
-            "mjpeg",
-            "-q:v",
-            "6",
+            "-c:v",
+            "libwebp",
+            "-quality",
+            "80",
             "-threads",
             "1",
             "-timelimit",
@@ -81,7 +81,7 @@ pub fn generate(path: &Path, cache_dir: &Path) -> Result<Poster, String> {
     if output.stdout.len() > MAX_POSTER_BYTES {
         return Err(format!("poster exceeds {} bytes", MAX_POSTER_BYTES));
     }
-    let tmp_path = cache_path.with_extension("jpg.tmp");
+    let tmp_path = cache_path.with_extension("webp.tmp");
     std::fs::write(&tmp_path, &output.stdout).map_err(|e| format!("write poster: {e}"))?;
     std::fs::rename(&tmp_path, &cache_path).map_err(|e| format!("publish poster: {e}"))?;
     Ok(Poster {

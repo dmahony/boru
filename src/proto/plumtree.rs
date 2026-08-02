@@ -554,6 +554,13 @@ impl<PI: PeerIdentity> State<PI> {
             }
         // otherwise store the message, emit to application and forward to peers
         } else {
+            // Emit the Received event with the **original** message scope
+            // (before next_round is called), so the application sees the
+            // correct delivery round / is_direct flag.
+            io.push(OutEvent::EmitEvent(Event::Received(
+                GossipEvent::from_message(&message, sender),
+            )));
+
             if let DeliveryScope::Swarm(prev_round) = message.scope {
                 // insert the message in the list of received messages
                 self.received_messages.insert(
@@ -595,11 +602,6 @@ impl<PI: PeerIdentity> State<PI> {
                 self.stats.max_last_delivery_hop =
                     self.stats.max_last_delivery_hop.max(prev_round.0);
             }
-
-            // emit event to application
-            io.push(OutEvent::EmitEvent(Event::Received(
-                GossipEvent::from_message(&message, sender),
-            )));
         }
     }
 
@@ -834,18 +836,19 @@ mod test {
         );
         state.handle(event, now, &mut io);
         let expected = {
-            // we expect a MissingMessages gap event, then the Received event,
+            // we expect the Received event (emitted with the original message scope),
+            // then the MissingMessages gap event,
             // but no Graft or Prune or dispatch timer messages (no lazy peers exist)
             let mut io = VecDeque::new();
-            io.push(OutEvent::EmitEvent(Event::MissingMessages {
-                since_round: Round(0),
-                from_peer: 3,
-            }));
             io.push(OutEvent::EmitEvent(Event::Received(GossipEvent {
                 content,
                 delivered_from: 3,
                 scope: DeliveryScope::Swarm(Round(6)),
             })));
+            io.push(OutEvent::EmitEvent(Event::MissingMessages {
+                since_round: Round(0),
+                from_peer: 3,
+            }));
             io
         };
         assert_eq!(io, expected);
@@ -877,9 +880,15 @@ mod test {
         );
         state.handle(event, now, &mut io);
         let expected = {
-            // this time we expect the MissingMessages gap event (round 9 > previous max 6),
-            // the Graft and Prune messages for the optimization step, and the Received event.
+            // this time we expect the Received event (emitted first with the original scope),
+            // the MissingMessages gap event (round 9 > previous max 6),
+            // and the Graft and Prune messages for the optimization step.
             let mut io = VecDeque::new();
+            io.push(OutEvent::EmitEvent(Event::Received(GossipEvent {
+                content,
+                delivered_from: 3,
+                scope: DeliveryScope::Swarm(Round(9)),
+            })));
             io.push(OutEvent::EmitEvent(Event::MissingMessages {
                 since_round: Round(6),
                 from_peer: 3,
@@ -892,11 +901,6 @@ mod test {
                 }),
             ));
             io.push(OutEvent::SendMessage(3, Message::Prune));
-            io.push(OutEvent::EmitEvent(Event::Received(GossipEvent {
-                content,
-                delivered_from: 3,
-                scope: DeliveryScope::Swarm(Round(9)),
-            })));
             io
         };
         assert_eq!(io, expected);
