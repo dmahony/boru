@@ -44,6 +44,9 @@ pub mod video_poster;
 pub mod streaming_server;
 #[cfg(feature = "net")]
 pub mod net;
+/// Optional network diagnostics over the shared tunnel raw-stream transport.
+#[cfg(feature = "net")]
+pub mod network_doctor;
 pub mod proto;
 pub mod public_room;
 #[cfg(feature = "net")]
