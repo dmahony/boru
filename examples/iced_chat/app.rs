@@ -1601,6 +1601,8 @@ pub(crate) struct DownloadAttachment {
     pub(crate) thumbnail: Option<Vec<u8>>,
     /// Cached image handle for the thumbnail, created once to prevent flicker.
     pub(crate) thumbnail_handle: Option<iced::widget::image::Handle>,
+    /// Hash of the thumbnail blob (for async fetch by receivers).
+    pub(crate) thumbnail_hash: Option<MessageHash>,
     /// Poster dimensions preserve a known aspect ratio without probing video
     /// data from the view function.
     pub(crate) poster_dimensions: Option<(u32, u32)>,
@@ -1658,6 +1660,7 @@ impl DownloadAttachment {
             thumbnail_handle: thumbnail
                 .as_deref()
                 .map(|bytes| iced::widget::image::Handle::from_bytes(bytes.to_vec())),
+            thumbnail_hash: None,
             poster_dimensions,
             playback_error: None,
             expected_content_hash,
@@ -3788,6 +3791,11 @@ pub enum AppMessage {
         ticket: String,
         /// JPEG thumbnail bytes generated during video upload (None for non-video).
         thumbnail: Option<Vec<u8>>,
+    },
+    /// A thumbnail blob hash was resolved; update the download card with the bytes.
+    ThumbnailFetched {
+        entry_index: usize,
+        thumbnail_bytes: Vec<u8>,
     },
 
     // ── GUI test actions (MCP-driven) ──
@@ -6259,6 +6267,7 @@ impl IcedChat {
             AppMessage::ImageUploadFailed(_) => "ImageUploadFailed",
             AppMessage::FileUploadFailed(_) => "FileUploadFailed",
             AppMessage::FileDownloaded { .. } => "FileDownloaded",
+            AppMessage::ThumbnailFetched { .. } => "ThumbnailFetched",
             AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
             AppMessage::ImageDownloaded { .. } => "ImageDownloaded",
             AppMessage::FriendAdded { .. } => "FriendAdded",
@@ -11559,6 +11568,7 @@ impl IcedChat {
             AppMessage::ExecuteFileSend(encoded) => {
                 let parts: Vec<&str> = encoded.splitn(3, '|').collect();
                 if parts.len() < 3 {
+                    tracing::warn!("ExecuteFileSend: invalid encoded payload ({} parts)", parts.len());
                     return iced::Task::none();
                 }
                 let filename = parts[0].to_string();
@@ -11636,7 +11646,7 @@ impl IcedChat {
                                 blob_ticket_string(endpoint_addr, tag.hash, tag.format);
                             // The local file is the sender's verified selection. Probe it
                             // off the Iced update loop; failure only omits the optional
-                            // thumbnail and must not fail the upload.
+                            // thumbnail blob and must not fail the upload.
                             let thumbnail_bytes = if is_video {
                                 let poster_path = path_buf.clone();
                                 let cache_dir = poster_cache_dir.clone();
@@ -11651,16 +11661,44 @@ impl IcedChat {
                             } else {
                                 None
                             };
+                            // Store the poster as a blob so receivers can fetch it
+                            // via iroh — keeps gossip messages small.
+                            let thumbnail_hash = match thumbnail_bytes.as_ref() {
+                                Some(bytes) => blob_store
+                                    .blobs()
+                                    .add_bytes(bytes.clone())
+                                    .await
+                                    .ok()
+                                    .map(|tag| MessageHash::from(*tag.hash.as_bytes())),
+                                None => None,
+                            };
                             let msg = crate::Message::FileShare {
                                 name: filename.clone(),
                                 ticket: ticket_str.clone(),
                                 size: file_size,
-                                thumbnail: thumbnail_bytes.clone(),
+                                thumbnail_hash,
                             };
                             let encoded_msg = SignedMessage::sign_and_encode(&secret_key, &msg)
                                 .map_err(|e| format!("Failed to sign: {e}"))?;
+                            let _encoded_len = encoded_msg.len();
                             if let Some(ref sender) = sender {
-                                sender.broadcast(encoded_msg).await.ok();
+                                match sender.broadcast(encoded_msg).await {
+                                    Ok(()) => tracing::info!(
+                                        name = %filename,
+                                        file_size,
+                                        encoded_len = _encoded_len,
+                                        has_thumbnail = thumbnail_bytes.is_some(),
+                                        thumbnail_len = thumbnail_bytes.as_ref().map(|b| b.len()).unwrap_or(0),
+                                        "FileShare broadcast OK"
+                                    ),
+                                    Err(e) => tracing::error!(
+                                        name = %filename,
+                                        file_size,
+                                        encoded_len = _encoded_len,
+                                        error = %e,
+                                        "FileShare broadcast FAILED"
+                                    ),
+                                }
                             }
                             Ok::<_, String>((filename, ticket_str, thumbnail_bytes))
                         })
@@ -12811,11 +12849,19 @@ impl IcedChat {
             }
             AppMessage::FileUploadFailed(error) => {
                 self.pending_file_upload = None;
+                tracing::error!(error = %error, "FileUploadFailed");
                 self.push_system(format!("File upload failed: {error}"));
                 iced::Task::none()
             }
             AppMessage::FileDownloaded { name, ticket, thumbnail } => {
                 self.pending_file_upload = None;
+                tracing::info!(
+                    name = %name,
+                    has_ticket = !ticket.is_empty(),
+                    has_thumbnail = thumbnail.is_some(),
+                    thumbnail_len = thumbnail.as_ref().map(|b| b.len()).unwrap_or(0),
+                    "FileDownloaded"
+                );
                 // Update the upload-progress entry to Completed.
                 if let Some(idx) = self.download_entry_index {
                     if let Some(entry) = self.entries.get_mut(idx) {
@@ -12836,6 +12882,26 @@ impl IcedChat {
                 }
                 // Also set pending_file so the file can be re-downloaded.
                 self.pending_file = Some((name, ticket));
+                iced::Task::none()
+            }
+            AppMessage::ThumbnailFetched { entry_index, thumbnail_bytes } => {
+                if !thumbnail_bytes.is_empty() {
+                    if let Some(entry) = self.entries.get_mut(entry_index) {
+                        if let Some(dl) = entry.download.as_mut() {
+                            dl.thumbnail = Some(thumbnail_bytes.clone());
+                            dl.thumbnail_handle = Some(
+                                iced::widget::image::Handle::from_bytes(thumbnail_bytes),
+                            );
+                            dl.poster_dimensions = image::ImageReader::new(
+                                std::io::Cursor::new(&dl.thumbnail.as_ref().unwrap()),
+                            )
+                            .with_guessed_format()
+                            .ok()
+                            .and_then(|reader| reader.into_dimensions().ok());
+                        }
+                        self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                    }
+                }
                 iced::Task::none()
             }
             AppMessage::ErrorMsg(msg) => {
@@ -17261,12 +17327,9 @@ impl ChatCallbacks for IcedChat {
         name: String,
         ticket: String,
         size: u64,
-        thumbnail: Option<Vec<u8>>,
+        thumbnail_hash: Option<MessageHash>,
     ) {
         self.pending_file = Some((name.clone(), ticket.clone()));
-        // Create a download card entry so the file appears as a card with a
-        // download button, not just a system notification.  The download
-        // entry index is set so ExecuteDownloadAt can find the entry.
         self.download_entry_index = Some(self.entries.len());
         let xfer_kind = if classify_attachment(None, &name) == MediaKind::Video {
             TransferKind::Video
@@ -17279,12 +17342,12 @@ impl ChatCallbacks for IcedChat {
             name,
             ticket,
             "",
-            thumbnail,
+            None, // thumbnail fetched asynchronously via blob
         );
-        // Pre-populate the total size so the progress bar appears immediately
-        // when the user clicks Download — no need to wait for Phase 2 export.
+        // Store the thumbnail hash so the poster can be fetched on demand.
         if let Some(dl) = entry.download.as_mut() {
             dl.state = DownloadState::Ready { total: Some(size) };
+            dl.thumbnail_hash = thumbnail_hash;
         }
         self.entries_push(entry);
     }
@@ -27748,7 +27811,7 @@ mod tests {
             endpoint.online().await;
 
             let gossip = boru_core::net::Gossip::builder()
-                .max_message_size(64 * 1024) // 64 KiB — room for video thumbnails in FileShare
+                .max_message_size(16 * 1024) // 16 KiB — tiny, thumbnails go via blobs now
                 .spawn(endpoint.clone());
             let router = iroh::protocol::Router::builder(endpoint.clone())
                 .accept(boru_core::net::GOSSIP_ALPN, gossip.clone())
