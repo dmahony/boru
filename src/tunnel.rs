@@ -19,6 +19,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
 };
 
+pub(crate) mod forwarding;
 pub mod service;
 
 /// Current version of the tunnel handshake wire messages.
