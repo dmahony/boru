@@ -23337,7 +23337,10 @@ impl IcedChat {
             lc.window(self.scroll_offset, self.viewport_height);
 
         // ── Build windowed content column ──
-        let mut col = Column::new().spacing(SPACE_4).width(Length::Fill);
+        let mut col = Column::new()
+            .spacing(SPACE_4)
+            .width(Length::Fill)
+            .align_x(Alignment::Start);
 
         if top_space_h > 0.0 {
             col = col.push(
