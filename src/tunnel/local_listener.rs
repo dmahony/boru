@@ -134,7 +134,7 @@ impl LocalTunnelListener {
             .clone()
             .try_acquire_owned()
             .map_err(|_| anyhow::anyhow!("tunnel connection limit reached"))?;
-        self.route(local, permit).await
+        self.route(local, permit, CancellationToken::new()).await
     }
 
     /// Run the listener until cancellation, routing each application
@@ -160,6 +160,7 @@ impl LocalTunnelListener {
             let tunnel_id = self.tunnel_id;
             let capability = self.capability.clone();
             let peer_connection = Arc::clone(&self.peer_connection);
+            let route_cancellation = cancellation.clone();
             tokio::spawn(async move {
                 let result = Self::route_with(
                     endpoint,
@@ -169,6 +170,7 @@ impl LocalTunnelListener {
                     peer_connection,
                     local,
                     permit,
+                    route_cancellation,
                 )
                 .await;
                 if let Err(error) = result {
@@ -178,7 +180,12 @@ impl LocalTunnelListener {
         }
     }
 
-    async fn route(&self, local: TcpStream, permit: OwnedSemaphorePermit) -> anyhow::Result<()> {
+    async fn route(
+        &self,
+        local: TcpStream,
+        permit: OwnedSemaphorePermit,
+        cancellation: CancellationToken,
+    ) -> anyhow::Result<()> {
         Self::route_with(
             self.endpoint.clone(),
             self.owner.clone(),
@@ -187,6 +194,7 @@ impl LocalTunnelListener {
             Arc::clone(&self.peer_connection),
             local,
             permit,
+            cancellation,
         )
         .await
     }
@@ -199,6 +207,7 @@ impl LocalTunnelListener {
         peer_connection: Arc<Mutex<Option<Connection>>>,
         local: TcpStream,
         _permit: OwnedSemaphorePermit,
+        cancellation: CancellationToken,
     ) -> anyhow::Result<()> {
         let connection = {
             let mut shared = peer_connection.lock().await;
@@ -222,8 +231,22 @@ impl LocalTunnelListener {
                 connection
             }
         };
-        let (send, recv) = open_tunnel(&connection, tunnel_id, capability).await?;
-        forwarding::forward_bidirectional(local, send, recv, CancellationToken::new()).await;
+        let (send, recv) = match open_tunnel(&connection, tunnel_id, capability).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                // A cached QUIC connection can outlive its peer. Do not make
+                // all future local connections fail against the same dead
+                // transport.
+                if connection.close_reason().is_some() {
+                    peer_connection.lock().await.take();
+                }
+                return Err(error);
+            }
+        };
+        forwarding::forward_bidirectional(local, send, recv, cancellation).await;
+        if connection.close_reason().is_some() {
+            peer_connection.lock().await.take();
+        }
         tracing::debug!(tunnel = %super::tunnel_id_label(tunnel_id), "tunnel local connection closed");
         Ok(())
     }
