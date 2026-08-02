@@ -25,6 +25,13 @@ impl TunnelTarget {
     pub const fn tcp(host: IpAddr, port: u16) -> Self {
         Self::Tcp { host, port }
     }
+
+    /// Return whether this target is restricted to the local machine.
+    pub fn is_loopback(&self) -> bool {
+        match self {
+            Self::Tcp { host, .. } => host.is_loopback(),
+        }
+    }
 }
 
 /// Lifecycle state for a configured tunnel.
@@ -70,6 +77,8 @@ pub enum TunnelServiceError {
     InvalidExpiry,
     /// The operation is not valid for the current lifecycle state.
     InvalidState,
+    /// The target is not a loopback address.
+    NonLoopbackTarget,
 }
 
 /// In-memory owner of configured tunnel metadata.
@@ -94,6 +103,9 @@ impl TunnelService {
         created_at_ms: u64,
         expires_at_ms: u64,
     ) -> Result<TunnelDefinition, TunnelServiceError> {
+        if !target.is_loopback() {
+            return Err(TunnelServiceError::NonLoopbackTarget);
+        }
         if expires_at_ms <= created_at_ms {
             return Err(TunnelServiceError::InvalidExpiry);
         }
@@ -174,7 +186,7 @@ mod tests {
 
     use iroh::SecretKey;
 
-    use super::{TunnelService, TunnelStatus, TunnelTarget};
+    use super::{TunnelService, TunnelServiceError, TunnelStatus, TunnelTarget};
     use crate::tunnel::TunnelId;
 
     fn fixture() -> (TunnelService, iroh::PublicKey, iroh::PublicKey, TunnelId) {
@@ -244,6 +256,33 @@ mod tests {
         assert_eq!(
             service.get_tunnel(id).unwrap().status,
             TunnelStatus::Connecting
+        );
+    }
+
+    #[test]
+    fn create_rejects_non_loopback_targets() {
+        let (service, owner, peer, id) = fixture();
+        let result = service.create_tunnel(
+            id,
+            owner,
+            TunnelTarget::tcp("192.168.1.10".parse().unwrap(), 3000),
+            peer,
+            100,
+            200,
+        );
+        assert_eq!(result, Err(TunnelServiceError::NonLoopbackTarget));
+    }
+
+    #[test]
+    fn ipv6_loopback_target_is_allowed() {
+        let (service, owner, peer, id) = fixture();
+        let target = TunnelTarget::tcp("::1".parse().unwrap(), 3000);
+        assert_eq!(
+            service
+                .create_tunnel(id, owner, target, peer, 100, 200)
+                .unwrap()
+                .status,
+            TunnelStatus::Active
         );
     }
 }

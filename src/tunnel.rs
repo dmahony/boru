@@ -5,12 +5,20 @@
 //! versioned handshake messages below before later phases add capability
 //! validation and stream forwarding.
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::{mpsc, Mutex},
+};
+use tokio_util::sync::CancellationToken;
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +29,8 @@ use iroh::{
 
 pub(crate) mod forwarding;
 pub mod service;
+
+use service::{TunnelService, TunnelStatus, TunnelTarget};
 
 /// Current version of the tunnel handshake wire messages.
 pub const TUNNEL_PROTOCOL_VERSION: u16 = 1;
@@ -257,6 +267,8 @@ pub struct TunnelProtocol {
     accepted: Arc<AtomicUsize>,
     streams: mpsc::Sender<TunnelStream>,
     incoming: Arc<Mutex<mpsc::Receiver<TunnelStream>>>,
+    service: Option<Arc<TunnelService>>,
+    owner: Option<iroh::PublicKey>,
 }
 
 impl Default for TunnelProtocol {
@@ -273,7 +285,18 @@ impl TunnelProtocol {
             accepted: Arc::new(AtomicUsize::new(0)),
             streams,
             incoming: Arc::new(Mutex::new(incoming)),
+            service: None,
+            owner: None,
         }
+    }
+
+    /// Construct a handler that validates requests and forwards them to
+    /// locally configured loopback services.
+    pub fn with_service(service: Arc<TunnelService>, owner: iroh::PublicKey) -> Self {
+        let mut protocol = Self::new();
+        protocol.service = Some(service);
+        protocol.owner = Some(owner);
+        protocol
     }
 
     /// Return the number of incoming connections routed to this handler.
@@ -290,22 +313,161 @@ impl TunnelProtocol {
 impl ProtocolHandler for TunnelProtocol {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         self.accepted.fetch_add(1, Ordering::AcqRel);
+        let remote_peer = connection.remote_id();
         loop {
             let stream = connection.accept_bi().await.map_err(AcceptError::from)?;
-            if self.streams.send(stream).await.is_err() {
+            if let (Some(service), Some(owner)) = (&self.service, self.owner) {
+                let service = Arc::clone(service);
+                tokio::spawn(async move {
+                    if let Err(error) =
+                        handle_incoming_stream(stream, remote_peer, owner, service).await
+                    {
+                        tracing::debug!(%error, "tunnel stream rejected or closed");
+                    }
+                });
+            } else if self.streams.send(stream).await.is_err() {
                 return Ok(());
             }
         }
     }
 }
 
+const MAX_HANDSHAKE_SIZE: usize = 64 * 1024;
+
+async fn write_frame<T: Serialize>(
+    send: &mut iroh::endpoint::SendStream,
+    value: &T,
+) -> anyhow::Result<()> {
+    let bytes = postcard::to_stdvec(value)?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_HANDSHAKE_SIZE,
+        "tunnel handshake is too large"
+    );
+    send.write_u32(bytes.len() as u32).await?;
+    send.write_all(&bytes).await?;
+    Ok(())
+}
+
+async fn read_frame<T: for<'de> Deserialize<'de>>(
+    recv: &mut iroh::endpoint::RecvStream,
+) -> anyhow::Result<T> {
+    let length = recv.read_u32().await? as usize;
+    anyhow::ensure!(
+        length <= MAX_HANDSHAKE_SIZE,
+        "tunnel handshake is too large"
+    );
+    let mut bytes = vec![0; length];
+    recv.read_exact(&mut bytes).await?;
+    Ok(postcard::from_bytes(&bytes)?)
+}
+
+/// Open an authorised tunnel stream and wait for the owner's handshake reply.
+pub async fn open_tunnel(
+    connection: &Connection,
+    tunnel_id: TunnelId,
+    capability: TunnelCapability,
+) -> anyhow::Result<TunnelStream> {
+    let (mut send, mut recv) = connection.open_bi().await?;
+    write_frame(&mut send, &TunnelRequest::open(tunnel_id, capability)).await?;
+    match read_frame::<TunnelResponse>(&mut recv).await? {
+        TunnelResponse::Accepted => Ok((send, recv)),
+        TunnelResponse::Rejected(reason) => anyhow::bail!("tunnel rejected: {reason:?}"),
+    }
+}
+
+async fn handle_incoming_stream(
+    (mut send, mut recv): TunnelStream,
+    requesting_peer: iroh::PublicKey,
+    owner: iroh::PublicKey,
+    service: Arc<TunnelService>,
+) -> anyhow::Result<()> {
+    let request = read_frame::<TunnelRequest>(&mut recv).await?;
+    let TunnelRequest::Open {
+        protocol_version,
+        tunnel_id,
+        capability,
+    } = request;
+    if protocol_version != TUNNEL_PROTOCOL_VERSION {
+        write_frame(&mut send, &reject_for_protocol_version(protocol_version)).await?;
+        send.finish()?;
+        anyhow::bail!("protocol mismatch");
+    }
+    let definition = match service.get_tunnel(tunnel_id) {
+        Some(definition) => definition,
+        None => {
+            write_frame(
+                &mut send,
+                &TunnelResponse::rejected(TunnelRejectReason::UnknownTunnel),
+            )
+            .await?;
+            send.finish()?;
+            anyhow::bail!("unknown tunnel");
+        }
+    };
+    if capability
+        .verify_for(
+            &owner,
+            &requesting_peer,
+            tunnel_id,
+            unix_epoch_ms(),
+            definition.status == TunnelStatus::Active,
+        )
+        .is_err()
+    {
+        write_frame(
+            &mut send,
+            &TunnelResponse::rejected(TunnelRejectReason::InvalidCapability),
+        )
+        .await?;
+        send.finish()?;
+        anyhow::bail!("invalid tunnel capability");
+    }
+    let (host, port) = match definition.target {
+        TunnelTarget::Tcp { host, port } => (host, port),
+    };
+    let local = match TcpStream::connect((host, port)).await {
+        Ok(local) => local,
+        Err(_) => {
+            write_frame(
+                &mut send,
+                &TunnelResponse::rejected(TunnelRejectReason::TargetUnavailable),
+            )
+            .await?;
+            send.finish()?;
+            anyhow::bail!("local tunnel target unavailable");
+        }
+    };
+    service
+        .connect_tunnel(tunnel_id)
+        .map_err(|_| anyhow::anyhow!("tunnel state changed"))?;
+    service
+        .mark_connected(tunnel_id)
+        .map_err(|_| anyhow::anyhow!("tunnel state changed"))?;
+    write_frame(&mut send, &TunnelResponse::Accepted).await?;
+    forwarding::forward_bidirectional(local, send, recv, CancellationToken::new()).await;
+    Ok(())
+}
+
+/// Return the current Unix epoch in milliseconds for capability checks.
+fn unix_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_millis() as u64
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use iroh::{endpoint::presets, protocol::Router, Endpoint};
     use n0_error::{Result, StdResultExt};
-    use tokio::time::timeout;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time::timeout,
+    };
 
     use super::{
         reject_for_protocol_version, CapabilityVerificationError, TunnelCapability, TunnelId,
@@ -757,6 +919,53 @@ mod tests {
         assert_eq!(unrelated.count(), 1);
         assert_eq!(tunnel.accepted_count(), 0);
         router.shutdown().await.std_context("shutdown router")?;
+        client.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn valid_capability_forwards_to_loopback_service() -> anyhow::Result<()> {
+        let tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let target_addr = tcp_listener.local_addr()?;
+        let service_task = tokio::spawn(async move {
+            let (mut socket, _) = tcp_listener.accept().await?;
+            let mut request = [0; 4];
+            socket.read_exact(&mut request).await?;
+            socket.write_all(b"pong").await?;
+            anyhow::Ok(())
+        });
+
+        let owner = iroh::SecretKey::generate();
+        let tunnel_id = TunnelId([42; 32]);
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let service = Arc::new(crate::tunnel::service::TunnelService::new());
+        service
+            .create_tunnel(
+                tunnel_id,
+                owner.public(),
+                crate::tunnel::service::TunnelTarget::tcp(target_addr.ip(), target_addr.port()),
+                client.id(),
+                0,
+                u64::MAX,
+            )
+            .unwrap();
+        let tunnel = TunnelProtocol::with_service(Arc::clone(&service), owner.public());
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, tunnel)
+            .spawn();
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await?;
+        let capability = TunnelCapability::sign(&owner, client.id(), tunnel_id, 0, u64::MAX);
+        let (mut send, mut recv) = super::open_tunnel(&connection, tunnel_id, capability).await?;
+        send.write_all(b"ping").await?;
+        send.finish()?;
+        let mut response = [0; 4];
+        recv.read_exact(&mut response).await?;
+        assert_eq!(&response, b"pong");
+        service_task.await??;
+        router.shutdown().await?;
         client.close().await;
         Ok(())
     }
