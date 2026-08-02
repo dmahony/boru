@@ -148,6 +148,113 @@ Therefore Phase 21 does not add a separate `boru tunnel share <friend> <port>` o
 
 A future CLI/debug surface should reuse the existing endpoint, identity, friends store, `TunnelService`, and protocol router through an explicit service/control boundary. That boundary should define how a share command returns a redacted tunnel invitation/capability, how connect resolves the recipient and tunnel, and how the long-lived process remains alive while forwarding local TCP streams. Until then, tunnel control remains an in-process/API integration point rather than a supported shell command.
 
+## Future use cases (Phase 23)
+
+Tunnel v1 is a reliable byte-stream protocol. Each tunnel maps a local loopback TCP target (and on Unix, a local Unix socket target) onto one or more authenticated, recipient-bound Iroh QUIC streams. This section records how the same foundation could later support broader use cases. These are documented directions, not implemented features: nothing here changes `/boru-tunnel/1`, and none of it should be built until a concrete product need arrives.
+
+### Scope boundary: v1 stays a reliable byte-stream protocol
+
+`/boru-tunnel/1` is deliberately not a media protocol. The v1 contract is:
+
+- a tunnel carries opaque, ordered, reliable bytes between the owner and one allowed peer;
+- the owner chooses and stores the local target (loopback TCP or Unix socket path) locally; the remote peer never supplies an arbitrary host, port, or socket path;
+- capabilities are recipient-bound, expiring, and validated before any stream is forwarded;
+- one local connection maps to one QUIC bidirectional stream, with bounded per-tunnel and per-connection limits.
+
+Realtime voice and video will not be bolted onto this protocol. They have fundamentally different requirements (bounded latency, loss tolerance, jitter buffering, codec framing) that a reliable byte-stream protocol cannot satisfy without turning every media packet into a head-of-line blocking hazard. If Boru later supports realtime media, it should use Iroh datagrams or a specialised transport design with its own ALPN and protocol handler, sharing the existing endpoint, identity, friends store, and capability/authorization model — never by extending `/boru-tunnel/1`.
+
+The practical rule for future work: if a use case only needs a reliable byte stream, it can ride on tunnel v1 unchanged. If it needs realtime, loss-tolerant, or datagram semantics, it needs a new transport and must not be squeezed into the tunnel protocol.
+
+### SSH forwarding
+
+SSH is a natural fit for tunnel v1. An owner who runs `sshd` on a loopback port (or holds an SSH agent on a Unix socket) can create a tunnel whose target is that local listener; a trusted friend connects through the tunnel and gets an authenticated, encrypted SSH session that also rides Boru's existing identity, relay/direct connection, and capability validation. Future refinements (not required for v1):
+
+- convenience flows that pre-fill the target port for common services (`22` for SSH, agent socket paths);
+- per-tunnel metadata describing the service so the receiving side can offer sensible defaults;
+- keep-alive tuning for long-lived SSH sessions, which already benefit from v1's explicit cancellation semantics.
+
+No media or datagram support is needed; SSH is a byte-stream protocol.
+
+### Game servers
+
+TCP-based game servers (for example Minecraft-style dedicated servers, MUDs, or turn-based games) are already within v1's reach: expose the local server port as a tunnel target and let a friend connect. The constraints that matter are the same as for any long-lived byte stream: connection limits, idle behaviour, and cancellation. Future refinements:
+
+- a documented "game server" tunnel profile that raises per-connection limits and tunes keep-alives;
+- possibly a dedicated ALPN variant if the game protocol needs its own framing or pre-connection handshake.
+
+Realtime action games that assume UDP will not fit v1; like voice/video they would need a datagram or low-latency transport design and are out of scope for the byte-stream tunnel.
+
+### Terminal sharing
+
+Terminal sharing (for example sharing a Zellij, tmux, or shell session with a friend) is another byte-stream use case. The architecture naturally points at the Unix socket support described in this plan (Step 22): an owner exposes a local Unix socket that the terminal multiplexer writes to, and a friend connects through the tunnel. Because Unix socket targets are already part of the design surface (conditional compilation, owner-chosen path, no remote path exposure), terminal sharing can be layered on without a protocol change.
+
+Future work to consider:
+
+- a control channel or out-of-band signal for resize and session control, if the multiplexer protocol requires it;
+- read-only versus interactive sharing modes enforced on the owner side;
+- careful handling of terminal escape sequences, which are just bytes from the tunnel's point of view.
+
+### Remote support
+
+Remote support (temporary assistance on a friend's machine) fits the v1 model well: the person being helped creates a short-lived, recipient-bound tunnel to a local service (a shell, a diagnostic tool, or a screen-viewer service), and the helper connects through it. The existing capability model already supports expiry and revocation, which are exactly the properties remote-support sessions need: access is temporary, explicit, and can be cut off at any time.
+
+Future work to consider:
+
+- UI flows for "start a support session" that create a tunnel with a short expiry and clear lifecycle status;
+- audit/event reporting of who connected and when (already anticipated by the diagnostics and lifecycle-logging direction in this plan);
+- integration with the network-doctor diagnostics so a support session can observe the same live node state.
+
+### Screen sharing
+
+Screen sharing can be built in two very different ways, and v1 is only suited to one of them:
+
+- Frame/byte-stream screen sharing (for example streaming encoded still frames, or a tool that emits a byte stream a remote viewer renders) can ride v1 unchanged: it is just a reliable byte stream.
+- Realtime interactive screen sharing (low-latency region updates, cursor movement, continuous video-like updates) has the same constraints as video and should not be forced through a reliable byte-stream protocol.
+
+Future work should first decide which experience is wanted. If it is the realtime one, it belongs on the future datagram/specialised transport, not on `/boru-tunnel/1`.
+
+### Voice and video
+
+Explicitly out of scope for tunnel v1. The plan's guidance is unambiguous: do not prematurely turn `/boru-tunnel/1` into a media protocol, because realtime voice/video may eventually require datagrams or a specialised transport design.
+
+If Boru later adds realtime media:
+
+- introduce a new ALPN (for example `/boru-media/1` or a datagram-based protocol) rather than extending the tunnel ALPN;
+- reuse the existing endpoint, identity, friends store, capability/authorization model, and relay/direct connection machinery;
+- treat media signalling (session setup, codec negotiation, keying) separately from media data, and keep both out of the byte-stream tunnel;
+- apply the same abuse-protection, limit, expiry, and revocation thinking used for tunnel v1.
+
+Until such a transport exists, voice/video remain future work and the tunnel protocol stays a byte-stream protocol.
+
+### Developer web servers
+
+Developer web servers (for example a local `localhost:3000` dev server shared with a collaborator) are a classic tunnel use case and already work with v1's TCP target model. The owner creates a tunnel whose target is the local dev server port; the friend connects and sees the same HTTP server. Future refinements:
+
+- documented profiles for common dev-server ports and a UI that makes sharing a dev server a one-click flow;
+- optional per-tunnel display metadata describing the service (for example "dev server on port 3000") without exposing target details to the remote peer;
+- consideration of host-header or SNI handling if multiple dev servers are shared at once — this is application-level, not transport-level.
+
+### Local dashboards
+
+Local dashboards (metrics, admin UIs, home-automation panels, personal tools bound to loopback) share the same shape as developer web servers: the owner binds a local dashboard, creates a tunnel to it, and selects a trusted friend to view it. v1's loopback-only default is exactly the right safety property: dashboards are not exposed to the network at large, only through an authenticated, expiring, recipient-bound tunnel. No protocol change is required.
+
+### Device management
+
+Device management (administering a remote device: a router, server, or embedded board) is a broad future category. The byte-stream tunnel can already provide the secure transport for device management protocols such as SSH to the device, a local admin web UI, or a device-specific control protocol. Future work to consider:
+
+- a device-management orientation in the GUI that groups tunnels by device and shows lifecycle/connection state;
+- integration with diagnostics and the network doctor so a device's tunnel health is observable;
+- policy controls (who may create device tunnels, for how long, to which local services) built on the existing capability model.
+
+Anything that needs realtime telemetry streaming at high rates should again be evaluated against the datagram/specialised-transport path rather than the byte-stream tunnel.
+
+### Summary of the boundary
+
+- v1 (`/boru-tunnel/1`) carries reliable byte streams only; it does not carry media.
+- Byte-stream use cases (SSH, TCP game servers, terminal sharing, remote support, screen sharing by frame stream, dev web servers, local dashboards, device-management transports) can be layered on v1 without protocol changes; the natural hooks are target profiles, metadata, UI flows, and diagnostics.
+- Realtime use cases (interactive screen sharing, voice, video, UDP game traffic) require a future datagram or specialised transport with its own ALPN; they must not be implemented inside `/boru-tunnel/1`.
+- All future transports should reuse the existing endpoint, identity, friends store, capability/authorization model, limits, and cancellation/shutdown semantics rather than inventing a parallel stack.
+
 ## Invariants
 
 1. One primary Boru Iroh endpoint and identity.
