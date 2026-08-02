@@ -205,13 +205,26 @@ impl LocalTunnelListener {
             if let Some(connection) = shared.as_ref() {
                 connection.clone()
             } else {
+                let route = if owner.relay_urls().next().is_some() {
+                    "relay"
+                } else if owner.ip_addrs().next().is_some() {
+                    "direct"
+                } else {
+                    "unknown"
+                };
                 let connection = endpoint.connect(owner, super::BORU_TUNNEL_ALPN).await?;
+                tracing::info!(
+                    tunnel = %super::tunnel_id_label(tunnel_id),
+                    route,
+                    "tunnel route established"
+                );
                 *shared = Some(connection.clone());
                 connection
             }
         };
         let (send, recv) = open_tunnel(&connection, tunnel_id, capability).await?;
         forwarding::forward_bidirectional(local, send, recv, CancellationToken::new()).await;
+        tracing::debug!(tunnel = %super::tunnel_id_label(tunnel_id), "tunnel local connection closed");
         Ok(())
     }
 }

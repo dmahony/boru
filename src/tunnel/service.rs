@@ -4,9 +4,28 @@
 //! shared Iroh endpoint and stream forwarding remain in the networking layer;
 //! this keeps GUI callers independent from the transport implementation.
 
-use std::{collections::HashMap, net::IpAddr, sync::RwLock};
+use std::{
+    collections::{HashMap, VecDeque},
+    net::IpAddr,
+    sync::RwLock,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use tokio_util::sync::CancellationToken;
 
 use super::TunnelId;
+
+/// Maximum number of owner-configured tunnels held by one service.
+pub const MAX_ACTIVE_SHARED_TUNNELS: usize = 32;
+/// Maximum number of simultaneously received tunnel streams.
+pub const MAX_ACTIVE_RECEIVED_TUNNELS: usize = 32;
+/// Default maximum number of simultaneous streams per tunnel.
+pub const DEFAULT_MAX_CONNECTIONS_PER_TUNNEL: usize = 16;
+/// Maximum new tunnel streams accepted from one peer in the rate window.
+pub const MAX_CONNECTION_ATTEMPTS_PER_INTERVAL: usize = 8;
+/// Window used by the per-peer connection-attempt limiter.
+pub const CONNECTION_ATTEMPT_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_TRACKED_ATTEMPT_PEERS: usize = 256;
 
 /// A local service target exposed through a tunnel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +64,33 @@ pub enum TunnelStatus {
     Connected,
     /// The tunnel was revoked and is no longer connectable.
     Revoked,
+}
+
+/// User-facing tunnel authorisation durations converted to timestamps at creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelDuration {
+    /// Ten minutes.
+    TenMinutes,
+    /// Thirty minutes.
+    ThirtyMinutes,
+    /// One hour.
+    OneHour,
+    /// Eight hours.
+    EightHours,
+    /// Until the owner exits.
+    UntilExit,
+}
+
+impl TunnelDuration {
+    fn expires_at_ms(self, created_at_ms: u64) -> u64 {
+        match self {
+            Self::TenMinutes => created_at_ms.saturating_add(10 * 60 * 1_000),
+            Self::ThirtyMinutes => created_at_ms.saturating_add(30 * 60 * 1_000),
+            Self::OneHour => created_at_ms.saturating_add(60 * 60 * 1_000),
+            Self::EightHours => created_at_ms.saturating_add(8 * 60 * 60 * 1_000),
+            Self::UntilExit => u64::MAX,
+        }
+    }
 }
 
 /// Metadata for one configured tunnel.
@@ -87,12 +133,22 @@ pub enum TunnelServiceError {
     ConnectionLimitReached,
     /// The configured simultaneous connection limit is invalid.
     InvalidConnectionLimit,
+    /// The tunnel's authorisation window has elapsed.
+    Expired,
+    /// The service-wide tunnel limit has been reached.
+    TunnelLimitReached,
+    /// The service-wide received-stream limit has been reached.
+    ReceivedTunnelLimitReached,
+    /// The peer has exceeded the connection-attempt rate limit.
+    ConnectionAttemptLimitReached,
 }
 
 /// In-memory owner of configured tunnel metadata.
 #[derive(Debug, Default)]
 pub struct TunnelService {
     tunnels: RwLock<HashMap<TunnelId, TunnelDefinition>>,
+    cancellation: RwLock<HashMap<TunnelId, CancellationToken>>,
+    attempt_times: RwLock<HashMap<iroh::PublicKey, VecDeque<Instant>>>,
 }
 
 impl TunnelService {
@@ -118,7 +174,27 @@ impl TunnelService {
             allowed_peer,
             created_at_ms,
             expires_at_ms,
-            16,
+            DEFAULT_MAX_CONNECTIONS_PER_TUNNEL,
+        )
+    }
+
+    /// Register a tunnel using a supported duration choice.
+    pub fn create_tunnel_for_duration(
+        &self,
+        id: TunnelId,
+        owner: iroh::PublicKey,
+        target: TunnelTarget,
+        allowed_peer: iroh::PublicKey,
+        duration: TunnelDuration,
+    ) -> Result<TunnelDefinition, TunnelServiceError> {
+        let created_at_ms = unix_epoch_ms();
+        self.create_tunnel(
+            id,
+            owner,
+            target,
+            allowed_peer,
+            created_at_ms,
+            duration.expires_at_ms(created_at_ms),
         )
     }
 
@@ -134,12 +210,15 @@ impl TunnelService {
         max_connections: usize,
     ) -> Result<TunnelDefinition, TunnelServiceError> {
         if !target.is_loopback() {
+            tracing::warn!(tunnel = %super::tunnel_id_label(id), "tunnel rejected: target is not loopback");
             return Err(TunnelServiceError::NonLoopbackTarget);
         }
         if expires_at_ms <= created_at_ms {
+            tracing::warn!(tunnel = %super::tunnel_id_label(id), "tunnel rejected: invalid expiry");
             return Err(TunnelServiceError::InvalidExpiry);
         }
         if max_connections == 0 {
+            tracing::warn!(tunnel = %super::tunnel_id_label(id), "tunnel rejected: invalid connection limit");
             return Err(TunnelServiceError::InvalidConnectionLimit);
         }
 
@@ -156,9 +235,19 @@ impl TunnelService {
         };
         let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
         if tunnels.contains_key(&id) {
+            tracing::warn!(tunnel = %super::tunnel_id_label(id), "tunnel rejected: already exists");
             return Err(TunnelServiceError::AlreadyExists);
         }
+        if tunnels.len() >= MAX_ACTIVE_SHARED_TUNNELS {
+            tracing::warn!(tunnel = %super::tunnel_id_label(id), "tunnel rejected: tunnel limit reached");
+            return Err(TunnelServiceError::TunnelLimitReached);
+        }
         tunnels.insert(id, definition.clone());
+        self.cancellation
+            .write()
+            .expect("tunnel cancellation lock poisoned")
+            .insert(id, CancellationToken::new());
+        tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel created");
         Ok(definition)
     }
 
@@ -185,21 +274,60 @@ impl TunnelService {
     }
 
     /// Revoke and remove a tunnel, returning its final metadata snapshot.
+    /// Existing streams continue until closed; use
+    /// [`Self::revoke_tunnel_with_termination`] to cancel them.
     pub fn revoke_tunnel(&self, id: TunnelId) -> Result<TunnelDefinition, TunnelServiceError> {
+        self.revoke_tunnel_with_termination(id, false)
+    }
+
+    /// Revoke a tunnel and optionally terminate existing streams immediately.
+    pub fn revoke_tunnel_with_termination(
+        &self,
+        id: TunnelId,
+        terminate_existing: bool,
+    ) -> Result<TunnelDefinition, TunnelServiceError> {
         let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
         let mut definition = tunnels.remove(&id).ok_or(TunnelServiceError::NotFound)?;
         definition.status = TunnelStatus::Revoked;
+        if let Some(token) = self
+            .cancellation
+            .write()
+            .expect("tunnel cancellation lock poisoned")
+            .remove(&id)
+        {
+            if terminate_existing {
+                token.cancel();
+            }
+        }
         Ok(definition)
+    }
+
+    /// Get the cancellation token associated with an active stream.
+    pub fn cancellation_token(
+        &self,
+        id: TunnelId,
+    ) -> Result<CancellationToken, TunnelServiceError> {
+        self.cancellation
+            .read()
+            .expect("tunnel cancellation lock poisoned")
+            .get(&id)
+            .cloned()
+            .ok_or(TunnelServiceError::NotFound)
     }
 
     /// Mark an active tunnel as handed to the transport for connection.
     pub fn connect_tunnel(&self, id: TunnelId) -> Result<TunnelDefinition, TunnelServiceError> {
         let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
         let definition = tunnels.get_mut(&id).ok_or(TunnelServiceError::NotFound)?;
+        if unix_epoch_ms() > definition.expires_at_ms {
+            tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel expired");
+            return Err(TunnelServiceError::Expired);
+        }
         if definition.status != TunnelStatus::Active {
             return Err(TunnelServiceError::InvalidState);
         }
         definition.status = TunnelStatus::Connecting;
+        tracing::debug!(tunnel = %super::tunnel_id_label(id), "tunnel connection started");
         Ok(definition.clone())
     }
 
@@ -214,6 +342,7 @@ impl TunnelService {
             return Err(TunnelServiceError::InvalidState);
         }
         definition.status = TunnelStatus::Connected;
+        tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel connected");
         Ok(definition.clone())
     }
 
@@ -223,7 +352,15 @@ impl TunnelService {
         id: TunnelId,
     ) -> Result<TunnelDefinition, TunnelServiceError> {
         let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
+        let total_connections: usize = tunnels.values().map(|t| t.active_connections).sum();
+        if total_connections >= MAX_ACTIVE_RECEIVED_TUNNELS {
+            return Err(TunnelServiceError::ReceivedTunnelLimitReached);
+        }
         let definition = tunnels.get_mut(&id).ok_or(TunnelServiceError::NotFound)?;
+        if unix_epoch_ms() > definition.expires_at_ms {
+            tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel expired");
+            return Err(TunnelServiceError::Expired);
+        }
         if definition.active_connections >= definition.max_connections {
             return Err(TunnelServiceError::ConnectionLimitReached);
         }
@@ -242,8 +379,41 @@ impl TunnelService {
             if definition.active_connections == 0 && definition.status == TunnelStatus::Connected {
                 definition.status = TunnelStatus::Active;
             }
+            tracing::debug!(tunnel = %super::tunnel_id_label(id), active_connections = definition.active_connections, "tunnel connection closed");
         }
     }
+
+    /// Admit one connection attempt from a peer using a bounded sliding window.
+    pub fn record_connection_attempt(
+        &self,
+        peer: iroh::PublicKey,
+    ) -> Result<(), TunnelServiceError> {
+        let now = Instant::now();
+        let cutoff = now.checked_sub(CONNECTION_ATTEMPT_INTERVAL).unwrap_or(now);
+        let mut attempts = self
+            .attempt_times
+            .write()
+            .expect("tunnel attempt limiter lock poisoned");
+        if !attempts.contains_key(&peer) && attempts.len() >= MAX_TRACKED_ATTEMPT_PEERS {
+            return Err(TunnelServiceError::ConnectionAttemptLimitReached);
+        }
+        let history = attempts.entry(peer).or_default();
+        while history.front().is_some_and(|time| *time <= cutoff) {
+            history.pop_front();
+        }
+        if history.len() >= MAX_CONNECTION_ATTEMPTS_PER_INTERVAL {
+            return Err(TunnelServiceError::ConnectionAttemptLimitReached);
+        }
+        history.push_back(now);
+        Ok(())
+    }
+}
+
+fn unix_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_millis() as u64
 }
 
 #[cfg(test)]
@@ -268,15 +438,22 @@ mod tests {
         let target = TunnelTarget::tcp("127.0.0.1".parse::<IpAddr>().unwrap(), 3000);
 
         let created = service
-            .create_tunnel(id, owner, target.clone(), peer, 100, 200)
+            .create_tunnel(
+                id,
+                owner,
+                target.clone(),
+                peer,
+                super::unix_epoch_ms(),
+                super::unix_epoch_ms() + 60_000,
+            )
             .unwrap();
 
         assert_eq!(created.id, id);
         assert_eq!(created.owner, owner);
         assert_eq!(created.target, target);
         assert_eq!(created.allowed_peer, peer);
-        assert_eq!(created.created_at_ms, 100);
-        assert_eq!(created.expires_at_ms, 200);
+        assert!(created.created_at_ms > 0);
+        assert!(created.expires_at_ms > created.created_at_ms);
         assert_eq!(created.status, TunnelStatus::Active);
         assert_eq!(service.list_tunnels(), vec![created]);
     }
@@ -290,8 +467,8 @@ mod tests {
                 owner,
                 TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
                 peer,
-                100,
-                200,
+                super::unix_epoch_ms(),
+                super::unix_epoch_ms() + 60_000,
             )
             .unwrap();
 
@@ -311,8 +488,8 @@ mod tests {
                 owner,
                 TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
                 peer,
-                100,
-                200,
+                super::unix_epoch_ms(),
+                super::unix_epoch_ms() + 60_000,
             )
             .unwrap();
 
@@ -348,8 +525,8 @@ mod tests {
                 owner,
                 TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
                 peer,
-                100,
-                200,
+                super::unix_epoch_ms(),
+                super::unix_epoch_ms() + 60_000,
                 2,
             )
             .unwrap();
@@ -391,8 +568,8 @@ mod tests {
                 owner,
                 TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
                 peer,
-                100,
-                200,
+                super::unix_epoch_ms(),
+                super::unix_epoch_ms() + 60_000,
                 0,
             ),
             Err(TunnelServiceError::InvalidConnectionLimit)
@@ -408,8 +585,8 @@ mod tests {
                 owner,
                 TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
                 peer,
-                100,
-                200,
+                super::unix_epoch_ms(),
+                super::unix_epoch_ms() + 60_000,
                 1,
             )
             .unwrap();
@@ -431,10 +608,116 @@ mod tests {
         let target = TunnelTarget::tcp("::1".parse().unwrap(), 3000);
         assert_eq!(
             service
-                .create_tunnel(id, owner, target, peer, 100, 200)
+                .create_tunnel(
+                    id,
+                    owner,
+                    target,
+                    peer,
+                    super::unix_epoch_ms(),
+                    super::unix_epoch_ms() + 60_000,
+                )
                 .unwrap()
                 .status,
             TunnelStatus::Active
+        );
+    }
+
+    #[test]
+    fn expired_tunnel_rejects_new_connections() {
+        let (service, owner, peer, id) = fixture();
+        service
+            .create_tunnel(
+                id,
+                owner,
+                TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                peer,
+                1,
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            service.try_acquire_connection(id),
+            Err(TunnelServiceError::Expired)
+        );
+    }
+
+    #[test]
+    fn duration_choices_use_expected_expiry_windows() {
+        let (service, owner, peer, id) = fixture();
+        let tunnel = service
+            .create_tunnel_for_duration(
+                id,
+                owner,
+                TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                peer,
+                super::TunnelDuration::TenMinutes,
+            )
+            .unwrap();
+        assert_eq!(tunnel.expires_at_ms - tunnel.created_at_ms, 600_000);
+    }
+
+    #[test]
+    fn revocation_can_cancel_existing_streams() {
+        let (service, owner, peer, id) = fixture();
+        service
+            .create_tunnel_for_duration(
+                id,
+                owner,
+                TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                peer,
+                super::TunnelDuration::UntilExit,
+            )
+            .unwrap();
+        let token = service.cancellation_token(id).unwrap();
+        assert!(!token.is_cancelled());
+        service.revoke_tunnel_with_termination(id, true).unwrap();
+        assert!(token.is_cancelled());
+        assert_eq!(
+            service.try_acquire_connection(id),
+            Err(TunnelServiceError::NotFound)
+        );
+    }
+
+    #[test]
+    fn connection_attempt_rate_limit_is_enforced() {
+        let service = TunnelService::new();
+        let peer = SecretKey::generate().public();
+        for _ in 0..super::MAX_CONNECTION_ATTEMPTS_PER_INTERVAL {
+            assert!(service.record_connection_attempt(peer).is_ok());
+        }
+        assert_eq!(
+            service.record_connection_attempt(peer),
+            Err(TunnelServiceError::ConnectionAttemptLimitReached)
+        );
+    }
+
+    #[test]
+    fn shared_tunnel_limit_is_enforced() {
+        let service = TunnelService::new();
+        let owner = SecretKey::generate().public();
+        let peer = SecretKey::generate().public();
+        for index in 0..super::MAX_ACTIVE_SHARED_TUNNELS {
+            assert!(service
+                .create_tunnel(
+                    TunnelId([index as u8; 32]),
+                    owner,
+                    TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                    peer,
+                    super::unix_epoch_ms(),
+                    super::unix_epoch_ms() + 60_000,
+                )
+                .is_ok());
+        }
+        assert_eq!(
+            service.create_tunnel(
+                TunnelId([255; 32]),
+                owner,
+                TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                peer,
+                super::unix_epoch_ms(),
+                super::unix_epoch_ms() + 60_000,
+            ),
+            Err(TunnelServiceError::TunnelLimitReached)
         );
     }
 }

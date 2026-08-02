@@ -10,15 +10,15 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Mutex, Semaphore},
+    time::timeout,
 };
-use tokio_util::sync::CancellationToken;
 
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,10 @@ pub mod service;
 pub use local_listener::LocalTunnelListener;
 
 use service::{TunnelService, TunnelStatus, TunnelTarget};
+
+fn tunnel_id_label(id: TunnelId) -> String {
+    id.0[..8].iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 /// Current version of the tunnel handshake wire messages.
 pub const TUNNEL_PROTOCOL_VERSION: u16 = 1;
@@ -272,6 +276,7 @@ pub struct TunnelProtocol {
     incoming: Arc<Mutex<mpsc::Receiver<TunnelStream>>>,
     service: Option<Arc<TunnelService>>,
     owner: Option<iroh::PublicKey>,
+    active_connections: Arc<Semaphore>,
 }
 
 impl Default for TunnelProtocol {
@@ -290,6 +295,7 @@ impl TunnelProtocol {
             incoming: Arc::new(Mutex::new(incoming)),
             service: None,
             owner: None,
+            active_connections: Arc::new(Semaphore::new(service::MAX_ACTIVE_RECEIVED_TUNNELS)),
         }
     }
 
@@ -315,8 +321,16 @@ impl TunnelProtocol {
 
 impl ProtocolHandler for TunnelProtocol {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let _connection_permit = match self.active_connections.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                tracing::warn!(peer = %connection.remote_id().fmt_short(), "tunnel connection rejected: active connection limit reached");
+                return Ok(());
+            }
+        };
         self.accepted.fetch_add(1, Ordering::AcqRel);
         let remote_peer = connection.remote_id();
+        tracing::info!(peer = %remote_peer.fmt_short(), "tunnel connection accepted");
         loop {
             let stream = connection.accept_bi().await.map_err(AcceptError::from)?;
             if let (Some(service), Some(owner)) = (&self.service, self.owner) {
@@ -336,8 +350,14 @@ impl ProtocolHandler for TunnelProtocol {
 }
 
 const MAX_HANDSHAKE_SIZE: usize = 64 * 1024;
+/// Bounds endpoint and local-service connection establishment.
+pub const TUNNEL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bounds each tunnel handshake read, preventing stuck pending streams.
+pub const TUNNEL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum time a tunnel may remain completely idle.
+pub const TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-async fn write_frame<T: Serialize>(
+pub(crate) pub(crate) async fn write_frame<T: Serialize>(
     send: &mut iroh::endpoint::SendStream,
     value: &T,
 ) -> anyhow::Result<()> {
@@ -351,7 +371,7 @@ async fn write_frame<T: Serialize>(
     Ok(())
 }
 
-async fn read_frame<T: for<'de> Deserialize<'de>>(
+pub(crate) pub(crate) async fn read_frame<T: for<'de> Deserialize<'de>>(
     recv: &mut iroh::endpoint::RecvStream,
 ) -> anyhow::Result<T> {
     let length = recv.read_u32().await? as usize;
@@ -372,9 +392,21 @@ pub async fn open_tunnel(
 ) -> anyhow::Result<TunnelStream> {
     let (mut send, mut recv) = connection.open_bi().await?;
     write_frame(&mut send, &TunnelRequest::open(tunnel_id, capability)).await?;
-    match read_frame::<TunnelResponse>(&mut recv).await? {
-        TunnelResponse::Accepted => Ok((send, recv)),
-        TunnelResponse::Rejected(reason) => anyhow::bail!("tunnel rejected: {reason:?}"),
+    match timeout(
+        TUNNEL_HANDSHAKE_TIMEOUT,
+        read_frame::<TunnelResponse>(&mut recv),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("tunnel handshake timed out"))??
+    {
+        TunnelResponse::Accepted => {
+            tracing::info!(tunnel = %tunnel_id_label(tunnel_id), "tunnel connected");
+            Ok((send, recv))
+        }
+        TunnelResponse::Rejected(reason) => {
+            tracing::warn!(tunnel = %tunnel_id_label(tunnel_id), reason = ?reason, "tunnel rejected");
+            anyhow::bail!("tunnel rejected: {reason:?}")
+        }
     }
 }
 
@@ -384,20 +416,38 @@ async fn handle_incoming_stream(
     owner: iroh::PublicKey,
     service: Arc<TunnelService>,
 ) -> anyhow::Result<()> {
-    let request = read_frame::<TunnelRequest>(&mut recv).await?;
+    let request = timeout(
+        TUNNEL_HANDSHAKE_TIMEOUT,
+        read_frame::<TunnelRequest>(&mut recv),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("tunnel handshake timed out"))??;
     let TunnelRequest::Open {
         protocol_version,
         tunnel_id,
         capability,
     } = request;
+    let tunnel_label = tunnel_id_label(tunnel_id);
     if protocol_version != TUNNEL_PROTOCOL_VERSION {
+        tracing::warn!(peer = %requesting_peer.fmt_short(), tunnel = %tunnel_label, "tunnel rejected: protocol mismatch");
         write_frame(&mut send, &reject_for_protocol_version(protocol_version)).await?;
         send.finish()?;
         anyhow::bail!("protocol mismatch");
     }
+    if service.record_connection_attempt(requesting_peer).is_err() {
+        tracing::warn!(peer = %requesting_peer.fmt_short(), tunnel = %tunnel_label, "tunnel rejected: connection attempt rate limit reached");
+        write_frame(
+            &mut send,
+            &TunnelResponse::rejected(TunnelRejectReason::Busy),
+        )
+        .await?;
+        send.finish()?;
+        anyhow::bail!("connection attempt rate limit reached");
+    }
     let definition = match service.get_tunnel(tunnel_id) {
         Some(definition) => definition,
         None => {
+            tracing::warn!(peer = %requesting_peer.fmt_short(), tunnel = %tunnel_label, "tunnel rejected: unknown tunnel");
             write_frame(
                 &mut send,
                 &TunnelResponse::rejected(TunnelRejectReason::UnknownTunnel),
@@ -407,27 +457,26 @@ async fn handle_incoming_stream(
             anyhow::bail!("unknown tunnel");
         }
     };
-    if capability
-        .verify_for(
-            &owner,
-            &requesting_peer,
-            tunnel_id,
-            unix_epoch_ms(),
-            definition.status != TunnelStatus::Revoked,
-        )
-        .is_err()
-    {
-        write_frame(
-            &mut send,
-            &TunnelResponse::rejected(TunnelRejectReason::InvalidCapability),
-        )
-        .await?;
+    if let Err(error) = capability.verify_for(
+        &owner,
+        &requesting_peer,
+        tunnel_id,
+        unix_epoch_ms(),
+        definition.status != TunnelStatus::Revoked,
+    ) {
+        let reason = if error == CapabilityVerificationError::Expired {
+            TunnelRejectReason::Expired
+        } else {
+            TunnelRejectReason::InvalidCapability
+        };
+        write_frame(&mut send, &TunnelResponse::rejected(reason)).await?;
         send.finish()?;
-        anyhow::bail!("invalid tunnel capability");
+        anyhow::bail!("invalid tunnel capability: {error:?}");
     }
     let _reservation = match service.try_acquire_connection(tunnel_id) {
         Ok(reservation) => reservation,
-        Err(service::TunnelServiceError::ConnectionLimitReached) => {
+        Err(service::TunnelServiceError::ConnectionLimitReached)
+        | Err(service::TunnelServiceError::ReceivedTunnelLimitReached) => {
             write_frame(
                 &mut send,
                 &TunnelResponse::rejected(TunnelRejectReason::Busy),
@@ -435,6 +484,15 @@ async fn handle_incoming_stream(
             .await?;
             send.finish()?;
             anyhow::bail!("tunnel connection limit reached");
+        }
+        Err(service::TunnelServiceError::Expired) => {
+            write_frame(
+                &mut send,
+                &TunnelResponse::rejected(TunnelRejectReason::Expired),
+            )
+            .await?;
+            send.finish()?;
+            anyhow::bail!("tunnel expired");
         }
         Err(_) => {
             write_frame(
@@ -446,12 +504,15 @@ async fn handle_incoming_stream(
             anyhow::bail!("tunnel is not available");
         }
     };
+    let cancellation = service
+        .cancellation_token(tunnel_id)
+        .map_err(|_| anyhow::anyhow!("tunnel is no longer available"))?;
     let (host, port) = match definition.target {
         TunnelTarget::Tcp { host, port } => (host, port),
     };
-    let local = match TcpStream::connect((host, port)).await {
-        Ok(local) => local,
-        Err(_) => {
+    let local = match timeout(TUNNEL_CONNECTION_TIMEOUT, TcpStream::connect((host, port))).await {
+        Ok(Ok(local)) => local,
+        Ok(Err(_)) | Err(_) => {
             service.release_connection(tunnel_id);
             write_frame(
                 &mut send,
@@ -466,7 +527,12 @@ async fn handle_incoming_stream(
         .mark_connected(tunnel_id)
         .map_err(|_| anyhow::anyhow!("tunnel state changed"))?;
     write_frame(&mut send, &TunnelResponse::Accepted).await?;
-    forwarding::forward_bidirectional(local, send, recv, CancellationToken::new()).await;
+    timeout(
+        TUNNEL_IDLE_TIMEOUT,
+        forwarding::forward_bidirectional(local, send, recv, cancellation),
+    )
+    .await
+    .ok();
     service.release_connection(tunnel_id);
     Ok(())
 }
