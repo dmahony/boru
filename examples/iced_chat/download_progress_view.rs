@@ -560,7 +560,7 @@ fn view_download_progress_inner<'a>(
                         .center_x(Length::Fill)
                         .center_y(Length::Fill)
                 } else {
-                    container(iced::widget::Space::new(0, 0))
+                    container(iced::widget::Space::new().width(0.0).height(0.0))
                 }
             })
         ])

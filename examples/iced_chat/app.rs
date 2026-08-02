@@ -1855,6 +1855,7 @@ impl DownloadAttachment {
             DownloadState::Active { .. } => "Downloading",
             DownloadState::Paused { .. } => "Paused",
             DownloadState::Completed { .. } => "Open",
+            DownloadState::Shared { .. } => "Open",
             DownloadState::Failed { ref failure } if failure.retry_available() => "Retry",
             DownloadState::Failed { .. } => "Dismiss",
             DownloadState::Cancelled => "Retry",
@@ -1933,6 +1934,13 @@ impl DownloadAttachment {
                 format!("Paused — tap Resume to continue{size_info}")
             }
             DownloadState::Cancelled => "Cancelled".to_string(),
+            DownloadState::Shared { name, path, size } => {
+                let size_suffix = size
+                    .filter(|s| *s > 0)
+                    .map(|s| format!(" ({})", DownloadAttachment::total_bytes_label(s)))
+                    .unwrap_or_default();
+                format!("Shared — {name}{size_suffix} ({})", path.display())
+            }
         }
     }
 
@@ -1959,6 +1967,7 @@ impl DownloadAttachment {
             | DownloadState::Active { .. }
             | DownloadState::Paused { .. } => accent_primary(&iced::Theme::Dark),
             DownloadState::Completed { .. } => Color::from_rgb(0.2, 0.7, 0.2),
+            DownloadState::Shared { .. } => accent_primary(&iced::Theme::Dark),
             DownloadState::Failed { ref failure } => match failure.stability_label() {
                 "Temporary" => Color::from_rgb(0.78, 0.58, 0.16),
                 "Terminal" | "Permanent" => Color::from_rgb(0.8, 0.22, 0.22),
@@ -1976,6 +1985,7 @@ impl DownloadAttachment {
             DownloadState::Active { total: Some(_), .. } | DownloadState::Paused { .. } => 112.0,
             DownloadState::Active { total: None, .. } => 176.0,
             DownloadState::Completed { .. } => 92.0,
+            DownloadState::Shared { .. } => 92.0,
             DownloadState::Failed { .. } => 176.0,
             DownloadState::Cancelled => 84.0,
         }
@@ -2987,6 +2997,10 @@ pub struct IcedChat {
     create_group_description: String,
     /// Set of friend public keys selected as group members.
     create_group_selected_members: HashSet<PublicKey>,
+    /// Whether the tunnel creation (friend-picker) dialog is shown.
+    show_create_tunnel_dialog: bool,
+    /// Pending incoming tunnel requests, in arrival order.
+    tunnel_requests: Vec<TunnelRequest>,
     /// Reusable advanced connection-details dialog state.
     connection_details_dialog: Option<ConnectionDetailsDialogState>,
     /// Accessible status announcement shown after copying from the dialog.
@@ -3358,6 +3372,22 @@ struct SidebarGroupInviteRow {
     inviter_label: String,
 }
 
+/// A pending incoming tunnel request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TunnelRequest {
+    peer: PublicKey,
+    tunnel_id: String,
+    timestamp: i64,
+}
+
+/// A tunnel request row rendered in the REQUESTS sidebar section.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SidebarTunnelRequestRow {
+    peer: PublicKey,
+    tunnel_id: String,
+    label: String,
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct SidebarRequestsDependency {
     dark_mode: bool,
@@ -3367,6 +3397,7 @@ struct SidebarRequestsDependency {
     incoming: Vec<SidebarRequestRow>,
     friend_request_error: String,
     group_invites: Vec<SidebarGroupInviteRow>,
+    tunnel_requests: Vec<SidebarTunnelRequestRow>,
 }
 
 /// A structured join-request item exposed by the main-menu ViewModel.
@@ -3573,6 +3604,19 @@ pub enum AppMessage {
         /// creation cannot yank the UI out of a newer room.
         generation: u64,
     },
+    // ── Tunnel creation ──
+    /// Show the tunnel creation (friend-picker) dialog.
+    ShowCreateTunnelDialog,
+    /// Initiate a tunnel to a specific peer.
+    CreateTunnel(PublicKey),
+    /// Close the tunnel creation dialog without action.
+    CancelCreateTunnel,
+    /// An incoming tunnel request arrived from a peer.
+    TunnelRequestReceived { peer: PublicKey, tunnel_id: String },
+    /// Accept an incoming tunnel request.
+    AcceptTunnelRequest(String),
+    /// Decline an incoming tunnel request.
+    DeclineTunnelRequest(String),
     // ── ChatList ──
     JoinTicketInputChanged(String),
     NewChatCreated,
@@ -5207,6 +5251,8 @@ impl IcedChat {
             create_group_name: String::new(),
             create_group_description: String::new(),
             create_group_selected_members: HashSet::new(),
+            show_create_tunnel_dialog: false,
+            tunnel_requests: Vec::new(),
             dht,
             private_dht_disabled,
             create_room_dht_enabled: true,
@@ -5301,7 +5347,7 @@ impl IcedChat {
             directory_store,
             directory_room_rx,
             auto_subscribed_rooms: HashSet::new(),
-            tunnel_service: Arc::new(boru_core::tunnel::service::TunnelService::new()),
+            tunnel_service,
         }
     }
 
@@ -6730,6 +6776,12 @@ impl IcedChat {
             AppMessage::CreateGroupMemberToggled(_) => "CreateGroupMemberToggled",
             AppMessage::ConfirmCreateGroup => "ConfirmCreateGroup",
             AppMessage::GroupCreated { .. } => "GroupCreated",
+            AppMessage::ShowCreateTunnelDialog => "ShowCreateTunnelDialog",
+            AppMessage::CreateTunnel(_) => "CreateTunnel",
+            AppMessage::CancelCreateTunnel => "CancelCreateTunnel",
+            AppMessage::TunnelRequestReceived { .. } => "TunnelRequestReceived",
+            AppMessage::AcceptTunnelRequest(_) => "AcceptTunnelRequest",
+            AppMessage::DeclineTunnelRequest(_) => "DeclineTunnelRequest",
             AppMessage::OpenConversation(_) => "OpenConversation",
             AppMessage::SelectConversation(_) => "SelectConversation",
             AppMessage::CloseConversation(_) => "CloseConversation",
@@ -7829,6 +7881,77 @@ impl IcedChat {
                 } else {
                     self.create_group_selected_members.insert(peer);
                 }
+                iced::Task::none()
+            }
+
+            AppMessage::ShowCreateTunnelDialog => {
+                self.show_create_tunnel_dialog = true;
+                iced::Task::none()
+            }
+            AppMessage::CreateTunnel(peer) => {
+                // Friend picked from the "Share Tunnel" dialog. Hand off to
+                // the existing Share-local-service dialog for that friend,
+                // which collects the loopback target + expiry and registers
+                // the tunnel with the shared TunnelService on confirm.
+                self.show_create_tunnel_dialog = false;
+                self.screen = Screen::FriendProfile(peer);
+                self.friend_profile_menu_open = false;
+                self.share_local_service_open = true;
+                self.share_service_name = "Development Server".to_string();
+                self.share_service_port = "3000".to_string();
+                self.share_service_expiry =
+                    boru_core::tunnel::service::TunnelDuration::OneHour;
+                self.share_service_is_http = true;
+                iced::Task::none()
+            }
+            AppMessage::CancelCreateTunnel => {
+                self.show_create_tunnel_dialog = false;
+                iced::Task::none()
+            }
+            AppMessage::TunnelRequestReceived { peer, tunnel_id } => {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                // Replace any existing entry for the same tunnel id so a
+                // re-sent request does not create duplicates.
+                self.tunnel_requests.retain(|req| req.tunnel_id != tunnel_id);
+                self.tunnel_requests
+                    .push(TunnelRequest { peer, tunnel_id, timestamp });
+                // Bump the revision so the lazy sidebar Requests section
+                // re-renders with the new tunnel request.
+                self.requests_sidebar_revision = self.requests_sidebar_revision.wrapping_add(1);
+                iced::Task::none()
+            }
+            AppMessage::AcceptTunnelRequest(tunnel_id) => {
+                // Accepting an incoming tunnel request means connecting to
+                // the sharer's service: route into the existing
+                // ConnectReceivedTunnel flow (binds a loopback listener
+                // through the tunnel) when the received offer is present.
+                self.tunnel_requests.retain(|req| req.tunnel_id != tunnel_id);
+                self.requests_sidebar_revision = self.requests_sidebar_revision.wrapping_add(1);
+                if let Ok(bytes) = hex::decode(&tunnel_id) {
+                    if let Ok(id) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                        let tid = boru_core::tunnel::TunnelId(id);
+                        if self.received_tunnels.contains_key(&tid) {
+                            return iced::Task::done(AppMessage::ConnectReceivedTunnel(tid));
+                        }
+                    }
+                }
+                self.push_system("Tunnel request accepted".to_string());
+                iced::Task::none()
+            }
+            AppMessage::DeclineTunnelRequest(tunnel_id) => {
+                // Declining drops the request and the stored received offer
+                // so it stops being presented in Settings → Secure Tunnels.
+                self.tunnel_requests.retain(|req| req.tunnel_id != tunnel_id);
+                self.requests_sidebar_revision = self.requests_sidebar_revision.wrapping_add(1);
+                if let Ok(bytes) = hex::decode(&tunnel_id) {
+                    if let Ok(id) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                        self.received_tunnels.remove(&boru_core::tunnel::TunnelId(id));
+                    }
+                }
+                self.push_system("Tunnel request declined".to_string());
                 iced::Task::none()
             }
 
@@ -11415,7 +11538,19 @@ impl IcedChat {
                                 self.try_save_friends();
                             }
                             Ok((sender, ContactAction::TunnelOffer { offer })) => {
-                                self.handle_received_tunnel_offer(sender, offer);
+                                // Forward the incoming tunnel offer to the
+                                // sidebar Requests section so the user can
+                                // accept or decline it. The tunnel id is
+                                // hex-encoded so Accept/Decline can map it
+                                // back to a TunnelId.
+                                if let Some(tunnel_id) =
+                                    self.handle_received_tunnel_offer(sender, offer)
+                                {
+                                    return iced::Task::done(AppMessage::TunnelRequestReceived {
+                                        peer: sender,
+                                        tunnel_id: hex::encode(tunnel_id.0),
+                                    });
+                                }
                             }
                             Ok((_sender, _action)) => {
                                 self.push_system(
@@ -17767,7 +17902,7 @@ impl IcedChat {
         &mut self,
         sender: PublicKey,
         offer: boru_core::tunnel::TunnelOffer,
-    ) {
+    ) -> Option<boru_core::tunnel::TunnelId> {
         let now = now_ms().max(0) as u64;
         let valid =
             offer
@@ -17779,20 +17914,21 @@ impl IcedChat {
                 ?error,
                 "ignoring invalid received tunnel offer"
             );
-            return;
+            return None;
         }
         if offer.expires_at_ms <= now {
             info!(
                 from = %sender.fmt_short(),
                 "ignoring expired received tunnel offer"
             );
-            return;
+            return None;
         }
         let sharer_label = self.resolve_name(&sender);
         let service_name = offer.service_name.clone();
         let expiry = tunnel_expiry_label(offer.expires_at_ms);
+        let tunnel_id = offer.tunnel_id;
         self.received_tunnels.insert(
-            offer.tunnel_id,
+            tunnel_id,
             ReceivedTunnelState {
                 offer,
                 sharer: sender,
@@ -17813,6 +17949,7 @@ impl IcedChat {
             service = %service_name,
             "received tunnel offer"
         );
+        Some(tunnel_id)
     }
 
     fn handle_friend_event(&mut self, event: FriendEvent) {
@@ -18764,6 +18901,8 @@ impl IcedChat {
             self.view_create_room_dialog(base)
         } else if self.show_create_group_dialog {
             self.view_create_group_dialog(base)
+        } else if self.show_create_tunnel_dialog {
+            self.view_create_tunnel_dialog(base)
         } else if self.show_invite_member_dialog {
             self.view_invite_member_dialog(base)
         } else if let Some(entry_index) = self.lightbox_image {
@@ -19080,6 +19219,104 @@ impl IcedChat {
             .height(Length::Shrink)
             .padding(24)
             .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(
+                    0.15, 0.15, 0.15, 0.95,
+                ))),
+                border: iced::Border {
+                    radius: 12.0.into(),
+                    width: 1.0,
+                    color: iced::Color::from_rgb(0.4, 0.4, 0.4),
+                },
+                ..Default::default()
+            });
+
+        iced::widget::stack![
+            base,
+            container(overlay)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        ]
+        .into()
+    }
+
+    /// Dialog for sharing a tunnel with a friend — shows a friend picker
+    /// with a per-friend "Share" action.
+    fn view_create_tunnel_dialog<'a>(
+        &'a self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, column, container, scrollable, text, Column, Row};
+        use iced::{Alignment, Length};
+
+        // Build friend selection list — only friends who can accept tunnels.
+        let mut friends_list = Column::new().spacing(SPACE_4).padding(SPACE_8);
+
+        for (fid, record) in self.friends.iter() {
+            if !record.relationship.can_message() {
+                continue;
+            }
+            let peer = match fid.parse_public_key() {
+                Ok(pk) => pk,
+                Err(_) => continue,
+            };
+            let label = record.display_label(fid, &peer);
+            let row = Row::new()
+                .push(text(label).size(TYPO_SM))
+                .push(
+                    button(text("Share").size(TYPO_SM))
+                        .on_press(AppMessage::CreateTunnel(peer))
+                        .padding([SPACE_4, SPACE_10]),
+                )
+                .align_y(Alignment::Center)
+                .spacing(SPACE_8);
+            friends_list = friends_list.push(row);
+        }
+
+        let dialog = column![]
+            .push(text("Share Tunnel").size(18))
+            .push(
+                text("Choose a friend to share a tunnel with:")
+                    .size(TYPO_XS)
+                    .style(move |t| iced::widget::text::Style {
+                        color: Some(text_secondary(t)),
+                    }),
+            )
+            .push(
+                container(
+                    scrollable(container(friends_list).width(Length::Fill).padding(SPACE_4))
+                        .height(Length::Fixed(250.0)),
+                )
+                .width(Length::Fill)
+                .style(move |t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.2, 0.2, 0.2, 0.3,
+                    ))),
+                    border: iced::Border {
+                        radius: SPACE_4.into(),
+                        width: 1.0,
+                        color: border_muted(t),
+                    },
+                    ..Default::default()
+                }),
+            )
+            .push(
+                iced::widget::row![
+                    button(text("Cancel"))
+                        .on_press(AppMessage::CancelCreateTunnel)
+                        .padding(8),
+                ]
+                .spacing(12),
+            )
+            .spacing(12)
+            .align_x(Alignment::Center);
+
+        let overlay = container(dialog)
+            .width(Length::Fixed(360.0))
+            .height(Length::Shrink)
+            .padding(24)
+            .style(move |_t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(iced::Color::from_rgba(
                     0.15, 0.15, 0.15, 0.95,
                 ))),
@@ -20677,6 +20914,15 @@ impl IcedChat {
             incoming,
             friend_request_error: self.friend_request_error.clone(),
             group_invites,
+            tunnel_requests: self
+                .tunnel_requests
+                .iter()
+                .map(|request| SidebarTunnelRequestRow {
+                    peer: request.peer,
+                    tunnel_id: request.tunnel_id.clone(),
+                    label: self.resolve_name(&request.peer),
+                })
+                .collect(),
         };
         self.cached_requests_revision.set(cur_revision);
         *self.cached_requests_dep.borrow_mut() = Some(dep.clone());
@@ -20737,7 +20983,9 @@ impl IcedChat {
             .width(Length::Fill),
         );
 
-        let has_requests = !dep.incoming.is_empty() || !dep.group_invites.is_empty();
+        let has_requests = !dep.incoming.is_empty()
+            || !dep.group_invites.is_empty()
+            || !dep.tunnel_requests.is_empty();
 
         if !has_requests {
             let theme = Self::theme_from_dark(dep.dark_mode);
@@ -20831,6 +21079,75 @@ impl IcedChat {
 
                     section = section.push(container(row_el).width(Length::Fill));
                 }
+            }
+
+            // ── Tunnel requests ──
+            for request in &dep.tunnel_requests {
+                let row_el = Row::new()
+                    .push(
+                        Row::new()
+                            .push(
+                                text(request.label.clone())
+                                    .size(TYPO_SM)
+                                    .width(Length::Fill),
+                            )
+                            .push(
+                                container(
+                                    text("Tunnel").size(TYPO_XXS).color(accent_primary(&theme)),
+                                )
+                                .padding([SPACE_2, SPACE_4])
+                                .style(move |t| iced::widget::container::Style {
+                                    background: Some(iced::Background::Color(bg_surface(t))),
+                                    border: iced::Border {
+                                        color: border_muted(t),
+                                        width: 1.0,
+                                        radius: SPACE_4.into(),
+                                    },
+                                    ..Default::default()
+                                }),
+                            )
+                            .spacing(SPACE_4)
+                            .align_y(Alignment::Center)
+                            .width(Length::Fill),
+                    )
+                    .push(
+                        button(text("✓").size(TYPO_XS))
+                            .on_press(AppMessage::AcceptTunnelRequest(
+                                request.tunnel_id.clone(),
+                            ))
+                            .padding([SPACE_2, SPACE_4])
+                            .style(move |t, _status| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(accent_primary(t))),
+                                text_color: Color::WHITE,
+                                border: iced::Border {
+                                    radius: SPACE_4.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }),
+                    )
+                    .push(
+                        button(text("✗").size(TYPO_XS))
+                            .on_press(AppMessage::DeclineTunnelRequest(
+                                request.tunnel_id.clone(),
+                            ))
+                            .padding([SPACE_2, SPACE_4])
+                            .style(move |t, _status| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(color_error(t))),
+                                text_color: Color::WHITE,
+                                border: iced::Border {
+                                    radius: SPACE_4.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }),
+                    )
+                    .spacing(SPACE_4)
+                    .align_y(Alignment::Center)
+                    .padding([SPACE_4, SPACE_12])
+                    .width(Length::Fill);
+
+                section = section.push(container(row_el).width(Length::Fill));
             }
         }
 
@@ -21058,7 +21375,7 @@ impl IcedChat {
         .width(Length::Fill)
         .style(container_card);
 
-        // ── Action section: 5 action buttons in a grid ──
+        // ── Action section: 6 action buttons in a grid ──
         struct ActionButton<'a> {
             icon: &'a [u8],
             label: &'a str,
@@ -21096,6 +21413,12 @@ impl IcedChat {
                 label: "Import Friend",
                 description: "Import a friend from a key file",
                 message: AppMessage::ImportFriendFromFile,
+            },
+            ActionButton {
+                icon: ICON_ACTIVITY,
+                label: "Create Tunnel",
+                description: "Share a secure tunnel with a friend",
+                message: AppMessage::ShowCreateTunnelDialog,
             },
         ];
 
@@ -22976,6 +23299,27 @@ impl IcedChat {
         .width(Length::Fill)
         .style(BUTTON_OUTLINE);
         tool_btns.push(connection_btn.into());
+
+        // Only show if we have a valid peer key
+        if let Some(pk) = peer {
+            let tunnel_btn = button(
+                row![
+                    icon_svg(ICON_ACTIVITY, TYPO_SM).style(|t, _| iced::widget::svg::Style {
+                        color: Some(accent_primary(t))
+                    }),
+                    text("Create Tunnel")
+                        .size(TYPO_SM)
+                        .color(accent_primary(&theme)),
+                ]
+                .spacing(SPACE_6)
+                .align_y(Alignment::Center),
+            )
+            .on_press(AppMessage::CreateTunnel(pk))
+            .padding([SPACE_6, SPACE_12])
+            .width(Length::Fill)
+            .style(BUTTON_OUTLINE);
+            tool_btns.push(tunnel_btn.into());
+        }
 
         // ── Assemble the panel ──
         let panel_body = column![
@@ -29185,6 +29529,7 @@ mod tests {
             .0,
             GuiActionHistory::default(),
             None, // storage
+            Arc::new(boru_core::tunnel::service::TunnelService::new()),
         );
 
         (runtime, app, local_public, peer_public)
