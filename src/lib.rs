@@ -40,6 +40,8 @@ pub mod video_playback;
 pub mod video_runtime;
 /// Content-addressed, bounded poster generation for verified local videos.
 pub mod video_poster;
+/// Lightweight HTTP streaming server for progressive video playback.
+pub mod streaming_server;
 #[cfg(feature = "net")]
 pub mod net;
 pub mod proto;

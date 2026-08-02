@@ -86,6 +86,7 @@ use boru_core::video_playback::{
 #[cfg(feature = "video-playback")]
 use boru_core::video_runtime::VideoRuntimeCapability;
 use boru_core::video_poster;
+use boru_core::streaming_server::StreamingServer;
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
     address_lookup::memory::MemoryLookup, EndpointAddr, PublicKey, RelayMode, SecretKey, Watcher,
@@ -2441,6 +2442,9 @@ pub struct IcedChat {
     inline_video_resume: Option<(VideoInstanceKey, Duration)>,
     #[cfg(feature = "video-playback")]
     video_runtime: VideoRuntimeCapability,
+    /// Optional streaming server for progressive video playback.
+    #[cfg(feature = "video-playback")]
+    streaming_server: Arc<StdMutex<Option<StreamingServer>>>,
     /// TransferId → entry index cache for O(1) progress update lookups.
     /// Populated lazily in handle_download_progress; cleared on room switch.
     transfer_id_to_index: HashMap<TransferId, usize>,
@@ -3381,6 +3385,9 @@ pub enum AppMessage {
     InlineVideoToggleExpanded,
     /// Close the active inline player and restore its poster.
     CloseInlineVideo,
+    #[cfg(feature = "video-playback")]
+    /// Playback via streaming server is ready — contains the entry index and HTTP URL.
+    StreamingPlay(usize, url::Url),
     #[cfg(feature = "video-playback")]
     InlineVideoEvent(InlineVideoEvent),
     OpenDownloadsFolder,
@@ -4711,6 +4718,8 @@ impl IcedChat {
                 }
                 capability
             },
+            #[cfg(feature = "video-playback")]
+            streaming_server: Arc::new(StdMutex::new(None)),
             transfer_id_to_index: HashMap::new(),
             names: HashMap::new(),
             topic: initial_topic,
@@ -5401,16 +5410,27 @@ impl IcedChat {
                             if download.transfer_id.is_none() {
                                 download.transfer_id = Some(id);
                             }
-                            // Preserve the last-known total size from the Active state.
-                            let total_size = match &download.state {
-                                DownloadState::Active { total, .. } => *total,
-                                _ => None,
-                            };
-                            download.state = DownloadState::Completed {
-                                saved_name: name,
-                                saved_path: None,
-                                total_size,
-                            };
+                            // If the download was already resolved to a local
+                            // path (e.g. DownloadDone arrived before this late
+                            // Completed progress event), preserve the existing
+                            // state instead of reverting to Verifying.
+                            if let DownloadState::Completed {
+                                saved_path: Some(_), ..
+                            } = &download.state
+                            {
+                                // Already resolved — nothing to do.
+                            } else {
+                                // Preserve the last-known total size from the Active state.
+                                let total_size = match &download.state {
+                                    DownloadState::Active { total, .. } => *total,
+                                    _ => None,
+                                };
+                                download.state = DownloadState::Completed {
+                                    saved_name: name,
+                                    saved_path: None,
+                                    total_size,
+                                };
+                            }
                             self.transfer_id_to_index.insert(id, idx);
                             invalidate_from = Some(idx);
                         }
@@ -6168,6 +6188,8 @@ impl IcedChat {
             AppMessage::InlineVideoToggleExpanded => "InlineVideoToggleExpanded",
             AppMessage::CloseInlineVideo => "CloseInlineVideo",
             #[cfg(feature = "video-playback")]
+            AppMessage::StreamingPlay(..) => "StreamingPlay",
+            #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoEvent(_) => "InlineVideoEvent",
             AppMessage::OpenDownloadsFolder => "OpenDownloadsFolder",
             AppMessage::ReportBug => "ReportBug",
@@ -6436,8 +6458,6 @@ impl IcedChat {
                     video.set_paused(true);
                 }
             }
-            // Report total playout losses for this session (deadlines that
-            // passed before the decoder delivered the frame).
             if session.jitter.total_losses() > 0 {
                 tracing::info!(
                     message_id = session.key.message_id,
@@ -6451,6 +6471,29 @@ impl IcedChat {
         self.inline_video_expanded = false;
         self.playback_coordinator.clear(None);
         self.layout_cache.borrow_mut().clear();
+        // Stop any active streaming server
+        if let Ok(mut slot) = self.streaming_server.lock() {
+            *slot = None;
+        }
+    }
+
+    /// Map a filename extension to a MIME content type for HTTP streaming.
+    #[cfg(feature = "video-playback")]
+    fn content_type_for_filename(name: &str) -> String {
+        let ext = std::path::Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        match ext.to_lowercase().as_str() {
+            "mp4" => "video/mp4",
+            "webm" => "video/webm",
+            "mkv" => "video/x-matroska",
+            "avi" => "video/x-msvideo",
+            "mov" => "video/quicktime",
+            "ogv" | "ogg" => "video/ogg",
+            _ => "application/octet-stream",
+        }
+        .to_string()
     }
 
     #[cfg(feature = "video-playback")]
@@ -12036,21 +12079,141 @@ impl IcedChat {
                     let Some(download) = entry.download.as_ref() else {
                         return iced::Task::none();
                     };
-                    let DownloadState::Completed {
-                        saved_path: Some(path),
-                        total_size,
-                        ..
-                    } = &download.state
-                    else {
-                        self.push_system("Video is not ready to play yet.");
-                        return iced::Task::none();
-                    };
-                    let path = path.clone();
+                    // Determine play source: downloaded file or streaming
+                    let (play_path, play_total_size) =
+                        if let DownloadState::Completed {
+                            saved_path: Some(path),
+                            total_size,
+                            ..
+                        } = &download.state
+                        {
+                            (path.clone(), *total_size)
+                        } else if !download.ticket.is_empty() {
+                            // Not yet downloaded — start streaming
+                            let total_size = match &download.state {
+                                DownloadState::Ready { total } => total.unwrap_or(0),
+                                DownloadState::Active { total, .. } => total.unwrap_or(0),
+                                DownloadState::Completed {
+                                    total_size, ..
+                                } => total_size.unwrap_or(0),
+                                _ => 0,
+                            };
+                            if total_size == 0 {
+                                self.push_system(
+                                    "Cannot stream video: unknown size.",
+                                );
+                                return iced::Task::none();
+                            }
+                            let name = download.name.clone();
+                            let content_type =
+                                Self::content_type_for_filename(&name);
+                            let data_dir = self.data_dir.clone();
+                            let blob_store = self.blob_store.clone();
+                            let endpoint = self.endpoint.clone();
+                            let neighbors = self.neighbors.clone();
+                            let progress_queue =
+                                self.download_progress_queue.clone();
+                            let kind = download.kind;
+                            let ticket = download.ticket.clone();
+                            let server_slot =
+                                self.streaming_server.clone();
+
+                            return iced::Task::perform(
+                                async move {
+                                    let dl_dir =
+                                        data_dir.join("downloads");
+                                    let _ = tokio::fs::create_dir_all(
+                                        &dl_dir,
+                                    )
+                                    .await;
+                                    let save_path =
+                                        dl_dir.join(&name);
+
+                                    // Parse ticket
+                                    let parsed: iroh_blobs::ticket::BlobTicket = ticket.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
+                                    let (addr, hash, _format) =
+                                        parsed.into_parts();
+                                    let candidates =
+                                        download_candidates(
+                                            addr.id, &neighbors,
+                                        );
+
+                                    // Start background download
+                                    let dl_path =
+                                        save_path.clone();
+                                    let dl_blob = blob_store;
+                                    let dl_ep = endpoint;
+                                    let dl_name = name.clone();
+                                    let dl_queue = progress_queue;
+                                    tokio::spawn(async move {
+                                        let _ = download_blob_to_file(
+                                            &dl_blob,
+                                            &dl_ep,
+                                            hash,
+                                            candidates,
+                                            dl_name,
+                                            kind,
+                                            &dl_path,
+                                            move |ev| {
+                                                if let Ok(mut q) =
+                                                    dl_queue.lock()
+                                                {
+                                                    q.push_back(ev);
+                                                }
+                                            },
+                                            Some(total_size),
+                                        )
+                                        .await;
+                                    });
+
+                                    // Start streaming server
+                                    let server =
+                                        StreamingServer::start(
+                                            save_path,
+                                            total_size,
+                                            content_type,
+                                        )
+                                        .await
+                                        .map_err(|e| {
+                                            format!(
+                                                "Streaming server: {e}"
+                                            )
+                                        })?;
+                                    let http_url = server.url();
+
+                                    // Store server for cleanup
+                                    if let Ok(mut slot) =
+                                        server_slot.lock()
+                                    {
+                                        *slot = Some(server);
+                                    }
+
+                                    Ok::<_, String>(http_url)
+                                },
+                                move |result| match result {
+                                    Ok(http_url) => {
+                                        AppMessage::StreamingPlay(
+                                            entry_index,
+                                            http_url,
+                                        )
+                                    }
+                                    Err(e) => {
+                                        AppMessage::ErrorMsg(e)
+                                    }
+                                },
+                            );
+                        } else {
+                            self.push_system(
+                                "Video is not ready to play yet.",
+                            );
+                            return iced::Task::none();
+                        };
+                    let path = play_path.clone();
                     let Some(expected_hash) = download.expected_content_hash.clone() else {
                         self.push_system("Video cannot be played because its content identity is missing.");
                         return iced::Task::none();
                     };
-                    let expected_size = *total_size;
+                    let expected_size = play_total_size;
                     let downloads_root = self.data_dir.join("downloads");
                     let message_id = entry.event_id;
                     let attachment_id = download.name.clone();
@@ -12167,6 +12330,82 @@ impl IcedChat {
                     self.stop_inline_video();
                 }
                 iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
+            AppMessage::StreamingPlay(entry_index, http_url) => {
+                let (message_id, attachment_id) =
+                    if let Some(entry) = self.entries.get(entry_index) {
+                        (entry.event_id, entry.download.as_ref().map(|d| d.name.clone()).unwrap_or_default())
+                    } else {
+                        return iced::Task::none();
+                    };
+                let key = VideoInstanceKey::new(
+                    self.topic,
+                    message_id,
+                    attachment_id,
+                );
+                if self.playback_coordinator.active_video() == Some(&key) {
+                    if let Some(session) =
+                        self.inline_video.as_mut().filter(|s| s.key == key)
+                    {
+                        if let Some(video) =
+                            session.video.as_mut().and_then(Arc::get_mut)
+                        {
+                            video.set_paused(!video.paused());
+                            self.layout_cache.borrow_mut().clear();
+                            return iced::Task::none();
+                        }
+                    }
+                }
+                let _previous =
+                    self.playback_coordinator.request_play(key.clone());
+                self.inline_video = Some(InlineVideoSession {
+                    key: key.clone(),
+                    video: None,
+                    error: None,
+                    jitter: VideoJitterBuffer::default(),
+                    resume_position: self
+                        .inline_video_resume
+                        .as_ref()
+                        .filter(|(resume_key, _)| resume_key == &key)
+                        .map(|(_, position)| *position)
+                        .unwrap_or_default(),
+                    last_near_viewport: Instant::now(),
+                });
+                self.inline_video_resume = None;
+                self.layout_cache
+                    .borrow_mut()
+                    .invalidate_from(entry_index);
+                return iced::Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            Video::new(&http_url)
+                                .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|result| result)
+                    },
+                    move |result| match result {
+                        Ok(mut video) => {
+                            video.set_paused(false);
+                            AppMessage::InlineVideoEvent(
+                                InlineVideoEvent::Loaded {
+                                    key,
+                                    video: Arc::new(video),
+                                },
+                            )
+                        }
+                        Err(error) => {
+                            AppMessage::InlineVideoEvent(
+                                InlineVideoEvent::Failed {
+                                    key,
+                                    error,
+                                },
+                            )
+                        }
+                    },
+                );
             }
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoTick => {
