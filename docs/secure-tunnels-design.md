@@ -140,6 +140,14 @@ If restart survival becomes a product requirement, it must be introduced as a de
 
 Until that migration exists, callers must treat tunnel definitions and capabilities as process-lifetime state and recreate them explicitly after restart.
 
+## Optional CLI/debug interface (Phase 21)
+
+The current Boru command surface is the GUI example (`cargo run --features gui --example boru`), whose Clap commands select or join chat rooms before the long-lived GUI/network runtime is started. It does not provide a standalone process or a reusable command context for tunnel operations: tunnel definitions and capabilities are owned by the in-process `TunnelService`, and tunnel protocol handling is registered on the shared endpoint/router created by the GUI startup path.
+
+Therefore Phase 21 does not add a separate `boru tunnel share <friend> <port>` or `boru tunnel connect <tunnel>` command. Adding those commands now would either create a second endpoint/identity and duplicate runtime setup, or require a new control API and lifecycle boundary for attaching short-lived CLI invocations to the running GUI. Neither is a small, natural extension of the existing architecture, and no new CLI framework is justified solely for this feature.
+
+A future CLI/debug surface should reuse the existing endpoint, identity, friends store, `TunnelService`, and protocol router through an explicit service/control boundary. That boundary should define how a share command returns a redacted tunnel invitation/capability, how connect resolves the recipient and tunnel, and how the long-lived process remains alive while forwarding local TCP streams. Until then, tunnel control remains an in-process/API integration point rather than a supported shell command.
+
 ## Invariants
 
 1. One primary Boru Iroh endpoint and identity.
