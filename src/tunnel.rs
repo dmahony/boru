@@ -33,10 +33,39 @@ pub mod service;
 
 pub use local_listener::LocalTunnelListener;
 
+pub use service::{TunnelConnectionInfo, TunnelLiveInfo, TunnelRoute};
 use service::{TunnelService, TunnelStatus, TunnelTarget};
 
 fn tunnel_id_label(id: TunnelId) -> String {
     id.0[..8].iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Classify a live Iroh connection's route from Iroh's own path data.
+///
+/// Only Iroh-reported information is used; no guesswork. If the connection
+/// exposes a selected path, it is classified as [`TunnelRoute::Direct`] or
+/// [`TunnelRoute::Relay`]. A path that exists but is neither is reported as
+/// [`TunnelRoute::Unknown`]; when no path information is available at all the
+/// route is [`TunnelRoute::Connected`] and the GUI displays the neutral
+/// "Connected" label.
+pub fn connection_route(connection: &Connection) -> TunnelRoute {
+    let paths = connection.paths();
+    let mut saw_path = false;
+    let mut selected = None;
+    for path in paths.iter() {
+        saw_path = true;
+        if path.is_selected() {
+            selected = Some(path);
+            break;
+        }
+    }
+    match selected {
+        Some(path) if path.is_relay() => TunnelRoute::Relay,
+        Some(path) if path.is_ip() => TunnelRoute::Direct,
+        Some(_) => TunnelRoute::Unknown,
+        None if saw_path => TunnelRoute::Unknown,
+        None => TunnelRoute::Connected,
+    }
 }
 
 /// Current version of the tunnel handshake wire messages.
@@ -357,9 +386,11 @@ impl ProtocolHandler for TunnelProtocol {
             let stream = connection.accept_bi().await.map_err(AcceptError::from)?;
             if let (Some(service), Some(owner)) = (&self.service, self.owner) {
                 let service = Arc::clone(service);
+                let connection = connection.clone();
                 tokio::spawn(async move {
                     if let Err(error) =
-                        handle_incoming_stream(stream, remote_peer, owner, service).await
+                        handle_incoming_stream(connection, stream, remote_peer, owner, service)
+                            .await
                     {
                         tracing::debug!(%error, "tunnel stream rejected or closed");
                     }
@@ -433,6 +464,7 @@ pub async fn open_tunnel(
 }
 
 async fn handle_incoming_stream(
+    connection: Connection,
     (mut send, mut recv): TunnelStream,
     requesting_peer: iroh::PublicKey,
     owner: iroh::PublicKey,
@@ -548,14 +580,18 @@ async fn handle_incoming_stream(
     service
         .mark_connected(tunnel_id)
         .map_err(|_| anyhow::anyhow!("tunnel state changed"))?;
+    service.record_route(tunnel_id, connection_route(&connection));
+    service.record_connection_opened(tunnel_id);
+    let live = service.live_info(tunnel_id);
     write_frame(&mut send, &TunnelResponse::Accepted).await?;
     timeout(
         TUNNEL_IDLE_TIMEOUT,
-        forwarding::forward_bidirectional(local, send, recv, cancellation),
+        forwarding::forward_bidirectional(local, send, recv, cancellation, live),
     )
     .await
     .ok();
     service.release_connection(tunnel_id);
+    service.record_connection_closed(tunnel_id);
     Ok(())
 }
 
@@ -581,9 +617,9 @@ mod tests {
     };
 
     use super::{
-        reject_for_protocol_version, CapabilityVerificationError, TunnelCapability, TunnelId,
-        TunnelOffer, TunnelProtocol, TunnelRejectReason, TunnelRequest, TunnelResponse,
-        BORU_TUNNEL_ALPN, TUNNEL_PROTOCOL_VERSION,
+        connection_route, reject_for_protocol_version, CapabilityVerificationError,
+        TunnelCapability, TunnelId, TunnelOffer, TunnelProtocol, TunnelRejectReason, TunnelRequest,
+        TunnelResponse, TunnelRoute, BORU_TUNNEL_ALPN, TUNNEL_PROTOCOL_VERSION,
     };
 
     fn capability_fixture() -> (iroh::SecretKey, iroh::SecretKey, TunnelId, TunnelCapability) {
@@ -620,7 +656,10 @@ mod tests {
         assert_eq!(decoded.service_name, "Development Server");
         assert!(decoded.is_http);
         assert_eq!(decoded.expires_at_ms, 200);
-        assert_eq!(decoded.capability.allowed_peer_endpoint_id, recipient.public());
+        assert_eq!(
+            decoded.capability.allowed_peer_endpoint_id,
+            recipient.public()
+        );
     }
 
     #[test]
@@ -636,13 +675,7 @@ mod tests {
         };
         // The offer's capability verifies for the intended recipient within
         // its validity window.
-        assert!(verify_fixture(
-            &offer.capability,
-            &owner,
-            &recipient,
-            tunnel_id
-        )
-        .is_ok());
+        assert!(verify_fixture(&offer.capability, &owner, &recipient, tunnel_id).is_ok());
         // A different peer cannot present the offer.
         let stranger = iroh::SecretKey::generate();
         assert_eq!(
@@ -650,9 +683,10 @@ mod tests {
             Err(CapabilityVerificationError::RecipientMismatch)
         );
         // The offer expires once its window passes.
-        let expired = offer
-            .capability
-            .verify_for(&owner.public(), &recipient.public(), tunnel_id, 201, true);
+        let expired =
+            offer
+                .capability
+                .verify_for(&owner.public(), &recipient.public(), tunnel_id, 201, true);
         assert_eq!(expired, Err(CapabilityVerificationError::Expired));
     }
 
@@ -853,6 +887,32 @@ mod tests {
         .std_context("wait for tunnel handler")?;
 
         assert_eq!(tunnel.accepted_count(), 1);
+        router.shutdown().await.std_context("shutdown router")?;
+        client.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_route_reports_direct_for_minimal_preset() -> Result {
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let tunnel = TunnelProtocol::new();
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, tunnel.clone())
+            .spawn();
+
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await
+            .std_context("connect tunnel")?;
+
+        // The Minimal preset has no relay, so Iroh selects a direct IP path.
+        assert_eq!(
+            connection_route(&connection),
+            TunnelRoute::Direct,
+            "Minimal preset should classify as Direct"
+        );
+
         router.shutdown().await.std_context("shutdown router")?;
         client.close().await;
         Ok(())

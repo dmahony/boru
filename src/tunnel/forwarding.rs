@@ -1,9 +1,13 @@
 //! Bounded bidirectional forwarding between a local TCP socket and an Iroh
 //! QUIC stream.
 
+use std::sync::Arc;
+
 use iroh::endpoint::{RecvStream, SendStream};
 use tokio::{io, net::TcpStream};
 use tokio_util::sync::CancellationToken;
+
+use super::service::TunnelLiveInfo;
 
 /// Forward bytes in both directions until both sides reach EOF, cancellation,
 /// or an I/O error.
@@ -12,17 +16,27 @@ use tokio_util::sync::CancellationToken;
 /// tasks are spawned. EOF in one direction half-closes that direction while
 /// allowing the other direction to drain. An error or cancellation stops both
 /// directions before this function returns.
+///
+/// When `live` is provided, forwarded byte counts are accumulated into it so
+/// the GUI can display lightweight transfer metrics.
 pub(crate) async fn forward_bidirectional(
     local: TcpStream,
     remote_send: SendStream,
     remote_recv: RecvStream,
     cancellation: CancellationToken,
+    live: Option<Arc<TunnelLiveInfo>>,
 ) {
     let (local_read, local_write) = local.into_split();
     let stop = CancellationToken::new();
-    let send_direction =
-        forward_to_remote(local_read, remote_send, cancellation.clone(), stop.clone());
-    let receive_direction = forward_to_local(remote_recv, local_write, cancellation, stop.clone());
+    let send_direction = forward_to_remote(
+        local_read,
+        remote_send,
+        cancellation.clone(),
+        stop.clone(),
+        live.clone(),
+    );
+    let receive_direction =
+        forward_to_local(remote_recv, local_write, cancellation, stop.clone(), live);
     let (send_result, receive_result) = tokio::join!(send_direction, receive_direction);
 
     for (direction, result) in [
@@ -40,10 +54,14 @@ async fn forward_to_remote(
     mut remote_send: SendStream,
     cancellation: CancellationToken,
     stop: CancellationToken,
+    live: Option<Arc<TunnelLiveInfo>>,
 ) -> io::Result<()> {
     let result = tokio::select! {
         result = io::copy(&mut local_read, &mut remote_send) => {
-            result?;
+            let copied = result?;
+            if let Some(live) = live.as_ref() {
+                live.add_bytes(copied as u64, 0);
+            }
             remote_send.finish().map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))
         }
         _ = cancellation.cancelled() => Ok(()),
@@ -60,10 +78,14 @@ async fn forward_to_local(
     mut local_write: tokio::net::tcp::OwnedWriteHalf,
     cancellation: CancellationToken,
     stop: CancellationToken,
+    live: Option<Arc<TunnelLiveInfo>>,
 ) -> io::Result<()> {
     let result = tokio::select! {
         result = io::copy(&mut remote_recv, &mut local_write) => {
-            result?;
+            let copied = result?;
+            if let Some(live) = live.as_ref() {
+                live.add_bytes(0, copied as u64);
+            }
             io::AsyncWriteExt::shutdown(&mut local_write).await
         }
         _ = cancellation.cancelled() => Ok(()),
@@ -155,6 +177,7 @@ mod tests {
             remote_server_send,
             remote_server_recv,
             cancellation,
+            None,
         ));
 
         let mut local_client = local_client;
@@ -184,6 +207,7 @@ mod tests {
             fixture.remote_server_send,
             fixture.remote_server_recv,
             cancellation.clone(),
+            None,
         ));
         sleep(Duration::from_millis(20)).await;
         cancellation.cancel();
@@ -212,6 +236,7 @@ mod tests {
             remote_server_send,
             remote_server_recv,
             cancellation.clone(),
+            None,
         ));
         let mut remote_client_send = remote_client_send;
         sleep(Duration::from_millis(20)).await;

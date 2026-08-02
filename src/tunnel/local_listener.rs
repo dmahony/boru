@@ -13,7 +13,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{forwarding, open_tunnel, TunnelCapability, TunnelId};
+use super::{forwarding, open_tunnel, service::TunnelLiveInfo, TunnelCapability, TunnelId};
 
 const DEFAULT_MAX_CONNECTIONS: usize = 16;
 
@@ -27,6 +27,7 @@ pub struct LocalTunnelListener {
     capability: TunnelCapability,
     max_connections: Arc<Semaphore>,
     peer_connection: Arc<Mutex<Option<Connection>>>,
+    live: Arc<TunnelLiveInfo>,
 }
 
 impl LocalTunnelListener {
@@ -76,7 +77,16 @@ impl LocalTunnelListener {
             capability,
             max_connections: Arc::new(Semaphore::new(max_connections)),
             peer_connection: Arc::new(Mutex::new(None)),
+            live: Arc::new(TunnelLiveInfo::default()),
         })
+    }
+
+    /// Return the shared live connection-info handle for this listener.
+    ///
+    /// The transport layer updates the handle as connections open, close, and
+    /// forward bytes; the GUI reads a snapshot for display.
+    pub fn live_info(&self) -> Arc<TunnelLiveInfo> {
+        Arc::clone(&self.live)
     }
 
     /// Bind to `127.0.0.1`, using `port` or selecting an available port when
@@ -160,6 +170,7 @@ impl LocalTunnelListener {
             let tunnel_id = self.tunnel_id;
             let capability = self.capability.clone();
             let peer_connection = Arc::clone(&self.peer_connection);
+            let live = Arc::clone(&self.live);
             let route_cancellation = cancellation.clone();
             tokio::spawn(async move {
                 let result = Self::route_with(
@@ -168,6 +179,7 @@ impl LocalTunnelListener {
                     tunnel_id,
                     capability,
                     peer_connection,
+                    live,
                     local,
                     permit,
                     route_cancellation,
@@ -192,6 +204,7 @@ impl LocalTunnelListener {
             self.tunnel_id,
             self.capability.clone(),
             Arc::clone(&self.peer_connection),
+            Arc::clone(&self.live),
             local,
             permit,
             cancellation,
@@ -205,6 +218,7 @@ impl LocalTunnelListener {
         tunnel_id: TunnelId,
         capability: TunnelCapability,
         peer_connection: Arc<Mutex<Option<Connection>>>,
+        live: Arc<TunnelLiveInfo>,
         local: TcpStream,
         _permit: OwnedSemaphorePermit,
         cancellation: CancellationToken,
@@ -214,23 +228,17 @@ impl LocalTunnelListener {
             if let Some(connection) = shared.as_ref() {
                 connection.clone()
             } else {
-                let route = if owner.relay_urls().next().is_some() {
-                    "relay"
-                } else if owner.ip_addrs().next().is_some() {
-                    "direct"
-                } else {
-                    "unknown"
-                };
                 let connection = endpoint.connect(owner, super::BORU_TUNNEL_ALPN).await?;
                 tracing::info!(
                     tunnel = %super::tunnel_id_label(tunnel_id),
-                    route,
                     "tunnel route established"
                 );
                 *shared = Some(connection.clone());
                 connection
             }
         };
+        live.set_route(super::connection_route(&connection));
+        live.connection_opened(super::unix_epoch_ms());
         let (send, recv) = match open_tunnel(&connection, tunnel_id, capability).await {
             Ok(stream) => stream,
             Err(error) => {
@@ -240,13 +248,16 @@ impl LocalTunnelListener {
                 if connection.close_reason().is_some() {
                     peer_connection.lock().await.take();
                 }
+                live.connection_closed();
                 return Err(error);
             }
         };
-        forwarding::forward_bidirectional(local, send, recv, cancellation).await;
+        forwarding::forward_bidirectional(local, send, recv, cancellation, Some(live.clone()))
+            .await;
         if connection.close_reason().is_some() {
             peer_connection.lock().await.take();
         }
+        live.connection_closed();
         tracing::debug!(tunnel = %super::tunnel_id_label(tunnel_id), "tunnel local connection closed");
         Ok(())
     }

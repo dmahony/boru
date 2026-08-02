@@ -7,7 +7,10 @@
 use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,
-    sync::RwLock,
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, RwLock,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -64,6 +67,116 @@ pub enum TunnelStatus {
     Connected,
     /// The tunnel was revoked and is no longer connectable.
     Revoked,
+}
+
+/// Best-effort route classification for a live tunnel connection.
+///
+/// The transport layer records this from Iroh's own path information and
+/// never guesses: when no reliable path data exists the value stays
+/// [`TunnelRoute::Connected`], and the GUI shows the neutral "Connected"
+/// label for ordinary users.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelRoute {
+    /// Iroh reports the selected path is a direct IP path.
+    Direct,
+    /// Iroh reports the selected path is a relay path.
+    Relay,
+    /// Iroh exposes path information, but it is neither clearly direct nor a
+    /// relay (for example a custom transport).
+    Unknown,
+    /// No reliable path information is available.
+    Connected,
+}
+
+impl TunnelRoute {
+    /// Human-readable route label. [`TunnelRoute::Connected`] is the neutral
+    /// fallback shown when Iroh has no path information, so the UI never
+    /// invents a route for ordinary users.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "Direct",
+            Self::Relay => "Relay",
+            Self::Unknown => "Unknown",
+            Self::Connected => "Connected",
+        }
+    }
+}
+
+impl Default for TunnelRoute {
+    fn default() -> Self {
+        Self::Connected
+    }
+}
+
+/// Lightweight, best-effort metrics for one tunnel connection.
+///
+/// These values are only populated when Iroh exposes them; zero fields simply
+/// mean the information is not available yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TunnelConnectionInfo {
+    /// Route classification from Iroh path data, or [`TunnelRoute::Unknown`].
+    pub route: TunnelRoute,
+    /// Bytes sent through the tunnel (local -> remote), when known.
+    pub bytes_sent: u64,
+    /// Bytes received through the tunnel (remote -> local), when known.
+    pub bytes_received: u64,
+    /// Unix epoch milliseconds when the current connection started, when known.
+    pub connected_at_ms: u64,
+    /// Number of TCP connections currently using this tunnel.
+    pub tcp_connections: usize,
+}
+
+/// Live, best-effort connection metadata shared between the transport layer
+/// and the GUI. The transport records route and byte counters; the GUI reads
+/// a snapshot for display. All updates are lightweight atomic writes.
+#[derive(Debug, Default)]
+pub struct TunnelLiveInfo {
+    route: RwLock<TunnelRoute>,
+    bytes_sent: AtomicU64,
+    bytes_received: AtomicU64,
+    connected_at_ms: AtomicU64,
+    tcp_connections: AtomicUsize,
+}
+
+impl TunnelLiveInfo {
+    /// Record the route observed from Iroh path data.
+    pub fn set_route(&self, route: TunnelRoute) {
+        *self.route.write().expect("tunnel live info lock poisoned") = route;
+    }
+
+    /// Record bytes forwarded in each direction.
+    pub fn add_bytes(&self, sent: u64, received: u64) {
+        self.bytes_sent.fetch_add(sent, Ordering::Relaxed);
+        self.bytes_received.fetch_add(received, Ordering::Relaxed);
+    }
+
+    /// Record the start of one TCP connection using the tunnel.
+    pub fn connection_opened(&self, connected_at_ms: u64) {
+        self.connected_at_ms
+            .compare_exchange(0, connected_at_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .ok();
+        self.tcp_connections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record the end of one TCP connection.
+    pub fn connection_closed(&self) {
+        self.tcp_connections
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(1))
+            })
+            .ok();
+    }
+
+    /// Snapshot the current values for display.
+    pub fn snapshot(&self) -> TunnelConnectionInfo {
+        TunnelConnectionInfo {
+            route: *self.route.read().expect("tunnel live info lock poisoned"),
+            bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
+            bytes_received: self.bytes_received.load(Ordering::Relaxed),
+            connected_at_ms: self.connected_at_ms.load(Ordering::Relaxed),
+            tcp_connections: self.tcp_connections.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// User-facing tunnel authorisation durations converted to timestamps at creation.
@@ -162,6 +275,7 @@ pub struct TunnelService {
     tunnels: RwLock<HashMap<TunnelId, TunnelDefinition>>,
     cancellation: RwLock<HashMap<TunnelId, CancellationToken>>,
     attempt_times: RwLock<HashMap<iroh::PublicKey, VecDeque<Instant>>>,
+    live_info: RwLock<HashMap<TunnelId, Arc<TunnelLiveInfo>>>,
 }
 
 impl TunnelService {
@@ -286,6 +400,60 @@ impl TunnelService {
             .cloned()
     }
 
+    /// Return the live connection-info handle for a tunnel, if one exists.
+    ///
+    /// The handle is created lazily by [`Self::record_route`] /
+    /// [`Self::record_transfer`] so an idle tunnel has no live-info entry.
+    pub fn live_info(&self, id: TunnelId) -> Option<Arc<TunnelLiveInfo>> {
+        self.live_info
+            .read()
+            .expect("tunnel service lock poisoned")
+            .get(&id)
+            .cloned()
+    }
+
+    /// Record the Iroh-reported route for a tunnel, creating the live-info
+    /// entry on first use.
+    pub fn record_route(&self, id: TunnelId, route: TunnelRoute) {
+        let info = self.live_info_entry(id);
+        info.set_route(route);
+    }
+
+    /// Record transferred bytes for a tunnel, creating the live-info entry on
+    /// first use.
+    pub fn record_transfer(&self, id: TunnelId, sent: u64, received: u64) {
+        let info = self.live_info_entry(id);
+        info.add_bytes(sent, received);
+    }
+
+    /// Record the start of one TCP connection using a tunnel.
+    pub fn record_connection_opened(&self, id: TunnelId) {
+        let info = self.live_info_entry(id);
+        info.connection_opened(unix_epoch_ms());
+    }
+
+    /// Record the end of one TCP connection using a tunnel.
+    pub fn record_connection_closed(&self, id: TunnelId) {
+        if let Some(info) = self.live_info(id) {
+            info.connection_closed();
+        }
+    }
+
+    /// Return a snapshot of the current connection info for a tunnel.
+    pub fn connection_info(&self, id: TunnelId) -> Option<TunnelConnectionInfo> {
+        self.live_info(id).map(|info| info.snapshot())
+    }
+
+    fn live_info_entry(&self, id: TunnelId) -> Arc<TunnelLiveInfo> {
+        let mut live = self
+            .live_info
+            .write()
+            .expect("tunnel service lock poisoned");
+        live.entry(id)
+            .or_insert_with(|| Arc::new(TunnelLiveInfo::default()))
+            .clone()
+    }
+
     /// Revoke and remove a tunnel, returning its final metadata snapshot.
     /// Existing streams continue until closed; use
     /// [`Self::revoke_tunnel_with_termination`] to cancel them.
@@ -302,6 +470,10 @@ impl TunnelService {
         let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
         let mut definition = tunnels.remove(&id).ok_or(TunnelServiceError::NotFound)?;
         definition.status = TunnelStatus::Revoked;
+        self.live_info
+            .write()
+            .expect("tunnel service lock poisoned")
+            .remove(&id);
         if let Some(token) = self
             .cancellation
             .write()
@@ -435,7 +607,9 @@ mod tests {
 
     use iroh::SecretKey;
 
-    use super::{TunnelService, TunnelServiceError, TunnelStatus, TunnelTarget};
+    use super::{
+        TunnelLiveInfo, TunnelRoute, TunnelService, TunnelServiceError, TunnelStatus, TunnelTarget,
+    };
     use crate::tunnel::TunnelId;
 
     fn fixture() -> (TunnelService, iroh::PublicKey, iroh::PublicKey, TunnelId) {
@@ -732,5 +906,84 @@ mod tests {
             ),
             Err(TunnelServiceError::TunnelLimitReached)
         );
+    }
+
+    #[test]
+    fn live_info_defaults_to_connected_route_and_zero_metrics() {
+        let info = TunnelLiveInfo::default();
+        let snapshot = info.snapshot();
+        assert_eq!(snapshot.route, TunnelRoute::Connected);
+        assert_eq!(snapshot.bytes_sent, 0);
+        assert_eq!(snapshot.bytes_received, 0);
+        assert_eq!(snapshot.connected_at_ms, 0);
+        assert_eq!(snapshot.tcp_connections, 0);
+    }
+
+    #[test]
+    fn live_info_accumulates_route_bytes_and_connection_count() {
+        let info = TunnelLiveInfo::default();
+        info.set_route(TunnelRoute::Relay);
+        info.connection_opened(1_000);
+        info.add_bytes(100, 250);
+        info.add_bytes(50, 75);
+
+        let snapshot = info.snapshot();
+        assert_eq!(snapshot.route, TunnelRoute::Relay);
+        assert_eq!(snapshot.bytes_sent, 150);
+        assert_eq!(snapshot.bytes_received, 325);
+        assert_eq!(snapshot.connected_at_ms, 1_000);
+        assert_eq!(snapshot.tcp_connections, 1);
+
+        info.connection_closed();
+        assert_eq!(info.snapshot().tcp_connections, 0);
+    }
+
+    #[test]
+    fn live_info_keeps_first_connected_timestamp() {
+        let info = TunnelLiveInfo::default();
+        info.connection_opened(500);
+        info.connection_opened(900);
+        assert_eq!(info.snapshot().connected_at_ms, 500);
+    }
+
+    #[test]
+    fn route_labels_never_invent_a_route_for_ordinary_users() {
+        assert_eq!(TunnelRoute::Direct.label(), "Direct");
+        assert_eq!(TunnelRoute::Relay.label(), "Relay");
+        assert_eq!(TunnelRoute::Unknown.label(), "Unknown");
+        assert_eq!(TunnelRoute::Connected.label(), "Connected");
+    }
+
+    #[test]
+    fn service_tracks_live_info_and_clears_it_on_revoke() {
+        let (service, owner, peer, id) = fixture();
+        service
+            .create_tunnel(
+                id,
+                owner,
+                TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                peer,
+                super::unix_epoch_ms(),
+                super::unix_epoch_ms() + 60_000,
+            )
+            .unwrap();
+
+        assert!(service.connection_info(id).is_none());
+        service.record_route(id, TunnelRoute::Direct);
+        service.record_transfer(id, 10, 20);
+        service.record_connection_opened(id);
+
+        let info = service.connection_info(id).expect("live info recorded");
+        assert_eq!(info.route, TunnelRoute::Direct);
+        assert_eq!(info.bytes_sent, 10);
+        assert_eq!(info.bytes_received, 20);
+        assert_eq!(info.tcp_connections, 1);
+        assert!(info.connected_at_ms > 0);
+
+        service.record_connection_closed(id);
+        assert_eq!(service.connection_info(id).unwrap().tcp_connections, 0);
+
+        service.revoke_tunnel(id).unwrap();
+        assert!(service.connection_info(id).is_none());
     }
 }

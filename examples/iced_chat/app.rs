@@ -1227,6 +1227,59 @@ fn tunnel_expiry_label(expires_at_ms: u64) -> String {
 /// last-seen timestamp for this long (10 seconds).
 const AWAY_THRESHOLD_MS: u64 = 10_000;
 
+/// Human-readable connection route label from Iroh path data.
+///
+/// The backend only records what Iroh reliably reports; unknown routes map to
+/// the neutral "Connected" label rather than inventing a Direct/Relay guess.
+fn tunnel_route_label(route: boru_core::tunnel::service::TunnelRoute) -> &'static str {
+    route.label()
+}
+
+/// Human-readable transfer summary for a tunnel, e.g. "12.4 MB transferred".
+fn tunnel_transfer_label(info: boru_core::tunnel::service::TunnelConnectionInfo) -> Option<String> {
+    let total = info.bytes_sent.saturating_add(info.bytes_received);
+    if total == 0 {
+        None
+    } else {
+        Some(format!("{} transferred", format_file_size(total)))
+    }
+}
+
+/// Human-readable connection duration for a tunnel, e.g. "3m 12s".
+fn tunnel_duration_label(connected_at_ms: u64) -> Option<String> {
+    if connected_at_ms == 0 {
+        return None;
+    }
+    let elapsed_ms = (now_ms() as u64).saturating_sub(connected_at_ms);
+    let seconds = elapsed_ms / 1_000;
+    if seconds == 0 {
+        return Some("connected just now".to_string());
+    }
+    if seconds < 60 {
+        return Some(format!("{seconds}s"));
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return Some(format!("{minutes}m {}s", seconds % 60));
+    }
+    let hours = minutes / 60;
+    Some(format!("{hours}h {}m", minutes % 60))
+}
+
+/// Compact one-line connection info for a tunnel row, e.g.
+/// "Direct · 12.4 MB transferred · 3m 12s". Metrics are only included when
+/// available; the route label is always shown once a connection exists.
+fn tunnel_connection_info_label(info: boru_core::tunnel::service::TunnelConnectionInfo) -> String {
+    let mut parts = vec![tunnel_route_label(info.route).to_string()];
+    if let Some(transfer) = tunnel_transfer_label(info) {
+        parts.push(transfer);
+    }
+    if let Some(duration) = tunnel_duration_label(info.connected_at_ms) {
+        parts.push(duration);
+    }
+    parts.join("  ·  ")
+}
+
 /// Presence state shown in contact displays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PeerPresence {
@@ -3355,6 +3408,12 @@ struct ReceivedTunnelState {
     local_addr: Option<std::net::SocketAddr>,
     /// Cancellation token driving the background listener task.
     cancellation: Option<tokio_util::sync::CancellationToken>,
+    /// Shared live connection info updated by the listener transport.
+    ///
+    /// None while disconnected; Some once the listener is running so the
+    /// Settings → Secure Tunnels section can display the Iroh-reported route
+    /// and lightweight transfer metrics.
+    live_info: Option<std::sync::Arc<boru_core::tunnel::service::TunnelLiveInfo>>,
 }
 
 /// GUI-side display metadata for a tunnel this user is sharing.
@@ -3628,6 +3687,8 @@ pub enum AppMessage {
         local_addr: std::net::SocketAddr,
         /// Cancellation token driving the background listener task.
         cancellation: tokio_util::sync::CancellationToken,
+        /// Shared live connection info updated by the listener transport.
+        live_info: std::sync::Arc<boru_core::tunnel::service::TunnelLiveInfo>,
     },
     /// Connecting to a received tunnel failed.
     ReceivedTunnelConnectFailed {
@@ -13468,19 +13529,23 @@ impl IcedChat {
                         )
                         .await?;
                         let local_addr = listener.local_addr()?;
+                        let live_info = listener.live_info();
                         let cancellation = tokio_util::sync::CancellationToken::new();
                         let run_cancellation = cancellation.clone();
                         tokio::spawn(async move {
                             let _ = listener.run(run_cancellation).await;
                         });
-                        Ok::<_, anyhow::Error>((local_addr, cancellation))
+                        Ok::<_, anyhow::Error>((local_addr, cancellation, live_info))
                     },
                     move |result| match result {
-                        Ok((local_addr, cancellation)) => AppMessage::ReceivedTunnelConnected {
-                            tunnel_id,
-                            local_addr,
-                            cancellation,
-                        },
+                        Ok((local_addr, cancellation, live_info)) => {
+                            AppMessage::ReceivedTunnelConnected {
+                                tunnel_id,
+                                local_addr,
+                                cancellation,
+                                live_info,
+                            }
+                        }
                         Err(error) => AppMessage::ReceivedTunnelConnectFailed {
                             tunnel_id,
                             message: format!("{error:#}"),
@@ -13492,11 +13557,13 @@ impl IcedChat {
                 tunnel_id,
                 local_addr,
                 cancellation,
+                live_info,
             } => {
                 if let Some(state) = self.received_tunnels.get_mut(&tunnel_id) {
                     state.connected = true;
                     state.local_addr = Some(local_addr);
                     state.cancellation = Some(cancellation);
+                    state.live_info = Some(live_info);
                 }
                 iced::Task::none()
             }
@@ -13518,6 +13585,7 @@ impl IcedChat {
                     }
                     state.connected = false;
                     state.local_addr = None;
+                    state.live_info = None;
                 }
                 iced::Task::none()
             }
@@ -17638,6 +17706,7 @@ impl IcedChat {
                 connected: false,
                 local_addr: None,
                 cancellation: None,
+                live_info: None,
             },
         );
         self.toast_message = Some(format!(
@@ -24159,25 +24228,32 @@ impl IcedChat {
                 } else {
                     format!("{} active connections", def.active_connections)
                 };
+                let connection_info = self
+                    .tunnel_service
+                    .connection_info(def.id)
+                    .map(tunnel_connection_info_label);
                 let tunnel_id = def.id;
-                let row = Row::new()
+                let mut info_column = Column::new()
+                    .push(text(name).size(TYPO_SM))
                     .push(
-                        Column::new()
-                            .push(text(name).size(TYPO_SM))
-                            .push(
-                                text(format!("With {friend}"))
-                                    .size(TYPO_XS)
-                                    .style(text_muted_style),
-                            )
-                            .push(
-                                text(format!("{target}  ·  {remaining}  ·  {connections}"))
-                                    .size(TYPO_XS)
-                                    .style(text_muted_style),
-                            )
-                            .spacing(SPACE_2)
-                            .width(Length::Fill)
-                            .align_x(Alignment::Start),
+                        text(format!("With {friend}"))
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
                     )
+                    .push(
+                        text(format!("{target}  ·  {remaining}  ·  {connections}"))
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start);
+                if let Some(label) = connection_info {
+                    info_column =
+                        info_column.push(text(label).size(TYPO_XS).style(text_muted_style));
+                }
+                let row = Row::new()
+                    .push(info_column)
                     .push(
                         button(text("Stop Sharing").size(TYPO_XS))
                             .on_press(AppMessage::StopSharingTunnel(tunnel_id))
@@ -24230,19 +24306,26 @@ impl IcedChat {
                     .local_addr
                     .map(|addr| tunnel_local_address(&state.offer, addr))
                     .unwrap_or_else(|| "connecting…".to_string());
-                let row = Row::new()
+                let connection_info = state
+                    .live_info
+                    .as_ref()
+                    .map(|live| tunnel_connection_info_label(live.snapshot()));
+                let mut info_column = Column::new()
+                    .push(text(label).size(TYPO_SM))
                     .push(
-                        Column::new()
-                            .push(text(label).size(TYPO_SM))
-                            .push(
-                                text(address)
-                                    .size(TYPO_XS)
-                                    .style(text_muted_style),
-                            )
-                            .spacing(SPACE_2)
-                            .width(Length::Fill)
-                            .align_x(Alignment::Start),
+                        text(address)
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
                     )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start);
+                if let Some(info) = connection_info {
+                    info_column =
+                        info_column.push(text(info).size(TYPO_XS).style(text_muted_style));
+                }
+                let row = Row::new()
+                    .push(info_column)
                     .push(
                         button(text("Disconnect").size(TYPO_XS))
                             .on_press(AppMessage::DisconnectReceivedTunnel(tunnel_id))
