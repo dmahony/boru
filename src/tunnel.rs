@@ -526,6 +526,187 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn raw_tunnel_stream_transfers_large_payload() -> anyhow::Result<()> {
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let tunnel = TunnelProtocol::new();
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, tunnel.clone())
+            .spawn();
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await
+            .std_context("connect tunnel")?;
+        let (mut send, _recv) = connection.open_bi().await?;
+        let payload = (0..(2 * 1024 * 1024))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        send.write_all(&payload[..1]).await?;
+        let (_server_send, mut server_recv) =
+            timeout(Duration::from_secs(2), tunnel.accept_stream())
+                .await
+                .std_context("accept large stream")?
+                .ok_or_else(|| anyhow::anyhow!("tunnel stream channel closed"))?;
+        let reader =
+            tokio::spawn(async move { server_recv.read_to_end(2 * 1024 * 1024 + 1).await });
+        send.write_all(&payload[1..]).await?;
+        send.finish()?;
+        assert_eq!(reader.await??, payload);
+        router.shutdown().await.std_context("shutdown router")?;
+        client.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_tunnel_stream_preserves_zero_length_finish() -> anyhow::Result<()> {
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let tunnel = TunnelProtocol::new();
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, tunnel.clone())
+            .spawn();
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await?;
+        let (mut send, mut recv) = connection.open_bi().await?;
+        send.finish()?;
+        let (mut server_send, mut server_recv) =
+            timeout(Duration::from_secs(2), tunnel.accept_stream())
+                .await
+                .std_context("accept zero-length stream")?
+                .ok_or_else(|| anyhow::anyhow!("tunnel stream channel closed"))?;
+        assert!(server_recv.read_to_end(1).await?.is_empty());
+        server_send.finish()?;
+        assert!(recv.read_to_end(1).await?.is_empty());
+        router.shutdown().await.std_context("shutdown router")?;
+        client.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_tunnel_stream_remote_disconnect_is_observable() -> anyhow::Result<()> {
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let tunnel = TunnelProtocol::new();
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, tunnel.clone())
+            .spawn();
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await?;
+        let (mut send, mut recv) = connection.open_bi().await?;
+        send.write_all(b"before disconnect").await?;
+        let (_server_send, mut server_recv) =
+            timeout(Duration::from_secs(2), tunnel.accept_stream())
+                .await
+                .std_context("accept disconnect stream")?
+                .ok_or_else(|| anyhow::anyhow!("tunnel stream channel closed"))?;
+        client.close().await;
+        assert!(server_recv.read_to_end(1024).await.is_err());
+        assert!(recv.read_to_end(1024).await.is_err());
+        router.shutdown().await.std_context("shutdown router")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_tunnel_stream_read_can_be_cancelled() -> anyhow::Result<()> {
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let tunnel = TunnelProtocol::new();
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, tunnel.clone())
+            .spawn();
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await?;
+        let (mut send, _recv) = connection.open_bi().await?;
+        send.write_all(b"pending").await?;
+        let (_server_send, mut server_recv) =
+            timeout(Duration::from_secs(2), tunnel.accept_stream())
+                .await
+                .std_context("accept cancellable stream")?
+                .ok_or_else(|| anyhow::anyhow!("tunnel stream channel closed"))?;
+        assert!(
+            timeout(Duration::from_millis(50), server_recv.read_to_end(1024))
+                .await
+                .is_err()
+        );
+        send.finish()?;
+        assert_eq!(server_recv.read_to_end(1024).await?, Vec::<u8>::new());
+        router.shutdown().await.std_context("shutdown router")?;
+        client.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_tunnel_stream_supports_multiple_sequential_streams() -> anyhow::Result<()> {
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let tunnel = TunnelProtocol::new();
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, tunnel.clone())
+            .spawn();
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await?;
+        for index in 0..4u8 {
+            let (mut send, mut recv) = connection.open_bi().await?;
+            send.write_all(&[index; 32]).await?;
+            send.finish()?;
+            let (mut server_send, mut server_recv) =
+                timeout(Duration::from_secs(2), tunnel.accept_stream())
+                    .await
+                    .std_context("accept sequential stream")?
+                    .ok_or_else(|| anyhow::anyhow!("tunnel stream channel closed"))?;
+            assert_eq!(server_recv.read_to_end(64).await?, vec![index; 32]);
+            server_send.write_all(&[index + 1; 16]).await?;
+            server_send.finish()?;
+            assert_eq!(recv.read_to_end(32).await?, vec![index + 1; 16]);
+        }
+        router.shutdown().await.std_context("shutdown router")?;
+        client.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_tunnel_stream_supports_simultaneous_streams() -> anyhow::Result<()> {
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let tunnel = TunnelProtocol::new();
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, tunnel.clone())
+            .spawn();
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await?;
+        let mut sends = Vec::new();
+        for index in 0..4u8 {
+            let connection = connection.clone();
+            sends.push(tokio::spawn(async move {
+                let (mut send, _recv) = connection.open_bi().await?;
+                send.write_all(&[index; 128]).await?;
+                send.finish()?;
+                Ok::<_, anyhow::Error>(())
+            }));
+        }
+        for _ in 0..4 {
+            let (_send, mut recv) = timeout(Duration::from_secs(2), tunnel.accept_stream())
+                .await
+                .std_context("accept simultaneous stream")?
+                .ok_or_else(|| anyhow::anyhow!("tunnel stream channel closed"))?;
+            let bytes = recv.read_to_end(256).await?;
+            assert_eq!(bytes.len(), 128);
+            assert!(bytes.iter().all(|byte| *byte < 4));
+        }
+        for send in sends {
+            send.await??;
+        }
+        router.shutdown().await.std_context("shutdown router")?;
+        client.close().await;
+        Ok(())
+    }
+
     #[derive(Debug, Clone, Default)]
     struct CountingHandler(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
