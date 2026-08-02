@@ -738,7 +738,15 @@ fn main() -> Result<()> {
                 #[allow(unused)]
                 endpoint.address_lookup()?.add(memory_lookup.clone());
                 if !matches!(relay_mode, RelayMode::Disabled) {
-                    endpoint.online().await;
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        endpoint.online(),
+                    )
+                    .await
+                    {
+                        Ok(()) => info!("relay connection established"),
+                        Err(_) => warn!("relay.online() timed out after 15s, proceeding anyway"),
+                    }
                 }
                 info!(endpoint_addr = ?endpoint.addr(), "endpoint address ready");
                 endpoint
