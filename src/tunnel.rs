@@ -10,6 +10,8 @@ use std::sync::{
     Arc,
 };
 
+use tokio::sync::{mpsc, Mutex};
+
 use serde::{Deserialize, Serialize};
 
 use iroh::{
@@ -241,32 +243,58 @@ pub const fn reject_for_protocol_version(version: u16) -> TunnelResponse {
 /// ALPN for Boru's secure tunnel protocol.
 pub const BORU_TUNNEL_ALPN: &[u8] = b"/boru-tunnel/1";
 
+/// A raw bidirectional stream routed to a tunnel protocol handler.
+pub type TunnelStream = (iroh::endpoint::SendStream, iroh::endpoint::RecvStream);
+
 /// Handler for incoming Boru tunnel connections.
 ///
-/// For now the handler records that the connection reached the tunnel
-/// protocol boundary.  Later phases will perform the authenticated handshake
-/// and stream forwarding using this same handler.
-#[derive(Debug, Clone, Default)]
+/// The handler owns no endpoint. It accepts every bidirectional stream on the
+/// shared Iroh connection and exposes those streams to the tunnel service. This
+/// keeps transport setup separate from the later TCP forwarding phase.
+#[derive(Debug, Clone)]
 pub struct TunnelProtocol {
     accepted: Arc<AtomicUsize>,
+    streams: mpsc::Sender<TunnelStream>,
+    incoming: Arc<Mutex<mpsc::Receiver<TunnelStream>>>,
+}
+
+impl Default for TunnelProtocol {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TunnelProtocol {
     /// Construct a tunnel protocol handler.
     pub fn new() -> Self {
-        Self::default()
+        let (streams, incoming) = mpsc::channel(32);
+        Self {
+            accepted: Arc::new(AtomicUsize::new(0)),
+            streams,
+            incoming: Arc::new(Mutex::new(incoming)),
+        }
     }
 
     /// Return the number of incoming connections routed to this handler.
     pub fn accepted_count(&self) -> usize {
         self.accepted.load(Ordering::Acquire)
     }
+
+    /// Wait for the next raw bidirectional stream from a remote tunnel peer.
+    pub async fn accept_stream(&self) -> Option<TunnelStream> {
+        self.incoming.lock().await.recv().await
+    }
 }
 
 impl ProtocolHandler for TunnelProtocol {
-    async fn accept(&self, _connection: Connection) -> Result<(), AcceptError> {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         self.accepted.fetch_add(1, Ordering::AcqRel);
-        Ok(())
+        loop {
+            let stream = connection.accept_bi().await.map_err(AcceptError::from)?;
+            if self.streams.send(stream).await.is_err() {
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -447,6 +475,52 @@ mod tests {
         .std_context("wait for tunnel handler")?;
 
         assert_eq!(tunnel.accepted_count(), 1);
+        router.shutdown().await.std_context("shutdown router")?;
+        client.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_tunnel_stream_exchanges_deterministic_bytes() -> anyhow::Result<()> {
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let tunnel = TunnelProtocol::new();
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, tunnel.clone())
+            .spawn();
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await
+            .std_context("connect tunnel")?;
+        let (mut client_send, mut client_recv) = connection
+            .open_bi()
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        client_send
+            .write_all(b"hello from peer A")
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        client_send.finish().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let (mut server_send, mut server_recv) =
+            timeout(Duration::from_secs(2), tunnel.accept_stream())
+                .await
+                .std_context("accept raw stream")?
+                .ok_or_else(|| anyhow::anyhow!("tunnel stream channel closed"))?;
+        let received = server_recv
+            .read_to_end(1024 * 1024)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(received, b"hello from peer A");
+        server_send
+            .write_all(b"hello from peer B")
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        server_send.finish().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let response = client_recv
+            .read_to_end(1024 * 1024)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(response, b"hello from peer B");
         router.shutdown().await.std_context("shutdown router")?;
         client.close().await;
         Ok(())
