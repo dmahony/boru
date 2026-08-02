@@ -542,7 +542,7 @@ fn view_download_progress_inner<'a>(
                     .center_y(Length::Fill)
             })
         ])
-        .width(Length::Fill)
+        .width(Length::Fixed(360.0))
         .height(Length::Fixed(preview_height))
         .clip(true)
         .style(|t| widget::container::Style {
@@ -708,7 +708,7 @@ fn view_download_progress_inner<'a>(
 
     // Card container with state-coloured border.
     let card = container(body)
-        .width(Length::Fill)
+        .width(Length::Shrink)
         .padding([SPACE_12, SPACE_16])
         .style(move |t| widget::container::Style {
             background: Some(iced::Background::Color(bg_surface(t))),
