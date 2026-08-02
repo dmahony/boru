@@ -17,11 +17,13 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
 };
 
+pub mod service;
+
 /// Current version of the tunnel handshake wire messages.
 pub const TUNNEL_PROTOCOL_VERSION: u16 = 1;
 
 /// Stable identifier for a locally configured tunnel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TunnelId(pub [u8; 32]);
 
 /// Version of the signed capability contract.
