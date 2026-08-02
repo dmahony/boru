@@ -1166,6 +1166,37 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Format a connected received-tunnel loopback address for display.
+///
+/// Only an explicitly HTTP-identified service gets the `http://` scheme
+/// prefix; other TCP services are shown as a bare host:port.
+fn tunnel_local_address(
+    offer: &boru_core::tunnel::TunnelOffer,
+    addr: std::net::SocketAddr,
+) -> String {
+    if offer.is_http {
+        format!("http://{addr}")
+    } else {
+        addr.to_string()
+    }
+}
+
+/// Human-readable tunnel expiry countdown, e.g. "Expires in 42 minutes".
+fn tunnel_expiry_label(expires_at_ms: u64) -> String {
+    let remaining = expires_at_ms.saturating_sub(now_ms() as u64);
+    if remaining >= 24 * 60 * 60 * 1_000 {
+        format!("Expires in {} days", remaining / (24 * 60 * 60 * 1_000))
+    } else if remaining >= 60 * 60 * 1_000 {
+        format!("Expires in {} hours", remaining / (60 * 60 * 1_000))
+    } else if remaining >= 60 * 1_000 {
+        format!("Expires in {} minutes", remaining / (60 * 1_000))
+    } else if remaining > 0 {
+        "Expires in less than a minute".to_string()
+    } else {
+        "Expired".to_string()
+    }
+}
+
 /// A peer is considered Away when no presence/activity has refreshed its
 /// last-seen timestamp for this long (10 seconds).
 const AWAY_THRESHOLD_MS: u64 = 10_000;
@@ -2847,8 +2878,18 @@ pub struct IcedChat {
     /// Expiry duration selected in the share dialog.
     share_service_expiry: boru_core::tunnel::service::TunnelDuration,
     /// Combo box state for the expiry picker in the share dialog.
-    share_expiry_combo:
-        iced::widget::combo_box::State<boru_core::tunnel::service::TunnelDuration>,
+    share_expiry_combo: iced::widget::combo_box::State<boru_core::tunnel::service::TunnelDuration>,
+    /// Whether the sharer explicitly identified the shared service as HTTP.
+    /// Controls whether the receiving side displays `http://` before the
+    /// loopback address — never inferred from the port or service name.
+    share_service_is_http: bool,
+    /// Received secure-tunnel offers, keyed by tunnel id.
+    ///
+    /// Populated when a friend sends a signed `ContactAction::TunnelOffer`
+    /// over the whisper control channel.  Each entry tracks the local
+    /// listener once the user connects, so the GUI can show the loopback
+    /// address and offer Open / Copy Address / Disconnect actions.
+    received_tunnels: HashMap<boru_core::tunnel::TunnelId, ReceivedTunnelState>,
     /// Whether the "Block Friend" confirmation dialog is shown.
     friend_block_confirm: bool,
     /// Optional toast message displayed briefly at the top of the friend profile.
@@ -3266,6 +3307,23 @@ fn apply_discovered_peers_update(peers: &mut Vec<PublicKey>, update: DiscoveredP
     }
 }
 
+/// Lifecycle state of a secure-tunnel offer received from a friend.
+#[derive(Debug, Clone)]
+struct ReceivedTunnelState {
+    /// The verified offer payload (capability + display metadata).
+    offer: boru_core::tunnel::TunnelOffer,
+    /// Endpoint identity of the sharer.
+    sharer: PublicKey,
+    /// Display name of the sharer at offer time.
+    sharer_label: String,
+    /// Whether the user has connected a local listener for this tunnel.
+    connected: bool,
+    /// Local loopback listener address once connected (127.0.0.1:<port>).
+    local_addr: Option<std::net::SocketAddr>,
+    /// Cancellation token driving the background listener task.
+    cancellation: Option<tokio_util::sync::CancellationToken>,
+}
+
 #[derive(Debug, Clone)]
 pub enum AppMessage {
     // ── Navigation ──
@@ -3499,7 +3557,44 @@ pub enum AppMessage {
         expires_at_ms: u64,
     },
     /// Creating a local service tunnel failed.
-    TunnelShareFailed { message: String },
+    TunnelShareFailed {
+        message: String,
+    },
+    /// The signed tunnel offer was dispatched to the friend's whisper inbox.
+    TunnelOfferSent,
+    /// Dispatching the tunnel offer to the friend failed (e.g. offline).
+    TunnelOfferSendFailed {
+        message: String,
+    },
+    /// Whether the shared service is explicitly identified as HTTP toggled.
+    /// Controls whether the receiving side shows `http://` before the
+    /// loopback address — never inferred from the port or service name.
+    ShareLocalServiceHttpToggled(bool),
+    /// Connect a received tunnel offer: bind a loopback listener that routes
+    /// through the tunnel to the sharer's service.
+    ConnectReceivedTunnel(boru_core::tunnel::TunnelId),
+    /// A received tunnel's local listener is now accepting connections.
+    ReceivedTunnelConnected {
+        /// Tunnel being connected.
+        tunnel_id: boru_core::tunnel::TunnelId,
+        /// Loopback address the listener is bound to.
+        local_addr: std::net::SocketAddr,
+        /// Cancellation token driving the background listener task.
+        cancellation: tokio_util::sync::CancellationToken,
+    },
+    /// Connecting to a received tunnel failed.
+    ReceivedTunnelConnectFailed {
+        /// Tunnel being connected.
+        tunnel_id: boru_core::tunnel::TunnelId,
+        /// Human-readable failure reason.
+        message: String,
+    },
+    /// Disconnect a connected received tunnel (cancels its listener task).
+    DisconnectReceivedTunnel(boru_core::tunnel::TunnelId),
+    /// Open the connected received tunnel's loopback address in a browser.
+    OpenReceivedTunnel(boru_core::tunnel::TunnelId),
+    /// Copy the connected received tunnel's loopback address to the clipboard.
+    CopyReceivedTunnelAddress(boru_core::tunnel::TunnelId),
     /// Text input changed for inline rename of a friend's display name.
     FriendRenameInputChanged(String),
     /// Confirm the inline rename of a friend's display name.
@@ -4972,6 +5067,8 @@ impl IcedChat {
                 boru_core::tunnel::service::TunnelDuration::EightHours,
                 boru_core::tunnel::service::TunnelDuration::UntilExit,
             ]),
+            share_service_is_http: true,
+            received_tunnels: HashMap::new(),
             toast_message: None,
             toast_counter: 0,
             context_menu: None,
@@ -6318,6 +6415,15 @@ impl IcedChat {
             AppMessage::CancelShareLocalService => "CancelShareLocalService",
             AppMessage::TunnelShared { .. } => "TunnelShared",
             AppMessage::TunnelShareFailed { .. } => "TunnelShareFailed",
+            AppMessage::ShareLocalServiceHttpToggled(_) => "ShareLocalServiceHttpToggled",
+            AppMessage::ConnectReceivedTunnel(_) => "ConnectReceivedTunnel",
+            AppMessage::ReceivedTunnelConnected { .. } => "ReceivedTunnelConnected",
+            AppMessage::ReceivedTunnelConnectFailed { .. } => "ReceivedTunnelConnectFailed",
+            AppMessage::DisconnectReceivedTunnel(_) => "DisconnectReceivedTunnel",
+            AppMessage::OpenReceivedTunnel(_) => "OpenReceivedTunnel",
+            AppMessage::CopyReceivedTunnelAddress(_) => "CopyReceivedTunnelAddress",
+            AppMessage::TunnelOfferSent => "TunnelOfferSent",
+            AppMessage::TunnelOfferSendFailed { .. } => "TunnelOfferSendFailed",
             AppMessage::FriendRenameInputChanged(_) => "FriendRenameInputChanged",
             AppMessage::FriendRenameConfirm => "FriendRenameConfirm",
             AppMessage::CopyPeerId(_) => "CopyPeerId",
@@ -11119,6 +11225,9 @@ impl IcedChat {
                                 record.set_mailbox_public_key(mailbox);
                                 self.try_save_friends();
                             }
+                            Ok((sender, ContactAction::TunnelOffer { offer })) => {
+                                self.handle_received_tunnel_offer(sender, offer);
+                            }
                             Ok((_sender, _action)) => {
                                 self.push_system(
                                     "Rejected invalid contact control message.".to_string(),
@@ -13126,6 +13235,7 @@ impl IcedChat {
                 self.share_service_name = "Development Server".to_string();
                 self.share_service_port = "3000".to_string();
                 self.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
+                self.share_service_is_http = true;
                 iced::Task::none()
             }
             AppMessage::ShareLocalServiceNameChanged(value) => {
@@ -13138,6 +13248,10 @@ impl IcedChat {
             }
             AppMessage::ShareLocalServiceExpiryChanged(value) => {
                 self.share_service_expiry = value;
+                iced::Task::none()
+            }
+            AppMessage::ShareLocalServiceHttpToggled(value) => {
+                self.share_service_is_http = value;
                 iced::Task::none()
             }
             AppMessage::CancelShareLocalService => {
@@ -13185,11 +13299,54 @@ impl IcedChat {
                 match result {
                     Ok(def) => {
                         self.share_local_service_open = false;
-                        iced::Task::done(AppMessage::TunnelShared {
-                            name: service_name,
-                            friend: friend_label,
+                        let offer = boru_core::tunnel::TunnelOffer {
+                            tunnel_id,
+                            capability: boru_core::tunnel::TunnelCapability::sign(
+                                &self.secret_key,
+                                *peer,
+                                tunnel_id,
+                                def.created_at_ms,
+                                def.expires_at_ms,
+                            ),
+                            service_name: service_name.clone(),
+                            is_http: self.share_service_is_http,
+                            owner_endpoint_addr: self.endpoint.addr(),
                             expires_at_ms: def.expires_at_ms,
-                        })
+                        };
+                        // Dispatch the offer over the authenticated whisper
+                        // control channel so the friend's GUI can display it.
+                        let peer_key = *peer;
+                        let whisper_handle = self.whisper_handle.clone();
+                        let secret_key = self.secret_key.clone();
+                        let send_task = iced::Task::perform(
+                            async move {
+                                let action =
+                                    boru_core::contact::ContactAction::TunnelOffer { offer };
+                                let payload = boru_core::contact::SignedContactMessage::sign(
+                                    &secret_key,
+                                    &action,
+                                );
+                                match payload {
+                                    Ok(payload) => whisper_handle
+                                        .send_control(peer_key, payload.into())
+                                        .await
+                                        .map_err(|e| e.to_string()),
+                                    Err(err) => Err(err.to_string()),
+                                }
+                            },
+                            |result| match result {
+                                Ok(()) => AppMessage::TunnelOfferSent,
+                                Err(message) => AppMessage::TunnelOfferSendFailed { message },
+                            },
+                        );
+                        iced::Task::batch(vec![
+                            iced::Task::done(AppMessage::TunnelShared {
+                                name: service_name,
+                                friend: friend_label,
+                                expires_at_ms: def.expires_at_ms,
+                            }),
+                            send_task,
+                        ])
                     }
                     Err(err) => iced::Task::done(AppMessage::TunnelShareFailed {
                         message: format!("{err:?}"),
@@ -13211,17 +13368,139 @@ impl IcedChat {
                 } else {
                     "less than a minute".to_string()
                 };
-                self.toast_message = Some(format!(
-                    "Sharing {name} with {friend} (expires in {when})"
-                ));
+                self.toast_message =
+                    Some(format!("Sharing {name} with {friend} (expires in {when})"));
                 self.toast_counter = 160;
                 iced::Task::none()
             }
             AppMessage::TunnelShareFailed { message } => {
-                self.toast_message =
-                    Some(format!("Could not share service: {message}"));
+                self.toast_message = Some(format!("Could not share service: {message}"));
                 self.toast_counter = 160;
                 iced::Task::none()
+            }
+            AppMessage::TunnelOfferSent => {
+                self.toast_message = Some("Tunnel offer sent".to_string());
+                self.toast_counter = 120;
+                iced::Task::none()
+            }
+            AppMessage::TunnelOfferSendFailed { message } => {
+                self.toast_message = Some(format!("Could not send tunnel offer: {message}"));
+                self.toast_counter = 160;
+                iced::Task::none()
+            }
+            AppMessage::ConnectReceivedTunnel(tunnel_id) => {
+                // Look up the received offer and start a loopback listener
+                // that routes through the tunnel to the sharer's service.
+                let Some(state) = self.received_tunnels.get(&tunnel_id) else {
+                    return iced::Task::none();
+                };
+                if state.connected {
+                    return iced::Task::none();
+                }
+                let offer = state.offer.clone();
+                let endpoint = self.endpoint.clone();
+                iced::Task::perform(
+                    async move {
+                        let listener = boru_core::tunnel::LocalTunnelListener::bind_loopback(
+                            endpoint,
+                            offer.owner_endpoint_addr.clone(),
+                            offer.tunnel_id,
+                            offer.capability.clone(),
+                            0,
+                        )
+                        .await?;
+                        let local_addr = listener.local_addr()?;
+                        let cancellation = tokio_util::sync::CancellationToken::new();
+                        let run_cancellation = cancellation.clone();
+                        tokio::spawn(async move {
+                            let _ = listener.run(run_cancellation).await;
+                        });
+                        Ok::<_, anyhow::Error>((local_addr, cancellation))
+                    },
+                    move |result| match result {
+                        Ok((local_addr, cancellation)) => AppMessage::ReceivedTunnelConnected {
+                            tunnel_id,
+                            local_addr,
+                            cancellation,
+                        },
+                        Err(error) => AppMessage::ReceivedTunnelConnectFailed {
+                            tunnel_id,
+                            message: format!("{error:#}"),
+                        },
+                    },
+                )
+            }
+            AppMessage::ReceivedTunnelConnected {
+                tunnel_id,
+                local_addr,
+                cancellation,
+            } => {
+                if let Some(state) = self.received_tunnels.get_mut(&tunnel_id) {
+                    state.connected = true;
+                    state.local_addr = Some(local_addr);
+                    state.cancellation = Some(cancellation);
+                }
+                iced::Task::none()
+            }
+            AppMessage::ReceivedTunnelConnectFailed { tunnel_id, message } => {
+                if let Some(state) = self.received_tunnels.get_mut(&tunnel_id) {
+                    state.connected = false;
+                    state.local_addr = None;
+                    state.cancellation = None;
+                }
+                self.toast_message =
+                    Some(format!("Could not connect to shared service: {message}"));
+                self.toast_counter = 160;
+                iced::Task::none()
+            }
+            AppMessage::DisconnectReceivedTunnel(tunnel_id) => {
+                if let Some(state) = self.received_tunnels.get_mut(&tunnel_id) {
+                    if let Some(cancellation) = state.cancellation.take() {
+                        cancellation.cancel();
+                    }
+                    state.connected = false;
+                    state.local_addr = None;
+                }
+                iced::Task::none()
+            }
+            AppMessage::OpenReceivedTunnel(tunnel_id) => {
+                let Some(state) = self.received_tunnels.get(&tunnel_id) else {
+                    return iced::Task::none();
+                };
+                let Some(local_addr) = state.local_addr else {
+                    return iced::Task::none();
+                };
+                let display = tunnel_local_address(&state.offer, local_addr);
+                // Only an explicitly-identified HTTP service is opened in the
+                // browser; anything else has no scheme to open.
+                if !state.offer.is_http {
+                    self.toast_message =
+                        Some("This service is not HTTP; use Copy Address instead.".to_string());
+                    self.toast_counter = 160;
+                    return iced::Task::none();
+                }
+                let url = display.clone();
+                iced::Task::perform(
+                    async move {
+                        let result = open::that(&url);
+                        if let Err(e) = result {
+                            tracing::warn!(url = %url, error = %e, "failed to open tunnel address");
+                        }
+                    },
+                    |_| AppMessage::Noop,
+                )
+            }
+            AppMessage::CopyReceivedTunnelAddress(tunnel_id) => {
+                let Some(state) = self.received_tunnels.get(&tunnel_id) else {
+                    return iced::Task::none();
+                };
+                let Some(local_addr) = state.local_addr else {
+                    return iced::Task::none();
+                };
+                let display = tunnel_local_address(&state.offer, local_addr);
+                self.toast_message = Some("Local address copied to clipboard".to_string());
+                self.toast_counter = 120;
+                return iced::clipboard::write(display);
             }
             AppMessage::FriendRenameInputChanged(value) => {
                 self.friend_profile_rename_input = value;
@@ -17232,6 +17511,62 @@ impl IcedChat {
             .find(|(_, rec)| rec.label.as_deref() == Some(target))
             .and_then(|(fid, _)| fid.parse_public_key().ok())
     }
+    /// Handle a signed secure-tunnel offer received over the whisper control
+    /// channel.
+    ///
+    /// The offer is verified before it is presented: it must name a valid
+    /// recipient-bound capability signed by the sender and not be expired.
+    /// Rejected or expired offers are ignored rather than shown to the user.
+    fn handle_received_tunnel_offer(
+        &mut self,
+        sender: PublicKey,
+        offer: boru_core::tunnel::TunnelOffer,
+    ) {
+        let now = now_ms().max(0) as u64;
+        let valid =
+            offer
+                .capability
+                .verify_for(&sender, &self.local_public, offer.tunnel_id, now, true);
+        if let Err(error) = valid {
+            info!(
+                from = %sender.fmt_short(),
+                ?error,
+                "ignoring invalid received tunnel offer"
+            );
+            return;
+        }
+        if offer.expires_at_ms <= now {
+            info!(
+                from = %sender.fmt_short(),
+                "ignoring expired received tunnel offer"
+            );
+            return;
+        }
+        let sharer_label = self.resolve_name(&sender);
+        let service_name = offer.service_name.clone();
+        let expiry = tunnel_expiry_label(offer.expires_at_ms);
+        self.received_tunnels.insert(
+            offer.tunnel_id,
+            ReceivedTunnelState {
+                offer,
+                sharer: sender,
+                sharer_label: sharer_label.clone(),
+                connected: false,
+                local_addr: None,
+                cancellation: None,
+            },
+        );
+        self.toast_message = Some(format!(
+            "{sharer_label} shared {service_name} with you ({expiry})"
+        ));
+        self.toast_counter = 200;
+        info!(
+            from = %sender.fmt_short(),
+            service = %service_name,
+            "received tunnel offer"
+        );
+    }
+
     fn handle_friend_event(&mut self, event: FriendEvent) {
         info!(?event, "friend event received");
         match event {
@@ -25495,6 +25830,116 @@ impl IcedChat {
         // ── Build body ──
         let mut body = Column::new().spacing(SPACE_4);
         body = body.push(status_section);
+
+        // ── Shared Services section (received tunnel offers) ──
+        let shared_services = self
+            .received_tunnels
+            .values()
+            .filter(|state| state.sharer == peer)
+            .collect::<Vec<_>>();
+        if !shared_services.is_empty() {
+            let mut services_col = Column::new().spacing(SPACE_4);
+            for state in shared_services {
+                let tunnel_id = state.offer.tunnel_id;
+                let service_name = state.offer.service_name.clone();
+                let sharer_label = state.sharer_label.clone();
+                let is_http = state.offer.is_http;
+                let expiry = tunnel_expiry_label(state.offer.expires_at_ms);
+                let mut card = Column::new().spacing(SPACE_4);
+
+                if state.connected {
+                    card = card.push(
+                        text("Connected")
+                            .size(TYPO_XS)
+                            .color(accent_primary(&theme)),
+                    );
+                }
+                card = card.push(text(sharer_label).size(TYPO_XS).style(text_muted_style));
+                card = card.push(text(service_name).size(TYPO_MD));
+
+                if let Some(local_addr) = state.local_addr {
+                    let display = tunnel_local_address(&state.offer, local_addr);
+                    card = card.push(
+                        text(format!("Local address: {display}"))
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    );
+                } else {
+                    card = card.push(text(expiry).size(TYPO_XS).style(text_muted_style));
+                }
+
+                let mut actions = row![].spacing(SPACE_6).align_y(Alignment::Center);
+                if state.connected {
+                    if is_http {
+                        actions = actions.push(
+                            button(text("Open").size(TYPO_XS))
+                                .on_press(AppMessage::OpenReceivedTunnel(tunnel_id))
+                                .padding([SPACE_2, SPACE_8])
+                                .style(move |t, _status| iced::widget::button::Style {
+                                    background: Some(iced::Background::Color(accent_primary(t))),
+                                    text_color: Color::WHITE,
+                                    border: iced::Border {
+                                        radius: SPACE_4.into(),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                }),
+                        );
+                    }
+                    actions = actions.push(
+                        button(text("Copy Address").size(TYPO_XS))
+                            .on_press(AppMessage::CopyReceivedTunnelAddress(tunnel_id))
+                            .padding([SPACE_2, SPACE_8]),
+                    );
+                    actions = actions.push(
+                        button(text("Disconnect").size(TYPO_XS))
+                            .on_press(AppMessage::DisconnectReceivedTunnel(tunnel_id))
+                            .padding([SPACE_2, SPACE_8]),
+                    );
+                } else {
+                    actions = actions.push(
+                        button(text("Connect").size(TYPO_XS))
+                            .on_press(AppMessage::ConnectReceivedTunnel(tunnel_id))
+                            .padding([SPACE_2, SPACE_8])
+                            .style(move |t, _status| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(accent_primary(t))),
+                                text_color: Color::WHITE,
+                                border: iced::Border {
+                                    radius: SPACE_4.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }),
+                    );
+                }
+                card = card.push(actions);
+
+                services_col =
+                    services_col.push(container(card).width(Length::Fill).padding(SPACE_8).style(
+                        move |t| iced::widget::container::Style {
+                            background: Some(iced::Background::Color(bg_surface(t))),
+                            border: iced::Border {
+                                radius: SPACE_6.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    ));
+            }
+
+            let shared_services_section = container(
+                Column::new()
+                    .push(text("Shared Services").size(TYPO_SM).width(Length::Fill))
+                    .push(Space::new().height(SPACE_4))
+                    .push(services_col)
+                    .spacing(SPACE_2),
+            )
+            .width(Length::Fill)
+            .padding(SPACE_12)
+            .style(container_surface);
+
+            body = body.push(shared_services_section);
+        }
 
         // Separator line
         body = body.push(

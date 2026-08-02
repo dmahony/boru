@@ -73,6 +73,28 @@ pub struct TunnelCapability {
     signature: Vec<u8>,
 }
 
+/// A recipient-bound invitation to connect to a shared local service.
+///
+/// The sharer signs a [`TunnelCapability`] for the intended friend and sends
+/// it together with display metadata over the existing whisper control
+/// channel.  The capability remains the authorisation secret: the offer only
+/// names an existing tunnel, never an arbitrary destination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelOffer {
+    /// Tunnel this offer authorises.
+    pub tunnel_id: TunnelId,
+    /// Signed, recipient-bound capability token.
+    pub capability: TunnelCapability,
+    /// Human-readable service name chosen by the sharer.
+    pub service_name: String,
+    /// Whether the sharer explicitly identified the service as HTTP.
+    pub is_http: bool,
+    /// Current endpoint address of the sharer, used to dial the tunnel.
+    pub owner_endpoint_addr: iroh::EndpointAddr,
+    /// Unix epoch milliseconds at which the offer expires.
+    pub expires_at_ms: u64,
+}
+
 /// Reason a received tunnel capability was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityVerificationError {
@@ -560,8 +582,8 @@ mod tests {
 
     use super::{
         reject_for_protocol_version, CapabilityVerificationError, TunnelCapability, TunnelId,
-        TunnelProtocol, TunnelRejectReason, TunnelRequest, TunnelResponse, BORU_TUNNEL_ALPN,
-        TUNNEL_PROTOCOL_VERSION,
+        TunnelOffer, TunnelProtocol, TunnelRejectReason, TunnelRequest, TunnelResponse,
+        BORU_TUNNEL_ALPN, TUNNEL_PROTOCOL_VERSION,
     };
 
     fn capability_fixture() -> (iroh::SecretKey, iroh::SecretKey, TunnelId, TunnelCapability) {
@@ -579,6 +601,59 @@ mod tests {
         tunnel_id: TunnelId,
     ) -> Result<(), CapabilityVerificationError> {
         capability.verify_for(&owner.public(), &recipient.public(), tunnel_id, 150, true)
+    }
+
+    #[test]
+    fn tunnel_offer_round_trips_through_postcard() {
+        let (owner, recipient, tunnel_id, capability) = capability_fixture();
+        let offer = TunnelOffer {
+            tunnel_id,
+            capability,
+            service_name: "Development Server".to_string(),
+            is_http: true,
+            owner_endpoint_addr: iroh::EndpointAddr::new(owner.public()),
+            expires_at_ms: 200,
+        };
+        let bytes = postcard::to_stdvec(&offer).expect("serialize offer");
+        let decoded: TunnelOffer = postcard::from_bytes(&bytes).expect("deserialize offer");
+        assert_eq!(offer, decoded);
+        assert_eq!(decoded.service_name, "Development Server");
+        assert!(decoded.is_http);
+        assert_eq!(decoded.expires_at_ms, 200);
+        assert_eq!(decoded.capability.allowed_peer_endpoint_id, recipient.public());
+    }
+
+    #[test]
+    fn tunnel_offer_capability_is_recipient_bound_and_verifiable() {
+        let (owner, recipient, tunnel_id, capability) = capability_fixture();
+        let offer = TunnelOffer {
+            tunnel_id,
+            capability,
+            service_name: "API".to_string(),
+            is_http: false,
+            owner_endpoint_addr: iroh::EndpointAddr::new(owner.public()),
+            expires_at_ms: 200,
+        };
+        // The offer's capability verifies for the intended recipient within
+        // its validity window.
+        assert!(verify_fixture(
+            &offer.capability,
+            &owner,
+            &recipient,
+            tunnel_id
+        )
+        .is_ok());
+        // A different peer cannot present the offer.
+        let stranger = iroh::SecretKey::generate();
+        assert_eq!(
+            verify_fixture(&offer.capability, &owner, &stranger, tunnel_id),
+            Err(CapabilityVerificationError::RecipientMismatch)
+        );
+        // The offer expires once its window passes.
+        let expired = offer
+            .capability
+            .verify_for(&owner.public(), &recipient.public(), tunnel_id, 201, true);
+        assert_eq!(expired, Err(CapabilityVerificationError::Expired));
     }
 
     #[test]

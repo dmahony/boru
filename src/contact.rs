@@ -54,6 +54,15 @@ pub enum ContactAction {
         /// Public identity and X25519 encryption key used by the mailbox.
         mailbox: MailboxPublicKey,
     },
+    /// Offer a recipient-bound secure tunnel to a local service.
+    ///
+    /// The capability is signed by the sender and names only an existing
+    /// tunnel — never an arbitrary destination.  The recipient verifies the
+    /// capability before presenting it when connecting.
+    TunnelOffer {
+        /// Serialised tunnel offer payload.
+        offer: crate::tunnel::TunnelOffer,
+    },
 }
 
 /// Wire envelope for authenticated contact control messages.
