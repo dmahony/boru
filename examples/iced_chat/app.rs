@@ -3617,6 +3617,8 @@ pub enum AppMessage {
     AcceptTunnelRequest(String),
     /// Decline an incoming tunnel request.
     DeclineTunnelRequest(String),
+    /// Close an active tunnel by its identifier.
+    CloseTunnel(boru_core::tunnel::TunnelId),
     // ── ChatList ──
     JoinTicketInputChanged(String),
     NewChatCreated,
@@ -6782,6 +6784,7 @@ impl IcedChat {
             AppMessage::TunnelRequestReceived { .. } => "TunnelRequestReceived",
             AppMessage::AcceptTunnelRequest(_) => "AcceptTunnelRequest",
             AppMessage::DeclineTunnelRequest(_) => "DeclineTunnelRequest",
+            AppMessage::CloseTunnel(_) => "CloseTunnel",
             AppMessage::OpenConversation(_) => "OpenConversation",
             AppMessage::SelectConversation(_) => "SelectConversation",
             AppMessage::CloseConversation(_) => "CloseConversation",
@@ -7952,6 +7955,12 @@ impl IcedChat {
                     }
                 }
                 self.push_system("Tunnel request declined".to_string());
+                iced::Task::none()
+            }
+
+            AppMessage::CloseTunnel(tunnel_id) => {
+                let _ = self.tunnel_service.revoke_tunnel(tunnel_id);
+                self.push_system("Tunnel closed".to_string());
                 iced::Task::none()
             }
 
@@ -21651,10 +21660,80 @@ impl IcedChat {
             .style(container_card);
 
         // ── Right column assembly ──
+        let tunnels_header = text("TUNNELS")
+            .size(TYPO_XS)
+            .color(text_muted(&theme));
+
+        let tunnel_list: Vec<TunnelDefinition> = self.tunnel_service.list_tunnels();
+        let tunnels_items: Vec<iced::Element<'_, AppMessage>> = if tunnel_list.is_empty() {
+            vec![Self::empty_state_block(
+                &theme,
+                "No active tunnels.",
+                None,
+                [SPACE_6, 0.0],
+            )]
+        } else {
+            tunnel_list
+                .iter()
+                .map(|def| {
+                    let peer_name = self
+                        .names
+                        .get(&def.allowed_peer)
+                        .cloned()
+                        .unwrap_or_else(|| def.allowed_peer.fmt_short().to_string());
+                    let status = tunnel_status_label(def);
+                    let status_theme_color = tunnel_status_color(&theme, def);
+                    let label = format!("{status} · {peer_name}");
+                    container(
+                        row![
+                            icon_svg(ICON_ACTIVITY, TYPO_SM).style(move |t, _| {
+                                iced::widget::svg::Style {
+                                    color: Some(status_theme_color),
+                                }
+                            }),
+                            text(label)
+                                .size(TYPO_SM)
+                                .color(text_system(&theme)),
+                            Space::new().width(Length::Fill),
+                            button(text("✗").size(TYPO_XS).color(color_error(&theme)))
+                                .on_press(AppMessage::CloseTunnel(def.id))
+                                .padding([SPACE_2, SPACE_6])
+                                .style(BUTTON_GHOST_BG),
+                        ]
+                        .spacing(SPACE_6)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([SPACE_2, 0.0])
+                    .width(Length::Fill)
+                    .into()
+                })
+                .collect()
+        };
+
+        let tunnels_feed = Column::new()
+            .push(tunnels_header)
+            .push(Space::new().height(Length::Fixed(SPACE_6)))
+            .push(
+                scrollable(
+                    Column::with_children(tunnels_items)
+                        .spacing(SPACE_2)
+                        .width(Length::Fill),
+                )
+                .height(Length::Fixed(120.0))
+                .width(Length::Fill),
+            );
+
+        let tunnels_card = container(tunnels_feed)
+            .padding([SPACE_12, SPACE_16])
+            .width(Length::Fill)
+            .style(container_card);
+
         let right_col = Column::new()
             .push(online_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(activity_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(tunnels_card)
             .spacing(0)
             .width(Length::Fill);
 
