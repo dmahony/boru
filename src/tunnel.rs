@@ -530,6 +530,57 @@ mod tests {
         assert_eq!(request.protocol_version(), TUNNEL_PROTOCOL_VERSION);
     }
 
+    #[tokio::test]
+    async fn remote_payload_cannot_select_a_different_target() -> anyhow::Result<()> {
+        // The destination is configured on the owner. Address-looking bytes
+        // from the remote peer are application data, not routing metadata.
+        let target_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let target_addr = target_listener.local_addr()?;
+        let target_task = tokio::spawn(async move {
+            let (mut socket, _) = target_listener.accept().await?;
+            let mut received = vec![0; b"192.168.1.1:80".len()];
+            socket.read_exact(&mut received).await?;
+            socket.write_all(b"owner-target").await?;
+            anyhow::Ok(received)
+        });
+
+        let owner = iroh::SecretKey::generate();
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let tunnel_id = TunnelId([43; 32]);
+        let service = Arc::new(crate::tunnel::service::TunnelService::new());
+        service
+            .create_tunnel(
+                tunnel_id,
+                owner.public(),
+                crate::tunnel::service::TunnelTarget::tcp(target_addr.ip(), target_addr.port()),
+                client.id(),
+                0,
+                u64::MAX,
+            )
+            .expect("owner target configuration should be accepted");
+        let protocol = TunnelProtocol::with_service(Arc::clone(&service), owner.public());
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, protocol)
+            .spawn();
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await?;
+        let (mut send, mut recv) = connection.open_bi().await?;
+        let capability = TunnelCapability::sign(&owner, client.id(), tunnel_id, 0, u64::MAX);
+        super::write_frame(&mut send, &TunnelRequest::open(tunnel_id, capability)).await?;
+        send.write_all(b"192.168.1.1:80").await?;
+        let response = super::read_frame::<TunnelResponse>(&mut recv).await?;
+        assert_eq!(response, TunnelResponse::Accepted);
+        send.finish()?;
+        assert_eq!(target_task.await??, b"192.168.1.1:80");
+        assert_eq!(recv.read_to_end(1024).await?, b"owner-target");
+
+        router.shutdown().await?;
+        client.close().await;
+        Ok(())
+    }
+
     #[test]
     fn valid_capability_verifies() {
         let (owner, recipient, tunnel_id, capability) = capability_fixture();
