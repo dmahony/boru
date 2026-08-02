@@ -23732,7 +23732,7 @@ impl IcedChat {
                         // scrollable's overlay scrollbar (~12 px).
                         Row::new()
                             .push(dl_el)
-                            .width(Length::Fill)
+                            .width(Length::Shrink)
                             .padding(iced::Padding::default().right(SPACE_12))
                     } else {
                         // Centred notice — muted text, no bubble/border

@@ -104,6 +104,14 @@ fn inline_video_preview_height(dimensions: Option<(u32, u32)>) -> f32 {
     (360.0 / (width / height)).clamp(120.0, 280.0)
 }
 
+/// Compute the preview width from known poster dimensions, clamped sensibly.
+fn inline_video_preview_width(dimensions: Option<(u32, u32)>) -> f32 {
+    dimensions
+        .filter(|(w, h)| *w > 0 && *h > 0)
+        .map(|(w, _)| (w as f32).clamp(160.0, 640.0))
+        .unwrap_or(360.0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VideoPresentationState {
     Remote,
@@ -474,6 +482,7 @@ fn view_download_progress_inner<'a>(
     if attachment.kind == super::app::TransferKind::Video {
         let presentation = video_presentation_state(attachment);
         let preview_height = inline_video_preview_height(attachment.poster_dimensions);
+        let preview_width = inline_video_preview_width(attachment.poster_dimensions);
         let poster: iced::Element<'static, AppMessage> =
             if let Some(ref handle) = attachment.thumbnail_handle {
                 iced::widget::image(handle.clone())
@@ -551,7 +560,7 @@ fn view_download_progress_inner<'a>(
                     .center_y(Length::Fill)
             })
         ])
-        .width(Length::Fixed(360.0))
+        .width(Length::Fixed(preview_width))
         .height(Length::Fixed(preview_height))
         .clip(true)
         .style(|t| widget::container::Style {
