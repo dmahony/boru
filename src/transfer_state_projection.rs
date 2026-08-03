@@ -320,6 +320,19 @@ impl TransferStateStore {
             .snapshot()
     }
 
+    /// Mark active transfers for an authenticated peer disconnected and
+    /// broadcast every resulting update to subscribers.
+    pub fn disconnect_peer(&self, peer_id: &str, occurred_at_ms: u64) {
+        let updates = self
+            .projection
+            .lock()
+            .expect("transfer projection lock")
+            .disconnect_peer(peer_id, occurred_at_ms);
+        for update in updates {
+            let _ = self.updates.send(update);
+        }
+    }
+
     /// Convert an existing authenticated inbound callback into a projection event.
     pub fn publish_progress(
         &self,

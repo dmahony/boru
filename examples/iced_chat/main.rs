@@ -10,6 +10,7 @@ mod card_shell;
 mod component_gallery;
 mod connection_details;
 mod dashboard_view_model;
+mod dashboard_filters;
 mod design_tokens;
 mod download_progress_view;
 mod downloaded_view_model;
@@ -72,7 +73,11 @@ use iroh::{
     endpoint::presets,
     Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl, SecretKey,
 };
-use iroh_blobs::{store::fs::FsStore, BlobsProtocol};
+use iroh_blobs::{
+    provider::events::{ConnectMode, EventMask, EventSender, ProviderMessage, RequestMode},
+    store::fs::FsStore,
+    BlobsProtocol,
+};
 
 use boru_core::whisper::{WhisperBuilder, WHISPER_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
@@ -695,6 +700,22 @@ fn main() -> Result<()> {
         });
     }
 
+        // ── FS-05/FS-11/FS-17 transfer projection ────────────────────
+        // Shared live projection store (broadcast channel + snapshot) plus
+        // item_id (content hash) → display-name enrichment maps. The blob
+        // provider consumer below feeds outbound events into the store AND
+        // records them durably (direction=outbound) so the Activity Log's
+        // "By others" view has real history. Created outside the async
+        // block because IcedChat::new (below) receives them.
+        let transfer_store = std::sync::Arc::new(
+            boru_core::transfer_state_projection::TransferStateStore::new(256),
+        );
+        let outbound_item_labels: std::sync::Arc<
+            std::sync::Mutex<std::collections::HashMap<String, String>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let inbound_item_labels: std::sync::Arc<
+            std::sync::Mutex<std::collections::HashMap<String, String>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let (
         endpoint,
         memory_lookup,
@@ -726,9 +747,10 @@ fn main() -> Result<()> {
         // Register the discovery subscriber before binding the endpoint. The
         // mDNS service caches advertisements but does not replay already-seen
         // endpoints to subscribers created later. Subscribing after endpoint
-        // setup and lobby initialization can therefore miss both peers'
-        // initial announcements indefinitely.
+        // creation would miss the loopback advertisement and break local
+        // single-machine demos.
         let mdns_events = mdns.subscribe().await;
+
         let endpoint = {
             {
                 let ep_builder = if matches!(relay_mode, RelayMode::Disabled) {
@@ -836,7 +858,27 @@ fn main() -> Result<()> {
         let gossip = Gossip::builder().spawn(endpoint.clone());
         splash_send("Gossip mesh ready");
         let blob_store = FsStore::load(data_dir.join("blobs")).await?;
-        let blobs_protocol = BlobsProtocol::new(&blob_store, None);
+
+        let (blob_event_sender, blob_event_rx) = EventSender::channel(
+            128,
+            EventMask {
+                connected: ConnectMode::Notify,
+                get: RequestMode::NotifyLog,
+                get_many: RequestMode::NotifyLog,
+                push: RequestMode::Disabled,
+                observe: iroh_blobs::provider::events::ObserveMode::None,
+                throttle: iroh_blobs::provider::events::ThrottleMode::None,
+            },
+        );
+        spawn_outbound_provider_consumer(
+            runtime.handle(),
+            blob_event_rx,
+            Arc::clone(&transfer_store),
+            Arc::clone(&outbound_item_labels),
+            Some(storage.clone()),
+            local_public,
+        );
+        let blobs_protocol = BlobsProtocol::new(&blob_store, Some(blob_event_sender));
         splash_send("Blob store ready");
 
         // ── Persistent history stores ────────────────────────────────
@@ -1508,6 +1550,9 @@ fn main() -> Result<()> {
                 gui_action_history,
                 Some((*storage).clone()),
                 Arc::clone(&tunnel_service),
+                Arc::clone(&transfer_store),
+                Arc::clone(&outbound_item_labels),
+                Arc::clone(&inbound_item_labels),
             );
             // Enable snapshot throttle: max ~8 updates/sec (125ms gap)
             // so rapidly changing GUI state (composer text, unread counts)
@@ -1661,6 +1706,346 @@ fn main() -> Result<()> {
     runtime.block_on(endpoint.close());
     let _keep_runtime_alive = runtime;
     Ok(())
+}
+
+/// FS-05/FS-11/FS-17: consume blob-provider request events into the live
+/// transfer projection and the durable activity log.
+///
+/// Every served blob request becomes an `Outbound` transfer record in the
+/// live `TransferStateStore` (the "Peers Downloading from Me" panel) and a
+/// privacy-filtered lifecycle event in the durable `transfer_activity`
+/// table (the Activity Log's "By others" view). Progress checkpoints are fed
+/// to the live store but intentionally NOT persisted, so a long upload cannot
+/// flood the bounded activity table with thousands of rows.
+fn spawn_outbound_provider_consumer(
+    runtime: &tokio::runtime::Handle,
+    mut rx: tokio::sync::mpsc::Receiver<ProviderMessage>,
+    store: Arc<boru_core::transfer_state_projection::TransferStateStore>,
+    item_labels: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    storage: Option<Arc<Storage>>,
+    local_public: PublicKey,
+) {
+    use boru_core::diagnostics::{event_names, TransferLifecycleEvent};
+    use boru_core::transfer_state_projection::{EventName, TransferDirection, TransferEvent};
+    use iroh_blobs::provider::events::RequestUpdate;
+    // Own the handle before the spawn so nested spawns don't borrow the
+    // function-scope reference across the 'static task boundary. Two clones:
+    // one is borrowed by this spawn call, the other is moved into the task.
+    let handle = runtime.clone();
+    let task_handle = handle.clone();
+    handle.spawn(async move {
+        let mut peers: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+        let mut transfers: std::collections::HashMap<(u64, u64), String> =
+            std::collections::HashMap::new();
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                // The EventMask requests ConnectMode::Notify, so the plain
+                // ClientConnected variant is not expected; both variants carry
+                // the same fields (Notify<T> derefs to T).
+                ProviderMessage::ClientConnected(msg) => {
+                    if let Some(peer) = msg.inner.endpoint_id {
+                        peers.insert(msg.inner.connection_id, peer.to_string());
+                    }
+                }
+                // Notify wrapper derefs to the same ClientConnected payload.
+                ProviderMessage::ClientConnectedNotify(msg) => {
+                    if let Some(peer) = msg.inner.endpoint_id {
+                        peers.insert(msg.inner.connection_id, peer.to_string());
+                    }
+                }
+                ProviderMessage::ConnectionClosed(msg) => {
+                    if let Some(peer) = peers.get(&msg.inner.connection_id).cloned() {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        store.disconnect_peer(&peer, now_ms);
+                    }
+                    peers.remove(&msg.inner.connection_id);
+                    transfers.retain(|(conn, _), _| *conn != msg.inner.connection_id);
+                }
+                ProviderMessage::GetRequestReceivedNotify(msg) => {
+                    let key = (msg.inner.connection_id, msg.inner.request_id);
+                    let transfer_id = transfers
+                        .entry(key)
+                        .or_insert_with(|| {
+                            format!("serve:{}-{}", msg.inner.connection_id, msg.inner.request_id)
+                        })
+                        .clone();
+                    let peer_id = peers.get(&msg.inner.connection_id).cloned();
+                    let mut update_rx = msg.rx;
+                    let store = store.clone();
+                    let item_labels = item_labels.clone();
+                    let storage = storage.clone();
+                    task_handle.spawn(async move {
+                        let mut sequence = 0u64;
+                        let mut current_hash: Option<String> = None;
+                        let mut current_total: Option<u64> = None;
+                        while let Ok(Some(update)) = update_rx.recv().await {
+                            sequence += 1;
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0);
+                            let (kind, bytes, total_bytes, error): (
+                                EventName,
+                                u64,
+                                Option<u64>,
+                                Option<String>,
+                            ) = match update {
+                                RequestUpdate::Started(started) => {
+                                    let hash_hex = started.hash.to_string();
+                                    if let Ok(mut labels) = item_labels.lock() {
+                                        labels.entry(hash_hex.clone()).or_insert_with(|| {
+                                            storage
+                                                .as_ref()
+                                                .and_then(|stg| {
+                                                    stg.get_shared_file(
+                                                        &local_public.to_string(),
+                                                        &hash_hex,
+                                                    )
+                                                    .ok()
+                                                    .flatten()
+                                                })
+                                                .map(|row| row.display_filename)
+                                                .unwrap_or_else(|| {
+                                                    let prefix: String =
+                                                        hash_hex.chars().take(12).collect();
+                                                    format!("file {prefix}…")
+                                                })
+                                        });
+                                    }
+                                    current_hash = Some(hash_hex.clone());
+                                    current_total = Some(started.size);
+                                    (EventName::Started, 0, Some(started.size), None)
+                                }
+                                RequestUpdate::Progress(progress) => (
+                                    EventName::Progress,
+                                    progress.end_offset,
+                                    current_total,
+                                    None,
+                                ),
+                                RequestUpdate::Completed(completed) => (
+                                    EventName::Completed,
+                                    completed.stats.payload_bytes_sent,
+                                    None,
+                                    None,
+                                ),
+                                RequestUpdate::Aborted(_) => (
+                                    EventName::Failed,
+                                    0,
+                                    None,
+                                    Some("Transfer aborted before completion".to_string()),
+                                ),
+                            };
+                            let event = TransferEvent {
+                                event_id: format!(
+                                    "serve:{transfer_id}:{sequence}:{now_ms}"
+                                ),
+                                transfer_id: transfer_id.clone(),
+                                item_id: current_hash.clone().unwrap_or_default(),
+                                direction: TransferDirection::Outbound,
+                                peer_id: peer_id.clone(),
+                                sequence,
+                                attempt: 1,
+                                occurred_at_ms: now_ms,
+                                kind: kind.clone(),
+                                bytes,
+                                total_bytes,
+                                error: error.clone(),
+                            };
+                            let is_progress = matches!(kind, EventName::Progress);
+                            store.publish(event);
+                            // Durable activity: persist non-progress lifecycle
+                            // points with direction=outbound. Progress is live
+                            // only, so the bounded table stays useful.
+                            if !is_progress {
+                                let (event_name, payload) = match kind {
+                                    EventName::Started => (
+                                        event_names::TRANSFER_STARTED,
+                                        Some(serde_json::json!({
+                                            "direction": "outbound",
+                                            "total_bytes": current_total.unwrap_or(0),
+                                        })),
+                                    ),
+                                    EventName::Completed => (
+                                        event_names::COMPLETION,
+                                        Some(serde_json::json!({
+                                            "direction": "outbound",
+                                            "bytes_transferred": bytes,
+                                        })),
+                                    ),
+                                    EventName::Failed => (
+                                        event_names::FAILURE,
+                                        Some(serde_json::json!({
+                                            "direction": "outbound",
+                                            "error_category": "protocol_error",
+                                            "reason": error.unwrap_or_default(),
+                                        })),
+                                    ),
+                                    _ => (event_names::TRANSFER_STARTED, None),
+                                };
+                                if let Some(stg) = storage.as_ref() {
+                                    let _ = stg.record_transfer_activity(&TransferLifecycleEvent {
+                                        schema_version: 1,
+                                        event_id: format!(
+                                            "serve:{transfer_id}:{sequence}:{now_ms}"
+                                        ),
+                                        event_name: event_name.to_string(),
+                                        transfer_id: transfer_id.clone(),
+                                        sequence,
+                                        occurred_at_ms: now_ms,
+                                        attempt: 1,
+                                        payload,
+                                    });
+                                }
+                            }
+                        }
+                    });
+                }
+                ProviderMessage::GetManyRequestReceivedNotify(msg) => {
+                    let key = (msg.inner.connection_id, msg.inner.request_id);
+                    let transfer_id = transfers
+                        .entry(key)
+                        .or_insert_with(|| {
+                            format!("serve:{}-{}", msg.inner.connection_id, msg.inner.request_id)
+                        })
+                        .clone();
+                    let peer_id = peers.get(&msg.inner.connection_id).cloned();
+                    let mut update_rx = msg.rx;
+                    let store = store.clone();
+                    let item_labels = item_labels.clone();
+                    let storage = storage.clone();
+                    task_handle.spawn(async move {
+                        let mut sequence = 0u64;
+                        let mut current_hash: Option<String> = None;
+                        let mut current_total: Option<u64> = None;
+                        while let Ok(Some(update)) = update_rx.recv().await {
+                            sequence += 1;
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0);
+                            let (kind, bytes, total_bytes, error): (
+                                EventName,
+                                u64,
+                                Option<u64>,
+                                Option<String>,
+                            ) = match update {
+                                RequestUpdate::Started(started) => {
+                                    let hash_hex = started.hash.to_string();
+                                    if let Ok(mut labels) = item_labels.lock() {
+                                        labels.entry(hash_hex.clone()).or_insert_with(|| {
+                                            storage
+                                                .as_ref()
+                                                .and_then(|stg| {
+                                                    stg.get_shared_file(
+                                                        &local_public.to_string(),
+                                                        &hash_hex,
+                                                    )
+                                                    .ok()
+                                                    .flatten()
+                                                })
+                                                .map(|row| row.display_filename)
+                                                .unwrap_or_else(|| {
+                                                    let prefix: String =
+                                                        hash_hex.chars().take(12).collect();
+                                                    format!("file {prefix}…")
+                                                })
+                                        });
+                                    }
+                                    current_hash = Some(hash_hex.clone());
+                                    current_total = Some(started.size);
+                                    (EventName::Started, 0, Some(started.size), None)
+                                }
+                                RequestUpdate::Progress(progress) => (
+                                    EventName::Progress,
+                                    progress.end_offset,
+                                    current_total,
+                                    None,
+                                ),
+                                RequestUpdate::Completed(completed) => (
+                                    EventName::Completed,
+                                    completed.stats.payload_bytes_sent,
+                                    None,
+                                    None,
+                                ),
+                                RequestUpdate::Aborted(_) => (
+                                    EventName::Failed,
+                                    0,
+                                    None,
+                                    Some("Transfer aborted before completion".to_string()),
+                                ),
+                            };
+                            let event = TransferEvent {
+                                event_id: format!(
+                                    "serve:{transfer_id}:{sequence}:{now_ms}"
+                                ),
+                                transfer_id: transfer_id.clone(),
+                                item_id: current_hash.clone().unwrap_or_default(),
+                                direction: TransferDirection::Outbound,
+                                peer_id: peer_id.clone(),
+                                sequence,
+                                attempt: 1,
+                                occurred_at_ms: now_ms,
+                                kind: kind.clone(),
+                                bytes,
+                                total_bytes,
+                                error: error.clone(),
+                            };
+                            let is_progress = matches!(kind, EventName::Progress);
+                            store.publish(event);
+                            // Durable activity: persist non-progress lifecycle
+                            // points with direction=outbound. Progress is live
+                            // only, so the bounded table stays useful.
+                            if !is_progress {
+                                let (event_name, payload) = match kind {
+                                    EventName::Started => (
+                                        event_names::TRANSFER_STARTED,
+                                        Some(serde_json::json!({
+                                            "direction": "outbound",
+                                            "total_bytes": current_total.unwrap_or(0),
+                                        })),
+                                    ),
+                                    EventName::Completed => (
+                                        event_names::COMPLETION,
+                                        Some(serde_json::json!({
+                                            "direction": "outbound",
+                                            "bytes_transferred": bytes,
+                                        })),
+                                    ),
+                                    EventName::Failed => (
+                                        event_names::FAILURE,
+                                        Some(serde_json::json!({
+                                            "direction": "outbound",
+                                            "error_category": "protocol_error",
+                                            "reason": error.unwrap_or_default(),
+                                        })),
+                                    ),
+                                    _ => (event_names::TRANSFER_STARTED, None),
+                                };
+                                if let Some(stg) = storage.as_ref() {
+                                    let _ = stg.record_transfer_activity(&TransferLifecycleEvent {
+                                        schema_version: 1,
+                                        event_id: format!(
+                                            "serve:{transfer_id}:{sequence}:{now_ms}"
+                                        ),
+                                        event_name: event_name.to_string(),
+                                        transfer_id: transfer_id.clone(),
+                                        sequence,
+                                        occurred_at_ms: now_ms,
+                                        attempt: 1,
+                                        payload,
+                                    });
+                                }
+                            }
+                        }
+                    });
+                }
+                _ => {}
+            }
+        }
+    });
 }
 
 #[cfg(test)]

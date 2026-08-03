@@ -56,9 +56,12 @@ const ACTIONS: &[QuickAction] = &[
 
 /// Build one complete quick-action card.
 ///
-/// `iced::widget::button` provides the full-card hit target and standard
-/// keyboard activation (Enter/Space), so no nested click targets can steal
-/// focus from the action.
+/// `iced::widget::button` provides the full-card hit target for pointer
+/// activation. Framework note (UI-19): iced 0.14 buttons do not implement
+/// `operation::Focusable`, so they cannot receive keyboard focus natively;
+/// the primary actions on the home screen are still keyboard-reachable via
+/// the global shortcuts (Ctrl+N new room, Ctrl+Backspace back, Escape,
+/// `/` focus composer) which the app subscribes to globally.
 pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<'a, AppMessage> {
     let content = Column::new()
         .push(icon_tile::<AppMessage>(action.icon, IconSize::Lg, None))

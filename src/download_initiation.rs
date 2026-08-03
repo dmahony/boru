@@ -17,7 +17,7 @@ use n0_error::StdResultExt;
 use tracing::info;
 
 use crate::chat_core::TRANSFER_TELEMETRY;
-use crate::storage::Storage;
+use crate::storage::{RemoteSharedFileRow, Storage};
 
 // ── Error type ──────────────────────────────────────────────────────────────
 
@@ -115,34 +115,38 @@ pub struct InitiateDownloadResult {
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
-/// Initiate a new durable download from a remote peer.
+/// Backend-authoritative gate for starting a download from a remote peer.
 ///
-/// Performs the following precondition checks (in order):
-///
-/// 1. **Catalogue verified** — the remote peer's catalogue must have been
-///    fetched and stored locally.  Checks `profile_manifest_state` for a
-///    matching row.
-/// 2. **File metadata valid** — the file entry (identified by `content_hash`)
-///    must exist in the stored catalogue for this peer, and its fields must
-///    be non-empty and reasonable.
-/// 3. **No conflicting download** — no terminal (complete, completed, failed,
-///    version_mismatch) or active (queued, resolving_peer, requesting_permission,
-///    downloading, verifying) download exists for the same content hash and
-///    peer.  An existing paused or cancelled download is not considered a
-///    conflict (the caller should resume or ignore those).
-///
-/// If all checks pass, a new download row is created in `queued` state and
-/// the result is returned with the new download's id.
+/// Runs the same catalogue-verified and file-metadata preconditions as
+/// [`initiate_download`] WITHOUT creating a durable download row. UI actions
+/// must pass this gate before beginning a transfer so that the backend's
+/// verified catalogue — not UI state — decides whether a download may start.
 ///
 /// # Errors
 ///
-/// Returns [`InitiateDownloadError`] describing the first failed check.
-pub fn initiate_download(
+/// Returns [`InitiateDownloadError::CatalogueNotFetched`] when the peer's
+/// signed catalogue has not been fetched and stored, or
+/// [`InitiateDownloadError::FileNotFoundInCatalogue`] /
+/// [`InitiateDownloadError::FileMetadataInvalid`] when the file is missing or
+/// malformed in the verified catalogue.
+pub fn validate_download_request(
     storage: &Storage,
     content_hash: &str,
     remote_peer: &str,
-    known_size: Option<u64>,
-) -> std::result::Result<InitiateDownloadResult, InitiateDownloadError> {
+) -> std::result::Result<(), InitiateDownloadError> {
+    find_verified_catalogue_entry(storage, content_hash, remote_peer)?;
+    Ok(())
+}
+
+/// Look up the verified catalogue entry for a file/peer pair.
+///
+/// Shared by [`validate_download_request`] and [`initiate_download`] so both
+/// enforcement paths apply identical preconditions.
+fn find_verified_catalogue_entry<'a>(
+    storage: &Storage,
+    content_hash: &str,
+    remote_peer: &str,
+) -> std::result::Result<RemoteSharedFileRow, InitiateDownloadError> {
     // ── Check 1: Catalogue is verified ─────────────────────────────────
     let peer_pk = remote_peer.parse::<iroh::PublicKey>().map_err(|_e| {
         InitiateDownloadError::CatalogueNotFetched {
@@ -201,6 +205,40 @@ pub fn initiate_download(
             reason: "file size is zero".to_string(),
         });
     }
+
+    Ok(file_entry.clone())
+}
+
+/// Initiate a new durable download from a remote peer.
+///
+/// Performs the following precondition checks (in order):
+///
+/// 1. **Catalogue verified** — the remote peer's catalogue must have been
+///    fetched and stored locally.  Checks `profile_manifest_state` for a
+///    matching row.
+/// 2. **File metadata valid** — the file entry (identified by `content_hash`)
+///    must exist in the stored catalogue for this peer, and its fields must
+///    be non-empty and reasonable.
+/// 3. **No conflicting download** — no terminal (complete, completed, failed,
+///    version_mismatch) or active (queued, resolving_peer, requesting_permission,
+///    downloading, verifying) download exists for the same content hash and
+///    peer.  An existing paused or cancelled download is not considered a
+///    conflict (the caller should resume or ignore those).
+///
+/// If all checks pass, a new download row is created in `queued` state and
+/// the result is returned with the new download's id.
+///
+/// # Errors
+///
+/// Returns [`InitiateDownloadError`] describing the first failed check.
+pub fn initiate_download(
+    storage: &Storage,
+    content_hash: &str,
+    remote_peer: &str,
+    known_size: Option<u64>,
+) -> std::result::Result<InitiateDownloadResult, InitiateDownloadError> {
+    // ── Checks 1 + 2: verified catalogue and valid file metadata ─────
+    let file_entry = find_verified_catalogue_entry(storage, content_hash, remote_peer)?;
 
     // ── Check 3: No conflicting download exists ────────────────────────
     // Conflicting means: the download is in a terminal or active state
@@ -640,5 +678,62 @@ mod tests {
         assert!(msg4.contains("peer123"));
         assert!(msg4.contains("42"));
         assert!(msg4.contains("complete"));
+    }
+
+    // ── FS-20: validate_download_request gate ─────────────────────────
+
+    #[test]
+    fn validate_download_request_passes_for_verified_catalogue() {
+        let storage = Storage::memory().unwrap();
+        let peer = test_peer();
+        let hash = test_content_hash();
+        seed_peer_catalogue(&storage, &peer, &hash);
+
+        let result = validate_download_request(&storage, &hash, &peer);
+        assert!(result.is_ok(), "verified catalogue entry must pass: {result:?}");
+    }
+
+    #[test]
+    fn validate_download_request_rejects_missing_catalogue() {
+        let storage = Storage::memory().unwrap();
+        let peer = test_peer();
+        let hash = test_content_hash();
+
+        let err = validate_download_request(&storage, &hash, &peer).unwrap_err();
+        assert!(
+            matches!(err, InitiateDownloadError::CatalogueNotFetched { .. }),
+            "expected CatalogueNotFetched, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_download_request_rejects_file_not_in_catalogue() {
+        let storage = Storage::memory().unwrap();
+        let peer = test_peer();
+        seed_peer_catalogue(&storage, &peer, &test_content_hash());
+
+        let other_hash = "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321";
+        let err = validate_download_request(&storage, other_hash, &peer).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                InitiateDownloadError::FileNotFoundInCatalogue { .. }
+            ),
+            "expected FileNotFoundInCatalogue, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_download_request_does_not_create_download_row() {
+        let storage = Storage::memory().unwrap();
+        let peer = test_peer();
+        let hash = test_content_hash();
+        seed_peer_catalogue(&storage, &peer, &hash);
+
+        validate_download_request(&storage, &hash, &peer).expect("gate passes");
+        assert!(
+            storage.list_downloads().unwrap().is_empty(),
+            "validation must not create a durable download row"
+        );
     }
 }

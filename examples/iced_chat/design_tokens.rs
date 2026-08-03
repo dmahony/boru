@@ -231,6 +231,11 @@ pub fn is_compact(width: f32) -> bool {
     width <= VIEWPORT_MIN_WIDTH
 }
 
+/// Returns true when the window width is between compact and reference thresholds.
+pub fn is_medium(width: f32) -> bool {
+    width > VIEWPORT_MIN_WIDTH && width < VIEWPORT_REF_WIDTH
+}
+
 /// Returns true when the window width is at or above the large threshold.
 pub fn is_large(width: f32) -> bool {
     width >= VIEWPORT_LG_WIDTH

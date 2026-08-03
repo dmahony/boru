@@ -70,6 +70,15 @@ pub(crate) enum Progress {
 }
 
 impl Progress {
+    /// Build a progress value from cumulative bytes and an optional total.
+    pub(crate) fn from_bytes(bytes: u64, total: Option<u64>) -> Self {
+        match total {
+            Some(total) if total > 0 => Self::Determinate { bytes, total },
+            Some(_) | None if bytes > 0 => Self::Indeterminate { bytes },
+            _ => Self::Unknown,
+        }
+    }
+
     pub(crate) fn fraction(&self) -> Option<f32> {
         match self {
             Self::Determinate { bytes, total } if *total > 0 => {
@@ -103,6 +112,76 @@ pub(crate) struct SharedItem {
     pub(crate) offered: bool,
     pub(crate) updated_at_ms: u64,
     pub(crate) recipients: Vec<RecipientSummary>,
+    /// FS-16: validated status of a remote-shared descriptor (None for local
+    /// items, which have no remote lifecycle).
+    pub(crate) remote_status: Option<RemoteItemStatus>,
+}
+
+/// FS-16: validated status of a remote-shared descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteItemStatus {
+    /// Descriptor is valid and the peer is reachable.
+    Available,
+    /// Descriptor is valid but the peer is offline — fetchable on return.
+    OfflineCached,
+    /// The content was already downloaded successfully.
+    AlreadyDownloaded,
+    /// The share grant expired.
+    Expired,
+    /// The share was revoked by the owner.
+    Revoked,
+    /// The descriptor failed validation.
+    Invalid,
+}
+
+/// FS-16: derive the remote item status from validation + presence + history.
+pub(crate) fn remote_item_status(
+    has_valid_descriptor: bool,
+    peer_online: bool,
+    already_downloaded: bool,
+    expired: bool,
+    revoked: bool,
+) -> RemoteItemStatus {
+    if !has_valid_descriptor {
+        return RemoteItemStatus::Invalid;
+    }
+    if revoked {
+        return RemoteItemStatus::Revoked;
+    }
+    if expired {
+        return RemoteItemStatus::Expired;
+    }
+    if already_downloaded {
+        return RemoteItemStatus::AlreadyDownloaded;
+    }
+    if peer_online {
+        RemoteItemStatus::Available
+    } else {
+        RemoteItemStatus::OfflineCached
+    }
+}
+
+/// FS-16: project a validated remote descriptor into a UI row. Returns `None`
+/// when the descriptor fails validation (missing required fields), so an
+/// untrusted or malformed catalogue entry never renders.
+pub(crate) fn project_validated_remote_shared_file(
+    owner_id: &str,
+    file: &RemoteSharedFile,
+    peer_online: bool,
+) -> Option<SharedItem> {
+    if file.display_name.trim().is_empty() || file.shared_file_id.trim().is_empty() {
+        return None;
+    }
+    Some(SharedItem {
+        id: StableId::new(format!("remote:{owner_id}:{}", file.shared_file_id)),
+        display_name: file.display_name.clone(),
+        mime_type: Some(file.mime_type.clone()),
+        size_bytes: Some(file.size_bytes),
+        offered: true,
+        updated_at_ms: file.updated_at_ms,
+        recipients: Vec::new(),
+        remote_status: Some(remote_item_status(true, peer_online, false, false, false)),
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -114,6 +193,89 @@ pub(crate) struct PeerDownload {
     pub(crate) display_name: String,
     pub(crate) progress: Progress,
     pub(crate) updated_at_ms: u64,
+    /// FS-11: outbound transfer state derived from the FS-05 projection.
+    pub(crate) state: OutboundState,
+    /// FS-11: bounded error summary for failed outbound transfers.
+    pub(crate) error: Option<String>,
+    /// FS-11: latest attempt number.
+    pub(crate) attempt: u32,
+}
+
+/// Dashboard-visible outbound transfer state, derived from the projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutboundState {
+    Transferring,
+    Retrying,
+    Verifying,
+    Completed,
+    Failed,
+    Cancelled,
+    Disconnected,
+}
+
+impl From<boru_core::transfer_state_projection::TransferState> for OutboundState {
+    fn from(state: boru_core::transfer_state_projection::TransferState) -> Self {
+        use boru_core::transfer_state_projection::TransferState;
+        match state {
+            TransferState::Active => Self::Transferring,
+            TransferState::Verifying => Self::Verifying,
+            TransferState::Completed => Self::Completed,
+            TransferState::Failed => Self::Failed,
+            TransferState::Cancelled => Self::Cancelled,
+            TransferState::Disconnected => Self::Disconnected,
+        }
+    }
+}
+
+/// Project an FS-05 outbound transfer record into a compact panel row.
+///
+/// The peer label is the authenticated peer id string from the projection —
+/// the caller resolves it to a verified display identity; it is never read
+/// from an untrusted display field. The file label is a UI enrichment keyed
+/// by the stable item id (content hash) and falls back to a short hash
+/// prefix rather than a fabricated name or local path.
+pub(crate) fn outbound_row(
+    record: &boru_core::transfer_state_projection::TransferRecord,
+    item_labels: &std::collections::HashMap<String, String>,
+) -> PeerDownload {
+    let peer_id = record
+        .peer_id
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let display_name = item_labels
+        .get(&record.item_id)
+        .cloned()
+        .unwrap_or_else(|| {
+            let prefix: String = record.item_id.chars().take(12).collect();
+            format!("file {prefix}…")
+        });
+    let state = OutboundState::from(record.state);
+    let state = if state == OutboundState::Transferring && record.attempt > 1 {
+        OutboundState::Retrying
+    } else {
+        state
+    };
+    PeerDownload {
+        id: StableId::new(format!("transfer:{}", record.transfer_id)),
+        peer_id: StableId::new(format!("peer:{peer_id}")),
+        peer_label: peer_id,
+        file_id: StableId::new(format!("item:{}", record.item_id)),
+        display_name,
+        progress: Progress::from_bytes(record.bytes, record.total_bytes),
+        updated_at_ms: record.updated_at_ms,
+        state,
+        error: record.error.clone(),
+        attempt: record.attempt,
+    }
+}
+
+/// Sort outbound rows newest-first with a stable id tiebreaker.
+pub(crate) fn sort_outbound_rows(rows: &mut [PeerDownload]) {
+    rows.sort_by(|a, b| {
+        b.updated_at_ms
+            .cmp(&a.updated_at_ms)
+            .then_with(|| a.id.cmp(&b.id))
+    });
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -222,6 +384,7 @@ pub(crate) fn project_local_shared_file(
         offered: row.offered,
         updated_at_ms: row.updated_at_ms,
         recipients,
+        remote_status: None,
     }
 }
 
@@ -234,6 +397,7 @@ pub(crate) fn project_remote_shared_file(owner_id: &str, file: &RemoteSharedFile
         offered: true,
         updated_at_ms: file.updated_at_ms,
         recipients: Vec::new(),
+        remote_status: None,
     }
 }
 
@@ -385,6 +549,84 @@ fn activity_label(kind: ActivityKind) -> &'static str {
     }
 }
 
+/// Local presence/integrity of a completed download's file on disk.
+///
+/// The dashboard only claims `Verified` when the recorded destination still
+/// exists and its size matches the recorded total; anything less is exposed
+/// as a warning or a missing-file state so history never implies a file
+/// exists when it does not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalFileState {
+    /// Destination exists and size matches the recorded total.
+    Verified,
+    /// Destination exists but its size differs from the recorded total
+    /// (tampered/truncated/replaced) or it could not be read.
+    Warning,
+    /// No file at the recorded destination (moved or deleted).
+    Missing,
+    /// No destination was recorded for this history row.
+    Unknown,
+}
+
+/// A completed incoming download shown in the Downloaded tab.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CompletedDownloadItem {
+    /// Stable history id (download row id).
+    pub(crate) id: StableId,
+    /// Numeric download row id — used for Open/Reveal/Remove messages.
+    pub(crate) row_id: i64,
+    /// Content id (content hash) — preserved internally for verification.
+    pub(crate) content_id: StableId,
+    /// Display filename.
+    pub(crate) display_name: String,
+    /// MIME type hint.
+    pub(crate) mime_type: Option<String>,
+    /// Total size in bytes.
+    pub(crate) size_bytes: u64,
+    /// Source peer display label.
+    pub(crate) source_peer: String,
+    /// When the download completed (ms since UNIX epoch).
+    pub(crate) completed_at_ms: u64,
+    /// Local file presence/integrity state.
+    pub(crate) local: LocalFileState,
+    /// Recorded destination path (used only for safe local actions; never
+    /// rendered as raw text).
+    pub(crate) destination_path: Option<String>,
+}
+
+/// Project a durable completed-download record into a UI-facing row.
+///
+/// `local` is computed by the caller from the filesystem so this module stays
+/// storage/IO-free; the recorded destination path is carried verbatim for
+/// Open/Reveal actions but the UI never renders it.
+pub(crate) fn project_completed_download(
+    record: &boru_core::storage::CompletedDownloadRecord,
+    peer_label: &str,
+    local: LocalFileState,
+) -> CompletedDownloadItem {
+    CompletedDownloadItem {
+        id: StableId::new(format!("download:{}", record.id)),
+        row_id: record.id,
+        content_id: StableId::new(format!("content:{}", record.content_hash)),
+        display_name: record.display_filename.clone(),
+        mime_type: Some(record.mime_type.clone()),
+        size_bytes: record.total_bytes,
+        source_peer: peer_label.to_string(),
+        completed_at_ms: record.completed_at_ms,
+        local,
+        destination_path: record.destination_path.clone(),
+    }
+}
+
+/// Order completed downloads newest-first with a stable id tiebreaker.
+pub(crate) fn sort_completed_downloads(items: &mut [CompletedDownloadItem]) {
+    items.sort_by(|a, b| {
+        b.completed_at_ms
+            .cmp(&a.completed_at_ms)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,5 +757,77 @@ mod tests {
         assert_eq!(state.active_tab, DashboardTab::SharedByMe);
         assert!(state.shared_by_me.is_empty());
         assert_eq!(DashboardTab::ALL.len(), 5);
+    }
+
+    #[test]
+    fn completed_download_projection_carries_safe_metadata() {
+        let record = boru_core::storage::CompletedDownloadRecord {
+            id: 42,
+            content_hash: "a".repeat(64),
+            remote_peer: "peer-a".into(),
+            total_bytes: 1234,
+            completed_at_ms: 99,
+            destination_path: Some("/home/alice/Downloads/report.pdf".into()),
+            display_filename: "report.pdf".into(),
+            mime_type: "application/pdf".into(),
+        };
+        let item = project_completed_download(&record, "Alice", LocalFileState::Verified);
+        assert_eq!(item.id.as_str(), "download:42");
+        assert_eq!(
+            item.content_id.as_str(),
+            format!("content:{}", "a".repeat(64))
+        );
+        assert_eq!(item.display_name, "report.pdf");
+        assert_eq!(item.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(item.size_bytes, 1234);
+        assert_eq!(item.source_peer, "Alice");
+        assert_eq!(item.completed_at_ms, 99);
+        assert_eq!(item.local, LocalFileState::Verified);
+        assert_eq!(
+            item.destination_path.as_deref(),
+            Some("/home/alice/Downloads/report.pdf")
+        );
+    }
+
+    #[test]
+    fn completed_download_projection_keeps_hash_internally_for_verification() {
+        let record = boru_core::storage::CompletedDownloadRecord {
+            id: 1,
+            content_hash: "deadbeef".repeat(8),
+            remote_peer: "peer-b".into(),
+            total_bytes: 5,
+            completed_at_ms: 1,
+            destination_path: None,
+            display_filename: "x.bin".into(),
+            mime_type: "application/octet-stream".into(),
+        };
+        let item = project_completed_download(&record, "Bob", LocalFileState::Missing);
+        assert_eq!(item.local, LocalFileState::Missing);
+        assert!(item.destination_path.is_none());
+        // The content id preserves the hash for integrity checks without
+        // leaking raw protocol noise into the UI.
+        assert!(item.content_id.as_str().starts_with("content:"));
+    }
+
+    #[test]
+    fn completed_downloads_sort_newest_first_with_stable_tiebreak() {
+        let record = |id: i64, at: u64| boru_core::storage::CompletedDownloadRecord {
+            id,
+            content_hash: format!("hash-{id}"),
+            remote_peer: "peer".into(),
+            total_bytes: 1,
+            completed_at_ms: at,
+            destination_path: None,
+            display_filename: format!("f{id}.bin"),
+            mime_type: "application/octet-stream".into(),
+        };
+        let mut items = vec![
+            project_completed_download(&record(1, 10), "p", LocalFileState::Verified),
+            project_completed_download(&record(2, 30), "p", LocalFileState::Verified),
+            project_completed_download(&record(3, 30), "p", LocalFileState::Verified),
+        ];
+        sort_completed_downloads(&mut items);
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["download:3", "download:2", "download:1"]);
     }
 }

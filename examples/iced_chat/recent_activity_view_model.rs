@@ -219,6 +219,7 @@ mod tests {
             occurred_at_ms,
             attempt: 1,
             payload_json: payload.map(str::to_owned),
+            direction: "inbound".into(),
         }
     }
 

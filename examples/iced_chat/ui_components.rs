@@ -28,6 +28,9 @@
 //! | Date separator     | `date_separator(…)`       | default (centered, muted)        |
 //! | System event chip  | `system_event_chip(…)`    | default (centered, muted surface)|
 //! | Connection footer  | `connection_footer(…)`    | live mesh summary                |
+//! | Connectivity notice | `connectivity_notice(…)`  | offline / stale-data / warning   |
+//! | Inline error       | `InlineError::new(…)`     | error message + optional retry   |
+//! | Loading skeleton   | `LoadingSkeleton::new(…)` | row count, optional row height   |
 
 use iced::widget::{
     button, container, rule, svg, text, text_input, tooltip as iced_tooltip, Column, Row, Space,
@@ -705,6 +708,37 @@ pub fn badge<'a, Message: 'a>(label: &'a str, kind: BadgeKind) -> Element<'a, Me
     .into()
 }
 
+/// A small rounded pill containing an owned label (for dynamic counts that
+/// cannot borrow from the enclosing view).
+pub fn badge_owned<'a, Message: 'a>(label: String, kind: BadgeKind) -> Element<'a, Message> {
+    container(
+        text(label)
+            .size(Typography::SecondaryText.size_px())
+            .font(Typography::SecondaryText.font()),
+    )
+    .padding([2.0, design_tokens::SPACE_8])
+    .style(move |t| container::Style {
+        background: Some(Background::Color(match kind {
+            BadgeKind::Default => design_tokens::surface_hover(t),
+            BadgeKind::Accent => design_tokens::primary_soft(t),
+            BadgeKind::Count => design_tokens::primary(t),
+            BadgeKind::Danger => design_tokens::color_danger(t),
+        })),
+        text_color: Some(match kind {
+            BadgeKind::Default => design_tokens::text_secondary(t),
+            BadgeKind::Accent => design_tokens::primary(t),
+            BadgeKind::Count => Color::WHITE,
+            BadgeKind::Danger => Color::WHITE,
+        }),
+        border: Border {
+            radius: design_tokens::SPACE_12.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // 11. DIVIDER
 // ═══════════════════════════════════════════════════════════════════════
@@ -1102,7 +1136,16 @@ impl<Message: 'static> Avatar<Message> {
                 })
                 .into()
             } else {
-                status_dot::<Message>(StatusDotKind::Online, 12.0)
+                // The online dot is colour-coded; give it a text label so
+                // status is never communicated by colour alone (UI-19).
+                iced_tooltip::Tooltip::new(
+                    status_dot::<Message>(StatusDotKind::Online, 12.0),
+                    text("Online")
+                        .size(Typography::SecondaryText.size_px())
+                        .font(Typography::SecondaryText.font()),
+                    iced_tooltip::Position::Top,
+                )
+                .into()
             };
 
             // Stack avatar with badge at bottom-right
@@ -2367,6 +2410,136 @@ fn overflow_menu_button_style(theme: &Theme, status: button::Status) -> button::
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 24. CONNECTIVITY NOTICE — non-blocking offline / stale-data banner
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Severity level for connectivity notices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NoticeSeverity {
+    /// Local node is offline — no network at all.
+    Offline,
+    /// Data may be stale — cached values shown, network is recovering.
+    Stale,
+    /// Warning about a specific condition (e.g. storage degraded).
+    Warning,
+}
+
+/// A non-blocking banner that sits at the top of a tab region to communicate
+/// connectivity or freshness state without blocking the rest of the UI.
+///
+/// Unlike [`InlineError`], this banner is dismissible and does not take over
+/// the entire content area — usable regions remain accessible.
+pub(crate) struct ConnectivityNotice<'a> {
+    message: String,
+    severity: NoticeSeverity,
+    dismiss_msg: Option<AppMessage>,
+    _phantom: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> ConnectivityNotice<'a> {
+    /// Create a connectivity notice with a severity and message.
+    pub fn new(severity: NoticeSeverity, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            severity,
+            dismiss_msg: None,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Add a dismiss action. When `None`, the banner is persistent.
+    pub fn on_dismiss(mut self, msg: AppMessage) -> Self {
+        self.dismiss_msg = Some(msg);
+        self
+    }
+
+    /// Build the notice element.
+    pub fn build(self, theme: &Theme) -> Element<'a, AppMessage> {
+        let (bg_color, border_color, text_color, icon) = match self.severity {
+            NoticeSeverity::Offline => (
+                design_tokens::color_danger(theme).scale_alpha(0.07),
+                design_tokens::color_danger(theme).scale_alpha(0.25),
+                design_tokens::color_danger(theme),
+                Icon::AlertTriangle,
+            ),
+            NoticeSeverity::Stale => (
+                design_tokens::color_warning(theme).scale_alpha(0.07),
+                design_tokens::color_warning(theme).scale_alpha(0.25),
+                design_tokens::color_warning(theme),
+                Icon::Activity,
+            ),
+            NoticeSeverity::Warning => (
+                design_tokens::color_warning(theme).scale_alpha(0.07),
+                design_tokens::color_warning(theme).scale_alpha(0.25),
+                design_tokens::color_warning(theme),
+                Icon::AlertTriangle,
+            ),
+        };
+
+        let icon_el = icon
+            .build()
+            .size(IconSize::Xs)
+            .color_fn(move |_| text_color)
+            .build();
+
+        let msg_text = text(self.message)
+            .font(Typography::SecondaryText.font())
+            .size(Typography::SecondaryText.size_px())
+            .color(text_color);
+
+        let mut row = Row::new()
+            .push(icon_el)
+            .push(
+                Space::new()
+                    .width(Length::Fixed(design_tokens::SPACE_8))
+                    .height(Length::Shrink),
+            )
+            .push(msg_text)
+            .push(Space::new().width(Length::Fill))
+            .spacing(0)
+            .align_y(Alignment::Center);
+
+        if let Some(dismiss) = self.dismiss_msg {
+            row = row.push(
+                button(
+                    text("\u{2715}")
+                        .font(Typography::ButtonLabel.font())
+                        .size(Typography::ButtonLabel.size_px()),
+                )
+                .on_press(dismiss)
+                .padding([design_tokens::SPACE_2, design_tokens::SPACE_8])
+                .style(move |_t, status| {
+                    let color = match status {
+                        button::Status::Hovered => text_color,
+                        _ => text_color.scale_alpha(0.6),
+                    };
+                    button::Style {
+                        background: None,
+                        text_color: color,
+                        border: Border::default(),
+                        ..Default::default()
+                    }
+                }),
+            );
+        }
+
+        container(row)
+            .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
+            .width(Length::Fill)
+            .style(move |_t| container::Style {
+                background: Some(Background::Color(bg_color)),
+                border: Border {
+                    color: border_color,
+                    width: 1.0,
+                    radius: design_tokens::RADIUS_SM.into(),
+                },
+                ..Default::default()
+            })
+            .into()
     }
 }
 

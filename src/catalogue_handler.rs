@@ -441,9 +441,17 @@ impl CatalogueHandler {
 
         let mut denied = false;
         let mut explicitly_granted = false;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         for perm in &permissions {
             if perm.grantor_user_id == self.profile_user_id && perm.content_hash == row.content_hash
             {
+                // Expired grants are inert: they neither deny nor authorize.
+                if !perm.is_active_at(now_ms) {
+                    continue;
+                }
                 match perm.permission.as_str() {
                     "deny" => denied = true,
                     "read" => explicitly_granted = true,

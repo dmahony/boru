@@ -214,6 +214,20 @@ pub struct SharedFilePermission {
     pub expires_at_ms: Option<u64>,
 }
 
+impl SharedFilePermission {
+    /// Whether this grant is active at `now_ms`.
+    ///
+    /// A grant with no `expires_at_ms` never expires; a grant whose expiry is
+    /// in the past is inactive and must not authorize (or deny) access. This
+    /// mirrors the expiry filter used by the SQL-level helpers
+    /// (`check_permission`, `count_read_grants_for_file`,
+    /// `has_active_permissions_for_file`) so in-memory authorization loops
+    /// cannot resurrect an expired grant.
+    pub fn is_active_at(&self, now_ms: u64) -> bool {
+        self.expires_at_ms.is_none_or(|expires| expires > now_ms)
+    }
+}
+
 /// Durable download state for a file being fetched from a remote peer.
 #[derive(Debug, Clone)]
 pub struct Download {
@@ -3466,6 +3480,7 @@ impl Storage {
             .get(&requester_id)
             .is_some_and(|r| r.relationship == FriendRelationship::Friends);
         let permissions = self.list_permissions_for_grantee(requester_id.as_str())?;
+        let now_ms = now_ms();
         let mut used_ids = std::collections::HashSet::new();
         let mut files = Vec::new();
         for row in self.list_shared_files(profile_user_id, true)? {
@@ -3477,6 +3492,8 @@ impl Storage {
             for permission in &permissions {
                 if permission.grantor_user_id == profile_user_id
                     && permission.content_hash == row.content_hash
+                    // Expired grants are inert: they neither deny nor authorize.
+                    && permission.is_active_at(now_ms)
                 {
                     denied |= permission.permission == "deny";
                     granted |= permission.permission == "read";
@@ -8258,5 +8275,83 @@ mod tests {
         let peers = storage.list_shared_peer_ids("local").unwrap();
         assert_eq!(downloads.len(), 3);
         assert_eq!(peers.len(), 1);
+    }
+
+    // ── Permission expiry (FS-20 security hardening) ─────────────────────
+
+    #[test]
+    fn permission_is_active_at_respects_expiry_boundary() {
+        let make = |expires: Option<u64>| crate::storage::SharedFilePermission {
+            content_hash: "hash".into(),
+            grantor_user_id: "owner".into(),
+            grantee_user_id: "peer".into(),
+            permission: "read".into(),
+            created_at_ms: 1000,
+            expires_at_ms: expires,
+        };
+        // No expiry → always active.
+        assert!(make(None).is_active_at(0));
+        assert!(make(None).is_active_at(u64::MAX));
+        // Strictly in the future → active.
+        assert!(make(Some(2000)).is_active_at(1999));
+        // At the exact boundary → inactive (expiry is exclusive).
+        assert!(!make(Some(2000)).is_active_at(2000));
+        // In the past → inactive.
+        assert!(!make(Some(2000)).is_active_at(2001));
+    }
+
+    #[test]
+    fn catalogue_entries_for_peer_hides_file_with_only_expired_grants() {
+        let storage = Storage::memory().unwrap();
+        let peer = iroh::SecretKey::generate().public();
+        let now = now_ms();
+        storage
+            .put_file_object("hash-x", 10, "text/plain", "x.txt", b"")
+            .unwrap();
+        storage
+            .upsert_shared_file("hash-x", "owner", "meta-x", "x.txt", None, true)
+            .unwrap();
+        // Grant is expired — must not make the file visible.
+        storage
+            .grant_permission("hash-x", "owner", &peer.to_string(), "read", Some(now - 1))
+            .unwrap();
+
+        let friends = crate::friends::FriendsStore::default();
+        let view = storage
+            .catalogue_entries_for_peer("owner", &peer, &friends)
+            .unwrap();
+        assert!(
+            view.files.is_empty(),
+            "expired read grant must not expose the file to the requester"
+        );
+    }
+
+    #[test]
+    fn catalogue_entries_for_peer_still_lists_active_grant() {
+        let storage = Storage::memory().unwrap();
+        let peer = iroh::SecretKey::generate().public();
+        let now = now_ms();
+        storage
+            .put_file_object("hash-y", 10, "text/plain", "y.txt", b"")
+            .unwrap();
+        storage
+            .upsert_shared_file("hash-y", "owner", "meta-y", "y.txt", None, true)
+            .unwrap();
+        storage
+            .grant_permission(
+                "hash-y",
+                "owner",
+                &peer.to_string(),
+                "read",
+                Some(now + 60_000),
+            )
+            .unwrap();
+
+        let friends = crate::friends::FriendsStore::default();
+        let view = storage
+            .catalogue_entries_for_peer("owner", &peer, &friends)
+            .unwrap();
+        assert_eq!(view.files.len(), 1);
+        assert_eq!(view.files[0].content_hash, "hash-y");
     }
 }

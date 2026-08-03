@@ -833,10 +833,20 @@ impl FileAccessHandler {
             Ok(p) => p,
             Err(_) => return FileAccessResponse::from(FileAccessErrorCode::InternalError),
         };
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         let mut explicitly_granted = false;
         for perm in &permissions {
             if perm.grantor_user_id == self.profile_user_id && perm.content_hash == row.content_hash
             {
+                // Expired grants must not authorize (or deny) access — they are
+                // treated as if absent, matching the SQL-level expiry filter in
+                // `count_read_grants_for_file` / `check_permission`.
+                if !perm.is_active_at(now_ms) {
+                    continue;
+                }
                 match perm.permission.as_str() {
                     "deny" => return FileAccessResponse::PermissionDenied,
                     "read" => explicitly_granted = true,
@@ -1073,9 +1083,17 @@ impl FileAccessHandler {
         };
 
         let mut explicitly_granted = false;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         for perm in &permissions {
             if perm.grantor_user_id == self.profile_user_id && perm.content_hash == row.content_hash
             {
+                // Expired grants are inert: they neither deny nor authorize.
+                if !perm.is_active_at(now_ms) {
+                    continue;
+                }
                 match perm.permission.as_str() {
                     "deny" => {
                         Self::access_diag(
@@ -1994,6 +2012,160 @@ mod tests {
         let response = handler.check_permission(&requester, &request).await;
 
         assert_eq!(response, FileAccessResponse::PermissionDenied);
+    }
+
+    // ── Expired read grant does not authorize (selected-peers mode) ────
+    //
+    // Regression test for the FS-20 expiry bypass: `list_permissions_for_grantee`
+    // returns grants regardless of `expires_at_ms`, and the authorization loop
+    // previously marked ANY `read` grant as `explicitly_granted` — including an
+    // expired one. When the file also had an active grant to another peer
+    // (`has_any_read_grants == true`, selected-peers mode), the expired grant
+    // resurrected access. Expired grants must be inert.
+
+    #[tokio::test]
+    async fn expired_read_grant_does_not_authorize() {
+        let metadata_id = "file-1";
+        let content_hash = "12".repeat(32);
+        let (storage, friends) = setup_storage_with_file(metadata_id, &content_hash, true);
+        let storage_clone = Arc::clone(&storage);
+        let (handler, _blob_store) = test_handler(storage, friends);
+        let requester = requester_pk();
+
+        // Active grant to another peer → file is in selected-peers mode.
+        storage_clone
+            .grant_permission(
+                &content_hash,
+                "owner-profile-id",
+                "other-peer",
+                "read",
+                None,
+            )
+            .expect("add grant for other peer");
+
+        // Requester's own read grant is EXPIRED.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        storage_clone
+            .grant_permission(
+                &content_hash,
+                "owner-profile-id",
+                &requester.to_string(),
+                "read",
+                Some(now - 1), // already expired
+            )
+            .expect("add expired grant for requester");
+
+        let request = make_request(metadata_id, &content_hash, 0);
+        let response = handler.check_permission(&requester, &request).await;
+
+        assert_eq!(
+            response,
+            FileAccessResponse::PermissionDenied,
+            "expired read grant must not authorize in selected-peers mode"
+        );
+    }
+
+    // ── Active read grant authorizes (selected-peers mode) ─────────────
+    //
+    // Counterpart to the expiry regression: a non-expired grant must still
+    // authorize, so the fix does not regress the happy path.
+
+    #[tokio::test]
+    async fn active_read_grant_authorizes() {
+        let metadata_id = "file-1";
+        let content_hash = "34".repeat(32);
+        let (storage, friends) = setup_storage_with_file(metadata_id, &content_hash, true);
+        let storage_clone = Arc::clone(&storage);
+        let (handler, _blob_store) = test_handler(storage, friends);
+        let requester = requester_pk();
+
+        // Active grant to another peer → selected-peers mode.
+        storage_clone
+            .grant_permission(
+                &content_hash,
+                "owner-profile-id",
+                "other-peer",
+                "read",
+                None,
+            )
+            .expect("add grant for other peer");
+
+        // Requester's own read grant is still valid (far future expiry).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        storage_clone
+            .grant_permission(
+                &content_hash,
+                "owner-profile-id",
+                &requester.to_string(),
+                "read",
+                Some(now + 60_000),
+            )
+            .expect("add active grant for requester");
+
+        // Use the actual DB version (stage 9 requires an exact match).
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
+            .expect("get shared file")
+            .expect("shared file exists");
+        let request = make_request(metadata_id, &content_hash, row.version);
+        let response = handler.check_permission(&requester, &request).await;
+
+        assert!(
+            matches!(response, FileAccessResponse::Granted(_)),
+            "active read grant should authorize, got {response:?}"
+        );
+    }
+
+    // ── Expired deny grant does not deny (contacts-only mode) ──────────
+    //
+    // An expired deny is inert: it must not keep a friend out after the
+    // denial period lapses. (The grantor removes a deny with
+    // `revoke_permission`; expiry is the schema-level way to bound it.)
+
+    #[tokio::test]
+    async fn expired_deny_grant_does_not_deny_friend() {
+        let metadata_id = "file-1";
+        let content_hash = "56".repeat(32);
+        let (storage, friends) = setup_storage_with_file(metadata_id, &content_hash, true);
+        let storage_clone = Arc::clone(&storage);
+        let (mut handler, _blob_store) = test_handler(storage, friends);
+        let requester = requester_pk();
+        add_friend(&mut handler, requester);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        storage_clone
+            .grant_permission(
+                &content_hash,
+                "owner-profile-id",
+                &requester.to_string(),
+                "deny",
+                Some(now - 1), // already expired
+            )
+            .expect("add expired deny for requester");
+
+        // Use the actual DB version (stage 9 requires an exact match).
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
+            .expect("get shared file")
+            .expect("shared file exists");
+        let request = make_request(metadata_id, &content_hash, row.version);
+        let response = handler.check_permission(&requester, &request).await;
+
+        assert!(
+            matches!(response, FileAccessResponse::Granted(_)),
+            "expired deny must not block a friend, got {response:?}"
+        );
     }
 
     // ── Not friend in contacts-only mode ──────────────────────────────
