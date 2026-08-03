@@ -772,6 +772,7 @@ pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../assets/icons/lucide/sh
 /// Deliberately static (no animation) so it consumes no CPU while idle.
 pub(crate) const NETWORK_MOTIF: &[u8] = include_bytes!("../../assets/icons/network-motif.svg");
 pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../assets/icons/lucide/paperclip.svg");
+pub(crate) const ICON_SEND: &[u8] = include_bytes!("../../assets/icons/lucide/send.svg");
 pub(crate) const ICON_EMOJI: &str = "😊";
 #[expect(dead_code)]
 pub(crate) const ICON_UNREAD: &[u8] =
@@ -2684,6 +2685,15 @@ pub struct IcedChat {
     entries: Vec<ChatEntry>,
     /// Active conversation composer text.
     composer_text: String,
+    /// True while the last submitted composer send task is still in flight
+    /// (drives the transient "sending" state on the send button).
+    composer_sending: bool,
+    /// True while a window file is dragged over the app (drives the subtle
+    /// drag-over focus treatment on the composer).
+    composer_drag_over: bool,
+    /// True while an input-method (IME) composition is active on the composer;
+    /// sending is suppressed while composing so Enter commits text instead.
+    composer_ime_active: bool,
     pub help_visible: bool,
     pending_file: Option<(String, String)>,
     /// Pending image download: (filename, blob_hash, sender_pk).
@@ -3153,6 +3163,12 @@ pub struct IcedChat {
     shared_files: Vec<SharedFileRow>,
     /// Local folder where downloaded peer files are saved ("Boru Downloads").
     boru_downloads_dir: PathBuf,
+
+    // ── File Sharing dashboard ──
+    /// Currently selected tab in the File Sharing dashboard.
+    dashboard_active_tab: crate::dashboard_view_model::DashboardTab,
+    /// Search input text for filtering files and peers.
+    dashboard_search_input: String,
 
     // ── Remote catalogue browsing ──
     /// Currently displayed remote peer catalogue (peer, files). None when
@@ -3830,6 +3846,16 @@ pub enum AppMessage {
     InputChanged(String),
     SendPressed,
     AttachPressed,
+    /// The send task for the last submitted composer text finished (clears the
+    /// transient "sending" button state).
+    ComposerSendFinished,
+    /// A window file was dragged over the app (true) or left (false).
+    ComposerDragOver(bool),
+    /// A window file was dropped onto the app; route through the normal
+    /// attachment/send pipeline.
+    ComposerFileDropped(PathBuf),
+    /// Input-method (IME) composition state changed (true = composing).
+    ComposerImeActive(bool),
     ToggleHelp,
     /// Toggle the chat options popover (room info, delete, settings).
     ToggleChatOptions,
@@ -3849,6 +3875,10 @@ pub enum AppMessage {
     OpenFriendRequests,
     /// Open the file sharing dashboard screen.
     OpenFileSharing,
+    /// Search input changed in the file sharing dashboard.
+    DashboardSearchChanged(String),
+    /// Tab selected in the file sharing dashboard.
+    DashboardTabSelected(crate::dashboard_view_model::DashboardTab),
     /// Toggle a sidebar section's collapsed state by index (0=chats, 1=friends, 2=discover, 3=requests, 4=public_rooms).
     ToggleSidebarSectionCollapsed(usize),
     CloseFriendRequests,
@@ -5283,6 +5313,9 @@ impl IcedChat {
             conversations: HashMap::new(),
             entries: Vec::new(),
             composer_text: String::new(),
+            composer_sending: false,
+            composer_drag_over: false,
+            composer_ime_active: false,
             help_visible: false,
             show_chat_options: false,
             show_chat_search: false,
@@ -5519,6 +5552,8 @@ impl IcedChat {
             },
             file_indexer: FileIndexer::new(boru_core::file_indexer::default_shared_folder_path()),
             shared_files,
+            dashboard_active_tab: crate::dashboard_view_model::DashboardTab::SharedByMe,
+            dashboard_search_input: String::new(),
             peer_catalogue_view: None,
             catalogue_loading: false,
             catalogue_scroll_offset: 0.0,
@@ -6797,6 +6832,10 @@ impl IcedChat {
             AppMessage::InputChanged(_) => "InputChanged",
             AppMessage::SendPressed => "SendPressed",
             AppMessage::AttachPressed => "AttachPressed",
+            AppMessage::ComposerSendFinished => "ComposerSendFinished",
+            AppMessage::ComposerDragOver(_) => "ComposerDragOver",
+            AppMessage::ComposerFileDropped(_) => "ComposerFileDropped",
+            AppMessage::ComposerImeActive(_) => "ComposerImeActive",
             AppMessage::ToggleHelp => "ToggleHelp",
             AppMessage::ToggleChatOptions => "ToggleChatOptions",
             AppMessage::ToggleChatSearch => "ToggleChatSearch",
@@ -6805,6 +6844,8 @@ impl IcedChat {
             AppMessage::OpenSettings => "OpenSettings",
             AppMessage::CloseSettings => "CloseSettings",
             AppMessage::OpenFileSharing => "OpenFileSharing",
+            AppMessage::DashboardSearchChanged(_) => "DashboardSearchChanged",
+            AppMessage::DashboardTabSelected(_) => "DashboardTabSelected",
             AppMessage::NetEvent(_) => "NetEvent",
             AppMessage::ReplayPendingEvents(_) => "ReplayPendingEvents",
             AppMessage::FriendEvent(_) => "FriendEvent",
@@ -10570,6 +10611,13 @@ impl IcedChat {
             }
 
             AppMessage::SendPressed => {
+                // Never send while an input-method composition is active: the
+                // Enter that confirms the composition must not also submit the
+                // message.  The IME state is tracked from `InputMethod` window
+                // events (see the event subscription).
+                if self.composer_ime_active {
+                    return iced::Task::none();
+                }
                 let trimmed = self.composer_text.trim().to_string();
                 if trimmed.is_empty() {
                     return iced::Task::none();
@@ -11090,7 +11138,13 @@ impl IcedChat {
                                 .gui_action_history
                                 .set_state(&action_id, GuiActionState::Completed);
                         }
-                        Self::broadcast_or_queue(
+                        // Show the transient "sending" state on the send button
+                        // while the broadcast task is in flight.  The flag is
+                        // cleared by the completion task chained below (after
+                        // every output of the send task, including the
+                        // `MessageSent` acceptance).
+                        self.composer_sending = true;
+                        let send_task = Self::broadcast_or_queue(
                             encoded,
                             self.sender.clone(),
                             self.sender_ready,
@@ -11099,7 +11153,8 @@ impl IcedChat {
                             event_id,
                             msg_hash,
                             preview_task,
-                        )
+                        );
+                        send_task.chain(iced::Task::done(AppMessage::ComposerSendFinished))
                     }
                     Err(e) => iced::Task::done(AppMessage::ErrorMsg(e)),
                 }
@@ -11136,6 +11191,43 @@ impl IcedChat {
 
             AppMessage::ToggleHelp => {
                 self.help_visible = !self.help_visible;
+                iced::Task::none()
+            }
+            AppMessage::ComposerSendFinished => {
+                self.composer_sending = false;
+                iced::Task::none()
+            }
+            AppMessage::ComposerDragOver(over) => {
+                self.composer_drag_over = over;
+                iced::Task::none()
+            }
+            AppMessage::ComposerFileDropped(path) => {
+                self.composer_drag_over = false;
+                let name = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    return iced::Task::none();
+                }
+                let path_str = path.to_string_lossy().to_string();
+                let encoded = format!("{name}|{path_str}|{path_str}");
+                // Auto-detect image files by extension for inline display (same
+                // rule as the AttachPressed file dialog result).
+                let is_image = name.to_lowercase().ends_with(".png")
+                    || name.to_lowercase().ends_with(".jpg")
+                    || name.to_lowercase().ends_with(".jpeg")
+                    || name.to_lowercase().ends_with(".gif")
+                    || name.to_lowercase().ends_with(".webp")
+                    || name.to_lowercase().ends_with(".bmp");
+                if is_image {
+                    iced::Task::done(AppMessage::ExecuteImageSend(encoded))
+                } else {
+                    iced::Task::done(AppMessage::ExecuteFileSend(encoded))
+                }
+            }
+            AppMessage::ComposerImeActive(active) => {
+                self.composer_ime_active = active;
                 iced::Task::none()
             }
             AppMessage::ToggleChatOptions => {
@@ -14387,23 +14479,20 @@ impl IcedChat {
                         }
                     }
                 }
-                let conv = self
-                    .conversations
-                    .entry(topic)
-                    .or_insert_with(|| {
-                        let mut c = ConversationLive::new(topic);
-                        if !replayed.is_empty() {
-                            c.entries = replayed.clone();
-                            c.history_saved_count = replayed.len();
-                            c.history_loaded = true;
-                            // Follow-latest (the default) with the bottom
-                            // sentinel so the windowed renderer shows the
-                            // newest messages as soon as the chat opens,
-                            // matching the slow-path replay behaviour.
-                            c.scroll_offset = f32::MAX;
-                        }
-                        c
-                    });
+                let conv = self.conversations.entry(topic).or_insert_with(|| {
+                    let mut c = ConversationLive::new(topic);
+                    if !replayed.is_empty() {
+                        c.entries = replayed.clone();
+                        c.history_saved_count = replayed.len();
+                        c.history_loaded = true;
+                        // Follow-latest (the default) with the bottom
+                        // sentinel so the windowed renderer shows the
+                        // newest messages as soon as the chat opens,
+                        // matching the slow-path replay behaviour.
+                        c.scroll_offset = f32::MAX;
+                    }
+                    c
+                });
                 // The conversation-store loop and the friends loop can both
                 // subscribe the same direct topic, so a duplicate
                 // BackgroundSubscribed can arrive for a conversation that
@@ -15106,9 +15195,7 @@ impl IcedChat {
                 if matches!(command, GuiTestCommand::OpenFileSharing) {
                     let _ = self.gui_action_history.set_expected_state(
                         &action_id,
-                        boru_core::diagnostics::ExpectedState::ScreenIs(
-                            "FileSharing".to_string(),
-                        ),
+                        boru_core::diagnostics::ExpectedState::ScreenIs("FileSharing".to_string()),
                     );
                     let _ = self
                         .gui_action_history
@@ -16567,9 +16654,20 @@ impl IcedChat {
             AppMessage::OpenDownloadsFolder => {
                 let dl_dir = self.data_dir.join("downloads");
                 let _ = std::fs::create_dir_all(&dl_dir);
-                let _ = std::process::Command::new("xdg-open")
-                    .arg(dl_dir.to_string_lossy().as_ref())
-                    .spawn();
+                iced::Task::perform(async move { open::that(dl_dir) }, |result| {
+                    if let Err(e) = result {
+                        AppMessage::ErrorMsg(format!("Could not open downloads folder: {e}"))
+                    } else {
+                        AppMessage::Noop
+                    }
+                })
+            }
+            AppMessage::DashboardSearchChanged(query) => {
+                self.dashboard_search_input = query;
+                iced::Task::none()
+            }
+            AppMessage::DashboardTabSelected(tab) => {
+                self.dashboard_active_tab = tab;
                 iced::Task::none()
             }
             AppMessage::WindowResized(width) => {
@@ -21771,15 +21869,14 @@ impl IcedChat {
         // `Icon::Files` (Lucide files.svg) — the approved folder/files glyph.
         // The icon widget's colour is resolved at build time, so the active
         // state is applied to the SVG's theme closure instead.
-        let icon = icon_svg(ICON_FILES, IconSize::Md.px()).style(move |t, _| {
-            iced::widget::svg::Style {
+        let icon =
+            icon_svg(ICON_FILES, IconSize::Md.px()).style(move |t, _| iced::widget::svg::Style {
                 color: Some(if active {
                     crate::design_tokens::primary(t)
                 } else {
                     crate::design_tokens::text_secondary(t)
                 }),
-            }
-        });
+            });
 
         let label = text("File Sharing")
             .size(TYPO_SM)
@@ -24830,7 +24927,11 @@ impl IcedChat {
             .into()
     }
 
-    fn view_chat_log(&self, timeline_width: f32, viewport_height: f32) -> iced::widget::Scrollable<'_, AppMessage> {
+    fn view_chat_log(
+        &self,
+        timeline_width: f32,
+        viewport_height: f32,
+    ) -> iced::widget::Scrollable<'_, AppMessage> {
         use iced::widget::space;
         use iced::widget::text::Wrapping;
         use iced::widget::{button, container, scrollable, text, Column, Row};
@@ -25188,25 +25289,26 @@ impl IcedChat {
                 row.wrap().into()
             };
 
-            let bubble = container(body_el)
-                .padding([SPACE_10, SPACE_16])
-                .style(move |t: &iced::Theme| {
-                    let mut s = iced::widget::container::Style {
-                        border: crate::design_tokens::bubble_border(
-                            t,
-                            entry.kind == ChatKind::Local,
-                            entry.kind == ChatKind::System,
-                            matches!(entry.kind, ChatKind::Local)
-                                && entry.delivery_state == DeliveryState::Failed,
-                        )
-                        .unwrap_or_default(),
-                        ..Default::default()
-                    };
-                    if let Some(bg) = bubble_bg(t, entry.kind) {
-                        s.background = Some(bg);
-                    }
-                    s
-                });
+            let bubble =
+                container(body_el)
+                    .padding([SPACE_10, SPACE_16])
+                    .style(move |t: &iced::Theme| {
+                        let mut s = iced::widget::container::Style {
+                            border: crate::design_tokens::bubble_border(
+                                t,
+                                entry.kind == ChatKind::Local,
+                                entry.kind == ChatKind::System,
+                                matches!(entry.kind, ChatKind::Local)
+                                    && entry.delivery_state == DeliveryState::Failed,
+                            )
+                            .unwrap_or_default(),
+                            ..Default::default()
+                        };
+                        if let Some(bg) = bubble_bg(t, entry.kind) {
+                            s.background = Some(bg);
+                        }
+                        s
+                    });
 
             // Wrap non-system bubbles in a button so clicking copies the
             // message body to the clipboard with a toast confirmation.
@@ -25656,27 +25758,18 @@ impl IcedChat {
     }
 
     fn view_composer(&self) -> iced::Element<'_, AppMessage> {
-        use crate::design_tokens::{RADIUS_SM, SPACE_8};
+        use crate::design_tokens::{RADIUS_XL, SPACE_8};
         use iced::widget::{button, container, row, text, text_input};
         use iced::{Alignment, Length, Padding};
 
         let has_text = !self.composer_text.is_empty();
+        // A send in flight wins over the empty-text appearance: the button
+        // shows a clear "sending" state until the broadcast task completes.
+        let sending = self.composer_sending;
 
-        // ── Attach button (paperclip icon) ── sits next to send
+        // ── Attach button (paperclip icon) ── leading edge, left of input
         let attach_btn = button(icon_svg(ICON_PAPERCLIP, TYPO_SM))
             .on_press(AppMessage::AttachPressed)
-            .style(BUTTON_ICON)
-            .padding([SPACE_4, SPACE_6]);
-
-        // ── Emoji picker toggle button ── sits next to attach
-        let emoji_btn = button(Icon::Smile.build().size(IconSize::Sm).build())
-            .on_press(AppMessage::ToggleEmojiPicker)
-            .style(BUTTON_ICON)
-            .padding([SPACE_4, SPACE_6]);
-
-        // ── GIF picker toggle button ── sits next to emoji
-        let gif_btn = button(text("GIF").size(TYPO_SM))
-            .on_press(AppMessage::ToggleGifPicker)
             .style(BUTTON_ICON)
             .padding([SPACE_4, SPACE_6]);
 
@@ -25701,7 +25794,7 @@ impl IcedChat {
                                 iced::Color::TRANSPARENT
                             },
                             width: if is_focused { 1.0 } else { 0.0 },
-                            radius: RADIUS_SM.into(),
+                            radius: RADIUS_XL.into(),
                         },
                         icon: iced::Color::TRANSPARENT,
                         placeholder: crate::design_tokens::text_muted(t),
@@ -25711,35 +25804,77 @@ impl IcedChat {
                 },
             );
 
-        // ── Right: send button ── filled accent green when text exists,
-        // transparent / subdued when empty
-        let mut send_btn = button(text("Send").size(TYPO_SM))
-            .style(
-                move |t: &iced::Theme, status: iced::widget::button::Status| {
-                    if has_text {
-                        BUTTON_PRIMARY_GREEN(t, status)
-                    } else {
-                        let mut s = BUTTON_MUTED(t, iced::widget::button::Status::Disabled);
-                        s.background = None;
-                        s.text_color = crate::design_tokens::text_muted(t);
-                        s
-                    }
-                },
-            )
-            .padding([SPACE_6, SPACE_12]);
-        if has_text {
-            send_btn = send_btn.on_press(AppMessage::SendPressed);
-        }
+        // ── GIF picker toggle button ── trailing actions, after input
+        let gif_btn = button(text("GIF").size(TYPO_SM))
+            .on_press(AppMessage::ToggleGifPicker)
+            .style(BUTTON_ICON)
+            .padding([SPACE_4, SPACE_6]);
+
+        // ── Emoji picker toggle button ── next to GIF
+        let emoji_btn = button(Icon::Smile.build().size(IconSize::Sm).build())
+            .on_press(AppMessage::ToggleEmojiPicker)
+            .style(BUTTON_ICON)
+            .padding([SPACE_4, SPACE_6]);
+
+        // ── Right: circular green send button ──
+        //  * empty composer → muted transparent circle (disabled)
+        //  * text present   → filled accent-green circle with send icon
+        //  * send in flight → filled green circle with a brief spinner glyph
+        // The shortcut (Enter to send) is documented in the help overlay; the
+        // circular affordance matches Figure 4.
+        let send_btn = button(
+            if sending {
+                iced::Element::from(text("…").size(TYPO_MD))
+            } else {
+                iced::Element::from(
+                    icon_svg(ICON_SEND, 18.0)
+                        .style(|_t, _s| iced::widget::svg::Style {
+                            color: Some(iced::Color::WHITE),
+                        }),
+                )
+            },
+        )
+        .width(Length::Fixed(SPACE_18 * 2.0))
+        .height(Length::Fixed(SPACE_18 * 2.0))
+        .padding(0)
+        .style(move |t: &iced::Theme, status: iced::widget::button::Status| {
+            if sending {
+                // Sending: keep the green fill but dim it and disable press.
+                let mut s = BUTTON_PRIMARY_GREEN(t, iced::widget::button::Status::Disabled);
+                s.border.radius = SPACE_18.into();
+                s
+            } else if has_text {
+                let mut s = BUTTON_PRIMARY_GREEN(t, status);
+                s.border.radius = SPACE_18.into();
+                s
+            } else {
+                // Disabled: transparent circle with a muted send icon.
+                let mut s = BUTTON_MUTED(t, iced::widget::button::Status::Disabled);
+                s.background = None;
+                s.text_color = crate::design_tokens::text_muted(t);
+                s.border.radius = SPACE_18.into();
+                s
+            }
+        });
+        let send_btn = if sending || !has_text {
+            send_btn
+        } else {
+            send_btn.on_press(AppMessage::SendPressed)
+        };
 
         // ── Composer row ──
-        //  text input (fill) | gif | emoji | attach | send
-        let composer_bar = row![input, gif_btn, emoji_btn, attach_btn, send_btn]
+        //  attach | text input (fill) | gif | emoji | send
+        let composer_bar = row![attach_btn, input, gif_btn, emoji_btn, send_btn]
             .spacing(SPACE_6)
             .align_y(Alignment::Center)
             .padding(Padding::new(SPACE_4));
 
-        // ── Rounded composer container ──
-        //  Compact input bar with 12px rounding, subtle border, distinct surface.
+        // ── Elevated rounded composer container ──
+        //  16 px radius surface with a 1 px border and a very subtle shadow
+        //  (plan §4: composer elevation ~0 1 2).  While a window file is
+        //  dragged over the app the border adopts the accent colour as a
+        //  subtle focus treatment (file-drop routes through the same
+        //  attachment pipeline).
         container(composer_bar)
             .width(Length::Fill)
             .padding(Padding::new(0.0))
@@ -25747,9 +25882,14 @@ impl IcedChat {
                 background: Some(iced::Background::Color(bg_surface_secondary(t))),
                 border: iced::Border {
                     width: 1.0,
-                    color: border_muted(t),
-                    radius: RADIUS_LG.into(),
+                    color: if self.composer_drag_over {
+                        accent_primary(t)
+                    } else {
+                        border_muted(t)
+                    },
+                    radius: RADIUS_XL.into(),
                 },
+                shadow: crate::design_tokens::shadow_card(t),
                 ..Default::default()
             })
             .into()
@@ -27040,6 +27180,32 @@ impl IcedChat {
                 .map(|_| AppMessage::OutboxRetryTick),
             iced::window::resize_events()
                 .map(|(_id, size)| AppMessage::WindowResized(size.width as f32)),
+            // Window file drag/drop + IME composition state.  iced 0.14 maps
+            // winit `HoveredFile`/`DroppedFile`/`HoveredFileCancelled` and
+            // IME events into `window::Event` / `input_method::Event` which
+            // arrive through the generic event listen subscription.
+            iced::event::listen().filter_map(|event| match event {
+                iced::Event::Window(iced::window::Event::FileHovered(_)) => {
+                    Some(AppMessage::ComposerDragOver(true))
+                }
+                iced::Event::Window(iced::window::Event::FilesHoveredLeft) => {
+                    Some(AppMessage::ComposerDragOver(false))
+                }
+                iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                    Some(AppMessage::ComposerFileDropped(path))
+                }
+                iced::Event::InputMethod(ev) => match ev {
+                    iced::advanced::input_method::Event::Opened
+                    | iced::advanced::input_method::Event::Preedit(_, _) => {
+                        Some(AppMessage::ComposerImeActive(true))
+                    }
+                    iced::advanced::input_method::Event::Closed
+                    | iced::advanced::input_method::Event::Commit(_) => {
+                        Some(AppMessage::ComposerImeActive(false))
+                    }
+                },
+                _ => None,
+            }),
         ];
         // Main subscription stream — only added when gui_action_rx is available,
         // because the unfold state cannot be expressed conditionally within the
@@ -27555,89 +27721,252 @@ impl IcedChat {
     /// panels) is implemented in later FS cards; this card only establishes
     /// the route and navigation entry.
     fn view_file_sharing(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, text, Column, Row, Space};
-        use iced::{Alignment, Background, Length};
+        use crate::dashboard_view_model::DashboardTab as Tab;
+        use iced::widget::{button, container, scrollable, text, text_input, Column, Row, Space};
+        use iced::{Alignment, Background, Border, Length};
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
-        // Header row: back button + page title.
-        let header = Row::new()
+        // ── Header region: title + subtitle (left), search + action (right) ──
+        let page_title = Row::new()
             .push(
-                button(
-                    Row::new()
-                        .push(icon_svg(ICON_CHAT, TYPO_SM))
-                        .push(text(" Back").size(TYPO_SM))
-                        .spacing(SPACE_4)
-                        .align_y(Alignment::Center),
-                )
-                .on_press(AppMessage::GoToChatList)
-                .padding([SPACE_6, SPACE_12])
-                .style(BUTTON_GHOST_BG),
+                Column::new()
+                    .push(
+                        text("File Sharing")
+                            .size(TYPO_XL)
+                            .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                            .color(crate::design_tokens::text_primary(&theme)),
+                    )
+                    .push(
+                        text("Manage your shared files, downloads, and transfer activity.")
+                            .size(TYPO_XS)
+                            .style(text_muted_style),
+                    )
+                    .spacing(SPACE_4),
             )
-            .push(text("File Sharing").size(TYPO_LG))
-            .spacing(SPACE_8)
+            .width(Length::Fill);
+
+        let search_input = text_input("Search files or peers...", &self.dashboard_search_input)
+            .on_input(|s| AppMessage::DashboardSearchChanged(s))
+            .padding([SPACE_6, SPACE_12])
+            .size(TYPO_SM)
+            .width(Length::Fixed(320.0));
+
+        let search_icon = Icon::Search
+            .build()
+            .size(crate::icon_system::IconSize::Xs)
+            .color_fn(crate::design_tokens::text_muted)
+            .build();
+
+        let search_row = Row::new()
+            .push(search_icon)
+            .push(search_input)
+            .spacing(SPACE_4)
             .align_y(Alignment::Center);
 
-        // Placeholder panel using the shared design system.
-        let placeholder = container(
-            Column::new()
+        let open_downloads_btn = button(
+            Row::new()
                 .push(
                     Icon::Files
                         .build()
-                        .size(IconSize::Xl)
-                        .color_fn(crate::design_tokens::text_muted)
+                        .size(crate::icon_system::IconSize::Xs)
+                        .color_fn(|_| iced::Color::WHITE)
                         .build(),
                 )
-                .push(Space::new().height(Length::Fixed(SPACE_12)))
-                .push(
-                    text("File Sharing is coming soon")
-                        .size(TYPO_MD)
-                        .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
-                        .color(crate::design_tokens::text_primary(&theme)),
-                )
-                .push(Space::new().height(Length::Fixed(SPACE_6)))
-                .push(
-                    text(
-                        "Files you share and download will appear here.\n\
-                         Sharing keeps Boru's native OS file picker and verified transfers.",
-                    )
-                    .size(TYPO_XS)
-                    .style(text_muted_style)
-                    .width(Length::Fill),
-                )
-                .spacing(0)
-                .align_x(Alignment::Center),
+                .push(text("Open Downloads Folder").size(TYPO_SM))
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center),
         )
-        .width(Length::FillPortion(6))
-        .height(Length::Shrink)
-        .padding(SPACE_24)
-        .style(move |t| container::Style {
-            background: Some(Background::Color(bg_surface(t))),
-            border: iced::Border {
-                color: border_muted(&theme),
-                width: 1.0,
-                radius: SPACE_12.into(),
-            },
-            ..Default::default()
-        });
+        .on_press(AppMessage::OpenDownloadsFolder)
+        .padding([SPACE_6, SPACE_16])
+        .style(BUTTON_PRIMARY_GREEN);
 
-        let body = Column::new()
-            .push(header)
-            .push(
-                container(
-                    Column::new()
-                        .push(iced::widget::Space::new().height(Length::Fill))
-                        .push(placeholder)
-                        .push(iced::widget::Space::new().height(Length::Fill))
-                        .align_x(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .padding(SPACE_16),
+        let header_actions = Row::new()
+            .push(search_row)
+            .push(Space::new().width(Length::Fixed(SPACE_16)))
+            .push(open_downloads_btn)
+            .align_y(Alignment::Center);
+
+        let header = Row::new()
+            .push(page_title)
+            .push(header_actions)
+            .align_y(Alignment::Center)
+            .spacing(SPACE_16);
+
+        // ── Tab bar ──
+        let active_tab = self.dashboard_active_tab;
+        let mut tabs_row = Row::new().spacing(SPACE_16);
+
+        for tab in Tab::ALL.iter() {
+            let is_active = *tab == active_tab;
+            let tab_label = tab.label();
+            let tab_msg = AppMessage::DashboardTabSelected(*tab);
+
+            let tab_button = button(text(tab_label).size(TYPO_SM))
+                .on_press(tab_msg)
+                .padding([SPACE_4, SPACE_2])
+                .style(move |t, status| {
+                    let color = if is_active {
+                        crate::design_tokens::text_primary(t)
+                    } else if matches!(status, iced::widget::button::Status::Hovered) {
+                        crate::design_tokens::primary(t)
+                    } else {
+                        crate::design_tokens::text_secondary(t)
+                    };
+                    button::Style {
+                        background: None,
+                        text_color: color,
+                        border: if is_active {
+                            Border {
+                                color: crate::design_tokens::primary(t),
+                                width: 2.0,
+                                radius: 0.0.into(),
+                            }
+                        } else {
+                            Border::default()
+                        },
+                        ..Default::default()
+                    }
+                });
+
+            tabs_row = tabs_row.push(tab_button);
+        }
+
+        let tab_bar = container(
+            Row::new()
+                .push(tabs_row)
+                .push(Space::new().width(Length::Fill))
+                .align_y(Alignment::Center),
+        )
+        .padding([SPACE_8, 0.0])
+        .width(Length::Fill);
+
+        // Full-width muted separator below tabs.
+        let tab_separator = container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(move |t| container::Style {
+                background: Some(Background::Color(crate::design_tokens::border_muted(t))),
+                ..Default::default()
+            });
+
+        // ── Content grid: left (2/3) + right (1/3) ──
+        let is_wide = self.window_width >= crate::design_tokens::VIEWPORT_MIN_WIDTH;
+
+        // Placeholder card builder for unimplemented regions.
+        fn placeholder_card<'a>(
+            title: &'a str,
+            subtitle: &'a str,
+        ) -> iced::Element<'a, AppMessage> {
+            use iced::widget::{container, text, Column};
+            use iced::{Alignment, Length};
+            container(
+                Column::new()
+                    .push(
+                        text(title)
+                            .size(TYPO_MD)
+                            .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
+                    )
+                    .push(Space::new().height(Length::Fixed(SPACE_8)))
+                    .push(text(subtitle).size(TYPO_XS).style(text_muted_style))
+                    .push(Space::new().height(Length::Fill))
+                    .align_x(Alignment::Start)
+                    .spacing(SPACE_4),
             )
-            .spacing(SPACE_8);
+            .padding(SPACE_16)
+            .width(Length::Fill)
+            .height(Length::Fixed(120.0))
+            .style(|t| crate::design_tokens::card_style(t))
+            .into()
+        }
 
-        body.into()
+        // Content area with responsive layout.
+        let content_area: iced::Element<'_, AppMessage> = if is_wide {
+            // Two-column: 2/3 left + 1/3 right.
+            let file_table_section = placeholder_card(
+                "Shared by Me — File Table",
+                "File rows with type icons, metadata, peer chips, and actions will appear here.",
+            );
+            let peers_section = placeholder_card(
+                "Peers Downloading from Me",
+                "Live peer rows with progress bars and file names will appear here.",
+            );
+            let sharing_summary_section = placeholder_card(
+                "Sharing Summary",
+                "Aggregate stats: total files shared, data transferred, active peer count.",
+            );
+            let recent_activity_section = placeholder_card(
+                "Recent Activity",
+                "Chronological file-sharing activity events will appear here.",
+            );
+            let right_column = Column::new()
+                .push(peers_section)
+                .push(Space::new().height(Length::Fixed(SPACE_20)))
+                .push(sharing_summary_section)
+                .spacing(0)
+                .width(Length::Fill);
+            Column::new()
+                .push(
+                    Row::new()
+                        .push(container(file_table_section).width(Length::FillPortion(63)))
+                        .push(Space::new().width(Length::Fixed(SPACE_20)))
+                        .push(container(right_column).width(Length::FillPortion(34)))
+                        .width(Length::Fill),
+                )
+                .push(Space::new().height(Length::Fixed(SPACE_20)))
+                .push(recent_activity_section)
+                .spacing(0)
+                .width(Length::Fill)
+                .into()
+        } else {
+            // Single column: stack in priority order.
+            let file_table_section = placeholder_card(
+                "Shared by Me — File Table",
+                "File rows with type icons, metadata, peer chips, and actions will appear here.",
+            );
+            let sharing_summary_section = placeholder_card(
+                "Sharing Summary",
+                "Aggregate stats: total files shared, data transferred, active peer count.",
+            );
+            let peers_section = placeholder_card(
+                "Peers Downloading from Me",
+                "Live peer rows with progress bars and file names will appear here.",
+            );
+            let recent_activity_section = placeholder_card(
+                "Recent Activity",
+                "Chronological file-sharing activity events will appear here.",
+            );
+            Column::new()
+                .push(file_table_section)
+                .push(Space::new().height(Length::Fixed(SPACE_16)))
+                .push(sharing_summary_section)
+                .push(Space::new().height(Length::Fixed(SPACE_16)))
+                .push(peers_section)
+                .push(Space::new().height(Length::Fixed(SPACE_16)))
+                .push(recent_activity_section)
+                .spacing(0)
+                .width(Length::Fill)
+                .into()
+        };
+
+        let scrollable_content = scrollable(container(content_area).width(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        // ── Compose full page ──
+        let page = Column::new()
+            .push(header)
+            .push(Space::new().height(Length::Fixed(SPACE_20)))
+            .push(tab_bar)
+            .push(tab_separator)
+            .push(Space::new().height(Length::Fixed(SPACE_20)))
+            .push(scrollable_content)
+            .spacing(0)
+            .padding([SPACE_24, SPACE_24])
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        page.into()
     }
 
     fn view_discover(&self) -> iced::Element<'_, AppMessage> {
@@ -32874,10 +33203,12 @@ mod tests {
         assert_eq!(app.screen, Screen::FileSharing);
 
         // Networking/services identity and shell state must be untouched.
-        assert_eq!(app.local_public, identity, "account identity must not reset");
         assert_eq!(
-            app.sidebar_section_collapsed,
-            sidebar_collapsed,
+            app.local_public, identity,
+            "account identity must not reset"
+        );
+        assert_eq!(
+            app.sidebar_section_collapsed, sidebar_collapsed,
             "sidebar collapsed state must survive navigation"
         );
         assert_eq!(
@@ -33909,7 +34240,10 @@ mod tests {
         let _task = app.update(AppMessage::Scrolled(800.0, 200.0));
 
         assert!(app.follow_latest, "at the bottom → keep following latest");
-        assert_eq!(app.scroll_offset, 800.0, "offset is mirrored for the window");
+        assert_eq!(
+            app.scroll_offset, 800.0,
+            "offset is mirrored for the window"
+        );
         assert_eq!(app.viewport_height, 200.0, "viewport height is mirrored");
     }
 
@@ -33992,7 +34326,10 @@ mod tests {
         app.follow_latest = true;
         app.scroll_to_bottom_pending = false;
         app.entries_push(ChatEntry::local("me", "live message at bottom"));
-        assert!(app.scroll_to_bottom_pending, "append while following queues snap");
+        assert!(
+            app.scroll_to_bottom_pending,
+            "append while following queues snap"
+        );
         assert_eq!(app.scroll_offset, f32::MAX, "sentinel armed for the window");
 
         // Reading older messages (follow_latest=false, offset 500): an
@@ -34091,10 +34428,14 @@ mod tests {
         );
         assert_eq!(conv.history_saved_count, 3, "saved count avoids re-saving");
         assert_eq!(
-            conv.scroll_offset, f32::MAX,
+            conv.scroll_offset,
+            f32::MAX,
             "follow-latest bottom sentinel armed for fast-path open"
         );
-        assert!(conv.follow_latest, "new conversation follows latest by default");
+        assert!(
+            conv.follow_latest,
+            "new conversation follows latest by default"
+        );
 
         // A duplicate completion (the conversation-store loop and the friends
         // loop can both subscribe the same direct topic) must not replay
@@ -34117,12 +34458,18 @@ mod tests {
 
         let conv = app.conversations.get(&topic).expect("conversation created");
         assert!(conv.entries.is_empty(), "no history → empty timeline");
-        assert!(conv.history_loaded, "history considered loaded (nothing to load)");
+        assert!(
+            conv.history_loaded,
+            "history considered loaded (nothing to load)"
+        );
         assert!(
             conv.follow_latest,
             "follow-latest stays the default for a fresh conversation"
         );
-        assert_eq!(conv.scroll_offset, 0.0, "no sentinel when there is no history");
+        assert_eq!(
+            conv.scroll_offset, 0.0,
+            "no sentinel when there is no history"
+        );
     }
 
     #[test]
@@ -34172,11 +34519,15 @@ mod tests {
         app.scroll_to_bottom_pending = false;
 
         // B exists in the runtime map (background-subscribed).
-        app.conversations.insert(topic_b, ConversationLive::new(topic_b));
+        app.conversations
+            .insert(topic_b, ConversationLive::new(topic_b));
 
         // Switch to B, then back to A.
         assert!(app.switch_to_conversation(topic_b), "switch to B succeeds");
-        assert!(app.switch_to_conversation(topic_a), "switch back to A succeeds");
+        assert!(
+            app.switch_to_conversation(topic_a),
+            "switch back to A succeeds"
+        );
 
         assert_eq!(app.topic, topic_a);
         assert!(
