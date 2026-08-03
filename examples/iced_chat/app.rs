@@ -20692,9 +20692,13 @@ impl IcedChat {
         let mut rows: Vec<iced::Element<'_, AppMessage>> = Vec::new();
         for (topic, name) in &group_data {
             // Name line: clip long group names and show the full name in a tooltip.
+            // `Wrapping::None` keeps the row on a single line — without it the
+            // text wraps inside the clip container and the row grows taller
+            // instead of truncating (UI-18 long-value stress finding).
             let name_label = container(
                 text(name.clone())
                     .size(TYPO_SM)
+                    .wrapping(iced::widget::text::Wrapping::None)
                     .color(crate::design_tokens::text_primary(&theme))
                     .width(Length::Fill),
             )
@@ -20899,6 +20903,7 @@ impl IcedChat {
             .push(
                 text(preview_text.clone())
                     .size(TYPO_XS)
+                    .wrapping(iced::widget::text::Wrapping::None)
                     .style(move |t| iced::widget::text::Style {
                         color: Some(preview_color(t)),
                     })
@@ -20992,7 +20997,12 @@ impl IcedChat {
         });
 
         // ── Name line: clip long names, show a tooltip with the full name ──
-        let name_label = container(text(name.clone()).size(TYPO_SM).width(Length::Fill).style(
+        // `Wrapping::None` keeps the row single-line; without it the text
+        // wraps inside the clip container and the row grows (UI-18 finding).
+        let name_label = container(text(name.clone()).size(TYPO_SM).wrapping(
+            iced::widget::text::Wrapping::None,
+        )
+        .width(Length::Fill).style(
             move |t| iced::widget::text::Style {
                 color: Some(name_color(t)),
             },
