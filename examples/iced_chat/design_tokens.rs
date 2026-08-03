@@ -15,7 +15,7 @@
 //! | Borders      | `border_<weight>`                      | `border_muted()`     |
 
 use iced::widget::{button, container};
-use iced::{Background, Color, Theme};
+use iced::{Background, Border, Color, Theme};
 
 // ── Color palette (phase 1 — Boru Modern redesign) ───────────────────
 //
@@ -132,6 +132,7 @@ pub const SPACE_8: f32 = 8.0;
 pub const SPACE_10: f32 = 10.0;
 pub const SPACE_12: f32 = 12.0;
 pub const SPACE_16: f32 = 16.0;
+pub const SPACE_18: f32 = 18.0; // group-to-group gap between user message groups (plan §4)
 pub const SPACE_20: f32 = 20.0;
 pub const SPACE_24: f32 = 24.0;
 pub const SPACE_32: f32 = 32.0;
@@ -167,6 +168,11 @@ pub const SIDEBAR_WIDTH_MAX: f32 = 320.0;
 pub const SIDEBAR_INSET: f32 = 24.0;
 pub const DETAILS_PANEL_WIDTH: f32 = 280.0;
 pub const MESSAGE_MAX_WIDTH: f32 = 480.0;
+/// Chat bubble hard maximum width. Spec: 560 px.
+pub const CHAT_BUBBLE_MAX_WIDTH: f32 = 560.0;
+/// Chat bubble width as a fraction of the timeline width. Spec: 68 %.
+/// The effective maximum is `min(CHAT_BUBBLE_MAX_WIDTH, timeline * RATIO)`.
+pub const CHAT_BUBBLE_WIDTH_RATIO: f32 = 0.68;
 pub const IMAGE_PREVIEW_MAX_WIDTH: f32 = 360.0;
 pub const IMAGE_PREVIEW_MAX_HEIGHT: f32 = 400.0;
 
@@ -467,17 +473,52 @@ pub fn text_remote_body(theme: &Theme) -> Color {
 }
 
 /// Background tint for message bubbles. System messages get no bubble.
+///
+/// Spec (plan §4): incoming bubbles use the `surface` token (white in light
+/// mode); outgoing bubbles use `primary_soft` (#EAF5EE).  The surface colour
+/// is what separates an incoming bubble from the canvas, so incoming bubbles
+/// also carry a 1 px border via [`bubble_border`].
 pub fn bubble_bg(theme: &Theme, is_local: bool, is_system: bool) -> Option<Background> {
     if is_system {
         return None;
     }
-    let (r, g, b, a) = match (theme, is_local) {
-        (Theme::Dark, true) => (0.15, 0.3, 0.15, 0.4),
-        (Theme::Dark, false) => (0.2, 0.2, 0.25, 0.4),
-        (_, true) => (0.0, 0.5, 0.0, 0.06),
-        (_, false) => (0.1, 0.2, 0.5, 0.05),
+    let color = if is_local {
+        primary_soft(theme)
+    } else {
+        surface(theme)
     };
-    Some(Background::Color(Color::from_rgba(r, g, b, a)))
+    Some(Background::Color(color))
+}
+
+/// Border for message bubbles (1 px, 12 px radius).
+///
+/// Incoming bubbles get a subtle `border_muted` outline (spec: white bubbles
+/// with border/subtle elevation).  Outgoing bubbles rely on the soft-green
+/// `primary_soft` surface and carry no border, except a failed outgoing
+/// message which gets a `danger` border so the error is never communicated by
+/// colour alone (the metadata text and label icon also convey it).
+pub fn bubble_border(
+    theme: &Theme,
+    is_local: bool,
+    is_system: bool,
+    failed: bool,
+) -> Option<Border> {
+    if is_system {
+        return None;
+    }
+    if is_local && !failed {
+        return None;
+    }
+    Some(Border {
+        color: if failed {
+            color_danger(theme)
+        } else {
+            border_muted(theme)
+        },
+        width: BORDER_WIDTH,
+        radius: RADIUS_LG.into(),
+        ..Default::default()
+    })
 }
 
 // ── Backward-compatible aliases for existing callers ─────────────────
@@ -849,6 +890,44 @@ mod tests {
         let theme = Theme::Light;
         assert!(bubble_bg(&theme, true, false).is_some());
         assert!(bubble_bg(&theme, false, false).is_some());
+    }
+
+    #[test]
+    fn bubble_bg_uses_spec_surfaces() {
+        // Light mode: incoming = surface white, outgoing = primary_soft green.
+        let light = Theme::Light;
+        assert_eq!(
+            bubble_bg(&light, false, false),
+            Some(Background::Color(surface(&light)))
+        );
+        assert_eq!(
+            bubble_bg(&light, true, false),
+            Some(Background::Color(primary_soft(&light)))
+        );
+        // Dark mode stays distinct and non-transparent-white.
+        let dark = Theme::Dark;
+        assert_ne!(
+            bubble_bg(&dark, false, false),
+            Some(Background::Color(Color::WHITE))
+        );
+        assert!(bubble_bg(&dark, true, false).is_some());
+    }
+
+    #[test]
+    fn bubble_border_follows_spec_rules() {
+        let light = Theme::Light;
+        // Incoming (remote) bubbles carry a subtle border.
+        let remote = bubble_border(&light, false, false, false).expect("remote border");
+        assert_eq!(remote.width, BORDER_WIDTH);
+        assert_eq!(remote.color, border_muted(&light));
+        assert_eq!(remote.radius, RADIUS_LG.into());
+        // Outgoing (local) bubbles have no border unless failed.
+        assert!(bubble_border(&light, true, false, false).is_none());
+        let failed = bubble_border(&light, true, false, true).expect("failed border");
+        assert_eq!(failed.color, color_danger(&light));
+        // System messages never get a bubble border.
+        assert!(bubble_border(&light, false, true, false).is_none());
+        assert!(bubble_border(&light, true, true, true).is_none());
     }
 
     #[test]

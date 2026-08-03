@@ -518,8 +518,8 @@ fn blob_ticket_string(
 pub(crate) const SPACE_2: f32 = 2.0;
 pub(crate) use crate::design_tokens::{AVATAR_MD, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
-    DETAILS_PANEL_WIDTH, RADIUS_LG, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_20,
-    SPACE_24, SPACE_32, SPACE_4, SPACE_8,
+    DETAILS_PANEL_WIDTH, RADIUS_LG, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_18,
+    SPACE_20, SPACE_24, SPACE_32, SPACE_4, SPACE_8,
 };
 pub(crate) use crate::icon_system::{Icon, IconSize};
 pub(crate) const SPACE_6: f32 = 6.0;
@@ -2423,6 +2423,10 @@ impl ChatEntry {
             Some(self.reactions.join("  "))
         };
         self.parsed_segments = Some(link_preview::parse_url_segments(&self.body));
+        // Cache the formatted timestamp once so the bubble metadata row never
+        // re-formats on every frame.  `entries_push` calls `update_cache` for
+        // every entry (live and replayed), so the timestamp always renders.
+        self.formatted_time = self.timestamp.map(format_message_time);
     }
 }
 
@@ -22713,7 +22717,9 @@ impl IcedChat {
         let content = widget::column![
             self.view_chat_header(),
             divider(&self.theme()),
-            widget::responsive(|size: iced::Size| { self.view_chat_log(size.height).into() }),
+            widget::responsive(|size: iced::Size| {
+                self.view_chat_log(size.width, size.height).into()
+            }),
             self.view_composer(),
         ]
         // Make the column itself participate in the parent height
@@ -24824,7 +24830,7 @@ impl IcedChat {
             .into()
     }
 
-    fn view_chat_log(&self, viewport_height: f32) -> iced::widget::Scrollable<'_, AppMessage> {
+    fn view_chat_log(&self, timeline_width: f32, viewport_height: f32) -> iced::widget::Scrollable<'_, AppMessage> {
         use iced::widget::space;
         use iced::widget::text::Wrapping;
         use iced::widget::{button, container, scrollable, text, Column, Row};
@@ -24893,6 +24899,12 @@ impl IcedChat {
         // ── Use cached layout data for window computation (O(log n)) ──
         let total_height = lc.total_height;
         self.total_content_height.set(total_height);
+
+        // Effective bubble width cap: 560 px or 68 % of the timeline width,
+        // whichever is smaller (plan §4).  Supplied by the responsive wrapper
+        // in `view_chat_panel` so bubbles never exceed the conversation
+        // column and long content wraps instead of overflowing.
+        let bubble_max_w = crate::presentation::chat_bubble_max_width(timeline_width);
 
         let (first_idx, last_idx, top_space_h, bottom_h) =
             lc.window(self.scroll_offset, viewport_height);
@@ -25061,7 +25073,9 @@ impl IcedChat {
                     // System notices have no label — just the centred text
                     space::Space::new().height(0.0).into()
                 } else if group_continues {
-                    space::Space::new().height(Length::Fixed(SPACE_2)).into()
+                    // No label inside a group — the inter-bubble gap is the
+                    // plan's 6 px message-group gap.
+                    space::Space::new().height(Length::Fixed(0.0)).into()
                 } else if matches!(entry.kind, ChatKind::Remote) {
                     if let Some(sender_key) = entry.sender_key {
                         let status_icon = icon_svg(
@@ -25174,24 +25188,25 @@ impl IcedChat {
                 row.wrap().into()
             };
 
-            let bubble =
-                container(body_el)
-                    .padding([SPACE_10, SPACE_16])
-                    .style(move |t: &iced::Theme| {
-                        let mut s = iced::widget::container::Style {
-                            border: iced::Border {
-                                color: border_muted(t),
-                                width: 1.0,
-                                radius: (12.0_f32).into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        };
-                        if let Some(bg) = bubble_bg(t, entry.kind) {
-                            s.background = Some(bg);
-                        }
-                        s
-                    });
+            let bubble = container(body_el)
+                .padding([SPACE_10, SPACE_16])
+                .style(move |t: &iced::Theme| {
+                    let mut s = iced::widget::container::Style {
+                        border: crate::design_tokens::bubble_border(
+                            t,
+                            entry.kind == ChatKind::Local,
+                            entry.kind == ChatKind::System,
+                            matches!(entry.kind, ChatKind::Local)
+                                && entry.delivery_state == DeliveryState::Failed,
+                        )
+                        .unwrap_or_default(),
+                        ..Default::default()
+                    };
+                    if let Some(bg) = bubble_bg(t, entry.kind) {
+                        s.background = Some(bg);
+                    }
+                    s
+                });
 
             // Wrap non-system bubbles in a button so clicking copies the
             // message body to the clipboard with a toast confirmation.
@@ -25225,8 +25240,16 @@ impl IcedChat {
 
             let mut bubble_col = Column::new()
                 .spacing(SPACE_2)
-                .max_width(560.0)
-                .width(Length::Fill);
+                .max_width(bubble_max_w)
+                .width(Length::Fill)
+                // Outgoing groups hug the right edge (avatar trailing), so
+                // their bubble + timestamp align right inside the reserved
+                // column; incoming groups hug the left edge.
+                .align_x(if matches!(entry.kind, ChatKind::Local) {
+                    iced::Alignment::End
+                } else {
+                    iced::Alignment::Start
+                });
             // Skip the body bubble for image-only entries (empty body + image present)
             if entry.body.is_empty() && entry.image_handle.is_some() {
                 bubble_col = bubble_col.push(ts_el);
@@ -25306,42 +25329,61 @@ impl IcedChat {
                 });
             }
 
+            // ── Avatar column ──
+            // UI-14 rule: the sender avatar appears once per visual group, on
+            // the group's FIRST bubble.  Subsequent bubbles in the same group
+            // reserve the same-width slot so every bubble in the group shares
+            // one edge.  The avatar sits at the leading edge for incoming
+            // groups (left) and the trailing edge for outgoing groups (right).
+            let avatar_el: iced::Element<'_, AppMessage> = if group_continues {
+                space::Space::new()
+                    .width(Length::Fixed(AVATAR_SM))
+                    .height(Length::Fixed(AVATAR_SM))
+                    .into()
+            } else if let Some(ref handle) = entry.avatar_handle {
+                iced::widget::image(handle.clone())
+                    .content_fit(iced::ContentFit::ScaleDown)
+                    .width(Length::Fixed(AVATAR_SM))
+                    .height(Length::Fixed(AVATAR_SM))
+                    .into()
+            } else {
+                // Coloured circle fallback with the sender's initial, so an
+                // entry without a profile image never renders a bare "?".
+                let name = entry.label.as_str();
+                let initial = name
+                    .chars()
+                    .next()
+                    .map(|c| c.to_uppercase().to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                let dark = matches!(self.theme(), iced::Theme::Dark);
+                let letter_color = crate::presentation::initials_color(name, dark);
+                container(text(initial).size(TYPO_SM).color(letter_color))
+                    .width(Length::Fixed(AVATAR_SM))
+                    .height(Length::Fixed(AVATAR_SM))
+                    .center_x(Length::Fixed(AVATAR_SM))
+                    .center_y(Length::Fixed(AVATAR_SM))
+                    .style(|t| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(bg_surface_secondary(t))),
+                        border: iced::Border {
+                            radius: (AVATAR_SM / 2.0).into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .into()
+            };
+
             let msg_row = match entry.kind {
-                ChatKind::Remote => {
-                    let avatar: iced::Element<'_, AppMessage> = {
-                        if let Some(ref handle) = entry.avatar_handle {
-                            iced::widget::image(handle.clone())
-                                .content_fit(iced::ContentFit::ScaleDown)
-                                .width(Length::Fixed(48.0))
-                                .height(Length::Fixed(48.0))
-                                .into()
-                        } else {
-                            text("?").size(TYPO_XL).into()
-                        }
-                    };
-                    Row::new()
-                        .push(avatar)
-                        .push(bubble_col)
-                        .align_y(iced::Alignment::Center)
-                        .spacing(SPACE_8)
-                }
-                ChatKind::Local => {
-                    let avatar: iced::Element<'_, AppMessage> =
-                        if let Some(ref handle) = entry.avatar_handle {
-                            iced::widget::image(handle.clone())
-                                .content_fit(iced::ContentFit::ScaleDown)
-                                .width(Length::Fixed(48.0))
-                                .height(Length::Fixed(48.0))
-                                .into()
-                        } else {
-                            text("?").size(TYPO_XL).into()
-                        };
-                    Row::new()
-                        .push(avatar)
-                        .push(bubble_col)
-                        .align_y(iced::Alignment::Center)
-                        .spacing(SPACE_8)
-                }
+                ChatKind::Remote => Row::new()
+                    .push(avatar_el)
+                    .push(bubble_col)
+                    .align_y(iced::Alignment::Center)
+                    .spacing(SPACE_8),
+                ChatKind::Local => Row::new()
+                    .push(bubble_col)
+                    .push(avatar_el)
+                    .align_y(iced::Alignment::Center)
+                    .spacing(SPACE_8),
                 // System entries with a download attachment render the
                 // download card directly (upload progress, received file).
                 // Plain text system events render as small centred notices.
@@ -25397,11 +25439,14 @@ impl IcedChat {
                     // message bubbles (normal spacing below).
                     SPACE_2
                 } else if group_continues {
-                    SPACE_2
+                    // 6 px gap between bubbles inside one sender group (plan §4).
+                    SPACE_6
                 } else if matches!(entry.kind, ChatKind::System) {
                     SPACE_4
                 } else {
-                    SPACE_8
+                    // 18 px group-to-group gap between different sender groups
+                    // (plan §4).
+                    SPACE_18
                 },
             ));
 
@@ -29577,6 +29622,26 @@ mod tests {
             IcedChat::image_chat_kind(remote, local),
             ChatKind::Remote
         ));
+    }
+
+    #[test]
+    fn update_cache_formats_timestamp_once() {
+        // UI-14 regression: the bubble metadata row reads
+        // `entry.formatted_time`, which must be populated by `update_cache`
+        // (invoked for every entry by `entries_push`). Timestamps previously
+        // never rendered because every constructor left the field None.
+        let mut entry = ChatEntry::local("You", "hello");
+        assert!(entry.formatted_time.is_none());
+        entry.update_cache();
+        assert!(
+            entry.formatted_time.is_some(),
+            "update_cache must cache a formatted timestamp"
+        );
+        let cached = entry.formatted_time.clone().unwrap();
+        assert!(!cached.is_empty());
+        // Re-running the cache must be stable (no per-frame re-format).
+        entry.update_cache();
+        assert_eq!(entry.formatted_time.as_deref(), Some(cached.as_str()));
     }
 
     #[test]

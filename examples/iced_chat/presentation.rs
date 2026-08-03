@@ -10,7 +10,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Messages from the same sender stay in one visual group for this long.
 /// Keeping this rule in the presentation layer means replayed history and live
 /// delivery get identical grouping without changing the stored message data.
+///
+/// UI-14 grouping rule: two adjacent user messages share a visual group when
+/// (a) both are the same kind (Local or Remote), (b) they have the same
+/// sender, and (c) the timestamps are within this window.  Grouping is purely
+/// presentational — stored timestamps, sender fields, and message order are
+/// never modified.  A group's first bubble carries the sender avatar; the
+/// delivery/read indicator is shown on the group's last bubble.
 pub(crate) const MESSAGE_GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
+
+/// Effective maximum width for a message bubble.
+///
+/// Spec (plan §4): 560 px or 68 % of the timeline width, whichever is smaller.
+/// A non-positive timeline width (pre-layout frame) falls back to the 560 px
+/// cap so bubbles never collapse to zero on the first frame.
+pub(crate) fn chat_bubble_max_width(timeline_width: f32) -> f32 {
+    if timeline_width <= 0.0 {
+        return crate::design_tokens::CHAT_BUBBLE_MAX_WIDTH;
+    }
+    crate::design_tokens::CHAT_BUBBLE_MAX_WIDTH
+        .min(timeline_width * crate::design_tokens::CHAT_BUBBLE_WIDTH_RATIO)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MessageKind {
@@ -274,6 +294,19 @@ pub(crate) fn count_label(count: usize, singular: &str, plural: &str) -> String 
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn chat_bubble_max_width_caps_at_560_or_68_percent() {
+        // Wide timeline: 560 px cap wins.
+        assert_eq!(chat_bubble_max_width(1200.0), 560.0);
+        // Medium timeline: 68 % is smaller than 560 px.
+        assert!((chat_bubble_max_width(688.0) - 467.84).abs() < 0.01);
+        // Narrow timeline: 68 % shrinks further.
+        assert!((chat_bubble_max_width(400.0) - 272.0).abs() < 0.01);
+        // Non-positive width (pre-layout frame) falls back to the cap.
+        assert_eq!(chat_bubble_max_width(0.0), 560.0);
+        assert_eq!(chat_bubble_max_width(-10.0), 560.0);
+    }
 
     #[test]
     fn message_groups_require_kind_sender_and_time_window() {

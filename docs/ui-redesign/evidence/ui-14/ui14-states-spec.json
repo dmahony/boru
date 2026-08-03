@@ -1,0 +1,187 @@
+{
+  "spec_id": "ui14-states-spec",
+  "spec_version": 1,
+  "purpose": "UI-14 evidence timeline: message-bubble states and content shapes that the Figure 4 fixture does not cover — emoji-only text, long unbroken text, multiline text, long wrapped text, and the full local delivery-state ladder (Queued/Sent/Delivered/Seen/Failed). Injected into an isolated data dir by figure4_fixture.py --spec and captured by scripts/ui14_states_evidence.sh.",
+  "source": {
+    "document": "Boru_Modern_UI_Hermes_Kanban_Implementation_Plan.pdf",
+    "page": 6,
+    "figure": "Figure 4 - Target chat screen",
+    "notes": "UI-14 card verification requires: emoji-only, long text, multiline, failed and read states (card step 'Verification required before Done'). This spec is dev/QA-only and never touches production data paths."
+  },
+  "target_visual_state": {
+    "window": {"reference_size": "1280x800", "theme": "light"},
+    "conversation": {
+      "kind": "Direct",
+      "remote_peer_display_name": "28d7ee8656",
+      "notes": "Same identity seed and remote key as the Figure 4 fixture so the conversation row opens through the same MCP action."
+    }
+  },
+  "messages": [
+    {
+      "id": 1,
+      "type": "system_chip",
+      "content": "Chat joined.",
+      "day_offset": 1,
+      "time": "10:30 AM",
+      "classification": {"kind": "INFO", "reason": "falls through to Information"},
+      "chip_label": "INFO",
+      "chip_accent": "Muted",
+      "alignment": "center"
+    },
+    {
+      "id": 2,
+      "type": "text",
+      "content": "👋😊🎉",
+      "sender": "remote",
+      "sender_display_name": "28d7ee8656",
+      "day_offset": 1,
+      "time": "10:31 AM",
+      "delivery_state": null,
+      "alignment": "left",
+      "styling_hints": {"note": "emoji-only message renders inside a normal incoming bubble"}
+    },
+    {
+      "id": 3,
+      "type": "text",
+      "content": "Read state: this outgoing message was seen.",
+      "sender": "local",
+      "sender_display_name": "You",
+      "day_offset": 1,
+      "time": "10:33 AM",
+      "delivery_state": "Seen",
+      "alignment": "right",
+      "styling_hints": {"note": "group of one -> metadata row shows '10:33 AM - Read'"}
+    },
+    {
+      "id": 4,
+      "type": "text",
+      "content": "OK, thanks.",
+      "sender": "remote",
+      "sender_display_name": "28d7ee8656",
+      "day_offset": 1,
+      "time": "10:34 AM",
+      "delivery_state": null,
+      "alignment": "left",
+      "styling_hints": {"note": "sender switch breaks the local group"}
+    },
+    {
+      "id": 5,
+      "type": "text",
+      "content": "Delivered when unseen; shown as Read while the chat is open.",
+      "sender": "local",
+      "sender_display_name": "You",
+      "day_offset": 1,
+      "time": "10:35 AM",
+      "delivery_state": "Delivered",
+      "alignment": "right",
+      "styling_hints": {
+        "note": "stored as Delivered; the app's seen-on-visibility rule promotes it to Seen (Read) while the conversation is on screen — truthful read-receipt behaviour"
+      }
+    },
+    {
+      "id": 6,
+      "type": "text",
+      "content": "Got it.",
+      "sender": "remote",
+      "sender_display_name": "28d7ee8656",
+      "day_offset": 1,
+      "time": "10:36 AM",
+      "delivery_state": null,
+      "alignment": "left"
+    },
+    {
+      "id": 7,
+      "type": "text",
+      "content": "Sent state: broadcast accepted by the transport.",
+      "sender": "local",
+      "sender_display_name": "You",
+      "day_offset": 1,
+      "time": "10:37 AM",
+      "delivery_state": "Sent",
+      "alignment": "right",
+      "styling_hints": {"note": "metadata row shows 'Sent'"}
+    },
+    {
+      "id": 8,
+      "type": "text",
+      "content": "Sure.",
+      "sender": "remote",
+      "sender_display_name": "28d7ee8656",
+      "day_offset": 1,
+      "time": "10:38 AM",
+      "delivery_state": null,
+      "alignment": "left"
+    },
+    {
+      "id": 9,
+      "type": "text",
+      "content": "Queued state: still sending.",
+      "sender": "local",
+      "sender_display_name": "You",
+      "day_offset": 1,
+      "time": "10:39 AM",
+      "delivery_state": "Queued",
+      "alignment": "right",
+      "styling_hints": {"note": "metadata row shows 'Sending' (user-facing label for Queued)"}
+    },
+    {
+      "id": 10,
+      "type": "text",
+      "content": "Hmm.",
+      "sender": "remote",
+      "sender_display_name": "28d7ee8656",
+      "day_offset": 1,
+      "time": "10:40 AM",
+      "delivery_state": null,
+      "alignment": "left"
+    },
+    {
+      "id": 11,
+      "type": "text",
+      "content": "Failed state: this message could not be delivered.",
+      "sender": "local",
+      "sender_display_name": "You",
+      "day_offset": 1,
+      "time": "10:41 AM",
+      "delivery_state": "Failed",
+      "alignment": "right",
+      "styling_hints": {"note": "metadata row shows 'Failed', label shows 'You -', bubble border uses the danger token; retry remains available via the label"}
+    },
+    {
+      "id": 12,
+      "type": "text",
+      "content": "SupercalifragilisticexpialidociousSupercalifragilisticexpialidociousSupercalifragilisticexpialidociousSupercalifragilisticexpialidocious",
+      "sender": "remote",
+      "sender_display_name": "28d7ee8656",
+      "day_offset": 1,
+      "time": "10:42 AM",
+      "delivery_state": null,
+      "alignment": "left",
+      "styling_hints": {"note": "long unbroken word must wrap, not overflow the timeline"}
+    },
+    {
+      "id": 13,
+      "type": "text",
+      "content": "Multiline:\nFirst line of the message.\nSecond line of the message.\nThird line of the message.",
+      "sender": "remote",
+      "sender_display_name": "28d7ee8656",
+      "day_offset": 1,
+      "time": "10:43 AM",
+      "delivery_state": null,
+      "alignment": "left",
+      "styling_hints": {"note": "embedded newlines render as line breaks inside the bubble"}
+    },
+    {
+      "id": 14,
+      "type": "text",
+      "content": "A longer wrapped sentence that goes on for a while so the message bubble reaches its maximum width and the text reflows onto multiple lines instead of expanding beyond the timeline edge.",
+      "sender": "remote",
+      "sender_display_name": "28d7ee8656",
+      "day_offset": 1,
+      "time": "10:44 AM",
+      "delivery_state": null,
+      "alignment": "left",
+      "styling_hints": {"note": "long wrapped text: bubble width capped at min(560px, 68% of timeline)"}
+    }
+  ]
+}

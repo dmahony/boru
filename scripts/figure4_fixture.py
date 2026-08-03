@@ -201,7 +201,11 @@ def build_chat_history(
             sender = (
                 local_pk_hex if msg.get("sender") == "local" else remote_pk_hex
             )
-            delivery = "Seen" if msg.get("sender") == "local" else "Delivered"
+            # Spec delivery_state wins when present (UI-14 states evidence);
+            # fall back to the Figure 4 defaults otherwise.
+            delivery = msg.get("delivery_state") or (
+                "Seen" if msg.get("sender") == "local" else "Delivered"
+            )
             push("text", sender, body, ts, delivery)
         else:
             raise ValueError(f"unrecognised spec message type: {mtype!r}")
