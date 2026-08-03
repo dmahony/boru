@@ -33835,6 +33835,92 @@ mod tests {
         drop(runtime);
     }
 
+    // ── UI-15 composer state tests ────────────────────────────────────
+
+    /// SendPressed while an IME composition is active must not clear the
+    /// composer or create a message (Enter confirms the composition instead).
+    #[test]
+    fn send_pressed_skips_while_ime_composing() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([9u8; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        app.composer_ime_active = true;
+        app.composer_text = "still composing".to_string();
+
+        let task = app.update(AppMessage::SendPressed);
+        drop(task);
+
+        assert!(app.composer_ime_active);
+        assert_eq!(app.composer_text, "still composing");
+        assert!(app.entries.is_empty());
+        drop(runtime);
+    }
+
+    /// The transient "sending" flag is set when a normal text send starts and
+    /// cleared by ComposerSendFinished (the completion task chained after the
+    /// broadcast task).
+    #[test]
+    fn composer_sending_flag_roundtrips() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([10u8; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+        let subscription = runtime
+            .block_on(app.gossip.subscribe(topic, vec![]))
+            .expect("test room subscription");
+        let (sender, _receiver) = subscription.split();
+        app.sender = Some(sender);
+        app.sender_ready = true;
+        app.composer_text = "flag roundtrip".to_string();
+
+        let task = app.update(AppMessage::SendPressed);
+        drop(task);
+        assert!(app.composer_sending, "sending flag should be set on send");
+
+        let task = app.update(AppMessage::ComposerSendFinished);
+        drop(task);
+        assert!(!app.composer_sending, "sending flag should clear on completion");
+        drop(runtime);
+    }
+
+    /// File drag-over toggles the composer focus treatment; a dropped image
+    /// file routes through ExecuteImageSend while a non-image routes through
+    /// ExecuteFileSend.
+    #[test]
+    fn composer_drag_over_and_file_drop_routing() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([11u8; 32]);
+        app.topic = topic;
+        app.screen = Screen::Chat { topic };
+
+        // Hover sets the flag; leaving clears it.
+        let task = app.update(AppMessage::ComposerDragOver(true));
+        drop(task);
+        assert!(app.composer_drag_over);
+        let task = app.update(AppMessage::ComposerDragOver(false));
+        drop(task);
+        assert!(!app.composer_drag_over);
+
+        // Hover again then drop a PNG: routes to ExecuteImageSend and clears
+        // the drag-over flag.
+        let task = app.update(AppMessage::ComposerDragOver(true));
+        drop(task);
+        let task = app.update(AppMessage::ComposerFileDropped(
+            std::path::PathBuf::from("/tmp/ui15-shot.png"),
+        ));
+        drop(task);
+        assert!(!app.composer_drag_over, "drop must clear the drag-over flag");
+
+        // Non-image drop routes through ExecuteFileSend (no panic, task
+        // produced and consumed).
+        let task = app.update(AppMessage::ComposerFileDropped(
+            std::path::PathBuf::from("/tmp/ui15-note.txt"),
+        ));
+        drop(task);
+        drop(runtime);
+    }
+
     // ── PeerPresence state transition tests ───────────────────────────
 
     /// Every PeerPresence variant has a non-empty, distinct label.
