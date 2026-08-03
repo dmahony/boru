@@ -9,6 +9,7 @@ mod app;
 mod card_shell;
 mod component_gallery;
 mod connection_details;
+mod dashboard_view_model;
 mod design_tokens;
 mod download_progress_view;
 mod fonts;
