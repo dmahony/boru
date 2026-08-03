@@ -2436,6 +2436,8 @@ impl ChatEntry {
 pub enum Screen {
     /// No chat selected — empty state shown in the main panel.
     ChatList,
+    /// File sharing dashboard (placeholder panel; full dashboard in FS-04+).
+    FileSharing,
     /// An individual chat room with a given topic.
     Chat { topic: TopicId },
     /// The friend request management screen.
@@ -2666,8 +2668,8 @@ pub struct IcedChat {
     /// Currently selected chat list topic, used by cached sidebar rows to
     /// update selection styling without rebuilding row contents.
     sidebar_selected_topic: Rc<Cell<Option<TopicId>>>,
-    /// Track sidebar section collapsed state: [chats, groups, friends, discover, requests, public_rooms]
-    sidebar_section_collapsed: [bool; 6],
+    /// Track sidebar section collapsed state: [chats, groups, friends, discover, requests, public_rooms, files]
+    sidebar_section_collapsed: [bool; 7],
 
     // ── Chat state (active room — display cache) ──
     /// Active conversation topic (display cache).
@@ -3182,6 +3184,8 @@ pub struct IcedChat {
     pending_open_friends_action: Option<GuiActionId>,
     /// OpenSettings action waiting for the normal settings navigation path.
     pending_open_settings_action: Option<GuiActionId>,
+    /// OpenFileSharing action waiting for the normal file-sharing navigation path.
+    pending_open_file_sharing_action: Option<GuiActionId>,
     /// CloseDialog action waiting for the normal dialog-cancel message path.
     pending_close_dialog_action: Option<GuiActionId>,
     /// SelectPeer action waiting for the normal peer-profile navigation path.
@@ -3839,6 +3843,8 @@ pub enum AppMessage {
     CloseSettings,
     /// Open the friend requests management screen.
     OpenFriendRequests,
+    /// Open the file sharing dashboard screen.
+    OpenFileSharing,
     /// Toggle a sidebar section's collapsed state by index (0=chats, 1=friends, 2=discover, 3=requests, 4=public_rooms).
     ToggleSidebarSectionCollapsed(usize),
     CloseFriendRequests,
@@ -4425,6 +4431,7 @@ fn gui_navigation_message(command: &GuiTestCommand) -> Option<AppMessage> {
         GuiTestCommand::GoToChatList => Some(AppMessage::GoToChatList),
         GuiTestCommand::OpenFriends => Some(AppMessage::OpenFriendRequests),
         GuiTestCommand::OpenSettings => Some(AppMessage::OpenSettings),
+        GuiTestCommand::OpenFileSharing => Some(AppMessage::OpenFileSharing),
         _ => None,
     }
 }
@@ -5417,7 +5424,7 @@ impl IcedChat {
             cached_requests_revision: Cell::new(0),
             cached_requests_dep: std::cell::RefCell::new(None),
             sidebar_selected_topic: Rc::new(Cell::new(None)),
-            sidebar_section_collapsed: [false; 6],
+            sidebar_section_collapsed: [false; 7],
             initial_bootstrap_peers: initial_bootstrap,
             return_to_chat_list_after_open,
             whisper_handle,
@@ -5522,6 +5529,7 @@ impl IcedChat {
             pending_chat_list_action: None,
             pending_open_friends_action: None,
             pending_open_settings_action: None,
+            pending_open_file_sharing_action: None,
             pending_close_dialog_action: None,
             pending_select_peer_action: None,
             pending_create_room_action: None,
@@ -6792,6 +6800,7 @@ impl IcedChat {
             AppMessage::ClearConversation => "ClearConversation",
             AppMessage::OpenSettings => "OpenSettings",
             AppMessage::CloseSettings => "CloseSettings",
+            AppMessage::OpenFileSharing => "OpenFileSharing",
             AppMessage::NetEvent(_) => "NetEvent",
             AppMessage::ReplayPendingEvents(_) => "ReplayPendingEvents",
             AppMessage::FriendEvent(_) => "FriendEvent",
@@ -7721,6 +7730,7 @@ impl IcedChat {
             Screen::PeerProfile(_) => "Peer profile open".to_string(),
             Screen::PeerCatalogue(_) => "Peer catalogue open".to_string(),
             Screen::FriendRequests => "Friend requests open".to_string(),
+            Screen::FileSharing => "File sharing open".to_string(),
             Screen::Settings => "Settings open".to_string(),
             Screen::ChatList => "Chat list open".to_string(),
             Screen::Discover => "Discover".to_string(),
@@ -7968,6 +7978,7 @@ impl IcedChat {
             Screen::Chat { topic } => ("Chat", Some(topic.to_string())),
             Screen::ChatList => ("ChatList", None),
             Screen::FriendRequests => ("FriendRequests", None),
+            Screen::FileSharing => ("FileSharing", None),
             Screen::Settings => ("Settings", None),
             Screen::PeerProfile(_) => ("PeerProfile", None),
             Screen::PeerCatalogue(_) => ("PeerCatalogue", None),
@@ -11314,6 +11325,22 @@ impl IcedChat {
             AppMessage::OpenFriendRequests => {
                 self.screen = Screen::FriendRequests;
                 if let Some(action_id) = self.pending_open_friends_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::OpenFileSharing => {
+                // Navigation only — the shared shell, networking services, and
+                // conversation subscriptions stay alive; only the main panel
+                // swaps to the File Sharing screen.
+                self.screen = Screen::FileSharing;
+                if let Some(action_id) = self.pending_open_file_sharing_action.take() {
                     let _ = self
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::AppMessageHandled);
@@ -15069,6 +15096,22 @@ impl IcedChat {
                     self.pending_open_settings_action = Some(action_id);
                     return iced::Task::done(
                         gui_navigation_message(&command).expect("OpenSettings mapping"),
+                    );
+                }
+
+                if matches!(command, GuiTestCommand::OpenFileSharing) {
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_core::diagnostics::ExpectedState::ScreenIs(
+                            "FileSharing".to_string(),
+                        ),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_open_file_sharing_action = Some(action_id);
+                    return iced::Task::done(
+                        gui_navigation_message(&command).expect("OpenFileSharing mapping"),
                     );
                 }
 
@@ -19263,6 +19306,7 @@ impl IcedChat {
         // Main panel depends on the active screen.
         let main_panel: iced::Element<'_, AppMessage> = match &self.screen {
             Screen::ChatList => self.view_main_empty_state(),
+            Screen::FileSharing => self.view_file_sharing(),
             Screen::Chat { .. } => self.view_chat_panel(),
             Screen::FriendRequests => self.view_friend_requests(),
             Screen::Settings => self.view_settings_screen(),
@@ -20090,6 +20134,19 @@ impl IcedChat {
         );
         if !self.sidebar_section_collapsed[4] {
             sections = sections.push(self.view_sidebar_requests());
+        }
+
+        // FILES section (FS-03) — persistent navigation entry into the File
+        // Sharing dashboard. Kept last so every pre-existing section index
+        // and route is unchanged.
+        sections = sections.push(
+            SidebarSectionHeader::new("FILES")
+                .collapsed(self.sidebar_section_collapsed[6])
+                .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(6))
+                .build(&theme),
+        );
+        if !self.sidebar_section_collapsed[6] {
+            sections = sections.push(self.view_sidebar_files());
         }
 
         let sections_scroll = scrollable(sections)
@@ -21693,6 +21750,86 @@ impl IcedChat {
         }
 
         section.into()
+    }
+
+    /// FILES sidebar section content (FS-03): a single navigation row into the
+    /// File Sharing dashboard. Uses the existing sidebar row styling and the
+    /// `Icon::Files` glyph; the row is styled active while `Screen::FileSharing`
+    /// is selected so the persistent navigation state matches the route.
+    fn view_sidebar_files(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, text, Row, Space};
+        use iced::{Alignment, Background, Length};
+
+        let dark_mode = self.dark_mode;
+        let theme = Self::theme_from_dark(dark_mode);
+        let active = matches!(self.screen, Screen::FileSharing);
+
+        // `Icon::Files` (Lucide files.svg) — the approved folder/files glyph.
+        // The icon widget's colour is resolved at build time, so the active
+        // state is applied to the SVG's theme closure instead.
+        let icon = icon_svg(ICON_FILES, IconSize::Md.px()).style(move |t, _| {
+            iced::widget::svg::Style {
+                color: Some(if active {
+                    crate::design_tokens::primary(t)
+                } else {
+                    crate::design_tokens::text_secondary(t)
+                }),
+            }
+        });
+
+        let label = text("File Sharing")
+            .size(TYPO_SM)
+            .color(if active {
+                crate::design_tokens::text_primary(&theme)
+            } else {
+                crate::design_tokens::text_secondary(&theme)
+            })
+            .width(Length::Fill);
+
+        let row_el = Row::new()
+            .push(icon)
+            .push(
+                Space::new()
+                    .width(Length::Fixed(SPACE_8))
+                    .height(Length::Shrink),
+            )
+            .push(label)
+            .spacing(0)
+            .align_y(Alignment::Center)
+            .padding([SPACE_6, SPACE_12])
+            .width(Length::Fill);
+
+        let btn = button(row_el)
+            .on_press(AppMessage::OpenFileSharing)
+            .width(Length::Fill)
+            .padding(0)
+            .style(move |t, status| {
+                let bg = if active {
+                    Some(Background::Color(crate::design_tokens::surface_selected(t)))
+                } else if matches!(status, iced::widget::button::Status::Hovered) {
+                    Some(Background::Color(crate::design_tokens::surface_hover(t)))
+                } else {
+                    None
+                };
+                iced::widget::button::Style {
+                    background: bg,
+                    border: iced::Border {
+                        // Thin primary border mirrors the selected
+                        // conversation-row treatment for keyboard focus.
+                        color: if active {
+                            crate::design_tokens::primary(t)
+                        } else {
+                            iced::Color::TRANSPARENT
+                        },
+                        width: if active { 1.0 } else { 0.0 },
+                        radius: crate::design_tokens::RADIUS_MD.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            });
+
+        container(btn).width(Length::Fill).into()
     }
 
     // ── Home-rail card selectors (fine-grained state slices) ─────────────
@@ -27366,7 +27503,98 @@ impl IcedChat {
             .style(container_surface)
             .into()
     }
-    /// Public room directory (Discover) screen.
+    /// File Sharing screen (FS-03 placeholder).
+    ///
+    /// Renders inside the real shared shell (sidebar + main panel + overlays)
+    /// using design-system tokens. The full dashboard (tabs, file table, peer
+    /// panels) is implemented in later FS cards; this card only establishes
+    /// the route and navigation entry.
+    fn view_file_sharing(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, container, text, Column, Row, Space};
+        use iced::{Alignment, Background, Length};
+
+        let theme = Self::theme_from_dark(self.dark_mode);
+
+        // Header row: back button + page title.
+        let header = Row::new()
+            .push(
+                button(
+                    Row::new()
+                        .push(icon_svg(ICON_CHAT, TYPO_SM))
+                        .push(text(" Back").size(TYPO_SM))
+                        .spacing(SPACE_4)
+                        .align_y(Alignment::Center),
+                )
+                .on_press(AppMessage::GoToChatList)
+                .padding([SPACE_6, SPACE_12])
+                .style(BUTTON_GHOST_BG),
+            )
+            .push(text("File Sharing").size(TYPO_LG))
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center);
+
+        // Placeholder panel using the shared design system.
+        let placeholder = container(
+            Column::new()
+                .push(
+                    Icon::Files
+                        .build()
+                        .size(IconSize::Xl)
+                        .color_fn(crate::design_tokens::text_muted)
+                        .build(),
+                )
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(
+                    text("File Sharing is coming soon")
+                        .size(TYPO_MD)
+                        .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                        .color(crate::design_tokens::text_primary(&theme)),
+                )
+                .push(Space::new().height(Length::Fixed(SPACE_6)))
+                .push(
+                    text(
+                        "Files you share and download will appear here.\n\
+                         Sharing keeps Boru's native OS file picker and verified transfers.",
+                    )
+                    .size(TYPO_XS)
+                    .style(text_muted_style)
+                    .width(Length::Fill),
+                )
+                .spacing(0)
+                .align_x(Alignment::Center),
+        )
+        .width(Length::FillPortion(6))
+        .height(Length::Shrink)
+        .padding(SPACE_24)
+        .style(move |t| container::Style {
+            background: Some(Background::Color(bg_surface(t))),
+            border: iced::Border {
+                color: border_muted(&theme),
+                width: 1.0,
+                radius: SPACE_12.into(),
+            },
+            ..Default::default()
+        });
+
+        let body = Column::new()
+            .push(header)
+            .push(
+                container(
+                    Column::new()
+                        .push(iced::widget::Space::new().height(Length::Fill))
+                        .push(placeholder)
+                        .push(iced::widget::Space::new().height(Length::Fill))
+                        .align_x(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(SPACE_16),
+            )
+            .spacing(SPACE_8);
+
+        body.into()
+    }
+
     fn view_discover(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, container, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Background, Length};
@@ -32391,7 +32619,15 @@ mod tests {
     }
 
     #[test]
-    fn gui_navigation_mapping_includes_home_friends_and_settings() {
+    fn gui_open_file_sharing_uses_file_sharing_navigation_message() {
+        assert!(matches!(
+            gui_navigation_message(&GuiTestCommand::OpenFileSharing),
+            Some(AppMessage::OpenFileSharing)
+        ));
+    }
+
+    #[test]
+    fn gui_navigation_mapping_includes_home_friends_settings_and_file_sharing() {
         assert!(matches!(
             gui_navigation_message(&GuiTestCommand::GoToChatList),
             Some(AppMessage::GoToChatList)
@@ -32403,6 +32639,10 @@ mod tests {
         assert!(matches!(
             gui_navigation_message(&GuiTestCommand::OpenSettings),
             Some(AppMessage::OpenSettings)
+        ));
+        assert!(matches!(
+            gui_navigation_message(&GuiTestCommand::OpenFileSharing),
+            Some(AppMessage::OpenFileSharing)
         ));
     }
 
@@ -32511,6 +32751,11 @@ mod tests {
                 AppMessage::OpenSettings,
                 Screen::Settings,
             ),
+            (
+                GuiTestCommand::OpenFileSharing,
+                AppMessage::OpenFileSharing,
+                Screen::FileSharing,
+            ),
         ];
 
         for (command, app_message, expected_screen) in cases {
@@ -32537,6 +32782,45 @@ mod tests {
             assert_gui_action_completed(&app, &action_id, expected_state);
             drop(runtime);
         }
+    }
+
+    #[test]
+    fn file_sharing_navigation_preserves_persistent_shell_state() {
+        // FS-03 acceptance: Home -> Files -> Chat -> Files must not recreate
+        // networking services, lose sidebar state, or reset account identity.
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Baseline persistent state.
+        let identity = app.local_public;
+        let sidebar_collapsed = app.sidebar_section_collapsed;
+        let conversation_count = app.conversation_store.active_iter().into_iter().count();
+
+        // Cycle: Home (ChatList) -> Files -> ChatList -> Files.
+        let task = app.update(AppMessage::OpenFileSharing);
+        drop(task);
+        assert_eq!(app.screen, Screen::FileSharing);
+
+        let task = app.update(AppMessage::GoToChatList);
+        drop(task);
+        assert_eq!(app.screen, Screen::ChatList);
+
+        let task = app.update(AppMessage::OpenFileSharing);
+        drop(task);
+        assert_eq!(app.screen, Screen::FileSharing);
+
+        // Networking/services identity and shell state must be untouched.
+        assert_eq!(app.local_public, identity, "account identity must not reset");
+        assert_eq!(
+            app.sidebar_section_collapsed,
+            sidebar_collapsed,
+            "sidebar collapsed state must survive navigation"
+        );
+        assert_eq!(
+            app.conversation_store.active_iter().into_iter().count(),
+            conversation_count,
+            "conversation subscriptions must not be recreated"
+        );
+        drop(runtime);
     }
 
     #[test]

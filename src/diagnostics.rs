@@ -2863,6 +2863,8 @@ pub enum GuiTestCommand {
     OpenFriends,
     /// Open the settings screen.
     OpenSettings,
+    /// Open the file sharing dashboard screen.
+    OpenFileSharing,
     /// Close the currently open dialog or settings screen.
     CloseDialog,
     /// Set the composer (message input) text for the active conversation.
@@ -2997,6 +2999,7 @@ impl GuiTestCommand {
             GuiTestCommand::ClearComposer => Ok(()),
             GuiTestCommand::FocusComposer => Ok(()),
             GuiTestCommand::OpenSettings => Ok(()),
+            GuiTestCommand::OpenFileSharing => Ok(()),
             GuiTestCommand::CloseDialog => Ok(()),
             GuiTestCommand::CreateNewRoom => Ok(()),
             GuiTestCommand::SetCreateRoomName { name } => validate_gui_text(name, "Room name"),
@@ -3102,6 +3105,7 @@ impl GuiTestCommand {
             GuiTestCommand::ToggleHelp => Some(ExpectedState::HelpVisible(true)),
             GuiTestCommand::OpenFriends => Some(ExpectedState::ScreenIs("FriendRequests".into())),
             GuiTestCommand::OpenSettings => Some(ExpectedState::ScreenIs("Settings".into())),
+            GuiTestCommand::OpenFileSharing => Some(ExpectedState::ScreenIs("FileSharing".into())),
             // CloseDialog: depends on what screen was behind the dialog.
             GuiTestCommand::CloseDialog => None,
             // SelectPeer: may open a conversation or profile — depends on context.
