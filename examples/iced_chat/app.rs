@@ -515,6 +515,7 @@ pub(crate) use crate::design_tokens::{AVATAR_MD, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
     DETAILS_PANEL_WIDTH, RADIUS_LG, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24, SPACE_4, SPACE_8,
 };
+pub(crate) use crate::icon_system::{Icon, IconSize};
 pub(crate) const SPACE_6: f32 = 6.0;
 pub(crate) const SPACE_10: f32 = 10.0;
 
@@ -19542,7 +19543,7 @@ impl IcedChat {
         #[cfg(feature = "terminal")]
         {
             header = header.push(iced::widget::tooltip::Tooltip::new(
-                button(text(">_").font(iced::Font::MONOSPACE).size(TYPO_MD))
+                button(Icon::Terminal.build().size(IconSize::Md).build())
                     .on_press(AppMessage::OpenTerminal)
                     .padding([SPACE_6, SPACE_8])
                     .style(BUTTON_ICON),
@@ -20836,7 +20837,7 @@ impl IcedChat {
                         .width(Length::Fill),
                 )
                 .push(
-                    button(text("…").size(TYPO_MD))
+                    button(Icon::More.build().size(IconSize::Md).build())
                         .on_press(AppMessage::OpenFriendProfile(friend.peer))
                         .padding([SPACE_2, SPACE_8])
                         .style(move |t, status| iced::widget::button::Style {
@@ -21038,7 +21039,7 @@ impl IcedChat {
                             .width(Length::Fill),
                     )
                     .push(
-                        button(text("✓").size(TYPO_XS))
+                        button(Icon::Check.build().size(IconSize::Xs).build())
                             .on_press(AppMessage::IncomingFriendRequestAccept {
                                 request_id: request.request_id.clone(),
                                 peer: request.requester,
@@ -21055,7 +21056,7 @@ impl IcedChat {
                             }),
                     )
                     .push(
-                        button(text("✗").size(TYPO_XS))
+                        button(Icon::Close.build().size(IconSize::Xs).build())
                             .on_press(AppMessage::IncomingFriendRequestDecline {
                                 request_id: request.request_id.clone(),
                                 peer: request.requester,
@@ -21143,7 +21144,7 @@ impl IcedChat {
                             .width(Length::Fill),
                     )
                     .push(
-                        button(text("✓").size(TYPO_XS))
+                        button(Icon::Check.build().size(IconSize::Xs).build())
                             .on_press(AppMessage::AcceptTunnelRequest(
                                 request.tunnel_id.clone(),
                             ))
@@ -21159,7 +21160,7 @@ impl IcedChat {
                             }),
                     )
                     .push(
-                        button(text("✗").size(TYPO_XS))
+                        button(Icon::Close.build().size(IconSize::Xs).build())
                             .on_press(AppMessage::DeclineTunnelRequest(
                                 request.tunnel_id.clone(),
                             ))
@@ -21729,7 +21730,7 @@ impl IcedChat {
                                 .size(TYPO_SM)
                                 .color(text_system(&theme)),
                             Space::new().width(Length::Fill),
-                            button(text("✗").size(TYPO_XS).color(color_error(&theme)))
+                            button(Icon::Close.build().size(IconSize::Xs).destructive(true).build())
                                 .on_press(AppMessage::CloseTunnel(def.id))
                                 .padding([SPACE_2, SPACE_6])
                                 .style(BUTTON_GHOST_BG),
@@ -22113,7 +22114,7 @@ impl IcedChat {
         use iced::widget::{button, column, container, text};
 
         let theme = self.theme();
-        let close_btn = button(text("✕").size(TYPO_XS).color(text_muted(&theme)))
+        let close_btn = button(Icon::Close.build().size(IconSize::Xs).build())
             .on_press(AppMessage::CloseContextMenu)
             .padding([SPACE_2, SPACE_6])
             .style(|_t, _s| iced::widget::button::Style::default());
@@ -22183,7 +22184,7 @@ impl IcedChat {
             "💯", "✅", "❌", "⚠️", "💡", "📌", "🎵", "🌈", "🍕", "☕", "🕐", "💤",
         ];
 
-        let close_btn = button(text("✕").size(TYPO_XS).color(text_muted(&theme)))
+        let close_btn = button(Icon::Close.build().size(IconSize::Xs).build())
             .on_press(AppMessage::ToggleEmojiPicker)
             .padding([SPACE_2, SPACE_4])
             .style(|_t, _s| iced::widget::button::Style::default());
@@ -22232,7 +22233,7 @@ impl IcedChat {
         use iced::widget::{button, column, container, row, text, text_input, Scrollable};
 
         let theme = self.theme();
-        let close_btn = button(text("✕").size(TYPO_XS).color(text_muted(&theme)))
+        let close_btn = button(Icon::Close.build().size(IconSize::Xs).build())
             .on_press(AppMessage::ToggleGifPicker)
             .padding([SPACE_2, SPACE_4])
             .style(|_t, _s| iced::widget::button::Style::default());
@@ -22551,10 +22552,14 @@ impl IcedChat {
 
         container(
             row![
-                button(text("←").size(TYPO_MD))
-                    .on_press(AppMessage::GoToChatList)
-                    .padding([SPACE_4, SPACE_6])
-                    .style(BUTTON_ICON),
+                iced::widget::tooltip::Tooltip::new(
+                    button(Icon::Back.build().size(IconSize::Md).build())
+                        .on_press(AppMessage::GoToChatList)
+                        .padding([SPACE_4, SPACE_6])
+                        .style(BUTTON_ICON),
+                    text("Back to chats").size(TYPO_XS),
+                    iced::widget::tooltip::Position::Bottom,
+                ),
                 avatar,
                 identity,
                 Space::new().width(Length::Fill),
@@ -24407,7 +24412,7 @@ impl IcedChat {
             .padding([SPACE_4, SPACE_6]);
 
         // ── Emoji picker toggle button ── sits next to attach
-        let emoji_btn = button(text(ICON_EMOJI).size(TYPO_SM))
+        let emoji_btn = button(Icon::Smile.build().size(IconSize::Sm).build())
             .on_press(AppMessage::ToggleEmojiPicker)
             .style(BUTTON_ICON)
             .padding([SPACE_4, SPACE_6]);
@@ -26520,7 +26525,7 @@ impl IcedChat {
         let header = row![]
             .push(name_element)
             .push(
-                button(text("\u{22ee}").size(TYPO_MD))
+                button(Icon::MoreVertical.build().size(IconSize::Md).build())
                     .on_press(AppMessage::ToggleFriendProfileMenu)
                     .padding([SPACE_4, SPACE_8])
                     .style(move |t, status| iced::widget::button::Style {

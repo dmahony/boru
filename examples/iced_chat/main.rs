@@ -11,6 +11,7 @@ mod design_tokens;
 mod download_progress_view;
 mod fonts;
 mod gui_test_actions;
+mod icon_system;
 mod link_preview;
 mod log_viewer;
 mod mcp_server;
