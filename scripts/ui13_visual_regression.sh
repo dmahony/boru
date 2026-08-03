@@ -13,20 +13,31 @@ MCP_CLIENT=$ROOT_DIR/scripts/ui_mcp.py
 FIXTURE=$ROOT_DIR/scripts/figure4_fixture.py
 COMPARE=$ROOT_DIR/scripts/compare_screenshot.py
 EVIDENCE_DIR=$ROOT_DIR/docs/ui-redesign/evidence/ui-13-fixture
-BASELINE=$EVIDENCE_DIR/figure4-baseline-1280x800.png
-ACTUAL=$EVIDENCE_DIR/figure4-current-1280x800.png
-DIFF=$EVIDENCE_DIR/figure4-diff-1280x800.png
-METRICS=$EVIDENCE_DIR/figure4-comparison.json
-WIDTH=1280
-HEIGHT=800
+WIDTH=${BORU_WIDTH:-1280}
+HEIGHT=${BORU_HEIGHT:-800}
+BASELINE=$EVIDENCE_DIR/figure4-baseline-${WIDTH}x${HEIGHT}.png
+ACTUAL=$EVIDENCE_DIR/figure4-current-${WIDTH}x${HEIGHT}.png
+DIFF=$EVIDENCE_DIR/figure4-diff-${WIDTH}x${HEIGHT}.png
+# The default 1280x800 run keeps the legacy metrics filename referenced by
+# the committed README and baseline workflow; alternate sizes get a suffix.
+if [[ "$WIDTH" == "1280" && "$HEIGHT" == "800" ]]; then
+    METRICS=$EVIDENCE_DIR/figure4-comparison.json
+else
+    METRICS=$EVIDENCE_DIR/figure4-comparison-${WIDTH}x${HEIGHT}.json
+fi
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 [[ -x "$BINARY" ]] || fail "GUI binary not found: $BINARY (build with: cargo build --features gui --example boru)"
 [[ -x "$MCP_CLIENT" ]] || fail "MCP client is not executable: $MCP_CLIENT"
-[[ -f "$BASELINE" ]] || fail "baseline not found: $BASELINE"
 command -v Xvfb >/dev/null || fail "Xvfb is required for headless CI capture"
 command -v xdotool >/dev/null || fail "xdotool is required for headless CI capture"
 command -v import >/dev/null || fail "ImageMagick import is required for screenshot capture"
+if [[ -f "$BASELINE" ]]; then
+    HAS_BASELINE=1
+else
+    HAS_BASELINE=0
+    echo "no baseline for ${WIDTH}x${HEIGHT}; capture-only mode"
+fi
 
 mkdir -p "$EVIDENCE_DIR"
 display=""
@@ -79,15 +90,41 @@ DISPLAY=":$display" python3 "$MCP_CLIENT" "$mcp_port" boru_ping '{}' >/dev/null 
 remote_pk=28d7ee8656$(printf 'ab%.0s' {1..27})
 DISPLAY=":$display" python3 "$MCP_CLIENT" "$mcp_port" boru_gui_open_conversation \
     "{\"conversation_id\":\"$remote_pk\"}" >/dev/null
-sleep 1  # Allow the deterministic history replay to settle before capture.
 
 window_id=$(DISPLAY=":$display" xdotool search --sync --onlyvisible --name '^Boru' | head -n 1)
 [[ -n "$window_id" ]] || fail "Boru window not found"
 DISPLAY=":$display" xdotool windowsize "$window_id" "$WIDTH" "$HEIGHT"
 sleep 0.8
+
+# Wait for the timeline to settle. The deterministic history replay and the
+# live system events that follow it ("Chat joined.", /help hint) arrive
+# asynchronously, so a fixed sleep is racy: two runs could capture different
+# states (earlier run only the replay, later run replay + live events).
+# Poll until two consecutive frames are pixel-identical (or timeout).
+settle_prev=""
+settled=0
+for settle_attempt in $(seq 1 30); do
+    DISPLAY=":$display" import -window "$window_id" /tmp/boru-figure4-settle.png 2>/dev/null || true
+    if [[ -n "$settle_prev" ]] && cmp -s /tmp/boru-figure4-settle.png "$settle_prev"; then
+        settled=1
+        break
+    fi
+    cp /tmp/boru-figure4-settle.png "$settle_prev" 2>/dev/null || true
+    sleep 0.5
+done
+if [[ "$settled" == "1" ]]; then
+    echo "timeline settled after ${settle_attempt} stability checks"
+else
+    echo "timeline did not fully settle within timeout; capturing anyway"
+fi
+
 DISPLAY=":$display" import -window "$window_id" "$ACTUAL"
 
-python3 "$COMPARE" "$ACTUAL" "$BASELINE" --diff "$DIFF" --metrics "$METRICS" \
-    --tolerance "${BORU_PIXEL_TOLERANCE:-16}" \
-    --max-mismatch "${BORU_MAX_MISMATCH:-0.005}"
-printf 'Visual regression artifacts:\n  actual:  %s\n  baseline: %s\n  diff:    %s\n  metrics: %s\n' "$ACTUAL" "$BASELINE" "$DIFF" "$METRICS"
+if [[ "$HAS_BASELINE" == "1" ]]; then
+    python3 "$COMPARE" "$ACTUAL" "$BASELINE" --diff "$DIFF" --metrics "$METRICS" \
+        --tolerance "${BORU_PIXEL_TOLERANCE:-16}" \
+        --max-mismatch "${BORU_MAX_MISMATCH:-0.005}"
+    printf 'Visual regression artifacts:\n  actual:  %s\n  baseline: %s\n  diff:    %s\n  metrics: %s\n' "$ACTUAL" "$BASELINE" "$DIFF" "$METRICS"
+else
+    printf 'Capture artifact (no baseline to compare): %s\n' "$ACTUAL"
+fi

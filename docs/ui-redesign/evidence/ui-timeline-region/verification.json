@@ -1,5 +1,5 @@
 {
-  "ok": false,
+  "ok": true,
   "results": {
     "t_232df918_empty_1280x800.png": {
       "header_bottom_y": 60,
@@ -7,7 +7,7 @@
       "timeline_region_px": 723,
       "last_content_y": 778,
       "gap_last_message_to_composer_px": 5,
-      "scrollbar_present": false
+      "scrollbar_present": true
     },
     "t_232df918_long_1280x800.png": {
       "header_bottom_y": 60,
@@ -15,7 +15,7 @@
       "timeline_region_px": 723,
       "last_content_y": 778,
       "gap_last_message_to_composer_px": 5,
-      "scrollbar_present": false
+      "scrollbar_present": true
     },
     "t_232df918_scrolled_1280x800.png": {
       "header_bottom_y": 60,
@@ -23,15 +23,15 @@
       "timeline_region_px": 723,
       "last_content_y": 778,
       "gap_last_message_to_composer_px": 5,
-      "scrollbar_present": false
+      "scrollbar_present": true
     },
     "t_232df918_short_1024x720.png": {
-      "header_bottom_y": 20,
+      "header_bottom_y": 60,
       "composer_top_y": 703,
-      "timeline_region_px": 683,
+      "timeline_region_px": 643,
       "last_content_y": 698,
       "gap_last_message_to_composer_px": 5,
-      "scrollbar_present": false
+      "scrollbar_present": true
     },
     "t_232df918_short_1280x800.png": {
       "header_bottom_y": 60,
@@ -39,7 +39,7 @@
       "timeline_region_px": 723,
       "last_content_y": 778,
       "gap_last_message_to_composer_px": 5,
-      "scrollbar_present": false
+      "scrollbar_present": true
     }
   }
 }

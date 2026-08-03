@@ -205,14 +205,25 @@ def row_color(im, y, x0=0.45, x1=0.9):
 
 
 def header_bottom(im):
-    """Return the y of the last near-white (header surface) row at the top."""
+    """Return the y of the last header-surface row at the top.
+
+    The header surface is near-white (>= 244 in every channel) and ends at
+    the thin divider line below it (clearly darker, ~220) or the canvas
+    background (247,249,248 is still >= 244, so the divider is what stops
+    the scan). The threshold must tolerate the modern compact header's
+    off-white surface (244-254) instead of requiring pure 255.
+    """
     w, h = im.size
     y = 0
     while y < h:
         r, g, b = row_color(im, y)
-        # header surface is pure white (255); the divider below it and the
-        # canvas (247,249,248) are darker.
-        if r < 246 or g < 246 or b < 246:
+        # Header surface is near-white; anything clearly darker is the
+        # divider or the canvas below the header. Threshold 235 gives
+        # margin for the off-white header surface (244-254) and its
+        # subpixel-darker rows at alternate widths (down to ~239), while
+        # still stopping at the divider (~220) and treating the canvas
+        # (247,249,248) as header-adjacent only until the divider stops it.
+        if r < 235 or g < 235 or b < 235:
             break
         y += 2
     return y

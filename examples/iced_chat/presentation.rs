@@ -19,50 +19,57 @@ pub(crate) enum MessageKind {
     Remote,
 }
 
-/// Semantic treatment for informational entries in the timeline.
+/// Accent palette used by system-event chips.
 ///
-/// The original message text remains the source of truth; this classification
-/// only selects a compact visual accent and label for the system-event chip.
+/// Kept as a theme-independent selector so the presentation layer stays
+/// data-only; the view maps each accent to a concrete `Color` via the active
+/// theme (green/primary/warning/error/muted tokens in `design_tokens`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SystemEventKind {
-    Membership,
-    Rename,
-    Command,
+pub(crate) enum SystemEventAccent {
+    Green,
+    Primary,
     Warning,
-    Information,
+    Error,
+    Muted,
 }
 
-/// Classify a system entry without changing or filtering its original text.
-pub(crate) fn system_event_kind(text: &str) -> SystemEventKind {
-    let normalized = text.trim().to_ascii_lowercase();
-    if normalized.contains("rename")
-        || normalized.contains("renamed")
-        || normalized.contains("name changed")
-    {
-        SystemEventKind::Rename
-    } else if normalized.contains("/help")
-        || normalized.starts_with("usage:")
-        || normalized.contains("command")
-    {
-        SystemEventKind::Command
-    } else if normalized.contains("failed")
-        || normalized.contains("error")
-        || normalized.contains("rejected")
-        || normalized.contains("cannot ")
-        || normalized.contains("unknown peer")
-    {
-        SystemEventKind::Warning
-    } else if normalized.contains("joined")
-        || normalized.contains("left")
-        || normalized.contains("online")
-        || normalized.contains("offline")
-        || normalized.contains("member")
-        || normalized.contains("peer")
-    {
-        SystemEventKind::Membership
-    } else {
-        SystemEventKind::Information
+/// Map a data-layer system-event kind to the chip's compact label + accent.
+///
+/// Classification itself lives in `boru_core::system_events` (single source
+/// of truth, 16 variants, total mapping); this function only selects the
+/// restrained presentation treatment for the shared `system_event_chip`
+/// component. The original message text is never inspected or rewritten here.
+pub(crate) fn system_event_chip_meta(
+    kind: boru_core::system_events::SystemEventKind,
+) -> (&'static str, SystemEventAccent) {
+    use boru_core::system_events::SystemEventKind;
+    match kind {
+        SystemEventKind::Join => ("JOIN", SystemEventAccent::Green),
+        SystemEventKind::Leave => ("LEFT", SystemEventAccent::Muted),
+        SystemEventKind::Rename => ("NAME", SystemEventAccent::Primary),
+        SystemEventKind::FileShared => ("FILE", SystemEventAccent::Primary),
+        SystemEventKind::CommandHelp => ("HELP", SystemEventAccent::Muted),
+        SystemEventKind::Error => ("ERROR", SystemEventAccent::Error),
+        SystemEventKind::Warning => ("NOTICE", SystemEventAccent::Warning),
+        SystemEventKind::Whisper => ("WHISPER", SystemEventAccent::Primary),
+        SystemEventKind::Invite => ("INVITE", SystemEventAccent::Primary),
+        SystemEventKind::Tunnel => ("TUNNEL", SystemEventAccent::Primary),
+        SystemEventKind::Transfer => ("TRANSFER", SystemEventAccent::Primary),
+        SystemEventKind::Video => ("VIDEO", SystemEventAccent::Primary),
+        SystemEventKind::Friend => ("FRIEND", SystemEventAccent::Primary),
+        SystemEventKind::Profile => ("PROFILE", SystemEventAccent::Primary),
+        SystemEventKind::Mesh => ("MESH", SystemEventAccent::Warning),
+        SystemEventKind::Information => ("INFO", SystemEventAccent::Muted),
     }
+}
+
+/// Whether two adjacent plain system chips should be visually grouped.
+///
+/// Both entries must be plain system notices (no download attachment — those
+/// render as attachment cards, not chips). Grouping only tightens vertical
+/// spacing; it never reorders or filters entries.
+pub(crate) fn continues_system_group(previous_is_chip: bool, current_is_chip: bool) -> bool {
+    previous_is_chip && current_is_chip
 }
 
 /// Whether two adjacent entries can share a sender/avatar treatment.
@@ -313,28 +320,53 @@ mod tests {
     }
 
     #[test]
-    fn system_event_classification_is_semantic_without_rewriting_text() {
+    fn system_event_chip_meta_covers_all_variants_without_rewriting_text() {
+        use boru_core::system_events::SystemEventKind;
+        let all = [
+            SystemEventKind::Join,
+            SystemEventKind::Leave,
+            SystemEventKind::Rename,
+            SystemEventKind::FileShared,
+            SystemEventKind::CommandHelp,
+            SystemEventKind::Error,
+            SystemEventKind::Warning,
+            SystemEventKind::Whisper,
+            SystemEventKind::Invite,
+            SystemEventKind::Tunnel,
+            SystemEventKind::Transfer,
+            SystemEventKind::Video,
+            SystemEventKind::Friend,
+            SystemEventKind::Profile,
+            SystemEventKind::Mesh,
+            SystemEventKind::Information,
+        ];
+        // Total mapping: every data-layer variant gets a non-empty label and a
+        // defined accent — nothing silently discarded.
+        for kind in all {
+            let (label, accent) = system_event_chip_meta(kind);
+            assert!(!label.is_empty(), "every variant needs a chip label");
+            let _ = accent;
+        }
         assert_eq!(
-            system_event_kind("Alice joined the room"),
-            SystemEventKind::Membership
+            system_event_chip_meta(SystemEventKind::Join),
+            ("JOIN", SystemEventAccent::Green)
         );
         assert_eq!(
-            system_event_kind("Alice renamed the room"),
-            SystemEventKind::Rename
-        );
-        assert_eq!(system_event_kind("Usage: /help"), SystemEventKind::Command);
-        assert_eq!(
-            system_event_kind("Request failed"),
-            SystemEventKind::Warning
+            system_event_chip_meta(SystemEventKind::Error),
+            ("ERROR", SystemEventAccent::Error)
         );
         assert_eq!(
-            system_event_kind("Chat joined."),
-            SystemEventKind::Membership
+            system_event_chip_meta(SystemEventKind::Information),
+            ("INFO", SystemEventAccent::Muted)
         );
-        assert_eq!(
-            system_event_kind("Invite sent"),
-            SystemEventKind::Information
-        );
+    }
+
+    #[test]
+    fn system_group_requires_consecutive_plain_chips() {
+        assert!(continues_system_group(true, true));
+        assert!(!continues_system_group(false, true));
+        assert!(!continues_system_group(true, false));
+        assert!(!continues_system_group(false, false));
     }
 
     #[test]

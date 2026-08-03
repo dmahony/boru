@@ -1,0 +1,22 @@
+{
+  "ok": true,
+  "results": {
+    "t_6fda7f62_grouped_1024x720.png": {
+      "chip_bands": 4,
+      "gaps_px": [
+        8,
+        7,
+        8
+      ],
+      "min_gap_px": 7
+    },
+    "t_6fda7f62_grouped_1280x800.png": {
+      "chip_bands": 3,
+      "gaps_px": [
+        7,
+        8
+      ],
+      "min_gap_px": 7
+    }
+  }
+}
