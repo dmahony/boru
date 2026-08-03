@@ -116,6 +116,13 @@ impl TransferState {
     fn terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
+
+    /// Whether this state is a durable terminal outcome. Disconnected is
+    /// intentionally not terminal — an interrupted transfer may resume when
+    /// the peer returns.
+    pub fn is_terminal(self) -> bool {
+        self.terminal()
+    }
 }
 
 /// A state change delivered to subscribers.
