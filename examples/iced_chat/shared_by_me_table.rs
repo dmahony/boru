@@ -290,6 +290,12 @@ pub(crate) struct SharedByMeUiState {
     pub(crate) details_open: Option<String>,
     /// Row awaiting "Stop sharing" confirmation.
     pub(crate) confirm_stop: Option<String>,
+    /// Whether the compact "+ Share Files or Folder" menu is open.
+    pub(crate) share_menu_open: bool,
+    /// Nonblocking registration status shown under the card header while a
+    /// selected item is read/hashed/registered. Carries only a display name —
+    /// never a full local path.
+    pub(crate) sharing_status: Option<String>,
 }
 
 impl SharedByMeUiState {
@@ -297,6 +303,8 @@ impl SharedByMeUiState {
         self.menu_open = None;
         self.details_open = None;
         self.confirm_stop = None;
+        self.share_menu_open = false;
+        self.sharing_status = None;
     }
 
     pub(crate) fn toggle_menu(&mut self, hash: &str) {
@@ -309,6 +317,9 @@ impl SharedByMeUiState {
         if self.menu_open.is_some() {
             self.details_open = None;
             self.confirm_stop = None;
+            // A row action menu and the header share menu are mutually
+            // exclusive popovers.
+            self.share_menu_open = false;
         }
     }
 
@@ -316,6 +327,21 @@ impl SharedByMeUiState {
         self.details_open = Some(hash.to_owned());
         self.menu_open = None;
         self.confirm_stop = None;
+    }
+
+    /// Toggle the compact share menu. Opening it closes any row action menu
+    /// so the header action is never ambiguous with a row's menu.
+    pub(crate) fn toggle_share_menu(&mut self) {
+        self.share_menu_open = !self.share_menu_open;
+        if self.share_menu_open {
+            self.menu_open = None;
+            self.details_open = None;
+            self.confirm_stop = None;
+        }
+    }
+
+    pub(crate) fn close_share_menu(&mut self) {
+        self.share_menu_open = false;
     }
 }
 
@@ -367,8 +393,27 @@ pub(crate) fn view_shared_by_me_card<'a>(
 
     container(
         Column::new()
-            .push(card_header(rows.len(), &theme))
-            .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+            .push(card_header(rows.len(), ui, &theme))
+            .push(if let Some(status) = &ui.sharing_status {
+                container(
+                    Row::new()
+                        .push(
+                            text(status.clone())
+                                .size(TYPO_XS)
+                                .style(text_muted_style),
+                        )
+                        .spacing(design_tokens::SPACE_4)
+                        .align_y(Alignment::Center),
+                )
+                .padding([design_tokens::SPACE_4, design_tokens::SPACE_4])
+                .width(Length::Fill)
+                .into()
+            } else {
+                let placeholder: iced::Element<'static, AppMessage> =
+                    Space::new().height(0.0).into();
+                placeholder
+            })
+            .push(Space::new().height(design_tokens::SPACE_8))
             .push(body)
             .spacing(0)
             .width(Length::Fill),
@@ -379,7 +424,71 @@ pub(crate) fn view_shared_by_me_card<'a>(
     .into()
 }
 
-fn card_header(count: usize, theme: &Theme) -> Element<'static, AppMessage> {
+/// The two items in the compact share menu — exactly "Share Files..." and
+/// "Share Folder...". Both return into the existing secure share flow: files
+/// reuse `AddSharedFile` (the native OS picker → content-addressed
+/// registration); folders reuse the same picker family and the limitation is
+/// made explicit by the application layer (the secure catalogue is file-based,
+/// so a folder is never silently flattened or faked as a row).
+const SHARE_MENU_ITEMS: [(&str, AppMessage); 2] = [
+    ("Share Files...", AppMessage::AddSharedFile),
+    ("Share Folder...", AppMessage::AddSharedFolder),
+];
+
+fn share_menu(theme: &Theme) -> Element<'static, AppMessage> {
+    let item = |label: &'static str, message: AppMessage| {
+        button(
+            Row::new()
+                .push(text(label).size(TYPO_SM))
+                .spacing(design_tokens::SPACE_4)
+                .align_y(Alignment::Center),
+        )
+        .on_press(message)
+        .padding([design_tokens::SPACE_6, design_tokens::SPACE_10])
+        .width(Length::Fill)
+        .style(|t, status| {
+            let background = match status {
+                iced::widget::button::Status::Hovered => design_tokens::surface_hover(t),
+                _ => iced::Color::TRANSPARENT,
+            };
+            iced::widget::button::Style {
+                background: Some(Background::Color(background)),
+                text_color: design_tokens::text_primary(t),
+                border: Border {
+                    radius: design_tokens::RADIUS_MD.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        })
+    };
+
+    container(
+        Column::new()
+            .push(item(SHARE_MENU_ITEMS[0].0, SHARE_MENU_ITEMS[0].1.clone()))
+            .push(item(SHARE_MENU_ITEMS[1].0, SHARE_MENU_ITEMS[1].1.clone()))
+            .spacing(design_tokens::SPACE_2)
+            .width(Length::Fixed(176.0)),
+    )
+    .padding([design_tokens::SPACE_4, design_tokens::SPACE_4])
+    .style(move |t| container::Style {
+        background: Some(Background::Color(design_tokens::surface(t))),
+        border: Border {
+            color: design_tokens::border_muted(t),
+            radius: design_tokens::RADIUS_MD.into(),
+            width: 1.0,
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+fn card_header(
+    count: usize,
+    ui: &SharedByMeUiState,
+    theme: &Theme,
+) -> Element<'static, AppMessage> {
+    let menu_open = ui.share_menu_open;
     let title_block = Column::new()
         .push(
             text("Files I'm Sharing")
@@ -408,9 +517,18 @@ fn card_header(count: usize, theme: &Theme) -> Element<'static, AppMessage> {
             .spacing(design_tokens::SPACE_4)
             .align_y(Alignment::Center),
     )
-    .on_press(AppMessage::AddSharedFile)
+    .on_press(AppMessage::SharedByMeToggleShareMenu)
     .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
     .style(BUTTON_PRIMARY_GREEN);
+
+    let mut share_control = Column::new()
+        .push(share_button)
+        .align_x(Alignment::End)
+        .spacing(design_tokens::SPACE_4)
+        .width(Length::Shrink);
+    if menu_open {
+        share_control = share_control.push(share_menu(theme));
+    }
 
     let count_badge = container(
         text(count.to_string())
@@ -432,8 +550,8 @@ fn card_header(count: usize, theme: &Theme) -> Element<'static, AppMessage> {
         .push(title_block)
         .push(count_badge)
         .push(Space::new().width(Length::Fixed(design_tokens::SPACE_8)))
-        .push(share_button)
-        .align_y(Alignment::Center)
+        .push(share_control)
+        .align_y(Alignment::Start)
         .spacing(design_tokens::SPACE_8)
         .width(Length::Fill)
         .into()
@@ -1570,6 +1688,50 @@ mod tests {
         assert_eq!(ui.menu_open, None);
         assert_eq!(ui.details_open.as_deref(), Some("a"));
         ui.clear();
+        assert_eq!(ui, SharedByMeUiState::default());
+    }
+
+    #[test]
+    fn share_menu_toggle_is_mutually_exclusive_with_row_menus() {
+        let mut ui = SharedByMeUiState::default();
+        ui.toggle_menu("row-a");
+        ui.toggle_share_menu();
+        // Opening the header share menu closes row menus.
+        assert!(ui.share_menu_open);
+        assert_eq!(ui.menu_open, None);
+        ui.toggle_share_menu();
+        assert!(!ui.share_menu_open);
+        // Toggling a row menu while the share menu is open closes the share menu.
+        ui.toggle_share_menu();
+        ui.toggle_menu("row-b");
+        assert!(!ui.share_menu_open);
+        assert_eq!(ui.menu_open.as_deref(), Some("row-b"));
+        ui.clear();
+        assert!(!ui.share_menu_open);
+    }
+
+    #[test]
+    fn share_menu_items_are_exactly_files_and_folder() {
+        let labels: Vec<&str> = SHARE_MENU_ITEMS.iter().map(|(label, _)| *label).collect();
+        assert_eq!(labels, vec!["Share Files...", "Share Folder..."]);
+        assert!(
+            matches!(SHARE_MENU_ITEMS[0].1, AppMessage::AddSharedFile),
+            "files must reuse the existing secure share entry point"
+        );
+        assert!(
+            matches!(SHARE_MENU_ITEMS[1].1, AppMessage::AddSharedFolder),
+            "folders must route to the native folder picker"
+        );
+    }
+
+    #[test]
+    fn sharing_status_is_cleared_with_the_rest_of_ui_state() {
+        let mut ui = SharedByMeUiState::default();
+        ui.sharing_status = Some("Registering report.pdf…".into());
+        ui.share_menu_open = true;
+        ui.clear();
+        assert_eq!(ui.sharing_status, None);
+        assert!(!ui.share_menu_open);
         assert_eq!(ui, SharedByMeUiState::default());
     }
 }
