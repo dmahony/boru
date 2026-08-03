@@ -60,13 +60,13 @@ const TEXT_SECONDARY: Color = Color::from_rgb(
     0x66 as f32 / 255.0,
 );
 const TEXT_MUTED: Color = Color::from_rgb(
-    0x8A as f32 / 255.0,
-    0x97 as f32 / 255.0,
-    0x8F as f32 / 255.0,
+    0x64 as f32 / 255.0,
+    0x70 as f32 / 255.0,
+    0x6A as f32 / 255.0,
 );
 const PRIMARY: Color = Color::from_rgb(
     0x18 as f32 / 255.0,
-    0x8C as f32 / 255.0,
+    0x7F as f32 / 255.0,
     0x50 as f32 / 255.0,
 );
 const PRIMARY_HOVER: Color = Color::from_rgb(
@@ -80,9 +80,9 @@ const PRIMARY_SOFT: Color = Color::from_rgb(
     0xEE as f32 / 255.0,
 );
 const SUCCESS: Color = Color::from_rgb(
-    0x20 as f32 / 255.0,
-    0xA6 as f32 / 255.0,
-    0x61 as f32 / 255.0,
+    0x1A as f32 / 255.0,
+    0x7F as f32 / 255.0,
+    0x48 as f32 / 255.0,
 );
 const DANGER: Color = Color::from_rgb(
     0xC8 as f32 / 255.0,
@@ -360,7 +360,7 @@ pub fn text_secondary(theme: &Theme) -> Color {
     }
 }
 
-/// Muted / tertiary text. Spec: #8A978F.
+/// Muted / tertiary text. Spec: #8A978F (darkened to #64706A for WCAG AA).
 pub fn text_muted(theme: &Theme) -> Color {
     if dark(theme) {
         Color::from_rgb(0.60, 0.60, 0.60)
@@ -369,7 +369,7 @@ pub fn text_muted(theme: &Theme) -> Color {
     }
 }
 
-/// Primary brand accent (green). Spec: #188C50.
+/// Primary brand accent (green). Spec: #188C50 (darkened to #187F50 for WCAG AA).
 pub fn primary(theme: &Theme) -> Color {
     if dark(theme) {
         Color::from_rgb(0.29, 0.62, 1.0)
@@ -409,7 +409,7 @@ pub fn primary_soft(theme: &Theme) -> Color {
     }
 }
 
-/// Online / success green. Spec: #20A661.
+/// Online / success green. Spec: #20A661 (darkened to #1A7F48 for WCAG AA).
 pub fn color_success(theme: &Theme) -> Color {
     if dark(theme) {
         Color::from_rgb(0.24, 0.86, 0.52)
@@ -764,15 +764,57 @@ mod tests {
             primary_on_canvas
         );
 
-        // Muted text — spec value #8A978F is intended to be subtle;
-        // it's below 4.5:1 but that's the intentional design trade-off
-        // for secondary metadata. Validate it's at least visible.
-        let muted_on_canvas = contrast_ratio(TEXT_MUTED, canvas);
+        // Muted text — spec value #8A978F was below AA; UI-19 darkened the
+        // token to #64706A so muted text passes WCAG AA on every light
+        // surface (white, canvas, sidebar, soft-green bubble, selected).
+        for (name, bg) in [
+            ("white", Color::WHITE),
+            ("canvas", CANVAS),
+            ("sidebar", SIDEBAR),
+            ("soft-green bubble", PRIMARY_SOFT),
+            ("selected surface", SURFACE_SELECTED),
+        ] {
+            let muted_on = contrast_ratio(TEXT_MUTED, bg);
+            assert!(
+                muted_on >= 4.5,
+                "text_muted on {name}: {:.1}:1 (need ≥ 4.5:1)",
+                muted_on
+            );
+        }
+
+        // Primary on white for button text / accents (≥ 4.5:1 normal text).
+        let primary_on_white = contrast_ratio(PRIMARY, Color::WHITE);
         assert!(
-            muted_on_canvas >= 2.5,
-            "text_muted on canvas: {:.1}:1 (below visibility floor)",
-            muted_on_canvas
+            primary_on_white >= 4.5,
+            "primary on white: {:.1}:1 (need ≥ 4.5:1)",
+            primary_on_white
         );
+
+        // Success (online green) on white — used for status label text as
+        // well as dots, so it must pass normal-text AA.
+        let success_on_white = contrast_ratio(SUCCESS, Color::WHITE);
+        assert!(
+            success_on_white >= 4.5,
+            "success on white: {:.1}:1 (need ≥ 4.5:1)",
+            success_on_white
+        );
+
+        // Focus ring — non-text UI component, WCAG 1.4.11 requires ≥ 3:1
+        // against the adjacent surface.
+        for (name, bg) in [
+            ("white", Color::WHITE),
+            ("canvas", CANVAS),
+            ("sidebar", SIDEBAR),
+            ("soft-green bubble", PRIMARY_SOFT),
+            ("selected surface", SURFACE_SELECTED),
+        ] {
+            let focus_on = contrast_ratio(FOCUS, bg);
+            assert!(
+                focus_on >= 3.0,
+                "focus ring on {name}: {:.1}:1 (need ≥ 3:1)",
+                focus_on
+            );
+        }
     }
 
     // ── Geometry consistency ───────────────────────────────────────────
