@@ -22590,9 +22590,7 @@ impl IcedChat {
         let content = widget::column![
             self.view_chat_header(),
             divider(&self.theme()),
-            widget::responsive(|size: iced::Size| {
-                self.view_chat_log(size.height).into()
-            }),
+            widget::responsive(|size: iced::Size| { self.view_chat_log(size.height).into() }),
             self.view_composer(),
         ]
         .spacing(0);
