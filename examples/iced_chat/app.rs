@@ -2553,7 +2553,6 @@ pub struct ConversationLive {
     pub unread: u64,
     /// Whether persisted history has been loaded from ChatHistoryStore
     /// and replayed into this conversation's entries.
-    #[expect(dead_code)]
     pub history_loaded: bool,
 }
 
@@ -14323,10 +14322,68 @@ impl IcedChat {
                 )
             }
             AppMessage::BackgroundSubscribed(topic, sender, forward_handle_slot) => {
+                // A freshly background-subscribed conversation (startup
+                // auto-subscribe) has never been opened this session, so its
+                // in-memory timeline starts empty.  Replay the persisted
+                // local history (chat_history.json) into it now, so opening
+                // the chat later via the fast path shows the same messages a
+                // fresh subscription would have replayed — instead of an
+                // empty timeline until a network backfill happens to arrive.
+                // This mirrors the RoomOpened JSON replay for the slow path.
+                let local_hex = self.local_public.to_string();
+                let mut replayed: Vec<ChatEntry> = Vec::new();
+                {
+                    let store = self.chat_history.lock().unwrap();
+                    for hist in store
+                        .for_topic(&topic)
+                        .into_iter()
+                        // Skip placeholder rows that never got a real id
+                        // (mirrors the RoomOpened replay guard).
+                        .filter(|e| e.event_id != 0)
+                    {
+                        if let Some(mut chat) =
+                            self.history_entry_to_chat_entry(hist, &topic, &local_hex)
+                        {
+                            // Populate derived caches (label_text,
+                            // reactions_text, parsed_segments) exactly like
+                            // `entries_push` does — otherwise the windowed
+                            // renderer sees an empty segment list and draws
+                            // an empty bubble.
+                            chat.update_cache();
+                            replayed.push(chat);
+                        }
+                    }
+                }
                 let conv = self
                     .conversations
                     .entry(topic)
-                    .or_insert_with(|| ConversationLive::new(topic));
+                    .or_insert_with(|| {
+                        let mut c = ConversationLive::new(topic);
+                        if !replayed.is_empty() {
+                            c.entries = replayed.clone();
+                            c.history_saved_count = replayed.len();
+                            c.history_loaded = true;
+                            // Follow-latest (the default) with the bottom
+                            // sentinel so the windowed renderer shows the
+                            // newest messages as soon as the chat opens,
+                            // matching the slow-path replay behaviour.
+                            c.scroll_offset = f32::MAX;
+                        }
+                        c
+                    });
+                // The conversation-store loop and the friends loop can both
+                // subscribe the same direct topic, so a duplicate
+                // BackgroundSubscribed can arrive for a conversation that
+                // already replayed its history.  Fill the timeline only if
+                // the first completion never did (e.g. a raced first event).
+                if !conv.history_loaded {
+                    if conv.entries.is_empty() && !replayed.is_empty() {
+                        conv.entries = replayed;
+                        conv.history_saved_count = conv.entries.len();
+                        conv.scroll_offset = f32::MAX;
+                    }
+                    conv.history_loaded = true;
+                }
                 if let Some(ref s) = sender {
                     // Retroactively join any discovered peers that were not part
                     // of the bootstrap list at subscription time (e.g. peers that
@@ -33632,5 +33689,88 @@ mod tests {
         // A later update with the flag already clear emits no second snap.
         let _task2 = app.update(AppMessage::Scrolled(800.0, 200.0));
         assert!(!app.scroll_to_bottom_pending);
+    }
+
+    #[test]
+    fn background_subscribed_replays_history_into_new_conversation() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&app.local_public, &peer);
+        let local_hex = app.local_public.to_string();
+
+        // Seed persisted history for the direct topic: two remote messages
+        // and one local message (event_ids start at 1 in the real store).
+        {
+            let mut store = app.chat_history.lock().unwrap();
+            store.push_with_id(HistoryEntry::new(
+                topic,
+                peer.to_string(),
+                vec![],
+                "text",
+                "hello from peer",
+            ));
+            store.push_with_id(HistoryEntry::new(
+                topic,
+                peer.to_string(),
+                vec![],
+                "text",
+                "second from peer",
+            ));
+            store.push_with_id(HistoryEntry::new(
+                topic,
+                local_hex,
+                vec![],
+                "text",
+                "my old message",
+            ));
+        }
+
+        // The background subscription completes for this topic.
+        let _task = app.update(AppMessage::BackgroundSubscribed(topic, None, None));
+
+        let conv = app.conversations.get(&topic).expect("conversation created");
+        assert!(conv.history_loaded, "history marked loaded");
+        assert_eq!(conv.entries.len(), 3, "all history entries replayed");
+        assert_eq!(
+            conv.entries[0].body, "hello from peer",
+            "oldest history entry first"
+        );
+        assert!(
+            conv.entries[0].parsed_segments.is_some(),
+            "replayed entries have cached text segments so the bubble body renders"
+        );
+        assert_eq!(conv.history_saved_count, 3, "saved count avoids re-saving");
+        assert_eq!(
+            conv.scroll_offset, f32::MAX,
+            "follow-latest bottom sentinel armed for fast-path open"
+        );
+        assert!(conv.follow_latest, "new conversation follows latest by default");
+
+        // A duplicate completion (the conversation-store loop and the friends
+        // loop can both subscribe the same direct topic) must not replay
+        // history twice.
+        let _task2 = app.update(AppMessage::BackgroundSubscribed(topic, None, None));
+        let conv2 = app.conversations.get(&topic).unwrap();
+        assert_eq!(
+            conv2.entries.len(),
+            3,
+            "duplicate BackgroundSubscribed must not double-replay"
+        );
+    }
+
+    #[test]
+    fn background_subscribed_without_history_creates_empty_conversation() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&app.local_public, &peer);
+
+        let _task = app.update(AppMessage::BackgroundSubscribed(topic, None, None));
+
+        let conv = app.conversations.get(&topic).expect("conversation created");
+        assert!(conv.entries.is_empty(), "no history → empty timeline");
+        assert!(conv.history_loaded, "history considered loaded (nothing to load)");
+        assert!(
+            conv.follow_latest,
+            "follow-latest stays the default for a fresh conversation"
+        );
+        assert_eq!(conv.scroll_offset, 0.0, "no sentinel when there is no history");
     }
 }

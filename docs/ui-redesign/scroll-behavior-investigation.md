@@ -247,3 +247,48 @@ deliberately NOT changed.
   t_727c1d5e should treat the two-instance mesh as a prerequisite to fix separately if
   real-network round-trip evidence is required.
 
+### 9.4 Follow-up: fast-path history replay (same task, uncommitted at 9.1–9.3)
+
+Re-verification of the probe on 2026-08-03 (run 3712) exposed a **pre-existing bug that
+made the probe flaky**: opening a conversation that had been auto-subscribed at startup
+took the **fast path** (`switch_to_conversation`) which restores in-memory entries but
+**never replays `chat_history.json`**, so a chat opened after restart showed an **empty
+timeline** until a network backfill happened to arrive. In the probe, the lobby's
+`RoomOpened` auto-subscribes every stored conversation + every friend's direct topic
+within ~1s of boot, so the subsequent MCP open almost always hit the fast path; the
+9.1–9.3 probe runs passed only when the slow path won the race.
+
+Root cause: `AppMessage::BackgroundSubscribed` created an empty `ConversationLive` and
+never loaded persisted history (the `history_loaded` field existed but was
+`#[expect(dead_code)]`). This is user-visible: after restarting with stored
+conversations, clicking a chat could show "No messages yet" until a peer connected.
+
+Fix (in `app.rs`, `BackgroundSubscribed` handler, committed with this task):
+- Replay `chat_history.json` entries for the topic into a **newly-created**
+  conversation (`or_insert_with`), mirroring the `RoomOpened` JSON replay (including the
+  `event_id != 0` guard).
+- Call `ChatEntry::update_cache()` on each replayed entry — the windowed renderer draws
+  the body from `parsed_segments`, and entries built by `history_entry_to_chat_entry`
+  start with `None`; without this the bubbles render empty.
+- Set `history_saved_count` (so `enforce_entry_cap` won't re-save) and arm the
+  `f32::MAX` bottom sentinel so a fast-path open renders the newest messages
+  immediately (consistent with `keep_latest_visible` on the slow path).
+- Duplicate `BackgroundSubscribed` events (conversation-store loop + friends loop both
+  subscribe the same direct topic) are guarded by `history_loaded` — no double replay.
+- The SQLite outgoing delivery-state overlay that `RoomOpened` applies to the *active*
+  room is deliberately **not** applied to background conversations (pre-existing
+  behaviour; persisted delivery states in `chat_history.json` are used instead). If
+  exact post-restart delivery indicators are required, that overlay is a candidate
+  follow-up.
+
+Verification after the fix:
+- 610/610 example tests green (was 608; +2 new unit tests:
+  `background_subscribed_replays_history_into_new_conversation` (includes
+  `parsed_segments` non-None and duplicate-subscribe no-double-replay assertions) and
+  `background_subscribed_without_history_creates_empty_conversation`).
+- `scripts/scroll_probe.sh` re-run: **5/5 PASS, now deterministic** — state 1 shows
+  `Seed msg 054-059` (fresh open at latest), state 2/3 show `041-046` (scrolled up and
+  live appends do not move the reading position), state 4/5 show `055-060` (back to
+  bottom and append-at-bottom snaps).
+
+
