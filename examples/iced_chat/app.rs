@@ -27195,8 +27195,15 @@ impl IcedChat {
                     Some(AppMessage::ComposerFileDropped(path))
                 }
                 iced::Event::InputMethod(ev) => match ev {
-                    iced::advanced::input_method::Event::Opened
-                    | iced::advanced::input_method::Event::Preedit(_, _) => {
+                    // Only an active preedit (composition) must block sending.
+                    // `Opened` fires merely when a text field gains focus and
+                    // enables the input method — treating it as composing
+                    // would freeze the composer in environments without a
+                    // real IME session.
+                    iced::advanced::input_method::Event::Opened => {
+                        Some(AppMessage::ComposerImeActive(false))
+                    }
+                    iced::advanced::input_method::Event::Preedit(_, _) => {
                         Some(AppMessage::ComposerImeActive(true))
                     }
                     iced::advanced::input_method::Event::Closed
