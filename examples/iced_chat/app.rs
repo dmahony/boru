@@ -106,8 +106,8 @@ use crate::connection_details::{
 };
 use crate::perf_tracker::PerfTracker;
 use crate::ui_components::{
-    ghost_icon_button, secondary_button, sidebar_empty_state, text_input_field, Avatar,
-    SidebarSectionHeader,
+    connection_footer, ghost_icon_button, secondary_button, sidebar_empty_state, text_input_field,
+    Avatar, SidebarSectionHeader,
 };
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_core::chat_core::{verify_advertisement, RoomAdvertisement, RoomInvitation, DIAGNOSTICS};
@@ -2873,6 +2873,11 @@ pub struct IcedChat {
     scroll_offset: f32,
     /// Current viewport height of the chat log, in pixels.
     viewport_height: f32,
+    /// Set when an entry was appended while following the latest message (or
+    /// a conversation was opened in follow-latest mode).  The next update
+    /// snaps the top-anchored chat scrollable back to the bottom so the
+    /// newest message stays visible; cleared once the snap task is emitted.
+    scroll_to_bottom_pending: bool,
     /// Per-peer presence tracking: PublicKey -> last-seen unix milliseconds.
     /// A peer stays in the map while connected; removal happens on
     /// NeighborDown only. Presence is derived from the timestamp:
@@ -5369,6 +5374,7 @@ impl IcedChat {
             total_content_height: std::cell::Cell::new(0.0),
             scroll_offset: f32::MAX,
             viewport_height: 0.0,
+            scroll_to_bottom_pending: false,
             settings: app_settings.clone(),
             settings_return_to: None,
             dark_mode: app_settings.dark_mode,
@@ -5758,6 +5764,10 @@ impl IcedChat {
     fn keep_latest_visible(&mut self) {
         if self.follow_latest {
             self.scroll_offset = f32::MAX;
+            // The timeline is top-anchored; growth alone would strand the
+            // viewport above the newly appended entry.  Snap to the bottom on
+            // the next update instead.
+            self.scroll_to_bottom_pending = true;
         }
     }
 
@@ -7393,6 +7403,12 @@ impl IcedChat {
             self.follow_latest = conversation.follow_latest;
             self.scroll_offset = conversation.scroll_offset;
             self.viewport_height = conversation.viewport_height;
+            // A fresh conversation starts its scrollable at the top; if we are
+            // following latest (the default), snap to the bottom once the chat
+            // screen renders.
+            if self.follow_latest {
+                self.scroll_to_bottom_pending = true;
+            }
 
             self.layout_cache.borrow_mut().invalidate_all();
 
@@ -22115,18 +22131,6 @@ impl IcedChat {
                 MeshHealth::Degraded(_) => ("Degraded", color_warning),
                 MeshHealth::Offline(_) => ("Offline", color_error),
             };
-        let count_cell = |label: String| {
-            container(text(label).size(TYPO_XS).color(text_secondary(&theme)))
-                .padding([SPACE_6, SPACE_8])
-                .width(Length::Fill)
-                .style(container_card)
-        };
-        let counts = Row::new()
-            .push(count_cell(format!("{}\nNeighbors", self.neighbors.len())))
-            .push(count_cell(format!("{}\nDirect", self.direct_peers)))
-            .push(count_cell(format!("{}\nRelayed", self.relayed_peers)))
-            .spacing(SPACE_6)
-            .width(Length::Fill);
         let now = Instant::now();
         let event_rows: Vec<iced::Element<'_, AppMessage>> = self
             .mesh_event_log
@@ -22209,34 +22213,21 @@ impl IcedChat {
                         .push(Space::new().width(Length::Fixed(SPACE_8)))
                         .push(
                             Column::new()
-                                .push(text("Mesh Health").size(TYPO_MD).color(text_system(&theme)))
                                 .push(
-                                    text("Live network connectivity and recent events")
+                                    text("Mesh Activity")
+                                        .size(TYPO_MD)
+                                        .color(text_system(&theme)),
+                                )
+                                .push(
+                                    text("Recent network connectivity events")
                                         .size(TYPO_XS)
                                         .color(text_muted(&theme)),
                                 ),
                         )
                         .push(Space::new().width(Length::Fill))
-                        .push(
-                            container(text(health_label).size(TYPO_XS).color(health_color(&theme)))
-                                .padding([SPACE_4, SPACE_8])
-                                .style(move |t| iced::widget::container::Style {
-                                    background: Some(iced::Background::Color(
-                                        crate::design_tokens::primary_soft(t),
-                                    )),
-                                    border: iced::Border {
-                                        color: health_color(t),
-                                        width: 1.0,
-                                        radius: SPACE_16.into(),
-                                    },
-                                    ..Default::default()
-                                }),
-                        )
                         .align_y(Alignment::Center)
                         .width(Length::Fill),
                 )
-                .push(Space::new().height(Length::Fixed(SPACE_12)))
-                .push(counts)
                 .push(Space::new().height(Length::Fixed(SPACE_12)))
                 .push(
                     Row::new()
@@ -22262,123 +22253,8 @@ impl IcedChat {
         .width(Length::Fill)
         .style(container_card);
 
-        // ── Action section: 6 action buttons in a grid ──
-        struct ActionButton<'a> {
-            icon: &'a [u8],
-            label: &'a str,
-            description: &'a str,
-            message: AppMessage,
-        }
-
-        let actions = [
-            ActionButton {
-                icon: ICON_CHAT,
-                label: "Create Public Room",
-                description: "Open a public room for anyone to join",
-                message: AppMessage::CreateNewRoom,
-            },
-            ActionButton {
-                icon: ICON_NOTIFICATION,
-                label: "Create Group Chat",
-                description: "Start a private group conversation",
-                message: AppMessage::ShowCreateGroupDialog,
-            },
-            ActionButton {
-                icon: ICON_FRIEND,
-                label: "Add Friend",
-                description: "Add a friend by key or invite file",
-                message: AppMessage::OpenFriendRequests,
-            },
-            ActionButton {
-                icon: ICON_SEARCH,
-                label: "Join Ticket",
-                description: "Join a room using a ticket code",
-                message: AppMessage::JoinFromTicket,
-            },
-            ActionButton {
-                icon: ICON_FILES,
-                label: "Import Friend",
-                description: "Import a friend from a key file",
-                message: AppMessage::ImportFriendFromFile,
-            },
-            ActionButton {
-                icon: ICON_ACTIVITY,
-                label: "Create Tunnel",
-                description: "Share a secure tunnel with a friend",
-                message: AppMessage::ShowCreateTunnelDialog,
-            },
-        ];
-
-        let mut action_buttons: Vec<iced::Element<'_, AppMessage>> = actions
-            .iter()
-            .map(|a| {
-                button(
-                    Column::new()
-                        .push(
-                            icon_svg(a.icon, TYPO_XL).style(|t, _| iced::widget::svg::Style {
-                                color: Some(accent_primary(t)),
-                            }),
-                        )
-                        .push(Space::new().height(Length::Fixed(SPACE_8)))
-                        .push(text(a.label).size(TYPO_MD))
-                        .push(Space::new().height(Length::Fixed(SPACE_4)))
-                        .push(text(a.description).size(TYPO_XS).color(text_muted(&theme)))
-                        .spacing(0)
-                        .align_x(Alignment::Center)
-                        .width(Length::Fill),
-                )
-                .on_press(a.message.clone())
-                .padding([SPACE_16, SPACE_12])
-                .width(Length::Fill)
-                .style(BUTTON_CARD)
-                .into()
-            })
-            .collect();
-
-        // Responsive grid: 3 columns on wide, 2 on medium, 1 on narrow
-        let action_grid: iced::Element<'_, AppMessage> = if narrow {
-            Column::with_children(action_buttons)
-                .spacing(SPACE_8)
-                .width(Length::Fill)
-                .into()
-        } else {
-            let cols = if self.window_width < 900.0 { 2 } else { 3 };
-            let mut rows: Vec<iced::Element<'_, AppMessage>> = Vec::new();
-            let mut i = 0;
-            while i < action_buttons.len() {
-                let end = (i + cols).min(action_buttons.len());
-                let mut row = Row::new().spacing(SPACE_8).width(Length::Fill);
-                for btn in action_buttons.drain(i..end) {
-                    row = row.push(btn);
-                }
-                i = end;
-                rows.push(row.into());
-            }
-            Column::with_children(rows)
-                .spacing(SPACE_8)
-                .width(Length::Fill)
-                .into()
-        };
-
-        // ── Share files ──
-        let share_files_btn = button(
-            row![
-                icon_svg(ICON_FILES, TYPO_SM).style(|t, _| iced::widget::svg::Style {
-                    color: Some(accent_primary(t))
-                }),
-                text("Share files").size(TYPO_SM),
-                Space::new().width(Length::Fill),
-                text("Drop files here or choose files")
-                    .size(TYPO_XS)
-                    .color(text_muted(&theme)),
-            ]
-            .spacing(SPACE_8)
-            .align_y(Alignment::Center),
-        )
-        .on_press(AppMessage::OpenSettings)
-        .padding([SPACE_10, SPACE_16])
-        .width(Length::Fill)
-        .style(BUTTON_CARD);
+        // ── Quick actions: four equal, full-card targets (Figure 3) ──
+        let action_grid = crate::quick_actions::quick_action_grid(self.window_width, &theme);
 
         // ── Right rail: loading treatment decision (t_0441a1dc) ──
         // No skeleton/shimmer loading is used for the three rail cards, by
@@ -22456,8 +22332,6 @@ impl IcedChat {
                 .push(mesh_card)
                 .push(Space::new().height(Length::Fixed(SPACE_16)))
                 .push(action_grid)
-                .push(Space::new().height(Length::Fixed(SPACE_12)))
-                .push(share_files_btn)
                 .spacing(0)
                 .width(Length::Fill)
                 .into()
@@ -22469,8 +22343,6 @@ impl IcedChat {
                 .push(mesh_card)
                 .push(Space::new().height(Length::Fixed(SPACE_16)))
                 .push(action_grid)
-                .push(Space::new().height(Length::Fixed(SPACE_12)))
-                .push(share_files_btn)
                 .spacing(0)
                 .width(Length::Fill);
             Row::new()
@@ -22482,6 +22354,24 @@ impl IcedChat {
                 .width(Length::Fill)
                 .into()
         };
+
+        // ── Connection footer: one truthful, compact status strip ──
+        // Encryption status is derived from actual connection state: iroh
+        // always transports over QUIC (encrypted), so we report "QUIC encrypted"
+        // only when a peer connection exists, avoiding a blanket E2E claim.
+        let encryption_label = if self.direct_peers > 0 || self.relayed_peers > 0 {
+            "QUIC encrypted"
+        } else {
+            "Idle"
+        };
+        let footer = connection_footer(
+            health_label,
+            health_color,
+            self.direct_peers,
+            self.relayed_peers,
+            self.neighbors.len(),
+            encryption_label,
+        );
 
         // ── Assemble with responsive canvas padding (32 large / 24 medium / 16 compact) ──
         let content_padding = if crate::design_tokens::is_large(self.window_width) {
@@ -22498,6 +22388,7 @@ impl IcedChat {
             .push(Space::new().height(Length::Fixed(SPACE_20)))
             .push(main_content)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
+            .push(footer)
             .spacing(0)
             .width(Length::Fill);
 
@@ -22593,7 +22484,13 @@ impl IcedChat {
             widget::responsive(|size: iced::Size| { self.view_chat_log(size.height).into() }),
             self.view_composer(),
         ]
-        .spacing(0);
+        // Make the column itself participate in the parent height
+        // negotiation. The responsive timeline can then consume exactly the
+        // remaining space after the fixed header and composer have been
+        // measured, instead of falling back to the column's intrinsic height.
+        .spacing(0)
+        .width(Length::Fill)
+        .height(Length::Fill);
 
         let inner = widget::container(content)
             .padding(iced::Padding {
@@ -24765,6 +24662,9 @@ impl IcedChat {
         let total_height = lc.total_height;
         self.total_content_height.set(total_height);
 
+        let (first_idx, last_idx, top_space_h, bottom_h) =
+            lc.window(self.scroll_offset, viewport_height);
+
         // Bottom-align a short timeline. The scrollable keeps its Fill height
         // (so the timeline is always the sole expanding region between the
         // fixed header and the pinned composer); when the message content is
@@ -24774,14 +24674,42 @@ impl IcedChat {
         // area below them. When content overflows the viewport the spacer is
         // zero and the anchored-to-bottom scrolling takes over unchanged.
         //
+        // The cache's `total_height` sums entry heights only; the rendered
+        // column also inserts `SPACE_4` between every child (leading spacer,
+        // date separators, entries, bottom spacer). Count the children we are
+        // about to push inside the visible window and subtract their gap
+        // overhead from the lead, so a short timeline fills the viewport
+        // exactly and iced does not paint a phantom near-full-height
+        // scrollbar for content that already fits.
+        //
         // `viewport_height` is the measured timeline region height supplied by
         // the `responsive` wrapper in `view_chat_panel` — it cannot come from
         // `self.viewport_height`, because iced only emits `Scrolled` events
         // when content overflows (short content would leave it at 0).
-        let timeline_lead = (viewport_height - total_height).max(0.0);
-
-        let (first_idx, last_idx, top_space_h, bottom_h) =
-            lc.window(self.scroll_offset, viewport_height);
+        let visible_count = last_idx.saturating_sub(first_idx).saturating_add(1);
+        let mut date_seps_in_window = 0usize;
+        {
+            let mut prev_day = if first_idx > 0 {
+                self.entries[first_idx - 1]
+                    .timestamp
+                    .map(|ts| ts / 86400000)
+            } else {
+                None
+            };
+            for i in first_idx..=last_idx {
+                if let Some(day) = self.entries[i].timestamp.map(|ts| ts / 86400000) {
+                    if prev_day != Some(day) {
+                        date_seps_in_window += 1;
+                    }
+                    prev_day = Some(day);
+                }
+            }
+        }
+        // Children in the short-content layout: lead spacer + visible entries
+        // + date separators (+ top/bottom spacers only when overflowing,
+        // where the lead is zero anyway). Gaps = children - 1.
+        let gap_overhead = SPACE_4 * (visible_count + date_seps_in_window) as f32;
+        let timeline_lead = (viewport_height - total_height - gap_overhead).max(0.0);
 
         // ── Build windowed content column ──
         let mut col = Column::new()
@@ -24846,6 +24774,18 @@ impl IcedChat {
                     entry.timestamp,
                 )
             });
+
+            // Consecutive plain system notices (no download attachment — those
+            // render as attachment cards, not chips) form a tight visual group:
+            // their chip-to-chip gap is smaller than the spacing around user
+            // message bubbles. Grouping is purely visual; entries are never
+            // reordered or filtered based on display type.
+            let system_group_continues = {
+                let is_plain_system = |entry: &ChatEntry| {
+                    matches!(entry.kind, ChatKind::System) && entry.download.is_none()
+                };
+                is_plain_system(entry) && previous.is_some_and(is_plain_system)
+            };
 
             // Whether the NEXT entry continues this same visual group.
             // Used to show delivery state only on the last message of a group.
@@ -25187,26 +25127,23 @@ impl IcedChat {
                             .padding(iced::Padding::default().right(SPACE_12))
                     } else {
                         // Centred system-event chip. The original body remains
-                        // intact; the semantic kind only supplies a restrained
-                        // accent and compact category label. The chip itself is
-                        // the shared presentational component (Figure 4).
-                        let event_kind = crate::presentation::system_event_kind(&entry.body);
-                        let (event_label, event_accent) = match event_kind {
-                            crate::presentation::SystemEventKind::Membership => {
-                                ("MEMBER", accent_green(&theme))
+                        // intact; the data-layer semantic kind only supplies a
+                        // restrained accent and compact category label. The chip
+                        // itself is the shared presentational component (Figure 4).
+                        let event_kind =
+                            boru_core::system_events::classify_system_event(&entry.body);
+                        let (event_label, chip_accent) =
+                            crate::presentation::system_event_chip_meta(event_kind);
+                        let event_accent = match chip_accent {
+                            crate::presentation::SystemEventAccent::Green => accent_green(&theme),
+                            crate::presentation::SystemEventAccent::Primary => {
+                                accent_primary(&theme)
                             }
-                            crate::presentation::SystemEventKind::Rename => {
-                                ("NAME", accent_primary(&theme))
+                            crate::presentation::SystemEventAccent::Warning => {
+                                color_warning(&theme)
                             }
-                            crate::presentation::SystemEventKind::Command => {
-                                ("HELP", text_muted(&theme))
-                            }
-                            crate::presentation::SystemEventKind::Warning => {
-                                ("NOTICE", color_warning(&theme))
-                            }
-                            crate::presentation::SystemEventKind::Information => {
-                                ("INFO", text_muted(&theme))
-                            }
+                            crate::presentation::SystemEventAccent::Error => color_error(&theme),
+                            crate::presentation::SystemEventAccent::Muted => text_muted(&theme),
                         };
                         Row::new()
                             .push(crate::ui_components::system_event_chip(
@@ -25222,7 +25159,12 @@ impl IcedChat {
             .width(Length::Fill);
 
             col = col.push(Column::new().push(label_el).push(msg_row).spacing(
-                if group_continues {
+                if system_group_continues {
+                    // Consecutive system chips are grouped tightly: the gap
+                    // between chips is smaller than the spacing around user
+                    // message bubbles (normal spacing below).
+                    SPACE_2
+                } else if group_continues {
                     SPACE_2
                 } else if matches!(entry.kind, ChatKind::System) {
                     SPACE_4
@@ -25420,9 +25362,15 @@ impl IcedChat {
             image_entry_count,
         });
 
+        // Top-anchored scrollable: `scroll_offset` (mirrored from the Scrolled
+        // event) is a top-relative offset, which matches the windowed layout
+        // cache exactly.  When following the latest message the app snaps the
+        // scrollable back to the bottom via `scroll_to_bottom_pending`; when
+        // the user has scrolled up, a top anchor keeps the reading position
+        // fixed while live entries append below the viewport.  The empty-state
+        // scrollable above keeps `anchor_bottom` because it has no content.
         scrollable(col)
             .id(CHAT_LOG)
-            .anchor_bottom()
             .width(iced::Length::Fill)
             .height(iced::Length::Fill)
             .on_scroll(|v: scrollable::Viewport| {
