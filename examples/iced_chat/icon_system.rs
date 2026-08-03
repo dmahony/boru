@@ -50,6 +50,8 @@ const SVG_ALERT_TRIANGLE: &[u8] = include_bytes!("../../assets/icons/lucide/aler
 const SVG_SMILE: &[u8] = include_bytes!("../../assets/icons/lucide/smile.svg");
 const SVG_TERMINAL: &[u8] = include_bytes!("../../assets/icons/lucide/terminal.svg");
 const SVG_IMAGE: &[u8] = include_bytes!("../../assets/icons/lucide/image.svg");
+const SVG_CHEVRON_DOWN: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-down.svg");
+const SVG_CHEVRON_RIGHT: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-right.svg");
 // Re-export the app-level constants for the Lucide icons that were already
 // embedded there.  We keep them in app.rs so app-level code that already
 // references ICON_CHAT etc. doesn't break, but the Icon enum uses them
@@ -71,6 +73,9 @@ pub enum Icon {
     // Navigation
     Back,
     Close,
+    /// Expand/collapse disclosure chevrons.
+    ChevronDown,
+    ChevronRight,
 
     // Communication
     Chat,
@@ -119,6 +124,8 @@ impl Icon {
             // Navigation
             Icon::Back => SVG_ARROW_LEFT,
             Icon::Close => ICON_CLOSE,
+            Icon::ChevronDown => SVG_CHEVRON_DOWN,
+            Icon::ChevronRight => SVG_CHEVRON_RIGHT,
 
             // Communication
             Icon::Chat => ICON_CHAT,
@@ -387,6 +394,8 @@ mod tests {
         let icons = [
             Icon::Back,
             Icon::Close,
+            Icon::ChevronDown,
+            Icon::ChevronRight,
             Icon::Chat,
             Icon::ChatFilled,
             Icon::Message,

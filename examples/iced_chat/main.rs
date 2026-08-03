@@ -6,6 +6,7 @@
 //!   cargo run --features gui --example iced_chat join <ticket>  # join room
 
 mod app;
+mod component_gallery;
 mod connection_details;
 mod design_tokens;
 mod download_progress_view;
@@ -18,10 +19,9 @@ mod mcp_server;
 mod notification;
 mod perf_tracker;
 mod presentation;
-mod ui_components;
-mod component_gallery;
 #[cfg(feature = "terminal")]
 mod terminal_view;
+mod ui_components;
 
 use mimalloc::MiMalloc;
 

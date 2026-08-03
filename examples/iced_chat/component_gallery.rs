@@ -11,9 +11,9 @@ use crate::design_tokens;
 use crate::fonts::Typography;
 use crate::icon_system::{Icon, IconSize};
 use crate::ui_components::{
-    self, badge, card_header, divider, elevated_card, empty_state, ghost_icon_button,
-    icon_tile, primary_button, primary_button_icon, secondary_button, section_header,
-    status_dot, text_input_field, Avatar, BadgeKind, Card, ListRow, StatusDotKind,
+    self, badge, card_header, divider, elevated_card, empty_state, ghost_icon_button, icon_tile,
+    primary_button, primary_button_icon, secondary_button, section_header, status_dot,
+    text_input_field, Avatar, BadgeKind, Card, ListRow, StatusDotKind,
 };
 
 /// Build the complete component gallery view.
@@ -216,11 +216,10 @@ fn card_gallery() -> Element<'static, AppMessage> {
         primary_button("Action", None, false),
     ];
 
-    let clickable_content: Vec<Element<'static, AppMessage>> = vec![
-        text("Click me — I'm interactive!")
+    let clickable_content: Vec<Element<'static, AppMessage>> =
+        vec![text("Click me — I'm interactive!")
             .size(Typography::Body.size_px())
-            .into(),
-    ];
+            .into()];
 
     let card_noop: AppMessage = AppMessage::Noop;
 
@@ -373,7 +372,12 @@ fn avatar_gallery() -> Element<'static, AppMessage> {
                 .width(Length::Fixed(design_tokens::SPACE_12))
                 .height(Length::Shrink),
         )
-        .push(avatar_with_extra("Dave", "With unread badge", false, Some(5)))
+        .push(avatar_with_extra(
+            "Dave",
+            "With unread badge",
+            false,
+            Some(5),
+        ))
         .push(
             Space::new()
                 .width(Length::Fixed(design_tokens::SPACE_12))
@@ -498,10 +502,7 @@ fn status_and_badge_gallery() -> Element<'static, AppMessage> {
         .into()
 }
 
-fn badge_sample(
-    label: &str,
-    sample: Element<'static, AppMessage>,
-) -> Element<'static, AppMessage> {
+fn badge_sample(label: &str, sample: Element<'static, AppMessage>) -> Element<'static, AppMessage> {
     Column::new()
         .push(sample)
         .push(

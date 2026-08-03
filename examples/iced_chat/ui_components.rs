@@ -475,9 +475,12 @@ fn text_input_error_style(theme: &Theme, status: text_input::Status) -> text_inp
 }
 
 /// A styled text input field.
-pub fn text_input_field<'a>(
-    placeholder: &'a str,
-    value: &'a str,
+///
+/// Input strings are cloned into the widget, so the returned element does not
+/// borrow from `placeholder` or `value` (mirrors `iced::widget::text_input`).
+pub fn text_input_field<'a, 'b>(
+    placeholder: &'b str,
+    value: &'b str,
     on_input: impl Fn(String) -> AppMessage + 'a,
     has_error: bool,
 ) -> Element<'a, AppMessage> {
@@ -1102,6 +1105,243 @@ pub fn card_header<'a>(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 17. SIDEBAR SECTION HEADER
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A collapsible sidebar section header with an optional count badge and a
+/// trailing add action.
+///
+/// The whole label row is clickable when `on_toggle` is supplied (expand /
+/// collapse); the optional add action is a separate icon button so it never
+/// triggers the toggle.  All colours are theme-aware.
+pub struct SidebarSectionHeader<'a> {
+    title: &'a str,
+    count: Option<usize>,
+    collapsed: bool,
+    on_toggle: Option<AppMessage>,
+    add_action: Option<(Icon, AppMessage)>,
+}
+
+impl<'a> SidebarSectionHeader<'a> {
+    /// Start a header with an ALL-CAPS section label.
+    pub fn new(title: &'a str) -> Self {
+        Self {
+            title,
+            count: None,
+            collapsed: false,
+            on_toggle: None,
+            add_action: None,
+        }
+    }
+
+    /// Show a count badge.  Zero is treated as no badge.
+    pub fn count(mut self, count: usize) -> Self {
+        self.count = (count > 0).then_some(count);
+        self
+    }
+
+    /// Mark the section collapsed so the header shows a right chevron.
+    pub fn collapsed(mut self, collapsed: bool) -> Self {
+        self.collapsed = collapsed;
+        self
+    }
+
+    /// Make the whole header row clickable with the given message.
+    pub fn on_toggle(mut self, msg: AppMessage) -> Self {
+        self.on_toggle = Some(msg);
+        self
+    }
+
+    /// Add a trailing icon action (e.g. a "＋" add button).
+    pub fn add_action(mut self, icon: Icon, msg: AppMessage) -> Self {
+        self.add_action = Some((icon, msg));
+        self
+    }
+
+    /// Build the header element.
+    pub fn build(self, theme: &Theme) -> Element<'a, AppMessage> {
+        let chevron = if self.collapsed {
+            Icon::ChevronRight
+        } else {
+            Icon::ChevronDown
+        };
+
+        let mut toggle_row = Row::new()
+            .push(
+                chevron
+                    .build()
+                    .size(IconSize::Sm)
+                    .color_fn(design_tokens::text_muted)
+                    .build(),
+            )
+            .push(
+                Space::new()
+                    .width(Length::Fixed(design_tokens::SPACE_4))
+                    .height(Length::Shrink),
+            )
+            .push(
+                text(self.title)
+                    .font(Typography::SidebarSectionLabel.font())
+                    .size(Typography::SidebarSectionLabel.size_px())
+                    .color(design_tokens::text_muted(theme))
+                    .width(Length::Shrink),
+            );
+
+        if let Some(count) = self.count {
+            toggle_row = toggle_row
+                .push(
+                    Space::new()
+                        .width(Length::Fixed(design_tokens::SPACE_4))
+                        .height(Length::Shrink),
+                )
+                .push(
+                    text(count.to_string())
+                        .font(Typography::Timestamp.font())
+                        .size(Typography::Timestamp.size_px())
+                        .color(design_tokens::text_muted(theme)),
+                );
+        }
+
+        toggle_row = toggle_row.push(Space::new().width(Length::Fill).height(Length::Shrink));
+
+        let label_button = button(toggle_row)
+            .width(Length::Fill)
+            .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
+            .style(move |t, status| {
+                let bg = match status {
+                    button::Status::Hovered => {
+                        Some(Background::Color(design_tokens::surface_hover(t)))
+                    }
+                    button::Status::Pressed => {
+                        Some(Background::Color(design_tokens::surface_selected(t)))
+                    }
+                    _ => None,
+                };
+                button::Style {
+                    background: bg,
+                    border: Border {
+                        radius: design_tokens::RADIUS_MD.into(),
+                        ..Default::default()
+                    },
+                    text_color: design_tokens::text_muted(t),
+                    ..Default::default()
+                }
+            });
+
+        let mut header_row = Row::new().push(label_button);
+
+        if let Some((icon, msg)) = self.add_action {
+            let add_btn = button(icon.build().size(IconSize::Md).interactive(true).build())
+                .on_press(msg)
+                .padding(design_tokens::SPACE_8)
+                .style(move |t, status| {
+                    let active = match status {
+                        button::Status::Hovered => design_tokens::primary(t),
+                        button::Status::Pressed => design_tokens::primary_pressed(t),
+                        _ => design_tokens::text_secondary(t),
+                    };
+                    button::Style {
+                        background: match status {
+                            button::Status::Hovered => {
+                                Some(Background::Color(design_tokens::surface_hover(t)))
+                            }
+                            button::Status::Pressed => {
+                                Some(Background::Color(design_tokens::surface_selected(t)))
+                            }
+                            _ => None,
+                        },
+                        border: Border {
+                            radius: design_tokens::RADIUS_SM.into(),
+                            ..Default::default()
+                        },
+                        text_color: active,
+                        ..Default::default()
+                    }
+                });
+            header_row = header_row.push(add_btn);
+        }
+
+        header_row
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 18. SIDEBAR EMPTY STATE
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A compact left-aligned empty-state row for sidebar sections: a 20 px icon,
+/// a primary title line, and a muted supporting explanation, with an optional
+/// ghost action button.  Colours resolve against the live theme so the row
+/// works in both light and dark mode.
+pub fn sidebar_empty_state<'a>(
+    icon: Icon,
+    title: &'a str,
+    supporting: &'a str,
+    action: Option<(&'a str, AppMessage)>,
+) -> Element<'a, AppMessage> {
+    let mut copy = Column::new()
+        .push(
+            text(title)
+                .font(Typography::Body.font())
+                .size(Typography::Body.size_px())
+                .style(move |t| text::Style {
+                    color: Some(design_tokens::text_secondary(t)),
+                }),
+        )
+        .push(
+            text(supporting)
+                .font(Typography::SecondaryText.font())
+                .size(Typography::SecondaryText.size_px())
+                .style(move |t| text::Style {
+                    color: Some(design_tokens::text_muted(t)),
+                }),
+        )
+        .spacing(design_tokens::SPACE_2)
+        .width(Length::Fill);
+
+    if let Some((label, message)) = action {
+        copy = copy.push(
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Fixed(design_tokens::SPACE_4)),
+        );
+        copy = copy.push(
+            button(
+                text(label)
+                    .font(Typography::ButtonLabel.font())
+                    .size(Typography::ButtonLabel.size_px()),
+            )
+            .on_press(message)
+            .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
+            .style(button_secondary_style),
+        );
+    }
+
+    container(
+        Row::new()
+            .push(
+                icon.build()
+                    .size(IconSize::Md)
+                    .color_fn(design_tokens::text_muted)
+                    .build(),
+            )
+            .push(
+                Space::new()
+                    .width(Length::Fixed(design_tokens::SPACE_8))
+                    .height(Length::Shrink),
+            )
+            .push(copy)
+            .align_y(Alignment::Start),
+    )
+    .width(Length::Fill)
+    .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
+    .into()
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1162,5 +1402,41 @@ mod tests {
     fn list_row_stores_text() {
         let row: ListRow<'static, ()> = ListRow::new("Hello");
         assert_eq!(row.primary_text, "Hello");
+    }
+
+    #[test]
+    fn sidebar_section_header_zero_count_is_suppressed() {
+        let header: SidebarSectionHeader = SidebarSectionHeader::new("CHATS").count(0);
+        assert_eq!(header.count, None, "zero count must not render a badge");
+        let header = SidebarSectionHeader::new("CHATS").count(7);
+        assert_eq!(header.count, Some(7));
+    }
+
+    #[test]
+    fn sidebar_section_header_defaults_to_expanded_chevron() {
+        let header: SidebarSectionHeader = SidebarSectionHeader::new("FRIENDS");
+        assert!(!header.collapsed, "headers start expanded");
+        let header = SidebarSectionHeader::new("FRIENDS").collapsed(true);
+        assert!(header.collapsed);
+    }
+
+    #[test]
+    fn sidebar_section_header_stores_add_action() {
+        let header = SidebarSectionHeader::new("PUBLIC ROOMS")
+            .add_action(Icon::Plus, AppMessage::CreateNewRoom);
+        // AppMessage is not PartialEq; verify the icon and presence instead.
+        match header.add_action {
+            Some((icon, _msg)) => assert_eq!(icon, Icon::Plus),
+            None => panic!("expected an add action to be stored"),
+        }
+    }
+
+    #[test]
+    fn sidebar_empty_state_accepts_no_action() {
+        let el: Element<'static, AppMessage> =
+            sidebar_empty_state(Icon::Search, "No peers", "They will appear here.", None);
+        // Building should not panic; the element is opaque so we only verify
+        // the builder produces an element.
+        let _ = el;
     }
 }
