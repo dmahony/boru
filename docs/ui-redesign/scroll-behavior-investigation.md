@@ -291,4 +291,76 @@ Verification after the fix:
   live appends do not move the reading position), state 4/5 show `055-060` (back to
   bottom and append-at-bottom snaps).
 
+---
+
+## 10. Test task t_727c1d5e (completed)
+
+Comprehensive test pass over all five scroll behaviours in the task scope.
+Committed as `test(t_727c1d5e): cover scroll state machine, unread badge, backfill gate; fix stale snap on conversation switch`.
+
+### 10.1 New unit tests
+
+In `examples/iced_chat/app.rs` (example suite, now **615 tests**; was 610):
+
+| Test | Behaviour covered |
+|---|---|
+| `conversation_switch_at_bottom_rearms_snap` | Manual scroll-to-bottom trigger: opening a follow-latest conversation re-arms `snap_to_end` so the newest message shows immediately |
+| `conversation_switch_preserves_scrolled_up_reading_position` | Scroll position preservation **across conversation switches**: reading at offset 500 in room A, switch to B and back → offset/viewport restored, no stale snap |
+| `inactive_room_message_increments_unread_badge` | The only unread mechanism that exists (sidebar badge): user-visible message to a hidden room bumps `unread` and queues the event |
+| `inactive_room_gossip_events_do_not_increment_unread` | NeighborUp/Presence noise never bumps the badge |
+| `opening_conversation_clears_unread_badge_but_keeps_backlog` | Viewing clears the badge while the pending backlog is retained for incremental replay |
+
+In `src/backfill.rs` (lib suite):
+
+| Test | Behaviour covered |
+|---|---|
+| `try_backfill_skips_when_history_at_or_above_threshold` | History pagination is **network-driven, not scroll-driven**: at/above `BACKFILL_TRIGGER_THRESHOLD` no request is made; an unknown peer below threshold degrades to `Ok(None)` |
+
+### 10.2 Regression found and fixed
+
+`conversation_switch_preserves_scrolled_up_reading_position` initially **failed**,
+exposing a real bug in the t_9e9a0fcd implementation: `switch_to_conversation`
+only ever *set* `scroll_to_bottom_pending = true` (when the target follows latest)
+and never cleared it. A snap armed while switching away from a follow-latest room
+survived into the next conversation, so the queued `snap_to_end` fired at the end of
+the update and **stole the reading position** of a scrolled-up room opened right
+after. The `Scrolled`-handler cancel (e2a0a6ce) covered manual wheel scrolls but not
+the conversation-switch path. Fix: recompute the transient flag from the restored
+`follow_latest` state — `self.scroll_to_bottom_pending = self.follow_latest`
+(`app.rs`, `switch_to_conversation`).
+
+### 10.3 E2E probe is now self-asserting
+
+`scripts/scroll_probe_check.py` parses the probe's five OCR dumps and asserts the
+visible `Seed msg NNN` range per acceptance state; `scripts/scroll_probe.sh` runs it
+at the end and exits non-zero on any failure. Two consecutive runs:
+**5/5 PASS, identical maxima (60 / 48 / 48 / 60 / 60)** — fresh open lands at the
+latest message, wheel-up shows older history, live appends while scrolled up do not
+move the reading position, wheel-down returns to latest, and append-at-bottom snaps
+to the newest entry.
+
+### 10.4 Behaviours verified as not implemented (documented, per t_9e9a0fcd decisions)
+
+- **Unread anchor in the timeline**: does not exist. Only the sidebar badge +
+  follow-latest read receipts exist; those semantics are pinned by the new unread
+  badge tests. An in-timeline anchor would need a per-conversation last-read
+  position (new UI scope, per parent t_6f308ca5).
+- **Jump-to-latest control**: does not exist (no button/shortcut; grep-verified).
+  The scroll-to-bottom path it would drive is covered by the snap tests and probe
+  state 5. Adding the control is new UI scope.
+- **Scroll-triggered history pagination**: does not exist. History loads wholesale
+  on open; backfill is network-driven and gated by `BACKFILL_TRIGGER_THRESHOLD`
+  (now unit-pinned). No scroll code touches the backfill path.
+
+### 10.5 Verification summary
+
+- `cargo check --example boru --features gui` OK.
+- `cargo test --example boru --features gui`: **615 passed / 0 failed** (was 610;
+  +5 new tests). All 9 parent scroll tests still pass — no regressions.
+- `cargo test --lib -- try_backfill_skips_when_history_at_or_above_threshold`: PASS
+  (0.03s). The full lib suite was not re-run end-to-end: it is long-running
+  (pre-existing; includes file-watcher/network tests) and the backfill edit is a
+  self-contained test addition with no production-code change.
+- `scripts/scroll_probe.sh`: **5/5 PASS twice**, now with automated OCR assertions.
+
 

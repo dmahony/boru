@@ -7402,12 +7402,14 @@ impl IcedChat {
             self.follow_latest = conversation.follow_latest;
             self.scroll_offset = conversation.scroll_offset;
             self.viewport_height = conversation.viewport_height;
-            // A fresh conversation starts its scrollable at the top; if we are
-            // following latest (the default), snap to the bottom once the chat
-            // screen renders.
-            if self.follow_latest {
-                self.scroll_to_bottom_pending = true;
-            }
+            // Recompute the snap intent from the restored follow-latest
+            // state.  `scroll_to_bottom_pending` is a transient global, not
+            // per-conversation state: a snap armed by the PREVIOUS
+            // conversation (e.g. switching away from a follow-latest room)
+            // must be cleared when the restored conversation is scrolled up,
+            // otherwise the queued snap fires at the end of this update and
+            // steals the reading position of the newly opened room.
+            self.scroll_to_bottom_pending = self.follow_latest;
 
             self.layout_cache.borrow_mut().invalidate_all();
 
@@ -33772,5 +33774,187 @@ mod tests {
             "follow-latest stays the default for a fresh conversation"
         );
         assert_eq!(conv.scroll_offset, 0.0, "no sentinel when there is no history");
+    }
+
+    #[test]
+    fn conversation_switch_at_bottom_rearms_snap() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic_a = direct_topic(&app.local_public, &peer);
+        let topic_b = TopicId::from_bytes([9u8; 32]);
+
+        // Conversation A is active and following latest (bottom sentinel set).
+        app.topic = topic_a;
+        app.screen = Screen::Chat { topic: topic_a };
+        app.follow_latest = true;
+        app.scroll_offset = f32::MAX;
+        app.scroll_to_bottom_pending = false;
+
+        // Conversation B exists in the runtime map (background-subscribed).
+        let mut conv_b = ConversationLive::new(topic_b);
+        conv_b.follow_latest = true;
+        conv_b.scroll_offset = f32::MAX;
+        app.conversations.insert(topic_b, conv_b);
+
+        // Switching to B restores its follow-latest state and re-arms the
+        // snap so the newest message is visible the moment the chat screen
+        // renders (manual scroll-to-bottom trigger via conversation open).
+        assert!(app.switch_to_conversation(topic_b), "switch to B succeeds");
+        assert_eq!(app.topic, topic_b);
+        assert!(app.follow_latest, "follow-latest state restored");
+        assert!(
+            app.scroll_to_bottom_pending,
+            "opening a follow-latest conversation queues the snap-to-bottom"
+        );
+        assert_eq!(app.scroll_offset, f32::MAX, "bottom sentinel restored");
+    }
+
+    #[test]
+    fn conversation_switch_preserves_scrolled_up_reading_position() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic_a = direct_topic(&app.local_public, &peer);
+        let topic_b = TopicId::from_bytes([9u8; 32]);
+
+        // A is active and the user has scrolled up to read older messages.
+        app.topic = topic_a;
+        app.screen = Screen::Chat { topic: topic_a };
+        app.follow_latest = false;
+        app.scroll_offset = 500.0;
+        app.viewport_height = 200.0;
+        app.scroll_to_bottom_pending = false;
+
+        // B exists in the runtime map (background-subscribed).
+        app.conversations.insert(topic_b, ConversationLive::new(topic_b));
+
+        // Switch to B, then back to A.
+        assert!(app.switch_to_conversation(topic_b), "switch to B succeeds");
+        assert!(app.switch_to_conversation(topic_a), "switch back to A succeeds");
+
+        assert_eq!(app.topic, topic_a);
+        assert!(
+            !app.follow_latest,
+            "scrolled-up conversation stays scrolled-up across switches"
+        );
+        assert_eq!(
+            app.scroll_offset, 500.0,
+            "reading offset is preserved per conversation"
+        );
+        assert_eq!(
+            app.viewport_height, 200.0,
+            "viewport height is preserved per conversation"
+        );
+        assert!(
+            !app.scroll_to_bottom_pending,
+            "no stale snap steals the reading position on return"
+        );
+    }
+
+    #[test]
+    fn inactive_room_message_increments_unread_badge() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&app.local_public, &peer);
+
+        // A different conversation is active.
+        app.topic = TopicId::from_bytes([9u8; 32]);
+        app.screen = Screen::Chat { topic: app.topic };
+
+        let _task = app.update(AppMessage::NetEvent(ConversationNetEvent::new(
+            topic,
+            NetEvent::Message {
+                from: peer,
+                message: Message::Message {
+                    text: "hello while hidden".into(),
+                },
+                sent_at: 0,
+            },
+        )));
+
+        let conv = app.conversations.get(&topic).expect("conversation created");
+        assert_eq!(
+            conv.unread, 1,
+            "user-visible message to an inactive room bumps the sidebar badge"
+        );
+        assert_eq!(
+            conv.pending_events.len(),
+            1,
+            "event is queued for replay when the room is opened"
+        );
+    }
+
+    #[test]
+    fn inactive_room_gossip_events_do_not_increment_unread() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&app.local_public, &peer);
+        app.topic = TopicId::from_bytes([9u8; 32]);
+        app.screen = Screen::Chat { topic: app.topic };
+
+        // NeighborUp is pure gossip — no badge bump.
+        let _t1 = app.update(AppMessage::NetEvent(ConversationNetEvent::new(
+            topic,
+            NetEvent::NeighborUp { peer },
+        )));
+        // Presence heartbeats are protocol noise — no badge bump.
+        let _t2 = app.update(AppMessage::NetEvent(ConversationNetEvent::new(
+            topic,
+            NetEvent::Message {
+                from: peer,
+                message: Message::Presence,
+                sent_at: 0,
+            },
+        )));
+
+        let conv = app.conversations.get(&topic).unwrap();
+        assert_eq!(
+            conv.unread, 0,
+            "gossip protocol events never bump the unread badge"
+        );
+        assert_eq!(
+            conv.pending_events.len(),
+            2,
+            "gossip events are still queued (replayed as system chips)"
+        );
+    }
+
+    #[test]
+    fn opening_conversation_clears_unread_badge_but_keeps_backlog() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&app.local_public, &peer);
+        let other = TopicId::from_bytes([9u8; 32]);
+
+        // A hidden conversation with a badge and a queued backlog.
+        let mut conv = ConversationLive::new(topic);
+        conv.unread = 3;
+        conv.pending_events.push_back(NetEvent::Message {
+            from: peer,
+            message: Message::Message {
+                text: "queued 1".into(),
+            },
+            sent_at: 1,
+        });
+        conv.pending_events.push_back(NetEvent::Message {
+            from: peer,
+            message: Message::Message {
+                text: "queued 2".into(),
+            },
+            sent_at: 2,
+        });
+        app.conversations.insert(topic, conv);
+
+        // A different room is active; opening the hidden conversation clears
+        // its badge (sidebar unread anchor) while the backlog stays queued
+        // for incremental replay.
+        app.topic = other;
+        app.screen = Screen::Chat { topic: other };
+        assert!(app.switch_to_conversation(topic), "switch to backlog room");
+
+        let restored = app
+            .conversations
+            .get(&topic)
+            .expect("backlog conversation retained in map");
+        assert_eq!(restored.unread, 0, "viewing clears the unread badge");
+        assert_eq!(
+            restored.pending_events.len(),
+            2,
+            "queued backlog is retained for replay after the badge clears"
+        );
     }
 }

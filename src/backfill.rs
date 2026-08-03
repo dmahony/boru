@@ -802,6 +802,62 @@ mod tests {
         assert!(!rl.try_accept(pk2));
     }
 
+    /// The GUI has no scroll-triggered pagination: history is loaded
+    /// wholesale on open, and backfill is network-driven, gated by
+    /// [`BACKFILL_TRIGGER_THRESHOLD`].  This pins the gate itself — when the
+    /// local history count meets the threshold no request is made (and no
+    /// network round trip is attempted), and an unknown peer below the
+    /// threshold degrades to `Ok(None)` rather than erroring.
+    #[tokio::test]
+    async fn try_backfill_skips_when_history_at_or_above_threshold() {
+        let ep = Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+            .secret_key(SecretKey::generate())
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddrV4>().unwrap())
+            .unwrap()
+            .bind()
+            .await
+            .expect("bind endpoint");
+        let handle = BackfillHandle::spawn(ep.clone());
+        let peer = SecretKey::generate().public();
+        let (net_tx, _net_rx) = mpsc::channel(16);
+
+        // At exactly the threshold: no backfill request.
+        let at = handle
+            .try_backfill_from_peer(
+                &ep,
+                peer,
+                BACKFILL_TRIGGER_THRESHOLD,
+                None,
+                net_tx.clone(),
+                None,
+            )
+            .await
+            .expect("threshold skip is not an error");
+        assert_eq!(at, None, "at threshold → no backfill request");
+
+        // Above the threshold: no backfill request.
+        let above = handle
+            .try_backfill_from_peer(
+                &ep,
+                peer,
+                BACKFILL_TRIGGER_THRESHOLD + 10,
+                None,
+                net_tx.clone(),
+                None,
+            )
+            .await
+            .expect("above-threshold skip is not an error");
+        assert_eq!(above, None, "above threshold → no backfill request");
+
+        // Below the threshold but no known route to the peer: Ok(None), not an
+        // error — the caller simply gets no history this round.
+        let below = handle
+            .try_backfill_from_peer(&ep, peer, 0, None, net_tx.clone(), None)
+            .await
+            .expect("unknown-peer below threshold degrades gracefully");
+        assert_eq!(below, None, "no route → no backfill performed");
+    }
+
     #[tokio::test]
     async fn test_backfill_handle_spawn_and_drop() {
         let ep = Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)

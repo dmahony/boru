@@ -134,6 +134,16 @@ ocr_chat "$OUT/append_at_bottom.png" > "$OUT/append_at_bottom.ocr"
 sed -n '1,30p' "$OUT/append_at_bottom.ocr"
 
 echo "captures: $(ls -la "$OUT"/*.png | wc -l)"
+# Deterministic PASS/FAIL assertions over the OCR dumps (t_727c1d5e).
+if python3 "$ROOT_DIR/scripts/scroll_probe_check.py" "$OUT"; then
+    echo "scroll_probe: 5/5 PASS"
+else
+    echo "scroll_probe: FAIL (see state diagnostics above)"
+    kill "$app_pid" 2>/dev/null || true
+    kill "$xvfb_pid" 2>/dev/null || true
+    rm -rf "$data_dir"
+    exit 1
+fi
 kill "$app_pid" 2>/dev/null || true
 kill "$xvfb_pid" 2>/dev/null || true
 rm -rf "$data_dir"
