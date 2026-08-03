@@ -2902,6 +2902,19 @@ pub enum GuiTestCommand {
         /// Content hash (blake3) of the file to download.
         content_hash: String,
     },
+    /// Simulate a peer's online/offline presence for GUI testing.
+    ///
+    /// The simulated event is routed through the same friend-status path used
+    /// by real network events, so the conversation header derives its presence
+    /// label and dot from the production `peer_presence_map` code path. This
+    /// lets screenshot harnesses exercise the Online/Offline header states
+    /// without requiring a live peer connection.
+    SetPeerPresence {
+        /// Peer public key as a hex string.
+        peer_id: String,
+        /// `true` = online (fresh last-seen timestamp), `false` = offline.
+        online: bool,
+    },
     /// Open the create-room dialog.
     CreateNewRoom,
     /// Set the room name in the create-room dialog.
@@ -2998,6 +3011,9 @@ impl GuiTestCommand {
             } => {
                 validate_gui_identifier(peer_id, "peer_id")?;
                 validate_gui_identifier(content_hash, "content_hash")
+            }
+            GuiTestCommand::SetPeerPresence { peer_id, .. } => {
+                validate_gui_identifier(peer_id, "peer_id")
             }
             GuiTestCommand::Wait {
                 condition,
@@ -3101,6 +3117,9 @@ impl GuiTestCommand {
             GuiTestCommand::DownloadFile { .. } => {
                 Some(ExpectedState::Generic("download_initiated".into()))
             }
+            // SetPeerPresence: the resulting header state depends on the peer and
+            // the current presence map — verified by screenshot, not statically.
+            GuiTestCommand::SetPeerPresence { .. } => None,
             GuiTestCommand::CreateNewRoom => {
                 Some(ExpectedState::Generic("create_room_dialog_open".into()))
             }
@@ -6279,6 +6298,58 @@ mod tests {
         assert!(GuiTestCommand::SelectPeer { peer_id: long }
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn test_gui_test_command_set_peer_presence_validates_peer_id() {
+        // Valid hex identifier is accepted for both online and offline.
+        assert!(GuiTestCommand::SetPeerPresence {
+            peer_id: "a1".repeat(32),
+            online: true,
+        }
+        .validate()
+        .is_ok());
+        assert!(GuiTestCommand::SetPeerPresence {
+            peer_id: "a1".repeat(32),
+            online: false,
+        }
+        .validate()
+        .is_ok());
+        // Oversized or unsafe identifiers are rejected.
+        let long = "a".repeat(GUI_TEST_COMMAND_MAX_STRING_LEN + 1);
+        assert!(GuiTestCommand::SetPeerPresence {
+            peer_id: long,
+            online: true,
+        }
+        .validate()
+        .is_err());
+        assert!(GuiTestCommand::SetPeerPresence {
+            peer_id: "not a valid id!".into(),
+            online: true,
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn test_gui_test_command_set_peer_presence_serde_round_trip() {
+        let command = GuiTestCommand::SetPeerPresence {
+            peer_id: "a1".repeat(32),
+            online: true,
+        };
+        let encoded = serde_json::to_string(&command).expect("serialize");
+        assert!(encoded.contains("set_peer_presence"));
+        let decoded: GuiTestCommand = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded, command);
+        // The offline form must round-trip too.
+        let offline = GuiTestCommand::SetPeerPresence {
+            peer_id: "b2".repeat(32),
+            online: false,
+        };
+        let decoded: GuiTestCommand =
+            serde_json::from_str(&serde_json::to_string(&offline).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(decoded, offline);
     }
 
     #[test]

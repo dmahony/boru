@@ -7745,6 +7745,21 @@ impl IcedChat {
                 }
                 Ok(())
             }
+            GuiTestCommand::SetPeerPresence { peer_id, .. } => {
+                let peer = peer_id.parse::<PublicKey>().map_err(|_| {
+                    error(
+                        GuiActionErrorCode::UnknownPeer,
+                        format!("Peer `{peer_id}` is not known"),
+                    )
+                })?;
+                if self.friends.get(&FriendId::from_public_key(peer)).is_none() {
+                    return Err(error(
+                        GuiActionErrorCode::UnknownPeer,
+                        format!("Peer `{peer_id}` is not a friend"),
+                    ));
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -14959,6 +14974,51 @@ impl IcedChat {
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::AppMessageQueued);
                     return iced::Task::done(AppMessage::ToggleDark(enabled));
+                }
+
+                if let GuiTestCommand::SetPeerPresence { peer_id, online } = &command {
+                    if let Err(error) = self.validate_gui_test_command(&command) {
+                        let _ = self.gui_action_history.set_error(&action_id, error);
+                        let _ = self
+                            .gui_action_history
+                            .set_state(&action_id, GuiActionState::Rejected);
+                        return iced::Task::none();
+                    }
+                    let peer = match peer_id.parse::<PublicKey>() {
+                        Ok(peer) => peer,
+                        Err(error) => {
+                            let _ = self.gui_action_history.set_error(
+                                &action_id,
+                                GuiActionError::new(
+                                    GuiActionErrorCode::InvalidArgument,
+                                    format!("Invalid peer_id for SetPeerPresence: {error}"),
+                                ),
+                            );
+                            let _ = self
+                                .gui_action_history
+                                .set_state(&action_id, GuiActionState::Rejected);
+                            return iced::Task::none();
+                        }
+                    };
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    // Route through the same friend-status path real network
+                    // events use, so the header presence (dot + label) is
+                    // derived from the production peer_presence_map.
+                    let status = if *online {
+                        FriendStatus::Online
+                    } else {
+                        FriendStatus::Offline
+                    };
+                    self.handle_friend_event(FriendEvent::StatusChanged { peer, status });
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::none();
                 }
 
                 let GuiTestCommand::OpenRoom { room_id } = command else {

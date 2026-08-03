@@ -32,6 +32,7 @@
 //! | `boru_gui_open_conversation` | Open a direct conversation with a peer (requires `--enable-gui-test-actions`) |
 //! | `boru_gui_toggle_dark_mode` | Toggle dark mode on/off (requires `--enable-gui-test-actions`) |
 //! | `boru_gui_close_dialog` | Close the currently open dialog or overlay (requires `--enable-gui-test-actions`) |
+//! | `boru_gui_set_peer_presence` | Simulate a peer's online/offline presence for header evidence (requires `--enable-gui-test-actions`) |
 //! | `boru_run_gui_message_test` | Verify the local GUI message pipeline without claiming remote delivery (requires `--enable-gui-test-actions`) |
 //! | `boru_browse_peer_catalogue` | Fetch and return a remote peer's signed file catalogue |
 //! | `boru_download_file` | Initiate a durable file download from a remote peer |
@@ -537,7 +538,8 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
         | "boru_gui_open_conversation"
         | "boru_gui_submit_composer"
         | "boru_gui_toggle_dark_mode"
-        | "boru_gui_close_dialog" => {
+        | "boru_gui_close_dialog"
+        | "boru_gui_set_peer_presence" => {
             if !state.gui_test_actions_enabled || state.gui_action_tx.is_none() {
                 return jsonrpc_error(
                     req.id.clone(),
@@ -565,7 +567,8 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                 | "boru_gui_open_conversation"
                 | "boru_gui_submit_composer"
                 | "boru_gui_toggle_dark_mode"
-                | "boru_gui_close_dialog" => {
+                | "boru_gui_close_dialog"
+                | "boru_gui_set_peer_presence" => {
                     if let Err(e) = check_gui_action_rate_limit(&state.gui_action_rate_limiter) {
                         return jsonrpc_error(req.id.clone(), -32000, "Rate limit exceeded", &e);
                     }
@@ -580,6 +583,7 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                         "boru_gui_submit_composer" => handle_submit_composer(tx),
                         "boru_gui_toggle_dark_mode" => handle_gui_toggle_dark_mode(req, tx),
                         "boru_gui_close_dialog" => handle_gui_close_dialog(tx),
+                        "boru_gui_set_peer_presence" => handle_gui_set_peer_presence(req, tx),
                         _ => unreachable!(),
                     }
                 }
@@ -804,6 +808,7 @@ fn validate_gui_tool_params(method: &str, params: &Value) -> Result<(), String> 
         ("boru_gui_focus_composer", &[], &[]),
         ("boru_gui_toggle_dark_mode", &["enabled"], &[]),
         ("boru_gui_close_dialog", &[], &[]),
+        ("boru_gui_set_peer_presence", &["peer_id", "online"], &[]),
         ("boru_gui_wait_for_state", &["condition"], &["timeout_ms"]),
         (
             "boru_run_gui_message_test",
@@ -2003,6 +2008,66 @@ fn handle_gui_toggle_dark_mode(
         "sent": true,
         "action_id": idempotency_key,
         "enabled": enabled,
+    }))
+}
+
+/// `boru_gui_set_peer_presence` — simulate a friend's online/offline presence.
+///
+/// The command is routed through the same friend-status path real network
+/// events use, so the conversation header's presence label/dot is derived
+/// from the production `peer_presence_map`. This exists so screenshot
+/// harnesses can capture the Online/Offline header states without a live
+/// peer connection. Only available with `--enable-gui-test-actions`.
+fn handle_gui_set_peer_presence(
+    req: &JsonRpcRequest,
+    tx: boru_core::diagnostics::GuiTestHandle,
+) -> Result<Value, String> {
+    let peer_id = req
+        .params
+        .get("peer_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required argument: peer_id (hex string)".to_string())?;
+    let online = req
+        .params
+        .get("online")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| "Missing required argument: online (must be a boolean)".to_string())?;
+
+    info!(
+        "boru_gui_set_peer_presence: SetPeerPresence action queued (peer_id={} online={})",
+        peer_id, online
+    );
+
+    let idempotency_key = crate::gui_test_actions::generate_action_key();
+
+    let command = boru_core::diagnostics::GuiTestCommand::SetPeerPresence {
+        peer_id: peer_id.to_string(),
+        online,
+    };
+    let command_json =
+        serde_json::to_string(&command).map_err(|e| format!("Failed to serialize command: {e}"))?;
+
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(idempotency_key.clone()),
+        requested_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64,
+        command: command_json,
+    };
+
+    tx.enqueue(request).map_err(|e| match e.code {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+            format!("GUI action queue is full (capacity: {})", tx.capacity())
+        }
+        _ => format!("GUI action channel error: {}", e.message),
+    })?;
+
+    Ok(serde_json::json!({
+        "sent": true,
+        "action_id": idempotency_key,
+        "peer_id": peer_id,
+        "online": online,
     }))
 }
 
