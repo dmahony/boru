@@ -16735,16 +16735,37 @@ impl IcedChat {
             }
 
             AppMessage::Scrolled(offset, vp_h) => {
-                self.scroll_offset = offset;
-                self.viewport_height = vp_h;
-                // Detect whether the user is at the bottom of the chat log.
-                // total_content_height is set during view_chat_log() each frame
-                // via Cell interior mutability (allows &self reads in view()).
+                // Mirror the scrollable's offset into the windowed-renderer
+                // state and track whether the user is at the bottom.
+                // total_content_height is set during view_chat_log() each
+                // frame via Cell interior mutability (allows &self reads in
+                // view()).
                 let total = self.total_content_height.get();
-                if total > 0.0 && offset + vp_h >= total - 10.0 {
-                    self.follow_latest = true;
-                } else if total > 0.0 {
-                    self.follow_latest = false;
+                if total > 0.0 {
+                    self.scroll_offset = offset;
+                    self.viewport_height = vp_h;
+                    // Detect whether the user is at the bottom of the chat
+                    // log.  The 10px epsilon absorbs sub-pixel rounding and
+                    // viewport re-measurement during resize.
+                    if offset + vp_h >= total - 10.0 {
+                        self.follow_latest = true;
+                    } else {
+                        self.follow_latest = false;
+                        // A manual scroll away from the bottom cancels any
+                        // queued snap-to-bottom so a stale snap can never
+                        // steal the user's reading position.
+                        self.scroll_to_bottom_pending = false;
+                    }
+                } else {
+                    // Empty timeline: the anchor-bottom empty-state
+                    // scrollable reports offset 0 with no content.  Clobbering
+                    // `scroll_offset` here would destroy the `f32::MAX`
+                    // bottom sentinel that keeps follow-latest armed until the
+                    // first entry renders (RoomOpened history replay / live
+                    // append) — which is what landed fresh conversations at
+                    // the TOP of history instead of the latest message.  Only
+                    // learn the viewport height; leave the sentinel untouched.
+                    self.viewport_height = vp_h;
                 }
                 #[cfg(feature = "video-playback")]
                 self.reconcile_inline_video_viewport();
@@ -17469,6 +17490,18 @@ impl IcedChat {
                 // already happened as part of SaveProfile handling.
                 iced::Task::none()
             }
+        };
+        // Consume a pending scroll-to-bottom snap request. The flag is armed
+        // when a fresh conversation opens in follow-latest mode or when a live
+        // entry is appended while the user is at the bottom. The windowed chat
+        // log is top-anchored, so content growth alone cannot move the Iced
+        // scrollable's viewport; the snap task actually drives the scrollable
+        // to the latest entry so the newest message stays visible.
+        let task = if self.scroll_to_bottom_pending {
+            self.scroll_to_bottom_pending = false;
+            iced::Task::batch([task, iced::widget::operation::snap_to_end(CHAT_LOG)])
+        } else {
+            task
         };
         // Publish after applying the message so diagnostics observe the
         // resulting state (not the state that existed before the update).
@@ -33415,5 +33448,189 @@ mod tests {
         assert_eq!(peers_a, peers_b);
         assert_eq!(activity_a, activity_b);
         assert_eq!(tunnels_a, tunnels_b);
+    }
+
+    // ── Chat-log scroll state machine (t_9e9a0fcd) ────────────────────────
+    //
+    // The chat log is a top-anchored windowed scrollable.  The app mirrors
+    // the Iced scrollable's offset into `scroll_offset` (which drives the
+    // windowed renderer) and tracks `follow_latest` so incoming messages
+    // snap to the bottom only while the user is at the bottom.  The
+    // `f32::MAX` bottom sentinel keeps follow-latest armed while the
+    // timeline is empty; a `Scrolled(0, vp)` event from the anchor-bottom
+    // empty-state scrollable must NOT clobber it, otherwise a fresh
+    // conversation lands at the TOP of history once entries render.
+
+    #[test]
+    fn chat_scroll_empty_timeline_preserves_bottom_sentinel() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        // Fresh conversation state: following latest with the bottom sentinel.
+        app.follow_latest = true;
+        app.scroll_offset = f32::MAX;
+        app.viewport_height = 0.0;
+        app.total_content_height.set(0.0);
+
+        // The anchor-bottom empty-state scrollable reports offset 0 with no
+        // content.  This is the pre-RoomOpened event that used to clobber the
+        // sentinel and land the user at the top of history.
+        let _task = app.update(AppMessage::Scrolled(0.0, 700.0));
+
+        assert_eq!(
+            app.scroll_offset,
+            f32::MAX,
+            "bottom sentinel must survive an empty-state Scrolled event"
+        );
+        assert!(
+            app.follow_latest,
+            "follow-latest stays armed while the timeline is empty"
+        );
+        assert_eq!(
+            app.viewport_height, 700.0,
+            "viewport height is still learned from the empty-state event"
+        );
+    }
+
+    #[test]
+    fn chat_scroll_at_bottom_keeps_following_latest_and_mirrors_offset() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.total_content_height.set(1000.0);
+        app.follow_latest = true;
+        app.scroll_to_bottom_pending = false;
+
+        // offset + viewport (800 + 200 = 1000) is inside the 10px bottom band.
+        let _task = app.update(AppMessage::Scrolled(800.0, 200.0));
+
+        assert!(app.follow_latest, "at the bottom → keep following latest");
+        assert_eq!(app.scroll_offset, 800.0, "offset is mirrored for the window");
+        assert_eq!(app.viewport_height, 200.0, "viewport height is mirrored");
+    }
+
+    #[test]
+    fn chat_scroll_away_from_bottom_cancels_queued_snap() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.total_content_height.set(1000.0);
+        app.follow_latest = true;
+        // A snap-to-bottom is queued (e.g. an entry was just appended while
+        // the user was at the bottom); the user then scrolls up to read.
+        app.scroll_to_bottom_pending = true;
+
+        let _task = app.update(AppMessage::Scrolled(0.0, 200.0));
+
+        assert!(
+            !app.follow_latest,
+            "scrolling up to read old messages leaves follow-latest"
+        );
+        assert!(
+            !app.scroll_to_bottom_pending,
+            "manual scroll away from the bottom cancels the queued snap"
+        );
+        assert_eq!(app.scroll_offset, 0.0);
+        assert_eq!(app.viewport_height, 200.0);
+    }
+
+    #[test]
+    fn chat_scroll_bottom_detection_uses_ten_pixel_epsilon() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.total_content_height.set(1000.0);
+
+        // Exactly at the epsilon boundary (offset + vp == total - 10).
+        let _t1 = app.update(AppMessage::Scrolled(790.0, 200.0));
+        assert!(
+            app.follow_latest,
+            "offset+vp == total-10 counts as at the bottom"
+        );
+
+        // One pixel above the boundary: genuinely reading older messages.
+        let _t2 = app.update(AppMessage::Scrolled(789.0, 200.0));
+        assert!(
+            !app.follow_latest,
+            "offset+vp < total-10 counts as scrolled up"
+        );
+    }
+
+    #[test]
+    fn keep_latest_visible_arms_snap_only_while_following() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Following latest → sentinel + queued snap for the next update.
+        app.follow_latest = true;
+        app.scroll_offset = 42.0;
+        app.scroll_to_bottom_pending = false;
+        app.keep_latest_visible();
+        assert_eq!(app.scroll_offset, f32::MAX, "sentinel re-armed");
+        assert!(app.scroll_to_bottom_pending, "snap queued");
+
+        // Reading older messages → offset and snap state stay untouched.
+        app.follow_latest = false;
+        app.scroll_offset = 500.0;
+        app.scroll_to_bottom_pending = false;
+        app.keep_latest_visible();
+        assert_eq!(
+            app.scroll_offset, 500.0,
+            "scrolled-up reading position is preserved on append"
+        );
+        assert!(
+            !app.scroll_to_bottom_pending,
+            "no snap queued while reading older messages"
+        );
+    }
+
+    #[test]
+    fn entries_push_arms_snap_only_while_following() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // At the bottom (follow_latest): a live append queues the snap that
+        // drives the top-anchored scrollable to the newest entry.
+        app.follow_latest = true;
+        app.scroll_to_bottom_pending = false;
+        app.entries_push(ChatEntry::local("me", "live message at bottom"));
+        assert!(app.scroll_to_bottom_pending, "append while following queues snap");
+        assert_eq!(app.scroll_offset, f32::MAX, "sentinel armed for the window");
+
+        // Reading older messages (follow_latest=false, offset 500): an
+        // incoming live append must not move the reading position.
+        app.follow_latest = false;
+        app.scroll_offset = 500.0;
+        app.scroll_to_bottom_pending = false;
+        let before = app.entries.len();
+        app.entries_push(ChatEntry::remote(
+            "Alice",
+            "live while reading",
+            None,
+            None,
+            Some(iroh::SecretKey::generate().public()),
+        ));
+        assert_eq!(
+            app.entries.len(),
+            before + 1,
+            "live entry still lands in the timeline"
+        );
+        assert_eq!(
+            app.scroll_offset, 500.0,
+            "scrolled-up reading position survives a live append"
+        );
+        assert!(
+            !app.scroll_to_bottom_pending,
+            "no snap steals the reading position"
+        );
+    }
+
+    #[test]
+    fn update_tail_consumes_pending_snap_once() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.total_content_height.set(1000.0);
+        app.scroll_to_bottom_pending = true;
+
+        // The update tail turns the pending flag into the snap task exactly
+        // once.
+        let _task = app.update(AppMessage::Scrolled(800.0, 200.0));
+        assert!(
+            !app.scroll_to_bottom_pending,
+            "pending snap consumed by the update tail"
+        );
+
+        // A later update with the flag already clear emits no second snap.
+        let _task2 = app.update(AppMessage::Scrolled(800.0, 200.0));
+        assert!(!app.scroll_to_bottom_pending);
     }
 }
