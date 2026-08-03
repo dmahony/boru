@@ -202,10 +202,22 @@ def build_chat_history(
                 local_pk_hex if msg.get("sender") == "local" else remote_pk_hex
             )
             # Spec delivery_state wins when present (UI-14 states evidence);
-            # fall back to the Figure 4 defaults otherwise.
-            delivery = msg.get("delivery_state") or (
-                "Seen" if msg.get("sender") == "local" else "Delivered"
-            )
+            # fall back to the Figure 4 defaults otherwise.  Normalise to the
+            # app's case-sensitive DeliveryState serde variant names — the
+            # figure's extracted annotations spell them lowercase ("seen"),
+            # which the app's enum would otherwise reject on load, making the
+            # whole history file fail to parse and the timeline render empty.
+            delivery = (msg.get("delivery_state") or "").strip()
+            if delivery:
+                delivery = {
+                    "queued": "Queued",
+                    "sent": "Sent",
+                    "delivered": "Delivered",
+                    "seen": "Seen",
+                    "failed": "Failed",
+                }.get(delivery.lower(), delivery)
+            else:
+                delivery = "Seen" if msg.get("sender") == "local" else "Delivered"
             push("text", sender, body, ts, delivery)
         else:
             raise ValueError(f"unrecognised spec message type: {mtype!r}")

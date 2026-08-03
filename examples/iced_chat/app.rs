@@ -7616,7 +7616,11 @@ fn chat_footer_status(
             )
         }
     } else if peer.is_some_and(|pk| neighbors.contains(&pk)) {
-        ("Direct (mesh)".to_string(), true, Some("1 peer".to_string()))
+        (
+            "Direct (mesh)".to_string(),
+            true,
+            Some("1 peer".to_string()),
+        )
     } else if presence != PeerPresence::Offline && presence != PeerPresence::Unknown {
         ("Relay".to_string(), true, Some("1 peer".to_string()))
     } else {
