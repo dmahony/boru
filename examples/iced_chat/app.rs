@@ -3208,6 +3208,8 @@ pub struct IcedChat {
     pending_open_file_sharing_action: Option<GuiActionId>,
     /// CloseDialog action waiting for the normal dialog-cancel message path.
     pending_close_dialog_action: Option<GuiActionId>,
+    /// ToggleHelp action waiting for the normal help-overlay toggle path.
+    pending_toggle_help_action: Option<GuiActionId>,
     /// SelectPeer action waiting for the normal peer-profile navigation path.
     pending_select_peer_action: Option<(GuiActionId, PublicKey)>,
     /// CreateNewRoom action waiting for the create-room dialog to open.
@@ -4479,6 +4481,15 @@ fn gui_dark_mode_message(command: &GuiTestCommand) -> Option<AppMessage> {
     }
 }
 
+/// Map the semantic help-overlay test command to the same application message
+/// emitted by the visible help button in the chat header and help overlay.
+fn gui_help_message(command: &GuiTestCommand) -> Option<AppMessage> {
+    match command {
+        GuiTestCommand::ToggleHelp => Some(AppMessage::ToggleHelp),
+        _ => None,
+    }
+}
+
 /// Run a GUI action task alongside its one-shot timeout. The timeout message
 /// is harmless after completion because the handler checks the action state.
 fn with_gui_action_timeout(
@@ -5570,6 +5581,7 @@ impl IcedChat {
             pending_open_settings_action: None,
             pending_open_file_sharing_action: None,
             pending_close_dialog_action: None,
+            pending_toggle_help_action: None,
             pending_select_peer_action: None,
             pending_create_room_action: None,
             pending_confirm_create_room_action: None,
@@ -8093,7 +8105,8 @@ impl IcedChat {
             dialog_open: self.show_create_room_dialog
                 || self.connection_details_dialog.is_some()
                 || self.history_confirm_clear
-                || self.room_delete_confirm_topic.is_some(),
+                || self.room_delete_confirm_topic.is_some()
+                || self.help_visible,
             unread_count: 0,
             timestamp: chrono::Utc::now(),
         };
@@ -11232,6 +11245,14 @@ impl IcedChat {
 
             AppMessage::ToggleHelp => {
                 self.help_visible = !self.help_visible;
+                if let Some(action_id) = self.pending_toggle_help_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
                 iced::Task::none()
             }
             AppMessage::ComposerSendFinished => {
@@ -15391,6 +15412,21 @@ impl IcedChat {
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::AppMessageQueued);
                     return iced::Task::done(AppMessage::ToggleDark(enabled));
+                }
+
+                if let Some(AppMessage::ToggleHelp) = gui_help_message(&command) {
+                    // ToggleHelp flips the overlay; declare the post-state so
+                    // the action status is truthful for both directions.
+                    let target = !self.help_visible;
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_core::diagnostics::ExpectedState::HelpVisible(target),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_toggle_help_action = Some(action_id);
+                    return iced::Task::done(AppMessage::ToggleHelp);
                 }
 
                 if let GuiTestCommand::SetPeerPresence { peer_id, online } = &command {
@@ -29495,6 +29531,16 @@ mod tests {
             Some(AppMessage::ToggleDark(false))
         ));
         assert!(gui_dark_mode_message(&GuiTestCommand::OpenSettings).is_none());
+    }
+
+    #[test]
+    fn gui_help_command_maps_to_normal_toggle_message() {
+        assert!(matches!(
+            gui_help_message(&GuiTestCommand::ToggleHelp),
+            Some(AppMessage::ToggleHelp)
+        ));
+        assert!(gui_help_message(&GuiTestCommand::OpenSettings).is_none());
+        assert!(gui_help_message(&GuiTestCommand::GoToChatList).is_none());
     }
 
     #[test]
