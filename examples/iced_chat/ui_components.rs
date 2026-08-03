@@ -27,6 +27,7 @@
 //! | Card header        | `card_header(…)`          | default                          |
 //! | Date separator     | `date_separator(…)`       | default (centered, muted)        |
 //! | System event chip  | `system_event_chip(…)`    | default (centered, muted surface)|
+//! | Connection footer  | `connection_footer(…)`    | live mesh summary                |
 
 use iced::widget::{
     button, container, rule, svg, text, text_input, tooltip as iced_tooltip, Column, Row, Space,
@@ -39,6 +40,64 @@ use crate::design_tokens;
 use crate::fonts::Typography;
 use crate::icon_system::{self, Icon, IconSize};
 use crate::presentation;
+
+/// Build the compact, persistent mesh connectivity strip used at the bottom
+/// of the home screen.
+///
+/// The component is deliberately data-only: callers provide the latest
+/// counts and status labels from application state, so it can be reused by
+/// responsive layouts without coupling it to `IcedChat`.
+pub fn connection_footer<'a>(
+    health_label: &'a str,
+    health_color: fn(&Theme) -> Color,
+    direct_peers: usize,
+    relayed_peers: usize,
+    neighbor_count: usize,
+    encryption_status: &'a str,
+) -> Element<'a, AppMessage> {
+    let mesh_icon = Icon::Mesh
+        .build()
+        .size(IconSize::Xs)
+        .build()
+        .style(move |theme, _| svg::Style {
+            color: Some(health_color(theme)),
+        });
+    let lock_icon = Icon::Lock
+        .build()
+        .size(IconSize::Xs)
+        .build()
+        .style(|theme, _| svg::Style {
+            color: Some(design_tokens::text_secondary(theme)),
+        });
+
+    container(
+        Row::new()
+            .push(mesh_icon)
+            .push(text(format!("Mesh {health_label}")))
+            .push(text("·").style(|theme| iced::widget::text::Style {
+                color: Some(design_tokens::text_muted(theme)),
+            }))
+            .push(text(format!("{direct_peers} direct")))
+            .push(text("·").style(|theme| iced::widget::text::Style {
+                color: Some(design_tokens::text_muted(theme)),
+            }))
+            .push(text(format!("{relayed_peers} relayed")))
+            .push(Space::new().width(Length::Fill))
+            .push(lock_icon)
+            .push(text(encryption_status))
+            .push(text("·").style(|theme| iced::widget::text::Style {
+                color: Some(design_tokens::text_muted(theme)),
+            }))
+            .push(text(format!("{neighbor_count} neighbors")))
+            .spacing(design_tokens::SPACE_8)
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+    )
+    .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
+    .width(Length::Fill)
+    .style(|theme| design_tokens::card_style(theme))
+    .into()
+}
 
 // ── Helper: fn pointer for Icon::color_fn ─────────────────────────────
 
