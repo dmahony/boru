@@ -50,7 +50,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 16;
+const CURRENT_SCHEMA_VERSION: u32 = 17;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -241,6 +241,31 @@ pub struct Download {
     pub next_retry_at_ms: Option<u64>,
 }
 
+/// A completed download joined with its file-object metadata and the
+/// recorded destination path — the durable record behind the Downloaded tab.
+///
+/// Only dashboard-safe display metadata is exposed: display name, MIME type,
+/// size, remote peer, and the destination path needed for safe local actions.
+#[derive(Debug, Clone)]
+pub struct CompletedDownloadRecord {
+    /// Unique download row id (stable history id).
+    pub id: i64,
+    /// Links to `file_objects.content_hash` (the verified content hash).
+    pub content_hash: String,
+    /// The remote peer we downloaded from.
+    pub remote_peer: String,
+    /// Total expected bytes.
+    pub total_bytes: u64,
+    /// When the download reached the terminal complete state.
+    pub completed_at_ms: u64,
+    /// Recorded destination path (the file may have moved or been deleted).
+    pub destination_path: Option<String>,
+    /// Display filename from the file object.
+    pub display_filename: String,
+    /// MIME type hint from the file object.
+    pub mime_type: String,
+}
+
 /// Durable, privacy-filtered transfer activity used by the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferActivityRow {
@@ -258,6 +283,10 @@ pub struct TransferActivityRow {
     pub attempt: u32,
     /// Sanitized JSON payload containing only dashboard-safe counters/status.
     pub payload_json: Option<String>,
+    /// Transfer direction: `"inbound"` (downloads to this node) or
+    /// `"outbound"` (uploads served to remote peers). Existing rows default
+    /// to inbound because outbound recording arrived with schema v17.
+    pub direction: String,
 }
 
 fn sanitize_activity_payload(value: &serde_json::Value) -> Option<String> {
@@ -278,6 +307,8 @@ fn sanitize_activity_payload(value: &serde_json::Value) -> Option<String> {
         "error_category",
         "retry_delay_ms",
         "reason",
+        // Direction marker set by outbound producers ("inbound"/"outbound").
+        "direction",
     ];
     let filtered = object
         .iter()
@@ -833,6 +864,7 @@ impl Storage {
                 14 => self.migrate_v14(&conn)?,
                 15 => self.migrate_v15(&conn)?,
                 16 => self.migrate_v16(&conn)?,
+                17 => self.migrate_v17(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -1295,6 +1327,20 @@ impl Storage {
         )
         .std_context("migrate v16 file revisions and transfer activity")?;
         Ok(())
+    }
+
+    /// v17 adds a `direction` column to the transfer activity projection so the
+    /// Activity Log can deterministically distinguish downloads to this node
+    /// (`inbound`) from uploads served to remote peers (`outbound`) without
+    /// re-deriving direction from transfer-id prefixes or row resolvability.
+    /// Existing rows predate outbound recording and are all inbound.
+    fn migrate_v17(&self, conn: &Connection) -> Result<()> {
+        Self::add_column_if_missing(
+            conn,
+            "transfer_activity",
+            "direction",
+            "TEXT NOT NULL DEFAULT 'inbound'",
+        )
     }
 
     /// during repeat sync requests.  Every message id served via SyncResponse
@@ -3810,6 +3856,44 @@ impl Storage {
         Ok(results)
     }
 
+    /// List every permission grant this profile has made on its shared files
+    /// (grantor-side). Used by the "Files I'm Sharing" dashboard projection so
+    /// the UI can show recipients, expiry, and deny grants without scanning
+    /// the whole table or trusting remote display strings.
+    pub fn list_permissions_for_grantor(
+        &self,
+        grantor_user_id: &str,
+    ) -> Result<Vec<SharedFilePermission>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT content_hash, grantor_user_id, grantee_user_id, permission,
+                        created_at_ms, expires_at_ms
+                 FROM shared_file_permissions
+                 WHERE grantor_user_id = ?1
+                 ORDER BY created_at_ms DESC",
+            )
+            .std_context("prepare list_permissions_for_grantor")?;
+        let mut rows = stmt
+            .query(params![grantor_user_id])
+            .std_context("query permissions")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next row")? {
+            results.push(SharedFilePermission {
+                content_hash: row.get(0).std_context("get hash")?,
+                grantor_user_id: row.get(1).std_context("get grantor")?,
+                grantee_user_id: row.get(2).std_context("get grantee")?,
+                permission: row.get(3).std_context("get permission")?,
+                created_at_ms: row.get::<_, i64>(4).std_context("get created")? as u64,
+                expires_at_ms: row
+                    .get::<_, Option<i64>>(5)
+                    .std_context("get expires")?
+                    .map(|v| v as u64),
+            });
+        }
+        Ok(results)
+    }
+
     /// Return whether a file has any active explicit permissions.
     pub fn has_active_permissions_for_file(
         &self,
@@ -3836,15 +3920,24 @@ impl Storage {
     // ── Transfer activity projection (v16) ────────────────────────────
 
     /// Persist one privacy-filtered lifecycle event. Replays are ignored by
-    /// event id and by the transfer/sequence pair.
+    /// event id and by the transfer/sequence pair. Direction is read from the
+    /// allow-listed `direction` payload key ("outbound" for uploads served to
+    /// remote peers); events without it are inbound by default.
     pub fn record_transfer_activity(&self, event: &TransferLifecycleEvent) -> Result<()> {
         let payload_json = event.payload.as_ref().and_then(sanitize_activity_payload);
+        let direction = event
+            .payload
+            .as_ref()
+            .and_then(|value| value.get("direction"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| *value == "outbound" || *value == "inbound")
+            .unwrap_or("inbound");
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR IGNORE INTO transfer_activity
                 (event_id, transfer_id, event_name, sequence, occurred_at_ms,
-                 attempt, payload_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 attempt, payload_json, direction)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 event.event_id,
                 event.transfer_id,
@@ -3853,6 +3946,7 @@ impl Storage {
                 event.occurred_at_ms as i64,
                 event.attempt as i64,
                 payload_json,
+                direction,
             ],
         )
         .std_context("record transfer activity")?;
@@ -3865,7 +3959,7 @@ impl Storage {
         let mut stmt = conn
             .prepare(
                 "SELECT event_id, transfer_id, event_name, sequence, occurred_at_ms,
-                        attempt, payload_json
+                        attempt, payload_json, direction
                  FROM transfer_activity
                  ORDER BY occurred_at_ms DESC, event_id DESC
                  LIMIT ?1",
@@ -3881,6 +3975,7 @@ impl Storage {
                     occurred_at_ms: row.get::<_, i64>(4)? as u64,
                     attempt: row.get::<_, i64>(5)? as u32,
                     payload_json: row.get(6)?,
+                    direction: row.get(7)?,
                 })
             })
             .std_context("query transfer activity")?;
@@ -3898,6 +3993,19 @@ impl Storage {
                 params![before_occurred_at_ms as i64],
             )
             .std_context("prune transfer activity")?)
+    }
+
+    /// Clear the local activity projection entirely.
+    ///
+    /// This is the retention-aware "Clear History" primitive: it deletes only
+    /// the `transfer_activity` projection rows. It never touches shared files,
+    /// downloaded files, permissions, security records, or any other table, so
+    /// the underlying share/download state machine stays authoritative.
+    pub fn clear_transfer_activity(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .execute("DELETE FROM transfer_activity", [])
+            .std_context("clear transfer activity")?)
     }
 
     // ── Downloads (v2) ────────────────────────────────────────────────
@@ -4388,6 +4496,107 @@ impl Storage {
             results.push(row_to_download(row)?);
         }
         Ok(results)
+    }
+
+    /// List every download row regardless of state, oldest first.
+    ///
+    /// This is the authoritative all-time view for the Sharing Summary card:
+    /// each row is one durable download record, so total and active counts can
+    /// be derived without scanning the filesystem or the rendered UI.
+    pub fn list_downloads(&self) -> Result<Vec<Download>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content_hash, remote_peer, state, bytes_downloaded,
+                        total_bytes, created_at_ms, updated_at_ms, last_error,
+                        retry_count, next_retry_at_ms
+                 FROM downloads
+                 ORDER BY created_at_ms ASC, id ASC",
+            )
+            .std_context("prepare list_downloads")?;
+        let mut rows = stmt.query([]).std_context("query all downloads")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next download row")? {
+            results.push(row_to_download(row)?);
+        }
+        Ok(results)
+    }
+
+    /// List the distinct peers a profile has explicitly shared files with,
+    /// as recorded by durable permission grants (grantor → grantee).
+    ///
+    /// Unique peers are identified by their hex-encoded public key. The list
+    /// is ordered deterministically by peer id so projections are stable
+    /// across refreshes and restarts. A peer granted access to several files
+    /// counts once.
+    pub fn list_shared_peer_ids(&self, grantor_user_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT grantee_user_id
+                 FROM shared_file_permissions
+                 WHERE grantor_user_id = ?1
+                 ORDER BY grantee_user_id ASC",
+            )
+            .std_context("prepare list_shared_peer_ids")?;
+        let mut rows = stmt
+            .query(params![grantor_user_id])
+            .std_context("query shared peer ids")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next peer row")? {
+            results.push(row.get(0).std_context("get grantee id")?);
+        }
+        Ok(results)
+    }
+
+    /// List completed downloads (terminal `complete` state), newest first,
+    /// joined with their file-object display metadata and recorded destination
+    /// paths. Used by the Downloaded dashboard tab; it never scans arbitrary
+    /// download directories — history comes only from durable records.
+    pub fn list_completed_downloads(&self) -> Result<Vec<CompletedDownloadRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT d.id, d.content_hash, d.remote_peer, d.total_bytes,
+                        d.updated_at_ms, d.destination_path, fo.filename, fo.mime_type
+                 FROM downloads d
+                 JOIN file_objects fo ON fo.content_hash = d.content_hash
+                 WHERE d.state IN ('complete', 'completed')
+                 ORDER BY d.updated_at_ms DESC, d.id DESC",
+            )
+            .std_context("prepare list completed downloads")?;
+        let mut rows = stmt.query([]).std_context("query completed downloads")?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next().std_context("next completed download row")? {
+            results.push(CompletedDownloadRecord {
+                id: row.get(0).std_context("get download id")?,
+                content_hash: row.get(1).std_context("get content hash")?,
+                remote_peer: row.get(2).std_context("get remote peer")?,
+                total_bytes: row.get::<_, i64>(3).std_context("get total bytes")? as u64,
+                completed_at_ms: row.get::<_, i64>(4).std_context("get completed at")? as u64,
+                destination_path: row.get(5).std_context("get destination path")?,
+                display_filename: row.get(6).std_context("get display filename")?,
+                mime_type: row.get(7).std_context("get mime type")?,
+            });
+        }
+        Ok(results)
+    }
+
+    /// Remove a completed download's history record only. Never deletes the
+    /// local file and never touches rows that are still part of the transfer
+    /// state machine (queued/active/paused/verifying). Returns true when a
+    /// terminal row was removed.
+    pub fn delete_download_history(&self, id: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn
+            .execute(
+                "DELETE FROM downloads
+                 WHERE id = ?1 AND state IN
+                     ('complete', 'completed', 'failed', 'cancelled', 'version_mismatch')",
+                params![id],
+            )
+            .std_context("delete download history record")?;
+        Ok(changed > 0)
     }
 
     /// Find downloads targeting a specific content_hash, optionally filtered
@@ -7668,6 +7877,84 @@ mod tests {
     }
 
     #[test]
+    fn transfer_activity_records_direction_and_clear_is_non_destructive() {
+        let storage = Storage::memory().unwrap();
+        // Inbound lifecycle event (no direction marker → defaults inbound).
+        storage
+            .record_transfer_activity(&TransferLifecycleEvent {
+                schema_version: 1,
+                event_id: "evt-in".into(),
+                event_name: "completion".into(),
+                transfer_id: "t-in".into(),
+                sequence: 0,
+                occurred_at_ms: 10,
+                attempt: 1,
+                payload: Some(serde_json::json!({ "total_bytes": 4 })),
+            })
+            .unwrap();
+        // Outbound lifecycle event produced by the blob provider consumer.
+        storage
+            .record_transfer_activity(&TransferLifecycleEvent {
+                schema_version: 1,
+                event_id: "evt-out".into(),
+                event_name: "completion".into(),
+                transfer_id: "t-out".into(),
+                sequence: 0,
+                occurred_at_ms: 20,
+                attempt: 1,
+                payload: Some(serde_json::json!({ "direction": "outbound" })),
+            })
+            .unwrap();
+        // A hostile payload cannot smuggle an unexpected direction.
+        storage
+            .record_transfer_activity(&TransferLifecycleEvent {
+                schema_version: 1,
+                event_id: "evt-evil".into(),
+                event_name: "completion".into(),
+                transfer_id: "t-evil".into(),
+                sequence: 0,
+                occurred_at_ms: 30,
+                attempt: 1,
+                payload: Some(serde_json::json!({ "direction": "../../etc" })),
+            })
+            .unwrap();
+
+        let rows = storage.list_transfer_activity(10).unwrap();
+        let by_id = |id: &str| rows.iter().find(|r| r.event_id == id).unwrap();
+        assert_eq!(by_id("evt-in").direction, "inbound");
+        assert_eq!(by_id("evt-out").direction, "outbound");
+        assert_eq!(by_id("evt-evil").direction, "inbound");
+
+        // Seed a shared file, a permission grant, and a queued download, then
+        // clear the activity projection. Clear History must not touch them.
+        storage
+            .put_file_object("hash", 10, "text/plain", "x.txt", b"")
+            .unwrap();
+        storage
+            .upsert_shared_file("hash", "owner", "meta", "x.txt", None, true)
+            .unwrap();
+        storage
+            .grant_permission("hash", "owner", "peer", "read", None)
+            .unwrap();
+        storage.create_download("hash", "peer", 10).unwrap();
+
+        assert_eq!(storage.clear_transfer_activity().unwrap(), 3);
+        assert!(storage.list_transfer_activity(10).unwrap().is_empty());
+        assert!(storage
+            .get_shared_file("owner", "hash")
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            storage
+                .list_permissions_for_grantee("peer")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(storage.list_downloads().unwrap().len(), 1);
+    }
+
+    #[test]
     fn activity_retention_prunes_old_rows() {
         let storage = Storage::memory().unwrap();
         for (id, occurred_at_ms) in [("old", 10), ("new", 20)] {
@@ -7713,5 +8000,263 @@ mod tests {
             storage.get_download(download).unwrap().unwrap().state,
             "queued"
         );
+    }
+
+    #[test]
+    fn list_permissions_for_grantor_returns_only_my_grants() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object("hash-a", 10, "text/plain", "a.txt", b"")
+            .unwrap();
+        storage
+            .upsert_shared_file("hash-a", "owner", "meta-a", "a.txt", None, true)
+            .unwrap();
+        storage
+            .grant_permission("hash-a", "owner", "peer-1", "read", None)
+            .unwrap();
+        storage
+            .grant_permission("hash-a", "owner", "peer-2", "deny", None)
+            .unwrap();
+        // A grant made by someone else must never appear in my projection.
+        storage
+            .grant_permission("hash-a", "other-owner", "peer-1", "read", None)
+            .unwrap();
+
+        let mine = storage.list_permissions_for_grantor("owner").unwrap();
+        assert_eq!(mine.len(), 2);
+        assert!(mine.iter().all(|p| p.grantor_user_id == "owner"));
+        let read_grantees: Vec<&str> = mine
+            .iter()
+            .filter(|p| p.permission == "read")
+            .map(|p| p.grantee_user_id.as_str())
+            .collect();
+        assert_eq!(read_grantees, vec!["peer-1"]);
+
+        let theirs = storage.list_permissions_for_grantor("other-owner").unwrap();
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].grantee_user_id, "peer-1");
+    }
+
+    // ── Completed-download history (FS-15 Downloaded tab) ──────────────
+
+    fn insert_completed_download(
+        storage: &Storage,
+        hash: &str,
+        filename: &str,
+        mime: &str,
+        peer: &str,
+        total: u64,
+        destination: Option<&str>,
+    ) -> i64 {
+        storage
+            .put_file_object(hash, total, mime, filename, b"")
+            .unwrap();
+        let id = storage.create_download(hash, peer, total).unwrap();
+        storage
+            .set_download_paths(id, format!("/tmp/{hash}.part"), destination.unwrap_or(""))
+            .unwrap();
+        storage.complete_download(id, total).unwrap();
+        id
+    }
+
+    #[test]
+    fn list_completed_downloads_is_newest_first_with_metadata() {
+        let storage = Storage::memory().unwrap();
+        let id1 = insert_completed_download(
+            &storage,
+            "hash-a",
+            "report.pdf",
+            "application/pdf",
+            "peer-a",
+            100,
+            Some("/tmp/report.pdf"),
+        );
+        let id2 = insert_completed_download(
+            &storage,
+            "hash-b",
+            "photo.png",
+            "image/png",
+            "peer-b",
+            50,
+            Some("/tmp/photo.png"),
+        );
+
+        // A non-complete row must not appear in completed history.
+        storage
+            .put_file_object("hash-c", 10, "text/plain", "pending.txt", b"")
+            .unwrap();
+        let pending = storage.create_download("hash-c", "peer-c", 10).unwrap();
+
+        let rows = storage.list_completed_downloads().unwrap();
+        assert_eq!(rows.len(), 2);
+        // Newest first: id2 was completed after id1.
+        assert_eq!(rows[0].id, id2);
+        assert_eq!(rows[0].display_filename, "photo.png");
+        assert_eq!(rows[0].mime_type, "image/png");
+        assert_eq!(rows[0].remote_peer, "peer-b");
+        assert_eq!(rows[0].total_bytes, 50);
+        assert_eq!(rows[0].destination_path.as_deref(), Some("/tmp/photo.png"));
+        assert_eq!(rows[1].id, id1);
+        assert_eq!(rows[1].display_filename, "report.pdf");
+
+        // Pending row untouched.
+        assert_eq!(
+            storage.get_download(pending).unwrap().unwrap().state,
+            "queued"
+        );
+    }
+
+    #[test]
+    fn delete_download_history_removes_record_but_never_the_file() {
+        let storage = Storage::memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("keep.bin");
+        std::fs::write(&destination, b"user file bytes").unwrap();
+        let id = insert_completed_download(
+            &storage,
+            "hash-keep",
+            "keep.bin",
+            "application/octet-stream",
+            "peer-a",
+            10,
+            Some(destination.to_str().unwrap()),
+        );
+        assert_eq!(storage.list_completed_downloads().unwrap().len(), 1);
+
+        assert!(storage.delete_download_history(id).unwrap());
+        assert!(storage.list_completed_downloads().unwrap().is_empty());
+
+        // The on-disk file survives history removal untouched.
+        assert!(destination.is_file());
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "user file bytes"
+        );
+    }
+
+    #[test]
+    fn delete_download_history_refuses_active_rows() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object("hash-active", 10, "text/plain", "active.bin", b"")
+            .unwrap();
+        let id = storage
+            .create_download("hash-active", "peer-a", 10)
+            .unwrap();
+        storage
+            .update_download_progress(id, 5, "downloading")
+            .unwrap();
+
+        // Active rows are not history; deletion is refused so the transfer
+        // state machine is never disturbed.
+        assert!(!storage.delete_download_history(id).unwrap());
+        assert_eq!(
+            storage.get_download(id).unwrap().unwrap().state,
+            "downloading"
+        );
+    }
+
+    #[test]
+    fn completed_downloads_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let id;
+        {
+            let storage = Storage::open(dir.path()).unwrap();
+            id = insert_completed_download(
+                &storage,
+                "hash-restart",
+                "restart.bin",
+                "application/octet-stream",
+                "peer-z",
+                7,
+                Some("/tmp/restart.bin"),
+            );
+        }
+        let storage = Storage::open(dir.path()).unwrap();
+        let rows = storage.list_completed_downloads().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].display_filename, "restart.bin");
+        assert_eq!(rows[0].content_hash, "hash-restart");
+    }
+
+    // ── Sharing Summary projections (FS-13) ─────────────────────────────
+
+    fn insert_download_with_state(storage: &Storage, hash: &str, peer: &str, state: &str) -> i64 {
+        storage
+            .put_file_object(hash, 100, "application/octet-stream", "f.bin", b"")
+            .unwrap();
+        let id = storage.create_download(hash, peer, 100).unwrap();
+        storage.update_download_progress(id, 100, state).unwrap();
+        id
+    }
+
+    #[test]
+    fn list_downloads_returns_all_states_oldest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        let id1 = insert_download_with_state(&storage, "hash-q", "peer-a", "queued");
+        let id2 = insert_download_with_state(&storage, "hash-d", "peer-b", "downloading");
+        let id3 = insert_download_with_state(&storage, "hash-c", "peer-c", "complete");
+
+        let rows = storage.list_downloads().unwrap();
+        assert_eq!(rows.len(), 3);
+        // Oldest first with stable id tiebreak.
+        assert_eq!(rows[0].id, id1);
+        assert_eq!(rows[1].id, id2);
+        assert_eq!(rows[2].id, id3);
+        assert_eq!(rows[0].state, "queued");
+        assert_eq!(rows[1].state, "downloading");
+        assert_eq!(rows[2].state, "complete");
+    }
+
+    #[test]
+    fn list_shared_peer_ids_is_distinct_and_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).unwrap();
+        // Grant two files to peer-a and one to peer-b (from the local profile).
+        for hash in ["hash-1", "hash-2", "hash-3", "hash-4"] {
+            storage
+                .put_file_object(hash, 10, "application/octet-stream", "f.bin", b"")
+                .unwrap();
+        }
+        storage
+            .grant_permission("hash-1", "local", "peer-a", "read", None)
+            .unwrap();
+        storage
+            .grant_permission("hash-2", "local", "peer-a", "read", None)
+            .unwrap();
+        storage
+            .grant_permission("hash-3", "local", "peer-b", "read", None)
+            .unwrap();
+        // Another profile's grants must not leak into the local list.
+        storage
+            .grant_permission("hash-4", "other", "peer-c", "read", None)
+            .unwrap();
+
+        let peers = storage.list_shared_peer_ids("local").unwrap();
+        assert_eq!(peers, vec!["peer-a".to_string(), "peer-b".to_string()]);
+
+        // No grants → empty list (distinct from unknown/loading state).
+        assert!(storage.list_shared_peer_ids("nobody").unwrap().is_empty());
+    }
+
+    #[test]
+    fn summary_projection_counts_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let storage = Storage::open(dir.path()).unwrap();
+            insert_download_with_state(&storage, "hash-a", "peer-a", "complete");
+            insert_download_with_state(&storage, "hash-b", "peer-b", "downloading");
+            insert_download_with_state(&storage, "hash-c", "peer-c", "failed");
+            storage
+                .grant_permission("hash-a", "local", "peer-a", "read", None)
+                .unwrap();
+        }
+        let storage = Storage::open(dir.path()).unwrap();
+        let downloads = storage.list_downloads().unwrap();
+        let peers = storage.list_shared_peer_ids("local").unwrap();
+        assert_eq!(downloads.len(), 3);
+        assert_eq!(peers.len(), 1);
     }
 }
