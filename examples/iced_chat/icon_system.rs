@@ -57,8 +57,8 @@ const SVG_CHEVRON_RIGHT: &[u8] = include_bytes!("../../assets/icons/lucide/chevr
 // references ICON_CHAT etc. doesn't break, but the Icon enum uses them
 // through its mapping.
 use crate::app::{
-    ICON_ACTIVITY, ICON_CHAT, ICON_CLOSE, ICON_FILES, ICON_FRIEND, ICON_MESH, ICON_MORE,
-    ICON_NOTIFICATION, ICON_OFFLINE, ICON_ONLINE, ICON_PAPERCLIP, ICON_PLUS, ICON_RETRY,
+    ICON_ACTIVITY, ICON_CHAT, ICON_CLOSE, ICON_COPY, ICON_FILES, ICON_FRIEND, ICON_LOCK, ICON_MESH,
+    ICON_MORE, ICON_NOTIFICATION, ICON_OFFLINE, ICON_ONLINE, ICON_PAPERCLIP, ICON_PLUS, ICON_RETRY,
     ICON_SEARCH, ICON_SETTINGS, ICON_SWEEP, ICON_UNREAD, ICON_USER_PLUS,
 };
 
@@ -107,6 +107,10 @@ pub enum Icon {
     Check,
     Delete,
     Mesh,
+    /// Copy an identifier / value to the clipboard.
+    Copy,
+    /// Security / end-to-end encryption cue.
+    Lock,
 
     // Meta
     Activity,
@@ -157,6 +161,8 @@ impl Icon {
             Icon::Check => SVG_CHECK,
             Icon::Delete => ICON_SWEEP,
             Icon::Mesh => ICON_MESH,
+            Icon::Copy => ICON_COPY,
+            Icon::Lock => ICON_LOCK,
 
             // Meta
             Icon::Activity => ICON_ACTIVITY,

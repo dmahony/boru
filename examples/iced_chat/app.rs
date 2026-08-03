@@ -772,6 +772,8 @@ pub(crate) const ICON_EMOJI: &str = "😊";
 pub(crate) const ICON_UNREAD: &[u8] =
     include_bytes!("../../assets/icons/lucide/message-circle-fill.svg");
 pub(crate) const ICON_SWEEP: &[u8] = include_bytes!("../../assets/icons/lucide/trash-2.svg");
+pub(crate) const ICON_LOCK: &[u8] = include_bytes!("../../assets/icons/lucide/lock.svg");
+pub(crate) const ICON_COPY: &[u8] = include_bytes!("../../assets/icons/lucide/copy.svg");
 pub(crate) const ICON_USER_PLUS: &[u8] = include_bytes!("../../assets/icons/lucide/user-plus.svg");
 
 // ── SVG icon helper ──────────────────────────────────────────────────
@@ -1326,6 +1328,11 @@ enum PeerPresence {
     Online,
     Away,
     Offline,
+    /// The peer is known but we have not yet established a live connection
+    /// (e.g. the room subscription is still in flight).
+    Connecting,
+    /// We cannot determine the peer's state (no identity, no presence data).
+    Unknown,
 }
 
 impl PeerPresence {
@@ -1334,21 +1341,24 @@ impl PeerPresence {
             PeerPresence::Online => "Online",
             PeerPresence::Away => "Away",
             PeerPresence::Offline => "Offline",
+            PeerPresence::Connecting => "Connecting…",
+            PeerPresence::Unknown => "Unknown",
         }
     }
 
     fn color(&self, theme: &iced::Theme) -> Color {
         match self {
             PeerPresence::Online => accent_green(theme),
-            PeerPresence::Away => color_warning(theme),
-            PeerPresence::Offline => text_muted(theme),
+            PeerPresence::Away | PeerPresence::Connecting => color_warning(theme),
+            PeerPresence::Offline | PeerPresence::Unknown => text_muted(theme),
         }
     }
 
     fn icon(&self) -> &'static [u8] {
         match self {
             PeerPresence::Online | PeerPresence::Away => ICON_ONLINE,
-            PeerPresence::Offline => ICON_OFFLINE,
+            PeerPresence::Connecting => ICON_RETRY,
+            PeerPresence::Offline | PeerPresence::Unknown => ICON_OFFLINE,
         }
     }
 }
@@ -3168,6 +3178,10 @@ pub struct IcedChat {
     link_preview_fetch_index: Option<usize>,
     /// Whether the chat options popover is open.
     show_chat_options: bool,
+    /// Whether the in-conversation search panel is open.
+    show_chat_search: bool,
+    /// Live query for the in-conversation search panel.
+    chat_search_query: String,
     /// Whether the group member list overlay is shown.
     show_member_list: bool,
     /// Whether the emoji picker panel is currently visible.
@@ -3650,6 +3664,10 @@ pub enum AppMessage {
     ToggleHelp,
     /// Toggle the chat options popover (room info, delete, settings).
     ToggleChatOptions,
+    /// Toggle the in-conversation search panel.
+    ToggleChatSearch,
+    /// Live query text for the in-conversation search panel.
+    ChatSearchQueryChanged(String),
     /// Clear conversation history from screen and database.
     ClearConversation,
     /// Toggle the right-side details panel.
@@ -5093,6 +5111,8 @@ impl IcedChat {
             composer_text: String::new(),
             help_visible: false,
             show_chat_options: false,
+            show_chat_search: false,
+            chat_search_query: String::new(),
             show_member_list: false,
             show_emoji_picker: false,
             show_gif_picker: false,
@@ -6592,6 +6612,8 @@ impl IcedChat {
             AppMessage::AttachPressed => "AttachPressed",
             AppMessage::ToggleHelp => "ToggleHelp",
             AppMessage::ToggleChatOptions => "ToggleChatOptions",
+            AppMessage::ToggleChatSearch => "ToggleChatSearch",
+            AppMessage::ChatSearchQueryChanged(_) => "ChatSearchQueryChanged",
             AppMessage::ClearConversation => "ClearConversation",
             AppMessage::OpenSettings => "OpenSettings",
             AppMessage::CloseSettings => "CloseSettings",
@@ -7326,6 +7348,25 @@ impl IcedChat {
 }
 
 // ── Deterministic private topic ────────────────────────────────────
+
+/// Case-insensitive substring search over the conversation log. Returns the
+/// indices of entries whose body or sender label contains `query`, capped at
+/// 50 so the results panel stays cheap to render. Pure and unit-testable.
+fn chat_search_matches_in(entries: &[ChatEntry], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            e.body.to_lowercase().contains(&query) || e.label.to_lowercase().contains(&query)
+        })
+        .map(|(i, _)| i)
+        .take(50)
+        .collect()
+}
 
 /// Format a unix-ms timestamp into a human-readable relative time string.
 fn format_last_seen(last_seen_ms: Option<u64>) -> String {
@@ -10887,6 +10928,17 @@ impl IcedChat {
                 self.show_chat_options = !self.show_chat_options;
                 // Close the details panel when opening the options popover
                 self.details_panel_open = false;
+                iced::Task::none()
+            }
+            AppMessage::ToggleChatSearch => {
+                self.show_chat_search = !self.show_chat_search;
+                if !self.show_chat_search {
+                    self.chat_search_query.clear();
+                }
+                iced::Task::none()
+            }
+            AppMessage::ChatSearchQueryChanged(query) => {
+                self.chat_search_query = query;
                 iced::Task::none()
             }
             AppMessage::ClearConversation => {
@@ -22000,9 +22052,11 @@ impl IcedChat {
         }
 
         // Keep the header and composer outside the scrollable message log so
-        // navigation and sending remain available while reading history.
+        // navigation and sending remain available while reading history. A
+        // subtle divider separates the header from the message region.
         let content = widget::column![
             self.view_chat_header(),
+            divider(&self.theme()),
             self.view_chat_log(),
             self.view_composer(),
         ]
@@ -22047,6 +22101,43 @@ impl IcedChat {
                         .height(Length::Fill)
                         .center_x(Length::Fill)
                         .center_y(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else if self.show_chat_search {
+            use iced::widget::Stack;
+            use iced::Color;
+
+            let backdrop = widget::button(widget::Space::new())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .on_press(AppMessage::ToggleChatSearch)
+                .style(move |t, _status| iced::widget::button::Style {
+                    background: Some(iced::Background::Color(if matches!(t, iced::Theme::Dark) {
+                        Color::from_rgba(0.0, 0.0, 0.0, 0.35)
+                    } else {
+                        Color::from_rgba(0.0, 0.0, 0.0, 0.15)
+                    })),
+                    ..Default::default()
+                });
+
+            let search_panel = self.view_chat_search_panel();
+
+            Stack::new()
+                .push(inner)
+                .push(backdrop)
+                .push(
+                    widget::container(search_panel)
+                        .width(Length::Fill)
+                        .padding(iced::Padding {
+                            top: 72.0, // below the fixed header
+                            right: SPACE_16,
+                            bottom: 0.0,
+                            left: 0.0,
+                        })
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .align_y(iced::alignment::Vertical::Top),
                 )
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -22470,12 +22561,39 @@ impl IcedChat {
             })
             .unwrap_or(false);
         let peer = conversation.and_then(|entry| PublicKey::from_str(&entry.peer_id).ok());
-        let presence = peer
-            .map(|key| self.peer_presence(&key))
-            .unwrap_or(PeerPresence::Offline);
+
+        // Presence: while the subscription or gossip sender is still coming
+        // up we show Connecting; if no peer identity can be resolved we show
+        // Unknown instead of guessing.
+        let presence = if self.room_loading || self.sender.is_none() {
+            PeerPresence::Connecting
+        } else {
+            peer.map(|key| self.peer_presence(&key))
+                .unwrap_or(PeerPresence::Unknown)
+        };
+
+        // ── Shared ghost icon toolbar button ─────────────────────────
+        // Consistent padding, tooltip and BUTTON_ICON (transparent, themed
+        // hover) for every header action so the toolbar reads as one system.
+        fn tool_btn<'a>(
+            icon: iced::widget::svg::Svg<'a, iced::Theme>,
+            tip: &'static str,
+            msg: Option<AppMessage>,
+        ) -> iced::Element<'a, AppMessage> {
+            let mut b = button(icon).padding([SPACE_4, SPACE_6]).style(BUTTON_ICON);
+            if let Some(m) = msg {
+                b = b.on_press(m);
+            }
+            iced::widget::tooltip::Tooltip::new(
+                b,
+                text(tip).size(TYPO_XS),
+                iced::widget::tooltip::Position::Bottom,
+            )
+            .into()
+        };
 
         // Group chat header: show name + member count
-        // Direct chat header: show name + online/offline status
+        // Direct chat header: show name + online/offline status + encryption cue
         let (avatar, identity) = if is_group {
             // Group avatar: initials from group name
             let initials = crate::presentation::initials(&room_name);
@@ -22488,10 +22606,10 @@ impl IcedChat {
             let is_dark = matches!(theme_for_initials, iced::Theme::Dark);
             let letter_color = crate::presentation::initials_color(&room_name, is_dark);
             let group_avatar = container(text(display_initials).size(TYPO_SM).color(letter_color))
-                .width(Length::Fixed(30.0))
-                .height(Length::Fixed(30.0))
-                .center_x(Length::Fixed(30.0))
-                .center_y(Length::Fixed(30.0))
+                .width(Length::Fixed(AVATAR_SM))
+                .height(Length::Fixed(AVATAR_SM))
+                .center_x(Length::Fixed(AVATAR_SM))
+                .center_y(Length::Fixed(AVATAR_SM))
                 .style(move |t| iced::widget::container::Style {
                     background: Some(iced::Background::Color(bg_surface_secondary(
                         &theme_for_initials,
@@ -22522,6 +22640,7 @@ impl IcedChat {
                 text(room_name.clone())
                     .size(TYPO_SM)
                     .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::None)
                     .font(crate::fonts::inter(iced::font::Weight::Semibold)),
                 text(member_label)
                     .size(TYPO_XS)
@@ -22539,8 +22658,8 @@ impl IcedChat {
                 .map(|handle| {
                     iced::widget::image(handle)
                         .content_fit(iced::ContentFit::ScaleDown)
-                        .width(Length::Fixed(30.0))
-                        .height(Length::Fixed(30.0))
+                        .width(Length::Fixed(AVATAR_SM))
+                        .height(Length::Fixed(AVATAR_SM))
                         .into()
                 })
                 .unwrap_or_else(|| {
@@ -22549,10 +22668,10 @@ impl IcedChat {
                     let is_dark = matches!(theme_for_initials, iced::Theme::Dark);
                     let letter_color = crate::presentation::initials_color(&room_name, is_dark);
                     container(text(initials).size(TYPO_SM).color(letter_color))
-                        .width(Length::Fixed(30.0))
-                        .height(Length::Fixed(30.0))
-                        .center_x(Length::Fixed(30.0))
-                        .center_y(Length::Fixed(30.0))
+                        .width(Length::Fixed(AVATAR_SM))
+                        .height(Length::Fixed(AVATAR_SM))
+                        .center_x(Length::Fixed(AVATAR_SM))
+                        .center_y(Length::Fixed(AVATAR_SM))
                         .style(move |t| iced::widget::container::Style {
                             background: Some(iced::Background::Color(bg_surface_secondary(
                                 &theme_for_initials,
@@ -22572,11 +22691,78 @@ impl IcedChat {
                     color: Some(presence.color(t)),
                 });
 
+            // Long peer IDs: show the key truncated with a copy affordance and
+            // a tooltip that reveals the full value. The copy button uses the
+            // existing CopyPeerId flow (toast + clipboard).
+            let peer_key_row: iced::Element<'_, AppMessage> = match peer {
+                Some(key) => {
+                    let full_key = key.to_string();
+                    let truncated_key = if full_key.len() > 16 {
+                        format!("{}…{}", &full_key[..8], &full_key[full_key.len() - 4..])
+                    } else {
+                        full_key.clone()
+                    };
+                    let copy_btn = tool_btn(
+                        Icon::Copy.build().size(IconSize::Xs).build(),
+                        "Copy peer ID",
+                        Some(AppMessage::CopyPeerId(key)),
+                    );
+                    let key_tooltip: iced::Element<'_, AppMessage> =
+                        iced::widget::tooltip::Tooltip::new(
+                            container(
+                                text(truncated_key)
+                                    .size(TYPO_XS)
+                                    .font(crate::fonts::jetbrains_mono(iced::font::Weight::Normal))
+                                    .style(move |t| iced::widget::text::Style {
+                                        color: Some(text_secondary(t)),
+                                    }),
+                            )
+                            .width(Length::Shrink),
+                            text(full_key).size(TYPO_XS),
+                            iced::widget::tooltip::Position::Bottom,
+                        )
+                        .into();
+                    row![key_tooltip, copy_btn]
+                        .spacing(SPACE_2)
+                        .align_y(Alignment::Center)
+                        .into()
+                }
+                None => iced::widget::Space::new().width(Length::Fixed(0.0)).into(),
+            };
+
+            // Security / connection cue derived from real state: iroh always
+            // transports over QUIC (encrypted); the connection type mirrors the
+            // details panel (direct mesh vs relay).
+            let is_mesh_neighbor = peer.is_some_and(|pk| self.neighbors.contains(&pk));
+            let connection_type = if is_mesh_neighbor {
+                "Direct (mesh)"
+            } else if presence != PeerPresence::Offline && presence != PeerPresence::Unknown {
+                "Relay"
+            } else {
+                "Not connected"
+            };
+            let lock_icon = iced::widget::tooltip::Tooltip::new(
+                container(icon_svg(ICON_LOCK, TYPO_XS).style(move |t, _| {
+                    iced::widget::svg::Style {
+                        color: Some(text_secondary(t)),
+                    }
+                }))
+                .padding([0.0, SPACE_2]),
+                text(format!("QUIC encrypted · {connection_type}")).size(TYPO_XS),
+                iced::widget::tooltip::Position::Bottom,
+            );
+
             let peer_identity = column![
-                text(room_name.clone())
-                    .size(TYPO_SM)
-                    .width(Length::Fill)
-                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                row![
+                    text(room_name.clone())
+                        .size(TYPO_SM)
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                    peer_key_row,
+                ]
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center),
                 row![
                     status_dot,
                     text(status_text)
@@ -22584,6 +22770,12 @@ impl IcedChat {
                         .style(move |t| iced::widget::text::Style {
                             color: Some(presence.color(t))
                         }),
+                    lock_icon,
+                    text("End-to-end encrypted").size(TYPO_XS).style(move |t| {
+                        iced::widget::text::Style {
+                            color: Some(text_secondary(t)),
+                        }
+                    }),
                 ]
                 .spacing(SPACE_4)
                 .align_y(Alignment::Center),
@@ -22594,73 +22786,57 @@ impl IcedChat {
             (peer_avatar, peer_identity)
         };
 
-        let search = iced::widget::tooltip::Tooltip::new(
-            button(icon_svg(ICON_SEARCH, TYPO_SM))
-                .padding([SPACE_4, SPACE_6])
-                .style(BUTTON_ICON),
-            text("Search").size(TYPO_XS),
-            iced::widget::tooltip::Position::Bottom,
+        // ── Toolbar (right side) ─────────────────────────────────────
+        // All actions use the shared ghost icon button + tooltip. Search now
+        // opens the in-conversation search panel; shared files opens the peer
+        // catalogue for direct chats (matching the details-panel action).
+        let search = tool_btn(
+            Icon::Search.build().size(IconSize::Sm).build().into(),
+            "Search",
+            Some(AppMessage::ToggleChatSearch),
         );
-
-        let sweep = iced::widget::tooltip::Tooltip::new(
-            button(icon_svg(ICON_SWEEP, TYPO_SM))
-                .on_press(AppMessage::ClearConversation)
-                .padding([SPACE_4, SPACE_6])
-                .style(BUTTON_ICON),
-            text("Clear conversation").size(TYPO_XS),
-            iced::widget::tooltip::Position::Bottom,
+        let sweep = tool_btn(
+            Icon::Delete.build().size(IconSize::Sm).build().into(),
+            "Clear conversation",
+            Some(AppMessage::ClearConversation),
         );
-
-        let shared = iced::widget::tooltip::Tooltip::new(
-            button(icon_svg(ICON_FILES, TYPO_SM))
-                .padding([SPACE_4, SPACE_6])
-                .style(BUTTON_ICON),
-            text("Shared files").size(TYPO_XS),
-            iced::widget::tooltip::Position::Bottom,
-        );
-
-        let details_toggle = iced::widget::tooltip::Tooltip::new(
-            button(icon_svg(ICON_MESH, TYPO_SM))
-                .on_press(AppMessage::ToggleDetailsPanel)
-                .padding([SPACE_4, SPACE_6])
-                .style(BUTTON_ICON),
-            text("Details panel").size(TYPO_XS),
-            iced::widget::tooltip::Position::Bottom,
+        let shared = match peer {
+            Some(key) => tool_btn(
+                Icon::Files.build().size(IconSize::Sm).build().into(),
+                "Shared files",
+                Some(AppMessage::BrowsePeerCatalogue(key)),
+            ),
+            None => iced::widget::Space::new().width(Length::Fixed(0.0)).into(),
+        };
+        let details_toggle = tool_btn(
+            Icon::Mesh.build().size(IconSize::Sm).build().into(),
+            "Details panel",
+            Some(AppMessage::ToggleDetailsPanel),
         );
 
         // Member list button — only shown for group conversations.
         let members_button: iced::Element<'_, AppMessage> = if is_group {
-            iced::widget::tooltip::Tooltip::new(
-                button(text("Members").size(TYPO_XS))
-                    .on_press(AppMessage::ToggleMemberList)
-                    .padding([SPACE_4, SPACE_6])
-                    .style(BUTTON_ICON),
-                text("Group members").size(TYPO_XS),
-                iced::widget::tooltip::Position::Bottom,
+            tool_btn(
+                Icon::Friend.build().size(IconSize::Sm).build().into(),
+                "Group members",
+                Some(AppMessage::ToggleMemberList),
             )
-            .into()
         } else {
             iced::widget::Space::new().width(Length::Fixed(0.0)).into()
         };
 
-        let more = iced::widget::tooltip::Tooltip::new(
-            button(icon_svg(ICON_MORE, TYPO_MD))
-                .on_press(AppMessage::ToggleChatOptions)
-                .padding([SPACE_4, SPACE_6])
-                .style(BUTTON_ICON),
-            text("More options").size(TYPO_XS),
-            iced::widget::tooltip::Position::Bottom,
+        let more = tool_btn(
+            Icon::More.build().size(IconSize::Md).build().into(),
+            "More options",
+            Some(AppMessage::ToggleChatOptions),
         );
 
         container(
             row![
-                iced::widget::tooltip::Tooltip::new(
-                    button(Icon::Back.build().size(IconSize::Md).build())
-                        .on_press(AppMessage::GoToChatList)
-                        .padding([SPACE_4, SPACE_6])
-                        .style(BUTTON_ICON),
-                    text("Back to chats").size(TYPO_XS),
-                    iced::widget::tooltip::Position::Bottom,
+                tool_btn(
+                    Icon::Back.build().size(IconSize::Md).build().into(),
+                    "Back to chats",
+                    Some(AppMessage::GoToChatList),
                 ),
                 avatar,
                 identity,
@@ -22676,10 +22852,128 @@ impl IcedChat {
             .align_y(Alignment::Center),
         )
         .width(Length::Fill)
-        .height(Length::Fixed(52.0))
+        .height(Length::Fixed(60.0))
         .padding([SPACE_6, SPACE_10])
         .style(container_header)
         .into()
+    }
+
+    /// Return the indices of conversation entries matching the live search
+    /// query (case-insensitive substring over body and sender label), capped
+    /// so the results panel stays cheap to render.
+    fn chat_search_matches(&self) -> Vec<usize> {
+        chat_search_matches_in(&self.entries, &self.chat_search_query)
+    }
+
+    /// In-conversation search panel — a compact popover listing messages that
+    /// match the current query. Each result copies the full message text.
+    fn view_chat_search_panel(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, scrollable, text, text_input};
+        use iced::{Alignment, Length};
+
+        let theme = self.theme();
+        let matches = self.chat_search_matches();
+        let total = self.entries.len();
+
+        let close_btn = button(Icon::Close.build().size(IconSize::Xs).build())
+            .on_press(AppMessage::ToggleChatSearch)
+            .padding([SPACE_2, SPACE_4])
+            .style(BUTTON_ICON);
+
+        let header = row![
+            text("Search in conversation")
+                .size(TYPO_SM)
+                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+            iced::widget::Space::new().width(Length::Fill),
+            close_btn,
+        ]
+        .spacing(SPACE_4)
+        .align_y(Alignment::Center);
+
+        let input = text_input("Search messages…", &self.chat_search_query)
+            .on_input(AppMessage::ChatSearchQueryChanged)
+            .on_submit(AppMessage::ToggleChatSearch)
+            .size(TYPO_SM)
+            .padding([SPACE_4, SPACE_6]);
+
+        let summary = if self.chat_search_query.trim().is_empty() {
+            text(format!("{total} messages loaded"))
+                .size(TYPO_XS)
+                .color(text_muted(&theme))
+        } else {
+            text(format!(
+                "{} match{}",
+                matches.len(),
+                if matches.len() == 1 { "" } else { "es" }
+            ))
+            .size(TYPO_XS)
+            .color(accent_primary(&theme))
+        };
+
+        let mut results = column![].spacing(SPACE_2);
+        if matches.is_empty() && !self.chat_search_query.trim().is_empty() {
+            results = results.push(
+                text("No matching messages")
+                    .size(TYPO_SM)
+                    .color(text_muted(&theme)),
+            );
+        } else {
+            for idx in &matches {
+                let entry = &self.entries[*idx];
+                let body = if entry.body.len() > 140 {
+                    format!("{}…", &entry.body[..140])
+                } else {
+                    entry.body.clone()
+                };
+                let result_row: iced::Element<'_, AppMessage> = button(
+                    column![
+                        row![
+                            text(&entry.label).size(TYPO_XS).color(text_muted(&theme)),
+                            iced::widget::Space::new().width(Length::Fill),
+                            text(entry.timestamp.map(format_message_time).unwrap_or_default())
+                                .size(TYPO_XS)
+                                .color(text_muted(&theme)),
+                        ]
+                        .spacing(SPACE_4),
+                        text(body)
+                            .size(TYPO_SM)
+                            .wrapping(iced::widget::text::Wrapping::None)
+                            .color(crate::design_tokens::text(&theme)),
+                    ]
+                    .spacing(SPACE_2)
+                    .align_x(Alignment::Start),
+                )
+                .on_press(AppMessage::CopyToClipboard(entry.body.clone()))
+                .padding([SPACE_4, SPACE_6])
+                .style(BUTTON_GHOST_BG)
+                .width(Length::Fill)
+                .into();
+                results = results.push(result_row);
+            }
+        }
+
+        let content = column![header, input, summary, scrollable(results)]
+            .spacing(SPACE_6)
+            .padding(SPACE_10);
+
+        container(content)
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: 1.0,
+                    radius: SPACE_12.into(),
+                },
+                shadow: iced::Shadow {
+                    color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                    offset: iced::Vector::new(0.0, 4.0),
+                    blur_radius: 24.0,
+                },
+                ..Default::default()
+            })
+            .width(Length::Fixed(380.0))
+            .max_height(460.0)
+            .into()
     }
 
     /// Render the group member list overlay — showing avatar, display name, role, and presence.
@@ -28141,6 +28435,95 @@ mod tests {
             .map(|b| b.len())
             .sum();
         assert_eq!(bytes, 0, "text entries must not carry image data");
+    }
+
+    // ── Chat header presence states (UI-12) ────────────────────────────
+
+    #[test]
+    fn presence_states_have_distinct_labels() {
+        assert_eq!(PeerPresence::Online.label(), "Online");
+        assert_eq!(PeerPresence::Away.label(), "Away");
+        assert_eq!(PeerPresence::Offline.label(), "Offline");
+        assert_eq!(PeerPresence::Connecting.label(), "Connecting…");
+        assert_eq!(PeerPresence::Unknown.label(), "Unknown");
+    }
+
+    #[test]
+    fn presence_colors_map_to_theme_semantics() {
+        let light = iced::Theme::Light;
+        let dark = iced::Theme::Dark;
+        // Online is green, Away/Connecting use warning amber, Offline/Unknown muted.
+        for theme in [&light, &dark] {
+            let online = PeerPresence::Online.color(theme);
+            let away = PeerPresence::Away.color(theme);
+            let connecting = PeerPresence::Connecting.color(theme);
+            let offline = PeerPresence::Offline.color(theme);
+            let unknown = PeerPresence::Unknown.color(theme);
+            assert_ne!(online, offline, "online must read differently from offline");
+            assert_eq!(away, connecting, "connecting borrows the warning tone");
+            assert_eq!(offline, unknown, "unknown stays muted like offline");
+            assert_ne!(connecting, online, "connecting must not read as online");
+        }
+    }
+
+    #[test]
+    fn presence_icons_are_consistent_with_state() {
+        assert_eq!(
+            PeerPresence::Connecting.icon(),
+            ICON_RETRY,
+            "connecting should show a retry/sync glyph"
+        );
+        assert_eq!(PeerPresence::Offline.icon(), ICON_OFFLINE);
+        assert_eq!(PeerPresence::Unknown.icon(), ICON_OFFLINE);
+        assert_eq!(PeerPresence::Online.icon(), ICON_ONLINE);
+    }
+
+    // ── In-conversation search matching (UI-12) ────────────────────────
+
+    #[test]
+    fn chat_search_empty_query_returns_no_matches() {
+        let entries = vec![
+            ChatEntry::remote("alice", "hello world", None, None, None),
+            ChatEntry::remote("bob", "anything here", None, None, None),
+        ];
+        assert!(chat_search_matches_in(&entries, "").is_empty());
+        assert!(chat_search_matches_in(&entries, "   ").is_empty());
+    }
+
+    #[test]
+    fn chat_search_matches_body_case_insensitively() {
+        let entries = vec![
+            ChatEntry::remote("alice", "Hello World", None, None, None),
+            ChatEntry::remote("bob", "nothing", None, None, None),
+        ];
+        assert_eq!(chat_search_matches_in(&entries, "hello"), vec![0]);
+        assert_eq!(chat_search_matches_in(&entries, "HELLO"), vec![0]);
+        assert_eq!(chat_search_matches_in(&entries, "world"), vec![0]);
+        assert_eq!(chat_search_matches_in(&entries, "nope"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn chat_search_matches_sender_label_too() {
+        let entries = vec![
+            ChatEntry::remote("alice", "hello", None, None, None),
+            ChatEntry::remote("bob", "hello", None, None, None),
+        ];
+        assert_eq!(
+            chat_search_matches_in(&entries, "alice"),
+            vec![0],
+            "sender label should participate in search"
+        );
+    }
+
+    #[test]
+    fn chat_search_caps_results_to_avoid_heavy_panels() {
+        let entries: Vec<ChatEntry> = (0..120)
+            .map(|i| ChatEntry::remote("peer", format!("message {i} with needle"), None, None, None))
+            .collect();
+        let matches = chat_search_matches_in(&entries, "needle");
+        assert_eq!(matches.len(), 50, "results must be capped");
+        assert_eq!(matches[0], 0);
+        assert_eq!(matches[49], 49);
     }
 
     #[test]
