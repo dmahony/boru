@@ -136,9 +136,7 @@ fn video_presentation_state(attachment: &DownloadAttachment) -> VideoPresentatio
             ..
         } if path.exists() => VideoPresentationState::Ready,
         DownloadState::Completed { .. } => VideoPresentationState::Missing,
-        DownloadState::Shared { ref path, .. } if path.exists() => {
-            VideoPresentationState::Ready
-        }
+        DownloadState::Shared { ref path, .. } if path.exists() => VideoPresentationState::Ready,
         DownloadState::Shared { .. } => VideoPresentationState::Missing,
         DownloadState::Failed { failure }
             if matches!(failure, super::app::DownloadFailure::FileRemoved) =>
@@ -322,9 +320,7 @@ fn view_download_progress_inner<'a>(
         DownloadState::Paused { bytes, .. } => {
             format!("{} received", human_size(*bytes))
         }
-        DownloadState::Shared {
-            size: Some(s), ..
-        } if *s > 0 => human_size(*s),
+        DownloadState::Shared { size: Some(s), .. } if *s > 0 => human_size(*s),
         _ => String::new(),
     };
 

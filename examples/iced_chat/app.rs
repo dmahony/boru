@@ -104,6 +104,7 @@ use crate::connection_details::{
     self, ConnectionDetailsDialogAction, ConnectionDetailsDialogState, ConnectionDetailsViewModel,
 };
 use crate::perf_tracker::PerfTracker;
+use crate::ui_components::ghost_icon_button;
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_core::chat_core::{verify_advertisement, RoomAdvertisement, RoomInvitation, DIAGNOSTICS};
 use boru_core::diagnostics::DiagnosticEventKind;
@@ -513,7 +514,8 @@ fn blob_ticket_string(
 pub(crate) const SPACE_2: f32 = 2.0;
 pub(crate) use crate::design_tokens::{AVATAR_MD, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
-    DETAILS_PANEL_WIDTH, RADIUS_LG, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24, SPACE_4, SPACE_8,
+    DETAILS_PANEL_WIDTH, RADIUS_LG, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24,
+    SPACE_4, SPACE_8,
 };
 pub(crate) use crate::icon_system::{Icon, IconSize};
 pub(crate) const SPACE_6: f32 = 6.0;
@@ -2398,6 +2400,8 @@ pub enum Screen {
     /// Embedded terminal tab (feature `terminal`).
     #[cfg(feature = "terminal")]
     Terminal,
+    /// Developer component gallery — excluded from release navigation.
+    Gallery,
 }
 
 // ── State-safety snapshots ─────────────────────────────────────────────
@@ -3636,7 +3640,10 @@ pub enum AppMessage {
     /// Close the tunnel creation dialog without action.
     CancelCreateTunnel,
     /// An incoming tunnel request arrived from a peer.
-    TunnelRequestReceived { peer: PublicKey, tunnel_id: String },
+    TunnelRequestReceived {
+        peer: PublicKey,
+        tunnel_id: String,
+    },
     /// Accept an incoming tunnel request.
     AcceptTunnelRequest(String),
     /// Decline an incoming tunnel request.
@@ -3929,6 +3936,9 @@ pub enum AppMessage {
 
     /// Internal no-op for async task completions that should not change UI state.
     Noop,
+
+    /// Toggle the developer component gallery screen (debug builds only).
+    ToggleGallery,
 
     // ── Shared file catalogue management ──
     /// Open the file picker to select a file for sharing.
@@ -6720,6 +6730,7 @@ impl IcedChat {
             AppMessage::WindowResized(_) => "WindowResized",
 
             AppMessage::Noop => "Noop",
+            AppMessage::ToggleGallery => "ToggleGallery",
             AppMessage::AddSharedFile => "AddSharedFile",
             AppMessage::SharedFilePicked(_) => "SharedFilePicked",
             AppMessage::SharedFileAdded(_) => "SharedFileAdded",
@@ -7511,6 +7522,7 @@ impl IcedChat {
             Screen::Groups => "Groups".to_string(),
             #[cfg(feature = "terminal")]
             Screen::Terminal => "Terminal open".to_string(),
+            Screen::Gallery => "Component gallery".to_string(),
         };
 
         let mesh_state = match &self.mesh_health {
@@ -7744,6 +7756,7 @@ impl IcedChat {
             Screen::Groups => ("Groups", None),
             #[cfg(feature = "terminal")]
             Screen::Terminal => ("Terminal", None),
+            Screen::Gallery => ("Gallery", None),
         };
         let snapshot = IcedStateSnapshot {
             node_id: self.local_public.to_string(),
@@ -7926,8 +7939,7 @@ impl IcedChat {
                 self.share_local_service_open = true;
                 self.share_service_name = "Development Server".to_string();
                 self.share_service_port = "3000".to_string();
-                self.share_service_expiry =
-                    boru_core::tunnel::service::TunnelDuration::OneHour;
+                self.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
                 self.share_service_is_http = true;
                 iced::Task::none()
             }
@@ -7942,9 +7954,13 @@ impl IcedChat {
                     .as_secs() as i64;
                 // Replace any existing entry for the same tunnel id so a
                 // re-sent request does not create duplicates.
-                self.tunnel_requests.retain(|req| req.tunnel_id != tunnel_id);
                 self.tunnel_requests
-                    .push(TunnelRequest { peer, tunnel_id, timestamp });
+                    .retain(|req| req.tunnel_id != tunnel_id);
+                self.tunnel_requests.push(TunnelRequest {
+                    peer,
+                    tunnel_id,
+                    timestamp,
+                });
                 // Bump the revision so the lazy sidebar Requests section
                 // re-renders with the new tunnel request.
                 self.requests_sidebar_revision = self.requests_sidebar_revision.wrapping_add(1);
@@ -7955,7 +7971,8 @@ impl IcedChat {
                 // the sharer's service: route into the existing
                 // ConnectReceivedTunnel flow (binds a loopback listener
                 // through the tunnel) when the received offer is present.
-                self.tunnel_requests.retain(|req| req.tunnel_id != tunnel_id);
+                self.tunnel_requests
+                    .retain(|req| req.tunnel_id != tunnel_id);
                 self.requests_sidebar_revision = self.requests_sidebar_revision.wrapping_add(1);
                 if let Ok(bytes) = hex::decode(&tunnel_id) {
                     if let Ok(id) = <[u8; 32]>::try_from(bytes.as_slice()) {
@@ -7971,11 +7988,13 @@ impl IcedChat {
             AppMessage::DeclineTunnelRequest(tunnel_id) => {
                 // Declining drops the request and the stored received offer
                 // so it stops being presented in Settings → Secure Tunnels.
-                self.tunnel_requests.retain(|req| req.tunnel_id != tunnel_id);
+                self.tunnel_requests
+                    .retain(|req| req.tunnel_id != tunnel_id);
                 self.requests_sidebar_revision = self.requests_sidebar_revision.wrapping_add(1);
                 if let Ok(bytes) = hex::decode(&tunnel_id) {
                     if let Ok(id) = <[u8; 32]>::try_from(bytes.as_slice()) {
-                        self.received_tunnels.remove(&boru_core::tunnel::TunnelId(id));
+                        self.received_tunnels
+                            .remove(&boru_core::tunnel::TunnelId(id));
                     }
                 }
                 self.push_system("Tunnel request declined".to_string());
@@ -12811,6 +12830,13 @@ impl IcedChat {
                     } = &download.state
                     {
                         (path.clone(), *total_size)
+                    } else if let DownloadState::Shared { path, .. } = &download.state {
+                        if path.exists() {
+                            (path.clone(), None)
+                        } else {
+                            self.push_system("Shared file is no longer available.");
+                            return iced::Task::none();
+                        }
                     } else if !download.ticket.is_empty() {
                         // Not yet downloaded — start the download and
                         // inform the user to click play again when
@@ -13451,9 +13477,7 @@ impl IcedChat {
                             });
                             dl.state = DownloadState::Shared {
                                 name: name.clone(),
-                                path: std::path::PathBuf::from(
-                                    local_path.unwrap_or_default(),
-                                ),
+                                path: std::path::PathBuf::from(local_path.unwrap_or_default()),
                                 size: None,
                             };
                         }
@@ -16223,6 +16247,14 @@ impl IcedChat {
 
             AppMessage::Noop => iced::Task::none(),
 
+            AppMessage::ToggleGallery => {
+                self.screen = match self.screen {
+                    Screen::Gallery => Screen::ChatList,
+                    _ => Screen::Gallery,
+                };
+                iced::Task::none()
+            }
+
             // ── Shared file catalogue management ──
             AppMessage::AddSharedFile => {
                 // Open the file picker — map result to SharedFilePicked(path) or Noop
@@ -18015,7 +18047,10 @@ impl IcedChat {
                         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                         if has_been_seen {
                             self.push_system(format!("Friend {label} is now ONLINE"));
-                            self.push_activity(format!("{label} came online"), ActivityKind::Online);
+                            self.push_activity(
+                                format!("{label} came online"),
+                                ActivityKind::Online,
+                            );
                         }
                     }
                     FriendStatus::Offline => {
@@ -18025,7 +18060,10 @@ impl IcedChat {
                         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                         if has_been_seen {
                             self.push_system(format!("Friend {label} is now offline"));
-                            self.push_activity(format!("{label} went offline"), ActivityKind::Offline);
+                            self.push_activity(
+                                format!("{label} went offline"),
+                                ActivityKind::Offline,
+                            );
                         }
                     }
                     FriendStatus::Unknown => {}
@@ -18873,17 +18911,33 @@ impl IcedChat {
             Screen::Groups => self.view_sidebar_groups(),
             #[cfg(feature = "terminal")]
             Screen::Terminal => self.terminal.view().map(AppMessage::TerminalEvent),
+            Screen::Gallery => crate::component_gallery::view_gallery(),
         };
+
+        // Responsive sidebar width – clamps to 288–320 px based on window width.
+        let sidebar_w = crate::design_tokens::sidebar_width_for(self.window_width);
 
         let content = row![
             container(sidebar)
-                .width(Length::Fixed(SIDEBAR_WIDTH))
+                .width(Length::Fixed(sidebar_w))
                 .height(Length::Fill)
                 .style(move |t| {
                     iced::widget::container::Style {
-                        background: Some(iced::Background::Color(bg_surface(t))),
+                        background: Some(iced::Background::Color(
+                            crate::design_tokens::color_sidebar(t),
+                        )),
                         ..Default::default()
                     }
+                }),
+            // 1 px vertical divider between sidebar and main content.
+            container(iced::widget::Space::new().width(Length::Fixed(1.0)).height(Length::Fill))
+                .width(Length::Fixed(1.0))
+                .height(Length::Fill)
+                .style(move |t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(
+                        crate::design_tokens::border_muted(t),
+                    )),
+                    ..Default::default()
                 }),
             container(main_panel)
                 .width(Length::Fill)
@@ -19335,11 +19389,9 @@ impl IcedChat {
                 }),
             )
             .push(
-                iced::widget::row![
-                    button(text("Cancel"))
-                        .on_press(AppMessage::CancelCreateTunnel)
-                        .padding(8),
-                ]
+                iced::widget::row![button(text("Cancel"))
+                    .on_press(AppMessage::CancelCreateTunnel)
+                    .padding(8),]
                 .spacing(12),
             )
             .spacing(12)
@@ -19532,37 +19584,68 @@ impl IcedChat {
     }
 
     /// Left sidebar containing Chats, Friends, Discover, and Requests sections.
+    ///
+    /// Layout: pinned brand row + identity row + divider at top;
+    /// scrollable collapsible sections in the middle;
+    /// pinned utility row at the bottom.
     fn view_sidebar(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{container, rule, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
-        let mut header = Row::new()
-            .push(boru_logo(LogoSize::Small).into_element())
+        let theme = self.theme();
+        let inset = SIDEBAR_INSET; // 24 px
+
+        // ═══════════════════════════════════════════════════════════════
+        // 1. BRAND ROW — app icon + Raleway ExtraBold "BORU" + settings
+        // ═══════════════════════════════════════════════════════════════
+        let mut brand_row = Row::new()
+            .push(
+                // App icon: small BORU logo
+                boru_logo(LogoSize::Medium)
+                    .color(crate::design_tokens::text_primary(&theme))
+                    .into_element(),
+            )
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
+            .push(
+                // "BORU" wordmark in Raleway ExtraBold
+                text("BORU")
+                    .font(crate::fonts::raleway_extra_bold())
+                    .size(20.0)
+                    .color(crate::design_tokens::text_primary(&theme)),
+            )
             .push(Space::new().width(Length::Fill));
 
         #[cfg(feature = "terminal")]
         {
-            header = header.push(iced::widget::tooltip::Tooltip::new(
-                button(Icon::Terminal.build().size(IconSize::Md).build())
-                    .on_press(AppMessage::OpenTerminal)
-                    .padding([SPACE_6, SPACE_8])
-                    .style(BUTTON_ICON),
-                text("Terminal").size(TYPO_XS),
-                iced::widget::tooltip::Position::Bottom,
-            ));
+            brand_row = brand_row.push(
+                ghost_icon_button(
+                    Icon::Terminal,
+                    IconSize::Md,
+                    Some("Terminal"),
+                    Some(AppMessage::OpenTerminal),
+                    false,
+                    false,
+                ),
+            );
+            brand_row = brand_row.push(Space::new().width(Length::Fixed(SPACE_4)));
         }
 
-        let header = header
-            .push(iced::widget::tooltip::Tooltip::new(
-                button(icon_svg(ICON_SETTINGS, TYPO_MD))
-                    .on_press(AppMessage::OpenSettings)
-                    .padding([SPACE_6, SPACE_8])
-                    .style(BUTTON_ICON),
-                text("Settings").size(TYPO_XS),
-                iced::widget::tooltip::Position::Bottom,
-            ))
+        brand_row = brand_row
+            .push(
+                ghost_icon_button(
+                    Icon::Settings,
+                    IconSize::Md,
+                    Some("Settings"),
+                    Some(AppMessage::OpenSettings),
+                    false,
+                    false,
+                ),
+            )
             .align_y(Alignment::Center);
 
+        // ═══════════════════════════════════════════════════════════════
+        // 2. IDENTITY ROW — avatar, name, online status, profile action
+        // ═══════════════════════════════════════════════════════════════
         let local_presence = match &self.mesh_health {
             MeshHealth::Good => PeerPresence::Online,
             MeshHealth::Degraded(_) => PeerPresence::Away,
@@ -19591,8 +19674,19 @@ impl IcedChat {
             })
             .into();
 
-        // Use cached counts (recomputed via refresh_sidebar_counts when
-        // the corresponding revision counter changes).
+        // ═══════════════════════════════════════════════════════════════
+        // 3. DIVIDER beneath identity
+        // ═══════════════════════════════════════════════════════════════
+        let identity_divider = rule::horizontal(1).style(move |t| rule::Style {
+            color: crate::design_tokens::border_muted(t),
+            radius: 0.0.into(),
+            fill_mode: rule::FillMode::Full,
+            snap: false,
+        });
+
+        // ═══════════════════════════════════════════════════════════════
+        // 4. SCROLLABLE SECTIONS (chats, groups, friends, discover, etc.)
+        // ═══════════════════════════════════════════════════════════════
         let chat_count = self.cached_chat_count;
         let group_count = self.cached_group_count;
         let friend_count = self.cached_friend_count;
@@ -19600,22 +19694,17 @@ impl IcedChat {
         let public_room_count = self.cached_public_room_count;
         let request_count = self.cached_request_count;
 
-        let mut content = Column::new()
-            .push(container(header).padding(iced::Padding {
-                top: SPACE_12,
-                right: SPACE_12,
-                bottom: SPACE_4,
-                left: SPACE_12,
-            }))
-            .push(container(identity_row).padding(iced::Padding {
-                top: SPACE_2,
-                right: SPACE_12,
-                bottom: SPACE_8,
-                left: SPACE_12,
-            }));
+        let mut sections = Column::new()
+            .padding(iced::Padding {
+                top: SPACE_8,
+                right: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+            })
+            .spacing(0);
 
         // CHATS section
-        content = content.push(Self::sidebar_collapsible_section_header(
+        sections = sections.push(Self::sidebar_collapsible_section_header(
             "CHATS",
             chat_count,
             0,
@@ -19623,11 +19712,11 @@ impl IcedChat {
             self.dark_mode,
         ));
         if !self.sidebar_section_collapsed[0] {
-            content = content.push(self.view_sidebar_chats());
+            sections = sections.push(self.view_sidebar_chats());
         }
 
         // GROUPS section
-        content = content.push(Self::sidebar_collapsible_section_header(
+        sections = sections.push(Self::sidebar_collapsible_section_header(
             "GROUPS",
             group_count,
             1,
@@ -19635,11 +19724,11 @@ impl IcedChat {
             self.dark_mode,
         ));
         if !self.sidebar_section_collapsed[1] {
-            content = content.push(self.view_sidebar_groups());
+            sections = sections.push(self.view_sidebar_groups());
         }
 
         // FRIENDS section
-        content = content.push(Self::sidebar_collapsible_section_header(
+        sections = sections.push(Self::sidebar_collapsible_section_header(
             "FRIENDS",
             friend_count,
             2,
@@ -19647,11 +19736,11 @@ impl IcedChat {
             self.dark_mode,
         ));
         if !self.sidebar_section_collapsed[2] {
-            content = content.push(self.view_sidebar_friends());
+            sections = sections.push(self.view_sidebar_friends());
         }
 
         // DISCOVER section
-        content = content.push(Self::sidebar_collapsible_section_header(
+        sections = sections.push(Self::sidebar_collapsible_section_header(
             "DISCOVER",
             discover_count,
             3,
@@ -19659,11 +19748,11 @@ impl IcedChat {
             self.dark_mode,
         ));
         if !self.sidebar_section_collapsed[3] {
-            content = content.push(self.view_sidebar_discovered_peers());
+            sections = sections.push(self.view_sidebar_discovered_peers());
         }
 
         // PUBLIC ROOMS section
-        content = content.push(Self::sidebar_collapsible_section_header(
+        sections = sections.push(Self::sidebar_collapsible_section_header(
             "PUBLIC ROOMS",
             public_room_count,
             5,
@@ -19671,11 +19760,11 @@ impl IcedChat {
             self.dark_mode,
         ));
         if !self.sidebar_section_collapsed[5] {
-            content = content.push(self.view_sidebar_public_rooms());
+            sections = sections.push(self.view_sidebar_public_rooms());
         }
 
         // REQUESTS section
-        content = content.push(Self::sidebar_collapsible_section_header(
+        sections = sections.push(Self::sidebar_collapsible_section_header(
             "REQUESTS",
             request_count,
             4,
@@ -19683,12 +19772,123 @@ impl IcedChat {
             self.dark_mode,
         ));
         if !self.sidebar_section_collapsed[4] {
-            content = content.push(self.view_sidebar_requests());
+            sections = sections.push(self.view_sidebar_requests());
         }
 
-        content = content.push(Space::new().height(Length::Fill));
+        let sections_scroll = scrollable(sections)
+            .width(Length::Fill)
+            .height(Length::Fill);
 
-        scrollable(content)
+        // ═══════════════════════════════════════════════════════════════
+        // 5. BOTTOM UTILITY ROW — new chat, search, mesh, notifications
+        // ═══════════════════════════════════════════════════════════════
+        let utility_row = Row::new()
+            .push(
+                ghost_icon_button(
+                    Icon::Plus,
+                    IconSize::Md,
+                    Some("New chat"),
+                    Some(AppMessage::CreateNewRoom),
+                    false,
+                    false,
+                ),
+            )
+            .push(Space::new().width(Length::Fixed(SPACE_4)))
+            .push(
+                ghost_icon_button(
+                    Icon::Search,
+                    IconSize::Md,
+                    Some("Search"),
+                    Some(AppMessage::Noop),
+                    false,
+                    false,
+                ),
+            )
+            .push(Space::new().width(Length::Fill))
+            .push(
+                ghost_icon_button(
+                    Icon::Mesh,
+                    IconSize::Md,
+                    Some("Network"),
+                    Some(AppMessage::OpenConnectionDetails),
+                    false,
+                    false,
+                ),
+            )
+            .push(Space::new().width(Length::Fixed(SPACE_4)))
+            .push(
+                ghost_icon_button(
+                    Icon::Notification,
+                    IconSize::Md,
+                    Some("Notifications"),
+                    Some(AppMessage::OpenSettings),
+                    false,
+                    false,
+                ),
+            )
+            .align_y(Alignment::Center);
+
+        // ═══════════════════════════════════════════════════════════════
+        // ASSEMBLE — pinned top, scrollable middle, pinned bottom
+        // ═══════════════════════════════════════════════════════════════
+        Column::new()
+            // Pinned: brand row
+            .push(
+                container(brand_row).padding(iced::Padding {
+                    top: SPACE_16,
+                    right: inset,
+                    bottom: SPACE_8,
+                    left: inset,
+                }),
+            )
+            // Pinned: identity row
+            .push(
+                container(identity_row).padding(iced::Padding {
+                    top: SPACE_4,
+                    right: inset,
+                    bottom: SPACE_8,
+                    left: inset,
+                }),
+            )
+            // Pinned: subtle divider
+            .push(
+                container(identity_divider).padding(iced::Padding {
+                    top: 0.0,
+                    right: inset,
+                    bottom: 0.0,
+                    left: inset,
+                }),
+            )
+            // Scrollable: all sections
+            .push(sections_scroll)
+            // Pinned: bottom utility row with top divider
+            .push(
+                container(
+                    Column::new()
+                        .push(
+                            rule::horizontal(1).style(move |t| rule::Style {
+                                color: crate::design_tokens::border_muted(t),
+                                radius: 0.0.into(),
+                                fill_mode: rule::FillMode::Full,
+                                snap: false,
+                            }),
+                        )
+                        .push(
+                            container(utility_row).padding(iced::Padding {
+                                top: SPACE_8,
+                                right: inset,
+                                bottom: SPACE_12,
+                                left: inset,
+                            }),
+                        ),
+                )
+                .padding(iced::Padding {
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                }),
+            )
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -21129,14 +21329,16 @@ impl IcedChat {
                                     text("Tunnel").size(TYPO_XXS).color(accent_primary(&theme)),
                                 )
                                 .padding([SPACE_2, SPACE_4])
-                                .style(move |t| iced::widget::container::Style {
-                                    background: Some(iced::Background::Color(bg_surface(t))),
-                                    border: iced::Border {
-                                        color: border_muted(t),
-                                        width: 1.0,
-                                        radius: SPACE_4.into(),
-                                    },
-                                    ..Default::default()
+                                .style(move |t| {
+                                    iced::widget::container::Style {
+                                        background: Some(iced::Background::Color(bg_surface(t))),
+                                        border: iced::Border {
+                                            color: border_muted(t),
+                                            width: 1.0,
+                                            radius: SPACE_4.into(),
+                                        },
+                                        ..Default::default()
+                                    }
                                 }),
                             )
                             .spacing(SPACE_4)
@@ -21145,9 +21347,7 @@ impl IcedChat {
                     )
                     .push(
                         button(Icon::Check.build().size(IconSize::Xs).build())
-                            .on_press(AppMessage::AcceptTunnelRequest(
-                                request.tunnel_id.clone(),
-                            ))
+                            .on_press(AppMessage::AcceptTunnelRequest(request.tunnel_id.clone()))
                             .padding([SPACE_2, SPACE_4])
                             .style(move |t, _status| iced::widget::button::Style {
                                 background: Some(iced::Background::Color(accent_primary(t))),
@@ -21161,9 +21361,7 @@ impl IcedChat {
                     )
                     .push(
                         button(Icon::Close.build().size(IconSize::Xs).build())
-                            .on_press(AppMessage::DeclineTunnelRequest(
-                                request.tunnel_id.clone(),
-                            ))
+                            .on_press(AppMessage::DeclineTunnelRequest(request.tunnel_id.clone()))
                             .padding([SPACE_2, SPACE_4])
                             .style(move |t, _status| iced::widget::button::Style {
                                 background: Some(iced::Background::Color(color_error(t))),
@@ -21695,9 +21893,7 @@ impl IcedChat {
             .style(container_card);
 
         // ── Right column assembly ──
-        let tunnels_header = text("TUNNELS")
-            .size(TYPO_XS)
-            .color(text_muted(&theme));
+        let tunnels_header = text("TUNNELS").size(TYPO_XS).color(text_muted(&theme));
 
         let tunnel_list: Vec<TunnelDefinition> = self.tunnel_service.list_tunnels();
         let tunnels_items: Vec<iced::Element<'_, AppMessage>> = if tunnel_list.is_empty() {
@@ -21726,14 +21922,18 @@ impl IcedChat {
                                     color: Some(status_theme_color),
                                 }
                             }),
-                            text(label)
-                                .size(TYPO_SM)
-                                .color(text_system(&theme)),
+                            text(label).size(TYPO_SM).color(text_system(&theme)),
                             Space::new().width(Length::Fill),
-                            button(Icon::Close.build().size(IconSize::Xs).destructive(true).build())
-                                .on_press(AppMessage::CloseTunnel(def.id))
-                                .padding([SPACE_2, SPACE_6])
-                                .style(BUTTON_GHOST_BG),
+                            button(
+                                Icon::Close
+                                    .build()
+                                    .size(IconSize::Xs)
+                                    .destructive(true)
+                                    .build()
+                            )
+                            .on_press(AppMessage::CloseTunnel(def.id))
+                            .padding([SPACE_2, SPACE_6])
+                            .style(BUTTON_GHOST_BG),
                         ]
                         .spacing(SPACE_6)
                         .align_y(Alignment::Center),

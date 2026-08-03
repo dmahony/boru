@@ -139,16 +139,16 @@ pub const CONTROL_HEIGHT: f32 = 40.0;
 pub const CONTROL_HEIGHT_COMPACT: f32 = 36.0;
 
 // ── Corner radii ──────────────────────────────────────────────────────
-pub const RADIUS_SM: f32 = 8.0;          // small controls
-pub const RADIUS_MD: f32 = 10.0;         // buttons, list selections
-pub const RADIUS_LG: f32 = 12.0;         // cards, chat bubbles
-pub const RADIUS_XL: f32 = 16.0;         // hero cards, composer
+pub const RADIUS_SM: f32 = 8.0; // small controls
+pub const RADIUS_MD: f32 = 10.0; // buttons, list selections
+pub const RADIUS_LG: f32 = 12.0; // cards, chat bubbles
+pub const RADIUS_XL: f32 = 16.0; // hero cards, composer
 
 // ── Borders ───────────────────────────────────────────────────────────
-pub const BORDER_WIDTH: f32 = 1.0;       // standard 1 px border
+pub const BORDER_WIDTH: f32 = 1.0; // standard 1 px border
 
 // ── Focus ─────────────────────────────────────────────────────────────
-pub const FOCUS_WIDTH: f32 = 2.0;        // focus ring width
+pub const FOCUS_WIDTH: f32 = 2.0; // focus ring width
 
 // ── Avatar sizes ──────────────────────────────────────────────────────
 pub const AVATAR_SM: f32 = 36.0;
@@ -156,7 +156,12 @@ pub const AVATAR_MD: f32 = 48.0;
 pub const AVATAR_LG: f32 = 64.0;
 
 // ── Layout dimensions ─────────────────────────────────────────────────
-pub const SIDEBAR_WIDTH: f32 = 280.0;
+/// Target sidebar width at reference viewport (1280×800). Range: 288–320 px.
+pub const SIDEBAR_WIDTH: f32 = 304.0;
+pub const SIDEBAR_WIDTH_MIN: f32 = 288.0;
+pub const SIDEBAR_WIDTH_MAX: f32 = 320.0;
+/// Horizontal inset from sidebar edges to content. Spec: 24 px.
+pub const SIDEBAR_INSET: f32 = 24.0;
 pub const DETAILS_PANEL_WIDTH: f32 = 280.0;
 pub const MESSAGE_MAX_WIDTH: f32 = 480.0;
 pub const IMAGE_PREVIEW_MAX_WIDTH: f32 = 360.0;
@@ -181,6 +186,14 @@ pub const VIEWPORT_XL_HEIGHT: f32 = 1080.0;
 
 /// Maximum content width for prose/chat panels before centering.
 pub const CONTENT_MAX_WIDTH: f32 = 720.0;
+
+/// Returns a sidebar width clamped to the allowed range for a given window width.
+/// At the reference viewport (1280 px) this returns the target 304 px.
+pub fn sidebar_width_for(window_width: f32) -> f32 {
+    let fraction = (window_width - VIEWPORT_MIN_WIDTH) / (VIEWPORT_REF_WIDTH - VIEWPORT_MIN_WIDTH);
+    let clamped_fraction = fraction.clamp(0.0, 1.0);
+    SIDEBAR_WIDTH_MIN + (SIDEBAR_WIDTH - SIDEBAR_WIDTH_MIN) * clamped_fraction
+}
 
 /// Returns true when the window width is at or below the compact threshold.
 pub fn is_compact(width: f32) -> bool {
@@ -700,15 +713,24 @@ mod tests {
 
     #[test]
     fn spacing_scale_is_monotonic() {
-        let scale = [SPACE_4, SPACE_8, SPACE_12, SPACE_16, SPACE_20, SPACE_24, SPACE_32, SPACE_40];
+        let scale = [
+            SPACE_4, SPACE_8, SPACE_12, SPACE_16, SPACE_20, SPACE_24, SPACE_32, SPACE_40,
+        ];
         for w in scale.windows(2) {
-            assert!(w[1] > w[0], "spacing scale not monotonic: {} → {}", w[0], w[1]);
+            assert!(
+                w[1] > w[0],
+                "spacing scale not monotonic: {} → {}",
+                w[0],
+                w[1]
+            );
         }
     }
 
     #[test]
     fn all_spacing_is_positive() {
-        for s in [SPACE_4, SPACE_8, SPACE_12, SPACE_16, SPACE_20, SPACE_24, SPACE_32, SPACE_40] {
+        for s in [
+            SPACE_4, SPACE_8, SPACE_12, SPACE_16, SPACE_20, SPACE_24, SPACE_32, SPACE_40,
+        ] {
             assert!(s > 0.0, "spacing {s} must be positive");
         }
     }
@@ -759,6 +781,19 @@ mod tests {
         assert!(!is_compact(VIEWPORT_REF_WIDTH));
         assert!(is_large(VIEWPORT_LG_WIDTH));
         assert!(!is_large(VIEWPORT_REF_WIDTH));
+    }
+
+    #[test]
+    fn sidebar_width_for_clamps_to_allowed_range() {
+        // At min viewport (1024 px): should be 288 px.
+        assert!((sidebar_width_for(VIEWPORT_MIN_WIDTH) - SIDEBAR_WIDTH_MIN).abs() < 0.5);
+        // At reference viewport (1280 px): should be 304 px.
+        assert!((sidebar_width_for(VIEWPORT_REF_WIDTH) - SIDEBAR_WIDTH).abs() < 0.5);
+        // Below min: clamped to 288 px.
+        assert!((sidebar_width_for(800.0) - SIDEBAR_WIDTH_MIN).abs() < 0.5);
+        // Above max: clamped to 304 px.
+        assert!((sidebar_width_for(VIEWPORT_LG_WIDTH) - SIDEBAR_WIDTH).abs() < 0.5);
+        assert!((sidebar_width_for(VIEWPORT_XL_WIDTH) - SIDEBAR_WIDTH).abs() < 0.5);
     }
 
     // ── Shadow token invariants ────────────────────────────────────────

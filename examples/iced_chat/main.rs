@@ -18,6 +18,8 @@ mod mcp_server;
 mod notification;
 mod perf_tracker;
 mod presentation;
+mod ui_components;
+mod component_gallery;
 #[cfg(feature = "terminal")]
 mod terminal_view;
 

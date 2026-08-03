@@ -193,7 +193,6 @@ pub use sizes::*;
 #[expect(dead_code)]
 pub enum Typography {
     // ── Source Sans 3 roles ──────────────────────────────────────────
-
     /// Page title — Source Sans 3 SemiBold, 28 px.
     PageTitle,
     /// Conversation / section heading — Source Sans 3 SemiBold, 18 px.
@@ -222,12 +221,10 @@ pub enum Typography {
     SystemMessage,
 
     // ── JetBrains Mono roles ────────────────────────────────────────
-
     /// Technical value (peer IDs, keys, diagnostics) — JetBrains Mono Regular, 12 px.
     TechnicalValue,
 
     // ── Branding ─────────────────────────────────────────────────────
-
     /// Boru wordmark — Raleway ExtraBold, 28 px.
     BoruWordmark,
 }
@@ -265,10 +262,16 @@ impl Typography {
             Self::SectionHeading => CONVERSATION_TITLE,
             Self::SidebarIdentity => SIDEBAR_IDENTITY,
             Self::ChatMessage => CHAT_MESSAGE,
-            Self::Body | Self::ButtonLabel | Self::NavigationLabel | Self::FormLabel
+            Self::Body
+            | Self::ButtonLabel
+            | Self::NavigationLabel
+            | Self::FormLabel
             | Self::SystemMessage => BODY,
-            Self::SecondaryText | Self::SidebarSectionLabel | Self::Timestamp
-            | Self::DeliveryState | Self::TechnicalValue => SECONDARY,
+            Self::SecondaryText
+            | Self::SidebarSectionLabel
+            | Self::Timestamp
+            | Self::DeliveryState
+            | Self::TechnicalValue => SECONDARY,
         }
     }
 
@@ -402,15 +405,20 @@ mod tests {
     #[test]
     fn type_scale_is_monotonic() {
         let sizes = [
-            Typography::PageTitle.size_px(),     // 28
-            Typography::SectionHeading.size_px(), // 18
+            Typography::PageTitle.size_px(),       // 28
+            Typography::SectionHeading.size_px(),  // 18
             Typography::SidebarIdentity.size_px(), // 16
-            Typography::ChatMessage.size_px(),   // 15
-            Typography::Body.size_px(),          // 14
-            Typography::SecondaryText.size_px(), // 12
+            Typography::ChatMessage.size_px(),     // 15
+            Typography::Body.size_px(),            // 14
+            Typography::SecondaryText.size_px(),   // 12
         ];
         for w in sizes.windows(2) {
-            assert!(w[0] >= w[1], "type scale not descending: {} → {}", w[0], w[1]);
+            assert!(
+                w[0] >= w[1],
+                "type scale not descending: {} → {}",
+                w[0],
+                w[1]
+            );
         }
     }
 

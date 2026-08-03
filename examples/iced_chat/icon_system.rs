@@ -44,7 +44,8 @@ const SVG_ARROW_LEFT: &[u8] = include_bytes!("../../assets/icons/lucide/arrow-le
 const SVG_CHECK: &[u8] = include_bytes!("../../assets/icons/lucide/check.svg");
 const SVG_PLAY: &[u8] = include_bytes!("../../assets/icons/lucide/play.svg");
 const SVG_ELLIPSIS: &[u8] = include_bytes!("../../assets/icons/lucide/ellipsis.svg");
-const SVG_ELLIPSIS_VERTICAL: &[u8] = include_bytes!("../../assets/icons/lucide/ellipsis-vertical.svg");
+const SVG_ELLIPSIS_VERTICAL: &[u8] =
+    include_bytes!("../../assets/icons/lucide/ellipsis-vertical.svg");
 const SVG_ALERT_TRIANGLE: &[u8] = include_bytes!("../../assets/icons/lucide/alert-triangle.svg");
 const SVG_SMILE: &[u8] = include_bytes!("../../assets/icons/lucide/smile.svg");
 const SVG_TERMINAL: &[u8] = include_bytes!("../../assets/icons/lucide/terminal.svg");
@@ -54,10 +55,9 @@ const SVG_IMAGE: &[u8] = include_bytes!("../../assets/icons/lucide/image.svg");
 // references ICON_CHAT etc. doesn't break, but the Icon enum uses them
 // through its mapping.
 use crate::app::{
-    ICON_ACTIVITY, ICON_CHAT, ICON_CLOSE, ICON_FILES, ICON_FRIEND, ICON_MESH,
-    ICON_MORE, ICON_NOTIFICATION, ICON_OFFLINE, ICON_ONLINE, ICON_PAPERCLIP,
-    ICON_PLUS, ICON_RETRY, ICON_SEARCH, ICON_SETTINGS, ICON_SWEEP, ICON_UNREAD,
-    ICON_USER_PLUS,
+    ICON_ACTIVITY, ICON_CHAT, ICON_CLOSE, ICON_FILES, ICON_FRIEND, ICON_MESH, ICON_MORE,
+    ICON_NOTIFICATION, ICON_OFFLINE, ICON_ONLINE, ICON_PAPERCLIP, ICON_PLUS, ICON_RETRY,
+    ICON_SEARCH, ICON_SETTINGS, ICON_SWEEP, ICON_UNREAD, ICON_USER_PLUS,
 };
 
 // ── Icon enum ────────────────────────────────────────────────────────
@@ -319,9 +319,9 @@ pub fn button_icon_destructive(
             iced::widget::button::Status::Hovered => {
                 Some(iced::Background::Color(design_tokens::surface_hover(theme)))
             }
-            iced::widget::button::Status::Pressed => {
-                Some(iced::Background::Color(design_tokens::selected_surface(theme)))
-            }
+            iced::widget::button::Status::Pressed => Some(iced::Background::Color(
+                design_tokens::selected_surface(theme),
+            )),
             _ => None,
         },
         text_color: color,
