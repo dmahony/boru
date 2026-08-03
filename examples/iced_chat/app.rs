@@ -2043,10 +2043,10 @@ pub struct ChatEntry {
     /// Original image pixel height, extracted from image bytes at construction time.
     /// Used to compute the display size (scale-to-fit) during rendering.
     image_height: Option<u32>,
-    /// Animated GIF frames (PNG-encoded frame bytes, delay in milliseconds).
-    gif_frames: Option<std::sync::Arc<Vec<(Vec<u8>, u32)>>>,
-    /// Current frame index into gif_frames (0 = first frame / static).
-    gif_frame_idx: usize,
+    /// Animated GIF frames (raw RGBA handles + per-frame delays) managed by
+    /// the iced-moving-picture `Gif` widget. None for static images and
+    /// single-frame GIFs (those render as static images).
+    gif_frames: Option<std::sync::Arc<iced_moving_picture::widget::gif::Frames>>,
     /// Unix epoch milliseconds when this message was sent (protocol sent_at
     /// for remote messages, local creation time for system/local messages).
     timestamp: Option<i64>,
@@ -2076,44 +2076,31 @@ pub struct ChatEntry {
     parsed_segments: Option<Vec<link_preview::TextSegment>>,
 }
 
-/// Decode an animated GIF into individual frames as PNG-encoded bytes.
-/// Returns None if the image is not a GIF or has only one frame.
-fn decode_gif_frames(image_bytes: &[u8]) -> Option<std::sync::Arc<Vec<(Vec<u8>, u32)>>> {
+/// Decode an animated GIF into iced-moving-picture `Frames` (raw RGBA
+/// handles + per-frame delays). Returns None if the image is not a GIF or has
+/// only one frame — single-frame GIFs render as static images.
+fn decode_gif_frames(
+    image_bytes: &[u8],
+) -> Option<std::sync::Arc<iced_moving_picture::widget::gif::Frames>> {
     use image::codecs::gif::GifDecoder;
     use image::AnimationDecoder;
     use std::io::Cursor;
 
-    let cursor = Cursor::new(image_bytes);
-    let decoder = match GifDecoder::new(cursor) {
-        Ok(d) => d,
-        Err(_) => return None,
-    };
-    let frames = decoder.into_frames();
-
-    let mut result: Vec<(Vec<u8>, u32)> = Vec::new();
-    for frame_result in frames {
-        let frame = match frame_result {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-        let delay_ms = frame.delay().numer_denom_ms().0;
-        let buffer = frame.into_buffer();
-        // Encode as PNG
-        let mut png_bytes = Vec::new();
-        if buffer
-            .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-            .is_err()
-        {
-            continue;
-        }
-        result.push((png_bytes, delay_ms));
+    // First pass: count frames. A single-frame GIF must stay on the static
+    // image path — the Gif widget would otherwise keep requesting redraws
+    // forever (its update loop re-schedules at the frame delay even when the
+    // frame never changes).
+    let decoder = GifDecoder::new(Cursor::new(image_bytes)).ok()?;
+    let frame_count = decoder.into_frames().count();
+    if frame_count <= 1 {
+        return None;
     }
 
-    if result.len() <= 1 {
-        None
-    } else {
-        Some(std::sync::Arc::new(result))
-    }
+    // Second pass: decode once into raw RGBA handles. The widget advances
+    // frames itself via per-frame delay + request_redraw_at, so there is no
+    // PNG encode→decode cycle and no global tick.
+    let frames = iced_moving_picture::widget::gif::Frames::from_bytes(image_bytes.to_vec()).ok()?;
+    Some(std::sync::Arc::new(frames))
 }
 
 impl ChatEntry {
@@ -2133,7 +2120,6 @@ impl ChatEntry {
             image_width: None,
             image_height: None,
             gif_frames: None,
-            gif_frame_idx: 0,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -2169,7 +2155,6 @@ impl ChatEntry {
             image_width: None,
             image_height: None,
             gif_frames: None,
-            gif_frame_idx: 0,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -2207,7 +2192,6 @@ impl ChatEntry {
             image_width: None,
             image_height: None,
             gif_frames: None,
-            gif_frame_idx: 0,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -2261,7 +2245,6 @@ impl ChatEntry {
             image_width: img_w,
             image_height: img_h,
             gif_frames: decode_gif_frames(&image_bytes),
-            gif_frame_idx: 0,
             timestamp: sent_at_secs.map(|s| s as i64 * 1000),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -2301,7 +2284,6 @@ impl ChatEntry {
             image_width: None,
             image_height: None,
             gif_frames: None,
-            gif_frame_idx: 0,
             timestamp: Some(now_ms()),
             event_id: 0,
             delivery_state: DeliveryState::default(),
@@ -3988,8 +3970,6 @@ pub enum AppMessage {
     GifSearchSubmit,
     /// GIF search results arrived.
     GifSearchResults(Vec<GifResult>),
-    /// Advance animated GIF frames for all active GIF entries.
-    AdvanceGifFrames,
     /// Copy the user's own friend ID (public key) to the clipboard with visual feedback.
     CopyFriendId,
     /// Clear the "Copied!" visual feedback after copy.
@@ -6205,7 +6185,6 @@ impl IcedChat {
                 image_width: None,
                 image_height: None,
                 gif_frames: None,
-                gif_frame_idx: 0,
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
@@ -6236,7 +6215,6 @@ impl IcedChat {
                 image_width: None,
                 image_height: None,
                 gif_frames: None,
-                gif_frame_idx: 0,
                 timestamp: Some(hist.timestamp as i64),
                 event_id: hist.event_id,
                 delivery_state: hist.delivery_state.clone(),
@@ -6310,7 +6288,6 @@ impl IcedChat {
             image_width: None,
             image_height: None,
             gif_frames: None,
-            gif_frame_idx: 0,
             timestamp: Some(row.timestamp_ms),
             event_id: row.id as u64,
             delivery_state,
@@ -6754,7 +6731,6 @@ impl IcedChat {
             AppMessage::SendGifUrl(_) => "SendGif",
             AppMessage::GifSearchSubmit => "GifSearchSubmit",
             AppMessage::GifSearchResults(_) => "GifSearchResults",
-            AppMessage::AdvanceGifFrames => "AdvanceGifFrames",
             AppMessage::CopyFriendId => "CopyFriendId",
             AppMessage::FriendIdCopiedClear => "FriendIdCopiedClear",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
@@ -16620,21 +16596,6 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::AdvanceGifFrames => {
-                for entry in &mut self.entries {
-                    if let Some(ref frames) = entry.gif_frames {
-                        if frames.len() > 1 {
-                            entry.gif_frame_idx = (entry.gif_frame_idx + 1) % frames.len();
-                            // Update image_handle to current frame
-                            let (ref frame_bytes, _delay) = frames[entry.gif_frame_idx];
-                            entry.image_handle =
-                                Some(iced::widget::image::Handle::from_bytes(frame_bytes.clone()));
-                        }
-                    }
-                }
-                iced::Task::none()
-            }
-
             AppMessage::SendGifUrl(url) => {
                 let url_clone = url.clone();
                 self.show_gif_picker = false;
@@ -19122,29 +19083,39 @@ impl IcedChat {
         use iced::widget::{container, image, mouse_area, stack};
         use iced::{Color, Length};
 
-        let Some(handle) = self
-            .entries
-            .get(entry_index)
-            .and_then(|e| self.image_handle_for_entry(e))
-        else {
+        let Some(entry) = self.entries.get(entry_index) else {
             return base.into();
         };
 
         let dark_mode = self.dark_mode;
         let _theme = Self::theme_from_dark(dark_mode);
 
-        // Dark backdrop that dismisses on click
-        let backdrop = mouse_area(
-            container(
+        // Large content element: animated GIF widget when frames exist,
+        // otherwise the cached static image handle.
+        let content: iced::Element<'a, AppMessage> =
+            if let Some(frames) = entry.gif_frames.as_deref() {
+                iced_moving_picture::widget::gif::Gif::new(frames)
+                    .content_fit(iced::ContentFit::Contain)
+                    .width(Length::FillPortion(3))
+                    .height(Length::FillPortion(3))
+                    .into()
+            } else if let Some(handle) = self.image_handle_for_entry(entry) {
                 image(handle)
                     .content_fit(iced::ContentFit::Contain)
                     .width(Length::FillPortion(3))
-                    .height(Length::FillPortion(3)),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
+                    .height(Length::FillPortion(3))
+                    .into()
+            } else {
+                return base.into();
+            };
+
+        // Dark backdrop that dismisses on click
+        let backdrop = mouse_area(
+            container(content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
         )
         .on_press(AppMessage::CloseImageLightbox);
 
@@ -24359,22 +24330,51 @@ impl IcedChat {
                     .spacing(if group_continues { SPACE_2 } else { SPACE_8 }),
             );
 
-            // ── Image (cached handle — decoded once at construction) ──
-            if let Some(handle) = self.image_handle_for_entry(entry) {
-                // Compute display size from original image dimensions.
-                // If the image fits within the max width, use its original size.
-                // Otherwise, scale down proportionally to fit.
-                let (orig_w, orig_h) = match (entry.image_width, entry.image_height) {
-                    (Some(w), Some(h)) if w > 0 && h > 0 => (w as f32, h as f32),
-                    _ => (IMAGE_PREVIEW_MAX_WIDTH, IMAGE_PREVIEW_MAX_HEIGHT),
-                };
-                let aspect = orig_w / orig_h;
-                let max_w = IMAGE_PREVIEW_MAX_WIDTH;
-                let (display_w, display_h) = if orig_w <= max_w {
-                    (orig_w, orig_h)
-                } else {
-                    (max_w, (max_w / aspect).round().max(50.0))
-                };
+            // ── Image / animated GIF (decoded once at construction) ──
+            // Compute display size from original image dimensions.
+            // If the image fits within the max width, use its original size.
+            // Otherwise, scale down proportionally to fit.
+            let (orig_w, orig_h) = match (entry.image_width, entry.image_height) {
+                (Some(w), Some(h)) if w > 0 && h > 0 => (w as f32, h as f32),
+                _ => (IMAGE_PREVIEW_MAX_WIDTH, IMAGE_PREVIEW_MAX_HEIGHT),
+            };
+            let aspect = orig_w / orig_h;
+            let max_w = IMAGE_PREVIEW_MAX_WIDTH;
+            let (display_w, display_h) = if orig_w <= max_w {
+                (orig_w, orig_h)
+            } else {
+                (max_w, (max_w / aspect).round().max(50.0))
+            };
+
+            if let Some(frames) = entry.gif_frames.as_deref() {
+                // Animated GIF: the iced-moving-picture Gif widget manages its
+                // own state tree and advances frames via per-frame delays +
+                // request_redraw_at, so each GIF animates independently at the
+                // correct speed (no global 100ms tick, no PNG re-encode).
+                let img = iced_moving_picture::widget::gif::Gif::new(frames)
+                    .content_fit(iced::ContentFit::ScaleDown)
+                    .width(Length::Fixed(display_w))
+                    .height(Length::Fixed(display_h));
+                // Keep the preview edge consistent.
+                let framed = container(img)
+                    .width(Length::Fixed(display_w))
+                    .height(Length::Fixed(display_h))
+                    .style(|t| iced::widget::container::Style {
+                        border: iced::Border {
+                            color: border_muted(t),
+                            width: 1.0,
+                            radius: ATTACHMENT_RADIUS.into(),
+                        },
+                        ..Default::default()
+                    });
+                let thumbnail = iced::widget::button(framed)
+                    .on_press(AppMessage::OpenImageLightbox(i))
+                    .padding(0)
+                    .style(|_t, _s| iced::widget::button::Style::default());
+                let thumb_with_right_click = iced::widget::mouse_area(thumbnail)
+                    .on_right_press(AppMessage::RightClickImage(i));
+                col = col.push(thumb_with_right_click);
+            } else if let Some(handle) = self.image_handle_for_entry(entry) {
                 let img = iced::widget::image(handle)
                     .content_fit(iced::ContentFit::ScaleDown)
                     .width(Length::Fixed(display_w))
@@ -25904,8 +25904,6 @@ impl IcedChat {
                 .map(|_| AppMessage::MeshWatchdogTick),
             iced::time::every(std::time::Duration::from_secs(30))
                 .map(|_| AppMessage::OutboxRetryTick),
-            iced::time::every(std::time::Duration::from_millis(100))
-                .map(|_| AppMessage::AdvanceGifFrames),
             iced::window::resize_events()
                 .map(|(_id, size)| AppMessage::WindowResized(size.width as f32)),
         ];
@@ -28105,7 +28103,6 @@ mod tests {
                 image_width: None,
                 image_height: None,
                 gif_frames: None,
-                gif_frame_idx: 0,
                 timestamp: Some(i as i64),
                 event_id: 0,
                 delivery_state: DeliveryState::default(),
@@ -28177,7 +28174,6 @@ mod tests {
             image_width: None,
             image_height: None,
             gif_frames: None,
-            gif_frame_idx: 0,
         };
         assert_eq!(e.body, "hello");
         assert_eq!(e.label, "peer");

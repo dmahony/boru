@@ -895,9 +895,10 @@ dependencies = [
  "hex",
  "humantime-serde",
  "iced",
+ "iced_moving_picture",
  "iced_term",
  "iced_video_player",
- "image",
+ "image 0.25.10",
  "indexmap",
  "iroh",
  "iroh-base",
@@ -3532,7 +3533,7 @@ dependencies = [
  "iced_runtime",
  "iced_widget",
  "iced_winit",
- "image",
+ "image 0.25.10",
  "thiserror 2.0.19",
 ]
 
@@ -3592,7 +3593,7 @@ dependencies = [
  "half",
  "iced_core",
  "iced_futures",
- "image",
+ "image 0.25.10",
  "kamadak-exif",
  "log",
  "lyon_path",
@@ -3600,6 +3601,20 @@ dependencies = [
  "rustc-hash 2.1.3",
  "thiserror 2.0.19",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "iced_moving_picture"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a058d0a3f6d4195fea964c68947e87ade42b1c3842f4a836c1fbecf5969a4fd"
+dependencies = [
+ "iced_futures",
+ "iced_runtime",
+ "iced_widget",
+ "image 0.24.9",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -3876,6 +3891,24 @@ dependencies = [
 
 [[package]]
 name = "image"
+version = "0.24.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5690139d2f55868e080017335e4b94cb7414274c74f1669c84fb5feba2c9f69d"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+ "color_quant",
+ "exr",
+ "gif 0.13.3",
+ "jpeg-decoder",
+ "num-traits",
+ "png 0.17.16",
+ "qoi",
+ "tiff 0.9.1",
+]
+
+[[package]]
+name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
@@ -3893,7 +3926,7 @@ dependencies = [
  "ravif",
  "rayon",
  "rgb",
- "tiff",
+ "tiff 0.11.3",
  "zune-core 0.5.1",
  "zune-jpeg 0.5.15",
 ]
@@ -4471,6 +4504,15 @@ checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
+]
+
+[[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
+dependencies = [
+ "rayon",
 ]
 
 [[package]]
@@ -8460,6 +8502,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "tiff"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba1310fcea54c6a9a4fd1aad794ecc02c31682f6bfbecdf460bf19533eed1e3e"
+dependencies = [
+ "flate2",
+ "jpeg-decoder",
+ "weezl",
 ]
 
 [[package]]
