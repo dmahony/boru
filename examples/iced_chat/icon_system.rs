@@ -48,6 +48,7 @@ const SVG_ELLIPSIS_VERTICAL: &[u8] =
     include_bytes!("../../assets/icons/lucide/ellipsis-vertical.svg");
 const SVG_ALERT_TRIANGLE: &[u8] = include_bytes!("../../assets/icons/lucide/alert-triangle.svg");
 const SVG_SMILE: &[u8] = include_bytes!("../../assets/icons/lucide/smile.svg");
+const SVG_SHARE_2: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
 const SVG_TERMINAL: &[u8] = include_bytes!("../../assets/icons/lucide/terminal.svg");
 const SVG_IMAGE: &[u8] = include_bytes!("../../assets/icons/lucide/image.svg");
 const SVG_CHEVRON_DOWN: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-down.svg");
@@ -109,6 +110,8 @@ pub enum Icon {
     Mesh,
     /// Copy an identifier / value to the clipboard.
     Copy,
+    /// Share a room invitation or shared files.
+    Share,
     /// Security / end-to-end encryption cue.
     Lock,
 
@@ -162,6 +165,7 @@ impl Icon {
             Icon::Delete => ICON_SWEEP,
             Icon::Mesh => ICON_MESH,
             Icon::Copy => ICON_COPY,
+            Icon::Share => SVG_SHARE_2,
             Icon::Lock => ICON_LOCK,
 
             // Meta

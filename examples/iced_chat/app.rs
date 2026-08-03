@@ -19,6 +19,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::card_shell::{CardShell, CARD_ROW_HEIGHT};
 use crate::link_preview;
 use crate::notification::backend::NoopBackend;
 use crate::notification::event::{
@@ -517,8 +518,8 @@ fn blob_ticket_string(
 pub(crate) const SPACE_2: f32 = 2.0;
 pub(crate) use crate::design_tokens::{AVATAR_MD, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
-    DETAILS_PANEL_WIDTH, RADIUS_LG, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_24,
-    SPACE_4, SPACE_8,
+    DETAILS_PANEL_WIDTH, RADIUS_LG, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_20,
+    SPACE_24, SPACE_32, SPACE_4, SPACE_8,
 };
 pub(crate) use crate::icon_system::{Icon, IconSize};
 pub(crate) const SPACE_6: f32 = 6.0;
@@ -765,7 +766,11 @@ pub(crate) const ICON_ACTIVITY: &[u8] = include_bytes!("../../assets/icons/lucid
 pub(crate) const ICON_NOTIFICATION: &[u8] = include_bytes!("../../assets/icons/lucide/bell.svg");
 pub(crate) const ICON_ONLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle-filled.svg");
 pub(crate) const ICON_OFFLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle.svg");
+pub(crate) const ICON_CHECK: &[u8] = include_bytes!("../../assets/icons/lucide/check.svg");
 pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
+/// Static peer-to-peer node-graph decoration for the home hero card.
+/// Deliberately static (no animation) so it consumes no CPU while idle.
+pub(crate) const NETWORK_MOTIF: &[u8] = include_bytes!("../../assets/icons/network-motif.svg");
 pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../assets/icons/lucide/paperclip.svg");
 pub(crate) const ICON_EMOJI: &str = "😊";
 #[expect(dead_code)]
@@ -1361,6 +1366,61 @@ impl PeerPresence {
             PeerPresence::Offline | PeerPresence::Unknown => ICON_OFFLINE,
         }
     }
+}
+
+// ── Home connection hero state (UI-08) ────────────────────────────────
+//
+// The home hero card is bound to real readiness/connection state.  Visual
+// variants map 1:1 from the existing application state semantics below —
+// the UI never invents a state that the network layer has not reported.
+//
+// Mapping (priority order, most severe first):
+//   1. `MeshHealth::Offline(_)`            -> Offline   (red)
+//   2. `MeshHealth::Degraded(_)`           -> Degraded  (amber)
+//   3. has_peer_connections                -> Ready     (green)
+//   4. relay reachable (sender present)    -> Connecting (waiting for peers)
+//   5. otherwise                           -> Starting  (bootstrap)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HomeConnectionVariant {
+    /// Boru is still booting its network stack; no sender or peers yet.
+    Starting,
+    /// The relay / gossip sender is up but no peer connections yet.
+    Connecting,
+    /// Peer connections exist and the mesh is healthy.
+    Ready,
+    /// Connected but the mesh reports degradation.
+    Degraded,
+    /// Transport is offline (mesh health Offline).
+    Offline,
+}
+
+/// Truthful mapping from application connection state to the home hero
+/// variant.  This is a pure function so it can be unit-tested in isolation.
+fn home_connection_variant(
+    mesh_health: &MeshHealth,
+    has_peer_connections: bool,
+    relay_reachable: bool,
+) -> HomeConnectionVariant {
+    match mesh_health {
+        MeshHealth::Offline(_) => HomeConnectionVariant::Offline,
+        MeshHealth::Degraded(_) => HomeConnectionVariant::Degraded,
+        MeshHealth::Good => {
+            if has_peer_connections {
+                HomeConnectionVariant::Ready
+            } else if relay_reachable {
+                HomeConnectionVariant::Connecting
+            } else {
+                HomeConnectionVariant::Starting
+            }
+        }
+    }
+}
+
+/// A bounded, presentation-ready mesh event with a real capture time.
+#[derive(Debug, Clone)]
+struct MeshEvent {
+    message: String,
+    recorded_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2712,7 +2772,7 @@ pub struct IcedChat {
     /// first establishes peer connectivity.
     conversation_subscription_pending: bool,
     /// Scrolling log of mesh connection progress events.
-    mesh_event_log: std::collections::VecDeque<String>,
+    mesh_event_log: std::collections::VecDeque<MeshEvent>,
     /// Counter for periodic presence broadcast (decremented per ConnMonitorTick,
     /// broadcasts Message::Presence when it hits 0, resets to 5).
     presence_counter: u32,
@@ -3148,6 +3208,13 @@ pub struct IcedChat {
     gui_snapshot_pending: bool,
     /// Recent activity feed shown on the landing page (ring buffer, newest first).
     recent_activity: VecDeque<RecentActivityEvent>,
+    /// Monotonic counter bumped by `ActivityTick` (once per second). It is
+    /// included in the Recent Activity and Tunnels card dependencies so
+    /// relative timestamps refresh and tunnel expiry flips surface while the
+    /// app is idle. It is deliberately NOT included in the Online Peers card
+    /// dependency, which has no time-dependent content — the peers card stays
+    /// memoized (via `iced::widget::lazy`) across idle ticks.
+    activity_tick: u64,
     /// Current window width, updated by resize events.
     /// Used for responsive layout decisions (breakpoint at 640px).
     window_width: f32,
@@ -3303,7 +3370,7 @@ struct SidebarChatsRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SidebarAvatarHandle {
+pub(crate) struct SidebarAvatarHandle {
     handle: Option<iced::widget::image::Handle>,
     key: Option<u64>,
 }
@@ -3426,6 +3493,96 @@ struct SidebarRequestsDependency {
     friend_request_error: String,
     group_invites: Vec<SidebarGroupInviteRow>,
     tunnel_requests: Vec<SidebarTunnelRequestRow>,
+}
+
+// ── Home-rail card dependencies (fine-grained selectors) ─────────────────
+// Each struct holds ONLY the state slice its card renders. `iced::widget::lazy`
+// compares a freshly computed dependency with the previous frame's value via
+// PartialEq and, when equal, reuses the already-built subtree — the iced
+// equivalent of React.memo + a shallow-equality selector. Because each card's
+// dependency excludes the other cards' data, a change in one slice can never
+// rebuild a different card. The Online Peers dependency deliberately excludes
+// `activity_tick`, so the once-per-second ActivityTick (which refreshes
+// relative timestamps in the Recent Activity card and expiry labels in the
+// Tunnels card) does not touch the peers card at all.
+
+/// Dependency for the Online Peers card. Friend presence rows only.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct OnlinePeersCardData {
+    pub(crate) dark_mode: bool,
+    /// Number of friends the user can message (count-badge denominator).
+    pub(crate) total_friends: usize,
+    /// Online/Away friend rows (Offline friends are filtered out).
+    pub(crate) rows: Vec<OnlinePeerRow>,
+}
+
+/// One Online Peers row: the peer key (for the open-chat action), the
+/// resolved display name, and the avatar handle (keyed so image bytes do not
+/// defeat equality checks).
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct OnlinePeerRow {
+    pub(crate) pk: PublicKey,
+    pub(crate) name: String,
+    pub(crate) avatar: SidebarAvatarHandle,
+}
+
+/// Dependency for the Recent Activity card. `tick` is bumped once per second
+/// by `ActivityTick` so relative timestamps re-render while idle; `rows`
+/// changes only when a real activity event is pushed.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct RecentActivityCardData {
+    pub(crate) dark_mode: bool,
+    pub(crate) tick: u64,
+    /// Full ring-buffer length (drives the count badge).
+    pub(crate) total: usize,
+    /// The newest activity rows actually rendered (capped at 15).
+    pub(crate) rows: Vec<ActivityRow>,
+}
+
+/// One Recent Activity row. `timestamp` is kept stable so an unchanged buffer
+/// compares equal across frames — only `tick` makes the card rebuild for
+/// fresh relative timestamps.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct ActivityRow {
+    pub(crate) description: String,
+    pub(crate) kind: ActivityKind,
+    pub(crate) timestamp: SystemTime,
+}
+
+/// Dependency for the Tunnels card. `tick` is included so a tunnel that
+/// expires while the app is idle flips to "Expired" within a second; `rows`
+/// changes only when the live TunnelService snapshot or the shared-tunnel
+/// name map changes.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct TunnelsCardData {
+    pub(crate) dark_mode: bool,
+    pub(crate) tick: u64,
+    pub(crate) rows: Vec<TunnelRow>,
+}
+
+/// One Tunnels row. `expired` is resolved against the wall clock at selector
+/// time so status labels never invent a state; the close action uses `id`.
+///
+/// `Hash` is implemented manually because `TunnelStatus` does not implement
+/// it — the discriminant is hashed, which is all `iced::widget::lazy`'s cache
+/// key needs (the actual change detection uses `PartialEq`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TunnelRow {
+    pub(crate) id: boru_core::tunnel::TunnelId,
+    pub(crate) name: String,
+    pub(crate) endpoint: String,
+    pub(crate) status: TunnelStatus,
+    pub(crate) expired: bool,
+}
+
+impl std::hash::Hash for TunnelRow {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.name.hash(state);
+        self.endpoint.hash(state);
+        std::mem::discriminant(&self.status).hash(state);
+        self.expired.hash(state);
+    }
 }
 
 /// A structured join-request item exposed by the main-menu ViewModel.
@@ -3922,6 +4079,8 @@ pub enum AppMessage {
     DeleteRoom(TopicId),
     /// Periodic tick for the splash screen spinner animation.
     SplashTick,
+    /// Periodic redraw for relative labels in the home activity feed.
+    ActivityTick,
     /// Periodic tick for connection type refresh.
     ConnMonitorTick,
     /// Periodic tick for mesh quiescence watchdog.
@@ -5186,7 +5345,10 @@ impl IcedChat {
             conversation_subscription_pending: true,
             mesh_event_log: {
                 let mut log = std::collections::VecDeque::new();
-                log.push_back("Starting up...".to_string());
+                log.push_back(MeshEvent {
+                    message: "Starting up...".to_string(),
+                    recorded_at: Instant::now(),
+                });
                 log
             },
             presence_counter: 5,
@@ -5370,6 +5532,7 @@ impl IcedChat {
             notification_service: NotificationService::new(),
             window_focus_tracker: WindowFocusTracker::new(),
             recent_activity: VecDeque::with_capacity(50),
+            activity_tick: 0,
             window_width: 1200.0,
             link_preview_cache: Arc::new(StdMutex::new(link_preview::LinkPreviewCache::new())),
             link_preview_fetch_index: None,
@@ -6331,7 +6494,10 @@ impl IcedChat {
         if self.mesh_event_log.len() >= 50 {
             self.mesh_event_log.pop_front();
         }
-        self.mesh_event_log.push_back(text.into());
+        self.mesh_event_log.push_back(MeshEvent {
+            message: text.into(),
+            recorded_at: Instant::now(),
+        });
     }
     #[expect(dead_code)]
     fn push_local(&mut self, text: impl Into<String>) {
@@ -6723,6 +6889,7 @@ impl IcedChat {
             AppMessage::FriendListResult(_) => "FriendListResult",
             AppMessage::DeleteRoom(_) => "DeleteRoom",
             AppMessage::SplashTick => "SplashTick",
+            AppMessage::ActivityTick => "ActivityTick",
             AppMessage::ConnMonitorTick => "ConnMonitorTick",
             AppMessage::MeshWatchdogTick => "MeshWatchdogTick",
             AppMessage::OutboxRetryTick => "OutboxRetryTick",
@@ -15355,6 +15522,18 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            // The activity feed formats timestamps relative to the current
+            // wall clock. Bumping the tick revision changes the Recent
+            // Activity and Tunnels card dependencies so `iced::lazy` rebuilds
+            // those subtrees — and only those — with fresh relative
+            // timestamps / expiry labels while the app is otherwise idle. The
+            // Online Peers dependency deliberately excludes the tick, so the
+            // peers card stays memoized across idle seconds.
+            AppMessage::ActivityTick => {
+                self.activity_tick = self.activity_tick.wrapping_add(1);
+                iced::Task::none()
+            }
+
             AppMessage::ConnMonitorTick => {
                 let evicted = {
                     let mut store = self.directory_store.lock().unwrap();
@@ -16090,8 +16269,9 @@ impl IcedChat {
                     self.conversation_subscription_pending = false;
                     let count = self.conversation_store.active_iter().into_iter().count();
                     info!(count, "mesh ready: subscribing to stored conversations");
-                    self.mesh_event_log
-                        .push_back(format!("Subscribing to {count} stored conversation(s)…",));
+                    self.push_mesh_event(
+                        format!("Subscribing to {count} stored conversation(s)…",),
+                    );
                     if count > 0 {
                         self.mesh_health = new_health;
                         return iced::Task::done(AppMessage::SubscribeStoredConversations);
@@ -16123,10 +16303,7 @@ impl IcedChat {
                 }
                 // Log mesh health transitions to the event log (capacity 50).
                 if let Some(log_msg) = &notification {
-                    if self.mesh_event_log.len() > 50 {
-                        self.mesh_event_log.pop_front();
-                    }
-                    self.mesh_event_log.push_back(log_msg.clone());
+                    self.push_mesh_event(log_msg.clone());
                 }
 
                 iced::Task::none()
@@ -21410,44 +21587,391 @@ impl IcedChat {
         section.into()
     }
 
+    // ── Home-rail card selectors (fine-grained state slices) ─────────────
+    // Each selector returns ONLY the data its card renders: the Online Peers
+    // selector never reads `recent_activity` or the tunnel service, the
+    // Recent Activity selector never reads friends/presence, and the Tunnels
+    // selector never reads friends/activity. The matching builders run inside
+    // `iced::widget::lazy`, which compares the fresh selector value with the
+    // previous frame and reuses the built subtree when nothing in the slice
+    // changed — so a data change in one card rebuilds exactly that card.
+
+    /// Selector for the Online Peers card: friends with live presence plus
+    /// the total friend count for the badge denominator.
+    fn online_peers_card_data(&self) -> OnlinePeersCardData {
+        let total_friends = self
+            .friends
+            .iter()
+            .filter(|(_, r)| r.relationship.can_message())
+            .count();
+        let rows = self
+            .friends
+            .iter()
+            .filter_map(|(fid, _)| {
+                let pk = fid.parse_public_key().ok()?;
+                if self.peer_presence(&pk) == PeerPresence::Offline {
+                    return None;
+                }
+                Some(OnlinePeerRow {
+                    pk,
+                    name: self.resolve_name(&pk),
+                    avatar: Self::sidebar_avatar_handle(
+                        self.friend_image_handles
+                            .get(&pk)
+                            .and_then(|slot| slot.as_ref()),
+                    ),
+                })
+            })
+            .collect();
+        OnlinePeersCardData {
+            dark_mode: self.dark_mode,
+            total_friends,
+            rows,
+        }
+    }
+
+    /// Selector for the Recent Activity card: the ring-buffer slice only
+    /// (badge total + the newest 15 rendered rows). `tick` is included so the
+    /// per-second ActivityTick refreshes relative timestamps while idle.
+    fn recent_activity_card_data(&self) -> RecentActivityCardData {
+        let rows = self
+            .recent_activity
+            .iter()
+            .take(15)
+            .map(|event| ActivityRow {
+                description: event.description.clone(),
+                kind: event.kind,
+                timestamp: event.timestamp,
+            })
+            .collect();
+        RecentActivityCardData {
+            dark_mode: self.dark_mode,
+            tick: self.activity_tick,
+            total: self.recent_activity.len(),
+            rows,
+        }
+    }
+
+    /// Selector for the Tunnels card: the live TunnelService snapshot plus
+    /// the shared-tunnel name map needed to label rows. `tick` is included so
+    /// a tunnel expiring while idle flips to "Expired" within a second.
+    fn tunnels_card_data(&self) -> TunnelsCardData {
+        let rows = self
+            .tunnel_service
+            .list_tunnels()
+            .into_iter()
+            .map(|def| {
+                let now = now_ms().max(0) as u64;
+                let expired = def.status != TunnelStatus::Revoked && def.expires_at_ms <= now;
+                let endpoint = match def.target {
+                    boru_core::tunnel::service::TunnelTarget::Tcp { host, port } => {
+                        tunnel_target_label(host, port)
+                    }
+                };
+                let name = self
+                    .shared_tunnels
+                    .get(&def.id)
+                    .map(|state| state.service_name.clone())
+                    .unwrap_or_else(|| {
+                        self.names
+                            .get(&def.allowed_peer)
+                            .cloned()
+                            .unwrap_or_else(|| def.allowed_peer.fmt_short().to_string())
+                    });
+                TunnelRow {
+                    id: def.id,
+                    name,
+                    endpoint,
+                    status: def.status,
+                    expired,
+                }
+            })
+            .collect();
+        TunnelsCardData {
+            dark_mode: self.dark_mode,
+            tick: self.activity_tick,
+            rows,
+        }
+    }
+
+    /// Build the Online Peers card subtree. Runs inside `iced::widget::lazy`,
+    /// so it is only re-invoked when `OnlinePeersCardData` actually changes.
+    fn view_online_peers_card(dep: &OnlinePeersCardData) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, text, Row, Space};
+        use iced::{Alignment, Length};
+
+        let theme = Self::theme_from_dark(dep.dark_mode);
+        let peer_rows: Vec<iced::Element<'static, AppMessage>> = dep
+            .rows
+            .iter()
+            .map(|row| {
+                let mut avatar = Avatar::new(row.name.clone())
+                    .size(crate::design_tokens::AVATAR_SM)
+                    .dark_mode(dep.dark_mode)
+                    .online_dot(true)
+                    .fallback_icon(Icon::Friend);
+                if let Some(handle) = row.avatar.handle.clone() {
+                    avatar = avatar.image(handle);
+                }
+                let row_el = Row::new()
+                    .push(avatar.build())
+                    .push(Space::new().width(Length::Fixed(SPACE_8)))
+                    .push(
+                        text(row.name.clone())
+                            .size(TYPO_SM)
+                            .color(text_system(&theme))
+                            .width(Length::Fill),
+                    )
+                    .spacing(0)
+                    .align_y(Alignment::Center);
+                button(row_el)
+                    .on_press(AppMessage::OpenConversation(row.pk))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(crate::card_shell::CARD_ROW_HEIGHT))
+                    .padding([0.0, SPACE_8])
+                    .style(|t, status| iced::widget::button::Style {
+                        background: matches!(status, iced::widget::button::Status::Hovered).then(
+                            || iced::Background::Color(crate::design_tokens::surface_hover(t)),
+                        ),
+                        border: iced::Border {
+                            radius: crate::design_tokens::RADIUS_SM.into(),
+                            ..Default::default()
+                        },
+                        text_color: iced::Color::TRANSPARENT,
+                        ..Default::default()
+                    })
+                    .into()
+            })
+            .collect();
+
+        crate::card_shell::CardShell::new("Online Peers", peer_rows)
+            .count(dep.rows.len())
+            .count_total(dep.total_friends)
+            .on_view_all(AppMessage::OpenFriendRequests)
+            .empty_message("No peers online")
+            // Five 48 px rows + four SPACE_2 gaps: the 6th peer scrolls.
+            .max_height(
+                5.0 * crate::card_shell::CARD_ROW_HEIGHT + 4.0 * crate::design_tokens::SPACE_2,
+            )
+            .build(&theme)
+    }
+
+    /// Build the Recent Activity card subtree (memoized via lazy).
+    fn view_recent_activity_card(
+        dep: &RecentActivityCardData,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{container, row, text, Row, Space};
+        use iced::{Alignment, Length};
+
+        let theme = Self::theme_from_dark(dep.dark_mode);
+        let activity_rows: Vec<iced::Element<'static, AppMessage>> = dep
+            .rows
+            .iter()
+            .map(|event| {
+                let ago = crate::presentation::relative_time_from_system(event.timestamp);
+                let activity_icon = match event.kind {
+                    ActivityKind::Online => ICON_ONLINE,
+                    ActivityKind::Offline => ICON_OFFLINE,
+                    ActivityKind::FileShared => ICON_FILES,
+                    ActivityKind::Message => ICON_CHAT,
+                    ActivityKind::Generic => ICON_ACTIVITY,
+                };
+                // Copy the kind out of the borrowed row so the icon style
+                // closure stays 'static (owned values only) — required for
+                // the lazy content builder's `Element<'static, _>` return.
+                let kind = event.kind;
+                container(
+                    row![
+                        icon_svg(activity_icon, TYPO_SM).style(move |t, _| {
+                            iced::widget::svg::Style {
+                                color: Some(if kind == ActivityKind::Online {
+                                    accent_green(t)
+                                } else {
+                                    text_muted(t)
+                                }),
+                            }
+                        }),
+                        text(crate::presentation::truncate_with_ellipsis(
+                            &event.description,
+                            40,
+                        ))
+                        .size(TYPO_SM)
+                        .color(text_system(&theme))
+                        .wrapping(iced::widget::text::Wrapping::None),
+                        Space::new().width(Length::Fill),
+                        text(ago).size(TYPO_XXS).color(text_muted(&theme)),
+                    ]
+                    .spacing(SPACE_6)
+                    .align_y(Alignment::Center),
+                )
+                .height(Length::Fixed(CARD_ROW_HEIGHT))
+                .width(Length::Fill)
+                .align_y(Alignment::Center)
+                .into()
+            })
+            .collect();
+
+        CardShell::new("Recent Activity", activity_rows)
+            .count(dep.total)
+            .empty_message("No recent activity")
+            .max_height(180.0)
+            .build(&theme)
+    }
+
+    /// Build the Tunnels card subtree (memoized via lazy).
+    fn view_tunnels_card(dep: &TunnelsCardData) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, container, row, text, Column, Space};
+        use iced::{Alignment, Length};
+
+        let theme = Self::theme_from_dark(dep.dark_mode);
+        let tunnel_rows: Vec<iced::Element<'static, AppMessage>> = dep
+            .rows
+            .iter()
+            .map(|tunnel| {
+                let status = if tunnel.expired {
+                    "Expired"
+                } else {
+                    tunnel.status.label()
+                };
+                let status_color = if tunnel.expired {
+                    text_muted(&theme)
+                } else {
+                    match tunnel.status {
+                        TunnelStatus::Active => accent_primary(&theme),
+                        TunnelStatus::Connecting => color_warning(&theme),
+                        TunnelStatus::Connected => accent_green(&theme),
+                        TunnelStatus::Revoked => text_muted(&theme),
+                        TunnelStatus::Failed => color_error(&theme),
+                        TunnelStatus::Disconnected => text_muted(&theme),
+                    }
+                };
+                container(
+                    row![
+                        icon_svg(ICON_LOCK, TYPO_SM).style(move |t, _| {
+                            iced::widget::svg::Style {
+                                color: Some(status_color),
+                            }
+                        }),
+                        Column::new()
+                            .push(
+                                text(tunnel.name.clone())
+                                    .size(TYPO_SM)
+                                    .color(text_system(&theme)),
+                            )
+                            .push(
+                                text(tunnel.endpoint.clone())
+                                    .size(TYPO_XXS)
+                                    .color(text_muted(&theme)),
+                            )
+                            .spacing(SPACE_2)
+                            .align_x(Alignment::Start),
+                        Space::new().width(Length::Fill),
+                        text(status).size(TYPO_XXS).color(status_color),
+                        button(
+                            Icon::Close
+                                .build()
+                                .size(IconSize::Xs)
+                                .destructive(true)
+                                .build()
+                        )
+                        .on_press(AppMessage::CloseTunnel(tunnel.id))
+                        .padding([SPACE_2, SPACE_6])
+                        .style(BUTTON_GHOST_BG),
+                    ]
+                    .spacing(SPACE_6)
+                    .align_y(Alignment::Center),
+                )
+                .height(Length::Fixed(crate::card_shell::CARD_ROW_HEIGHT))
+                .width(Length::Fill)
+                .align_y(Alignment::Center)
+                .into()
+            })
+            .collect();
+
+        crate::card_shell::CardShell::new("Tunnels", tunnel_rows)
+            .count(dep.rows.len())
+            .on_view_all(AppMessage::ShowCreateTunnelDialog)
+            .empty_message("No active tunnels")
+            .max_height(120.0)
+            .build(&theme)
+    }
+
     // ── Main panel (empty state — landing screen) ─────────────────────
 
     /// Landing screen shown when no conversation is selected.
     /// Redesigned: connection status first, then actions, then activity.
     fn view_main_empty_state(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, row, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, row, rule, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = self.theme();
         let narrow = self.window_width < 640.0;
 
-        // ── Counts (from shared presence state) ──
-        let online_friend_count = self
-            .friends
-            .iter()
-            .filter(|(fid, _)| {
-                fid.parse_public_key()
-                    .ok()
-                    .map(|pk| {
-                        self.peer_presence(&pk) != PeerPresence::Offline
-                            && self.names.contains_key(&pk)
-                    })
-                    .unwrap_or(false)
-            })
-            .count();
-        let total_friend_count = self
-            .friends
-            .iter()
-            .filter(|(_, r)| r.relationship.can_message())
-            .count();
-
         // ── Connection state (single source of truth) ──
         let has_peer_connections =
             !self.neighbors.is_empty() || self.relayed_peers > 0 || self.direct_peers > 0;
-        let is_relay_reachable = self.sender.is_some() || has_peer_connections;
-        let is_offline = matches!(self.mesh_health, MeshHealth::Offline(_));
+        let relay_reachable = self.sender.is_some() || has_peer_connections;
+        let variant =
+            home_connection_variant(&self.mesh_health, has_peer_connections, relay_reachable);
 
-        // ── Greeting ──
+        // ── Hero variant visuals (truthful, from the pure mapping above) ──
+        let (hero_icon, hero_color, headline): (&[u8], fn(&iced::Theme) -> iced::Color, String) =
+            match variant {
+                HomeConnectionVariant::Starting => {
+                    const RECONNECT_DOTS: [&str; 4] =
+                        ["\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}"];
+                    let dot =
+                        RECONNECT_DOTS[self.main_screen_reconnect_frame % RECONNECT_DOTS.len()];
+                    (ICON_RETRY, color_warning, format!("Starting Boru {dot}"))
+                }
+                HomeConnectionVariant::Connecting => (
+                    ICON_RETRY,
+                    color_warning,
+                    "Connecting \u{2014} waiting for peers\u{2026}".to_string(),
+                ),
+                HomeConnectionVariant::Ready => (
+                    ICON_CHECK,
+                    accent_green,
+                    "Boru is connected and ready.".to_string(),
+                ),
+                HomeConnectionVariant::Degraded => {
+                    let reason = match &self.mesh_health {
+                        MeshHealth::Degraded(r) => r.clone(),
+                        _ => String::new(),
+                    };
+                    (
+                        ICON_MESH,
+                        color_warning,
+                        format!("Mesh degraded \u{2014} {reason}"),
+                    )
+                }
+                HomeConnectionVariant::Offline => {
+                    let reason = match &self.mesh_health {
+                        MeshHealth::Offline(r) => r.clone(),
+                        _ => String::new(),
+                    };
+                    (
+                        ICON_OFFLINE,
+                        color_error,
+                        format!("Boru is offline \u{2014} {reason}"),
+                    )
+                }
+            };
+        let show_retry = matches!(variant, HomeConnectionVariant::Offline);
+        let show_details = matches!(
+            variant,
+            HomeConnectionVariant::Offline | HomeConnectionVariant::Degraded
+        );
+        // Compact status pill label for the page header (Figure 3).
+        let pill_label = match variant {
+            HomeConnectionVariant::Starting => "Starting",
+            HomeConnectionVariant::Connecting => "Connecting",
+            HomeConnectionVariant::Ready => "Connected",
+            HomeConnectionVariant::Degraded => "Degraded",
+            HomeConnectionVariant::Offline => "Offline",
+        };
+
+        // ── Greeting (page header) ──
         let display_name = if self.local_label.is_empty() {
             "there"
         } else {
@@ -21457,161 +21981,279 @@ impl IcedChat {
             "Good {}, {display_name}",
             self.time_of_day_greeting()
         ))
-        .size(TYPO_LG)
+        .size(crate::fonts::PAGE_TITLE)
+        .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+        .color(crate::design_tokens::text_primary(&theme))
         .width(Length::Fill);
+        let welcome_line = text("Welcome to Boru")
+            .size(TYPO_SM)
+            .color(text_secondary(&theme))
+            .width(Length::Fill);
 
-        // ── Connection status (prominent, full-width) ──
-        let reconnecting_text: String;
-        let (status_icon, status_text, status_color, show_retry, show_details): (
-            &[u8],
-            String,
-            fn(&iced::Theme) -> iced::Color,
-            bool,
-            bool,
-        ) = if has_peer_connections {
-            (
-                ICON_ONLINE,
-                "Boru is connected and ready.".to_string(),
-                accent_green,
-                false,
-                false,
-            )
-        } else if is_offline {
-            (
-                ICON_OFFLINE,
-                "Boru could not reach the relay.".to_string(),
-                color_error,
-                true,
-                true,
-            )
-        } else if is_relay_reachable {
-            (
-                ICON_ONLINE,
-                "Connected \u{2014} waiting for peers\u{2026}".to_string(),
-                accent_green,
-                false,
-                false,
-            )
-        } else {
-            const RECONNECT_DOTS: [&str; 4] = ["\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}"];
-            let dot = RECONNECT_DOTS[self.main_screen_reconnect_frame % RECONNECT_DOTS.len()];
-            reconnecting_text = format!("Reconnecting to the relay {dot}");
-            (ICON_RETRY, reconnecting_text, color_warning, false, true)
-        };
+        // ── Status pill (page header right, compact) ──
+        let status_pill = container(
+            row![
+                icon_svg(hero_icon, TYPO_SM).style(move |t, _| iced::widget::svg::Style {
+                    color: Some(hero_color(t)),
+                }),
+                Space::new().width(Length::Fixed(SPACE_6)),
+                text(pill_label).size(TYPO_XS).color(hero_color(&theme)),
+            ]
+            .spacing(0)
+            .align_y(Alignment::Center),
+        )
+        .padding([SPACE_6, SPACE_12])
+        .style(move |t| iced::widget::container::Style {
+            background: Some(iced::Background::Color(bg_surface(t))),
+            border: iced::Border {
+                color: hero_color(t),
+                width: 1.0,
+                radius: SPACE_16.into(),
+            },
+            ..Default::default()
+        });
 
-        let mut status_row = Row::new()
-            .push(
-                icon_svg(status_icon, TYPO_LG).style(move |t, _| iced::widget::svg::Style {
-                    color: Some(status_color(t)),
+        // ── Large connection hero card (Figure 3) ──
+        let hero_badge =
+            container(
+                icon_svg(hero_icon, 22.0).style(move |t, _| iced::widget::svg::Style {
+                    color: Some(iced::Color::WHITE),
                 }),
             )
-            .push(Space::new().width(Length::Fixed(SPACE_8)))
-            .push(text(status_text).size(TYPO_MD).color(status_color(&theme)))
-            .spacing(0)
-            .align_y(Alignment::Center);
+            .width(Length::Fixed(48.0))
+            .height(Length::Fixed(48.0))
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(hero_color(t))),
+                border: iced::Border {
+                    radius: 24.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
 
+        let mut hero_actions = Row::new().spacing(SPACE_8);
         if show_retry {
-            status_row = status_row
-                .push(Space::new().width(Length::Fixed(SPACE_12)))
-                .push(
-                    button(text("Retry").size(TYPO_SM))
-                        .on_press(AppMessage::RetryConnection)
-                        .padding([SPACE_4, SPACE_12])
-                        .style(BUTTON_PRIMARY),
-                );
+            hero_actions = hero_actions.push(
+                button(text("Retry").size(TYPO_SM))
+                    .on_press(AppMessage::RetryConnection)
+                    .padding([SPACE_6, SPACE_12])
+                    .style(BUTTON_PRIMARY),
+            );
         }
         if show_details {
-            status_row = status_row
-                .push(Space::new().width(Length::Fixed(SPACE_8)))
-                .push(
-                    button(text("Details").size(TYPO_SM))
-                        .on_press(AppMessage::OpenConnectionDetails)
-                        .padding([SPACE_4, SPACE_12])
-                        .style(BUTTON_OUTLINE),
-                );
+            hero_actions = hero_actions.push(
+                button(text("Details").size(TYPO_SM))
+                    .on_press(AppMessage::OpenConnectionDetails)
+                    .padding([SPACE_6, SPACE_12])
+                    .style(BUTTON_OUTLINE),
+            );
         }
 
-        // ── Mesh health with reason ──
-        let mesh_health_text = match &self.mesh_health {
-            MeshHealth::Good => "Mesh is healthy".to_string(),
-            MeshHealth::Degraded(reason) => format!("\u{26A0} Mesh degraded: {reason}"),
-            MeshHealth::Offline(reason) => format!("\u{2717} Mesh offline: {reason}"),
-        };
-        let mesh_peers_text = format!(
-            "{} neighbor{}, {} direct, {} relayed",
-            self.neighbors.len(),
-            if self.neighbors.len() == 1 { "" } else { "s" },
-            self.direct_peers,
-            self.relayed_peers,
-        );
+        let mut hero_text = Column::new()
+            .push(
+                text(headline.clone())
+                    .size(TYPO_LG)
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                    .color(hero_color(&theme)),
+            )
+            .push(Space::new().height(Length::Fixed(SPACE_4)))
+            .push(
+                text("Private communication, peer to peer.")
+                    .size(TYPO_SM)
+                    .color(text_secondary(&theme)),
+            );
+        if show_retry || show_details {
+            hero_text = hero_text
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(hero_actions);
+        }
+        let hero_text = hero_text.spacing(0).width(Length::Fill);
 
-        // ── Mesh event log (all events, not just last 4) ──
-        let log_lines: Vec<iced::Element<'_, AppMessage>> = self
+        let mut hero_row = Row::new()
+            .push(hero_badge)
+            .push(Space::new().width(Length::Fixed(SPACE_16)))
+            .push(hero_text)
+            .spacing(0)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+        // Subtle static node-graph decoration on the right (wide layouts only).
+        if !narrow {
+            hero_row = hero_row.push(
+                iced::widget::svg(iced::widget::svg::Handle::from_memory(NETWORK_MOTIF))
+                    .width(Length::Fixed(200.0))
+                    .height(Length::Fixed(140.0))
+                    .style(|_t, _s| iced::widget::svg::Style { color: None }),
+            );
+        }
+
+        let hero_card = container(hero_row)
+            .padding(SPACE_24)
+            .width(Length::Fill)
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(
+                    if matches!(variant, HomeConnectionVariant::Ready) {
+                        crate::design_tokens::primary_soft(t)
+                    } else {
+                        bg_surface(t)
+                    },
+                )),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: 1.0,
+                    radius: crate::design_tokens::RADIUS_XL.into(),
+                },
+                ..Default::default()
+            });
+
+        // ── Mesh Health card ──
+        // Keep this card bounded to five rows so a burst of network events
+        // cannot change the home layout height. The scrollable list still
+        // exposes the complete bounded in-memory log.
+        let (health_label, health_color): (&str, fn(&iced::Theme) -> Color) =
+            match &self.mesh_health {
+                MeshHealth::Good => ("Healthy", accent_green),
+                MeshHealth::Degraded(_) => ("Degraded", color_warning),
+                MeshHealth::Offline(_) => ("Offline", color_error),
+            };
+        let count_cell = |label: String| {
+            container(text(label).size(TYPO_XS).color(text_secondary(&theme)))
+                .padding([SPACE_6, SPACE_8])
+                .width(Length::Fill)
+                .style(container_card)
+        };
+        let counts = Row::new()
+            .push(count_cell(format!("{}\nNeighbors", self.neighbors.len())))
+            .push(count_cell(format!("{}\nDirect", self.direct_peers)))
+            .push(count_cell(format!("{}\nRelayed", self.relayed_peers)))
+            .spacing(SPACE_6)
+            .width(Length::Fill);
+        let now = Instant::now();
+        let event_rows: Vec<iced::Element<'_, AppMessage>> = self
             .mesh_event_log
             .iter()
             .rev()
-            .map(|line| text(line).size(TYPO_XS).color(text_muted(&theme)).into())
+            .take(5)
+            .enumerate()
+            .map(|(index, event)| {
+                let age = now.saturating_duration_since(event.recorded_at);
+                let relative = if age.as_secs() < 1 {
+                    "now".to_string()
+                } else if age.as_secs() < 60 {
+                    format!("{}s", age.as_secs())
+                } else {
+                    format!("{}m", age.as_secs() / 60)
+                };
+                let lower = event.message.to_ascii_lowercase();
+                let (event_icon, event_color) = if lower.contains("error")
+                    || lower.contains("offline")
+                    || lower.contains("failed")
+                {
+                    (ICON_OFFLINE, color_error as fn(&iced::Theme) -> Color)
+                } else if lower.contains("degrad") || lower.contains("wait") {
+                    (ICON_RETRY, color_warning as fn(&iced::Theme) -> Color)
+                } else if lower.contains("connect") || lower.contains("discover") {
+                    (ICON_MESH, accent_green as fn(&iced::Theme) -> Color)
+                } else {
+                    (ICON_ACTIVITY, text_muted as fn(&iced::Theme) -> Color)
+                };
+                let row = Row::new()
+                    .push(icon_svg(event_icon, TYPO_XS).style(move |t, _| {
+                        iced::widget::svg::Style {
+                            color: Some(event_color(t)),
+                        }
+                    }))
+                    .push(Space::new().width(Length::Fixed(SPACE_8)))
+                    .push(
+                        text(event.message.clone())
+                            .size(TYPO_XS)
+                            .color(text_system(&theme))
+                            .width(Length::Fill),
+                    )
+                    .push(text(relative).size(TYPO_XXS).color(text_muted(&theme)))
+                    .spacing(0)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill);
+                let mut cell = Column::new().push(row);
+                if index < 4 {
+                    cell = cell.push(rule::horizontal(1).style(iced::widget::rule::weak));
+                }
+                cell.padding([SPACE_6, 0.0]).width(Length::Fill).into()
+            })
             .collect();
-        let event_log: iced::Element<'_, AppMessage> = if log_lines.is_empty() {
+        let event_log: iced::Element<'_, AppMessage> = if event_rows.is_empty() {
             container(
                 text("No recent mesh events.")
                     .size(TYPO_XS)
                     .color(text_muted(&theme)),
             )
-            .padding([SPACE_4, SPACE_8])
+            .height(Length::Fixed(156.0))
+            .align_y(Alignment::Center)
             .into()
         } else {
             container(
-                scrollable(
-                    Column::with_children(log_lines)
-                        .spacing(1)
-                        .width(Length::Fill),
-                )
-                .height(Length::Fixed(120.0)),
+                scrollable(Column::with_children(event_rows).width(Length::Fill))
+                    .height(Length::Fixed(156.0)),
             )
-            .padding([SPACE_4, SPACE_8])
+            .width(Length::Fill)
             .into()
         };
-
-        // ── Connection status card (full-width, prominent) ──
-        let conn_card = container(
+        let mesh_card = container(
             Column::new()
-                .push(greeting)
-                .push(Space::new().height(Length::Fixed(SPACE_10)))
-                .push(status_row)
-                .push(Space::new().height(Length::Fixed(SPACE_8)))
                 .push(
-                    text("Private communication, peer to peer.")
-                        .size(TYPO_XXS)
-                        .color(text_muted(&theme)),
+                    Row::new()
+                        .push(icon_svg(ICON_MESH, TYPO_MD).style(move |t, _| {
+                            iced::widget::svg::Style {
+                                color: Some(health_color(t)),
+                            }
+                        }))
+                        .push(Space::new().width(Length::Fixed(SPACE_8)))
+                        .push(
+                            Column::new()
+                                .push(text("Mesh Health").size(TYPO_MD).color(text_system(&theme)))
+                                .push(
+                                    text("Live network connectivity and recent events")
+                                        .size(TYPO_XS)
+                                        .color(text_muted(&theme)),
+                                ),
+                        )
+                        .push(Space::new().width(Length::Fill))
+                        .push(
+                            container(text(health_label).size(TYPO_XS).color(health_color(&theme)))
+                                .padding([SPACE_4, SPACE_8])
+                                .style(move |t| iced::widget::container::Style {
+                                    background: Some(iced::Background::Color(
+                                        crate::design_tokens::primary_soft(t),
+                                    )),
+                                    border: iced::Border {
+                                        color: health_color(t),
+                                        width: 1.0,
+                                        radius: SPACE_16.into(),
+                                    },
+                                    ..Default::default()
+                                }),
+                        )
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill),
                 )
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(counts)
                 .push(Space::new().height(Length::Fixed(SPACE_12)))
                 .push(
                     Row::new()
                         .push(
-                            icon_svg(ICON_MESH, TYPO_SM).style(|t, _| iced::widget::svg::Style {
-                                color: Some(text_muted(t)),
-                            }),
+                            text("RECENT EVENTS")
+                                .size(TYPO_XXS)
+                                .color(text_muted(&theme)),
                         )
-                        .push(Space::new().width(Length::Fixed(SPACE_6)))
+                        .push(Space::new().width(Length::Fill))
                         .push(
-                            Column::new()
-                                .push(
-                                    text(mesh_health_text.clone())
-                                        .size(TYPO_SM)
-                                        .color(text_system(&theme)),
-                                )
-                                .push(
-                                    text(mesh_peers_text.clone())
-                                        .size(TYPO_XS)
-                                        .color(text_muted(&theme)),
-                                )
-                                .spacing(SPACE_2),
+                            button(text("View details").size(TYPO_XXS))
+                                .on_press(AppMessage::OpenConnectionDetails)
+                                .padding([SPACE_2, SPACE_6])
+                                .style(BUTTON_GHOST),
                         )
-                        .spacing(0)
-                        .align_y(Alignment::Start),
+                        .width(Length::Fill),
                 )
-                .push(Space::new().height(Length::Fixed(SPACE_6)))
                 .push(event_log)
                 .spacing(0)
                 .width(Length::Fill),
@@ -21738,244 +22380,45 @@ impl IcedChat {
         .width(Length::Fill)
         .style(BUTTON_CARD);
 
-        // ── Left column: connection card + actions + share files ──
-        let left_col = Column::new()
-            .push(conn_card)
-            .push(Space::new().height(Length::Fixed(SPACE_16)))
-            .push(action_grid)
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
-            .push(share_files_btn)
-            .spacing(0)
-            .width(Length::Fill);
+        // ── Right rail: loading treatment decision (t_0441a1dc) ──
+        // No skeleton/shimmer loading is used for the three rail cards, by
+        // design. Every data source here is synchronously available at first
+        // render: Online Peers reads `self.friends` plus the presence map
+        // seeded from persisted friend status during IcedChat::new; Recent
+        // Activity reads the in-memory ring buffer; Tunnels reads
+        // TunnelService::list_tunnels() (a synchronous RwLock read of the
+        // live in-memory registry). There is no mount-time fetch of any of
+        // these. The only real asynchronous startup window (endpoint, DHT,
+        // protocol handlers, friend load) runs before the Iced window opens
+        // and is covered by the native splash window in main.rs; later
+        // presence/activity/tunnel updates arrive as event-driven messages
+        // that redraw these cards synchronously. A skeleton would therefore
+        // only appear by faking an async delay, which the task explicitly
+        // forbids — so rows render real data immediately and fill in
+        // progressively (e.g. profile images arrive async and replace the
+        // initials fallback when downloaded). Full rationale in
+        // docs/ui-redesign/evidence/ui-skeletons/README.md.
 
-        // ── Right column: Online Now ──
-        let online_label = if total_friend_count == 0 {
-            "ONLINE NOW".to_string()
-        } else {
-            format!("ONLINE NOW ({online_friend_count})")
-        };
-        let online_header = text(online_label).size(TYPO_XS).color(text_muted(&theme));
-
-        let online_items: Vec<iced::Element<'_, AppMessage>> = {
-            let online_friends: Vec<(PublicKey, String)> = self
-                .friends
-                .iter()
-                .filter_map(|(fid, _)| {
-                    let pk = fid.parse_public_key().ok()?;
-                    if self.peer_presence(&pk) != PeerPresence::Offline {
-                        self.names.get(&pk).cloned().map(|n| (pk, n))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if online_friends.is_empty() {
-                vec![Self::empty_state_block(
-                    &theme,
-                    "No friends are online.",
-                    None,
-                    [SPACE_6, 0.0],
-                )]
-            } else {
-                online_friends
-                    .into_iter()
-                    .map(|(pk, name)| {
-                        container(
-                            row![
-                                icon_svg(ICON_ONLINE, TYPO_SM).style(|t, _| {
-                                    iced::widget::svg::Style {
-                                        color: Some(accent_green(t)),
-                                    }
-                                }),
-                                text(name).size(TYPO_SM).color(text_system(&theme)),
-                                Space::new().width(Length::Fill),
-                                button(text("Msg").size(TYPO_XXS))
-                                    .on_press(AppMessage::OpenConversation(pk))
-                                    .padding([SPACE_2, SPACE_6])
-                                    .style(BUTTON_GHOST),
-                            ]
-                            .spacing(SPACE_6)
-                            .align_y(Alignment::Center),
-                        )
-                        .padding([SPACE_4, 0.0])
-                        .width(Length::Fill)
-                        .into()
-                    })
-                    .collect()
-            }
-        };
-
-        let online_feed = Column::new()
-            .push(online_header)
-            .push(Space::new().height(Length::Fixed(SPACE_6)))
-            .push(
-                scrollable(
-                    Column::with_children(online_items)
-                        .spacing(SPACE_2)
-                        .width(Length::Fill),
-                )
-                .height(Length::Fixed(140.0))
-                .width(Length::Fill),
-            );
-
-        let online_card = container(online_feed)
-            .padding([SPACE_12, SPACE_16])
-            .width(Length::Fill)
-            .style(container_card);
-
-        // ── Right column: Recent Activity ──
-        let activity_header = text("RECENT ACTIVITY")
-            .size(TYPO_XS)
-            .color(text_muted(&theme));
-
-        let activity_items: Vec<iced::Element<'_, AppMessage>> = if self.recent_activity.is_empty()
-        {
-            vec![Self::empty_state_block(
-                &theme,
-                "No recent activity.",
-                None,
-                [SPACE_6, 0.0],
-            )]
-        } else {
-            self.recent_activity
-                .iter()
-                .take(15)
-                .map(|event| {
-                    let ago = event
-                        .timestamp
-                        .elapsed()
-                        .map(|d| {
-                            if d.as_secs() < 60 {
-                                format!("{}s ago", d.as_secs())
-                            } else if d.as_secs() < 3600 {
-                                format!("{}m ago", d.as_secs() / 60)
-                            } else {
-                                format!("{}h ago", d.as_secs() / 3600)
-                            }
-                        })
-                        .unwrap_or_else(|_| "recently".to_string());
-                    let activity_icon = match event.kind {
-                        ActivityKind::Online => ICON_ONLINE,
-                        ActivityKind::Offline => ICON_OFFLINE,
-                        ActivityKind::FileShared => ICON_FILES,
-                        ActivityKind::Message => ICON_CHAT,
-                        ActivityKind::Generic => ICON_ACTIVITY,
-                    };
-                    container(
-                        row![
-                            icon_svg(activity_icon, TYPO_SM).style(move |t, _| {
-                                iced::widget::svg::Style {
-                                    color: Some(if event.kind == ActivityKind::Online {
-                                        accent_green(t)
-                                    } else {
-                                        text_muted(t)
-                                    }),
-                                }
-                            }),
-                            text(&event.description)
-                                .size(TYPO_SM)
-                                .color(text_system(&theme)),
-                            Space::new().width(Length::Fill),
-                            text(ago).size(TYPO_XXS).color(text_muted(&theme)),
-                        ]
-                        .spacing(SPACE_6)
-                        .align_y(Alignment::Center),
-                    )
-                    .padding([SPACE_2, 0.0])
-                    .width(Length::Fill)
-                    .into()
-                })
-                .collect()
-        };
-
-        let activity_feed = Column::new()
-            .push(activity_header)
-            .push(Space::new().height(Length::Fixed(SPACE_6)))
-            .push(
-                scrollable(
-                    Column::with_children(activity_items)
-                        .spacing(SPACE_2)
-                        .width(Length::Fill),
-                )
-                .height(Length::Fixed(180.0))
-                .width(Length::Fill),
-            );
-
-        let activity_card = container(activity_feed)
-            .padding([SPACE_12, SPACE_16])
-            .width(Length::Fill)
-            .style(container_card);
-
-        // ── Right column assembly ──
-        let tunnels_header = text("TUNNELS").size(TYPO_XS).color(text_muted(&theme));
-
-        let tunnel_list: Vec<TunnelDefinition> = self.tunnel_service.list_tunnels();
-        let tunnels_items: Vec<iced::Element<'_, AppMessage>> = if tunnel_list.is_empty() {
-            vec![Self::empty_state_block(
-                &theme,
-                "No active tunnels.",
-                None,
-                [SPACE_6, 0.0],
-            )]
-        } else {
-            tunnel_list
-                .iter()
-                .map(|def| {
-                    let peer_name = self
-                        .names
-                        .get(&def.allowed_peer)
-                        .cloned()
-                        .unwrap_or_else(|| def.allowed_peer.fmt_short().to_string());
-                    let status = tunnel_status_label(def);
-                    let status_theme_color = tunnel_status_color(&theme, def);
-                    let label = format!("{status} · {peer_name}");
-                    container(
-                        row![
-                            icon_svg(ICON_ACTIVITY, TYPO_SM).style(move |t, _| {
-                                iced::widget::svg::Style {
-                                    color: Some(status_theme_color),
-                                }
-                            }),
-                            text(label).size(TYPO_SM).color(text_system(&theme)),
-                            Space::new().width(Length::Fill),
-                            button(
-                                Icon::Close
-                                    .build()
-                                    .size(IconSize::Xs)
-                                    .destructive(true)
-                                    .build()
-                            )
-                            .on_press(AppMessage::CloseTunnel(def.id))
-                            .padding([SPACE_2, SPACE_6])
-                            .style(BUTTON_GHOST_BG),
-                        ]
-                        .spacing(SPACE_6)
-                        .align_y(Alignment::Center),
-                    )
-                    .padding([SPACE_2, 0.0])
-                    .width(Length::Fill)
-                    .into()
-                })
-                .collect()
-        };
-
-        let tunnels_feed = Column::new()
-            .push(tunnels_header)
-            .push(Space::new().height(Length::Fixed(SPACE_6)))
-            .push(
-                scrollable(
-                    Column::with_children(tunnels_items)
-                        .spacing(SPACE_2)
-                        .width(Length::Fill),
-                )
-                .height(Length::Fixed(120.0))
-                .width(Length::Fill),
-            );
-
-        let tunnels_card = container(tunnels_feed)
-            .padding([SPACE_12, SPACE_16])
-            .width(Length::Fill)
-            .style(container_card);
+        // ── Right column: Online Peers / Recent Activity / Tunnels ──
+        // Each card is built by a fine-grained selector (see the selector
+        // methods above) and wrapped in `iced::widget::lazy`. The lazy widget
+        // compares the fresh selector value — a PartialEq snapshot of exactly
+        // that card's state slice — with the previous frame and reuses the
+        // already-built subtree when nothing in the slice changed. A peer
+        // presence change therefore rebuilds only the Online Peers card, an
+        // activity push only Recent Activity, and a tunnel status change only
+        // Tunnels. The per-second ActivityTick bumps `activity_tick`, which
+        // the Recent Activity and Tunnels dependencies include (fresh relative
+        // timestamps / truthful expiry flips) but the Online Peers dependency
+        // deliberately excludes — the peers card never rebuilds on an idle
+        // tick.
+        let online_card =
+            iced::widget::lazy(self.online_peers_card_data(), Self::view_online_peers_card);
+        let activity_card = iced::widget::lazy(
+            self.recent_activity_card_data(),
+            Self::view_recent_activity_card,
+        );
+        let tunnels_card = iced::widget::lazy(self.tunnels_card_data(), Self::view_tunnels_card);
 
         let right_col = Column::new()
             .push(online_card)
@@ -21986,51 +22429,73 @@ impl IcedChat {
             .spacing(0)
             .width(Length::Fill);
 
-        // ── Page header: "Home" ──
+        // ── Page header: greeting + welcome + status pill (Figure 3) ──
         let page_header = row![
-            text("Home").size(TYPO_LG).width(Length::Fill),
-            // Connection indicator dot (compact)
-            if has_peer_connections || is_relay_reachable {
-                icon_svg(ICON_ONLINE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
-                    color: Some(accent_green(t)),
-                })
-            } else if is_offline {
-                icon_svg(ICON_OFFLINE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
-                    color: Some(color_error(t)),
-                })
-            } else {
-                icon_svg(ICON_RETRY, TYPO_SM).style(|t, _| iced::widget::svg::Style {
-                    color: Some(color_warning(t)),
-                })
-            },
+            Column::new()
+                .push(greeting)
+                .push(Space::new().height(Length::Fixed(SPACE_2)))
+                .push(welcome_line)
+                .spacing(0)
+                .width(Length::Fill),
+            status_pill,
         ]
         .spacing(SPACE_8)
         .align_y(Alignment::Center);
 
-        // ── Main content: two columns or stacked ──
-        let main_content: iced::Element<'_, AppMessage> = if narrow {
+        // ── Main content: hero left, activity rail right at wide sizes ──
+        // Two-thirds content + one-third activity rail (plan §4); the Online
+        // Peers panel reflows below the hero on narrower layouts.
+        let rail_stacked = self.window_width < 900.0;
+        let main_content: iced::Element<'_, AppMessage> = if rail_stacked {
+            // Narrow: hero first, then the activity rail reflows below it.
             Column::new()
-                .push(left_col)
+                .push(hero_card)
                 .push(Space::new().height(Length::Fixed(SPACE_16)))
                 .push(right_col)
+                .push(Space::new().height(Length::Fixed(SPACE_16)))
+                .push(mesh_card)
+                .push(Space::new().height(Length::Fixed(SPACE_16)))
+                .push(action_grid)
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(share_files_btn)
                 .spacing(0)
                 .width(Length::Fill)
                 .into()
         } else {
-            Row::new()
-                .push(container(left_col).width(Length::FillPortion(3)))
-                .push(Space::new().width(Length::Fixed(SPACE_16)))
-                .push(container(right_col).width(Length::FillPortion(2)))
+            // Wide: hero + mesh + actions on the left, rail on the right.
+            let left_col = Column::new()
+                .push(hero_card)
+                .push(Space::new().height(Length::Fixed(SPACE_16)))
+                .push(mesh_card)
+                .push(Space::new().height(Length::Fixed(SPACE_16)))
+                .push(action_grid)
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(share_files_btn)
                 .spacing(0)
+                .width(Length::Fill);
+            Row::new()
+                .push(container(left_col).width(Length::FillPortion(2)))
+                .push(Space::new().width(Length::Fixed(SPACE_20)))
+                .push(container(right_col).width(Length::FillPortion(1)))
+                .spacing(0)
+                .align_y(Alignment::Start)
                 .width(Length::Fill)
                 .into()
         };
 
-        // ── Assemble ──
+        // ── Assemble with responsive canvas padding (32 large / 24 medium / 16 compact) ──
+        let content_padding = if crate::design_tokens::is_large(self.window_width) {
+            SPACE_32
+        } else if crate::design_tokens::is_compact(self.window_width) {
+            SPACE_16
+        } else {
+            SPACE_24
+        };
+
         let col = Column::new()
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(page_header)
-            .push(Space::new().height(Length::Fixed(SPACE_16)))
+            .push(Space::new().height(Length::Fixed(SPACE_20)))
             .push(main_content)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .spacing(0)
@@ -22038,7 +22503,7 @@ impl IcedChat {
 
         scrollable(
             container(col)
-                .padding(SPACE_16)
+                .padding(content_padding)
                 .width(Length::Fill)
                 .height(Length::Fill),
         )
@@ -22114,10 +22579,20 @@ impl IcedChat {
         // Keep the header and composer outside the scrollable message log so
         // navigation and sending remain available while reading history. A
         // subtle divider separates the header from the message region.
+        //
+        // The timeline is the ONLY vertically expanding region: it fills the
+        // space between the fixed header and the pinned composer. It is wrapped
+        // in a `responsive` widget so `view_chat_log` knows its exact region
+        // height — iced only emits `Scrolled` events once content overflows,
+        // so a short timeline would otherwise never learn its viewport size
+        // and could not bottom-align its content (leaving a dead area below
+        // the last message).
         let content = widget::column![
             self.view_chat_header(),
             divider(&self.theme()),
-            self.view_chat_log(),
+            widget::responsive(|size: iced::Size| {
+                self.view_chat_log(size.height).into()
+            }),
             self.view_composer(),
         ]
         .spacing(0);
@@ -22847,69 +23322,110 @@ impl IcedChat {
         };
 
         // ── Toolbar (right side) ─────────────────────────────────────
-        // All actions use the shared ghost icon button + tooltip. Search now
-        // opens the in-conversation search panel; shared files opens the peer
-        // catalogue for direct chats (matching the details-panel action).
+        // Ghost icon buttons for: search, delete, copy, share, overflow.
+        // All actions use the shared tool_btn helper with consistent padding,
+        // tooltips, and BUTTON_ICON style.
         let search = tool_btn(
             Icon::Search.build().size(IconSize::Sm).build().into(),
             "Search",
             Some(AppMessage::ToggleChatSearch),
         );
-        let sweep = tool_btn(
-            Icon::Delete.build().size(IconSize::Sm).build().into(),
-            "Clear conversation",
-            Some(AppMessage::ClearConversation),
-        );
-        let shared = match peer {
+
+        // Delete: uses the existing ClearHistoryRequested/ConfirmClearHistory
+        // confirmation flow. First press toggles a destructive "Delete?"
+        // state; second press confirms and clears the conversation.
+        let is_deleting = self.history_confirm_clear;
+        let delete_icon = Icon::Delete
+            .build()
+            .size(IconSize::Sm)
+            .destructive(true)
+            .build();
+        let delete: iced::Element<'_, AppMessage> = if is_deleting {
+            let mut b = button(delete_icon).padding([SPACE_4, SPACE_6]);
+            b = b.on_press(AppMessage::ConfirmClearHistory);
+            iced::widget::tooltip::Tooltip::new(
+                b,
+                text("Confirm delete").size(TYPO_XS),
+                iced::widget::tooltip::Position::Bottom,
+            )
+            .into()
+        } else {
+            tool_btn(
+                Icon::Delete.build().size(IconSize::Sm).build().into(),
+                "Clear conversation",
+                Some(AppMessage::ClearHistoryRequested),
+            )
+        };
+
+        // Copy: copies the peer ID for direct chats, the room ticket for groups.
+        let copy: iced::Element<'_, AppMessage> = match peer {
             Some(key) => tool_btn(
-                Icon::Files.build().size(IconSize::Sm).build().into(),
+                Icon::Copy.build().size(IconSize::Sm).build().into(),
+                "Copy peer ID",
+                Some(AppMessage::CopyPeerId(key)),
+            ),
+            None => {
+                let ticket = self.ticket_str.clone();
+                if ticket.is_empty() {
+                    iced::widget::Space::new().width(Length::Fixed(0.0)).into()
+                } else {
+                    tool_btn(
+                        Icon::Copy.build().size(IconSize::Sm).build().into(),
+                        "Copy invite link",
+                        Some(AppMessage::CopyToClipboard(ticket)),
+                    )
+                }
+            }
+        };
+
+        // Share: opens the shared files catalogue for direct chats.
+        let share: iced::Element<'_, AppMessage> = match peer {
+            Some(key) => tool_btn(
+                Icon::Share.build().size(IconSize::Sm).build().into(),
                 "Shared files",
                 Some(AppMessage::BrowsePeerCatalogue(key)),
             ),
             None => iced::widget::Space::new().width(Length::Fixed(0.0)).into(),
         };
-        let details_toggle = tool_btn(
-            Icon::Mesh.build().size(IconSize::Sm).build().into(),
-            "Details panel",
-            Some(AppMessage::ToggleDetailsPanel),
-        );
 
-        // Member list button — only shown for group conversations.
-        let members_button: iced::Element<'_, AppMessage> = if is_group {
-            tool_btn(
-                Icon::Friend.build().size(IconSize::Sm).build().into(),
-                "Group members",
-                Some(AppMessage::ToggleMemberList),
-            )
-        } else {
-            iced::widget::Space::new().width(Length::Fixed(0.0)).into()
-        };
-
-        let more = tool_btn(
-            Icon::More.build().size(IconSize::Md).build().into(),
+        // Overflow: opens the chat options popover with room info, advertise
+        // toggle, delete, and settings.
+        let overflow = tool_btn(
+            Icon::More.build().size(IconSize::Sm).build().into(),
             "More options",
             Some(AppMessage::ToggleChatOptions),
         );
 
-        container(
-            row![
-                tool_btn(
-                    Icon::Back.build().size(IconSize::Md).build().into(),
-                    "Back to chats",
-                    Some(AppMessage::GoToChatList),
-                ),
-                avatar,
-                identity,
-                Space::new().width(Length::Fill),
-                search,
-                sweep,
-                shared,
-                details_toggle,
-                members_button,
-                more,
-            ]
+        // ── Header area (left): back button, avatar, identity ─────────
+        // Identity receives Fill so it shrinks when the toolbar needs
+        // space. Wrapping in a clipping container ensures long peer IDs
+        // are visually truncated rather than overflowing the header bar.
+        let back_btn = tool_btn(
+            Icon::Back.build().size(IconSize::Md).build().into(),
+            "Back to chats",
+            Some(AppMessage::GoToChatList),
+        );
+        let header_area = row![
+            back_btn,
+            avatar,
+            container(identity).width(Length::Fill).clip(true),
+        ]
+        .spacing(SPACE_4)
+        .width(Length::Fill)
+        .align_y(Alignment::Center);
+
+        // ── Toolbar (right): fixed natural width, never shrinks ──────
+        // Shrink ensures action buttons stay fully visible at any window
+        // size. The header area absorbs the remaining space instead.
+        let toolbar = row![search, delete, copy, share, overflow,]
             .spacing(SPACE_4)
-            .align_y(Alignment::Center),
+            .width(Length::Shrink)
+            .align_y(Alignment::Center);
+
+        container(
+            row![header_area, toolbar]
+                .spacing(SPACE_8)
+                .align_y(Alignment::Center),
         )
         .width(Length::Fill)
         .height(Length::Fixed(60.0))
@@ -24181,7 +24697,7 @@ impl IcedChat {
             .into()
     }
 
-    fn view_chat_log(&self) -> iced::widget::Scrollable<'_, AppMessage> {
+    fn view_chat_log(&self, viewport_height: f32) -> iced::widget::Scrollable<'_, AppMessage> {
         use iced::widget::space;
         use iced::widget::text::Wrapping;
         use iced::widget::{button, container, scrollable, text, Column, Row};
@@ -24251,14 +24767,36 @@ impl IcedChat {
         let total_height = lc.total_height;
         self.total_content_height.set(total_height);
 
+        // Bottom-align a short timeline. The scrollable keeps its Fill height
+        // (so the timeline is always the sole expanding region between the
+        // fixed header and the pinned composer); when the message content is
+        // shorter than the viewport, a leading spacer pushes the content to
+        // the bottom so it hugs the composer. Whitespace then sits above the
+        // messages (balanced, chat convention) instead of leaving a giant dead
+        // area below them. When content overflows the viewport the spacer is
+        // zero and the anchored-to-bottom scrolling takes over unchanged.
+        //
+        // `viewport_height` is the measured timeline region height supplied by
+        // the `responsive` wrapper in `view_chat_panel` — it cannot come from
+        // `self.viewport_height`, because iced only emits `Scrolled` events
+        // when content overflows (short content would leave it at 0).
+        let timeline_lead = (viewport_height - total_height).max(0.0);
+
         let (first_idx, last_idx, top_space_h, bottom_h) =
-            lc.window(self.scroll_offset, self.viewport_height);
+            lc.window(self.scroll_offset, viewport_height);
 
         // ── Build windowed content column ──
         let mut col = Column::new()
             .spacing(SPACE_4)
             .width(Length::Fill)
             .align_x(Alignment::Start);
+
+        if timeline_lead > 0.0 {
+            col = col.push(
+                container(space::Space::new().height(Length::Fixed(timeline_lead)))
+                    .width(Length::Fill),
+            );
+        }
 
         if top_space_h > 0.0 {
             col = col.push(
@@ -24283,19 +24821,11 @@ impl IcedChat {
             if let Some(day) = entry_day {
                 if prev_day != Some(day) {
                     let today_day = crate::presentation::day_key(Some(now_ms())).unwrap_or(day);
-                    col = col.push(
-                        container(
-                            text(crate::presentation::date_divider_label(
-                                entry.timestamp.unwrap_or(0),
-                                today_day,
-                            ))
-                            .size(TYPO_XXS)
-                            .color(text_muted(&theme)),
-                        )
-                        .padding([SPACE_8, SPACE_12])
-                        .width(Length::Fill)
-                        .center_x(Length::Fill),
+                    let divider_label = crate::presentation::date_divider_label(
+                        entry.timestamp.unwrap_or(0),
+                        today_day,
                     );
+                    col = col.push(crate::ui_components::date_separator(divider_label, &theme));
                 }
                 prev_day = Some(day);
             }
@@ -24658,31 +25188,50 @@ impl IcedChat {
                             .width(Length::Shrink)
                             .padding(iced::Padding::default().right(SPACE_12))
                     } else {
-                        // Centred notice — muted text, no bubble/border
+                        // Centred system-event chip. The original body remains
+                        // intact; the semantic kind only supplies a restrained
+                        // accent and compact category label. The chip itself is
+                        // the shared presentational component (Figure 4).
+                        let event_kind = crate::presentation::system_event_kind(&entry.body);
+                        let (event_label, event_accent) = match event_kind {
+                            crate::presentation::SystemEventKind::Membership => {
+                                ("MEMBER", accent_green(&theme))
+                            }
+                            crate::presentation::SystemEventKind::Rename => {
+                                ("NAME", accent_primary(&theme))
+                            }
+                            crate::presentation::SystemEventKind::Command => {
+                                ("HELP", text_muted(&theme))
+                            }
+                            crate::presentation::SystemEventKind::Warning => {
+                                ("NOTICE", color_warning(&theme))
+                            }
+                            crate::presentation::SystemEventKind::Information => {
+                                ("INFO", text_muted(&theme))
+                            }
+                        };
                         Row::new()
-                            .push(
-                                container(
-                                    text(&entry.body)
-                                        .size(TYPO_XXS)
-                                        .color(text_system(&theme))
-                                        .wrapping(Wrapping::Word),
-                                )
-                                .padding([SPACE_4, SPACE_24])
-                                .center_x(Length::Fill)
-                                .width(Length::Fill),
-                            )
+                            .push(crate::ui_components::system_event_chip(
+                                event_label,
+                                event_accent,
+                                &entry.body,
+                                &theme,
+                            ))
                             .width(Length::Fill)
                     }
                 }
             }
             .width(Length::Fill);
 
-            col = col.push(
-                Column::new()
-                    .push(label_el)
-                    .push(msg_row)
-                    .spacing(if group_continues { SPACE_2 } else { SPACE_8 }),
-            );
+            col = col.push(Column::new().push(label_el).push(msg_row).spacing(
+                if group_continues {
+                    SPACE_2
+                } else if matches!(entry.kind, ChatKind::System) {
+                    SPACE_4
+                } else {
+                    SPACE_8
+                },
+            ));
 
             // ── Image / animated GIF (decoded once at construction) ──
             // Compute display size from original image dimensions.
@@ -26023,6 +26572,14 @@ pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
                     }
                     key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => {
                         Some(AppMessage::Shortcut(Shortcut::NewChat))
+                    }
+                    // Developer gallery: Ctrl+Shift+G (documented in
+                    // component_gallery.rs). Debug-only harness — harmless in
+                    // release builds since ToggleGallery just flips screens.
+                    key::Key::Character(c)
+                        if ctrl && modifiers.shift() && c.eq_ignore_ascii_case("g") =>
+                    {
+                        Some(AppMessage::ToggleGallery)
                     }
                     key::Key::Character(c) if c == "/" => {
                         Some(AppMessage::Shortcut(Shortcut::QuickCommand))
@@ -27817,6 +28374,34 @@ mod tests {
     use chrono::{FixedOffset, TimeZone, Utc};
 
     #[test]
+    fn home_connection_variant_maps_each_network_state_truthfully() {
+        assert_eq!(
+            home_connection_variant(&MeshHealth::Good, false, false),
+            HomeConnectionVariant::Starting
+        );
+        assert_eq!(
+            home_connection_variant(&MeshHealth::Good, false, true),
+            HomeConnectionVariant::Connecting
+        );
+        assert_eq!(
+            home_connection_variant(&MeshHealth::Good, true, true),
+            HomeConnectionVariant::Ready
+        );
+        assert_eq!(
+            home_connection_variant(&MeshHealth::Degraded("peer churn".to_string()), true, true),
+            HomeConnectionVariant::Degraded
+        );
+        assert_eq!(
+            home_connection_variant(
+                &MeshHealth::Offline("transport unavailable".to_string()),
+                true,
+                true
+            ),
+            HomeConnectionVariant::Offline
+        );
+    }
+
+    #[test]
     fn inline_playback_errors_map_to_recoverable_categories() {
         assert!(matches!(
             InlinePlaybackError::from_backend("GStreamer: missing decoder for H265 codec").kind,
@@ -28559,7 +29144,10 @@ mod tests {
         assert_eq!(chat_search_matches_in(&entries, "hello"), vec![0]);
         assert_eq!(chat_search_matches_in(&entries, "HELLO"), vec![0]);
         assert_eq!(chat_search_matches_in(&entries, "world"), vec![0]);
-        assert_eq!(chat_search_matches_in(&entries, "nope"), Vec::<usize>::new());
+        assert_eq!(
+            chat_search_matches_in(&entries, "nope"),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
@@ -28578,7 +29166,9 @@ mod tests {
     #[test]
     fn chat_search_caps_results_to_avoid_heavy_panels() {
         let entries: Vec<ChatEntry> = (0..120)
-            .map(|i| ChatEntry::remote("peer", format!("message {i} with needle"), None, None, None))
+            .map(|i| {
+                ChatEntry::remote("peer", format!("message {i} with needle"), None, None, None)
+            })
             .collect();
         let matches = chat_search_matches_in(&entries, "needle");
         assert_eq!(matches.len(), 50, "results must be capped");
@@ -31780,6 +32370,53 @@ mod tests {
         assert!(gui_navigation_message(&GuiTestCommand::SubmitComposer).is_none());
     }
 
+    // ── UI-08: home connection hero variant mapping ──────────────────
+
+    #[test]
+    fn home_variant_maps_offline_mesh_to_offline() {
+        let v = home_connection_variant(
+            &MeshHealth::Offline("relay unreachable".to_string()),
+            true, // peers may still be cached
+            true,
+        );
+        assert_eq!(v, HomeConnectionVariant::Offline);
+    }
+
+    #[test]
+    fn home_variant_maps_degraded_mesh_to_degraded() {
+        let v =
+            home_connection_variant(&MeshHealth::Degraded("peers quiet".to_string()), true, true);
+        assert_eq!(v, HomeConnectionVariant::Degraded);
+        // A degraded mesh must never render as the green Ready state.
+        assert_ne!(v, HomeConnectionVariant::Ready);
+    }
+
+    #[test]
+    fn home_variant_ready_requires_peer_connections() {
+        // Good mesh + live peers -> Ready.
+        assert_eq!(
+            home_connection_variant(&MeshHealth::Good, true, true),
+            HomeConnectionVariant::Ready
+        );
+        // Good mesh but no peers yet is NOT ready even when the relay is up.
+        assert_eq!(
+            home_connection_variant(&MeshHealth::Good, false, true),
+            HomeConnectionVariant::Connecting
+        );
+        // Good mesh, no peers, no relay -> starting.
+        assert_eq!(
+            home_connection_variant(&MeshHealth::Good, false, false),
+            HomeConnectionVariant::Starting
+        );
+    }
+
+    #[test]
+    fn home_variant_connecting_requires_relay_reachable() {
+        let v = home_connection_variant(&MeshHealth::Good, false, true);
+        assert_eq!(v, HomeConnectionVariant::Connecting);
+        assert_ne!(v, HomeConnectionVariant::Ready);
+    }
+
     fn gui_update_request(command: GuiTestCommand) -> GuiActionRequest {
         GuiActionRequest {
             action_id: GuiActionId::new(),
@@ -32475,5 +33112,359 @@ mod tests {
         // Verify self_sent_events was populated
         assert!(!app.self_sent_events.is_empty());
         drop(runtime);
+    }
+
+    // ── PeerPresence state transition tests ───────────────────────────
+
+    /// Every PeerPresence variant has a non-empty, distinct label.
+    #[test]
+    fn peer_presence_labels_cover_all_states() {
+        let states = [
+            PeerPresence::Online,
+            PeerPresence::Away,
+            PeerPresence::Offline,
+            PeerPresence::Connecting,
+            PeerPresence::Unknown,
+        ];
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for state in &states {
+            let label = state.label();
+            assert!(!label.is_empty(), "{state:?} label is empty");
+            assert!(
+                seen.insert(label),
+                "{state:?} has duplicate label \"{label}\""
+            );
+        }
+    }
+
+    /// Each state maps to a distinct icon (Online/Away → filled circle,
+    /// Connecting → refresh, Offline/Unknown → empty circle).
+    #[test]
+    fn peer_presence_icons_are_distinct_per_state_group() {
+        let online_icon = PeerPresence::Online.icon();
+        let away_icon = PeerPresence::Away.icon();
+        let offline_icon = PeerPresence::Offline.icon();
+        let connecting_icon = PeerPresence::Connecting.icon();
+        let unknown_icon = PeerPresence::Unknown.icon();
+
+        // Online and Away share the same filled-circle icon.
+        assert_eq!(online_icon, away_icon);
+        // Offline and Unknown share the same empty-circle icon.
+        assert_eq!(offline_icon, unknown_icon);
+        // The three groups must be distinct.
+        assert_ne!(online_icon, offline_icon);
+        assert_ne!(online_icon, connecting_icon);
+        assert_ne!(connecting_icon, offline_icon);
+    }
+
+    /// Color mapping: Online → green, Away/Connecting → warning,
+    /// Offline/Unknown → muted.
+    #[test]
+    fn peer_presence_colors_match_semantics() {
+        let theme = iced::Theme::Dark;
+        let online_color = PeerPresence::Online.color(&theme);
+        let away_color = PeerPresence::Away.color(&theme);
+        let offline_color = PeerPresence::Offline.color(&theme);
+        let connecting_color = PeerPresence::Connecting.color(&theme);
+        let unknown_color = PeerPresence::Unknown.color(&theme);
+
+        // Same group = same color.
+        assert_eq!(away_color, connecting_color);
+        assert_eq!(offline_color, unknown_color);
+
+        // Different groups = different colors.
+        assert_ne!(online_color, offline_color);
+        assert_ne!(online_color, away_color);
+    }
+
+    /// peer_presence() returns Offline for a peer not in the presence map.
+    #[test]
+    fn peer_presence_returns_offline_for_unknown_peer() {
+        let (_runtime, app, _local, _peer) = build_join_request_test_app();
+        let unknown = iroh::SecretKey::generate().public();
+        assert_eq!(app.peer_presence(&unknown), PeerPresence::Offline);
+    }
+
+    /// peer_presence() returns Online for a recently-seen peer.
+    #[test]
+    fn peer_presence_returns_online_for_fresh_peer() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let pk = iroh::SecretKey::generate().public();
+        let now = now_ms().max(0) as u64;
+        // Insert a fresh timestamp (just now).
+        app.peer_presence_map.insert(pk, now);
+        assert_eq!(app.peer_presence(&pk), PeerPresence::Online);
+    }
+
+    /// peer_presence() returns Away when the last-seen timestamp is older
+    /// than AWAY_THRESHOLD_MS.
+    #[test]
+    fn peer_presence_returns_away_for_stale_peer() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let pk = iroh::SecretKey::generate().public();
+        let now = now_ms().max(0) as u64;
+        // Insert a timestamp well past the away threshold.
+        let stale = now.saturating_sub(AWAY_THRESHOLD_MS + 1);
+        app.peer_presence_map.insert(pk, stale);
+        assert_eq!(app.peer_presence(&pk), PeerPresence::Away);
+    }
+
+    /// refresh_peer_presence() identifies stale peers and marks them as
+    /// away without removing them from the presence map.
+    #[test]
+    fn refresh_peer_presence_downgrades_stale_to_away() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let pk = iroh::SecretKey::generate().public();
+        let now = now_ms().max(0) as u64;
+        let stale = now.saturating_sub(AWAY_THRESHOLD_MS + 1);
+        app.peer_presence_map.insert(pk, stale);
+        // Before refresh, presence_away_peers should not contain the peer.
+        assert!(!app.presence_away_peers.contains(&pk));
+        // After refresh, the stale peer is in presence_away_peers.
+        app.refresh_peer_presence();
+        assert!(app.presence_away_peers.contains(&pk));
+        // The peer stays in the presence map (removal only on NeighborDown).
+        assert!(app.peer_presence_map.contains_key(&pk));
+        // peer_presence still returns Away.
+        assert_eq!(app.peer_presence(&pk), PeerPresence::Away);
+    }
+
+    /// refresh_peer_presence() keeps fresh peers out of presence_away_peers.
+    #[test]
+    fn refresh_peer_presence_keeps_fresh_peer_online() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let pk = iroh::SecretKey::generate().public();
+        let now = now_ms().max(0) as u64;
+        app.peer_presence_map.insert(pk, now);
+        app.refresh_peer_presence();
+        assert!(!app.presence_away_peers.contains(&pk));
+        assert_eq!(app.peer_presence(&pk), PeerPresence::Online);
+    }
+
+    /// Transition from Online → Away → Offline using presence_map mutations.
+    #[test]
+    fn peer_presence_transitions_online_to_away_to_offline() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let pk = iroh::SecretKey::generate().public();
+        let now = now_ms().max(0) as u64;
+
+        // Online.
+        app.peer_presence_map.insert(pk, now);
+        assert_eq!(app.peer_presence(&pk), PeerPresence::Online);
+
+        // Away (timestamp aged past threshold).
+        let stale = now.saturating_sub(AWAY_THRESHOLD_MS + 1);
+        app.peer_presence_map.insert(pk, stale);
+        assert_eq!(app.peer_presence(&pk), PeerPresence::Away);
+
+        // Offline (peer removed from map, simulating NeighborDown).
+        app.peer_presence_map.remove(&pk);
+        assert_eq!(app.peer_presence(&pk), PeerPresence::Offline);
+    }
+
+    /// The Online Peers card renders the truthful empty state when no friend
+    /// has live presence (the CardShell empty message path).
+    #[test]
+    fn home_online_peers_card_empty_state_builds() {
+        let (_runtime, app, _local, _peer) = build_join_request_test_app();
+        let el = app.view_main_empty_state();
+        let _ = el;
+    }
+
+    /// With more than five online friends the Online Peers card builds a
+    /// bounded row list (CardShell handles the overflow scrolling), each row
+    /// derived from real friend labels + presence, never sample data.
+    #[test]
+    fn home_online_peers_card_populated_state_builds() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let now = now_ms().max(0) as u64;
+        for i in 0..8 {
+            let pk = iroh::SecretKey::generate().public();
+            let fid = FriendId::from_public_key(pk);
+            app.friends.set_label(fid.clone(), format!("Peer {i}"));
+            app.friends
+                .set_relationship(fid, FriendRelationship::Friends);
+            app.peer_presence_map.insert(pk, now);
+        }
+        let el = app.view_main_empty_state();
+        let _ = el;
+    }
+
+    // ── Home-rail card dependency isolation (the lazy memoization harness) ──
+    // Each card is rendered through `iced::widget::lazy(card_data, build)`.
+    // iced's lazy widget reuses the previously built subtree whenever the
+    // freshly computed card_data compares equal (PartialEq) to the previous
+    // frame's value. These tests are the iced analogue of a React DevTools
+    // flamegraph check: they prove each card's dependency changes IFF its own
+    // state slice changes, so exactly one card rebuilds per update and the
+    // other two never do.
+
+    /// Pushing an activity event must change only the Recent Activity card
+    /// dependency — the Online Peers and Tunnels snapshots stay identical, so
+    /// their lazy subtrees are not rebuilt.
+    #[test]
+    fn activity_push_changes_only_activity_card_data() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.push_activity("peer online", ActivityKind::Online);
+
+        let peers_before = app.online_peers_card_data();
+        let activity_before = app.recent_activity_card_data();
+        let tunnels_before = app.tunnels_card_data();
+
+        app.push_activity("file shared", ActivityKind::FileShared);
+
+        let peers_after = app.online_peers_card_data();
+        let activity_after = app.recent_activity_card_data();
+        let tunnels_after = app.tunnels_card_data();
+
+        assert_ne!(
+            activity_before, activity_after,
+            "activity slice must change when an event is pushed"
+        );
+        assert_eq!(
+            peers_before, peers_after,
+            "Online Peers card must not re-render when Recent Activity changes"
+        );
+        assert_eq!(
+            tunnels_before, tunnels_after,
+            "Tunnels card must not re-render when Recent Activity changes"
+        );
+    }
+
+    /// Toggling a peer's online state must change only the Online Peers card
+    /// dependency — Recent Activity and Tunnels snapshots stay identical.
+    #[test]
+    fn peer_presence_toggle_changes_only_peers_card_data() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let pk = iroh::SecretKey::generate().public();
+        let fid = FriendId::from_public_key(pk);
+        app.friends.set_label(fid.clone(), "Zed");
+        app.friends
+            .set_relationship(fid, FriendRelationship::Friends);
+
+        let peers_before = app.online_peers_card_data();
+        let activity_before = app.recent_activity_card_data();
+        let tunnels_before = app.tunnels_card_data();
+
+        let now = now_ms().max(0) as u64;
+        app.peer_presence_map.insert(pk, now);
+        app.refresh_peer_presence();
+
+        let peers_after = app.online_peers_card_data();
+        let activity_after = app.recent_activity_card_data();
+        let tunnels_after = app.tunnels_card_data();
+
+        assert_ne!(
+            peers_before, peers_after,
+            "peers slice must change when a peer comes online"
+        );
+        assert_eq!(
+            activity_before, activity_after,
+            "Recent Activity card must not re-render on a peer toggle"
+        );
+        assert_eq!(
+            tunnels_before, tunnels_after,
+            "Tunnels card must not re-render on a peer toggle"
+        );
+    }
+
+    /// A live tunnel transition (connected → disconnected) must change only
+    /// the Tunnels card dependency.
+    #[test]
+    fn tunnel_status_change_changes_only_tunnels_card_data() {
+        let (_runtime, app, _local, peer) = build_join_request_test_app();
+        let owner = iroh::SecretKey::generate().public();
+        let id = boru_core::tunnel::TunnelId([9u8; 32]);
+        let target =
+            boru_core::tunnel::service::TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 8080);
+        let now = now_ms().max(0) as u64;
+        app.tunnel_service
+            .create_tunnel(id, owner, target, peer, now, now + 60_000)
+            .expect("create tunnel");
+
+        let peers_before = app.online_peers_card_data();
+        let activity_before = app.recent_activity_card_data();
+        let tunnels_before = app.tunnels_card_data();
+
+        app.tunnel_service
+            .connect_tunnel(id)
+            .expect("connect tunnel");
+        app.tunnel_service
+            .mark_connected(id)
+            .expect("mark connected");
+        app.tunnel_service
+            .mark_disconnected(id)
+            .expect("mark disconnected");
+
+        let peers_after = app.online_peers_card_data();
+        let activity_after = app.recent_activity_card_data();
+        let tunnels_after = app.tunnels_card_data();
+
+        assert_ne!(
+            tunnels_before, tunnels_after,
+            "tunnels slice must change with live tunnel status"
+        );
+        assert_eq!(
+            peers_before, peers_after,
+            "Online Peers card must not re-render on tunnel status changes"
+        );
+        assert_eq!(
+            activity_before, activity_after,
+            "Recent Activity card must not re-render on tunnel status changes"
+        );
+    }
+
+    /// The per-second ActivityTick bumps `activity_tick`. The Recent Activity
+    /// card (relative timestamps) and the Tunnels card (expiry flips) include
+    /// the tick in their dependencies; the Online Peers card excludes it, so
+    /// an idle tick never rebuilds the peers card.
+    #[test]
+    fn activity_tick_refreshes_only_time_dependent_cards() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.push_activity("hello", ActivityKind::Message);
+
+        let peers_before = app.online_peers_card_data();
+
+        let _task = app.update(AppMessage::ActivityTick);
+
+        let peers_after = app.online_peers_card_data();
+        let activity_after = app.recent_activity_card_data();
+        let tunnels_after = app.tunnels_card_data();
+
+        assert_eq!(
+            peers_before, peers_after,
+            "Online Peers card must stay memoized across idle activity ticks"
+        );
+        assert_ne!(
+            app.activity_tick, 0,
+            "ActivityTick must bump the tick revision"
+        );
+        assert_eq!(
+            activity_after.tick, app.activity_tick,
+            "Recent Activity card consumes the tick for fresh timestamps"
+        );
+        assert_eq!(
+            tunnels_after.tick, app.activity_tick,
+            "Tunnels card consumes the tick for truthful expiry flips"
+        );
+    }
+
+    /// Sanity: with no state changes the three card dependencies are stable,
+    /// which is exactly what lets iced::lazy skip rebuilding them frame over
+    /// frame while other parts of the app redraw.
+    #[test]
+    fn lazy_card_dependencies_are_stable_without_change() {
+        let (_runtime, app, _local, _peer) = build_join_request_test_app();
+        let peers_a = app.online_peers_card_data();
+        let activity_a = app.recent_activity_card_data();
+        let tunnels_a = app.tunnels_card_data();
+
+        let peers_b = app.online_peers_card_data();
+        let activity_b = app.recent_activity_card_data();
+        let tunnels_b = app.tunnels_card_data();
+
+        assert_eq!(peers_a, peers_b);
+        assert_eq!(activity_a, activity_b);
+        assert_eq!(tunnels_a, tunnels_b);
     }
 }

@@ -6,6 +6,7 @@
 //!   cargo run --features gui --example iced_chat join <ticket>  # join room
 
 mod app;
+mod card_shell;
 mod component_gallery;
 mod connection_details;
 mod design_tokens;
@@ -1581,6 +1582,13 @@ fn main() -> Result<()> {
                     .map(|_| app::AppMessage::SplashTick),
             );
         }
+
+        // Keep relative timestamps in the Recent Activity card fresh even
+        // when no network or input event causes a normal redraw.
+        subs.push(
+            iced::time::every(std::time::Duration::from_secs(1))
+                .map(|_| app::AppMessage::ActivityTick),
+        );
 
         #[cfg(feature = "video-playback")]
         if state.has_inline_video() {

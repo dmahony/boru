@@ -370,6 +370,19 @@ impl ChatEntry {
         self.timestamp = timestamp_ms;
         self
     }
+
+    /// Classify this entry into a semantic system-event kind.
+    ///
+    /// Returns `None` for non-system entries. System entries always map to a
+    /// concrete [`SystemEventKind`](crate::system_events::SystemEventKind) —
+    /// the mapping is total, so no incoming system message is silently
+    /// discarded, and the original `body` text is never modified.
+    pub fn system_event_kind(&self) -> Option<crate::system_events::SystemEventKind> {
+        match self.kind {
+            ChatKind::System => Some(crate::system_events::classify_system_event(&self.body)),
+            ChatKind::Local | ChatKind::Remote => None,
+        }
+    }
 }
 
 // ── Status context ────────────────────────────────────────────────────────────

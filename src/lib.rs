@@ -106,6 +106,16 @@ pub mod private_room_tracker;
 #[cfg(feature = "net")]
 pub mod chat_core;
 
+/// Semantic event-type mapping for chat system messages.
+///
+/// Classifies the plain-text system messages produced by
+/// [`ChatCallbacks::push_system`](crate::chat_callbacks::ChatCallbacks::push_system)
+/// (join/leave, rename, command help, errors, …) into typed
+/// [`SystemEventKind`](system_events::SystemEventKind) variants. Pure data
+/// mapping — no UI logic, and all original message text is preserved.
+#[cfg(feature = "net")]
+pub mod system_events;
+
 /// Signed contact and direct-conversation negotiation messages.
 #[cfg(feature = "net")]
 pub mod contact;

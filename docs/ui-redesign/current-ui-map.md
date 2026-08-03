@@ -28,7 +28,7 @@ The pre-existing worktree modification `examples/iced_chat/app.rs` was present b
 - Treat `examples/iced_chat/app.rs` as the primary collision hotspot. It contains state, the complete message enum, update routing, all target views, and many non-target screens. Parallel workers should own disjoint functions or extract new modules rather than reformatting the whole file.
 - Extend `examples/iced_chat/design_tokens.rs` and `fonts.rs` for shared visual primitives. Avoid screen-local palette literals.
 - Keep `main.rs` owned by bootstrap/network work. UI workers should not modify endpoint/router startup unless required for an explicitly tested UI capability.
-- The existing `iced::widget::lazy` sidebar dependencies and revision counters are performance-sensitive; changing row identity or dependency inputs can cause stale UI or unnecessary rebuilds.
+- The existing `iced::widget::lazy` sidebar dependencies and revision counters are performance-sensitive; changing row identity or dependency inputs can cause stale UI or unnecessary rebuilds. The home-rail cards use the same lazy pattern (see `docs/ui-redesign/home-cards-reactivity.md`) — keep each card's dependency restricted to exactly the state slice it renders.
 - Keep Xvfb/screenshot evidence in `docs/ui-redesign/`; do not put test data or credentials in the default Boru data directory.
 
 ## BUILD, RUN, AND TOOLCHAIN BASELINE
@@ -139,8 +139,9 @@ Visible sidebar data sources are `FriendsStore`, `ConversationStore`, `RoomHisto
 - Action grid: Create Public Room → `CreateNewRoom`; Create Group Chat → `ShowCreateGroupDialog`; Add Friend → `OpenFriendRequests`; Join Ticket → `JoinFromTicket`; Import Friend → `ImportFriendFromFile`; Create Tunnel → `ShowCreateTunnelDialog` (`~21417-21513`). The grid is 3 columns wide, 2 medium, 1 narrow.
 - Share files strip: currently routes to `OpenSettings` (`~21515-21533`), despite its visual affordance suggesting a file picker.
 - Online Now card: friend records filtered through `peer_presence` and `names`; per-friend `OpenConversation(pk)` message (`~21545-21618`).
-- Recent Activity card: newest 15 `RecentActivityEvent` values, age text, and kind-specific icons (`~21620-21701`).
+- Recent Activity card: `CardShell` (see `card_shell.rs`) rendering the newest 15 `RecentActivityEvent` values as 48 px rows — action-specific icon, `presentation::relative_time_from_system` age text, `truncate_with_ellipsis` title — with a count badge and "No recent activity" empty state (`~22055-22112`).
 - Tunnels card: `tunnel_service.list_tunnels()`, status/peer display, close action `CloseTunnel(id)` (`~21703-21770`).
+- Card reactivity (t_9aaac275): each rail card renders through `iced::widget::lazy` with a fine-grained selector dependency — `online_peers_card_data()`, `recent_activity_card_data()`, `tunnels_card_data()` (selectors section in `app.rs` before `view_main_empty_state`; lazy wrappers at the right-column build). A data change in one card rebuilds only that card; the 1 Hz `ActivityTick` bumps `activity_tick` (included in the Activity + Tunnels deps, excluded from the Peers dep). Isolation harness + full audit: `docs/ui-redesign/home-cards-reactivity.md`.
 - Responsive behavior: below 640px Home stacks left/right columns; below 900px action grid uses two columns (`~21216`, `~21490-21513`).
 
 ### Chat screen

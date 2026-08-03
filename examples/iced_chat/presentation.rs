@@ -19,6 +19,52 @@ pub(crate) enum MessageKind {
     Remote,
 }
 
+/// Semantic treatment for informational entries in the timeline.
+///
+/// The original message text remains the source of truth; this classification
+/// only selects a compact visual accent and label for the system-event chip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SystemEventKind {
+    Membership,
+    Rename,
+    Command,
+    Warning,
+    Information,
+}
+
+/// Classify a system entry without changing or filtering its original text.
+pub(crate) fn system_event_kind(text: &str) -> SystemEventKind {
+    let normalized = text.trim().to_ascii_lowercase();
+    if normalized.contains("rename")
+        || normalized.contains("renamed")
+        || normalized.contains("name changed")
+    {
+        SystemEventKind::Rename
+    } else if normalized.contains("/help")
+        || normalized.starts_with("usage:")
+        || normalized.contains("command")
+    {
+        SystemEventKind::Command
+    } else if normalized.contains("failed")
+        || normalized.contains("error")
+        || normalized.contains("rejected")
+        || normalized.contains("cannot ")
+        || normalized.contains("unknown peer")
+    {
+        SystemEventKind::Warning
+    } else if normalized.contains("joined")
+        || normalized.contains("left")
+        || normalized.contains("online")
+        || normalized.contains("offline")
+        || normalized.contains("member")
+        || normalized.contains("peer")
+    {
+        SystemEventKind::Membership
+    } else {
+        SystemEventKind::Information
+    }
+}
+
 /// Whether two adjacent entries can share a sender/avatar treatment.
 pub(crate) fn continues_message_group(
     previous_kind: MessageKind,
@@ -164,6 +210,40 @@ pub(crate) fn relative_time(unix_ms: u64) -> String {
     relative_time_at(unix_ms, now_ms, 10)
 }
 
+/// Format a `SystemTime` timestamp as a short relative label.
+///
+/// Convenience wrapper for [`relative_time`] that accepts the `SystemTime`
+/// values stored on real event streams (e.g. the landing-page activity feed)
+/// instead of requiring callers to convert to Unix milliseconds first.
+///
+/// Timestamps before the Unix epoch are clamped to "just now": they cannot
+/// represent a real past event (1970 predates the app), so formatting them
+/// as a huge age would only expose a broken/placeholder clock.
+pub(crate) fn relative_time_from_system(ts: SystemTime) -> String {
+    let unix_ms = match ts.duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as u64,
+        Err(_) => {
+            return "just now".to_string();
+        }
+    };
+    relative_time(unix_ms)
+}
+
+/// Truncate display text to at most `max_chars` characters, appending a
+/// Unicode ellipsis (`…`) when the text is longer.
+///
+/// Operates on Unicode scalar values so multi-byte text is never split in the
+/// middle of a code point. Used by list rows (e.g. Recent Activity titles)
+/// where an unbounded description would break the shared row rhythm.
+pub(crate) fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 /// Format an optional last-seen timestamp, returning an empty label when absent.
 #[expect(dead_code)]
 pub(crate) fn format_last_seen(last_seen_ms: Option<u64>) -> String {
@@ -186,6 +266,7 @@ pub(crate) fn count_label(count: usize, singular: &str, plural: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn message_groups_require_kind_sender_and_time_window() {
@@ -232,6 +313,31 @@ mod tests {
     }
 
     #[test]
+    fn system_event_classification_is_semantic_without_rewriting_text() {
+        assert_eq!(
+            system_event_kind("Alice joined the room"),
+            SystemEventKind::Membership
+        );
+        assert_eq!(
+            system_event_kind("Alice renamed the room"),
+            SystemEventKind::Rename
+        );
+        assert_eq!(system_event_kind("Usage: /help"), SystemEventKind::Command);
+        assert_eq!(
+            system_event_kind("Request failed"),
+            SystemEventKind::Warning
+        );
+        assert_eq!(
+            system_event_kind("Chat joined."),
+            SystemEventKind::Membership
+        );
+        assert_eq!(
+            system_event_kind("Invite sent"),
+            SystemEventKind::Information
+        );
+    }
+
+    #[test]
     fn delivery_labels_preserve_user_facing_truth() {
         use boru_core::chat_history::DeliveryState;
         assert_eq!(delivery_label(&DeliveryState::Queued), "Sending");
@@ -256,6 +362,56 @@ mod tests {
         assert_eq!(relative_time_at(now - 10_000, now, 10), "10s ago");
         assert_eq!(relative_time_at(now - 60_000, now, 10), "1m ago");
         assert_eq!(relative_time_at(now - 3_600_000, now, 10), "1h ago");
+    }
+
+    #[test]
+    fn relative_time_from_system_delegates_to_unix_ms_formatter() {
+        let two_min_ago = SystemTime::now() - Duration::from_secs(120);
+        assert_eq!(relative_time_from_system(two_min_ago), "2m ago");
+        let just_now = SystemTime::now();
+        assert_eq!(relative_time_from_system(just_now), "just now");
+    }
+
+    #[test]
+    fn relative_time_from_system_clamps_pre_epoch_timestamps() {
+        // A timestamp before the Unix epoch must not panic or produce a
+        // negative age; it falls back to the epoch and formats as "just now".
+        let pre_epoch = UNIX_EPOCH - Duration::from_secs(5);
+        assert_eq!(relative_time_from_system(pre_epoch), "just now");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_keeps_short_text_untouched() {
+        assert_eq!(truncate_with_ellipsis("Alice joined", 48), "Alice joined");
+        assert_eq!(truncate_with_ellipsis("", 48), "");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_cuts_long_text_at_char_boundary() {
+        assert_eq!(
+            truncate_with_ellipsis("A very long activity message that must be cut", 12),
+            "A very long…"
+        );
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_never_splits_multibyte_chars() {
+        // "héllo wörld" contains é and ö (2-byte UTF-8); a byte-level slice
+        // at an odd index would panic, the char-level cut must not.
+        let long = "héllo wörld — this message has multibyte characters";
+        let cut = truncate_with_ellipsis(long, 10);
+        assert!(cut.ends_with('…'));
+        assert!(cut.chars().count() <= 10);
+        // Round-trip through lossless UTF-8 to prove the string is valid.
+        assert_eq!(cut, String::from_utf8_lossy(cut.as_bytes()));
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_reserves_room_for_ellipsis_char() {
+        // max_chars includes the ellipsis: 6 chars of text + '…' = 7 total.
+        let out = truncate_with_ellipsis("abcdefghij", 7);
+        assert_eq!(out, "abcdef…");
+        assert_eq!(out.chars().count(), 7);
     }
 
     #[test]

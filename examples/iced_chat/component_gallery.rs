@@ -7,13 +7,15 @@ use iced::widget::{container, scrollable, text, Column, Row, Space};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::AppMessage;
+use crate::card_shell::{CardShell, CARD_ROW_HEIGHT};
 use crate::design_tokens;
 use crate::fonts::Typography;
 use crate::icon_system::{Icon, IconSize};
 use crate::ui_components::{
-    self, badge, card_header, divider, elevated_card, empty_state, ghost_icon_button, icon_tile,
-    primary_button, primary_button_icon, secondary_button, section_header, status_dot,
-    text_input_field, Avatar, BadgeKind, Card, ListRow, StatusDotKind,
+    self, badge, card_header, date_separator, divider, elevated_card, empty_state,
+    ghost_icon_button, icon_tile, primary_button, primary_button_icon, secondary_button,
+    section_header, status_dot, system_event_chip, text_input_field, Avatar, BadgeKind, Card,
+    ListRow, StatusDotKind,
 };
 
 /// Build the complete component gallery view.
@@ -26,6 +28,9 @@ pub fn view_gallery() -> Element<'static, AppMessage> {
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Cards"))
         .push(card_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Card Shell (Figure 3 rail)"))
+        .push(card_shell_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("List Rows"))
         .push(list_row_gallery())
@@ -47,6 +52,9 @@ pub fn view_gallery() -> Element<'static, AppMessage> {
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Dividers"))
         .push(divider_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Timeline (Figure 4)"))
+        .push(timeline_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Elevated Card (Dialog)"))
         .push(dialog_example())
@@ -269,6 +277,95 @@ fn card_gallery() -> Element<'static, AppMessage> {
                         .height(Length::Fixed(4.0)),
                 )
                 .push(icon_tile::<AppMessage>(Icon::Chat, IconSize::Lg, None))
+                .width(Length::FillPortion(1)),
+        )
+        .spacing(0)
+        .align_y(Alignment::Start)
+        .into()
+}
+
+// ── Card shell gallery (Figure 3 rail) ────────────────────────────────
+
+/// A single demo row at the shared 48 px rail row height.
+fn card_shell_row(label: &str, meta: &str) -> Element<'static, AppMessage> {
+    container(
+        Row::new()
+            .push(
+                text(label.to_string())
+                    .font(Typography::Body.font())
+                    .size(Typography::Body.size_px())
+                    .color(design_tokens::text_primary(&Theme::Light)),
+            )
+            .push(Space::new().width(Length::Fill))
+            .push(
+                text(meta.to_string())
+                    .font(Typography::SecondaryText.font())
+                    .size(Typography::SecondaryText.size_px())
+                    .color(design_tokens::text_muted(&Theme::Light)),
+            )
+            .spacing(design_tokens::SPACE_8)
+            .align_y(Alignment::Center),
+    )
+    .height(Length::Fixed(CARD_ROW_HEIGHT))
+    .width(Length::Fill)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn card_shell_gallery() -> Element<'static, AppMessage> {
+    let noop: AppMessage = AppMessage::Noop;
+
+    // Empty state — title + count badge + caller-provided empty message.
+    let empty_shell = CardShell::new("Online Peers", vec![])
+        .count(0)
+        .empty_message("No peers are online right now.")
+        .build(&Theme::Light);
+
+    // Populated state — 8 rows at 48 px exceed the bounded 140 px body, so a
+    // vertical scrollbar appears instead of the card growing without bound.
+    let rows: Vec<Element<'static, AppMessage>> = (1..=8)
+        .map(|i| {
+            card_shell_row(
+                &format!("Peer {i}"),
+                if i % 2 == 0 { "online" } else { "idle" },
+            )
+        })
+        .collect();
+    let populated_shell = CardShell::new("Online Peers", rows)
+        .count(5)
+        .on_view_all(noop)
+        .max_height(140.0)
+        .row_spacing(design_tokens::SPACE_4)
+        .build(&Theme::Light);
+
+    Row::new()
+        .push(
+            Column::new()
+                .push(state_label("Empty state"))
+                .push(
+                    Space::new()
+                        .width(Length::Shrink)
+                        .height(Length::Fixed(4.0)),
+                )
+                .push(empty_shell)
+                .width(Length::FillPortion(1)),
+        )
+        .push(
+            Space::new()
+                .width(Length::Fixed(design_tokens::SPACE_16))
+                .height(Length::Shrink),
+        )
+        .push(
+            Column::new()
+                .push(state_label(
+                    "8 rows > max height → scrollbar, count badge, View all",
+                ))
+                .push(
+                    Space::new()
+                        .width(Length::Shrink)
+                        .height(Length::Fixed(4.0)),
+                )
+                .push(populated_shell)
                 .width(Length::FillPortion(1)),
         )
         .spacing(0)
@@ -684,6 +781,139 @@ fn divider_gallery() -> Element<'static, AppMessage> {
             "(Divider is a thin horizontal line between items above)",
         ))
         .spacing(design_tokens::SPACE_8)
+        .into()
+}
+
+// ── Timeline (Figure 4) gallery ──────────────────────────────────────
+
+fn timeline_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+    let spacing = design_tokens::SPACE_24;
+
+    // Sample timeline: date separators open each day; system-event chips use
+    // the same muted/centred treatment as the real chat log. The caller
+    // supplies label + accent — no classification logic lives in the chip.
+    let timeline = Column::new()
+        .push(date_separator("Today", &theme))
+        .push(system_event_chip(
+            "MEMBER",
+            design_tokens::online(&theme),
+            "Alice joined the chat.",
+            &theme,
+        ))
+        .push(system_event_chip(
+            "NAME",
+            design_tokens::primary(&theme),
+            "Alice renamed the room to Kitchen",
+            &theme,
+        ))
+        .push(system_event_chip(
+            "HELP",
+            design_tokens::text_muted(&theme),
+            "Usage: /help — show available commands",
+            &theme,
+        ))
+        .push(
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Fixed(design_tokens::SPACE_16)),
+        )
+        .push(date_separator("Yesterday", &theme))
+        .push(system_event_chip(
+            "NOTICE",
+            design_tokens::color_warning(&theme),
+            "Message delivery failed after 3 attempts.",
+            &theme,
+        ))
+        .push(system_event_chip(
+            "INFO",
+            design_tokens::text_muted(&theme),
+            "Invite sent to Bob.",
+            &theme,
+        ))
+        .push(
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Fixed(design_tokens::SPACE_16)),
+        )
+        .push(date_separator("Sunday, August 2, 2026", &theme))
+        .push(system_event_chip(
+            "MEMBER",
+            design_tokens::online(&theme),
+            "Chat joined.",
+            &theme,
+        ))
+        .spacing(design_tokens::SPACE_4);
+
+    Row::new()
+        .push(
+            Column::new()
+                .push(state_label(
+                    "Date separators: centered, muted, 12 px. Chips: muted surface, 1 px accent border.",
+                ))
+                .push(
+                    Space::new()
+                        .width(Length::Shrink)
+                        .height(Length::Fixed(4.0)),
+                )
+                .push(timeline)
+                .width(Length::FillPortion(1)),
+        )
+        .push(
+            Space::new()
+                .width(Length::Fixed(spacing))
+                .height(Length::Shrink),
+        )
+        .push(
+            Column::new()
+                .push(state_label("Chip inputs come from the caller:"))
+                .push(
+                    Space::new()
+                        .width(Length::Shrink)
+                        .height(Length::Fixed(4.0)),
+                )
+                .push(
+                    container(
+                        Column::new()
+                            .push(state_label("system_event_chip(label, accent, body, theme)"))
+                            .push(
+                                Space::new()
+                                    .width(Length::Shrink)
+                                    .height(Length::Fixed(design_tokens::SPACE_4)),
+                            )
+                            .push(system_event_chip(
+                                "MEMBER",
+                                design_tokens::online(&theme),
+                                "accent = online green",
+                                &theme,
+                            ))
+                            .push(system_event_chip(
+                                "NAME",
+                                design_tokens::primary(&theme),
+                                "accent = primary green",
+                                &theme,
+                            ))
+                            .push(system_event_chip(
+                                "HELP",
+                                design_tokens::text_muted(&theme),
+                                "accent = muted text",
+                                &theme,
+                            ))
+                            .push(system_event_chip(
+                                "NOTICE",
+                                design_tokens::color_warning(&theme),
+                                "accent = warning amber",
+                                &theme,
+                            ))
+                            .spacing(design_tokens::SPACE_4),
+                    )
+                    .padding(design_tokens::SPACE_12)
+                    .style(design_tokens::card_style),
+                )
+                .width(Length::FillPortion(1)),
+        )
+        .spacing(0)
+        .align_y(Alignment::Start)
         .into()
 }
 

@@ -25,9 +25,12 @@
 //! | Section header     | `section_header(…)`       | default                          |
 //! | Tooltip            | `tooltip(…)`              | default                          |
 //! | Card header        | `card_header(…)`          | default                          |
+//! | Date separator     | `date_separator(…)`       | default (centered, muted)        |
+//! | System event chip  | `system_event_chip(…)`    | default (centered, muted surface)|
 
 use iced::widget::{
     button, container, rule, svg, text, text_input, tooltip as iced_tooltip, Column, Row, Space,
+    Stack,
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Pixels, Theme};
 
@@ -996,21 +999,29 @@ impl<Message: 'static> Avatar<Message> {
                     ..Default::default()
                 });
 
-            // Position badge at bottom-right of avatar using a stacking column/row
+            // Overlay the status badge at bottom-right while retaining the
+            // avatar circle itself. (The badge-only layout would otherwise
+            // make online avatars disappear entirely.)
             let badge_offset = self.size - 12.0;
-            container(
-                Column::new().push(
-                    Row::new()
-                        .push(
-                            Space::new()
-                                .width(Length::Fixed(badge_offset))
-                                .height(Length::Fixed(badge_offset)),
-                        )
-                        .push(badge_element),
-                ),
-            )
-            .style(|_t| container::Style::default())
-            .into()
+            Stack::new()
+                .push(circle)
+                .push(
+                    container(
+                        Row::new()
+                            .push(
+                                Space::new()
+                                    .width(Length::Fixed(badge_offset))
+                                    .height(Length::Fixed(badge_offset)),
+                            )
+                            .push(badge_element),
+                    )
+                    .width(Length::Fixed(self.size))
+                    .height(Length::Fixed(self.size))
+                    .style(|_t| container::Style::default()),
+                )
+                .width(Length::Fixed(self.size))
+                .height(Length::Fixed(self.size))
+                .into()
         } else {
             container(label)
                 .width(Length::Fixed(self.size))
@@ -1342,6 +1353,84 @@ pub fn sidebar_empty_state<'a>(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 14. TIMELINE ITEMS — date separators and system-event chips (Figure 4)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Presentational only: callers supply the already-formatted label / accent /
+// body. The chat timeline maps business data to these inputs (see
+// `presentation::date_divider_label` and `presentation::system_event_kind`),
+// so the components stay free of classification logic.
+
+/// A centered, muted date divider for the chat timeline.
+///
+/// Compact 12 px typography on a quiet surface; used between message groups
+/// when the day changes (e.g. "Today", "Yesterday", "Sunday, August 2, 2026").
+/// Accepts any text fragment (borrowed `&str` or owned `String`) so callers
+/// can pass freshly formatted labels without lifetime gymnastics.
+pub fn date_separator<'a, Message: 'a>(
+    label: impl text::IntoFragment<'a>,
+    theme: &Theme,
+) -> Element<'a, Message> {
+    container(
+        text(label)
+            .size(Typography::Timestamp.size_px())
+            .color(design_tokens::text_muted(theme)),
+    )
+    .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
+    .width(Length::Fill)
+    .center_x(Length::Fill)
+    .into()
+}
+
+/// A centered, muted chip for informational system entries in the timeline.
+///
+/// Displays a compact category label (`label`, rendered in `accent`) followed
+/// by the original event text (`body`). The muted secondary surface keeps the
+/// event readable but visually secondary to user message bubbles. No mapping
+/// logic — the caller decides the label/accent pair.
+pub fn system_event_chip<'a, Message: 'a>(
+    label: &'a str,
+    accent: Color,
+    body: &'a str,
+    theme: &Theme,
+) -> Element<'a, Message> {
+    Row::new()
+        .push(
+            container(
+                Row::new()
+                    .push(
+                        text(label)
+                            .size(Typography::Timestamp.size_px())
+                            .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                            .color(accent),
+                    )
+                    .push(
+                        text(body)
+                            .size(Typography::Timestamp.size_px())
+                            .color(design_tokens::text_secondary(theme))
+                            .wrapping(iced::widget::text::Wrapping::Word),
+                    )
+                    .spacing(design_tokens::SPACE_8)
+                    .align_y(Alignment::Center),
+            )
+            .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
+            .center_x(Length::Fill)
+            .max_width(720.0)
+            .style(move |t| container::Style {
+                background: Some(Background::Color(design_tokens::surface_secondary(t))),
+                border: Border {
+                    color: accent.scale_alpha(0.45),
+                    width: 1.0,
+                    radius: design_tokens::SPACE_8.into(),
+                },
+                ..Default::default()
+            }),
+        )
+        .width(Length::Fill)
+        .into()
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1438,5 +1527,30 @@ mod tests {
         // Building should not panic; the element is opaque so we only verify
         // the builder produces an element.
         let _ = el;
+    }
+
+    #[test]
+    fn date_separator_builds_with_sample_label() {
+        // Presentational smoke test: the component must render for a sample
+        // label without panicking and return an element.
+        let el: Element<'static, AppMessage> = date_separator("Today", &Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn system_event_chip_builds_with_sample_data() {
+        // Presentational smoke test for every accent the timeline uses.
+        let theme = Theme::Light;
+        for (label, accent) in [
+            ("MEMBER", design_tokens::online(&theme)),
+            ("NAME", design_tokens::primary(&theme)),
+            ("HELP", design_tokens::text_muted(&theme)),
+            ("NOTICE", design_tokens::color_warning(&theme)),
+            ("INFO", design_tokens::text_muted(&theme)),
+        ] {
+            let el: Element<'static, AppMessage> =
+                system_event_chip(label, accent, "Sample system event body", &theme);
+            let _ = el;
+        }
     }
 }
