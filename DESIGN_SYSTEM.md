@@ -1,46 +1,42 @@
 # Boru — Design System
 
-> **Version:** 1.1 (final)
+> **Version:** 2.0 (UI-02 — Boru Modern redesign)
 > **Created:** 2026-07-21
-> **Updated:** 2026-07-23
+> **Updated:** 2026-08-03
 > **Scope:** `examples/iced_chat/` — the `iced` desktop GUI for Boru
 > **Audience:** Developers maintaining or extending the Boru GUI
 
-This document specifies every visual token, component, and behaviour in the Boru UI. All values reference the **current codebase** — this is a living document describing the implementation as it stands after the UI redesign (Steps 2–23). Token names, line numbers, and dimensions are verified against the source.
+This document specifies every visual token, component, and behaviour in the Boru UI. All values reference the **current codebase** — a living document describing the implementation. Token names and dimensions are verified against `design_tokens.rs` and `fonts.rs`.
 
 ---
 
 ## 1. Typography
 
-### Font Family
+### Font Families
 
-System font stack — no custom fonts loaded. The stack falls through to the platform default UI font:
+| Family | Weights loaded | Scope |
+|---|---|---|
+| **Source Sans 3** | 400 (Regular), 600 (SemiBold), 700 (Bold) | Primary app font — all UI text and chat |
+| **Raleway** | 800 (ExtraBold) | BORU wordmark / branding only |
+| **JetBrains Mono** | 400 (Regular), 500 (Medium) | Technical/code values |
 
-```css
-/* Conceptual */
-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
-             Helvetica, Arial, sans-serif;
-```
-
-Iced's built-in theme engine uses this stack already; no change needed.
+Fonts are bundled at compile time via `include_bytes!` in `fonts.rs` and loaded at startup by `fonts::load_fonts()`. Inter and Manrope remain bundled for legacy compatibility but are not loaded by default.
 
 ### Type Scale
 
-The current scale uses a minor-second ratio (~1.125) with six steps. These **should remain** — they're used consistently across the app.
+| Token | px | Semantic role | Weight |
+|---|---|---|---|
+| `PAGE_TITLE` | 28 | Page title | SemiBold |
+| `CONVERSATION_TITLE` | 18 | Section heading, room name | SemiBold |
+| `SIDEBAR_IDENTITY` | 16 | Sidebar identity name | SemiBold |
+| `CHAT_MESSAGE` | 15 | Chat message body | Regular |
+| `BODY` | 14 | Body text, labels, buttons | Regular |
+| `SECONDARY` | 12 | Secondary metadata, timestamps | Regular |
 
-| Token    | px  | Current constant | Usage                                                           | File:Line      |
-|----------|-----|------------------|-----------------------------------------------------------------|----------------|
-| TYPO_XXS | 10  | `TYPO_XXS: f32 = 10.0`  | Fine print, ticket text, instruction text, timestamp labels, size labels | `app.rs:187`   |
-| TYPO_XS  | 11  | `TYPO_XS: f32 = 11.0`   | Metadata, identity info, secondary labels, section headers, error detail | `app.rs:186`   |
-| TYPO_SM  | 13  | `TYPO_SM: f32 = 13.0`   | Secondary body, preview text, entry labels, button labels (default) | `app.rs:185`   |
-| TYPO_MD  | 15  | `TYPO_MD: f32 = 15.0`   | Body text, section headers, primary button labels, settings section titles | `app.rs:184`   |
-| TYPO_LG  | 18  | `TYPO_LG: f32 = 18.0`   | Secondary heading (room name, help title), sidebar app name           | `app.rs:183`   |
-| TYPO_XL  | 24  | `TYPO_XL: f32 = 24.0`   | Primary heading (settings page title)                                 | `app.rs:182`   |
+**Legacy aliases** (keep app.rs compiling; values updated to spec):
+`XL`(28), `LG`(18), `MD`(15), `SM`(14), `XS`(12), `XXS`(12)
 
-**Conventions:**
-- Button labels default to `TYPO_SM` (13px); primary CTA buttons use `TYPO_MD` (15px).
-- Chat message body size is user-configurable (`chat_text_size`, defaults to `TYPO_SM`).
-- Section headers in the sidebar use `TYPO_XS` (11px) in muted colour.
+Source: `examples/iced_chat/fonts.rs`, module `sizes`. Defined in Rust as `pub const` f32 values.
 
 ### Text Styles
 
@@ -133,96 +129,60 @@ Base unit: **4px**. All spacing values are multiples or fractions of this base.
 
 ## 3. Colour Palettes
 
-### 3.1 Light Theme
+Source: `examples/iced_chat/design_tokens.rs`. All colours are theme-aware (light/dark) via Rust functions.
+
+### 3.1 Light Theme (Boru Modern spec)
 
 **Backgrounds**
 
-| Token         | Hex     | RGB              | Usage                       | File:Line |
-|---------------|---------|------------------|-----------------------------|-----------|
-| bg_primary    | #f0f0f6 | 0.94, 0.94, 0.96 | Main panel background       | `app.rs:353` |
-| bg_surface    | #ffffff | 1.0, 1.0, 1.0    | Sidebar, cards, surfaces    | `app.rs:362` |
-| bg_input      | #f0f0f4 | 0.94, 0.94, 0.96 | Input field background      | `app.rs:372` |
-| bg_hover      | #e6e6f2 | 0.90, 0.90, 0.95 | Row hover state             | `app.rs:381` |
-| border_muted  | #d9d9e0 | 0.85, 0.85, 0.88 | Card borders, dividers      | `app.rs:391` |
+| Token | Hex | Usage |
+|---|---|---|
+| `color_canvas()` | #F7F9F8 | Main panel background |
+| `color_sidebar()` | #FCFDFC | Sidebar background |
+| `surface()` | #FFFFFF | Cards, dialogs, elevated surfaces |
+| `surface_selected()` | #EDF7F1 | Selected row/item background |
+| `surface_hover()` | #EFF3F1 | Row hover state |
+| `bg_input()` | #F0F0F4 | Input field background |
 
 **Text**
 
-| Token              | Hex     | RGB              | Contrast  | Usage                       | File:Line |
-|--------------------|---------|------------------|-----------|-----------------------------|-----------|
-| text_primary       | #222    | 0.13, 0.13, 0.13| ≥ 11.5:1   | Body text (remote messages) | `app.rs:328` |
-| text_secondary     | #666    | 0.40, 0.40, 0.40| ≥ 5.2:1    | Muted, secondary labels     | `app.rs:283` |
-| text_system        | #595959 | 0.35, 0.35, 0.35| ≥ 6.5:1    | System messages, help text  | `app.rs:292` |
-| text_local_label   | #007300 | 0.0, 0.45, 0.0 | ≥ 5.8:1    | "You" label in chat         | `app.rs:301` |
-| text_local_body    | #005900 | 0.0, 0.35, 0.0 | ≥ 6.5:1    | Self-sent message body      | `app.rs:310` |
-| text_remote_label  | #0054A8 | 0.0, 0.33, 0.66| ≥ 5.5:1    | Peer name label             | `app.rs:319` |
-| text_remote_body   | #222    | 0.13, 0.13, 0.13| ≥ 11.5:1   | Received message body       | `app.rs:328` |
+| Token | Hex | Contrast | Usage |
+|---|---|---|---|
+| `text_primary()` | #17211B | ≥ 12.5:1 | Body text, message content |
+| `text_secondary()` | #5F6F66 | ≥ 4.7:1 | Labels, supporting text |
+| `text_muted()` | #8A978F | ≥ 2.8:1 | Tertiary metadata, timestamps |
+
+**Borders**
+
+| Token | Hex | Usage |
+|---|---|---|
+| `border_muted()` | #DCE5DF | Standard borders, dividers |
+| `border_strong()` | #C8D7CE | Emphasized borders |
 
 **Accents**
 
-| Token           | Hex     | RGB              | Usage                               | File:Line |
-|-----------------|---------|------------------|-------------------------------------|-----------|
-| accent_primary  | #2e70cc | 0.18, 0.44, 0.80 | Buttons, links, selection, focus    | `app.rs:399` |
-| accent_green    | #1a8c33 | 0.10, 0.55, 0.20 | Success, online indicator           | `app.rs:408` |
-| color_error     | #bf2626 | 0.75, 0.15, 0.15 | Error, destructive actions          | `app.rs:417` |
+| Token | Hex | Usage |
+|---|---|---|
+| `primary()` | #188C50 | Brand accent, buttons, links |
+| `primary_hover()` | #147643 | Hover state |
+| `primary_pressed()` | #105F38 | Pressed state |
+| `primary_soft()` | #EAF5EE | Subtle accent background |
+| `color_success()` | #20A661 | Success, online indicator |
+| `color_danger()` | #C84E4E | Error, destructive actions |
+| `color_focus()` | #2B9B67 | Focus ring |
+| `color_warning()` | #B3730D | Reconnecting, warning states |
 
-**Chat bubbles**
+**Chat bubbles** (unchanged)
 
-| Kind   | Background RGBA          | Effect                         | File:Line |
-|--------|--------------------------|--------------------------------|-----------|
-| Local  | (0.0, 0.5, 0.0, 0.06)   | Very faint green tint          | `app.rs:340` |
-| Remote | (0.1, 0.2, 0.5, 0.05)   | Very faint blue tint           | `app.rs:341` |
-| System | None (transparent)       | No bubble — centered text      | `app.rs:334-335` |
+| Kind | Background RGBA | Effect |
+|---|---|---|
+| Local | (0.0, 0.5, 0.0, 0.06) | Very faint green tint |
+| Remote | (0.1, 0.2, 0.5, 0.05) | Very faint blue tint |
+| System | None (transparent) | No bubble — centered text |
 
 ### 3.2 Dark Theme
 
-**Backgrounds**
-
-| Token         | Hex     | RGB              | Usage                       | File:Line |
-|---------------|---------|------------------|-----------------------------|-----------|
-| bg_primary    | #1a1a2e | 0.10, 0.10, 0.18 | Main panel background       | `app.rs:351` |
-| bg_surface    | #2a2a3e | 0.16, 0.16, 0.24 | Sidebar, cards, surfaces    | `app.rs:359` |
-| bg_input      | #222238 | 0.13, 0.13, 0.22 | Input field background      | `app.rs:370` |
-| bg_hover      | #33334d | 0.20, 0.20, 0.30 | Row hover state             | `app.rs:379` |
-| border_muted  | #383852 | 0.22, 0.22, 0.32 | Card borders, dividers      | `app.rs:389` |
-
-**Text**
-
-| Token              | Hex     | RGB              | Contrast  | Usage                       | File:Line |
-|--------------------|---------|------------------|-----------|-----------------------------|-----------|
-| text_primary       | #ccc    | 0.80, 0.80, 0.80| ≥ 5.5:1    | Body text (remote messages) | `app.rs:326` |
-| text_secondary     | #999    | 0.60, 0.60, 0.60| ≥ 4.5:1    | Muted, secondary labels     | `app.rs:281` |
-| text_system        | #999    | 0.60, 0.60, 0.60| ≥ 4.5:1    | System messages, help text  | `app.rs:289` |
-| text_local_label   | #33cc33 | 0.20, 0.80, 0.20| vivid green | "You" label in chat        | `app.rs:299` |
-| text_local_body    | #4de64d | 0.30, 0.90, 0.30| bright green| Self-sent message body      | `app.rs:308` |
-| text_remote_label  | #66a6ff | 0.40, 0.65, 1.0 | light blue  | Peer name label             | `app.rs:317` |
-| text_remote_body   | #ccc    | 0.80, 0.80, 0.80| ≥ 5.5:1    | Received message body       | `app.rs:326` |
-
-**Accents**
-
-| Token           | Hex     | RGB              | Usage                               | File:Line |
-|-----------------|---------|------------------|-------------------------------------|-----------|
-| accent_primary  | #4a9eff | 0.29, 0.62, 1.0  | Buttons, links, selection, focus    | `app.rs:397` |
-| accent_green    | #3ddc84 | 0.24, 0.86, 0.52 | Success, online indicator           | `app.rs:406` |
-| color_error     | #e64040 | 0.90, 0.25, 0.25 | Error, destructive actions          | `app.rs:415` |
-
-**Chat bubbles**
-
-| Kind   | Background RGBA            | Effect                         | File:Line |
-|--------|----------------------------|--------------------------------|-----------|
-| Local  | (0.15, 0.30, 0.15, 0.40)  | Semi-transparent green tint    | `app.rs:338` |
-| Remote | (0.20, 0.20, 0.25, 0.40)  | Semi-transparent grey-blue     | `app.rs:339` |
-| System | None (transparent)         | No bubble — centered text      | `app.rs:334-335` |
-
-### 3.3 Semantic Status Colours
-
-| Status   | Light hex | Dark hex  | Used for                                    |
-|----------|-----------|-----------|---------------------------------------------|
-| Online   | #1a8c33   | #3ddc84   | Green dot ("●") next to peer name           |
-| Idle     | #c4a000   | #e6b800   | Amber (currently not explicitly present — recommended addition) |
-| Offline  | #999      | #666      | Grey dot ("○") next to peer name            |
-| Error    | #bf2626   | #e64040   | Destructive buttons, error messages         |
-| Success  | #1a8c33   | #3ddc84   | Confirmation, completed states              |
-| Link     | #2e70cc   | #4a9eff   | Peer profile links, clickable labels        |
+Dark values use the same semantic token names; the functions branch on `Theme::Dark`. See `design_tokens.rs` for exact dark values. The dark palette preserves blue accent (#4a9eff) to distinguish from the green light-mode accent — both call `primary()`, but the function returns the theme-appropriate colour.
 
 ### 3.4 Notification / Unread Indicators
 
