@@ -181,9 +181,10 @@ produce OCR-checked PNG evidence; both last failed on state 1 against a stale bi
 
 ## 9. Implementation (t_9e9a0fcd, completed)
 
-Implemented 2026-08-03 in `examples/iced_chat/app.rs` (commit
-`4d4166d4` "fix(t_9e9a0fcd): preserve chat scroll-to-bottom and reading position", see
-`git show 4d4166d4`). Summary of what changed and what was deliberately NOT changed.
+Implemented 2026-08-03 in `examples/iced_chat/app.rs` (commit titled
+"fix(t_9e9a0fcd): preserve chat scroll-to-bottom and reading position", see
+`git log --oneline --grep=t_9e9a0fcd`). Summary of what changed and what was
+deliberately NOT changed.
 
 ### 9.1 Code changes
 
