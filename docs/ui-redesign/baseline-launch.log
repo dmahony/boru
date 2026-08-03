@@ -1,0 +1,624 @@
+2026-08-03T10:36:32+10:00
+
+## launch command
+xvfb-run -a timeout 20s cargo run --features gui --example boru -- --data-dir /tmp/boru-ui-audit.caI1rk --no-dht --no-relay
+   Compiling futures-executor v0.3.33
+   Compiling iced_core v0.14.0
+   Compiling futures v0.3.33
+   Compiling actor-helper v0.3.0
+   Compiling netlink-proto v0.12.0
+   Compiling tokio-rustls-acme v0.9.1
+   Compiling igd-next v0.17.1
+   Compiling distributed-topic-tracker v0.3.5
+   Compiling netwatch v0.19.1
+   Compiling iced_futures v0.14.0
+   Compiling iroh-relay v1.0.3 (/home/dan/iroh-gossip-chat/patched/iroh-relay)
+   Compiling iced_graphics v0.14.0
+   Compiling iced_debug v0.14.0
+   Compiling portmapper v0.19.1
+   Compiling iced_runtime v0.14.0
+   Compiling iced_tiny_skia v0.14.0
+   Compiling iroh v1.0.3 (/home/dan/iroh-gossip-chat/patched/iroh)
+   Compiling iced_wgpu v0.14.0
+   Compiling iced_program v0.14.0
+   Compiling iced_winit v0.14.0
+   Compiling iced_renderer v0.14.0
+   Compiling iced_widget v0.14.2
+   Compiling iroh-util v0.6.0
+   Compiling iroh-mainline-address-lookup v0.4.0
+   Compiling iroh-mdns-address-lookup v0.4.0
+   Compiling iroh-blobs v0.103.0
+   Compiling iced v0.14.0
+   Compiling boru-core v0.108.0 (/home/dan/iroh-gossip-chat)
+warning: unused import: `AsyncWriteExt`
+   --> src/streaming_server.rs:112:35
+    |
+112 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+
+## exit code: 124
+2026-08-03T10:36:59+10:00
+
+## build binary
+   Compiling boru-core v0.108.0 (/home/dan/iroh-gossip-chat)
+warning: unused import: `AsyncWriteExt`
+   --> src/streaming_server.rs:112:35
+    |
+112 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+  --> src/streaming_server.rs:21:1
+   |
+21 | / pub struct StreamingServer {
+22 | |     /// The port the server is listening on.
+23 | |     pub port: u16,
+24 | |     /// Handle to the server task.
+...  |
+27 | |     running: Arc<AtomicBool>,
+28 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-debug-implementations`
+
+warning: this lint expectation is unfulfilled
+   --> src/room_history.rs:166:14
+    |
+166 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+    |
+    = note: `#[warn(unfulfilled_lint_expectations)]` on by default
+
+warning: `boru-core` (lib) generated 3 warnings (run `cargo fix --lib -p boru-core` to apply 1 suggestion)
+warning: unused import: `Instant`
+  --> examples/iced_chat/app.rs:20:27
+   |
+20 | use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+   |                           ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::notification::backend::NoopBackend`
+  --> examples/iced_chat/app.rs:23:5
+   |
+23 | use crate::notification::backend::NoopBackend;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ConversationMute`, `DoNotDisturb`, `NotificationPreferences`, `PreviewMode`, and `WindowFocusState`
+  --> examples/iced_chat/app.rs:29:5
+   |
+29 |     ConversationMute, DoNotDisturb, NotificationPreferences, NotificationService, PreviewMode,
+   |     ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^                       ^^^^^^^^^^^
+30 |     WindowFocusState,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `GroupTopicHistory`
+  --> examples/iced_chat/app.rs:48:24
+   |
+48 |     ConversationStore, GroupTopicHistory,
+   |                        ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TunnelStatus`
+  --> examples/iced_chat/app.rs:83:52
+   |
+83 | use boru_core::tunnel::service::{TunnelDefinition, TunnelStatus};
+   |                                                    ^^^^^^^^^^^^
+
+warning: unused imports: `PlaybackCoordinator`, `VideoInstanceKey`, `VideoJitterBuffer`, and `verify_local_attachment`
+  --> examples/iced_chat/app.rs:86:35
+   |
+86 |     validate_attachment_filename, verify_local_attachment, PlaybackCoordinator, VideoInstanceKey,
+   |                                   ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+87 |     VideoJitterBuffer,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TunnelDefinition`
+    --> examples/iced_chat/app.rs:1302:38
+     |
+1302 |     use boru_core::tunnel::service::{TunnelDefinition, TunnelStatus};
+     |                                      ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Row`
+     --> examples/iced_chat/app.rs:19183:88
+      |
+19183 |             button, checkbox, column, container, scrollable, text, text_input, Column, Row,
+      |                                                                                        ^^^
+
+warning: unused import: `Row`
+     --> examples/iced_chat/app.rs:19386:91
+      |
+19386 |         use iced::widget::{button, checkbox, column, container, scrollable, text, Column, Row};
+      |                                                                                           ^^^
+
+warning: unused import: `Space`
+     --> examples/iced_chat/app.rs:19921:66
+      |
+19921 |         use iced::widget::{button, container, text, Column, Row, Space};
+      |                                                                  ^^^^^
+
+warning: unused import: `SPACE_24`
+  --> examples/iced_chat/connection_details.rs:18:34
+   |
+18 |     SPACE_12, SPACE_16, SPACE_2, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XL, TYPO_XS,
+   |                                  ^^^^^^^^
+
+warning: unused import: `NotificationActionTarget`
+  --> examples/iced_chat/notification/service.rs:15:5
+   |
+15 |     NotificationActionTarget, NotificationEvent, NotificationEventKind, NotificationPriority,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `boru_core::chat_history::ChatHistoryStore::save`: SQLite inbox/outbox tables replace chat_history.json writes
+    --> examples/iced_chat/app.rs:5545:41
+     |
+5545 |                 if let Err(err) = store.save() {
+     |                                         ^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+
+warning: unused variable: `t`
+   --> examples/iced_chat/app.rs:378:31
+    |
+378 |             t = t.style(move |t| text::Style { color: Some(c) });
+    |                               ^ help: if this is intentional, prefix it with an underscore: `_t`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `t`
+    --> examples/iced_chat/app.rs:4700:22
+     |
+4700 |         .style(move |t| container::Style {
+     |                      ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: variable does not need to be mutable
+    --> examples/iced_chat/app.rs:5057:17
+     |
+5057 |             let mut store = if let Some(ref st) = storage {
+     |                 ----^^^^^
+     |                 |
+     |                 help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `neighbor_count`
+    --> examples/iced_chat/app.rs:8035:29
+     |
+8035 |                         let neighbor_count = neighbor_ids.len();
+     |                             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_neighbor_count`
+
+warning: unused variable: `description`
+     --> examples/iced_chat/app.rs:10150:17
+      |
+10150 |                 description,
+      |                 ^^^^^^^^^^^ help: try ignoring the field: `description: _`
+
+warning: unused variable: `entry`
+     --> examples/iced_chat/app.rs:14309:26
+      |
+14309 |                     Some(entry) => {
+      |                          ^^^^^ help: if this is intentional, prefix it with an underscore: `_entry`
+
+warning: unused variable: `inviter_name`
+     --> examples/iced_chat/app.rs:14328:21
+      |
+14328 |                 let inviter_name = self.local_label.clone();
+      |                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inviter_name`
+
+warning: unused variable: `data_dir`
+     --> examples/iced_chat/app.rs:14331:21
+      |
+14331 |                 let data_dir = self.data_dir.clone();
+      |                     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_dir`
+
+warning: unused variable: `sk`
+     --> examples/iced_chat/app.rs:14332:21
+      |
+14332 |                 let sk = self.secret_key.clone();
+      |                     ^^ help: if this is intentional, prefix it with an underscore: `_sk`
+
+warning: unused variable: `idx`
+     --> examples/iced_chat/app.rs:16485:42
+      |
+16485 |             AppMessage::ContextCopyImage(idx) => {
+      |                                          ^^^ help: if this is intentional, prefix it with an underscore: `_idx`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:18832:55
+      |
+18832 |                 text("Loading…").size(16).style(move |t| text::Style {
+      |                                                       ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:18828:52
+      |
+18828 |                 text(spinner).size(24).style(move |t| text::Style {
+      |                                                    ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:18822:30
+      |
+18822 |                 .style(move |t| text::Style {
+      |                              ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:19098:26
+      |
+19098 |             .style(move |t| iced::widget::container::Style {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:19154:26
+      |
+19154 |             .style(move |t| iced::widget::container::Style {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:19260:26
+      |
+19260 |             .style(move |t| iced::widget::container::Style {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `theme`
+     --> examples/iced_chat/app.rs:19187:13
+      |
+19187 |         let theme = Self::theme_from_dark(self.dark_mode);
+      |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_theme`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:19458:26
+      |
+19458 |             .style(move |t| iced::widget::container::Style {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `theme`
+     --> examples/iced_chat/app.rs:19389:13
+      |
+19389 |         let theme = Self::theme_from_dark(self.dark_mode);
+      |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_theme`
+
+warning: variable does not need to be mutable
+     --> examples/iced_chat/app.rs:19545:13
+      |
+19545 |         let mut header = Row::new()
+      |             ----^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:20409:26
+      |
+20409 |             .style(move |t| {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:20119:30
+      |
+20119 |                 .style(move |t| container::Style {
+      |                              ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:20155:26
+      |
+20155 |             .style(move |t| container::Style {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:20699:22
+      |
+20699 |         .style(move |t| container::Style {
+      |                      ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:20827:35
+      |
+20827 | ...                   move |t, _| iced::widget::svg::Style {
+      |                             ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:21730:74
+      |
+21730 | ...                   icon_svg(ICON_ACTIVITY, TYPO_SM).style(move |t, _| {
+      |                                                                    ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:22399:30
+      |
+22399 |                 .style(move |t| iced::widget::container::Style {
+      |                              ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:22460:38
+      |
+22460 |                         .style(move |t| iced::widget::container::Style {
+      |                                      ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:22742:26
+      |
+22742 |             .style(move |t| iced::widget::container::Style {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `r`
+     --> examples/iced_chat/app.rs:23502:24
+      |
+23502 |             .and_then(|r| {
+      |                        ^ help: if this is intentional, prefix it with an underscore: `_r`
+
+warning: unused variable: `description`
+     --> examples/iced_chat/app.rs:23501:13
+      |
+23501 |         let description = room_entry
+      |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_description`
+
+warning: unused variable: `status`
+     --> examples/iced_chat/app.rs:24546:24
+      |
+24546 |             .style(|t, status| iced::widget::button::Style {
+      |                        ^^^^^^ help: if this is intentional, prefix it with an underscore: `_status`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:27015:30
+      |
+27015 |                 .style(move |t| iced::widget::container::Style {
+      |                              ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: type `GifResult` is more private than the item `AppMessage::GifSearchResults::0`
+    --> examples/iced_chat/app.rs:3975:22
+     |
+3975 |     GifSearchResults(Vec<GifResult>),
+     |                      ^^^^^^^^^^^^^^ field `AppMessage::GifSearchResults::0` is reachable at visibility `pub`
+     |
+note: but type `GifResult` is only usable at visibility `pub(self)`
+    --> examples/iced_chat/app.rs:2552:1
+     |
+2552 | struct GifResult {
+     | ^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: variants `UnsupportedCodec`, `CorruptFile`, `MissingFile`, `PermissionDenied`, `Initialization`, and `Unknown` are never constructed
+    --> examples/iced_chat/app.rs:1359:5
+     |
+1358 | pub(crate) enum InlinePlaybackErrorKind {
+     |                 ----------------------- variants in this enum
+1359 |     UnsupportedCodec,
+     |     ^^^^^^^^^^^^^^^^
+1360 |     CorruptFile,
+     |     ^^^^^^^^^^^
+1361 |     MissingFile,
+     |     ^^^^^^^^^^^
+1362 |     PermissionDenied,
+     |     ^^^^^^^^^^^^^^^^
+1363 |     Initialization,
+     |     ^^^^^^^^^^^^^^
+1364 |     Unknown,
+     |     ^^^^^^^
+     |
+     = note: `InlinePlaybackErrorKind` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `from_backend` is never used
+    --> examples/iced_chat/app.rs:1375:19
+     |
+1374 | impl InlinePlaybackError {
+     | ------------------------ associated function in this implementation
+1375 |     pub(crate) fn from_backend(error: impl Into<String>) -> Self {
+     |                   ^^^^^^^^^^^^
+
+warning: variant `Groups` is never constructed
+    --> examples/iced_chat/app.rs:2396:5
+     |
+2378 | pub enum Screen {
+     |          ------ variant in this enum
+...
+2396 |     Groups,
+     |     ^^^^^^
+     |
+     = note: `Screen` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: variants `FileShared`, `Message`, and `Generic` are never constructed
+    --> examples/iced_chat/app.rs:3263:5
+     |
+3260 | pub(crate) enum ActivityKind {
+     |                 ------------ variants in this enum
+...
+3263 |     FileShared,
+     |     ^^^^^^^^^^
+3264 |     Message,
+     |     ^^^^^^^
+3265 |     Generic,
+     |     ^^^^^^^
+     |
+     = note: `ActivityKind` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+    --> examples/iced_chat/app.rs:3269:8
+     |
+3268 | impl RecentActivityEvent {
+     | ------------------------ associated function in this implementation
+3269 |     fn new(description: impl Into<String>) -> Self {
+     |        ^^^
+
+warning: field `is_http` is never read
+    --> examples/iced_chat/app.rs:3540:5
+     |
+3536 | struct SharedTunnelState {
+     |        ----------------- field in this struct
+...
+3540 |     is_http: bool,
+     |     ^^^^^^^
+     |
+     = note: `SharedTunnelState` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `content_type_for_filename` is never used
+    --> examples/iced_chat/app.rs:6957:8
+     |
+6850 | impl IcedChat {
+     | ------------- associated function in this implementation
+...
+6957 |     fn content_type_for_filename(name: &str) -> String {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `emit_message_notification` is never used
+     --> examples/iced_chat/app.rs:17381:8
+      |
+ 7721 | impl IcedChat {
+      | ------------- method in this implementation
+...
+17381 |     fn emit_message_notification(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+  --> examples/iced_chat/notification/focus.rs:30:9
+   |
+28 | pub struct WindowFocusTracker {
+   |            ------------------ fields in this struct
+29 |     /// Whether the window currently has keyboard focus.
+30 |     pub window_focused: bool,
+   |         ^^^^^^^^^^^^^^
+31 |     /// Whether the window is visible on screen (not minimised or hidden).
+32 |     pub window_visible: bool,
+   |         ^^^^^^^^^^^^^^
+33 |     /// Whether the window is minimised.
+34 |     pub window_minimised: bool,
+   |         ^^^^^^^^^^^^^^^^
+35 |     /// Whether the app is running in background (tray/minimise-to-tray) mode.
+36 |     pub running_in_background: bool,
+   |         ^^^^^^^^^^^^^^^^^^^^^
+37 |     /// The conversation topic currently active in the chat panel, if any.
+38 |     pub active_conversation_id: Option<String>,
+   |         ^^^^^^^^^^^^^^^^^^^^^^
+39 |     /// Timestamp of the last focus transition (for debounce logic).
+40 |     last_focus_change: Instant,
+   |     ^^^^^^^^^^^^^^^^^
+41 |     /// Number of focus events received (for diagnostics).
+42 |     focus_event_count: u64,
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: `WindowFocusTracker` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: multiple methods are never used
+   --> examples/iced_chat/notification/focus.rs:66:12
+    |
+ 51 | impl WindowFocusTracker {
+    | ----------------------- methods in this implementation
+...
+ 66 |     pub fn on_focused(&mut self) -> Vec<(String, String)> {
+    |            ^^^^^^^^^^
+...
+ 83 |     pub fn on_unfocused(&mut self) -> Vec<(String, String)> {
+    |            ^^^^^^^^^^^^
+...
+100 |     pub fn on_minimised(&mut self) -> Vec<(String, String)> {
+    |            ^^^^^^^^^^^^
+...
+117 |     pub fn on_restored(&mut self) -> Vec<(String, String)> {
+    |            ^^^^^^^^^^^
+...
+134 |     pub fn on_conversation_changed(&mut self, topic: Option<String>) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+146 |     pub fn set_running_in_background(&mut self, bg: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+158 |     pub fn to_focus_state(&self) -> WindowFocusState {
+    |            ^^^^^^^^^^^^^^
+...
+169 |     pub fn focus_event_count(&self) -> u64 {
+    |            ^^^^^^^^^^^^^^^^^
+...
+174 |     pub fn time_since_last_change(&self) -> Duration {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `PreviewMode` is never used
+  --> examples/iced_chat/notification/render.rs:11:10
+   |
+11 | pub enum PreviewMode {
+   |          ^^^^^^^^^^^
+
+warning: associated items `from_str` and `as_str` are never used
+  --> examples/iced_chat/notification/render.rs:22:12
+   |
+20 | impl PreviewMode {
+   | ---------------- associated items in this implementation
+21 |     /// Parse from a string (e.g. from settings).
+22 |     pub fn from_str(s: &str) -> Self {
+   |            ^^^^^^^^
+...
+31 |     pub fn as_str(&self) -> &'static str {
+   |            ^^^^^^
+
+warning: struct `RenderedNotification` is never constructed
+  --> examples/iced_chat/notification/render.rs:42:12
+   |
+42 | pub struct RenderedNotification {
+   |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_event` is never used
+  --> examples/iced_chat/notification/render.rs:57:8
+   |
+57 | pub fn render_event(event: &NotificationEvent, preview_mode: PreviewMode) -> RenderedNotification {
+   |        ^^^^^^^^^^^^
+
+warning: function `render_hidden_body` is never used
+  --> examples/iced_chat/notification/render.rs:84:4
+   |
+84 | fn render_hidden_body(kind: NotificationEventKind) -> String {
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_sender_only_body` is never used
+  --> examples/iced_chat/notification/render.rs:97:4
+   |
+97 | fn render_sender_only_body(kind: NotificationEventKind) -> String {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sanitize_preview` is never used
+   --> examples/iced_chat/notification/render.rs:114:8
+    |
+114 | pub fn sanitize_preview(text: &str) -> String {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `render_group_summary` is never used
+   --> examples/iced_chat/notification/render.rs:147:8
+    |
+147 | pub fn render_group_summary(title: &str, count: usize, conversations: usize) -> (String, String) {
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/notification/backend.rs:84:10
+   |
+84 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+   |
+   = note: `#[warn(unfulfilled_lint_expectations)]` on by default
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:266:14
+    |
+266 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: `boru-core` (example "boru") generated 67 warnings (run `cargo fix --example "boru" -p boru-core` to apply 45 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 07s
+
+## build exit code: 0
+2026-08-03T10:38:16+10:00
+
+## launch command
+xvfb-run -a timeout 15s target/debug/examples/boru --data-dir /tmp/boru-ui-audit.TiwBju --no-dht --no-relay
+libEGL warning: DRI3 error: Could not get DRI3 device
+libEGL warning: Ensure your X server supports DRI3 to get accelerated rendering
+
+## exit code: 124
+2026-08-03T10:38:49+10:00
+
+## screenshot smoke command
+xvfb-run -a sh -c "target/debug/examples/boru ... & pid=\$!; sleep 8; scrot docs/ui-redesign/baseline-home-1280x800.png; kill \$pid; wait \$pid || true"
+Terminated
+
+## screenshot exit code: 0
+screenshot: docs/ui-redesign/baseline-home-1280x800.png (108048 bytes)
