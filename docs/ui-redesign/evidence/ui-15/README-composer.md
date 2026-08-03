@@ -67,7 +67,9 @@ persistence, permission and authorization semantics are untouched.
 - MCP composer actions (`boru_gui_set_composer` / `boru_gui_submit_composer`)
   exercise the real update path; their `mcp_server` tests pass.
 
-## Visual evidence (fresh captures, Xvfb 1280×800)
+## Visual evidence (fresh captures, Xvfb)
+
+1280×800 (reference):
 
 - `ui15_empty_1280x800.png` — empty composer: paperclip left, placeholder
   text, muted disabled send circle.
@@ -75,10 +77,18 @@ persistence, permission and authorization semantics are untouched.
   send glyph.
 - `ui15_attach_hover_1280x800.png` — paperclip hover state.
 - `ui15_sending_1280x800.png` — transient sending state (broadcast held by a
-  slow link-preview fetch so the spinner glyph is visible).
+  slow link-preview fetch so the spinner glyph is visible; composer cleared,
+  "Sending / Loading preview…" bubble present).
+
+1024×720 (compact width — input remains usable, no clipping/overlap):
+
+- `ui15_empty_1024x720.png`, `ui15_typed_1024x720.png`,
+  `ui15_attach_hover_1024x720.png`, `ui15_sending_1024x720.png` — same four
+  states at the compact viewport.
 
 Re-run: `bash scripts/ui15_composer_evidence.sh` (requires Xvfb, xdotool,
-ImageMagick; builds/uses `target/debug/examples/boru`).
+ImageMagick; builds/uses `target/debug/examples/boru`). Set `BORU_WIDTH` /
+`BORU_HEIGHT` to capture other viewports.
 
 ## Remaining risks / notes
 
