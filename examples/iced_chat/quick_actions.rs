@@ -3,11 +3,19 @@
 //! Each card is a single keyboard- and pointer-activatable button. The cards
 //! deliberately only dispatch existing application messages; the normal
 //! update path owns the dialogs and file-picker flow.
+//!
+//! Visual notes (Figure 3 target):
+//! - Icons match the mockup semantics: chat bubble (public room), two people
+//!   (group chat), person + plus (add friend), upload arrow (share files).
+//! - Labels use the Semibold page-label weight; descriptions stay muted 12 px.
+//! - The card radius matches the rail `CardShell` cards (`RADIUS_LG`) so every
+//!   home card shares the same corner rhythm instead of the generic 8 px
+//!   `BUTTON_CARD`.
 
 use iced::widget::{button, Column, Space};
 use iced::{Alignment, Element, Length, Theme};
 
-use crate::app::{AppMessage, BUTTON_CARD, SPACE_12, SPACE_16, SPACE_4, SPACE_8, TYPO_MD, TYPO_XS};
+use crate::app::{AppMessage, SPACE_12, SPACE_16, SPACE_4, SPACE_8, TYPO_MD, TYPO_XS};
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
 use crate::ui_components::icon_tile;
@@ -27,7 +35,7 @@ const ACTIONS: &[QuickAction] = &[
         message: AppMessage::CreateNewRoom,
     },
     QuickAction {
-        icon: Icon::Notification,
+        icon: Icon::Users,
         label: "Create Group Chat",
         description: "Start a private group conversation",
         message: AppMessage::ShowCreateGroupDialog,
@@ -39,7 +47,7 @@ const ACTIONS: &[QuickAction] = &[
         message: AppMessage::OpenFriendRequests,
     },
     QuickAction {
-        icon: Icon::Files,
+        icon: Icon::Upload,
         label: "Share Files",
         description: "Choose a file to share in a chat",
         message: AppMessage::AttachPressed,
@@ -55,7 +63,11 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
     let content = Column::new()
         .push(icon_tile::<AppMessage>(action.icon, IconSize::Lg, None))
         .push(Space::new().height(Length::Fixed(SPACE_8)))
-        .push(iced::widget::text(action.label).size(TYPO_MD))
+        .push(
+            iced::widget::text(action.label)
+                .size(TYPO_MD)
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
+        )
         .push(Space::new().height(Length::Fixed(SPACE_4)))
         .push(
             iced::widget::text(action.description)
@@ -72,8 +84,61 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
         .padding([SPACE_12, SPACE_16])
         .height(Length::Fixed(132.0))
         .width(Length::Fill)
-        .style(BUTTON_CARD)
+        .style(quick_action_card_style)
         .into()
+}
+
+/// Card-style button for the quick actions.
+///
+/// Mirrors `BUTTON_CARD` (surface bg, muted border, hover lift) but uses
+/// `RADIUS_LG` so the action cards visually match the home rail cards and the
+/// Figure 3 mockup instead of the generic 8 px control radius.
+fn quick_action_card_style(theme: &Theme, status: button::Status) -> iced::widget::button::Style {
+    let surface = design_tokens::surface(theme);
+    let hover = design_tokens::surface_hover(theme);
+    let accent = design_tokens::primary(theme);
+    let background = match status {
+        button::Status::Hovered => hover,
+        button::Status::Pressed => {
+            let mut c = hover;
+            c.r *= 0.92;
+            c.g *= 0.92;
+            c.b *= 0.92;
+            c
+        }
+        _ => surface,
+    };
+    let border_color = match status {
+        button::Status::Hovered => accent,
+        button::Status::Pressed => {
+            let mut c = accent;
+            c.r *= 0.85;
+            c.g *= 0.85;
+            c.b *= 0.85;
+            c
+        }
+        _ => design_tokens::border_muted(theme),
+    };
+    button::Style {
+        background: Some(iced::Background::Color(background)),
+        text_color: match status {
+            button::Status::Hovered => accent,
+            button::Status::Pressed => {
+                let mut c = accent;
+                c.r *= 0.85;
+                c.g *= 0.85;
+                c.b *= 0.85;
+                c
+            }
+            _ => design_tokens::text_muted(theme),
+        },
+        border: iced::Border {
+            color: border_color,
+            width: 1.0,
+            radius: design_tokens::RADIUS_LG.into(),
+        },
+        ..Default::default()
+    }
 }
 
 /// Number of quick-action columns for a given window width (plan §4).
@@ -131,6 +196,15 @@ mod tests {
                 "Share Files",
             ]
         );
+    }
+
+    #[test]
+    fn action_icons_match_figure3_semantics() {
+        // Figure 3: chat bubble, two people, person + plus, upload arrow.
+        assert_eq!(ACTIONS[0].icon, crate::icon_system::Icon::Chat);
+        assert_eq!(ACTIONS[1].icon, crate::icon_system::Icon::Users);
+        assert_eq!(ACTIONS[2].icon, crate::icon_system::Icon::UserPlus);
+        assert_eq!(ACTIONS[3].icon, crate::icon_system::Icon::Upload);
     }
 
     #[test]

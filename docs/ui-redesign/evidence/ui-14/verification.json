@@ -1,0 +1,35 @@
+{
+  "ok": true,
+  "viewport_matrix": {
+    "1024x720": {"content_right_gap_px": 16, "horizontal_scroll": false},
+    "1280x800": {"content_right_gap_px": 24, "horizontal_scroll": false, "footer_visible": true},
+    "1440x900": {"content_right_gap_px": 32, "horizontal_scroll": false},
+    "1920x1080": {"content_right_gap_px": 32, "horizontal_scroll": false}
+  },
+  "quick_action_icons": {
+    "create_public_room": "Icon::Chat",
+    "create_group_chat": "Icon::Users",
+    "add_friend": "Icon::UserPlus",
+    "share_files": "Icon::Upload"
+  },
+  "icon_tile_circular": {
+    "card0_corner_white": true,
+    "card1_corner_white": true,
+    "card2_corner_white": true,
+    "card3_corner_white": true,
+    "all_inner_soft_green": true
+  },
+  "glyph_fingerprints_1280x800": {
+    "create_group_chat_stroke_px_before_after": [11, 21],
+    "share_files_stroke_px_before_after": [7, 10]
+  },
+  "card_radii": {
+    "hero": "RADIUS_XL (16px)",
+    "mesh_activity": "RADIUS_LG (12px)",
+    "quick_actions": "RADIUS_LG (12px)",
+    "rail_cards": "RADIUS_LG (12px)"
+  },
+  "tests": {"run": 601, "passed": 601, "failed": 0},
+  "fmt_check": "pass",
+  "diff_check": "pass"
+}

@@ -22251,7 +22251,10 @@ impl IcedChat {
         )
         .padding(SPACE_16)
         .width(Length::Fill)
-        .style(container_card);
+        // Match the rail cards' corner rhythm and subtle shadow instead of
+        // the generic 8 px container_card, so every home card shares the
+        // same radius system (hero RADIUS_XL, body cards RADIUS_LG).
+        .style(crate::design_tokens::card_style);
 
         // ── Quick actions: four equal, full-card targets (Figure 3) ──
         let action_grid = crate::quick_actions::quick_action_grid(self.window_width, &theme);

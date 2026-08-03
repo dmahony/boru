@@ -51,6 +51,8 @@ const SVG_SMILE: &[u8] = include_bytes!("../../assets/icons/lucide/smile.svg");
 const SVG_SHARE_2: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
 const SVG_TERMINAL: &[u8] = include_bytes!("../../assets/icons/lucide/terminal.svg");
 const SVG_IMAGE: &[u8] = include_bytes!("../../assets/icons/lucide/image.svg");
+const SVG_USERS: &[u8] = include_bytes!("../../assets/icons/lucide/users.svg");
+const SVG_UPLOAD: &[u8] = include_bytes!("../../assets/icons/lucide/upload.svg");
 const SVG_CHEVRON_DOWN: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-down.svg");
 const SVG_CHEVRON_RIGHT: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-right.svg");
 // Re-export the app-level constants for the Lucide icons that were already
@@ -90,12 +92,16 @@ pub enum Icon {
     Friend,
     UserPlus,
     Notification,
+    /// A group of people — used for group-chat actions (Figure 3).
+    Users,
 
     // File / media
     Files,
     Paperclip,
     Image,
     Play,
+    /// Upload / share-out arrow (Figure 3 share-files action).
+    Upload,
 
     // Status / presence
     Online,
@@ -146,12 +152,14 @@ impl Icon {
             Icon::Friend => ICON_FRIEND,
             Icon::UserPlus => ICON_USER_PLUS,
             Icon::Notification => ICON_NOTIFICATION,
+            Icon::Users => SVG_USERS,
 
             // File / media
             Icon::Files => ICON_FILES,
             Icon::Paperclip => ICON_PAPERCLIP,
             Icon::Image => SVG_IMAGE,
             Icon::Play => SVG_PLAY,
+            Icon::Upload => SVG_UPLOAD,
 
             // Status / presence
             Icon::Online => ICON_ONLINE,
@@ -415,7 +423,9 @@ mod tests {
             Icon::Friend,
             Icon::UserPlus,
             Icon::Notification,
+            Icon::Users,
             Icon::Files,
+            Icon::Upload,
             Icon::Paperclip,
             Icon::Image,
             Icon::Play,

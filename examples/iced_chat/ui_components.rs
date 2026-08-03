@@ -244,7 +244,9 @@ pub fn elevated_card<'a, Message: 'a>(children: Vec<Element<'a, Message>>) -> El
 // 3. ICON TILE — square container with a centred icon
 // ═══════════════════════════════════════════════════════════════════════
 
-/// A square tile containing a centred icon, used in home cards and quick actions.
+/// A circular tile containing a centred icon, used in home cards and quick
+/// actions. The container is a full circle (Figure 3: soft green circular
+/// icon wells) whose diameter scales with the icon size class.
 pub fn icon_tile<'a, Message: 'a>(
     icon: Icon,
     size: IconSize,
@@ -265,7 +267,7 @@ pub fn icon_tile<'a, Message: 'a>(
                 t
             ))),
             border: Border {
-                radius: design_tokens::RADIUS_MD.into(),
+                radius: (tile_size / 2.0).into(),
                 ..Default::default()
             },
             ..Default::default()
