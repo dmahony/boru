@@ -41,6 +41,7 @@ use tracing::{debug, info};
 
 use crate::catalogue_limits::CatalogueLimitsConfig;
 use crate::catalogue_model::{CatalogueView, RemoteSharedFile, SignedFileCatalogue};
+use crate::diagnostics::TransferLifecycleEvent;
 use crate::friends::{FriendRelationship, FriendsStore};
 use crate::mailbox::{seal_for, MailboxAck, MailboxEnvelope, MailboxPublicKey};
 use crate::proto::TopicId;
@@ -49,7 +50,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 15;
+const CURRENT_SCHEMA_VERSION: u32 = 16;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -238,6 +239,56 @@ pub struct Download {
     pub retry_count: u32,
     /// Next retry timestamp (ms since UNIX epoch).
     pub next_retry_at_ms: Option<u64>,
+}
+
+/// Durable, privacy-filtered transfer activity used by the dashboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferActivityRow {
+    /// Opaque event identifier supplied by the lifecycle event contract.
+    pub event_id: String,
+    /// Short logical transfer identifier.
+    pub transfer_id: String,
+    /// Stable lifecycle event name.
+    pub event_name: String,
+    /// Monotonic sequence within the transfer.
+    pub sequence: u64,
+    /// Local observation timestamp in Unix milliseconds.
+    pub occurred_at_ms: u64,
+    /// Transfer attempt number.
+    pub attempt: u32,
+    /// Sanitized JSON payload containing only dashboard-safe counters/status.
+    pub payload_json: Option<String>,
+}
+
+fn sanitize_activity_payload(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    const ALLOWED: &[&str] = &[
+        "total_bytes",
+        "queue_depth",
+        "request_kind",
+        "grant_ttl_ms",
+        "resumed_bytes",
+        "bytes_transferred",
+        "bytes_delta",
+        "checkpoint_interval_ms",
+        "rate_bytes_per_sec",
+        "percent_millis",
+        "success",
+        "duration_ms",
+        "error_category",
+        "retry_delay_ms",
+        "reason",
+    ];
+    let filtered = object
+        .iter()
+        .filter(|(key, _)| ALLOWED.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    if filtered.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&filtered).ok()
+    }
 }
 
 // ── Remote catalogue types ─────────────────────────────────────────
@@ -691,6 +742,30 @@ impl Storage {
 
     // ── Migrations ────────────────────────────────────────────────────
 
+    fn add_column_if_missing(
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<()> {
+        let present: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2 LIMIT 1",
+                params![table, column],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("inspect migration column")?;
+        if present.is_none() {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                [],
+            )
+            .std_context("add migration column")?;
+        }
+        Ok(())
+    }
+
     fn run_migrations(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
 
@@ -757,6 +832,7 @@ impl Storage {
                 13 => self.migrate_v13(&conn)?,
                 14 => self.migrate_v14(&conn)?,
                 15 => self.migrate_v15(&conn)?,
+                16 => self.migrate_v16(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -1180,18 +1256,44 @@ impl Storage {
     /// V14 adds a `ticket` column to `group_invites` so pending invites carry
     /// the room ticket needed to accept and join the group's gossip room.
     fn migrate_v14(&self, conn: &Connection) -> Result<()> {
-        conn.execute_batch("ALTER TABLE group_invites ADD COLUMN ticket TEXT NOT NULL DEFAULT '';")
-            .std_context("migrate v14 group_invites ticket column")?;
-        Ok(())
+        Self::add_column_if_missing(conn, "group_invites", "ticket", "TEXT NOT NULL DEFAULT ''")
     }
 
     /// v15 — persist group name from whisper invites so the recipient can
     /// create a ConversationEntry with the correct display name at accept time.
     fn migrate_v15(&self, conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            "ALTER TABLE group_invites ADD COLUMN group_name TEXT NOT NULL DEFAULT '';",
+        Self::add_column_if_missing(
+            conn,
+            "group_invites",
+            "group_name",
+            "TEXT NOT NULL DEFAULT ''",
         )
-        .std_context("migrate v15 group_invites group_name column")?;
+    }
+
+    /// v16 adds shared-file revisions and a bounded, idempotent activity
+    /// projection. Activity stores only privacy-filtered telemetry metadata.
+    fn migrate_v16(&self, conn: &Connection) -> Result<()> {
+        Self::add_column_if_missing(
+            conn,
+            "shared_files",
+            "version",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS transfer_activity (
+                 event_id TEXT PRIMARY KEY,
+                 transfer_id TEXT NOT NULL,
+                 event_name TEXT NOT NULL,
+                 sequence INTEGER NOT NULL,
+                 occurred_at_ms INTEGER NOT NULL,
+                 attempt INTEGER NOT NULL,
+                 payload_json TEXT,
+                 UNIQUE(transfer_id, sequence)
+             );
+             CREATE INDEX IF NOT EXISTS idx_transfer_activity_time
+                 ON transfer_activity(occurred_at_ms DESC, event_id DESC);",
+        )
+        .std_context("migrate v16 file revisions and transfer activity")?;
         Ok(())
     }
 
@@ -3206,13 +3308,14 @@ impl Storage {
         tx.execute(
             "INSERT INTO shared_files
                 (content_hash, profile_user_id, metadata_id, display_filename,
-                 description, offered, created_at_ms, updated_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                 description, offered, created_at_ms, updated_at_ms, version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)
              ON CONFLICT(content_hash, profile_user_id) DO UPDATE SET
                 metadata_id = excluded.metadata_id,
                 display_filename = excluded.display_filename,
                 description = excluded.description,
                 offered = excluded.offered,
+                version = shared_files.version + 1,
                 updated_at_ms = excluded.updated_at_ms",
             params![
                 content_hash,
@@ -3238,13 +3341,13 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         let sql = if offered_only {
             "SELECT content_hash, profile_user_id, metadata_id, display_filename,
-                    description, offered, created_at_ms, updated_at_ms
+                    description, offered, created_at_ms, updated_at_ms, version
              FROM shared_files
              WHERE profile_user_id = ?1 AND offered = 1
              ORDER BY updated_at_ms DESC"
         } else {
             "SELECT content_hash, profile_user_id, metadata_id, display_filename,
-                    description, offered, created_at_ms, updated_at_ms
+                    description, offered, created_at_ms, updated_at_ms, version
              FROM shared_files
              WHERE profile_user_id = ?1
              ORDER BY updated_at_ms DESC"
@@ -3256,7 +3359,6 @@ impl Storage {
         let mut results = Vec::new();
         while let Some(row) = rows.next().std_context("next row")? {
             results.push(SharedFileRow {
-                version: 0,
                 content_hash: row.get(0).std_context("get hash")?,
                 profile_user_id: row.get(1).std_context("get profile")?,
                 metadata_id: row.get(2).std_context("get metadata_id")?,
@@ -3265,6 +3367,7 @@ impl Storage {
                 offered: row.get::<_, i64>(5).std_context("get offered")? != 0,
                 created_at_ms: row.get::<_, i64>(6).std_context("get created")? as u64,
                 updated_at_ms: row.get::<_, i64>(7).std_context("get updated")? as u64,
+                version: row.get::<_, i64>(8).std_context("get version")? as u64,
             });
         }
         Ok(results)
@@ -3280,7 +3383,7 @@ impl Storage {
         let mut stmt = conn
             .prepare(
                 "SELECT content_hash, profile_user_id, metadata_id, display_filename,
-                        description, offered, created_at_ms, updated_at_ms
+                        description, offered, created_at_ms, updated_at_ms, version
                  FROM shared_files
                  WHERE profile_user_id = ?1 AND content_hash = ?2",
             )
@@ -3290,7 +3393,6 @@ impl Storage {
             .std_context("query shared_file")?;
         if let Some(row) = rows.next().std_context("next row")? {
             Ok(Some(SharedFileRow {
-                version: 0,
                 content_hash: row.get(0).std_context("get hash")?,
                 profile_user_id: row.get(1).std_context("get profile")?,
                 metadata_id: row.get(2).std_context("get metadata_id")?,
@@ -3299,6 +3401,7 @@ impl Storage {
                 offered: row.get::<_, i64>(5).std_context("get offered")? != 0,
                 created_at_ms: row.get::<_, i64>(6).std_context("get created")? as u64,
                 updated_at_ms: row.get::<_, i64>(7).std_context("get updated")? as u64,
+                version: row.get::<_, i64>(8).std_context("get version")? as u64,
             }))
         } else {
             Ok(None)
@@ -3361,7 +3464,7 @@ impl Storage {
                 mime_type: object.mime_type,
                 size_bytes: object.size,
                 content_hash: row.content_hash,
-                version_number: 1,
+                version_number: row.version.min(u32::MAX as u64) as u32,
                 updated_at_ms: row.updated_at_ms,
                 collection_ids: Vec::new(),
             });
@@ -3382,7 +3485,7 @@ impl Storage {
         let mut stmt = conn
             .prepare(
                 "SELECT content_hash, profile_user_id, metadata_id, display_filename,
-                    description, offered, created_at_ms, updated_at_ms
+                    description, offered, created_at_ms, updated_at_ms, version
              FROM shared_files WHERE profile_user_id = ?1 AND metadata_id = ?2",
             )
             .std_context("prepare get_shared_file_by_metadata_id")?;
@@ -3391,7 +3494,6 @@ impl Storage {
             .std_context("query shared_file_by_metadata_id")?;
         if let Some(row) = rows.next().std_context("next row")? {
             Ok(Some(SharedFileRow {
-                version: 0,
                 content_hash: row.get(0).std_context("get hash")?,
                 profile_user_id: row.get(1).std_context("get profile")?,
                 metadata_id: row.get(2).std_context("get metadata_id")?,
@@ -3400,6 +3502,7 @@ impl Storage {
                 offered: row.get::<_, i64>(5).std_context("get offered")? != 0,
                 created_at_ms: row.get::<_, i64>(6).std_context("get created")? as u64,
                 updated_at_ms: row.get::<_, i64>(7).std_context("get updated")? as u64,
+                version: row.get::<_, i64>(8).std_context("get version")? as u64,
             }))
         } else {
             Ok(None)
@@ -3728,6 +3831,73 @@ impl Storage {
             .std_context("check file permissions")?
             .unwrap_or(false);
         Ok(has)
+    }
+
+    // ── Transfer activity projection (v16) ────────────────────────────
+
+    /// Persist one privacy-filtered lifecycle event. Replays are ignored by
+    /// event id and by the transfer/sequence pair.
+    pub fn record_transfer_activity(&self, event: &TransferLifecycleEvent) -> Result<()> {
+        let payload_json = event.payload.as_ref().and_then(sanitize_activity_payload);
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO transfer_activity
+                (event_id, transfer_id, event_name, sequence, occurred_at_ms,
+                 attempt, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                event.event_id,
+                event.transfer_id,
+                event.event_name,
+                event.sequence as i64,
+                event.occurred_at_ms as i64,
+                event.attempt as i64,
+                payload_json,
+            ],
+        )
+        .std_context("record transfer activity")?;
+        Ok(())
+    }
+
+    /// List newest activity first, bounded by the caller's requested limit.
+    pub fn list_transfer_activity(&self, limit: usize) -> Result<Vec<TransferActivityRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_id, transfer_id, event_name, sequence, occurred_at_ms,
+                        attempt, payload_json
+                 FROM transfer_activity
+                 ORDER BY occurred_at_ms DESC, event_id DESC
+                 LIMIT ?1",
+            )
+            .std_context("prepare transfer activity list")?;
+        let rows = stmt
+            .query_map(params![limit.min(1000) as i64], |row| {
+                Ok(TransferActivityRow {
+                    event_id: row.get(0)?,
+                    transfer_id: row.get(1)?,
+                    event_name: row.get(2)?,
+                    sequence: row.get::<_, i64>(3)? as u64,
+                    occurred_at_ms: row.get::<_, i64>(4)? as u64,
+                    attempt: row.get::<_, i64>(5)? as u32,
+                    payload_json: row.get(6)?,
+                })
+            })
+            .std_context("query transfer activity")?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .std_context("collect transfer activity")?)
+    }
+
+    /// Delete activity older than the supplied event timestamp.
+    pub fn prune_transfer_activity(&self, before_occurred_at_ms: u64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .execute(
+                "DELETE FROM transfer_activity WHERE occurred_at_ms < ?1",
+                params![before_occurred_at_ms as i64],
+            )
+            .std_context("prune transfer activity")?)
     }
 
     // ── Downloads (v2) ────────────────────────────────────────────────
@@ -4727,14 +4897,24 @@ impl Storage {
 
     /// Delete a shared file entry.
     pub fn delete_shared_file(&self, content_hash: &str, profile_user_id: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let n = conn
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .std_context("begin delete shared file")?;
+        tx.execute(
+            "DELETE FROM shared_file_permissions
+             WHERE content_hash = ?1 AND grantor_user_id = ?2",
+            params![content_hash, profile_user_id],
+        )
+        .std_context("delete shared file permissions")?;
+        let n = tx
             .execute(
                 "DELETE FROM shared_files
                  WHERE content_hash = ?1 AND profile_user_id = ?2",
                 params![content_hash, profile_user_id],
             )
             .std_context("delete shared file")?;
+        tx.commit().std_context("commit delete shared file")?;
         Ok(n > 0)
     }
 
@@ -7452,5 +7632,86 @@ mod tests {
             .get_pending_group_invites(&[2; 32], 50)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn transfer_activity_is_idempotent_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let event = TransferLifecycleEvent {
+            schema_version: 1,
+            event_id: "event-1".into(),
+            event_name: "completion".into(),
+            transfer_id: "transfer-1".into(),
+            sequence: 2,
+            occurred_at_ms: 42,
+            attempt: 1,
+            payload: Some(serde_json::json!({
+                "total_bytes": 12,
+                "source_path": "/secret/private.txt",
+                "token": "do-not-store",
+            })),
+        };
+        {
+            let storage = Storage::open(dir.path()).unwrap();
+            storage.record_transfer_activity(&event).unwrap();
+            storage.record_transfer_activity(&event).unwrap();
+            assert_eq!(storage.list_transfer_activity(10).unwrap().len(), 1);
+        }
+        let storage = Storage::open(dir.path()).unwrap();
+        let rows = storage.list_transfer_activity(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id, "event-1");
+        assert_eq!(
+            rows[0].payload_json.as_deref(),
+            Some(r#"{"total_bytes":12}"#)
+        );
+    }
+
+    #[test]
+    fn activity_retention_prunes_old_rows() {
+        let storage = Storage::memory().unwrap();
+        for (id, occurred_at_ms) in [("old", 10), ("new", 20)] {
+            storage
+                .record_transfer_activity(&TransferLifecycleEvent {
+                    schema_version: 1,
+                    event_id: id.into(),
+                    event_name: "completion".into(),
+                    transfer_id: id.into(),
+                    sequence: 0,
+                    occurred_at_ms,
+                    attempt: 1,
+                    payload: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(storage.prune_transfer_activity(20).unwrap(), 1);
+        assert_eq!(
+            storage.list_transfer_activity(10).unwrap()[0].event_id,
+            "new"
+        );
+    }
+
+    #[test]
+    fn deleting_shared_file_removes_grants_but_not_active_download() {
+        let storage = Storage::memory().unwrap();
+        storage
+            .put_file_object("hash", 10, "text/plain", "x.txt", b"")
+            .unwrap();
+        storage
+            .upsert_shared_file("hash", "owner", "meta", "x.txt", None, true)
+            .unwrap();
+        storage
+            .grant_permission("hash", "owner", "peer", "read", None)
+            .unwrap();
+        let download = storage.create_download("hash", "peer", 10).unwrap();
+        assert!(storage.delete_shared_file("hash", "owner").unwrap());
+        assert!(storage
+            .list_permissions_for_grantee("peer")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            storage.get_download(download).unwrap().unwrap().state,
+            "queued"
+        );
     }
 }
