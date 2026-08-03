@@ -398,6 +398,10 @@ pub mod blob_transfer;
 #[cfg(feature = "net")]
 pub mod transfer_telemetry;
 
+/// Live, deduplicated transfer state for dashboard subscribers.
+#[cfg(feature = "net")]
+pub mod transfer_state_projection;
+
 /// Data directory resolution with backward compatibility.
 ///
 /// Resolves the application's persistent data directory using the
