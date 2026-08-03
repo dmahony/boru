@@ -106,8 +106,8 @@ use crate::connection_details::{
 };
 use crate::perf_tracker::PerfTracker;
 use crate::ui_components::{
-    connection_footer, ghost_icon_button, secondary_button, sidebar_empty_state, text_input_field,
-    Avatar, SidebarSectionHeader,
+    chat_status_footer, connection_footer, ghost_icon_button, secondary_button,
+    sidebar_empty_state, text_input_field, Avatar, SidebarSectionHeader,
 };
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
 use boru_core::chat_core::{verify_advertisement, RoomAdvertisement, RoomInvitation, DIAGNOSTICS};
@@ -7586,6 +7586,43 @@ impl IcedChat {
 }
 
 // ── Deterministic private topic ────────────────────────────────────
+
+/// Compute the chat footer's route/peer status labels (plan UI-16).
+///
+/// Mirrors the connection-type derivation used by the chat header tooltip
+/// and the details panel: a direct peer on the gossip mesh is "Direct
+/// (mesh)", a connected non-neighbour routes over "Relay", and a peer with
+/// no connection is "Not connected". Group chats report the gossip mesh
+/// directly with the number of connected neighbours. Returns
+/// `(route_label, connected, peer_label)`.
+fn chat_footer_status(
+    is_group: bool,
+    neighbors: &HashSet<PublicKey>,
+    peer: Option<PublicKey>,
+    presence: PeerPresence,
+) -> (String, bool, Option<String>) {
+    if is_group {
+        if neighbors.is_empty() {
+            ("Not connected".to_string(), false, None)
+        } else {
+            (
+                "Mesh".to_string(),
+                true,
+                Some(format!(
+                    "{} peer{}",
+                    neighbors.len(),
+                    if neighbors.len() == 1 { "" } else { "s" }
+                )),
+            )
+        }
+    } else if peer.is_some_and(|pk| neighbors.contains(&pk)) {
+        ("Direct (mesh)".to_string(), true, Some("1 peer".to_string()))
+    } else if presence != PeerPresence::Offline && presence != PeerPresence::Unknown {
+        ("Relay".to_string(), true, Some("1 peer".to_string()))
+    } else {
+        ("Not connected".to_string(), false, None)
+    }
+}
 
 /// Case-insensitive substring search over the conversation log. Returns the
 /// indices of entries whose body or sender label contains `query`, capped at
@@ -22811,6 +22848,11 @@ impl IcedChat {
         // so a short timeline would otherwise never learn its viewport size
         // and could not bottom-align its content (leaving a dead area below
         // the last message).
+        //
+        // The restrained footer/status line (plan UI-16) sits below the
+        // composer, separated by a small gap, and reports complementary
+        // route/peer state — the header already owns presence + encryption
+        // (direct) or member count (group), so nothing is duplicated.
         let content = widget::column![
             self.view_chat_header(),
             divider(&self.theme()),
@@ -22818,6 +22860,8 @@ impl IcedChat {
                 self.view_chat_log(size.width, size.height).into()
             }),
             self.view_composer(),
+            widget::Space::new().height(Length::Fixed(SPACE_8)),
+            self.view_chat_footer(),
         ]
         // Make the column itself participate in the parent height
         // negotiation. The responsive timeline can then consume exactly the
@@ -22831,7 +22875,7 @@ impl IcedChat {
             .padding(iced::Padding {
                 top: 0.0,
                 right: SPACE_16,
-                bottom: SPACE_16,
+                bottom: SPACE_12,
                 left: SPACE_16,
             })
             .width(Length::Fill)
@@ -23669,6 +23713,35 @@ impl IcedChat {
     /// so the results panel stays cheap to render.
     fn chat_search_matches(&self) -> Vec<usize> {
         chat_search_matches_in(&self.entries, &self.chat_search_query)
+    }
+
+    /// The restrained footer/status line below the chat composer (plan UI-16).
+    ///
+    /// Reports the active conversation's connection route and, when connected,
+    /// the peer count. The header already owns presence + encryption (direct
+    /// chats) and member count (group chats), so this footer shows only the
+    /// complementary route/peer state — no status text is duplicated.
+    fn view_chat_footer(&self) -> iced::Element<'_, AppMessage> {
+        let conversation = self
+            .conversation_store
+            .active_iter()
+            .into_iter()
+            .find(|entry| entry.topic == self.topic);
+        let peer = conversation.and_then(|entry| PublicKey::from_str(&entry.peer_id).ok());
+        let is_group = conversation
+            .map(|entry| {
+                matches!(
+                    entry.kind,
+                    boru_core::conversations::ConversationKind::Group
+                )
+            })
+            .unwrap_or(false);
+        let presence = peer
+            .map(|key| self.peer_presence(&key))
+            .unwrap_or(PeerPresence::Unknown);
+        let (route_label, connected, peer_label) =
+            chat_footer_status(is_group, &self.neighbors, peer, presence);
+        chat_status_footer(route_label, connected, peer_label)
     }
 
     /// In-conversation search panel — a compact popover listing messages that
@@ -29811,6 +29884,61 @@ mod tests {
             vec![0],
             "sender label should participate in search"
         );
+    }
+
+    #[test]
+    fn chat_footer_status_direct_mesh_neighbor() {
+        let key: PublicKey = iroh::SecretKey::from_bytes(&[7u8; 32]).public();
+        let neighbors: HashSet<PublicKey> = [key].into_iter().collect();
+        let (route, connected, peers) =
+            chat_footer_status(false, &neighbors, Some(key), PeerPresence::Online);
+        assert_eq!(route, "Direct (mesh)");
+        assert!(connected);
+        assert_eq!(peers.as_deref(), Some("1 peer"));
+    }
+
+    #[test]
+    fn chat_footer_status_direct_relay_when_online_not_neighbor() {
+        let key: PublicKey = iroh::SecretKey::from_bytes(&[8u8; 32]).public();
+        let neighbors: HashSet<PublicKey> = HashSet::new();
+        let (route, connected, peers) =
+            chat_footer_status(false, &neighbors, Some(key), PeerPresence::Online);
+        assert_eq!(route, "Relay");
+        assert!(connected);
+        assert_eq!(peers.as_deref(), Some("1 peer"));
+    }
+
+    #[test]
+    fn chat_footer_status_direct_offline_not_connected() {
+        let key: PublicKey = iroh::SecretKey::from_bytes(&[9u8; 32]).public();
+        let neighbors: HashSet<PublicKey> = HashSet::new();
+        let (route, connected, peers) =
+            chat_footer_status(false, &neighbors, Some(key), PeerPresence::Offline);
+        assert_eq!(route, "Not connected");
+        assert!(!connected);
+        assert!(peers.is_none());
+    }
+
+    #[test]
+    fn chat_footer_status_group_with_neighbors() {
+        let neighbors: HashSet<PublicKey> = (0..3)
+            .map(|i| iroh::SecretKey::from_bytes(&[10 + i; 32]).public())
+            .collect();
+        let (route, connected, peers) =
+            chat_footer_status(true, &neighbors, None, PeerPresence::Unknown);
+        assert_eq!(route, "Mesh");
+        assert!(connected);
+        assert_eq!(peers.as_deref(), Some("3 peers"));
+    }
+
+    #[test]
+    fn chat_footer_status_group_without_neighbors() {
+        let neighbors: HashSet<PublicKey> = HashSet::new();
+        let (route, connected, peers) =
+            chat_footer_status(true, &neighbors, None, PeerPresence::Unknown);
+        assert_eq!(route, "Not connected");
+        assert!(!connected);
+        assert!(peers.is_none());
     }
 
     #[test]

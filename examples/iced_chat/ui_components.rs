@@ -99,6 +99,66 @@ pub fn connection_footer<'a>(
     .into()
 }
 
+/// Build the compact, muted status line shown below the chat composer.
+///
+/// Reports the active conversation's connection route (direct mesh, relay,
+/// or not connected) and, when connected, the peer count. The chat header
+/// already reports presence and encryption (direct chats) or member count
+/// (group chats), so this footer deliberately shows complementary route /
+/// peer state only — no status text is duplicated between header and footer
+/// (plan UI-16 step 129).
+pub fn chat_status_footer<'a>(
+    route_label: String,
+    connected: bool,
+    peer_label: Option<String>,
+) -> Element<'a, AppMessage> {
+    let route_color: fn(&Theme) -> Color = if connected {
+        design_tokens::text_secondary
+    } else {
+        design_tokens::text_muted
+    };
+    let route_icon = Icon::Mesh
+        .build()
+        .size(IconSize::Xs)
+        .build()
+        .style(move |theme, _| svg::Style {
+            color: Some(route_color(theme)),
+        });
+    let mut row = Row::new()
+        .push(route_icon)
+        .push(
+            text(route_label)
+                .size(crate::fonts::XS)
+                .style(move |theme| iced::widget::text::Style {
+                    color: Some(route_color(theme)),
+                }),
+        )
+        .spacing(design_tokens::SPACE_6)
+        .align_y(Alignment::Center);
+    match peer_label {
+        Some(peer) => {
+            row =
+                row.push(Space::new().width(Length::Fill))
+                    .push(text("·").style(|theme| iced::widget::text::Style {
+                        color: Some(design_tokens::text_muted(theme)),
+                    }))
+                    .push(text(peer).size(crate::fonts::XS).style(|theme| {
+                        iced::widget::text::Style {
+                            color: Some(design_tokens::text_muted(theme)),
+                        }
+                    }))
+                    .spacing(design_tokens::SPACE_8);
+        }
+        None => {
+            row = row.push(Space::new().width(Length::Fill));
+        }
+    }
+    container(row)
+        .padding([design_tokens::SPACE_2, design_tokens::SPACE_4])
+        .width(Length::Fill)
+        .into()
+}
+
 // ── Helper: fn pointer for Icon::color_fn ─────────────────────────────
 
 fn white_color(_theme: &Theme) -> Color {
@@ -2317,6 +2377,29 @@ fn overflow_menu_button_style(theme: &Theme, status: button::Status) -> button::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_status_footer_connected_with_peer() {
+        let el: Element<'static, AppMessage> = chat_status_footer(
+            "Direct (mesh)".to_string(),
+            true,
+            Some("1 peer".to_string()),
+        );
+        let _ = el;
+    }
+
+    #[test]
+    fn chat_status_footer_connected_without_peer() {
+        let el: Element<'static, AppMessage> = chat_status_footer("Relay".to_string(), true, None);
+        let _ = el;
+    }
+
+    #[test]
+    fn chat_status_footer_disconnected() {
+        let el: Element<'static, AppMessage> =
+            chat_status_footer("Not connected".to_string(), false, None);
+        let _ = el;
+    }
 
     #[test]
     fn status_dot_kinds_are_distinct() {
