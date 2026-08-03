@@ -1,0 +1,56 @@
+{
+  "ok": true,
+  "task": "t_f75e5521",
+  "title": "UI-18 Responsive resizing and high-DPI validation",
+  "matrix": {
+    "viewports": ["1024x720", "1280x800", "1440x900", "1920x1080"],
+    "screens": ["home", "chat"],
+    "dimensions_verified": true,
+    "horizontal_scroll": false,
+    "clipped_labels": false,
+    "overlapping_controls": false,
+    "compressed_cards": false
+  },
+  "stress": {
+    "viewports": ["1024x720", "1280x800"],
+    "long_friend_labels": "truncated single-line (Wrapping::None)",
+    "long_group_name": "truncated single-line with tooltip",
+    "long_unbroken_message_2176_chars": "bubble wraps within max width 560px",
+    "long_url": "wraps within bubble",
+    "long_system_event": "truncated/ellipsized",
+    "pre_fix_bug": "long names wrapped rows to 4-5 lines inside clip containers",
+    "post_fix": "all stress rows single-line; no row growth"
+  },
+  "dpi": {
+    "factors": ["1.25", "1.5", "2.0"],
+    "logical_window": "1280x800",
+    "physical_sizes": {"1.25": "1600x1000", "1.5": "1920x1200", "2.0": "2560x1600"},
+    "native_render_verified": true,
+    "detail_vs_upscale_rmse_pct": 7.3,
+    "blurry_icons": false,
+    "incorrectly_scaled_text": false
+  },
+  "resize_sweep": {
+    "frames": 9,
+    "sizes": ["1024x720", "1080x720", "1152x768", "1280x800", "1366x768", "1440x900", "1600x900", "1920x1080", "1280x800"],
+    "breakpoint_boundary_crossed": true,
+    "frame9_vs_frame4_pixel_diff": 231,
+    "oscillation": false,
+    "mcp_responsive_after_sweep": true
+  },
+  "breakpoints": {
+    "quick_actions": {"lt_640": 1, "640_1039": 2, "ge_1040": 4},
+    "home_rail": "stacks below hero under 900px; 2/3 + 1/3 at wide sizes",
+    "sidebar_width": "288-304px interpolated across 1024-1280",
+    "content_padding": {"ge_1440": 32, "1024_1439": 24, "le_1024": 16},
+    "chat_bubble_max_width": "min(560px, 68% of timeline)"
+  },
+  "tests": {"run": 664, "passed": 664, "failed": 0},
+  "test_command": "cargo test --features gui --example boru (worktree /tmp/verify-t_f75e5521)",
+  "build": "cargo build --features gui --example boru (isolated worktree HEAD + fix) — exit 0",
+  "production_fix": {
+    "file": "examples/iced_chat/app.rs",
+    "summary": "Wrapping::None on conversation name, last-message preview, and group name so long values truncate single-line instead of wrapping rows taller",
+    "lines": ["group name_label ~21077", "preview_text ~21283", "conversation name_label ~21376"]
+  }
+}
