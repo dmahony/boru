@@ -185,6 +185,28 @@ pub const VIEWPORT_REF_HEIGHT: f32 = 800.0;
 pub const VIEWPORT_MIN_WIDTH: f32 = 1024.0;
 pub const VIEWPORT_MIN_HEIGHT: f32 = 720.0;
 
+// ── FS-02 File Sharing dashboard extended tokens ──────────────────────
+// Proposed in docs/fs-02-file-sharing-dashboard-spec.md, section 2.2.
+// These are semantic additions used by progress bars, table rows, peer
+// chips, and the peers panel. Any future screen needing the same primitives
+// reuses these constants.
+
+/// Thin progress bar height (4 px) — unobtrusive inline indicator.
+pub const PROGRESS_BAR_HEIGHT: f32 = 4.0;
+/// Slightly thicker progress bar (6 px) — for download cards where the
+/// bar is the primary visual element.
+pub const PROGRESS_BAR_HEIGHT_BOLD: f32 = 6.0;
+/// Standard file-table row height (56 px) — tall enough for two-line
+/// name + MIME + metadata.
+pub const TABLE_ROW_HEIGHT: f32 = 56.0;
+/// Compact row height (48 px) — for activity-log entries and other
+/// single-line rows. Matches `card_shell::CARD_ROW_HEIGHT`.
+pub const TABLE_ROW_HEIGHT_COMPACT: f32 = 48.0;
+/// Standard peer/status chip height (28 px).
+pub const CHIP_HEIGHT: f32 = 28.0;
+/// Bounded max height for the Peers panel before vertical scroll (320 px).
+pub const PEER_PANEL_MAX_HEIGHT: f32 = 320.0;
+
 /// Comfortable large display.
 pub const VIEWPORT_LG_WIDTH: f32 = 1440.0;
 pub const VIEWPORT_LG_HEIGHT: f32 = 900.0;

@@ -735,7 +735,7 @@ impl<'a, Message: Clone + 'a> ListRow<'a, Message> {
         let mut row = Row::new()
             .spacing(design_tokens::SPACE_8)
             .align_y(Alignment::Center);
-
+        // ... ListRow
         if let Some(leading) = self.leading {
             row = row.push(leading);
         }
@@ -1492,6 +1492,825 @@ pub fn system_event_chip<'a, Message: 'a>(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 15. TAB STRIP — horizontal tabs with active underline
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A horizontal tab strip builder. Each tab is a `button` styled as a tab;
+/// the active tab gets a primary underline and SemiBold text.
+pub struct TabStrip<Message> {
+    pub(crate) tabs: Vec<(String, Message)>,
+    pub(crate) active_index: usize,
+}
+
+impl<'a, Message: Clone + 'a> TabStrip<Message> {
+    /// Create a tab strip with labelled tabs, each with its own message.
+    /// The first tab is active by default.
+    pub fn new(tabs: Vec<(&'a str, Message)>) -> Self {
+        Self {
+            tabs: tabs
+                .into_iter()
+                .map(|(label, msg)| (label.to_string(), msg))
+                .collect(),
+            active_index: 0,
+        }
+    }
+
+    /// Override which tab is active.
+    pub fn active(mut self, index: usize) -> Self {
+        self.active_index = index.min(self.tabs.len().saturating_sub(1));
+        self
+    }
+
+    /// Build the tab strip element.
+    pub fn build(self, _theme: &Theme) -> Element<'a, Message> {
+        let active = self.active_index;
+
+        let tab_row: Vec<Element<'a, Message>> = self
+            .tabs
+            .into_iter()
+            .enumerate()
+            .map(|(i, (label, msg))| {
+                let is_active = i == active;
+
+                let style_active = is_active;
+
+                let btn = button(
+                    text(label)
+                        .font(if is_active {
+                            Typography::Body.font()
+                        } else {
+                            Typography::Body.font()
+                        })
+                        .size(Typography::Body.size_px()),
+                )
+                .on_press(msg)
+                .padding([design_tokens::SPACE_4, design_tokens::SPACE_12])
+                .style(move |t, status| tab_button_style(t, status, style_active));
+
+                btn.into()
+            })
+            .collect();
+
+        let tabs_row = Row::with_children(tab_row)
+            .spacing(design_tokens::SPACE_16)
+            .align_y(Alignment::Center);
+
+        // Full-width underline separator below the tabs
+        let separator = rule::horizontal(1).style(move |t| rule::Style {
+            color: design_tokens::border_muted(t),
+            radius: 0.0.into(),
+            fill_mode: rule::FillMode::Full,
+            snap: false,
+        });
+
+        container(
+            Column::new()
+                .push(tabs_row)
+                .push(separator)
+                .spacing(design_tokens::SPACE_8),
+        )
+        .padding([design_tokens::SPACE_8, design_tokens::SPACE_24])
+        .width(Length::Fill)
+        .into()
+    }
+}
+
+/// Button style for a tab — switches between active (primary text, bottom border)
+/// and inactive (muted text, no border). Hover on inactive shows primary text.
+fn tab_button_style(theme: &Theme, status: button::Status, active: bool) -> button::Style {
+    let text_color = if active {
+        design_tokens::text_primary(theme)
+    } else {
+        match status {
+            button::Status::Hovered => design_tokens::primary(theme),
+            button::Status::Pressed => design_tokens::primary_pressed(theme),
+            _ => design_tokens::text_secondary(theme),
+        }
+    };
+
+    let bottom_border = if active {
+        Border {
+            color: design_tokens::primary(theme),
+            width: 2.0,
+            radius: 0.0.into(),
+        }
+    } else {
+        Border::default()
+    };
+
+    button::Style {
+        background: match status {
+            button::Status::Hovered => Some(Background::Color(design_tokens::surface_hover(theme))),
+            button::Status::Pressed => {
+                Some(Background::Color(design_tokens::surface_selected(theme)))
+            }
+            _ => None,
+        },
+        text_color,
+        border: bottom_border,
+        ..Default::default()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 16. PROGRESS BAR — thin determinate + indeterminate
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Kind of progress bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressKind {
+    /// Normal determinate progress (percentage). Fill uses `primary`.
+    Normal,
+    /// Paused — fill uses `color_warning`.
+    Paused,
+    /// Error — fill uses `color_danger`.
+    Error,
+    /// Complete — fill uses `color_success`.
+    Complete,
+}
+
+/// Builder for a thin progress bar with optional numeric label.
+pub struct ProgressBar<'a, Message> {
+    pub(crate) fraction: f32,
+    pub(crate) kind: ProgressKind,
+    pub(crate) indeterminate: bool,
+    pub(crate) show_label: bool,
+    pub(crate) height: f32,
+    _phantom: std::marker::PhantomData<&'a Message>,
+}
+
+impl<'a, Message: 'a> ProgressBar<'a, Message> {
+    /// Start a progress bar at the given fraction (0.0–1.0).
+    /// Pass any fraction (including 0.0) for indeterminate — the bar ignores it.
+    pub fn new(fraction: f32) -> Self {
+        Self {
+            fraction: fraction.clamp(0.0, 1.0),
+            kind: ProgressKind::Normal,
+            indeterminate: false,
+            show_label: true,
+            height: design_tokens::PROGRESS_BAR_HEIGHT,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Set the progress kind (Normal, Paused, Error, Complete).
+    pub fn kind(mut self, kind: ProgressKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Enable indeterminate mode — renders a shimmer instead of a percentage fill.
+    pub fn indeterminate(mut self, yes: bool) -> Self {
+        self.indeterminate = yes;
+        if yes {
+            self.show_label = false;
+        }
+        self
+    }
+
+    /// Show or hide the percentage label.
+    pub fn show_label(mut self, yes: bool) -> Self {
+        self.show_label = yes;
+        self
+    }
+
+    /// Use the bold (6 px) height variant.
+    pub fn bold(mut self) -> Self {
+        self.height = design_tokens::PROGRESS_BAR_HEIGHT_BOLD;
+        self
+    }
+
+    /// Build the progress bar element.
+    pub fn build(self, theme: &Theme) -> Element<'a, Message> {
+        let fill_color = match self.kind {
+            ProgressKind::Normal => design_tokens::primary(theme),
+            ProgressKind::Paused => design_tokens::color_warning(theme),
+            ProgressKind::Error => design_tokens::color_danger(theme),
+            ProgressKind::Complete => design_tokens::color_success(theme),
+        };
+
+        let track_color = design_tokens::border_muted(theme);
+
+        let bar: Element<'_, Message> = if self.indeterminate {
+            // Indeterminate: a shimmer-style background that suggests activity.
+            // Iced 0.14 has no animation API, so we render a static gradient
+            // that visually communicates "in progress."
+            let shimmer = container(
+                Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fixed(self.height)),
+            )
+            .width(Length::FillPortion(4))
+            .height(Length::Fixed(self.height))
+            .style(move |t| container::Style {
+                background: Some(Background::Color(design_tokens::primary_soft(t))),
+                border: Border {
+                    radius: (self.height / 2.0).into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
+            container(shimmer)
+                .width(Length::Fill)
+                .height(Length::Fixed(self.height))
+                .style(move |_t| container::Style {
+                    background: Some(Background::Color(track_color)),
+                    border: Border {
+                        radius: (self.height / 2.0).into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+        } else {
+            // Determinate: fill portion grows proportionally using FillPortion.
+            let fill_portion = (self.fraction * 1000.0) as u16;
+            let track_portion = 1000u16.saturating_sub(fill_portion);
+
+            let mut row = Row::new().spacing(0);
+            if fill_portion > 0 {
+                row = row.push(
+                    container(Space::new().width(Length::Fill).height(Length::Shrink))
+                        .width(Length::FillPortion(fill_portion.max(1)))
+                        .style(move |_t| container::Style {
+                            background: Some(Background::Color(fill_color)),
+                            border: Border {
+                                radius: (self.height / 2.0).into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                );
+            }
+            if track_portion > 0 {
+                row = row.push(
+                    container(Space::new().width(Length::Fill).height(Length::Shrink))
+                        .width(Length::FillPortion(track_portion.max(1)))
+                        .style(move |t| container::Style {
+                            background: Some(Background::Color(track_color)),
+                            border: Border {
+                                radius: (self.height / 2.0).into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                );
+            }
+
+            container(row)
+                .width(Length::Fill)
+                .height(Length::Fixed(self.height))
+                .into()
+        };
+
+        if self.show_label && !self.indeterminate {
+            let pct = (self.fraction * 100.0) as u32;
+            let label = text(format!("{pct}%"))
+                .font(Typography::SecondaryText.font())
+                .size(Typography::SecondaryText.size_px())
+                .color(design_tokens::text_secondary(theme));
+
+            Row::new()
+                .push(container(bar).width(Length::Fill))
+                .push(
+                    Space::new()
+                        .width(Length::Fixed(design_tokens::SPACE_8))
+                        .height(Length::Shrink),
+                )
+                .push(label)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into()
+        } else {
+            bar
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 17. FILE IDENTITY CELL — icon + primary name + secondary metadata
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A compact identity cell for a file or folder: a file-type icon, a primary
+/// name (truncated), and a secondary metadata line.
+pub struct FileIdentityCell<'a, Message> {
+    icon: Icon,
+    name: &'a str,
+    metadata: &'a str,
+    _phantom: std::marker::PhantomData<Message>,
+}
+
+impl<'a, Message: 'a> FileIdentityCell<'a, Message> {
+    /// Start a file identity cell.
+    pub fn new(icon: Icon, name: &'a str, metadata: &'a str) -> Self {
+        Self {
+            icon,
+            name,
+            metadata,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Build the cell element.
+    pub fn build(self, theme: &Theme) -> Element<'a, Message> {
+        let icon_el = self
+            .icon
+            .build()
+            .size(IconSize::Md)
+            .color_fn(design_tokens::text_secondary)
+            .build();
+
+        let name_el = text(self.name)
+            .font(Typography::Body.font())
+            .size(Typography::Body.size_px())
+            .color(design_tokens::text_primary(theme))
+            .width(Length::Fill);
+
+        let meta_el = text(self.metadata)
+            .font(Typography::SecondaryText.font())
+            .size(Typography::SecondaryText.size_px())
+            .color(design_tokens::text_secondary(theme))
+            .width(Length::Fill);
+
+        Row::new()
+            .push(icon_el)
+            .push(
+                Space::new()
+                    .width(Length::Fixed(design_tokens::SPACE_12))
+                    .height(Length::Shrink),
+            )
+            .push(
+                Column::new()
+                    .push(name_el)
+                    .push(meta_el)
+                    .spacing(design_tokens::SPACE_4)
+                    .width(Length::Fill),
+            )
+            .spacing(0)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 18. PEER CHIP STACK — avatar/list with +N overflow
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Builder for a stack of peer chips with overflow count.
+pub struct PeerChipStack<'a, Message> {
+    peers: Vec<&'a str>,
+    max_visible: usize,
+    _phantom: std::marker::PhantomData<Message>,
+}
+
+impl<'a, Message: 'a> PeerChipStack<'a, Message> {
+    /// Start with a list of peer display names.
+    pub fn new(peers: Vec<&'a str>) -> Self {
+        Self {
+            peers,
+            max_visible: 3,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Override how many chips are visible before the "+N" overflow.
+    pub fn max_visible(mut self, n: usize) -> Self {
+        self.max_visible = n;
+        self
+    }
+
+    /// Build the chip stack element.
+    pub fn build(self, theme: &Theme) -> Element<'a, Message> {
+        let total = self.peers.len();
+        let visible = if total > self.max_visible {
+            self.max_visible
+        } else {
+            total
+        };
+
+        let mut row = Row::new()
+            .spacing(design_tokens::SPACE_4)
+            .align_y(Alignment::Center);
+
+        for name in self.peers.iter().take(visible) {
+            let truncated: String = if name.len() > 12 {
+                format!("{}…", &name[..11])
+            } else {
+                name.to_string()
+            };
+            row = row.push(peer_chip::<Message>(&truncated));
+        }
+
+        if total > self.max_visible {
+            let overflow = total - self.max_visible;
+            row = row.push(peer_chip::<Message>(&format!("+{overflow} more")));
+        }
+
+        row.into()
+    }
+}
+
+/// A single peer chip — a small, rounded pill with peer name.
+fn peer_chip<'a, Message: 'a>(name: &str) -> Element<'a, Message> {
+    let name_owned = name.to_string();
+    container(
+        text(name_owned)
+            .font(Typography::SecondaryText.font())
+            .size(Typography::SecondaryText.size_px()),
+    )
+    .padding([design_tokens::SPACE_2, design_tokens::SPACE_8])
+    .height(Length::Fixed(design_tokens::CHIP_HEIGHT))
+    .align_y(Alignment::Center)
+    .style(move |t| container::Style {
+        background: Some(Background::Color(design_tokens::surface(t))),
+        text_color: Some(design_tokens::text_primary(t)),
+        border: Border {
+            color: design_tokens::border_muted(t),
+            width: 1.0,
+            radius: design_tokens::RADIUS_MD.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 19. METRIC BLOCK — big number + label for summary cards
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A compact metric display: a large value and a small label below it.
+pub struct MetricBlock<'a, Message> {
+    value: &'a str,
+    label: &'a str,
+    accent: Option<fn(&Theme) -> Color>,
+    _phantom: std::marker::PhantomData<Message>,
+}
+
+impl<'a, Message: 'a> MetricBlock<'a, Message> {
+    /// Start a metric block.
+    pub fn new(value: &'a str, label: &'a str) -> Self {
+        Self {
+            value,
+            label,
+            accent: None,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Apply an accent colour to the value.
+    pub fn accent(mut self, color_fn: fn(&Theme) -> Color) -> Self {
+        self.accent = Some(color_fn);
+        self
+    }
+
+    /// Build the metric element.
+    pub fn build(self, theme: &Theme) -> Element<'a, Message> {
+        let value_color = self.accent.unwrap_or(design_tokens::text_primary);
+
+        Column::new()
+            .push(
+                text(self.value)
+                    .font(Typography::SectionHeading.font())
+                    .size(Typography::SectionHeading.size_px())
+                    .color(value_color(theme)),
+            )
+            .push(
+                text(self.label)
+                    .font(Typography::SecondaryText.font())
+                    .size(Typography::SecondaryText.size_px())
+                    .color(design_tokens::text_secondary(theme)),
+            )
+            .spacing(design_tokens::SPACE_2)
+            .align_x(Alignment::Center)
+            .into()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 20. LOADING SKELETON — placeholder shimmer for loading state
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A loading skeleton placeholder: a row of pulsing-styled placeholder blocks
+/// that match the dimensions of real content.
+pub struct LoadingSkeleton<Message> {
+    row_count: usize,
+    row_height: f32,
+    _phantom: std::marker::PhantomData<Message>,
+}
+
+impl<Message: 'static> LoadingSkeleton<Message> {
+    /// Create a skeleton with the given number of placeholder rows.
+    pub fn new(row_count: usize) -> Self {
+        Self {
+            row_count,
+            row_height: design_tokens::TABLE_ROW_HEIGHT,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Set a custom row height.
+    pub fn row_height(mut self, height: f32) -> Self {
+        self.row_height = height;
+        self
+    }
+
+    /// Build the skeleton element.
+    pub fn build(self, theme: &Theme) -> Element<'static, Message> {
+        let mut col = Column::new().spacing(design_tokens::SPACE_4);
+
+        for _ in 0..self.row_count {
+            let row = skeleton_row::<Message>(self.row_height, theme);
+            col = col.push(row);
+        }
+
+        container(col)
+            .width(Length::Fill)
+            .padding(design_tokens::SPACE_12)
+            .into()
+    }
+}
+
+fn skeleton_row<Message: 'static>(height: f32, theme: &Theme) -> Element<'static, Message> {
+    let skeleton_bg = design_tokens::surface_hover(theme);
+    let icon_size = 24.0;
+
+    let icon_placeholder = container(
+        Space::new()
+            .width(Length::Fixed(icon_size))
+            .height(Length::Fixed(icon_size)),
+    )
+    .width(Length::Fixed(icon_size))
+    .height(Length::Fixed(icon_size))
+    .style(move |_t| container::Style {
+        background: Some(Background::Color(skeleton_bg)),
+        border: Border {
+            radius: design_tokens::RADIUS_SM.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+
+    let text_line_1 = container(Space::new().width(Length::Fill).height(Length::Fixed(12.0)))
+        .width(Length::FillPortion(3))
+        .height(Length::Fixed(12.0))
+        .style(move |_t| container::Style {
+            background: Some(Background::Color(skeleton_bg)),
+            border: Border {
+                radius: design_tokens::RADIUS_SM.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+    let text_line_2 = container(Space::new().width(Length::Fill).height(Length::Fixed(10.0)))
+        .width(Length::FillPortion(2))
+        .height(Length::Fixed(10.0))
+        .style(move |_t| container::Style {
+            background: Some(Background::Color(skeleton_bg)),
+            border: Border {
+                radius: design_tokens::RADIUS_SM.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+    let text_col = Column::new()
+        .push(text_line_1)
+        .push(text_line_2)
+        .spacing(design_tokens::SPACE_4)
+        .width(Length::Fill);
+
+    container(
+        Row::new()
+            .push(icon_placeholder)
+            .push(
+                Space::new()
+                    .width(Length::Fixed(design_tokens::SPACE_12))
+                    .height(Length::Shrink),
+            )
+            .push(text_col)
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+    )
+    .height(Length::Fixed(height))
+    .width(Length::Fill)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 21. INLINE ERROR — error text with optional retry action
+// ═══════════════════════════════════════════════════════════════════════
+
+/// An inline error message with an optional retry button.
+pub struct InlineError<'a> {
+    message: &'a str,
+    retry_msg: Option<AppMessage>,
+}
+
+impl<'a> InlineError<'a> {
+    /// Create an inline error with a message.
+    pub fn new(message: &'a str) -> Self {
+        Self {
+            message,
+            retry_msg: None,
+        }
+    }
+
+    /// Add a retry action button.
+    pub fn on_retry(mut self, msg: AppMessage) -> Self {
+        self.retry_msg = Some(msg);
+        self
+    }
+
+    /// Build the error element.
+    pub fn build(self, theme: &Theme) -> Element<'a, AppMessage> {
+        let icon = Icon::AlertTriangle
+            .build()
+            .size(IconSize::Xs)
+            .color_fn(design_tokens::color_danger)
+            .build();
+
+        let msg_text = text(self.message)
+            .font(Typography::SecondaryText.font())
+            .size(Typography::SecondaryText.size_px())
+            .color(design_tokens::color_danger(theme));
+
+        let mut row = Row::new()
+            .push(icon)
+            .push(
+                Space::new()
+                    .width(Length::Fixed(design_tokens::SPACE_8))
+                    .height(Length::Shrink),
+            )
+            .push(msg_text)
+            .spacing(0)
+            .align_y(Alignment::Center);
+
+        if let Some(retry) = self.retry_msg {
+            row = row.push(
+                Space::new()
+                    .width(Length::Fixed(design_tokens::SPACE_8))
+                    .height(Length::Shrink),
+            );
+            row = row.push(
+                button(
+                    text("Retry")
+                        .font(Typography::ButtonLabel.font())
+                        .size(Typography::ButtonLabel.size_px()),
+                )
+                .on_press(retry)
+                .padding([design_tokens::SPACE_4, design_tokens::SPACE_8])
+                .style(move |t, status| {
+                    let color = match status {
+                        button::Status::Hovered => design_tokens::color_danger(t),
+                        button::Status::Pressed => {
+                            let mut c = design_tokens::color_danger(t);
+                            c.r *= 0.85;
+                            c.g *= 0.85;
+                            c.b *= 0.85;
+                            c
+                        }
+                        _ => design_tokens::text_secondary(t),
+                    };
+                    button::Style {
+                        background: None,
+                        text_color: color,
+                        border: Border {
+                            color,
+                            width: 1.0,
+                            radius: design_tokens::RADIUS_SM.into(),
+                        },
+                        ..Default::default()
+                    }
+                }),
+            );
+        }
+
+        container(row)
+            .padding([design_tokens::SPACE_8, 0.0])
+            .width(Length::Fill)
+            .into()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 22. TABLE HEADER ROW — column labels for data tables
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A table header row with column labels. Data-agnostic — callers provide
+/// the column labels and optional widths.
+pub struct TableHeaderRow<'a, Message> {
+    columns: Vec<(&'a str, Option<f32>)>, // (label, optional fixed width in px)
+    _phantom: std::marker::PhantomData<Message>,
+}
+
+impl<'a, Message: 'a> TableHeaderRow<'a, Message> {
+    /// Create a header row. Each entry is (label, optional_fixed_width).
+    /// Pass `None` for width to use `Length::Fill`.
+    pub fn new(columns: Vec<(&'a str, Option<f32>)>) -> Self {
+        Self {
+            columns,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Build the header row element.
+    pub fn build(self, theme: &Theme) -> Element<'a, Message> {
+        let mut row = Row::new()
+            .spacing(design_tokens::SPACE_8)
+            .align_y(Alignment::Center);
+
+        for (label, width) in self.columns {
+            let label_el = text(label)
+                .font(Typography::SidebarSectionLabel.font())
+                .size(Typography::SidebarSectionLabel.size_px())
+                .color(design_tokens::text_muted(theme));
+
+            let w = match width {
+                Some(px) => Length::Fixed(px),
+                None => Length::Fill,
+            };
+
+            row = row.push(container(label_el).width(w));
+        }
+
+        container(row)
+            .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
+            .width(Length::Fill)
+            .style(move |t| container::Style {
+                border: Border {
+                    color: design_tokens::border_muted(t),
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 23. OVERFLOW MENU — trailing kebab action menu anchor
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A trailing overflow menu anchor — renders the MoreVertical kebab icon as
+/// a ghost button. The actual dropdown menu is owner-rendered (the anchor
+/// just dispatches the toggle message).
+pub struct OverflowMenu {}
+
+impl OverflowMenu {
+    /// Build the kebab anchor button that dispatches `on_toggle` on press.
+    pub fn build<'a>(
+        on_toggle: AppMessage,
+        disabled: bool,
+        theme: &Theme,
+    ) -> Element<'a, AppMessage> {
+        let _ = theme;
+        let icon = Icon::MoreVertical
+            .build()
+            .size(IconSize::Sm)
+            .interactive(!disabled)
+            .build();
+
+        let btn = button(icon)
+            .padding(design_tokens::SPACE_8)
+            .style(move |t, status| overflow_menu_button_style(t, status));
+
+        if disabled {
+            btn.into()
+        } else {
+            btn.on_press(on_toggle).into()
+        }
+    }
+}
+
+fn overflow_menu_button_style(theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: match status {
+            button::Status::Hovered => Some(Background::Color(design_tokens::surface_hover(theme))),
+            button::Status::Pressed => {
+                Some(Background::Color(design_tokens::surface_selected(theme)))
+            }
+            _ => None,
+        },
+        text_color: match status {
+            button::Status::Hovered => design_tokens::primary(theme),
+            button::Status::Pressed => design_tokens::primary_pressed(theme),
+            button::Status::Disabled => design_tokens::text_muted(theme),
+            _ => design_tokens::text_secondary(theme),
+        },
+        border: Border {
+            radius: design_tokens::SPACE_8.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1613,5 +2432,228 @@ mod tests {
                 system_event_chip(label, accent, "Sample system event body", &theme);
             let _ = el;
         }
+    }
+
+    // ── FS-07 Dashboard component tests ──────────────────────────────
+
+    #[test]
+    fn tab_strip_stores_tabs() {
+        let tabs: Vec<(&str, AppMessage)> = vec![
+            ("Tab 1", AppMessage::Noop),
+            ("Tab 2", AppMessage::Noop),
+        ];
+        let strip = TabStrip::<AppMessage>::new(tabs);
+        assert_eq!(strip.tabs.len(), 2);
+        assert_eq!(strip.active_index, 0);
+    }
+
+    #[test]
+    fn tab_strip_active_clamped() {
+        let tabs: Vec<(&str, AppMessage)> = vec![("A", AppMessage::Noop)];
+        let strip = TabStrip::<AppMessage>::new(tabs).active(5);
+        assert_eq!(strip.active_index, 0); // clamped to 0
+    }
+
+    #[test]
+    fn tab_strip_builds_without_panic() {
+        let tabs: Vec<(&str, AppMessage)> = vec![
+            ("First", AppMessage::Noop),
+            ("Second", AppMessage::Noop),
+            ("Third", AppMessage::Noop),
+        ];
+        let el: Element<'static, AppMessage> =
+            TabStrip::<AppMessage>::new(tabs).active(1).build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn progress_bar_fraction_clamped() {
+        let pb = ProgressBar::<AppMessage>::new(1.5);
+        assert_eq!(pb.fraction, 1.0);
+        let pb = ProgressBar::<AppMessage>::new(-0.5);
+        assert_eq!(pb.fraction, 0.0);
+    }
+
+    #[test]
+    fn progress_bar_defaults() {
+        let pb = ProgressBar::<AppMessage>::new(0.5);
+        assert_eq!(pb.kind, ProgressKind::Normal);
+        assert!(!pb.indeterminate);
+        assert!(pb.show_label);
+        assert_eq!(pb.height, design_tokens::PROGRESS_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn progress_bar_kinds_are_distinct() {
+        let kinds = [
+            ProgressKind::Normal,
+            ProgressKind::Paused,
+            ProgressKind::Error,
+            ProgressKind::Complete,
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for (j, b) in kinds.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn progress_bar_builds_all_states() {
+        let theme = Theme::Light;
+        for (fraction, kind) in [
+            (0.0, ProgressKind::Normal),
+            (0.45, ProgressKind::Normal),
+            (0.5, ProgressKind::Paused),
+            (1.0, ProgressKind::Complete),
+            (0.75, ProgressKind::Error),
+        ] {
+            let el: Element<'static, AppMessage> = ProgressBar::<AppMessage>::new(fraction)
+                .kind(kind)
+                .build(&theme);
+            let _ = el;
+        }
+    }
+
+    #[test]
+    fn progress_bar_indeterminate_builds() {
+        let theme = Theme::Light;
+        let el: Element<'static, AppMessage> =
+            ProgressBar::<AppMessage>::new(0.0).indeterminate(true).build(&theme);
+        let _ = el;
+    }
+
+    #[test]
+    fn progress_bar_bold_builds() {
+        let theme = Theme::Light;
+        let el: Element<'static, AppMessage> =
+            ProgressBar::<AppMessage>::new(0.6).bold().build(&theme);
+        let _ = el;
+    }
+
+    #[test]
+    fn file_identity_cell_builds() {
+        let theme = Theme::Light;
+        let el: Element<'static, AppMessage> =
+            FileIdentityCell::<AppMessage>::new(
+                Icon::Files,
+                "report.pdf",
+                "application/pdf · 2.4 MB",
+            )
+            .build(&theme);
+        let _ = el;
+    }
+
+    #[test]
+    fn file_identity_cell_long_name() {
+        let theme = Theme::Light;
+        let el: Element<'static, AppMessage> =
+            FileIdentityCell::<AppMessage>::new(
+                Icon::Image,
+                "AVeryLongFileNameThatCouldExceedTheAvailableSpaceInTheTableRow.jpg",
+                "image/jpeg · 15 MB",
+            )
+            .build(&theme);
+        let _ = el;
+    }
+
+    #[test]
+    fn peer_chip_stack_no_overflow() {
+        let peers: Vec<&str> = vec!["Alice", "Bob"];
+        let stack = PeerChipStack::<AppMessage>::new(peers);
+        let el: Element<'static, AppMessage> = stack.build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn peer_chip_stack_with_overflow() {
+        let peers: Vec<&str> = vec!["Alice", "Bob", "Carol", "Dave", "Eve"];
+        let el: Element<'static, AppMessage> =
+            PeerChipStack::<AppMessage>::new(peers)
+                .max_visible(3)
+                .build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn peer_chip_stack_empty() {
+        let peers: Vec<&str> = vec![];
+        let el: Element<'static, AppMessage> =
+            PeerChipStack::<AppMessage>::new(peers).build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn metric_block_default() {
+        let el: Element<'static, AppMessage> =
+            MetricBlock::<AppMessage>::new("42", "files").build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn metric_block_accented() {
+        let el: Element<'static, AppMessage> = MetricBlock::<AppMessage>::new("2.4 GB", "data")
+            .accent(design_tokens::primary)
+            .build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn loading_skeleton_builds() {
+        let el: Element<'static, AppMessage> =
+            LoadingSkeleton::<AppMessage>::new(5).build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn loading_skeleton_compact() {
+        let el: Element<'static, AppMessage> = LoadingSkeleton::<AppMessage>::new(3)
+            .row_height(design_tokens::TABLE_ROW_HEIGHT_COMPACT)
+            .build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn inline_error_message_only() {
+        let el: Element<'static, AppMessage> =
+            InlineError::new("Something went wrong.").build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn inline_error_with_retry() {
+        let el: Element<'static, AppMessage> = InlineError::new("Transfer failed.")
+            .on_retry(AppMessage::Noop)
+            .build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn table_header_row_builds() {
+        let el: Element<'static, AppMessage> = TableHeaderRow::<AppMessage>::new(vec![
+            ("Name", None),
+            ("Kind", Some(100.0)),
+            ("Size", Some(80.0)),
+        ])
+        .build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn overflow_menu_normal() {
+        let el: Element<'static, AppMessage> =
+            OverflowMenu::build(AppMessage::Noop, false, &Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn overflow_menu_disabled() {
+        let el: Element<'static, AppMessage> =
+            OverflowMenu::build(AppMessage::Noop, true, &Theme::Light);
+        let _ = el;
     }
 }

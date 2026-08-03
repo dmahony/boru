@@ -15,7 +15,8 @@ use crate::ui_components::{
     self, badge, card_header, date_separator, divider, elevated_card, empty_state,
     ghost_icon_button, icon_tile, primary_button, primary_button_icon, secondary_button,
     section_header, status_dot, system_event_chip, text_input_field, Avatar, BadgeKind, Card,
-    ListRow, StatusDotKind,
+    FileIdentityCell, InlineError, ListRow, LoadingSkeleton, MetricBlock, OverflowMenu,
+    PeerChipStack, ProgressBar, ProgressKind, StatusDotKind, TabStrip, TableHeaderRow,
 };
 
 /// Build the complete component gallery view.
@@ -58,6 +59,33 @@ pub fn view_gallery() -> Element<'static, AppMessage> {
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Elevated Card (Dialog)"))
         .push(dialog_example())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Tab Strip"))
+        .push(tab_strip_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Progress Bar"))
+        .push(progress_bar_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("File Identity Cell"))
+        .push(file_identity_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Peer Chip Stack"))
+        .push(peer_chip_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Metric Block"))
+        .push(metric_block_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Loading Skeleton"))
+        .push(loading_skeleton_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Inline Error & Retry"))
+        .push(inline_error_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Table Header Row"))
+        .push(table_header_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Overflow Menu"))
+        .push(overflow_menu_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_32)))
         .spacing(0);
 
@@ -955,5 +983,285 @@ fn dialog_example() -> Element<'static, AppMessage> {
 
     container(elevated_card::<AppMessage>(vec![content.into()]))
         .width(Length::Fixed(400.0))
+        .into()
+}
+
+// ── Tab strip gallery ─────────────────────────────────────────────────
+
+fn tab_strip_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    let tabs: Vec<(&str, AppMessage)> = vec![
+        ("Shared by Me", AppMessage::Noop),
+        ("Downloading", AppMessage::Noop),
+        ("Downloaded", AppMessage::Noop),
+        ("Shared w/ Me", AppMessage::Noop),
+        ("Activity Log", AppMessage::Noop),
+    ];
+
+    Column::new()
+        .push(state_label(
+            "Active tab: Shared by Me (second tab is clickable for state demo)",
+        ))
+        .push(
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Fixed(4.0)),
+        )
+        .push(TabStrip::<AppMessage>::new(tabs).active(0).build(&theme))
+        .spacing(0)
+        .into()
+}
+
+// ── Progress bar gallery ──────────────────────────────────────────────
+
+fn progress_bar_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    Row::new()
+        .push(
+            Column::new()
+                .push(state_label("0%"))
+                .push(ProgressBar::<AppMessage>::new(0.0).build(&theme))
+                .width(Length::FillPortion(1)),
+        )
+        .push(
+            Space::new()
+                .width(Length::Fixed(design_tokens::SPACE_16))
+                .height(Length::Shrink),
+        )
+        .push(
+            Column::new()
+                .push(state_label("45%"))
+                .push(ProgressBar::<AppMessage>::new(0.45).build(&theme))
+                .width(Length::FillPortion(1)),
+        )
+        .push(
+            Space::new()
+                .width(Length::Fixed(design_tokens::SPACE_16))
+                .height(Length::Shrink),
+        )
+        .push(
+            Column::new()
+                .push(state_label("100% (complete)"))
+                .push(
+                    ProgressBar::<AppMessage>::new(1.0)
+                        .kind(ProgressKind::Complete)
+                        .build(&theme),
+                )
+                .width(Length::FillPortion(1)),
+        )
+        .spacing(0)
+        .push(
+            Column::new()
+                .push(state_label("Paused"))
+                .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
+                .push(state_label("Indeterminate"))
+                .push(
+                    ProgressBar::<AppMessage>::new(0.0)
+                        .indeterminate(true)
+                        .build(&theme),
+                )
+                .width(Length::FillPortion(1)),
+        )
+        .spacing(0)
+        .into()
+}
+
+// ── File identity cell gallery ────────────────────────────────────────
+
+fn file_identity_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    Column::new()
+        .push(state_label("PDF document"))
+        .push(
+            FileIdentityCell::<AppMessage>::new(
+                Icon::Files,
+                "QuarterlyReport.pdf",
+                "application/pdf · 2.4 MB · shared 3h ago",
+            )
+            .build(&theme),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Image file"))
+        .push(
+            FileIdentityCell::<AppMessage>::new(
+                Icon::Image,
+                "vacation-photo-2024.jpg",
+                "image/jpeg · 5.1 MB · downloaded yesterday",
+            )
+            .build(&theme),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Long name (truncated)"))
+        .push(
+            FileIdentityCell::<AppMessage>::new(
+                Icon::Files,
+                "VeryLongFileNameThatMightGetClippedByTheContainerOrTruncatedWithEllipsis.zip",
+                "application/zip · 128 MB",
+            )
+            .build(&theme),
+        )
+        .spacing(0)
+        .into()
+}
+
+// ── Peer chip stack gallery ───────────────────────────────────────────
+
+fn peer_chip_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    let few: Vec<&str> = vec!["Alice", "Bob"];
+    let many: Vec<&str> = vec!["Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace"];
+
+    Column::new()
+        .push(state_label("2 peers (no overflow)"))
+        .push(PeerChipStack::<AppMessage>::new(few.clone()).build(&theme))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("7 peers (max 3 visible + overflow)"))
+        .push(
+            PeerChipStack::<AppMessage>::new(many)
+                .max_visible(3)
+                .build(&theme),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Long names truncated to 12 chars"))
+        .push(
+            PeerChipStack::<AppMessage>::new(vec!["AlexanderTheGreat", "ChristopherColumbus"])
+                .build(&theme),
+        )
+        .spacing(0)
+        .into()
+}
+
+// ── Metric block gallery ──────────────────────────────────────────────
+
+fn metric_block_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    Row::new()
+        .push(
+            Column::new()
+                .push(state_label("Files shared"))
+                .push(MetricBlock::<AppMessage>::new("42", "files shared").build(&theme))
+                .width(Length::FillPortion(1)),
+        )
+        .push(
+            Space::new()
+                .width(Length::Fixed(design_tokens::SPACE_16))
+                .height(Length::Shrink),
+        )
+        .push(
+            Column::new()
+                .push(state_label("Data transferred (accented)"))
+                .push(
+                    MetricBlock::<AppMessage>::new("2.4 GB", "transferred")
+                        .accent(design_tokens::primary)
+                        .build(&theme),
+                )
+                .width(Length::FillPortion(1)),
+        )
+        .push(
+            Space::new()
+                .width(Length::Fixed(design_tokens::SPACE_16))
+                .height(Length::Shrink),
+        )
+        .push(
+            Column::new()
+                .push(state_label("Active peers (success)"))
+                .push(
+                    MetricBlock::<AppMessage>::new("12", "active peers")
+                        .accent(design_tokens::color_success)
+                        .build(&theme),
+                )
+                .width(Length::FillPortion(1)),
+        )
+        .spacing(0)
+        .into()
+}
+
+// ── Loading skeleton gallery ──────────────────────────────────────────
+
+fn loading_skeleton_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    Column::new()
+        .push(state_label("5-row skeleton (default 56 px row height)"))
+        .push(LoadingSkeleton::<AppMessage>::new(5).build(&theme))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("3-row skeleton (compact 48 px)"))
+        .push(
+            LoadingSkeleton::<AppMessage>::new(3)
+                .row_height(design_tokens::TABLE_ROW_HEIGHT_COMPACT)
+                .build(&theme),
+        )
+        .spacing(0)
+        .into()
+}
+
+// ── Inline error gallery ──────────────────────────────────────────────
+
+fn inline_error_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    Column::new()
+        .push(state_label("Error message only"))
+        .push(InlineError::new("Transfer failed: hash mismatch.").build(&theme))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Error with retry action"))
+        .push(
+            InlineError::new("Network error: peer disconnected.")
+                .on_retry(AppMessage::Noop)
+                .build(&theme),
+        )
+        .spacing(0)
+        .into()
+}
+
+// ── Table header row gallery ──────────────────────────────────────────
+
+fn table_header_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    Column::new()
+        .push(state_label("File table header (4 columns)"))
+        .push(
+            TableHeaderRow::<AppMessage>::new(vec![
+                ("Name", None),
+                ("Kind", Some(100.0)),
+                ("Size", Some(80.0)),
+                ("Shared", Some(100.0)),
+            ])
+            .build(&theme),
+        )
+        .spacing(0)
+        .into()
+}
+
+// ── Overflow menu gallery ─────────────────────────────────────────────
+
+fn overflow_menu_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    Row::new()
+        .push(
+            Column::new()
+                .push(state_label("Normal"))
+                .push(OverflowMenu::build(AppMessage::Noop, false, &theme))
+                .width(Length::FillPortion(1)),
+        )
+        .push(
+            Space::new()
+                .width(Length::Fixed(design_tokens::SPACE_16))
+                .height(Length::Shrink),
+        )
+        .push(
+            Column::new()
+                .push(state_label("Disabled"))
+                .push(OverflowMenu::build(AppMessage::Noop, true, &theme))
+                .width(Length::FillPortion(1)),
+        )
+        .spacing(0)
         .into()
 }
