@@ -1,0 +1,2035 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling log v0.4.33
+   Compiling portable-atomic v1.14.0
+   Compiling critical-section v1.2.0
+   Compiling pin-project-lite v0.2.17
+   Compiling memchr v2.8.3
+   Compiling bitflags v2.13.1
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling version_check v0.9.5
+   Compiling cc v1.3.0
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling libm v0.2.16
+   Compiling futures-core v0.3.33
+   Compiling autocfg v1.5.1
+   Compiling slab v0.4.12
+   Compiling num-traits v0.2.19
+   Compiling futures-io v0.3.33
+   Compiling errno v0.3.14
+   Compiling thiserror v2.0.19
+   Compiling signal-hook-registry v1.4.8
+   Compiling getrandom v0.2.17
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.2
+   Compiling stable_deref_trait v1.2.1
+   Compiling subtle v2.6.1
+   Compiling futures-sink v0.3.33
+   Compiling typenum v1.20.1
+   Compiling cfg_aliases v0.2.2
+   Compiling crossbeam-utils v0.8.22
+   Compiling futures-channel v0.3.33
+   Compiling futures-task v0.3.33
+   Compiling equivalent v1.0.2
+   Compiling generic-array v0.14.7
+   Compiling rand_core v0.6.4
+   Compiling rustix v1.1.4
+   Compiling linux-raw-sys v0.12.1
+   Compiling zerocopy v0.8.55
+   Compiling libloading v0.8.9
+   Compiling rand_core v0.10.1
+   Compiling pkg-config v0.3.33
+   Compiling arrayvec v0.7.8
+   Compiling foldhash v0.2.0
+   Compiling fastrand v2.5.0
+   Compiling semver v1.0.28
+   Compiling synstructure v0.13.2
+   Compiling rustc_version v0.4.1
+   Compiling allocator-api2 v0.2.21
+   Compiling percent-encoding v2.3.2
+   Compiling either v1.16.0
+   Compiling hashbrown v0.17.1
+   Compiling anyhow v1.0.104
+   Compiling scopeguard v1.2.0
+   Compiling parking v2.2.1
+   Compiling litemap v0.8.2
+   Compiling crossbeam-epoch v0.9.20
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.19
+   Compiling writeable v0.6.3
+   Compiling lock_api v0.4.14
+   Compiling utf8_iter v1.0.4
+   Compiling itoa v1.0.18
+   Compiling cpufeatures v0.3.0
+   Compiling icu_properties_data v2.2.0
+   Compiling icu_normalizer_data v2.2.0
+   Compiling zeroize_derive v1.5.0
+   Compiling tokio-macros v2.7.1
+   Compiling tracing-attributes v0.1.31
+   Compiling zeroize v1.9.0
+   Compiling futures-macro v0.3.33
+   Compiling displaydoc v0.2.6
+   Compiling bytemuck_derive v1.11.0
+   Compiling zerocopy-derive v0.8.55
+   Compiling futures-util v0.3.33
+   Compiling zerofrom-derive v0.1.7
+   Compiling bytemuck v1.25.2
+   Compiling yoke-derive v0.8.2
+   Compiling smallvec v1.15.2
+   Compiling bytes v1.12.1
+   Compiling once_cell v1.21.4
+   Compiling tracing-core v0.1.36
+   Compiling tokio v1.53.1
+   Compiling tracing v0.1.44
+   Compiling zerofrom v0.1.8
+   Compiling crypto-common v0.1.7
+   Compiling yoke v0.8.3
+   Compiling zerovec-derive v0.11.3
+   Compiling indexmap v2.14.0
+   Compiling zerotrie v0.2.4
+   Compiling getrandom v0.4.3
+   Compiling unicode-segmentation v1.13.3
+   Compiling form_urlencoded v1.2.2
+   Compiling wayland-sys v0.31.11
+   Compiling dlib v0.5.3
+   Compiling tinyvec_macros v0.1.1
+   Compiling tinyvec v1.12.0
+   Compiling rustls-pki-types v1.15.0
+   Compiling ring v0.17.14
+   Compiling zerovec v0.11.6
+   Compiling wayland-backend v0.3.16
+   Compiling atomic-waker v1.1.2
+   Compiling paste v1.0.15
+   Compiling futures-lite v2.6.1
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_collections v2.2.0
+   Compiling downcast-rs v1.2.1
+   Compiling base64 v0.22.1
+   Compiling scoped-tls v1.0.1
+   Compiling futures-executor v0.3.33
+   Compiling icu_provider v2.2.0
+   Compiling http v1.4.2
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling num-integer v0.1.46
+   Compiling quick-xml v0.41.0
+   Compiling tokio-util v0.7.19
+   Compiling untrusted v0.9.0
+   Compiling wayland-client v0.31.15
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling winnow v1.0.4
+   Compiling url v2.5.8
+   Compiling wayland-scanner v0.31.11
+   Compiling num-bigint v0.4.8
+   Compiling cpufeatures v0.2.17
+   Compiling simd-adler32 v0.3.10
+   Compiling parking_lot_core v0.9.12
+   Compiling half v2.7.1
+   Compiling futures v0.3.33
+   Compiling ipnet v2.12.0
+   Compiling core_maths v0.1.1
+   Compiling adler2 v2.0.1
+   Compiling arrayref v0.3.9
+   Compiling crc32fast v1.5.0
+   Compiling rustls v0.23.42
+   Compiling crossbeam-deque v0.8.7
+   Compiling miniz_oxide v0.8.9
+   Compiling rustls-webpki v0.103.13
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling memmap2 v0.9.11
+   Compiling rayon-core v1.13.0
+   Compiling rustc-hash v2.1.3
+   Compiling const-oid v0.10.2
+   Compiling parking_lot v0.12.5
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling chacha20 v0.10.1
+   Compiling tracy-client-sys v0.28.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling rand v0.10.2
+   Compiling toml_edit v0.25.13+spec-1.1.0
+   Compiling flate2 v1.1.9
+   Compiling polling v3.11.0
+   Compiling hybrid-array v0.4.13
+   Compiling getrandom v0.3.4
+   Compiling raw-window-handle v0.6.2
+   Compiling fnv v1.0.7
+   Compiling proc-macro-crate v3.5.0
+   Compiling ttf-parser v0.25.1
+   Compiling h2 v0.4.15
+   Compiling http-body v1.1.0
+   Compiling inout v0.1.4
+   Compiling httparse v1.10.1
+   Compiling base64ct v1.8.3
+   Compiling cipher v0.4.4
+   Compiling pem-rfc7468 v1.0.0
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling rayon v1.12.0
+   Compiling convert_case v0.10.0
+   Compiling universal-hash v0.5.1
+   Compiling block-buffer v0.10.4
+   Compiling profiling-procmacros v1.0.18
+   Compiling time-core v0.1.9
+   Compiling unicode-xid v0.2.6
+   Compiling opaque-debug v0.3.1
+   Compiling tower-service v0.3.3
+   Compiling num-conv v0.2.2
+   Compiling derive_more-impl v2.1.1
+   Compiling time-macros v0.2.32
+   Compiling tracy-client v0.18.4
+   Compiling profiling v1.0.18
+   Compiling digest v0.10.7
+   Compiling digest v0.11.3
+   Compiling der v0.8.1
+   Compiling fdeflate v0.3.7
+   Compiling equator-macro v0.4.2
+   Compiling sync_wrapper v1.0.2
+   Compiling data-encoding v2.11.0
+   Compiling powerfmt v0.2.0
+   Compiling zmij v1.0.23
+   Compiling try-lock v0.2.5
+   Compiling deranged v0.5.8
+   Compiling want v0.3.1
+   Compiling equator v0.4.2
+   Compiling spki v0.8.0
+   Compiling tokio-rustls v0.26.4
+   Compiling pin-project-internal v1.1.13
+   Compiling n0-error-macros v1.0.0
+   Compiling spez v0.1.2
+   Compiling curve25519-dalek v5.0.0
+   Compiling slotmap v1.1.1
+   Compiling base16ct v1.0.0
+   Compiling httpdate v1.0.3
+   Compiling serde_json v1.0.151
+   Compiling time v0.3.54
+   Compiling rustc-hash v1.1.0
+   Compiling smol_str v0.2.2
+   Compiling weezl v0.1.12
+   Compiling n0-error v1.0.0
+   Compiling hyper v1.11.0
+   Compiling pin-project v1.1.13
+   Compiling serdect v0.4.3
+   Compiling aligned-vec v0.6.4
+   Compiling pkcs8 v0.11.0
+   Compiling polyval v0.6.2
+   Compiling wayland-protocols v0.32.13
+   Compiling aead v0.5.2
+   Compiling concurrent-queue v2.5.0
+   Compiling heck v0.5.0
+   Compiling tower-layer v0.3.3
+   Compiling derive_more v2.1.1
+   Compiling bitflags v1.3.2
+   Compiling signature v3.0.0
+   Compiling roxmltree v0.20.0
+   Compiling ed25519 v3.0.0
+   Compiling hyper-util v0.1.20
+   Compiling fontconfig-parser v0.5.8
+   Compiling ghash v0.5.1
+   Compiling v_frame v0.3.9
+   Compiling sha2 v0.11.0
+   Compiling ctr v0.9.2
+   Compiling aes v0.8.4
+   Compiling http-body-util v0.1.4
+   Compiling num-rational v0.4.2
+   Compiling ppv-lite86 v0.2.21
+   Compiling font-types v0.12.1
+   Compiling font-types v0.10.1
+   Compiling spin v0.9.9
+   Compiling as-slice v0.2.1
+   Compiling pulp v0.22.3
+   Compiling aho-corasick v1.1.4
+   Compiling openssl-probe v0.2.1
+   Compiling unicode-script v0.5.8
+   Compiling lazy_static v1.5.0
+   Compiling minimal-lexical v0.2.1
+   Compiling rustversion v1.0.23
+   Compiling quick-error v2.0.1
+   Compiling built v0.8.1
+   Compiling color_quant v1.1.0
+   Compiling av-scenechange v0.14.1
+   Compiling byteorder v1.5.0
+   Compiling float-cmp v0.9.0
+   Compiling web-time v1.1.0
+   Compiling regex-syntax v0.8.11
+   Compiling lilt v0.8.1
+   Compiling strict-num v0.1.1
+   Compiling rav1e v0.8.1
+   Compiling nom v7.1.3
+   Compiling rustls-native-certs v0.8.4
+   Compiling read-fonts v0.41.0
+   Compiling read-fonts v0.35.0
+   Compiling aligned v0.4.3
+   Compiling aes-gcm v0.10.3
+   Compiling regex-automata v0.4.16
+   Compiling ed25519-dalek v3.0.0-rc.0
+   Compiling fontdb v0.23.0
+   Compiling tower v0.5.3
+   Compiling rand_core v0.9.5
+   Compiling num-complex v0.4.6
+   Compiling arg_enum_proc_macro v0.3.4
+   Compiling async-trait v0.1.91
+   Compiling hashbrown v0.16.1
+   Compiling n0-future v0.3.2
+   Compiling nom v8.0.0
+   Compiling no_std_io2 v0.9.4
+   Compiling raw-cpuid v11.6.0
+   Compiling self_cell v1.3.0
+   Compiling reborrow v0.5.5
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling cordyceps v0.3.4
+   Compiling spin v0.10.1
+   Compiling glam v0.25.0
+   Compiling diatomic-waker v0.2.3
+   Compiling pastey v0.1.1
+   Compiling y4m v0.8.0
+   Compiling unicode-bidi v0.3.18
+   Compiling av1-grain v0.2.5
+   Compiling iced_core v0.14.0
+   Compiling futures-buffered v0.2.13
+   Compiling skrifa v0.44.0
+   Compiling bitstream-io v4.10.0
+   Compiling rusticata-macros v4.1.0
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling tiny-skia-path v0.11.4
+   Compiling png v0.17.16
+   Compiling maybe-rayon v0.1.1
+   Compiling zune-inflate v0.2.54
+   Compiling webpki-roots v1.0.9
+   Compiling uuid v1.24.0
+   Compiling rgb v0.8.53
+   Compiling asn1-rs-derive v0.6.0
+   Compiling asn1-rs-impl v0.2.0
+   Compiling num-derive v0.4.2
+   Compiling itertools v0.14.0
+   Compiling heapless v0.7.17
+   Compiling noq-udp v1.1.0
+   Compiling naga v27.0.3
+   Compiling serde_bytes v0.11.19
+   Compiling simd_helpers v0.1.0
+   Compiling as-raw-xcb-connection v1.0.1
+   Compiling zeno v0.3.3
+   Compiling unicode-width v0.2.2
+   Compiling bit_field v0.10.3
+   Compiling new_debug_unreachable v1.0.6
+   Compiling noop_proc_macro v0.3.0
+   Compiling byteorder-lite v0.1.0
+   Compiling imgref v1.12.2
+   Compiling yazi v0.2.1
+   Compiling khronos-egl v6.0.0
+   Compiling foldhash v0.1.5
+   Compiling const-oid v0.9.6
+   Compiling lebe v0.5.3
+   Compiling zune-core v0.5.1
+   Compiling bit-vec v0.8.0
+   Compiling ash v0.38.0+1.3.281
+   Compiling exr v1.74.2
+   Compiling swash v0.2.10
+   Compiling bit-set v0.8.0
+   Compiling zune-jpeg v0.5.15
+   Compiling der v0.7.10
+   Compiling hashbrown v0.15.5
+   Compiling image-webp v0.2.4
+   Compiling loop9 v0.1.5
+   Compiling codespan-reporting v0.12.0
+   Compiling asn1-rs v0.7.2
+   Compiling hyper-rustls v0.27.9
+   Compiling iced_futures v0.14.0
+   Compiling harfrust v0.3.2
+   Compiling skrifa v0.37.0
+   Compiling tower-http v0.6.11
+   Compiling hash32 v0.2.1
+   Compiling event-listener v5.4.1
+   Compiling hmac v0.12.1
+   Compiling prefix-trie v0.8.4
+   Compiling qoi v0.4.1
+   Compiling gethostname v1.1.0
+   Compiling avif-serialize v0.8.9
+   Compiling crossbeam-channel v0.5.16
+   Compiling ff v0.13.1
+   Compiling wgpu-hal v27.0.4
+   Compiling blake3 v1.8.5
+   Compiling spirv v0.3.0+sdk-1.3.268.0
+   Compiling gpu-alloc-types v0.3.1
+   Compiling gpu-descriptor-types v0.2.0
+   Compiling utf8parse v0.2.2
+   Compiling oid-registry v0.8.1
+   Compiling litrs v1.0.0
+   Compiling x11rb-protocol v0.13.2
+   Compiling ryu v1.0.23
+   Compiling base16ct v0.2.0
+   Compiling hexf-parse v0.2.1
+   Compiling sys-locale v0.3.2
+   Compiling fax v0.2.7
+   Compiling unicode-linebreak v0.1.5
+   Compiling rangemap v1.7.1
+   Compiling pxfm v0.1.30
+   Compiling linebender_resource_handle v0.1.1
+   Compiling cosmic-text v0.15.0
+   Compiling tiff v0.11.3
+   Compiling data-encoding-macro-internal v0.1.18
+   Compiling sec1 v0.7.3
+   Compiling document-features v0.2.12
+   Compiling anstyle-parse v1.0.0
+   Compiling moxcms v0.8.1
+   Compiling gpu-alloc v0.6.2
+   Compiling gpu-descriptor v0.3.2
+   Compiling ravif v0.13.0
+   Compiling group v0.13.0
+   Compiling hickory-proto v0.26.1
+   Compiling hkdf v0.12.4
+   Compiling event-listener-strategy v0.5.4
+   Compiling tiny-skia v0.11.4
+   Compiling x11rb v0.13.2
+   Compiling matchers v0.2.0
+   Compiling gif v0.14.2
+   Compiling sharded-slab v0.1.7
+   Compiling png v0.18.1
+   Compiling netlink-packet-core v0.8.1
+   Compiling tracing-log v0.2.0
+   Compiling wgpu-types v27.0.1
+   Compiling crypto-bigint v0.5.5
+   Compiling cobs v0.3.0
+   Compiling postcard-derive v0.2.2
+   Compiling enumflags2_derive v0.7.12
+   Compiling curve25519-dalek v4.1.3
+   Compiling ordered-float v5.3.0
+   Compiling thread_local v1.1.10
+   Compiling glow v0.16.0
+   Compiling cursor-icon v1.2.0
+   Compiling mutate_once v0.1.2
+   Compiling sha1_smol v1.0.1
+   Compiling nu-ansi-term v0.50.3
+   Compiling xkeysym v0.2.1
+   Compiling thiserror v1.0.69
+   Compiling colorchoice v1.0.5
+   Compiling anstyle v1.0.14
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling constant_time_eq v0.4.2
+   Compiling anstyle-query v1.1.5
+   Compiling renderdoc-sys v1.1.0
+   Compiling xcursor v0.3.10
+   Compiling wayland-cursor v0.31.14
+   Compiling anstream v1.0.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling kamadak-exif v0.6.1
+   Compiling wayland-csd-frame v0.3.0
+   Compiling postcard v1.1.3
+   Compiling elliptic-curve v0.13.8
+   Compiling image v0.25.10
+   Compiling data-encoding-macro v0.1.20
+   Compiling reqwest v0.13.4
+   Compiling der-parser v10.0.0
+   Compiling zvariant_utils v3.5.0
+   Compiling arc-swap v1.9.2
+   Compiling rand_chacha v0.9.0
+   Compiling wayland-protocols-wlr v0.3.12
+   Compiling netlink-sys v0.8.8
+   Compiling kurbo v0.11.3
+   Compiling thiserror-impl v1.0.69
+   Compiling wgpu-core v27.0.3
+   Compiling unicode-properties v0.1.4
+   Compiling unicode-bidi-mirroring v0.4.0
+   Compiling tagptr v0.2.0
+   Compiling clap_lex v1.1.0
+   Compiling syn v1.0.109
+   Compiling rustix v0.38.44
+   Compiling strsim v0.11.1
+   Compiling netdev v0.45.0
+   Compiling siphasher v1.0.3
+   Compiling unicode-ccc v0.4.0
+   Compiling iana-time-zone v0.1.65
+   Compiling svgtypes v0.15.3
+   Compiling chrono v0.4.45
+   Compiling rustybuzz v0.20.1
+   Compiling clap_builder v4.6.2
+   Compiling moka v0.12.15
+   Compiling iced_graphics v0.14.0
+   Compiling rand v0.9.5
+   Compiling zvariant_derive v5.13.1
+   Compiling wgpu-core-deps-windows-linux-android v27.0.0
+   Compiling x509-parser v0.18.1
+   Compiling iroh-base v1.0.3
+   Compiling netlink-packet-route v0.31.0
+   Compiling hickory-net v0.26.1
+   Compiling gif v0.13.3
+   Compiling yasna v0.6.0
+   Compiling clap_derive v4.6.4
+   Compiling strum_macros v0.28.0
+   Compiling iroh-metrics-derive v1.0.1
+   Compiling num_enum_derive v0.7.6
+   Compiling pem v3.0.6
+   Compiling rustls-cert-read v0.3.0
+   Compiling enum-assoc v1.3.0
+   Compiling tiny-xlib v0.2.5
+   Compiling rand_pcg v0.10.2
+   Compiling noq v1.1.0
+   Compiling netwatch v0.19.1
+   Compiling wgpu v27.0.1
+   Compiling iroh-dns v1.0.3 (/tmp/ui17-verify/patched/iroh-dns)
+   Compiling euclid v0.22.14
+   Compiling async-io v2.6.0
+   Compiling simplecss v0.2.2
+   Compiling unicode-vo v0.1.0
+   Compiling mac-addr v0.3.0
+   Compiling hax-lib v0.3.6
+   Compiling xml-rs v0.8.28
+   Compiling svg_fmt v0.4.5
+   Compiling async-task v4.7.1
+   Compiling zune-core v0.4.12
+   Compiling endi v1.1.1
+   Compiling xmlwriter v0.1.0
+   Compiling pico-args v0.5.0
+   Compiling imagesize v0.13.0
+   Compiling lru v0.16.4
+   Compiling static_assertions v1.1.0
+   Compiling identity-hash v0.1.0
+   Compiling sorted-index-buffer v0.2.1
+   Compiling resolv-conf v0.7.6
+   Compiling linux-raw-sys v0.4.15
+   Compiling data-url v0.3.2
+   Compiling reloadable-core v0.1.0
+   Compiling lru-slab v0.1.2
+   Compiling reloadable-state v0.1.0
+   Compiling noq-proto v1.1.0
+   Compiling usvg v0.45.1
+   Compiling hickory-resolver v0.26.1
+   Compiling xmltree v0.10.3
+   Compiling zune-jpeg v0.4.21
+   Compiling strum v0.28.0
+   Compiling clap v4.6.4
+   Compiling num_enum v0.7.6
+   Compiling rcgen v0.14.8
+   Compiling iroh-metrics v1.0.1
+   Compiling netlink-proto v0.12.0
+   Compiling primeorder v0.13.6
+   Compiling async-channel v2.5.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling iced_debug v0.14.0
+   Compiling n0-watcher v1.0.0
+   Compiling sha2 v0.10.9
+   Compiling calloop v0.14.4
+   Compiling attohttpc v0.30.1
+   Compiling tokio-stream v0.1.19
+   Compiling hax-lib-macros v0.3.6
+   Compiling lru v0.18.1
+   Compiling iroh-relay v1.0.3 (/tmp/ui17-verify/patched/iroh-relay)
+   Compiling serde_spanned v1.1.1
+   Compiling proc-macro2-diagnostics v0.10.1
+   Compiling proc-macro-error-attr v0.4.12
+   Compiling simple-dns v0.11.3
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling ctor v0.10.1
+   Compiling hashbrown v0.14.5
+   Compiling simdutf8 v0.1.5
+   Compiling smithay-client-toolkit v0.20.0
+   Compiling mime v0.3.17
+   Compiling axum-core v0.5.6
+   Compiling dashmap v6.2.1
+   Compiling tokio-websockets v0.13.3
+   Compiling toml v1.1.3+spec-1.1.0
+   Compiling syn-mid v0.5.4
+   Compiling igd-next v0.17.1
+   Compiling calloop-wayland-source v0.4.1
+   Compiling tokio-rustls-acme v0.9.1
+   Compiling calloop v0.13.0
+   Compiling resvg v0.45.1
+   Compiling rustls-cert-reloadable-resolver v0.7.1
+   Compiling etagere v0.2.15
+   Compiling rustls-cert-file-reader v0.4.2
+   Compiling enumflags2 v0.7.12
+   Compiling wayland-protocols-experimental v20250721.0.1
+   Compiling wayland-protocols-misc v0.3.12
+   Compiling sha1 v0.11.0
+   Compiling poly1305 v0.8.0
+   Compiling chacha20 v0.9.1
+   Compiling piper v0.2.5
+   Compiling hex v0.4.3
+   Compiling serde_path_to_error v0.1.20
+   Compiling iroh v1.0.3 (/tmp/ui17-verify/patched/iroh)
+   Compiling seize v0.5.1
+   Compiling proc-macro-error v0.4.12
+   Compiling smithay-client-toolkit v0.19.2
+   Compiling cmov v0.5.4
+   Compiling matchit v0.8.4
+   Compiling yansi v1.0.1
+   Compiling proc-macro-hack v0.5.20+deprecated
+   Compiling axum v0.8.9
+   Compiling ctutils v0.4.2
+   Compiling papaya v0.2.4
+   Compiling chacha20poly1305 v0.10.1
+   Compiling blocking v1.6.2
+   Compiling zvariant v5.13.1
+   Compiling cryoglyph v0.1.0
+   Compiling calloop-wayland-source v0.3.0
+   Compiling portmapper v0.19.1
+   Compiling softbuffer v0.4.8
+   Compiling p256 v0.13.2
+   Compiling guillotiere v0.6.2
+   Compiling x25519-dalek v2.0.1
+   Compiling async-lock v3.4.2
+   Compiling owned_ttf_parser v0.25.1
+   Compiling backon v1.6.0
+   Compiling kurbo v0.10.4
+   Compiling x11-dl v2.21.0
+   Compiling ahash v0.8.12
+   Compiling ref-cast v1.0.26
+   Compiling ab_glyph_rasterizer v0.1.10
+   Compiling ciborium-io v0.2.2
+   Compiling heck v0.4.1
+   Compiling crc-catalog v2.5.0
+   Compiling libcrux-intrinsics v0.0.6
+   Compiling ouroboros_macro v0.18.5
+   Compiling iced_tiny_skia v0.14.0
+   Compiling crc v3.4.0
+   Compiling ciborium-ll v0.2.2
+   Compiling ab_glyph v0.2.32
+   Compiling iced_wgpu v0.14.0
+   Compiling zbus_names v4.3.4
+   Compiling smithay-clipboard v0.7.3
+   Compiling async-signal v0.2.14
+   Compiling libcrux-secrets v0.0.5
+   Compiling iced_runtime v0.14.0
+   Compiling serde_bencode v0.2.4
+   Compiling rand_chacha v0.3.1
+   Compiling ref-cast-impl v1.0.26
+   Compiling acto v0.8.2
+   Compiling winit v0.30.13
+   Compiling aliasable v0.1.3
+   Compiling signature v2.2.0
+   Compiling inotify-sys v0.1.8
+   Compiling dyn-clone v1.0.20
+   Compiling libcrux-sha3 v0.0.8
+   Compiling vcpkg v0.2.15
+   Compiling ed25519 v2.2.3
+   Compiling ouroboros v0.18.5
+   Compiling rand v0.8.7
+   Compiling genawaiter-proc-macro v0.99.1
+   Compiling libcrux-traits v0.0.6
+   Compiling async-process v2.5.0
+   Compiling libsqlite3-sys v0.37.0
+   Compiling sctk-adwaita v0.10.1
+   Compiling clipboard_wayland v0.2.2
+   Compiling zbus_macros v5.18.0
+   Compiling iced_renderer v0.14.0
+   Compiling ciborium v0.2.2
+   Compiling async-executor v1.14.0
+   Compiling xkbcommon-dl v0.4.2
+   Compiling clipboard_x11 v0.4.3
+   Compiling async-broadcast v0.7.2
+   Compiling hpke-rs-crypto v0.6.1
+   Compiling wayland-protocols-plasma v0.3.12
+   Compiling flume v0.12.0
+   Compiling jpeg-decoder v0.3.2
+   Compiling inplace-vec-builder v0.1.1
+   Compiling async-recursion v1.1.1
+   Compiling serde_repr v0.1.21
+   Compiling libmimalloc-sys v0.1.49
+   Compiling ordered-stream v0.2.0
+   Compiling libcrux-platform v0.0.3
+   Compiling same-file v1.0.6
+   Compiling redb v4.1.0
+   Compiling genawaiter-macro v0.99.1
+   Compiling binary-merge v0.1.2
+   Compiling dpi v0.1.2
+   Compiling smol_str v0.1.24
+   Compiling range-collections v0.4.6
+   Compiling genawaiter v0.99.1
+   Compiling zbus v5.18.0
+   Compiling walkdir v2.5.0
+   Compiling tiff v0.9.1
+   Compiling window_clipboard v0.5.1
+   Compiling iced_widget v0.14.2
+   Compiling ed25519-dalek v2.2.0
+   Compiling iced_program v0.14.0
+   Compiling async-fs v2.2.0
+   Compiling hpke v0.13.0
+   Compiling async-net v2.0.0
+   Compiling p384 v0.13.1
+   Compiling k256 v0.13.4
+   Compiling iroh-io v0.6.2
+   Compiling is-docker v0.2.0
+   Compiling irpc-derive v0.17.0
+   Compiling iroh-blobs v0.103.0
+   Compiling positioned-io v0.3.5
+   Compiling rfd v0.15.4
+   Compiling plotters-backend v0.3.7
+   Compiling irpc v0.17.0 (/tmp/ui17-verify/patched/irpc)
+   Compiling plotters-svg v0.3.7
+   Compiling ashpd v0.11.1
+   Compiling bao-tree v0.16.0
+   Compiling is-wsl v0.4.0
+   Compiling hpke-rs-rust-crypto v0.6.1
+   Compiling ed25519-dalek-hpke v0.0.5
+   Compiling iced_winit v0.14.0
+   Compiling inotify v0.9.6
+   Compiling p2panda-core v0.7.0
+   Compiling image v0.24.9
+   Compiling iroh-util v0.6.0
+   Compiling hpke-rs v0.6.1
+   Compiling swarm-discovery v0.6.3
+   Compiling actor-helper v0.3.0
+   Compiling mainline v7.0.0 (/tmp/ui17-verify/patched/mainline)
+   Compiling n0-mainline v0.5.0 (/tmp/ui17-verify/patched/n0-mainline)
+   Compiling iroh-tickets v1.0.0
+   Compiling hashlink v0.11.1
+   Compiling regex v1.13.1
+   Compiling nested_enum_utils v0.2.3
+   Compiling reflink-copy v0.1.30
+   Compiling itertools v0.10.5
+   Compiling mio v0.8.11
+   Compiling filetime v0.2.29
+   Compiling boru-core v0.108.0 (/tmp/ui17-verify)
+   Compiling fallible-iterator v0.3.0
+   Compiling pollster v0.4.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling cast v0.3.0
+   Compiling fixedbitset v0.5.7
+   Compiling symlink v0.1.0
+   Compiling urlencoding v2.1.3
+   Compiling futures-concurrency v7.7.1
+   Compiling tracing-appender v0.2.5
+   Compiling criterion-plot v0.5.0
+   Compiling rusqlite v0.39.0
+   Compiling notify v6.1.1
+   Compiling iroh-mainline-address-lookup v0.4.0
+   Compiling distributed-topic-tracker v0.3.5
+   Compiling iced_moving_picture v0.2.0
+   Compiling iroh-mdns-address-lookup v0.4.0
+   Compiling p2panda-encryption v0.7.0
+   Compiling mimalloc v0.1.52
+   Compiling iced v0.14.0
+   Compiling open v5.4.0
+   Compiling plotters v0.3.7
+   Compiling reqwest v0.12.28
+   Compiling tinytemplate v1.2.1
+   Compiling unicode-normalization v0.1.25
+   Compiling serde-byte-array v0.1.2
+   Compiling n0-tracing-test-macro v0.3.0
+   Compiling is-terminal v0.4.17
+   Compiling socket2 v0.5.10
+   Compiling anes v0.1.6
+   Compiling humantime v2.4.0
+   Compiling oorandom v11.1.5
+   Compiling n0-tracing-test v0.3.0
+   Compiling humantime-serde v1.1.1
+   Compiling criterion v0.5.1
+   Compiling tempfile v3.27.0
+   Compiling testresult v0.4.1
+warning: unused import: `AsyncWriteExt`
+   --> src/streaming_server.rs:112:35
+    |
+112 |     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    |                                   ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: type does not implement `Debug`; consider adding `#[derive(Debug)]` or a manual implementation
+  --> src/streaming_server.rs:21:1
+   |
+21 | / pub struct StreamingServer {
+22 | |     /// The port the server is listening on.
+23 | |     pub port: u16,
+24 | |     /// Handle to the server task.
+...  |
+27 | |     running: Arc<AtomicBool>,
+28 | | }
+   | |_^
+   |
+   = note: requested on the command line with `-W missing-debug-implementations`
+
+warning: this lint expectation is unfulfilled
+   --> src/room_history.rs:166:14
+    |
+166 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+    |
+    = note: `#[warn(unfulfilled_lint_expectations)]` on by default
+
+warning: `boru-core` (lib) generated 3 warnings (run `cargo fix --lib -p boru-core` to apply 1 suggestion)
+warning: unused import: `crate::notification::backend::NoopBackend`
+  --> examples/iced_chat/app.rs:24:5
+   |
+24 | use crate::notification::backend::NoopBackend;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `ConversationMute`, `DoNotDisturb`, `NotificationPreferences`, `PreviewMode`, and `WindowFocusState`
+  --> examples/iced_chat/app.rs:30:5
+   |
+30 |     ConversationMute, DoNotDisturb, NotificationPreferences, NotificationService, PreviewMode,
+   |     ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^                       ^^^^^^^^^^^
+31 |     WindowFocusState,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `GroupTopicHistory`
+  --> examples/iced_chat/app.rs:49:24
+   |
+49 |     ConversationStore, GroupTopicHistory,
+   |                        ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TunnelDefinition`
+  --> examples/iced_chat/app.rs:84:34
+   |
+84 | use boru_core::tunnel::service::{TunnelDefinition, TunnelStatus};
+   |                                  ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `PlaybackCoordinator`, `VideoInstanceKey`, `VideoJitterBuffer`, and `verify_local_attachment`
+  --> examples/iced_chat/app.rs:87:35
+   |
+87 |     validate_attachment_filename, verify_local_attachment, PlaybackCoordinator, VideoInstanceKey,
+   |                                   ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+88 |     VideoJitterBuffer,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TunnelDefinition`
+    --> examples/iced_chat/app.rs:1316:38
+     |
+1316 |     use boru_core::tunnel::service::{TunnelDefinition, TunnelStatus};
+     |                                      ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Row`
+     --> examples/iced_chat/app.rs:19830:88
+      |
+19830 |             button, checkbox, column, container, scrollable, text, text_input, Column, Row,
+      |                                                                                        ^^^
+
+warning: unused import: `Row`
+     --> examples/iced_chat/app.rs:20031:91
+      |
+20031 |         use iced::widget::{button, checkbox, column, container, scrollable, text, Column, Row};
+      |                                                                                           ^^^
+
+warning: unused import: `Row`
+     --> examples/iced_chat/app.rs:22186:50
+      |
+22186 |         use iced::widget::{container, row, text, Row, Space};
+      |                                                  ^^^
+
+warning: unnecessary trailing semicolon
+     --> examples/iced_chat/app.rs:23442:10
+      |
+23442 |         };
+      |          ^ help: remove this semicolon
+      |
+      = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Space`
+     --> examples/iced_chat/app.rs:23390:66
+      |
+23390 |         use iced::widget::{button, column, container, row, text, Space};
+      |                                                                  ^^^^^
+
+warning: unused import: `self`
+  --> examples/iced_chat/component_gallery.rs:15:5
+   |
+15 |     self, badge, card_header, date_separator, divider, elevated_card, empty_state,
+   |     ^^^^
+
+warning: unused import: `SPACE_24`
+  --> examples/iced_chat/connection_details.rs:18:34
+   |
+18 |     SPACE_12, SPACE_16, SPACE_2, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XL, TYPO_XS,
+   |                                  ^^^^^^^^
+
+warning: unused import: `Element`
+  --> examples/iced_chat/icon_system.rs:35:19
+   |
+35 | use iced::{Color, Element};
+   |                   ^^^^^^^
+
+warning: unused import: `self`
+  --> examples/iced_chat/ui_components.rs:41:26
+   |
+41 | use crate::icon_system::{self, Icon, IconSize};
+   |                          ^^^^
+
+warning: use of deprecated method `boru_core::chat_history::ChatHistoryStore::save`: SQLite inbox/outbox tables replace chat_history.json writes
+    --> examples/iced_chat/app.rs:5787:41
+     |
+5787 |                 if let Err(err) = store.save() {
+     |                                         ^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+
+warning: unused variable: `t`
+   --> examples/iced_chat/app.rs:383:31
+    |
+383 |             t = t.style(move |t| text::Style { color: Some(c) });
+    |                               ^ help: if this is intentional, prefix it with an underscore: `_t`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `t`
+    --> examples/iced_chat/app.rs:4928:22
+     |
+4928 |         .style(move |t| container::Style {
+     |                      ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: variable does not need to be mutable
+    --> examples/iced_chat/app.rs:5285:17
+     |
+5285 |             let mut store = if let Some(ref st) = storage {
+     |                 ----^^^^^
+     |                 |
+     |                 help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `neighbor_count`
+    --> examples/iced_chat/app.rs:8385:29
+     |
+8385 |                         let neighbor_count = neighbor_ids.len();
+     |                             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_neighbor_count`
+
+warning: unused variable: `description`
+     --> examples/iced_chat/app.rs:10500:17
+      |
+10500 |                 description,
+      |                 ^^^^^^^^^^^ help: try ignoring the field: `description: _`
+
+warning: unused variable: `entry`
+     --> examples/iced_chat/app.rs:14798:26
+      |
+14798 |                     Some(entry) => {
+      |                          ^^^^^ help: if this is intentional, prefix it with an underscore: `_entry`
+
+warning: unused variable: `inviter_name`
+     --> examples/iced_chat/app.rs:14817:21
+      |
+14817 |                 let inviter_name = self.local_label.clone();
+      |                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inviter_name`
+
+warning: unused variable: `data_dir`
+     --> examples/iced_chat/app.rs:14820:21
+      |
+14820 |                 let data_dir = self.data_dir.clone();
+      |                     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_dir`
+
+warning: unused variable: `sk`
+     --> examples/iced_chat/app.rs:14821:21
+      |
+14821 |                 let sk = self.secret_key.clone();
+      |                     ^^ help: if this is intentional, prefix it with an underscore: `_sk`
+
+warning: unused variable: `idx`
+     --> examples/iced_chat/app.rs:17098:42
+      |
+17098 |             AppMessage::ContextCopyImage(idx) => {
+      |                                          ^^^ help: if this is intentional, prefix it with an underscore: `_idx`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:19448:55
+      |
+19448 |                 text("Loading…").size(16).style(move |t| text::Style {
+      |                                                       ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:19444:52
+      |
+19444 |                 text(spinner).size(24).style(move |t| text::Style {
+      |                                                    ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:19438:30
+      |
+19438 |                 .style(move |t| text::Style {
+      |                              ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:19745:26
+      |
+19745 |             .style(move |t| iced::widget::container::Style {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:19801:26
+      |
+19801 |             .style(move |t| iced::widget::container::Style {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:19907:26
+      |
+19907 |             .style(move |t| iced::widget::container::Style {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `theme`
+     --> examples/iced_chat/app.rs:19834:13
+      |
+19834 |         let theme = Self::theme_from_dark(self.dark_mode);
+      |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_theme`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:20103:26
+      |
+20103 |             .style(move |t| iced::widget::container::Style {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `theme`
+     --> examples/iced_chat/app.rs:20034:13
+      |
+20034 |         let theme = Self::theme_from_dark(self.dark_mode);
+      |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_theme`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:22273:66
+      |
+22273 |                         icon_svg(ICON_LOCK, TYPO_SM).style(move |t, _| {
+      |                                                                  ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:22442:55
+      |
+22442 |                 icon_svg(hero_icon, 22.0).style(move |t, _| iced::widget::svg::Style {
+      |                                                       ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:23462:30
+      |
+23462 |                 .style(move |t| iced::widget::container::Style {
+      |                              ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:23524:38
+      |
+23524 |                         .style(move |t| iced::widget::container::Style {
+      |                                      ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:24055:26
+      |
+24055 |             .style(move |t| iced::widget::container::Style {
+      |                          ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `r`
+     --> examples/iced_chat/app.rs:24815:24
+      |
+24815 |             .and_then(|r| {
+      |                        ^ help: if this is intentional, prefix it with an underscore: `_r`
+
+warning: unused variable: `description`
+     --> examples/iced_chat/app.rs:24814:13
+      |
+24814 |         let description = room_entry
+      |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_description`
+
+warning: unused variable: `status`
+     --> examples/iced_chat/app.rs:26054:24
+      |
+26054 |             .style(|t, status| iced::widget::button::Style {
+      |                        ^^^^^^ help: if this is intentional, prefix it with an underscore: `_status`
+
+warning: unused variable: `t`
+     --> examples/iced_chat/app.rs:28816:30
+      |
+28816 |                 .style(move |t| iced::widget::container::Style {
+      |                              ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: value assigned to `direct_peers` is never read
+     --> examples/iced_chat/app.rs:30277:32
+      |
+30277 |         let mut direct_peers = 0usize;
+      |                                ^^^^^^ this value is reassigned later and never used
+...
+30282 |         direct_peers = 3;
+      |         ---------------- `direct_peers` is overwritten here before the previous value is read
+      |
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `relayed_peers` is never read
+     --> examples/iced_chat/app.rs:30278:33
+      |
+30278 |         let mut relayed_peers = 0usize;
+      |                                 ^^^^^^ this value is reassigned later and never used
+...
+30283 |         relayed_peers = 2;
+      |         ----------------- `relayed_peers` is overwritten here before the previous value is read
+
+warning: value assigned to `in_flight` is never read
+     --> examples/iced_chat/app.rs:30279:29
+      |
+30279 |         let mut in_flight = true;
+      |                             ^^^^ this value is reassigned later and never used
+...
+30284 |         in_flight = false;
+      |         ----------------- `in_flight` is overwritten here before the previous value is read
+
+warning: unused variable: `dummy_discovered_tx`
+     --> examples/iced_chat/app.rs:31596:14
+      |
+31596 |         let (dummy_discovered_tx, dummy_discovered_rx) =
+      |              ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dummy_discovered_tx`
+
+warning: unused variable: `prev_state`
+     --> examples/iced_chat/app.rs:32124:13
+      |
+32124 |         let prev_state = mgr.entries[0].download.as_ref().unwrap().state.clone();
+      |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prev_state`
+
+warning: variable does not need to be mutable
+     --> examples/iced_chat/app.rs:33616:13
+      |
+33616 |         let mut state_rx = app.gui_state_tx.subscribe();
+      |             ----^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> examples/iced_chat/app.rs:33667:13
+      |
+33667 |         let mut entry = ChatEntry {
+      |             ----^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: unused variable: `t`
+    --> examples/iced_chat/ui_components.rs:1810:38
+     |
+1810 |                         .style(move |t| container::Style {
+     |                                      ^ help: if this is intentional, prefix it with an underscore: `_t`
+
+warning: unused variable: `theme`
+    --> examples/iced_chat/ui_components.rs:1945:24
+     |
+1945 |     pub fn build(self, theme: &Theme) -> Element<'a, Message> {
+     |                        ^^^^^ help: if this is intentional, prefix it with an underscore: `_theme`
+
+warning: type `dashboard_view_model::DashboardTab` is more private than the item `app::AppMessage::DashboardTabSelected::0`
+    --> examples/iced_chat/app.rs:3883:26
+     |
+3883 |     DashboardTabSelected(crate::dashboard_view_model::DashboardTab),
+     |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `app::AppMessage::DashboardTabSelected::0` is reachable at visibility `pub`
+     |
+note: but type `dashboard_view_model::DashboardTab` is only usable at visibility `pub(crate)`
+    --> examples/iced_chat/dashboard_view_model.rs:12:1
+     |
+  12 | pub(crate) enum DashboardTab {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `GifResult` is more private than the item `app::AppMessage::GifSearchResults::0`
+    --> examples/iced_chat/app.rs:4195:22
+     |
+4195 |     GifSearchResults(Vec<GifResult>),
+     |                      ^^^^^^^^^^^^^^ field `app::AppMessage::GifSearchResults::0` is reachable at visibility `pub`
+     |
+note: but type `GifResult` is only usable at visibility `pub(self)`
+    --> examples/iced_chat/app.rs:2618:1
+     |
+2618 | struct GifResult {
+     | ^^^^^^^^^^^^^^^^
+
+warning: variant `Small` is never constructed
+   --> examples/iced_chat/app.rs:313:5
+    |
+311 | pub(crate) enum LogoSize {
+    |                 -------- variant in this enum
+312 |     /// Compact header — ~16 px.
+313 |     Small,
+    |     ^^^^^
+    |
+    = note: `LogoSize` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `bg_selected` is never used
+   --> examples/iced_chat/app.rs:725:4
+    |
+725 | fn bg_selected(theme: &iced::Theme) -> Color {
+    |    ^^^^^^^^^^^
+
+warning: constant `ICON_EMOJI` is never used
+   --> examples/iced_chat/app.rs:776:18
+    |
+776 | pub(crate) const ICON_EMOJI: &str = "😊";
+    |                  ^^^^^^^^^^
+
+warning: constant `BUTTON_CARD` is never used
+    --> examples/iced_chat/app.rs:1130:18
+     |
+1130 | pub(crate) const BUTTON_CARD: fn(
+     |                  ^^^^^^^^^^^
+
+warning: variant `Groups` is never constructed
+    --> examples/iced_chat/app.rs:2461:5
+     |
+2441 | pub enum Screen {
+     |          ------ variant in this enum
+...
+2461 |     Groups,
+     |     ^^^^^^
+     |
+     = note: `Screen` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: variant `Generic` is never constructed
+    --> examples/iced_chat/app.rs:3366:5
+     |
+3361 | pub(crate) enum ActivityKind {
+     |                 ------------ variant in this enum
+...
+3366 |     Generic,
+     |     ^^^^^^^
+     |
+     = note: `ActivityKind` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `new` is never used
+    --> examples/iced_chat/app.rs:3370:8
+     |
+3369 | impl RecentActivityEvent {
+     | ------------------------ associated function in this implementation
+3370 |     fn new(description: impl Into<String>) -> Self {
+     |        ^^^
+
+warning: field `is_http` is never read
+    --> examples/iced_chat/app.rs:3732:5
+     |
+3728 | struct SharedTunnelState {
+     |        ----------------- field in this struct
+...
+3732 |     is_http: bool,
+     |     ^^^^^^^
+     |
+     = note: `SharedTunnelState` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `content_type_for_filename` is never used
+    --> examples/iced_chat/app.rs:7213:8
+     |
+7106 | impl IcedChat {
+     | ------------- associated function in this implementation
+...
+7213 |     fn content_type_for_filename(name: &str) -> String {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `emit_message_notification` is never used
+     --> examples/iced_chat/app.rs:17991:8
+      |
+ 8062 | impl IcedChat {
+      | ------------- method in this implementation
+...
+17991 |     fn emit_message_notification(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `Ready`, `Stale`, `Offline`, and `Error` are never constructed
+  --> examples/iced_chat/dashboard_view_model.rs:44:5
+   |
+42 | pub(crate) enum ScreenStatus {
+   |                 ------------ variants in this enum
+43 |     Loading,
+44 |     Ready,
+   |     ^^^^^
+45 |     Stale { observed_at_ms: u64 },
+   |     ^^^^^
+46 |     Offline,
+   |     ^^^^^^^
+47 |     Error { message: String },
+   |     ^^^^^
+   |
+   = note: `ScreenStatus` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: variants `Allowed`, `Denied`, and `Unknown` are never constructed
+  --> examples/iced_chat/dashboard_view_model.rs:92:5
+   |
+91 | pub(crate) enum AccessState {
+   |                 ----------- variants in this enum
+92 |     Allowed,
+   |     ^^^^^^^
+93 |     Denied,
+   |     ^^^^^^
+94 |     Unknown,
+   |     ^^^^^^^
+   |
+   = note: `AccessState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: variants `Shared`, `Progress`, `Cancelled`, and `Notice` are never constructed
+   --> examples/iced_chat/dashboard_view_model.rs:149:5
+    |
+148 | pub(crate) enum ActivityKind {
+    |                 ------------ variants in this enum
+149 |     Shared,
+    |     ^^^^^^
+150 |     Started,
+151 |     Progress,
+    |     ^^^^^^^^
+...
+154 |     Cancelled,
+    |     ^^^^^^^^^
+155 |     Notice,
+    |     ^^^^^^
+    |
+    = note: `ActivityKind` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `project_transfer_event` is never used
+   --> examples/iced_chat/dashboard_view_model.rs:268:15
+    |
+268 | pub(crate) fn project_transfer_event(event: &TransferLifecycleEvent) -> ActivityEvent {
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sort_shared_items` is never used
+   --> examples/iced_chat/dashboard_view_model.rs:285:15
+    |
+285 | pub(crate) fn sort_shared_items(items: &mut [SharedItem]) {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: function `sort_downloads` is never used
+   --> examples/iced_chat/dashboard_view_model.rs:293:15
+    |
+293 | pub(crate) fn sort_downloads(downloads: &mut [DownloadRow]) {
+    |               ^^^^^^^^^^^^^^
+
+warning: function `metrics` is never used
+   --> examples/iced_chat/dashboard_view_model.rs:301:15
+    |
+301 | pub(crate) fn metrics(
+    |               ^^^^^^^
+
+warning: function `activity_kind` is never used
+   --> examples/iced_chat/dashboard_view_model.rs:364:4
+    |
+364 | fn activity_kind(value: &str) -> ActivityKind {
+    |    ^^^^^^^^^^^^^
+
+warning: constant `PRIMARY_LEGACY` is never used
+   --> examples/iced_chat/design_tokens.rs:103:11
+    |
+103 | pub const PRIMARY_LEGACY: Color = Color::from_rgb(
+    |           ^^^^^^^^^^^^^^
+
+warning: constant `PRIMARY_HOVER_LEGACY` is never used
+   --> examples/iced_chat/design_tokens.rs:109:11
+    |
+109 | pub const PRIMARY_HOVER_LEGACY: Color = Color::from_rgb(
+    |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SIDEBAR_WIDTH_MAX` is never used
+   --> examples/iced_chat/design_tokens.rs:166:11
+    |
+166 | pub const SIDEBAR_WIDTH_MAX: f32 = 320.0;
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: constant `PEER_PANEL_MAX_HEIGHT` is never used
+   --> examples/iced_chat/design_tokens.rs:208:11
+    |
+208 | pub const PEER_PANEL_MAX_HEIGHT: f32 = 320.0;
+    |           ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `focus_border` is never used
+   --> examples/iced_chat/design_tokens.rs:597:8
+    |
+597 | pub fn focus_border(theme: &Theme) -> iced::Border {
+    |        ^^^^^^^^^^^^
+
+warning: function `surface_style` is never used
+   --> examples/iced_chat/design_tokens.rs:606:8
+    |
+606 | pub fn surface_style(theme: &Theme) -> container::Style {
+    |        ^^^^^^^^^^^^^
+
+warning: constant `SVG_ELLIPSIS` is never used
+  --> examples/iced_chat/icon_system.rs:46:7
+   |
+46 | const SVG_ELLIPSIS: &[u8] = include_bytes!("../../assets/icons/lucide/ellipsis.svg");
+   |       ^^^^^^^^^^^^
+
+warning: function `button_icon_destructive` is never used
+   --> examples/iced_chat/icon_system.rs:328:8
+    |
+328 | pub fn button_icon_destructive(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `icon_with_tooltip` is never used
+   --> examples/iced_chat/icon_system.rs:368:8
+    |
+368 | pub fn icon_with_tooltip<'a>(
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `tooltip_for` is never used
+   --> examples/iced_chat/icon_system.rs:382:8
+    |
+382 | pub fn tooltip_for<'a>(
+    |        ^^^^^^^^^^^
+
+warning: function `more_icon` is never used
+   --> examples/iced_chat/icon_system.rs:397:8
+    |
+397 | pub fn more_icon<'a>(size: IconSize) -> svg::Svg<'a, iced::Theme> {
+    |        ^^^^^^^^^
+
+warning: function `more_vertical_icon` is never used
+   --> examples/iced_chat/icon_system.rs:402:8
+    |
+402 | pub fn more_vertical_icon<'a>(size: IconSize) -> svg::Svg<'a, iced::Theme> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: methods `focus_event_count` and `time_since_last_change` are never used
+   --> examples/iced_chat/notification/focus.rs:169:12
+    |
+ 51 | impl WindowFocusTracker {
+    | ----------------------- methods in this implementation
+...
+169 |     pub fn focus_event_count(&self) -> u64 {
+    |            ^^^^^^^^^^^^^^^^^
+...
+174 |     pub fn time_since_last_change(&self) -> Duration {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `from_str` and `as_str` are never used
+  --> examples/iced_chat/notification/render.rs:22:12
+   |
+20 | impl PreviewMode {
+   | ---------------- associated items in this implementation
+21 |     /// Parse from a string (e.g. from settings).
+22 |     pub fn from_str(s: &str) -> Self {
+   |            ^^^^^^^^
+...
+31 |     pub fn as_str(&self) -> &'static str {
+   |            ^^^^^^
+
+warning: fields `id`, `event_kind`, and `group_key` are never read
+  --> examples/iced_chat/notification/render.rs:44:9
+   |
+42 | pub struct RenderedNotification {
+   |            -------------------- fields in this struct
+43 |     /// The stable notification ID (from the source event).
+44 |     pub id: String,
+   |         ^^
+...
+50 |     pub event_kind: String,
+   |         ^^^^^^^^^^
+51 |     /// Group key for coalescing related notifications.
+52 |     pub group_key: Option<String>,
+   |         ^^^^^^^^^
+   |
+   = note: `RenderedNotification` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: methods `padding`, `spacing`, and `width` are never used
+   --> examples/iced_chat/ui_components.rs:196:12
+    |
+182 | impl<'a, Message: Clone + 'a> Card<'a, Message> {
+    | ----------------------------------------------- methods in this implementation
+...
+196 |     pub fn padding(mut self, vertical: f32, horizontal: f32) -> Self {
+    |            ^^^^^^^
+...
+203 |     pub fn spacing(mut self, s: f32) -> Self {
+    |            ^^^^^^^
+...
+209 |     pub fn width(mut self, w: Length) -> Self {
+    |            ^^^^^
+
+warning: function `button_ghost_style` is never used
+   --> examples/iced_chat/ui_components.rs:395:8
+    |
+395 | pub fn button_ghost_style(theme: &Theme, status: button::Status) -> button::Style {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: method `padding` is never used
+   --> examples/iced_chat/ui_components.rs:787:12
+    |
+741 | impl<'a, Message: Clone + 'a> ListRow<'a, Message> {
+    | -------------------------------------------------- method in this implementation
+...
+787 |     pub fn padding(mut self, vertical: f32, horizontal: f32) -> Self {
+    |            ^^^^^^^
+
+warning: method `show_label` is never used
+    --> examples/iced_chat/ui_components.rs:1732:12
+     |
+1702 | impl<'a, Message: 'a> ProgressBar<'a, Message> {
+     | ---------------------------------------------- method in this implementation
+...
+1732 |     pub fn show_label(mut self, yes: bool) -> Self {
+     |            ^^^^^^^^^^
+
+warning: unused `iced::Task` that must be used
+     --> examples/iced_chat/app.rs:33426:9
+      |
+33426 |         app.update(AppMessage::OpenRoom(topic));
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `Task` must be returned to the runtime to take effect; normally in your `update` or `new` functions.
+      = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+      |
+33426 |         let _ = app.update(AppMessage::OpenRoom(topic));
+      |         +++++++
+
+warning: unused `iced::Task` that must be used
+     --> examples/iced_chat/app.rs:33490:9
+      |
+33490 |         app.update(AppMessage::InputChanged("integration message".to_string()));
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `Task` must be returned to the runtime to take effect; normally in your `update` or `new` functions.
+help: use `let _ = ...` to ignore the resulting value
+      |
+33490 |         let _ = app.update(AppMessage::InputChanged("integration message".to_string()));
+      |         +++++++
+
+warning: unused `iced::Task` that must be used
+     --> examples/iced_chat/app.rs:33527:9
+      |
+33527 |         app.update(AppMessage::SendPressed);
+      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `Task` must be returned to the runtime to take effect; normally in your `update` or `new` functions.
+help: use `let _ = ...` to ignore the resulting value
+      |
+33527 |         let _ = app.update(AppMessage::SendPressed);
+      |         +++++++
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/app.rs:315:14
+    |
+315 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+    |
+    = note: `#[warn(unfulfilled_lint_expectations)]` on by default
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/app.rs:777:10
+    |
+777 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+    --> examples/iced_chat/app.rs:3623:10
+     |
+3623 | #[expect(dead_code)]
+     |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+    --> examples/iced_chat/app.rs:7702:10
+     |
+7702 | #[expect(dead_code)]
+     |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+    --> examples/iced_chat/app.rs:7711:10
+     |
+7711 | #[expect(dead_code)]
+     |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/connection_details.rs:27:10
+   |
+27 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/connection_details.rs:221:14
+    |
+221 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/connection_details.rs:224:14
+    |
+224 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/connection_details.rs:227:14
+    |
+227 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/fonts.rs:39:10
+   |
+39 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/fonts.rs:43:10
+   |
+43 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/fonts.rs:47:10
+   |
+47 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/fonts.rs:51:10
+   |
+51 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/fonts.rs:55:10
+   |
+55 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/fonts.rs:62:10
+   |
+62 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/fonts.rs:66:10
+   |
+66 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/fonts.rs:75:10
+   |
+75 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/fonts.rs:101:10
+    |
+101 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/gui_test_actions.rs:28:10
+   |
+28 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/gui_test_actions.rs:184:14
+    |
+184 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/gui_test_actions.rs:372:10
+    |
+372 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/gui_test_actions.rs:376:10
+    |
+376 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/gui_test_actions.rs:380:10
+    |
+380 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/link_preview.rs:155:10
+    |
+155 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/link_preview.rs:238:10
+    |
+238 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/log_viewer.rs:101:10
+    |
+101 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/mcp_server.rs:201:10
+    |
+201 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+    --> examples/iced_chat/mcp_server.rs:1774:10
+     |
+1774 | #[expect(dead_code)]
+     |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/notification/backend.rs:29:10
+   |
+29 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/notification/backend.rs:60:10
+   |
+60 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/notification/backend.rs:84:10
+   |
+84 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/event.rs:119:10
+    |
+119 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/event.rs:150:10
+    |
+150 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/event.rs:253:10
+    |
+253 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/notification/service.rs:20:10
+   |
+20 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/notification/service.rs:75:10
+   |
+75 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/notification/service.rs:93:10
+   |
+93 | #[expect(dead_code)]
+   |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:144:10
+    |
+144 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:194:10
+    |
+194 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:254:10
+    |
+254 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/presentation.rs:275:10
+    |
+275 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/presentation.rs:288:10
+    |
+288 | #[expect(dead_code)]
+    |          ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+    --> examples/iced_chat/app.rs:1929:14
+     |
+1929 |     #[expect(dead_code)]
+     |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+    --> examples/iced_chat/app.rs:1943:14
+     |
+1943 |     #[expect(dead_code)]
+     |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+    --> examples/iced_chat/app.rs:2025:14
+     |
+2025 |     #[expect(dead_code)]
+     |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+    --> examples/iced_chat/app.rs:2385:14
+     |
+2385 |     #[expect(dead_code)]
+     |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+    --> examples/iced_chat/app.rs:2391:14
+     |
+2391 |     #[expect(dead_code)]
+     |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+    --> examples/iced_chat/app.rs:4661:14
+     |
+4661 |     #[expect(dead_code)]
+     |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+     --> examples/iced_chat/app.rs:27402:14
+      |
+27402 |     #[expect(dead_code)]
+      |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/connection_details.rs:38:14
+   |
+38 |     #[expect(dead_code)]
+   |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/connection_details.rs:88:14
+   |
+88 |     #[expect(dead_code)]
+   |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/connection_details.rs:234:14
+    |
+234 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/connection_details.rs:241:14
+    |
+241 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/connection_details.rs:248:14
+    |
+248 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/connection_details.rs:265:14
+    |
+265 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/connection_details.rs:276:14
+    |
+276 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/gui_test_actions.rs:200:14
+    |
+200 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/gui_test_actions.rs:222:14
+    |
+222 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/gui_test_actions.rs:235:14
+    |
+235 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/link_preview.rs:269:14
+    |
+269 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/link_preview.rs:670:14
+    |
+670 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/link_preview.rs:688:14
+    |
+688 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/link_preview.rs:696:14
+    |
+696 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/link_preview.rs:702:14
+    |
+702 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+    --> examples/iced_chat/mcp_server.rs:1734:14
+     |
+1734 |     #[expect(dead_code)]
+     |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/notification/event.rs:51:14
+   |
+51 |     #[expect(dead_code)]
+   |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/event.rs:105:14
+    |
+105 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/event.rs:183:14
+    |
+183 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/event.rs:216:14
+    |
+216 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/event.rs:223:14
+    |
+223 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/event.rs:237:14
+    |
+237 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+  --> examples/iced_chat/notification/service.rs:82:14
+   |
+82 |     #[expect(dead_code)]
+   |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:120:14
+    |
+120 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:163:14
+    |
+163 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:183:14
+    |
+183 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:213:14
+    |
+213 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:231:14
+    |
+231 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:266:14
+    |
+266 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:279:14
+    |
+279 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:297:14
+    |
+297 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:312:14
+    |
+312 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:395:14
+    |
+395 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:410:14
+    |
+410 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:419:14
+    |
+419 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:522:14
+    |
+522 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:535:14
+    |
+535 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:542:14
+    |
+542 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/perf_tracker.rs:177:14
+    |
+177 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/perf_tracker.rs:223:14
+    |
+223 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: `boru-core` (example "boru" test) generated 184 warnings (run `cargo fix --example "boru" -p boru-core --tests` to apply 48 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5m 15s
+     Running unittests examples/iced_chat/main.rs (target/debug/examples/boru-a82a2cc4ca618fc4)
+
+running 1 test
+test app::tests::gui_help_command_maps_to_normal_toggle_message ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 663 filtered out; finished in 0.00s
+
+TEST_EXIT=0

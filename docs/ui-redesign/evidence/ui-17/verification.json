@@ -1,0 +1,67 @@
+{
+  "task": "t_8de1c9c4",
+  "card": "UI-17 Real-state integration and behavior regression pass",
+  "phase": "5-integration",
+  "status": "ready-for-review",
+  "acceptance": {
+    "all_ui00_interactions_reachable": true,
+    "ui00_audit_total": 42,
+    "ui00_audit_present_and_handled": 42,
+    "no_production_fixture_dependency": true,
+    "full_suite_green": "partial-shared-tree-blocked",
+    "isolated_build": "pass",
+    "isolated_targeted_test": "pass"
+  },
+  "live_flows": {
+    "connection_startup": "pass",
+    "message_send_receive": "pass",
+    "history_restore": "pass",
+    "peer_offline": "partial-timing",
+    "reconnect": "pass",
+    "public_room_create": "pass",
+    "public_room_discovery": "pass-relay",
+    "group_dialog_sidebar_click": "pass",
+    "navigation_screens": "pass",
+    "dark_mode_toggle": "pass",
+    "help_overlay": "pass"
+  },
+  "bug_found_and_fixed": {
+    "id": "dead-mcp-toggle-help",
+    "summary": "GuiTestCommand::ToggleHelp declared in src/diagnostics.rs but never dispatched in app.rs; fell into diagnostic-only catch-all and silently did nothing",
+    "fix": "gui_help_message() maps ToggleHelp -> AppMessage::ToggleHelp; pending_toggle_help_action completion path; help_visible added to diagnostics dialog_open snapshot",
+    "unit_test": "app::tests::gui_help_command_maps_to_normal_toggle_message"
+  },
+  "changed_files": [
+    "examples/iced_chat/app.rs",
+    "docs/ui-redesign/evidence/ui-17/README.md",
+    "docs/ui-redesign/evidence/ui-17/interaction-checklist.md",
+    "docs/ui-redesign/evidence/ui-17/regression-matrix.md",
+    "docs/ui-redesign/evidence/ui-17/ui17-audit.txt",
+    "docs/ui-redesign/evidence/ui-17/verification.json"
+  ],
+  "tests": {
+    "isolated_targeted": "1/1 pass (gui_help_command_maps_to_normal_toggle_message)",
+    "isolated_full_gui_suite": "664/664 pass on HEAD+UI17 worktree (663 baseline + 1 new)",
+    "last_green_full_suite": "663/663 at HEAD 52a312d7 (UI-16)",
+    "shared_tree_gui_run": "661 passed / 2 failed (sibling-caused default-screen change: join_request_send_failure_and_retry_keeps_exactly_one_request, open_friend_requests_navigates_to_dedicated_screen)",
+    "lib_baseline": "pre-existing failures documented in UI-00 baseline-tests.log"
+  },
+  "live_mcp_toggle_help_verification": {
+    "result": "pass",
+    "action_status": "completed (toggle_help x2 + go_to_chat_list)",
+    "dialog_open_snapshot": "reached=true",
+    "journal": "3x GuiTestActionReceived recorded",
+    "visual": "help overlay renders on chat screen (t_8de1c9c4_help_overlay_chat_live.png)",
+    "harness": "ui17_livefix.sh, ui17_helpvisual.sh"
+  },
+  "external_blockers": [
+    "Shared tree uncompilable during run: sibling kanban workers FS-09..FS-16 (coder-web/linux) mid-edit in same tree; examples/iced_chat/shared_by_me_table.rs references Element/SharedByMe* AppMessage variants not yet added; errors reproduce without UI-17 hunks"
+  ],
+  "remaining_risks": [
+    "offline friend-ping cadence > 75s; offline screenshot partial (t_8de1c9c4_peer_offline_1280x800.png captured before ping mark in one run)",
+    "Home Share-files strip still routes to OpenSettings (known UI-00 mismatch, separate card)"
+  ],
+  "evidence_dir": "docs/ui-redesign/evidence/ui-17",
+  "worker_profile": "deepseek-coder",
+  "generated_at": "2026-08-04"
+}
