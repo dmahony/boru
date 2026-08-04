@@ -53,31 +53,16 @@ jobs:
             echo "new_version=$NEW_VER" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create branch and PR
+      - name: Commit and push version bump
         if: steps.apply.outputs.new_version != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEW_VERSION: ${{ steps.apply.outputs.new_version }}
         run: |
-          BRANCH="chore/version-bump-${NEW_VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
           git add Cargo.toml .version-state.json
           git commit -m "chore: bump Boru version to ${NEW_VERSION}"
-          git push origin "$BRANCH"
-
-          BODY="Auto-generated version bump PR."
-          BODY="$BODY"$'\n'""
-          BODY="$BODY"$'\n'"Updates Cargo.toml and .version-state.json."
-          BODY="$BODY"$'\n'""
-          BODY="$BODY"$'\n'"**Review before merging.** Does not create releases, tags, or artefacts."
-          gh pr create \
-            --base main \
-            --head "$BRANCH" \
-            --title "chore: bump Boru version to ${NEW_VERSION}" \
-            --body "$BODY" \
-            || echo "PR creation requires GITHUB_TOKEN with write permissions."
+          git push origin main
 
       - name: No change summary
         if: steps.apply.outputs.new_version == ''
