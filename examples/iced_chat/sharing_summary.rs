@@ -211,8 +211,8 @@ fn metric_cell<'a>(
     Column::new()
         .push(
             text(format_value(value))
-                .size(28.0)
-                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                .font(Typography::PageTitle.font())
+                .size(Typography::PageTitle.size_px())
                 .color(design_tokens::text_primary(theme)),
         )
         .push(

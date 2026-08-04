@@ -1087,14 +1087,10 @@ fn stop_sharing_confirmation<'a>(
     .padding([design_tokens::SPACE_8, design_tokens::SPACE_4])
     .width(Length::Fill)
     .style(|t| {
-        let destructive = design_tokens::destructive(t);
+        let soft_bg = design_tokens::destructive_soft(t);
+        let destructive = design_tokens::color_danger(t);
         container::Style {
-            background: Some(Background::Color(Color::from_rgba(
-                destructive.r,
-                destructive.g,
-                destructive.b,
-                0.08,
-            ))),
+            background: Some(Background::Color(soft_bg)),
             border: Border {
                 color: destructive,
                 width: 1.0,

@@ -432,6 +432,15 @@ pub fn color_danger(theme: &Theme) -> Color {
     }
 }
 
+/// Destructive soft background (8 % opacity on danger red).
+/// Used for inline confirmation banners and destructive action previews.
+/// Light: rgba(200,78,78,0.08); Dark: rgba(230,64,64,0.12).
+pub fn destructive_soft(theme: &Theme) -> Color {
+    let d = color_danger(theme);
+    let a = if dark(theme) { 0.12 } else { 0.08 };
+    Color::from_rgba(d.r, d.g, d.b, a)
+}
+
 /// Keyboard focus ring color. Spec: #2B9B67.
 pub fn color_focus(theme: &Theme) -> Color {
     if dark(theme) {
