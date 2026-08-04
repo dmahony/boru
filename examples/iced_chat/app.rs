@@ -526,7 +526,7 @@ fn blob_ticket_string(
 pub(crate) const SPACE_2: f32 = 2.0;
 pub(crate) use crate::design_tokens::{AVATAR_MD, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
-    DETAILS_PANEL_WIDTH, RADIUS_LG, RADIUS_SM, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_18,
+    DETAILS_PANEL_WIDTH, RADIUS_SM, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_18,
     SPACE_20, SPACE_24, SPACE_32, SPACE_4, SPACE_8,
 };
 pub(crate) use crate::icon_system::{Icon, IconSize};
@@ -21593,11 +21593,15 @@ impl IcedChat {
         &'a self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, column, container, scrollable, text, Column, Row};
-        use iced::{Alignment, Length};
+        use crate::boru_dialog::BoruDialog;
+        use crate::form_components::{
+            peer_list, FormSection, SelectablePeerRow,
+        };
+
+        let theme = Self::theme_from_dark(self.dark_mode);
 
         // Build friend selection list — only friends who can accept tunnels.
-        let mut friends_list = Column::new().spacing(SPACE_4).padding(SPACE_8);
+        let mut rows: Vec<iced::Element<'a, AppMessage>> = Vec::new();
 
         for (fid, record) in self.friends.iter() {
             if !record.relationship.can_message() {
@@ -21608,79 +21612,30 @@ impl IcedChat {
                 Err(_) => continue,
             };
             let label = record.display_label(fid, &peer);
-            let row = Row::new()
-                .push(text(label).size(TYPO_SM))
-                .push(
-                    button(text("Share").size(TYPO_SM))
-                        .on_press(AppMessage::CreateTunnel(peer))
-                        .padding([SPACE_4, SPACE_10]),
-                )
-                .align_y(Alignment::Center)
-                .spacing(SPACE_8);
-            friends_list = friends_list.push(row);
+            rows.push(
+                SelectablePeerRow::new(label)
+                    .on_toggle(AppMessage::CreateTunnel(peer))
+                    .build(&theme),
+            );
         }
 
-        let dialog = column![]
-            .push(text("Share Tunnel").size(18))
-            .push(
-                text("Choose a friend to share a tunnel with:")
-                    .size(TYPO_XS)
-                    .style(move |t| iced::widget::text::Style {
-                        color: Some(text_secondary(t)),
-                    }),
-            )
-            .push(
-                container(
-                    scrollable(container(friends_list).width(Length::Fill).padding(SPACE_4))
-                        .height(Length::Fixed(250.0)),
-                )
-                .width(Length::Fill)
-                .style(move |t| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgba(
-                        0.2, 0.2, 0.2, 0.3,
-                    ))),
-                    border: iced::Border {
-                        radius: SPACE_4.into(),
-                        width: 1.0,
-                        color: border_muted(t),
-                    },
-                    ..Default::default()
-                }),
-            )
-            .push(
-                iced::widget::row![button(text("Cancel"))
-                    .on_press(AppMessage::CancelCreateTunnel)
-                    .padding(8),]
-                .spacing(12),
-            )
-            .spacing(12)
-            .align_x(Alignment::Center);
+        let connection_section = FormSection::new("Connection Target")
+            .helper("Choose a friend who will be able to connect through this tunnel.")
+            .push(peer_list(
+                rows,
+                250.0,
+                Some("No friends available to share tunnels with yet."),
+            ))
+            .build();
 
-        let overlay = container(dialog)
-            .width(Length::Fixed(360.0))
-            .height(Length::Shrink)
-            .padding(24)
-            .style(move |_t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(iced::Color::from_rgba(
-                    0.15, 0.15, 0.15, 0.95,
-                ))),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    width: 1.0,
-                    color: iced::Color::from_rgb(0.4, 0.4, 0.4),
-                },
-                ..Default::default()
-            });
+        let overlay = BoruDialog::new("Create Tunnel")
+            .subtitle("Securely route traffic between peers.")
+            .push_body(connection_section)
+            .secondary("Cancel", AppMessage::CancelCreateTunnel)
+            .on_close(AppMessage::CancelCreateTunnel)
+            .build(&theme);
 
-        iced::widget::stack![
-            base,
-            container(overlay)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        ]
-        .into()
+        iced::widget::stack![base, overlay].into()
     }
 
     /// Dialog for inviting members to the current group — shows a friend picker.
@@ -33450,98 +33405,77 @@ impl IcedChat {
         display_name: String,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::combo_box::ComboBox;
-        use iced::widget::{button, column, container, row, text, text_input};
-        use iced::{Alignment, Length};
+        use crate::boru_dialog::BoruDialog;
+        use crate::form_components::{
+            form_label, helper_text, FormSection, SearchableSelect, SelectablePeerRow, TextInput,
+        };
 
         let theme = Self::theme_from_dark(self.dark_mode);
-        let warning = text(format!(
-            "{display_name} will be able to connect to this local service while the tunnel is active."
-        ))
-        .size(TYPO_XS)
-        .color(text_remote_body(&theme));
 
-        let expiry_combo = ComboBox::new(
-            &self.share_expiry_combo,
-            "Expires after…",
-            Some(&self.share_service_expiry),
-            AppMessage::ShareLocalServiceExpiryChanged,
-        )
-        .width(Length::Fill);
+        // Tunnel Details — the service name the friend sees.
+        let details_section = FormSection::new("Tunnel Details")
+            .push(
+                TextInput::new(
+                    "Tunnel name",
+                    "Development Server",
+                    &self.share_service_name,
+                    AppMessage::ShareLocalServiceNameChanged,
+                )
+                .helper("A descriptive name so your friend knows what this service is.")
+                .build(),
+            )
+            .build();
 
-        let dialog = column![
-            text("Share Local Service").size(18),
-            text("Service name")
-                .size(TYPO_SM)
-                .color(text_remote_body(&theme)),
-            text_input("Service name…", &self.share_service_name)
-                .on_input(AppMessage::ShareLocalServiceNameChanged)
-                .width(Length::Fill),
-            text("Local port")
-                .size(TYPO_SM)
-                .color(text_remote_body(&theme)),
-            text_input("3000", &self.share_service_port)
-                .on_input(AppMessage::ShareLocalServicePortChanged)
-                .width(Length::Fill),
-            text("Share with")
-                .size(TYPO_SM)
-                .color(text_remote_body(&theme)),
-            text(display_name).size(TYPO_SM),
-            text("Expires after")
-                .size(TYPO_SM)
-                .color(text_remote_body(&theme)),
-            expiry_combo,
-            container(warning)
-                .width(Length::Fill)
-                .padding(SPACE_8)
-                .style(move |_t| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgba(
-                        0.85, 0.75, 0.45, 0.18,
-                    ))),
-                    border: iced::Border {
-                        radius: SPACE_4.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-            row![
-                button(text("Cancel"))
-                    .on_press(AppMessage::CancelShareLocalService)
-                    .padding([SPACE_4, SPACE_12]),
-                button(text("Share"))
-                    .on_press(AppMessage::ConfirmShareLocalService)
-                    .padding([SPACE_4, SPACE_12]),
-            ]
-            .spacing(SPACE_8)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(SPACE_6)
-        .align_x(Alignment::Start)
-        .width(Length::Fill);
+        // Connection Target — who it is shared with + the local port exposed.
+        let target_section = FormSection::new("Connection Target")
+            .push(form_label("Share with"))
+            .push(SelectablePeerRow::new(display_name.clone()).selected(true).build(&theme))
+            .push(
+                TextInput::new(
+                    "Local port",
+                    "3000",
+                    &self.share_service_port,
+                    AppMessage::ShareLocalServicePortChanged,
+                )
+                .helper("Port of the local service on this computer to expose.")
+                .build(),
+            )
+            .build();
 
-        let overlay = container(dialog)
-            .width(Length::Fixed(360.0))
-            .height(Length::Shrink)
-            .padding(SPACE_24)
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(bg_surface(t))),
-                border: iced::Border {
-                    radius: RADIUS_LG.into(),
-                    width: 1.0,
-                    color: border_muted(t),
-                },
-                ..Default::default()
-            });
+        // Permissions / Options — access duration.
+        let options_section = FormSection::new("Permissions / Options")
+            .push(
+                SearchableSelect::new(
+                    "Expires after",
+                    &self.share_expiry_combo,
+                    "Expires after…",
+                    Some(&self.share_service_expiry),
+                    AppMessage::ShareLocalServiceExpiryChanged,
+                )
+                .helper("How long the tunnel stays active before it expires.")
+                .build(),
+            )
+            .build();
 
-        iced::widget::stack![
-            base,
-            container(overlay)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        ]
-        .into()
+        // Status / Guidance — what the tunnel does for the friend.
+        let guidance_section = FormSection::new("Status / Guidance")
+            .push(helper_text(&format!(
+                "{display_name} will be able to connect to this local service while the tunnel is active."
+            )))
+            .build();
+
+        let overlay = BoruDialog::new("Create Tunnel")
+            .subtitle("Securely route traffic between peers.")
+            .push_body(details_section)
+            .push_body(target_section)
+            .push_body(options_section)
+            .push_body(guidance_section)
+            .secondary("Cancel", AppMessage::CancelShareLocalService)
+            .primary("Create Tunnel", AppMessage::ConfirmShareLocalService)
+            .on_close(AppMessage::CancelShareLocalService)
+            .build(&theme);
+
+        iced::widget::stack![base, overlay].into()
     }
 
     /// Confirmation overlay for removing a friend.
