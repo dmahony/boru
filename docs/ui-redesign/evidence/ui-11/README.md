@@ -22,7 +22,8 @@ The home screen is assembled as a responsive grid:
 - **Page header** — time-of-day greeting + identity, quiet "Welcome to Boru"
   supporting line, and a compact connection status pill on the right.
 - **Main content (two-thirds)** — connection hero card, Mesh Activity card
-  (bounded 156 px event viewport), then the four quick-action cards.
+  (current connection status only: status label, peer counts, and connection
+  time once healthy), then the four quick-action cards.
 - **Activity rail (one-third)** — Online Peers, Recent Activity, and Tunnels
   cards, each rendered through `iced::widget::lazy` with a fine-grained selector
   dependency so one card never rebuilds its siblings.

@@ -1432,6 +1432,18 @@ struct MeshEvent {
     recorded_at: Instant,
 }
 
+/// UI-28: true when a mesh event log line is a transient startup/connecting
+/// status that should be dropped once the mesh reaches `MeshHealth::Good`.
+/// Real lifecycle events (degraded/offline/recovered transitions, errors,
+/// discovery summaries) are preserved.
+fn is_transient_mesh_event(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("starting up")
+        || lower.contains("connecting to lobby")
+        || lower.contains("connected to lobby")
+        || lower.contains("subscribing to")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChatKind {
     System,
@@ -2791,6 +2803,10 @@ pub struct IcedChat {
     mesh_health: MeshHealth,
     /// Previous mesh health state, used to detect transitions.
     last_mesh_health: Option<MeshHealth>,
+    /// When the mesh last reached `MeshHealth::Good` (sender present with
+    /// gossip neighbors). Cleared on any non-Good transition. Drives the
+    /// connection-time indicator on the home mesh card.
+    mesh_connected_at: Option<Instant>,
     /// True until stored conversations have been subscribed after the mesh
     /// first establishes peer connectivity.
     conversation_subscription_pending: bool,
@@ -5906,6 +5922,7 @@ impl IcedChat {
             conn_refresh_counter: 0,
             mesh_health: MeshHealth::Good,
             last_mesh_health: None,
+            mesh_connected_at: None,
             conversation_subscription_pending: true,
             mesh_event_log: {
                 let mut log = std::collections::VecDeque::new();
@@ -7103,6 +7120,32 @@ impl IcedChat {
             message: text.into(),
             recorded_at: Instant::now(),
         });
+    }
+
+    /// UI-28: keep the home mesh card truthful. When the mesh is healthy,
+    /// remember when it connected (for the connection-time indicator) and
+    /// purge transient startup/connecting messages from the event log so
+    /// they never linger after a successful connection. Any non-Good
+    /// transition clears the connected timestamp.
+    fn update_mesh_connected_state(&mut self, new_health: &MeshHealth) {
+        if matches!(new_health, MeshHealth::Good) {
+            if self.mesh_connected_at.is_none() {
+                self.mesh_connected_at = Some(Instant::now());
+            }
+            self.clear_transient_mesh_events();
+        } else {
+            self.mesh_connected_at = None;
+        }
+    }
+
+    /// UI-28: remove transient startup/connection-progress messages from the
+    /// mesh event log. Called when the mesh reaches `MeshHealth::Good` so
+    /// "Starting up...", "Connecting to lobby..." and similar status lines
+    /// never linger after connect. Real lifecycle events (degraded/offline/
+    /// recovered transitions, errors) are preserved.
+    fn clear_transient_mesh_events(&mut self) {
+        self.mesh_event_log
+            .retain(|event| !is_transient_mesh_event(&event.message));
     }
     #[expect(dead_code)]
     fn push_local(&mut self, text: impl Into<String>) {
@@ -17395,6 +17438,7 @@ impl IcedChat {
                         format!("Subscribing to {count} stored conversation(s)…",),
                     );
                     if count > 0 {
+                        self.update_mesh_connected_state(&new_health);
                         self.mesh_health = new_health;
                         return iced::Task::done(AppMessage::SubscribeStoredConversations);
                     }
@@ -17416,6 +17460,8 @@ impl IcedChat {
                     (None, _) => None,
                     _ => None,
                 };
+
+                self.update_mesh_connected_state(&new_health);
 
                 self.mesh_health = new_health;
                 self.last_mesh_health = Some(self.mesh_health.clone());
@@ -23465,7 +23511,7 @@ impl IcedChat {
     /// Landing screen shown when no conversation is selected.
     /// Redesigned: connection status first, then actions, then activity.
     fn view_main_empty_state(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, row, rule, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, row, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = self.theme();
@@ -23669,86 +23715,87 @@ impl IcedChat {
                 ..Default::default()
             });
 
-        // ── Mesh Health card ──
-        // Keep this card bounded to five rows so a burst of network events
-        // cannot change the home layout height. The scrollable list still
-        // exposes the complete bounded in-memory log.
+        // ── Mesh Activity card ──
+        // UI-28: this card shows ONLY the current connection status. The
+        // scrolling "recent events" log was removed so transient startup
+        // messages ("Starting up...", "Connecting to lobby...") can never
+        // linger after the mesh connects. Status derives from the same
+        // truthful mapping used by the hero (home_connection_variant), so
+        // the card never invents a state the network layer has not reported;
+        // the connection-time indicator comes from mesh_connected_at, which
+        // the mesh watchdog clears on any non-Good transition.
         let (health_label, health_color): (&str, fn(&iced::Theme) -> Color) =
             match &self.mesh_health {
                 MeshHealth::Good => ("Healthy", accent_green),
                 MeshHealth::Degraded(_) => ("Degraded", color_warning),
                 MeshHealth::Offline(_) => ("Offline", color_error),
             };
-        let now = Instant::now();
-        let event_rows: Vec<iced::Element<'_, AppMessage>> = self
-            .mesh_event_log
-            .iter()
-            .rev()
-            .take(5)
-            .enumerate()
-            .map(|(index, event)| {
-                let age = now.saturating_duration_since(event.recorded_at);
-                let relative = if age.as_secs() < 1 {
-                    "now".to_string()
-                } else if age.as_secs() < 60 {
-                    format!("{}s", age.as_secs())
-                } else {
-                    format!("{}m", age.as_secs() / 60)
+        let mesh_has_peers =
+            !self.neighbors.is_empty() || self.relayed_peers > 0 || self.direct_peers > 0;
+        let mesh_relay_reachable = self.sender.is_some() || mesh_has_peers;
+        let mesh_variant =
+            home_connection_variant(&self.mesh_health, mesh_has_peers, mesh_relay_reachable);
+
+        let (status_icon, status_color, status_label): (
+            &[u8],
+            fn(&iced::Theme) -> Color,
+            String,
+        ) = match mesh_variant {
+            HomeConnectionVariant::Starting => {
+                (ICON_RETRY, color_warning, "Starting up…".to_string())
+            }
+            HomeConnectionVariant::Connecting => (
+                ICON_RETRY,
+                color_warning,
+                "Connecting — waiting for peers…".to_string(),
+            ),
+            HomeConnectionVariant::Ready => (ICON_CHECK, accent_green, "Connected".to_string()),
+            HomeConnectionVariant::Degraded => {
+                let reason = match &self.mesh_health {
+                    MeshHealth::Degraded(r) => r.clone(),
+                    _ => String::new(),
                 };
-                let lower = event.message.to_ascii_lowercase();
-                let (event_icon, event_color) = if lower.contains("error")
-                    || lower.contains("offline")
-                    || lower.contains("failed")
-                {
-                    (ICON_OFFLINE, color_error as fn(&iced::Theme) -> Color)
-                } else if lower.contains("degrad") || lower.contains("wait") {
-                    (ICON_RETRY, color_warning as fn(&iced::Theme) -> Color)
-                } else if lower.contains("connect") || lower.contains("discover") {
-                    (ICON_MESH, accent_green as fn(&iced::Theme) -> Color)
-                } else {
-                    (ICON_ACTIVITY, text_muted as fn(&iced::Theme) -> Color)
+                (ICON_MESH, color_warning, format!("Degraded — {reason}"))
+            }
+            HomeConnectionVariant::Offline => {
+                let reason = match &self.mesh_health {
+                    MeshHealth::Offline(r) => r.clone(),
+                    _ => String::new(),
                 };
-                let row = Row::new()
-                    .push(icon_svg(event_icon, TYPO_XS).style(move |t, _| {
-                        iced::widget::svg::Style {
-                            color: Some(event_color(t)),
-                        }
-                    }))
-                    .push(Space::new().width(Length::Fixed(SPACE_8)))
-                    .push(
-                        text(event.message.clone())
-                            .size(TYPO_XS)
-                            .color(text_system(&theme))
-                            .width(Length::Fill),
-                    )
-                    .push(text(relative).size(TYPO_XXS).color(text_muted(&theme)))
-                    .spacing(0)
-                    .align_y(Alignment::Center)
-                    .width(Length::Fill);
-                let mut cell = Column::new().push(row);
-                if index < 4 {
-                    cell = cell.push(rule::horizontal(1).style(iced::widget::rule::weak));
-                }
-                cell.padding([SPACE_6, 0.0]).width(Length::Fill).into()
-            })
-            .collect();
-        let event_log: iced::Element<'_, AppMessage> = if event_rows.is_empty() {
-            container(
-                text("No recent mesh events.")
-                    .size(TYPO_XS)
-                    .color(text_muted(&theme)),
-            )
-            .height(Length::Fixed(156.0))
-            .align_y(Alignment::Center)
-            .into()
-        } else {
-            container(
-                scrollable(Column::with_children(event_rows).width(Length::Fill))
-                    .height(Length::Fixed(156.0)),
-            )
-            .width(Length::Fill)
-            .into()
+                (ICON_OFFLINE, color_error, format!("Offline — {reason}"))
+            }
         };
+
+        // Secondary line: current peer counts, plus connection time once the
+        // mesh is healthy (mesh_connected_at is maintained by the watchdog).
+        let status_detail = match mesh_variant {
+            HomeConnectionVariant::Starting => "Establishing the mesh…".to_string(),
+            HomeConnectionVariant::Connecting => {
+                "Waiting for peers to join the mesh".to_string()
+            }
+            _ => {
+                let mut parts = vec![format!(
+                    "{} direct · {} relayed · {} neighbors",
+                    self.direct_peers,
+                    self.relayed_peers,
+                    self.neighbors.len(),
+                )];
+                if let Some(connected_at) = self.mesh_connected_at {
+                    let age = Instant::now().saturating_duration_since(connected_at);
+                    let secs = age.as_secs();
+                    let duration = if secs < 60 {
+                        format!("connected {secs}s")
+                    } else if secs < 3600 {
+                        format!("connected {}m {}s", secs / 60, secs % 60)
+                    } else {
+                        format!("connected {}h {}m", secs / 3600, (secs % 3600) / 60)
+                    };
+                    parts.push(duration);
+                }
+                parts.join("  ·  ")
+            }
+        };
+
         let mesh_card = container(
             Column::new()
                 .push(
@@ -23767,22 +23814,10 @@ impl IcedChat {
                                         .color(text_system(&theme)),
                                 )
                                 .push(
-                                    text("Recent network connectivity events")
+                                    text("Current connection status")
                                         .size(TYPO_XS)
                                         .color(text_muted(&theme)),
                                 ),
-                        )
-                        .push(Space::new().width(Length::Fill))
-                        .align_y(Alignment::Center)
-                        .width(Length::Fill),
-                )
-                .push(Space::new().height(Length::Fixed(SPACE_12)))
-                .push(
-                    Row::new()
-                        .push(
-                            text("RECENT EVENTS")
-                                .size(TYPO_XXS)
-                                .color(text_muted(&theme)),
                         )
                         .push(Space::new().width(Length::Fill))
                         .push(
@@ -23791,9 +23826,38 @@ impl IcedChat {
                                 .padding([SPACE_2, SPACE_6])
                                 .style(BUTTON_GHOST),
                         )
+                        .align_y(Alignment::Center)
                         .width(Length::Fill),
                 )
-                .push(event_log)
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(
+                    Row::new()
+                        .push(icon_svg(status_icon, TYPO_MD).style(move |t, _| {
+                            iced::widget::svg::Style {
+                                color: Some(status_color(t)),
+                            }
+                        }))
+                        .push(Space::new().width(Length::Fixed(SPACE_8)))
+                        .push(
+                            Column::new()
+                                .push(
+                                    text(status_label.clone())
+                                        .size(TYPO_MD)
+                                        .font(crate::fonts::source_sans(
+                                            iced::font::Weight::Semibold,
+                                        ))
+                                        .color(status_color(&theme)),
+                                )
+                                .push(
+                                    text(status_detail)
+                                        .size(TYPO_XS)
+                                        .color(text_muted(&theme)),
+                                ),
+                        )
+                        .spacing(0)
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill),
+                )
                 .spacing(0)
                 .width(Length::Fill),
         )
@@ -37177,6 +37241,26 @@ mod tests {
         let v = home_connection_variant(&MeshHealth::Good, false, true);
         assert_eq!(v, HomeConnectionVariant::Connecting);
         assert_ne!(v, HomeConnectionVariant::Ready);
+    }
+
+    // ── UI-28: transient mesh event cleanup ────────────────────────────
+
+    #[test]
+    fn transient_mesh_event_detection_removes_startup_lines() {
+        // Startup/connection-progress lines must be dropped once healthy.
+        assert!(is_transient_mesh_event("Starting up..."));
+        assert!(is_transient_mesh_event("Connecting to lobby..."));
+        assert!(is_transient_mesh_event("Connected to lobby — 3 peers online"));
+        assert!(is_transient_mesh_event("Subscribing to 2 stored conversation(s)…"));
+    }
+
+    #[test]
+    fn transient_mesh_event_detection_keeps_lifecycle_lines() {
+        // Real lifecycle / error lines must survive the cleanup.
+        assert!(!is_transient_mesh_event("Mesh recovered: all peers active."));
+        assert!(!is_transient_mesh_event("Mesh degraded: peer churn"));
+        assert!(!is_transient_mesh_event("Mesh offline: relay unreachable"));
+        assert!(!is_transient_mesh_event("Discovered 2 direct, 1 relayed peers"));
     }
 
     fn gui_update_request(command: GuiTestCommand) -> GuiActionRequest {
