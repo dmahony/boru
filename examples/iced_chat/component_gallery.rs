@@ -1429,6 +1429,32 @@ fn form_gallery() -> Element<'static, AppMessage> {
             ),
         )
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("SelectablePeerList (search + chips + summary)"))
+        .push(
+            crate::form_components::SelectablePeerList::new(
+                vec![
+                    crate::form_components::SelectablePeerRow::new("Alice")
+                        .secondary("abc123…")
+                        .selected(true)
+                        .on_toggle(AppMessage::Noop)
+                        .build(&theme),
+                    crate::form_components::SelectablePeerRow::new("Bob")
+                        .secondary("def456…")
+                        .on_toggle(AppMessage::Noop)
+                        .build(&theme),
+                ],
+                120.0,
+                Some("No peers available to add right now."),
+            )
+            .search("Search participants…", "", |_| AppMessage::Noop)
+            .chips(vec![crate::form_components::remove_chip(
+                "Alice",
+                Some(AppMessage::Noop),
+            )])
+            .summary(1, "participant")
+            .build(),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(state_label("Dialog footer"))
         .push(
             crate::form_components::DialogFooter::new()
