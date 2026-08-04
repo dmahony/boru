@@ -1,8 +1,8 @@
 # Boru — Design System
 
-> **Version:** 2.0 (UI-02 — Boru Modern redesign)
+> **Version:** 2.1 (UI-22 — final cleanup and documentation)
 > **Created:** 2026-07-21
-> **Updated:** 2026-08-03
+> **Updated:** 2026-08-04
 > **Scope:** `examples/iced_chat/` — the `iced` desktop GUI for Boru
 > **Audience:** Developers maintaining or extending the Boru GUI
 
@@ -638,28 +638,29 @@ All interactive elements in the UI respond to the same seven states. This sectio
 
 ### 11.1 Adopt a central token module
 
-**Status:** *Not implemented.* Colours, spacing, and typography remain defined as `pub(crate)` constants and free functions in `app.rs`. Extracting them into a dedicated `theme.rs` module is still recommended for maintainability.
+**Status:** *Implemented.* Colours, spacing, typography, radii, shadows, and responsive helpers live in `examples/iced_chat/design_tokens.rs`; font families and type-scale tokens live in `fonts.rs`. Screen code composes tokens through these modules instead of inventing local literals. See §19 for the module API.
 
 ### 11.2 Missing tokens
 
 | Token                    | Reason                                          | Status |
 |--------------------------|-------------------------------------------------|--------|
 | `TYPO_XXXS` (8px)       | For very dense data (download speeds, file sizes) | Not added |
-| `SPACE_20` (20px)       | Gap between major sidebar sections              | Not added — sections use existing spacing tokens |
-| Text `WARNING` (amber)  | For transient failure states (temporary)        | Not added |
+| Text `WARNING` (amber)  | For transient failure states                    | Added — `color_warning()` in `design_tokens.rs` |
 | `ANIMATION_DURATION`    | Standard transition speed for hover/selection   | Not added — Iced has no animation API |
+
+`SPACE_20` (20px) is present in `design_tokens.rs` and used by the dashboard and chat layouts.
 
 ### 11.3 Standardise button API
 
-**Status:** *Partially implemented.* Button styles are still defined inline in multiple places (`BUTTON_GHOST`, `BUTTON_ICON`, `BUTTON_PRIMARY`, `BUTTON_OUTLINE`, `BUTTON_GHOST_BG`, `DANGER_BUTTON`). A single `ButtonKind` enum with a unified `button_style` function would reduce duplication but has not been merged.
+**Status:** *Implemented.* `ui_components.rs` provides `button_primary_style`, `button_secondary_style`, `button_ghost_style`, `button_icon_ghost_style`, `button_icon_destructive`, plus builder helpers `primary_button`, `primary_button_icon`, `secondary_button`, and `ghost_icon_button`. Callers compose a single `button(...).style(...)` chain instead of repeating per-screen style literals.
 
 ### 11.4 Replace unicode status dots with vector circles
 
-**Status:** *Not implemented.* The `"●"` and `"○"` characters remain in use.
+**Status:** *Implemented.* `ui_components::status_dot` renders a filled/outline circle through Iced vector drawing, driven by `StatusDotKind::{Online, Offline, Warning}`. No `"●"`/`"○"` literals remain in the GUI.
 
 ### 11.5 Introduce real unread badge pills
 
-**Status:** *Not implemented.* Inline `" [N]"` text remains in use.
+**Status:** *Implemented.* `ui_components::badge` / `badge_owned` render pill-shaped unread/status badges (`BadgeKind::{Default, Accent, Danger, Muted}`). Inline `" [N]"` text was removed from the redesigned surfaces.
 
 ---
 
@@ -667,12 +668,12 @@ All interactive elements in the UI respond to the same seven states. This sectio
 
 The UI redesign was completed in the following steps (see Kanban tasks for details):
 
-1. **Step 2** — Extract theme tokens into `theme.rs`, add missing tokens *(NOT completed — tokens remain in app.rs)*
-2. **Step 3** — Standardise button style helpers *(NOT completed — button helpers remain ad-hoc)*
-3. **Step 4** — Implement notification badge pills and status dot widgets *(NOT completed)*
-4. **Step 5** — Refine sidebar spacing and layout *(COMPLETED — collapsible sections, identity row, 280px fixed width)*
-5. **Step 6** — Polish chat panel (bubbles, timestamps, avatar layout) *(COMPLETED)*
-6. **Step 7** — Add context menus *(NOT completed)*
+1. **Step 2** — Extract theme tokens into a central module *(COMPLETED — `design_tokens.rs` + `fonts.rs`, UI-02)*
+2. **Step 3** — Standardise button style helpers *(COMPLETED — `ui_components.rs` button styles, UI-04/UI-05)*
+3. **Step 4** — Implement notification badge pills and status dot widgets *(COMPLETED — `badge()` / `status_dot()` in `ui_components.rs`, UI-04/UI-05)*
+4. **Step 5** — Refine sidebar spacing and layout *(COMPLETED — collapsible sections, identity row, 288–320 px responsive width)*
+5. **Step 6** — Polish chat panel (bubbles, timestamps, avatar layout) *(COMPLETED — UI-14/UI-16)*
+6. **Step 7** — Add context menus *(COMPLETED — `OverflowMenu` in `ui_components.rs` + per-screen `ContextMenuKind` in `app.rs`)*
 7. **Step 8** — Finalise modal/dialog consistency *(COMPLETED)*
 8. **Step 9** — UX audit *(COMPLETED — see UX_AUDIT.md)*
 9. **Step 10** — Landing screen redesign *(COMPLETED — status card, actions, recent activity)*
@@ -680,15 +681,15 @@ The UI redesign was completed in the following steps (see Kanban tasks for detai
 11. **Step 12** — Redesigned friend profile *(COMPLETED — rename inline, status, three-dot menu)*
 12. **Step 13** — Redesigned recent activity *(COMPLETED — structured rows with relative time)*
 13. **Step 14** — Friends-online panel *(COMPLETED — online status in CHATS and FRIENDS sections)*
-14. **Step 15** — Dashboard file-drop area *(NOT implemented — Iced lacks native drag-and-drop)*
+14. **Step 15** — Dashboard file-drop area *(NOT implemented — Iced lacks native drag-and-drop; file sharing is reachable via the composer and share actions)*
 15. **Step 16** — Discovered peers section *(COMPLETED — Chat + Browse Files buttons per peer)*
 16. **Step 17** — Settings screen refinements *(COMPLETED — identity, network, appearance sections)*
 17. **Step 18** — Image preview screen *(COMPLETED)*
-18. **Step 19** — Accessibility and keyboard support audit *(COMPLETED — focus rings, keyboard shortcuts)*
+18. **Step 19** — Accessibility and keyboard support audit *(COMPLETED — focus rings, keyboard shortcuts, contrast tokens in UI-19)*
 19. **Step 20** — Chats section in sidebar *(COMPLETED — online sort, unread counts, previews)*
 20. **Step 21** — Requests section in sidebar *(COMPLETED — accept/decline, Manage button)*
 21. **Step 22** — Friends section in sidebar *(COMPLETED — add by key input, alphabetically sorted)*
-22. **Step 23** — Documentation update *(COMPLETED — this document and README)*
+22. **Step 23** — Documentation update *(COMPLETED — this document, README, docs/ui-redesign/)*
 
 ---
 
@@ -946,21 +947,69 @@ Peer names are generated deterministically from the peer's 32-byte Ed25519 publi
 
 ## 18. Remaining Planned Work
 
-The following items from the original design spec have NOT been implemented and remain as future work:
+The following items from the original design spec remain as future work (items that were implemented during the redesign are now recorded as COMPLETED in §12):
 
-1. **Dedicated `theme.rs` module** — tokens still live in `app.rs`
-2. **Standardised button API** — `ButtonKind` enum not merged
-3. **Unread badge pills** — inline `" [N]"` remains
-4. **Vector status dots** — Unicode ●/○ characters remain
-5. **Context menus** — no right-click menus anywhere
-6. **Dashboard file-drop area** — Iced v0.14 lacks native drag-and-drop
-7. **Toast notifications** — no transient notification system
-8. **Sidebar search/filter** — no text input for filtering chats or friends
-9. **Onboarding overlay** — no first-launch tutorial
-10. **Room-level settings** — "Settings" button opens global settings
-11. **"Voice" button** — dead button on friend profile, no action handler
-12. **Export Friend** — no counterpart to "Import Friend"
-13. **Delivery status indicators** — delivery_state tracked but not surfaced in chat log
-14. **`SPACE_20` gap token** — not added
-15. **`TYPO_XXXS` token** — not added
-16. **Animation duration token** — not applicable (Iced has no animation API)
+1. **Dashboard file-drop area** — Iced v0.14 lacks native drag-and-drop; file sharing is reachable via the composer and share actions
+2. **Toast notifications** — no transient notification system
+3. **Sidebar search/filter** — no text input for filtering chats or friends
+4. **Onboarding overlay** — no first-launch tutorial
+5. **Room-level settings** — "Settings" button opens global settings
+6. **"Voice" button** — dead button on friend profile, no action handler
+7. **Export Friend** — no counterpart to "Import Friend"
+8. **`TYPO_XXXS` token** — not added
+9. **Animation duration token** — not applicable (Iced has no animation API)
+
+**Completed during the redesign** (see §11 and §12): central token module (`design_tokens.rs`), standardised button API (`ui_components.rs`), unread badge pills (`badge()`), vector status dots (`status_dot()`), context menus (`OverflowMenu` / `ContextMenuKind`), `SPACE_20` gap token.
+
+## 19. Design-System Module API (for extending the UI)
+
+New screens and widgets should build on the shared modules below instead of introducing raw literals or per-screen style helpers.
+
+### 19.1 `design_tokens.rs` — tokens and responsive helpers
+
+- **Spacing:** `SPACE_2`, `SPACE_4`, `SPACE_6`, `SPACE_8`, `SPACE_10`, `SPACE_12`, `SPACE_16`, `SPACE_18`, `SPACE_20`, `SPACE_24`, `SPACE_32`, `SPACE_40` (`f32` px)
+- **Radii:** `RADIUS_SM` (8), `RADIUS_MD` (10), `RADIUS_LG` (12), `RADIUS_XL` (16)
+- **Sizes:** `CONTROL_HEIGHT` (40), `CONTROL_HEIGHT_COMPACT` (36), `AVATAR_SM/MD/LG`, `SIDEBAR_WIDTH` (304), `SIDEBAR_WIDTH_MIN` (288), `SIDEBAR_WIDTH_MAX` (320), `MESSAGE_MAX_WIDTH` (480), `CHAT_BUBBLE_MAX_WIDTH` (560), `CHAT_BUBBLE_WIDTH_RATIO` (0.68), `VIEWPORT_REF_WIDTH` (1280), `VIEWPORT_MIN_WIDTH` (1024), `VIEWPORT_LG_WIDTH` (1440), `VIEWPORT_XL_WIDTH` (1920), `CONTENT_MAX_WIDTH` (720)
+- **Theme-aware colour functions:** `color_canvas`, `color_sidebar`, `surface`, `surface_selected`, `surface_hover`, `bg_input`, `text_primary`, `text_secondary`, `text_muted`, `primary`, `primary_hover`, `primary_pressed`, `primary_soft`, `color_success`, `color_danger`, `color_focus`, `color_warning`, `border_muted`, `border_strong`, `border`, `text_local_label/body`, `text_remote_label/body`, `bubble_bg`
+- **Shadows:** `shadow_card`, `shadow_elevated`, `shadow_dialog`
+- **Responsive helpers:** `sidebar_width_for(window_width)` (288–320 px clamp), `is_compact(width)` (≤1024), `is_medium(width)` (1024–1280), `is_large(width)` (≥1440)
+
+### 19.2 `ui_components.rs` — shared component API
+
+Pure function/builders, no global state: `Card`, `elevated_card`, `icon_tile`, `primary_button`, `primary_button_icon`, `secondary_button`, `ghost_icon_button`, `text_input_field`, `status_dot` (`StatusDotKind`), `badge` / `badge_owned` (`BadgeKind`), `divider`, `ListRow`, `empty_state`, `Avatar`, `section_header`, `card_header`, `SidebarSectionHeader`, `date_separator`, `system_event_chip`, `TabStrip`, `ProgressBar` (`ProgressKind`), `FileIdentityCell`, `PeerChipStack`, `MetricBlock`, `LoadingSkeleton`, `InlineError`, `TableHeaderRow`, `OverflowMenu`, `connection_footer`, `chat_status_footer`.
+
+### 19.3 `icon_system.rs` — icons
+
+One `Icon` enum maps every semantic action to a Lucide SVG asset; `IconSize` names size steps (XS=16 … XL=28); `Icon::build()` produces a styled SVG with optional tooltip/destructive styling. Prefer `Icon::X.build()` over raw `include_bytes!` in new code.
+
+### 19.4 `fonts.rs` — typography
+
+`Typography` enum provides semantic roles (PageTitle, SectionHeading, ChatMessage, …) with correct family/weight/size; `load_fonts()` registers Source Sans 3, Raleway, and JetBrains Mono at startup.
+
+### 19.5 Responsive breakpoints
+
+| Breakpoint | Window width | Behaviour |
+|---|---|---|
+| Compact | ≤ 1024 px | One/two-column grids, sidebar clamps to 288 px |
+| Reference | 1280 px | Sidebar 304 px; two-thirds content + one-third rail |
+| Medium | 1024–1280 px | Reflow between compact and reference |
+| Large | ≥ 1440 px | Sidebar 320 px, full four-column quick actions |
+
+Quick-action grid columns are computed by `quick_actions::grid_columns_for(window_width)` (4 columns ≥1040 px, 2 columns 640–1039 px, 1 column <640 px).
+
+### 19.6 Screenshot workflow
+
+Deterministic screenshots are produced from the running GUI under Xvfb using the documented harness and QA fixtures — never production data:
+
+```sh
+# Build once
+cargo build --features gui --example boru
+
+# Baseline (UI-01): home + chat at 1280x800, 1024x720, 1440x900
+scripts/ui_baseline_screenshots.sh
+
+# Final regression matrix (UI-21): home + chat at all four sizes + key states
+scripts/ui21_final_evidence.sh   # writes docs/ui-redesign/evidence/final/
+```
+
+Screenshot naming convention: `<task-id>_<screen>_<width>x<height>_<state>.png`. Evidence lives under `docs/ui-redesign/evidence/` with per-phase README files and the top-level evidence index (`evidence/INDEX.md`). The loopback MCP (`--mcp --enable-gui-test-actions`) drives state navigation for QA captures; both flags are dev/test-only and disabled by default.

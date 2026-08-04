@@ -8,6 +8,18 @@ and versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 The authoritative version source is `Cargo.toml`. For full change history,
 see the [git log](https://github.com/dmahony/boru/commits/main/).
 
+## Unreleased
+
+### Changed
+
+- Redesigned the home and chat screens with a modern visual system: a
+  cleaner sidebar, card-based home layout with quick actions and an
+  activity rail, and a refreshed conversation view with grouped message
+  bubbles and an elevated composer. The design uses centralized tokens
+  (`design_tokens.rs`), shared components (`ui_components.rs`), and the
+  Source Sans 3 / Raleway font pairing. No messaging, file-sharing,
+  networking, or command behaviour changed.
+
 ## 0.102.0
 
 Performance and transfer improvements from Phase 25, including improved file
