@@ -254,4 +254,4 @@ New tests (all passing):
 
 ## COMMIT
 
-To be recorded after verification (message must reference FS-20).
+`2f64a1d1` — review(FS-20): security hardening — expiry enforcement, download gate, safe path, compile fixes
