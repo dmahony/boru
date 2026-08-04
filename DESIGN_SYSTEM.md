@@ -416,16 +416,47 @@ Implementation: `container_card` at `app.rs:462-472`.
 
 ### 4.9 Modal / Dialog Windows
 
-#### Create Room Dialog
+#### Creation Dialogs (BoruDialog)
 
-| Property     | Value                          | File:Line |
-|-------------|--------------------------------|-----------|
-| Width        | 320px fixed                    | `app.rs:10136` |
-| Height       | `Shrink` (content-dependent)   | `app.rs:10137` |
-| Padding      | 24px                           | `app.rs:10138` |
-| Background   | `rgba(0.15, 0.15, 0.15, 0.95)` (#262626F2) | `app.rs:10140-10142` |
-| Border radius| 12px                           | `app.rs:10144` |
-| Backdrop     | Full-screen, semi-transparent fill via `stack![]` | `app.rs:10151-10157` |
+The create-group, create-public-room, and create-tunnel flows share one modal
+shell, `BoruDialog` (`examples/iced_chat/boru_dialog.rs`), composed with the
+form primitives from `examples/iced_chat/form_components.rs` (UI-RESTYLE-02/03).
+The shell is token-driven — it composes `design_tokens` (surface, border,
+radius, shadow, backdrop, spacing, typography) and `ui_components` button
+styles; no per-dialog colours are hard-coded. It replaced the pre-redesign
+hard-edged dark block (`rgba(0.15, 0.15, 0.15, 0.95)`) used by the old Create
+Room dialog.
+
+| Property         | Value                                              | Source |
+|------------------|----------------------------------------------------|--------|
+| Shell            | `BoruDialog::new(title).subtitle(…)`               | `boru_dialog.rs` |
+| Width            | `BORU_DIALOG_WIDTH_STANDARD` 560px / `BORU_DIALOG_WIDTH_LARGE` 760px | `boru_dialog.rs` |
+| Height           | `Shrink` (content-dependent), or `scroll_body(max)` for capped internal scroll | `boru_dialog.rs` `build()` |
+| Padding          | `SPACE_24` (24px)                                  | `boru_dialog.rs` `build()` |
+| Background       | `surface()` — white (light) / dark surface         | `design_tokens::dialog_style` |
+| Border           | `border_muted`, `BORDER_WIDTH` (1px)               | `design_tokens::dialog_style` |
+| Border radius    | `RADIUS_LG` (12px)                                 | `design_tokens::dialog_style` |
+| Shadow           | `shadow_dialog`                                    | `design_tokens::dialog_style` |
+| Backdrop         | `dialog_backdrop`: light `rgba(0,0,0,0.35)`, dark `rgba(0,0,0,0.55)` | `design_tokens::dialog_backdrop` |
+| Header title     | `Typography::SectionHeading` (18px SemiBold), `text_primary` | `boru_dialog.rs` |
+| Header subtitle  | `Typography::SecondaryText`, `text_secondary`      | `boru_dialog.rs` |
+| Header close     | `Icon::Close` ghost icon button (`design_tokens::icon_button`) | `boru_dialog.rs` |
+| Body spacing     | `SPACE_12` between body blocks                     | `boru_dialog.rs` |
+| Footer           | Right-aligned: secondary (`button_secondary_style`) + primary (`button_primary_style`) | `boru_dialog.rs` |
+| Footer padding   | `[SPACE_8, SPACE_16]`                              | `boru_dialog.rs` |
+
+Form sections inside the body use `form_components::FormSection` (title
+`Typography::FormLabel`), `TextInput` (labelled input with helper/error),
+`checkbox_field`, `helper_text`, `SelectablePeerRow` + `peer_list` for peer
+pickers, `remove_chip` + `selection_summary` for group members, and
+`SearchableSelect` for options. Dialog flows:
+
+| Flow | Width | Sections | Footer |
+|------|-------|----------|--------|
+| Create Public Room (`view_create_room_dialog`) | 560 | Room Details; Visibility / Discovery; Access / Participation Options; Preview / Info | Cancel + Create Room |
+| Create Group Chat (`view_create_group_dialog`) | 760, `scroll_body(520)` | Group Details (name, description); Participants (search, chips, peer list, summary) | Cancel + Create Group |
+| Create Tunnel — friend picker (`view_create_tunnel_dialog`) | 560 | Connection Target (peer list) | Cancel |
+| Create Tunnel — share local service (`view_share_local_service_dialog`) | 560 | Tunnel Details; Connection Target; Permissions / Options; Status / Guidance | Cancel + Create Tunnel |
 
 #### Help Panel (Overlay)
 
@@ -1013,3 +1044,10 @@ scripts/ui21_final_evidence.sh   # writes docs/ui-redesign/evidence/final/
 ```
 
 Screenshot naming convention: `<task-id>_<screen>_<width>x<height>_<state>.png`. Evidence lives under `docs/ui-redesign/evidence/` with per-phase README files and the top-level evidence index (`evidence/INDEX.md`). The loopback MCP (`--mcp --enable-gui-test-actions`) drives state navigation for QA captures; both flags are dev/test-only and disabled by default.
+
+### 19.7 Dialog modules (UI-RESTYLE)
+
+The creation flows build on two shared dialog modules (see §4.9):
+
+- **`boru_dialog.rs`** — `BoruDialog` modal shell: header (title/subtitle/close), scrollable body, right-aligned secondary + primary footer, dimmed backdrop with optional click-outside (`on_backdrop`). Width constants `BORU_DIALOG_WIDTH_STANDARD` (560) and `BORU_DIALOG_WIDTH_LARGE` (760). Generic over `Message` — callers map their own messages onto the dialog actions.
+- **`form_components.rs`** — form primitives: `form_label`, `helper_text`, `error_text`, `FormSection`, `TextInput`, `TextArea`, `Select`, `SearchableSelect`, `checkbox_field`, `toggle_field`, `SelectablePeerRow`, `peer_list`, `remove_chip`, `selection_summary`, `DialogFooter`, `destructive_button`. Reuses `ui_components` button styles rather than re-defining them.
