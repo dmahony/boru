@@ -21377,73 +21377,75 @@ impl IcedChat {
         stack![base, overlay].into()
     }
 
-    /// Minimal dialog for creating a new room with optional DHT discovery.
+    /// Boru-styled dialog for creating a new public room (discoverable in the
+    /// directory and over DHT).
+    ///
+    /// Restyled per UI-RESTYLE-05. Only real, backend-backed options are
+    /// exposed: room name, directory advertisement, and DHT discovery. The
+    /// public-room flow has no description/limits/access-control fields in the
+    /// backend, so those sections carry helper text only — no invented
+    /// controls. Creation logic, messages, and validation are unchanged.
     fn view_create_room_dialog<'a>(
         &self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, checkbox, column, container, text, text_input};
-        use iced::{Alignment, Length};
+        use crate::boru_dialog::BoruDialog;
+        use crate::form_components::{FormSection, TextInput, checkbox_field, helper_text};
 
-        let dialog = column![]
-            .push(text("Create New Room").size(18))
-            .push(
-                text_input("Room name…", &self.create_room_name)
-                    .on_input(AppMessage::CreateNewRoomNameChanged)
-                    .width(Length::Fill),
-            )
-            .push(
-                checkbox(self.create_room_dht_enabled)
-                    .label("Enable DHT discovery")
-                    .on_toggle(AppMessage::CreateNewRoomDhtToggled),
-            )
-            .push(
-                checkbox(self.create_room_advertise)
-                    .label("Advertise in Directory")
-                    .on_toggle(AppMessage::CreateNewRoomAdvertiseToggled),
-            )
-            .push(
-                iced::widget::row![]
-                    .push(
-                        button(text("Cancel"))
-                            .on_press(AppMessage::CancelCreateRoom)
-                            .padding(8),
-                    )
-                    .push(
-                        button(text("Create"))
-                            .on_press(AppMessage::ConfirmCreateNewRoom)
-                            .padding(8),
-                    )
-                    .spacing(12),
-            )
-            .spacing(12)
-            .align_x(Alignment::Center);
+        let theme = Self::theme_from_dark(self.dark_mode);
 
-        let overlay = container(dialog)
-            .width(Length::Fixed(320.0))
-            .height(Length::Shrink)
-            .padding(24)
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(iced::Color::from_rgba(
-                    0.15, 0.15, 0.15, 0.95,
-                ))),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    width: 1.0,
-                    color: iced::Color::from_rgb(0.4, 0.4, 0.4),
-                },
-                ..Default::default()
-            });
+        // ── Room Details ────────────────────────────────────────────────
+        let room_details = FormSection::new("Room Details").push(
+            TextInput::new(
+                "Room Name",
+                "Room name…",
+                &self.create_room_name,
+                AppMessage::CreateNewRoomNameChanged,
+            )
+            .helper("A short name others will see in the directory.")
+            .build(),
+        );
 
-        iced::widget::stack![
-            base,
-            container(overlay)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        ]
-        .into()
+        // ── Visibility / Discovery ──────────────────────────────────────
+        let visibility = FormSection::new("Visibility / Discovery")
+            .helper("Choose how other Boru users can find this room.")
+            .push(checkbox_field(
+                "Advertise in Directory",
+                self.create_room_advertise,
+                AppMessage::CreateNewRoomAdvertiseToggled,
+                Some("List the room in the directory so others can discover and join it."),
+            ))
+            .push(checkbox_field(
+                "Enable DHT discovery",
+                self.create_room_dht_enabled,
+                AppMessage::CreateNewRoomDhtToggled,
+                Some("Publish a discovery record on the DHT so the room can be found on the network."),
+            ));
+
+        // ── Access / Participation Options ──────────────────────────────
+        // Public rooms are open by design; the backend exposes no join
+        // limits, invite gates, or access rules, so this section is helper
+        // text only.
+        let access = FormSection::new("Access / Participation Options").push(helper_text(
+            "Public rooms are open to everyone. Anyone who discovers the room can join it directly — no approval or invitation is required.",
+        ));
+
+        // ── Preview / Info ──────────────────────────────────────────────
+        let info = FormSection::new("Preview / Info").push(helper_text(
+            "A public room is advertised in the directory and discoverable over DHT. Other Boru users can find and join it while it stays online.",
+        ));
+
+        let overlay = BoruDialog::new("Create Public Room")
+            .subtitle("Create a room others can discover and join.")
+            .push_body(room_details.build())
+            .push_body(visibility.build())
+            .push_body(access.build())
+            .push_body(info.build())
+            .secondary("Cancel", AppMessage::CancelCreateRoom)
+            .primary("Create Room", AppMessage::ConfirmCreateNewRoom)
+            .build(&theme);
+
+        iced::widget::stack![base, overlay].into()
     }
 
     /// Dialog for creating a new group with name, description, and member selection.
