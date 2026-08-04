@@ -1,0 +1,41 @@
+name-template: "$RESOLVED_VERSION"
+tag-template: "$RESOLVED_VERSION"
+version-resolver:
+  major:
+    labels:
+      - "breaking"
+  minor:
+    labels:
+      - "enhancement"
+      - "feature"
+  patch:
+    labels:
+      - "bug"
+      - "fix"
+      - "dependencies"
+      - "chore"
+  default: patch
+
+categories:
+  - title: "🚀 Features"
+    labels:
+      - "feature"
+      - "enhancement"
+  - title: "🐛 Bug Fixes"
+    labels:
+      - "bug"
+      - "fix"
+  - title: "📦 Dependencies"
+    labels:
+      - "dependencies"
+  - title: "🧹 Chores"
+    labels:
+      - "chore"
+
+change-template: "- $TITLE (#$NUMBER) by @$AUTHOR"
+template: |
+  ## Changes
+
+  $CHANGES
+
+  **Full diff:** https://github.com/dmahony/boru/compare/$PREVIOUS_TAG...$RESOLVED_VERSION

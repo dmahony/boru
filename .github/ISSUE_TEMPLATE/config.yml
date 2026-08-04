@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Boru discussions
+    url: https://github.com/dmahony/boru/discussions
+    about: Questions, ideas, and general chat — use Discussions instead of Issues
