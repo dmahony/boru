@@ -3102,6 +3102,8 @@ pub struct IcedChat {
     create_group_description: String,
     /// Set of friend public keys selected as group members.
     create_group_selected_members: HashSet<PublicKey>,
+    /// Participant search/filter text in the group creation dialog.
+    create_group_search: String,
     /// Whether the tunnel creation (friend-picker) dialog is shown.
     show_create_tunnel_dialog: bool,
     /// Pending incoming tunnel requests, in arrival order.
@@ -4287,6 +4289,8 @@ pub enum AppMessage {
     CreateGroupDescriptionChanged(String),
     /// Toggle a friend in the member selection.
     CreateGroupMemberToggled(PublicKey),
+    /// Update the participant search/filter text.
+    CreateGroupSearchChanged(String),
     /// Confirm and execute group creation.
     ConfirmCreateGroup,
     /// A group was created and is ready to join.
@@ -6395,6 +6399,7 @@ impl IcedChat {
             create_group_name: String::new(),
             create_group_description: String::new(),
             create_group_selected_members: HashSet::new(),
+            create_group_search: String::new(),
             show_create_tunnel_dialog: false,
             tunnel_requests: Vec::new(),
             dht,
@@ -8038,6 +8043,7 @@ impl IcedChat {
             AppMessage::CreateGroupNameChanged(_) => "CreateGroupNameChanged",
             AppMessage::CreateGroupDescriptionChanged(_) => "CreateGroupDescriptionChanged",
             AppMessage::CreateGroupMemberToggled(_) => "CreateGroupMemberToggled",
+            AppMessage::CreateGroupSearchChanged(_) => "CreateGroupSearchChanged",
             AppMessage::ConfirmCreateGroup => "ConfirmCreateGroup",
             AppMessage::GroupCreated { .. } => "GroupCreated",
             AppMessage::ShowCreateTunnelDialog => "ShowCreateTunnelDialog",
@@ -9329,6 +9335,7 @@ impl IcedChat {
                 self.create_group_name = String::new();
                 self.create_group_description = String::new();
                 self.create_group_selected_members.clear();
+                self.create_group_search = String::new();
                 iced::Task::none()
             }
             AppMessage::HideCreateGroupDialog => {
@@ -9349,6 +9356,10 @@ impl IcedChat {
                 } else {
                     self.create_group_selected_members.insert(peer);
                 }
+                iced::Task::none()
+            }
+            AppMessage::CreateGroupSearchChanged(query) => {
+                self.create_group_search = query;
                 iced::Task::none()
             }
 
@@ -21440,105 +21451,138 @@ impl IcedChat {
         &'a self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{
-            button, checkbox, column, container, scrollable, text, text_input, Column, Row,
+        use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_LARGE};
+        use crate::form_components::{
+            FormSection, SelectablePeerRow, TextInput, peer_list, remove_chip, selection_summary,
         };
-        use iced::{Alignment, Length};
+        use iced::widget::Row;
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
-        // Build member selection list from friends
-        let mut members_list = Column::new().spacing(SPACE_4).padding(SPACE_8);
+        // ── Available peers: friends who can be messaged, sorted by label ─
+        let mut available: Vec<(PublicKey, String)> = self
+            .friends
+            .iter()
+            .filter_map(|(fid, record)| {
+                if !record.relationship.can_message() {
+                    return None;
+                }
+                let peer = fid.parse_public_key().ok()?;
+                let label = record.display_label(fid, &peer);
+                Some((peer, label))
+            })
+            .collect();
+        available.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
 
-        for (fid, record) in self.friends.iter() {
-            if !record.relationship.can_message() {
-                continue;
-            }
-            let peer = match fid.parse_public_key() {
-                Ok(pk) => pk,
-                Err(_) => continue,
-            };
-            let label = record.display_label(fid, &peer);
-            let is_selected = self.create_group_selected_members.contains(&peer);
-            let checkbox = checkbox(is_selected)
-                .label(label)
-                .on_toggle(move |_| AppMessage::CreateGroupMemberToggled(peer));
+        // Search/filter over display label and short peer id.
+        let query = self.create_group_search.trim().to_lowercase();
+        let filtered: Vec<&(PublicKey, String)> = if query.is_empty() {
+            available.iter().collect()
+        } else {
+            available
+                .iter()
+                .filter(|(pk, label)| {
+                    label.to_lowercase().contains(&query)
+                        || pk.fmt_short().to_string().to_lowercase().contains(&query)
+                })
+                .collect()
+        };
 
-            members_list = members_list.push(checkbox);
+        // Selected participants shown as removable chips above the list.
+        let selected_count = self.create_group_selected_members.len();
+        let label_of = |peer: &PublicKey| -> String {
+            self.friends
+                .iter()
+                .find(|(fid, _)| fid.parse_public_key().map(|pk| &pk == peer).unwrap_or(false))
+                .map(|(fid, record)| record.display_label(fid, peer))
+                .unwrap_or_else(|| peer.fmt_short().to_string())
+        };
+        let mut chips = Row::new().spacing(crate::design_tokens::SPACE_4);
+        for peer in &self.create_group_selected_members {
+            chips = chips.push(remove_chip(
+                label_of(peer),
+                Some(AppMessage::CreateGroupMemberToggled(*peer)),
+            ));
         }
 
-        let dialog = column![]
-            .push(text("Create Group Chat").size(18))
-            .push(
-                text_input("Group name…", &self.create_group_name)
-                    .on_input(AppMessage::CreateGroupNameChanged)
-                    .width(Length::Fill),
-            )
-            .push(
-                text_input("Description (optional)…", &self.create_group_description)
-                    .on_input(AppMessage::CreateGroupDescriptionChanged)
-                    .width(Length::Fill),
-            )
-            .push(
-                container(
-                    scrollable(container(members_list).width(Length::Fill).padding(SPACE_4))
-                        .height(Length::Fixed(200.0)),
-                )
-                .width(Length::Fill)
-                .style(move |t| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgba(
-                        0.2, 0.2, 0.2, 0.3,
-                    ))),
-                    border: iced::Border {
-                        radius: SPACE_4.into(),
-                        width: 1.0,
-                        color: border_muted(t),
-                    },
-                    ..Default::default()
-                }),
-            )
-            .push(
-                iced::widget::row![]
+        // Peer rows: avatar + display name + peer id / online status.
+        let mut rows: Vec<iced::Element<'a, AppMessage>> = Vec::new();
+        for (peer, label) in filtered {
+            let presence = self.peer_presence(peer);
+            let online = presence != PeerPresence::Offline;
+
+            let mut avatar = Avatar::new(label.clone())
+                .size(crate::design_tokens::AVATAR_SM)
+                .dark_mode(self.dark_mode)
+                .online_dot(online);
+            if let Some(handle) = self.friend_image_handles.get(peer).and_then(|h| h.clone()) {
+                avatar = avatar.image(handle);
+            }
+
+            rows.push(
+                SelectablePeerRow::new(label.clone())
+                    .secondary(format!("{} · {}", peer.fmt_short(), presence.label()))
+                    .avatar(avatar.build())
+                    .selected(self.create_group_selected_members.contains(peer))
+                    .on_toggle(AppMessage::CreateGroupMemberToggled(*peer))
+                    .build(&theme),
+            );
+        }
+
+        let empty_text: &'a str = if available.is_empty() {
+            "No peers available to add right now."
+        } else {
+            "No peers match your search."
+        };
+
+        let mut participants = FormSection::new("Participants");
+        if !available.is_empty() {
+            participants = participants.push(text_input_field(
+                "Search participants…",
+                &self.create_group_search,
+                AppMessage::CreateGroupSearchChanged,
+                false,
+            ));
+        }
+        if selected_count > 0 {
+            participants = participants.push(chips.into());
+        }
+        participants = participants.push(peer_list(rows, 240.0, Some(empty_text)));
+        participants = participants.push(selection_summary(selected_count, "participant"));
+
+        let overlay = BoruDialog::new("Create Group Chat")
+            .subtitle("Start a private conversation with multiple selected peers.")
+            .width(BORU_DIALOG_WIDTH_LARGE)
+            .push_body(
+                FormSection::new("Group Details")
                     .push(
-                        button(text("Cancel"))
-                            .on_press(AppMessage::HideCreateGroupDialog)
-                            .padding(8),
+                        TextInput::new(
+                            "Group Name",
+                            "Group name…",
+                            &self.create_group_name,
+                            AppMessage::CreateGroupNameChanged,
+                        )
+                        .build(),
                     )
                     .push(
-                        button(text("Create"))
-                            .on_press(AppMessage::ConfirmCreateGroup)
-                            .padding(8),
+                        TextInput::new(
+                            "Description",
+                            "Description (optional)…",
+                            &self.create_group_description,
+                            AppMessage::CreateGroupDescriptionChanged,
+                        )
+                        .build(),
                     )
-                    .spacing(12),
+                    .build(),
             )
-            .spacing(12)
-            .align_x(Alignment::Center);
+            .push_body(participants.build())
+            .secondary("Cancel", AppMessage::HideCreateGroupDialog)
+            .primary("Create Group", AppMessage::ConfirmCreateGroup)
+            .on_close(AppMessage::HideCreateGroupDialog)
+            .scroll_body(520.0)
+            .build(&theme);
 
-        let overlay = container(dialog)
-            .width(Length::Fixed(360.0))
-            .height(Length::Shrink)
-            .padding(24)
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(iced::Color::from_rgba(
-                    0.15, 0.15, 0.15, 0.95,
-                ))),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    width: 1.0,
-                    color: iced::Color::from_rgb(0.4, 0.4, 0.4),
-                },
-                ..Default::default()
-            });
-
-        iced::widget::stack![
-            base,
-            container(overlay)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        ]
-        .into()
+        iced::widget::stack![base, overlay].into()
     }
 
     /// Dialog for sharing a tunnel with a friend — shows a friend picker

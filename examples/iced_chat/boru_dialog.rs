@@ -38,7 +38,6 @@ use crate::ui_components::{button_primary_style, button_secondary_style};
 pub const BORU_DIALOG_WIDTH_STANDARD: f32 = 560.0;
 
 /// Larger dialog width for forms that need more room (member lists, etc.).
-#[expect(dead_code)] // consumed by the creation-flow restyles (UI-RESTYLE-04..06)
 pub const BORU_DIALOG_WIDTH_LARGE: f32 = 760.0;
 
 /// Reusable modal dialog shell.

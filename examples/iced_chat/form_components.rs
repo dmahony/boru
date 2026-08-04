@@ -862,10 +862,17 @@ pub fn peer_list<'a>(
 // ═══════════════════════════════════════════════════════════════════════
 
 /// A pill/tag chip showing a selected peer, with an optional × remove button.
-pub fn remove_chip<'a>(label: &'a str, on_remove: Option<AppMessage>) -> Element<'a, AppMessage> {
+///
+/// Accepts an owned label (or any `Into<String>`) so callers can pass
+/// dynamically computed display names without lifetime gymnastics.
+pub fn remove_chip(
+    label: impl Into<String>,
+    on_remove: Option<AppMessage>,
+) -> Element<'static, AppMessage> {
+    let label = label.into();
     let mut chip = Row::new()
         .push(
-            text(label.to_string())
+            text(label.clone())
                 .font(Typography::SecondaryText.font())
                 .size(Typography::SecondaryText.size_px())
                 .style(|t| text::Style {
