@@ -55,6 +55,8 @@ const SVG_USERS: &[u8] = include_bytes!("../../assets/icons/lucide/users.svg");
 const SVG_UPLOAD: &[u8] = include_bytes!("../../assets/icons/lucide/upload.svg");
 const SVG_CHEVRON_DOWN: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-down.svg");
 const SVG_CHEVRON_RIGHT: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-right.svg");
+const SVG_HOME: &[u8] = include_bytes!("../../assets/icons/lucide/home.svg");
+const SVG_FOLDER: &[u8] = include_bytes!("../../assets/icons/lucide/folder.svg");
 // Re-export the app-level constants for the Lucide icons that were already
 // embedded there.  We keep them in app.rs so app-level code that already
 // references ICON_CHAT etc. doesn't break, but the Icon enum uses them
@@ -79,6 +81,8 @@ pub enum Icon {
     /// Expand/collapse disclosure chevrons.
     ChevronDown,
     ChevronRight,
+    /// Go to the chat-list / home screen.
+    Home,
 
     // Communication
     Chat,
@@ -97,6 +101,7 @@ pub enum Icon {
 
     // File / media
     Files,
+    Folder,
     Paperclip,
     Image,
     Play,
@@ -139,6 +144,7 @@ impl Icon {
             Icon::Close => ICON_CLOSE,
             Icon::ChevronDown => SVG_CHEVRON_DOWN,
             Icon::ChevronRight => SVG_CHEVRON_RIGHT,
+            Icon::Home => SVG_HOME,
 
             // Communication
             Icon::Chat => ICON_CHAT,
@@ -156,6 +162,7 @@ impl Icon {
 
             // File / media
             Icon::Files => ICON_FILES,
+            Icon::Folder => SVG_FOLDER,
             Icon::Paperclip => ICON_PAPERCLIP,
             Icon::Image => SVG_IMAGE,
             Icon::Play => SVG_PLAY,
