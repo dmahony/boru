@@ -47,6 +47,52 @@ const SEND_RESIZE_FILTER: image::imageops::FilterType = image::imageops::FilterT
 /// Faster filter for receiver-side display thumbnails.
 const THUMBNAIL_RESIZE_FILTER: image::imageops::FilterType = image::imageops::FilterType::Triangle;
 
+/// Longest edge (px) of a uniform file-sharing thumbnail.
+pub const THUMBNAIL_MAX_EDGE: u32 = 96;
+
+/// Generate a small, uniform thumbnail for a picture file.
+///
+/// Decodes the input image, resizes it so its longest edge is at most
+/// `max_edge` (never upscaled), and re-encodes as JPEG.  The output is
+/// suitable for an `iced::widget::image::Handle` and keeps every file-row
+/// thumbnail the same display size regardless of the source aspect ratio.
+///
+/// Returns `Err(user_facing_error_message)` for empty, corrupt, or
+/// unsupported inputs so callers can fall back to a placeholder icon.
+pub fn thumbnail_image(raw: &[u8], max_edge: u32) -> Result<Vec<u8>, String> {
+    if raw.is_empty() {
+        return Err("Image is empty.".to_string());
+    }
+    let img = image::load_from_memory(raw)
+        .map_err(|_| "Unsupported or corrupt image format.".to_string())?;
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return Err("Image has zero dimensions.".to_string());
+    }
+    let rgb = img.to_rgb8();
+    let max_dim = w.max(h);
+    let (new_w, new_h) = if max_dim > max_edge {
+        let ratio = max_edge as f64 / max_dim as f64;
+        (
+            (w as f64 * ratio).round().max(1.0) as u32,
+            (h as f64 * ratio).round().max(1.0) as u32,
+        )
+    } else {
+        (w, h)
+    };
+    let thumb = if new_w != w || new_h != h {
+        image::imageops::resize(&rgb, new_w, new_h, THUMBNAIL_RESIZE_FILTER)
+    } else {
+        rgb
+    };
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let encoder = JpegEncoder::new_with_quality(&mut buf, 70);
+    encoder
+        .write_image(thumb.as_raw(), new_w, new_h, image::ExtendedColorType::Rgb8)
+        .map_err(|_| "JPEG encoding failed.".to_string())?;
+    Ok(buf.into_inner())
+}
+
 /// Convert an RGBA image into an RGB image without allocating a temporary
 /// `Vec` for every pixel.
 fn rgba_to_rgb(rgba: &RgbaImage) -> Result<image::RgbImage, String> {
@@ -801,5 +847,41 @@ mod tests {
             "aspect ratio {aspect} differs from {expected}"
         );
         assert!(optimized.len() <= CHAT_IMAGE_OPTIMIZED_MAX_BYTES);
+    }
+
+    // ── Acceptance test: uniform thumbnail generation ─────────────
+
+    #[test]
+    fn test_thumbnail_image_downscales_large_pictures_to_max_edge() {
+        let raw = encode_jpeg_helper(&make_test_rgb(1200, 800), 85);
+        let thumb = thumbnail_image(&raw, THUMBNAIL_MAX_EDGE).unwrap();
+        let decoded = image::load_from_memory(&thumb).unwrap();
+        let (w, h) = decoded.dimensions();
+        assert!(w.max(h) <= THUMBNAIL_MAX_EDGE, "w={w} h={h}");
+        // Aspect ratio preserved: 1200/800 = 3/2.
+        let aspect = w as f64 / h as f64;
+        assert!((aspect - 1.5).abs() < 0.02, "aspect {aspect}");
+    }
+
+    #[test]
+    fn test_thumbnail_image_never_upscales_small_pictures() {
+        let raw = encode_jpeg_helper(&make_test_rgb(48, 48), 85);
+        let thumb = thumbnail_image(&raw, THUMBNAIL_MAX_EDGE).unwrap();
+        let decoded = image::load_from_memory(&thumb).unwrap();
+        assert_eq!(decoded.dimensions(), (48, 48));
+    }
+
+    #[test]
+    fn test_thumbnail_image_rejects_empty_and_corrupt_input() {
+        assert!(thumbnail_image(b"", THUMBNAIL_MAX_EDGE).is_err());
+        assert!(thumbnail_image(b"not an image", THUMBNAIL_MAX_EDGE).is_err());
+    }
+
+    #[test]
+    fn test_thumbnail_image_output_is_jpeg() {
+        let raw = encode_jpeg_helper(&make_test_rgb(400, 300), 85);
+        let thumb = thumbnail_image(&raw, THUMBNAIL_MAX_EDGE).unwrap();
+        assert_eq!(thumb[0], 0xFF);
+        assert_eq!(thumb[1], 0xD8);
     }
 }

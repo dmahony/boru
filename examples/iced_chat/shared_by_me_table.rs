@@ -368,16 +368,19 @@ const CHIP_LABEL_MAX_CHARS: usize = 14;
 /// Build the full "Files I'm Sharing" card.
 ///
 /// `ui` carries the open menu/details/confirmation state owned by the
-/// application; `dark_mode` selects the avatar palette. The theme and load
-/// state are taken by value so the returned element borrows only from `rows`
-/// and `ui` (both owned by the app) — the same ownership pattern as the
-/// Sharing Summary card.
+/// application; `dark_mode` selects the avatar palette. `thumbnails` maps a
+/// content hash to an optional image handle — image/video rows render their
+/// preview at a uniform size via [`crate::ui_components::file_thumbnail`].
+/// The theme and load state are taken by value so the returned element
+/// borrows only from `rows`, `ui`, and `thumbnails` (all owned by the app) —
+/// the same ownership pattern as the Sharing Summary card.
 pub(crate) fn view_shared_by_me_card<'a>(
     rows: &'a [SharedByMeRow],
     ui: &'a SharedByMeUiState,
     load_state: SharedByMeLoadState,
     theme: Theme,
     dark_mode: bool,
+    thumbnails: &'a HashMap<String, Option<iced::widget::image::Handle>>,
 ) -> Element<'a, AppMessage> {
     let body: Element<'a, AppMessage> = match &load_state {
         SharedByMeLoadState::Loading => skeleton_body(&theme),
@@ -386,7 +389,7 @@ pub(crate) fn view_shared_by_me_card<'a>(
             if rows.is_empty() {
                 empty_body(&theme)
             } else {
-                table_body(rows, ui, &theme, dark_mode)
+                table_body(rows, ui, &theme, dark_mode, thumbnails)
             }
         }
     };
@@ -587,6 +590,7 @@ fn table_body<'a>(
     ui: &'a SharedByMeUiState,
     theme: &Theme,
     dark_mode: bool,
+    thumbnails: &'a HashMap<String, Option<iced::widget::image::Handle>>,
 ) -> Element<'a, AppMessage> {
     let mut children: Vec<Element<'a, AppMessage>> = Vec::with_capacity(rows.len() + 1);
     children.push(column_header(theme));
@@ -594,8 +598,18 @@ fn table_body<'a>(
         let menu_open = ui.menu_open.as_deref() == Some(row.content_hash.as_str());
         let details_open = ui.details_open.as_deref() == Some(row.content_hash.as_str());
         let confirm_stop = ui.confirm_stop.as_deref() == Some(row.content_hash.as_str());
-        children
-            .push(view_row(row, menu_open, details_open, confirm_stop, theme, dark_mode).into());
+        children.push(
+            view_row(
+                row,
+                menu_open,
+                details_open,
+                confirm_stop,
+                theme,
+                dark_mode,
+                thumbnails,
+            )
+            .into(),
+        );
         if index < rows.len().saturating_sub(1) {
             children.push(
                 container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
@@ -640,8 +654,9 @@ fn view_row<'a>(
     confirm_stop: bool,
     theme: &Theme,
     dark_mode: bool,
+    thumbnails: &'a HashMap<String, Option<iced::widget::image::Handle>>,
 ) -> Element<'a, AppMessage> {
-    let name_cell = name_cell(row, theme);
+    let name_cell = name_cell(row, theme, thumbnails);
     let shared_with_cell = shared_with_cell(row, theme, dark_mode);
     let size_cell = text(format_size(row.size_bytes))
         .size(TYPO_XS)
@@ -707,8 +722,27 @@ fn view_row<'a>(
         .into()
 }
 
-fn name_cell<'a>(row: &'a SharedByMeRow, theme: &Theme) -> Element<'a, AppMessage> {
-    let icon = file_icon(row);
+fn name_cell<'a>(
+    row: &'a SharedByMeRow,
+    theme: &Theme,
+    thumbnails: &'a HashMap<String, Option<iced::widget::image::Handle>>,
+) -> Element<'a, AppMessage> {
+    // Image/video rows get a uniform-size thumbnail preview when a handle is
+    // available (generated off the UI thread by the application layer);
+    // otherwise the standard file icon keeps the row readable.
+    let icon = match row.mime_type.as_deref().unwrap_or("") {
+        value if value.starts_with("image/") => crate::ui_components::file_thumbnail(
+            thumbnails.get(&row.content_hash).and_then(|h| h.as_ref()),
+            Icon::Image,
+            theme,
+        ),
+        value if value.starts_with("video/") => crate::ui_components::file_thumbnail(
+            thumbnails.get(&row.content_hash).and_then(|h| h.as_ref()),
+            Icon::Play,
+            theme,
+        ),
+        _ => file_icon(row),
+    };
     let full_name = row.display_name.clone();
     let name_text = text(truncated_name(&row.display_name, 44))
         .size(TYPO_SM)
@@ -1576,6 +1610,7 @@ mod tests {
     fn card_builds_without_panicking_for_all_states() {
         let theme = Theme::Light;
         let ui = SharedByMeUiState::default();
+        let thumbnails: HashMap<String, Option<iced::widget::image::Handle>> = HashMap::new();
 
         let empty: Vec<SharedByMeRow> = vec![];
         let _ = view_shared_by_me_card(
@@ -1584,6 +1619,7 @@ mod tests {
             SharedByMeLoadState::Loading,
             theme.clone(),
             false,
+            &thumbnails,
         );
         let _ = view_shared_by_me_card(
             &empty,
@@ -1591,6 +1627,7 @@ mod tests {
             SharedByMeLoadState::Error("storage unavailable".into()),
             theme.clone(),
             false,
+            &thumbnails,
         );
         let _ = view_shared_by_me_card(
             &empty,
@@ -1598,6 +1635,7 @@ mod tests {
             SharedByMeLoadState::Ready,
             theme.clone(),
             false,
+            &thumbnails,
         );
 
         let mut rows = vec![
@@ -1639,6 +1677,7 @@ mod tests {
             SharedByMeLoadState::Ready,
             theme.clone(),
             false,
+            &thumbnails,
         );
 
         let mut ui_open = SharedByMeUiState::default();
@@ -1649,6 +1688,7 @@ mod tests {
             SharedByMeLoadState::Ready,
             theme.clone(),
             true,
+            &thumbnails,
         );
 
         ui_open.open_details(&rows[0].content_hash);
@@ -1658,6 +1698,7 @@ mod tests {
             SharedByMeLoadState::Ready,
             theme.clone(),
             true,
+            &thumbnails,
         );
 
         let mut ui_confirm = SharedByMeUiState::default();
@@ -1668,6 +1709,7 @@ mod tests {
             SharedByMeLoadState::Ready,
             theme.clone(),
             true,
+            &thumbnails,
         );
         rows.clear();
     }

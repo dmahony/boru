@@ -2548,6 +2548,68 @@ impl ConnectivityNotice {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 25. FILE THUMBNAIL — uniform-size preview for image/video rows
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Uniform thumbnail box edge (px). Every image/video file row renders its
+/// preview at this exact size, so thumbnails never vary by content.
+pub(crate) const FILE_THUMBNAIL_EDGE: f32 = 40.0;
+
+/// Render a uniform-size thumbnail preview for a picture or video file.
+///
+/// When `handle` is present the image is drawn with `ContentFit::Cover` so
+/// the preview fills the fixed box regardless of the source aspect ratio.
+/// When the handle is absent (still loading, unsupported, or non-media) the
+/// fallback icon is centred inside the same box, keeping every row the same
+/// height.
+pub(crate) fn file_thumbnail<'a>(
+    handle: Option<&'a iced::widget::image::Handle>,
+    fallback_icon: Icon,
+    _theme: &Theme,
+) -> Element<'a, AppMessage> {
+    let content: Element<'a, AppMessage> = match handle {
+        Some(handle) => iced::widget::image(handle.clone())
+            .width(Length::Fixed(FILE_THUMBNAIL_EDGE))
+            .height(Length::Fixed(FILE_THUMBNAIL_EDGE))
+            .content_fit(iced::ContentFit::Cover)
+            .into(),
+        None => container(
+            fallback_icon
+                .build()
+                .size(IconSize::Md)
+                .color_fn(design_tokens::text_secondary)
+                .build(),
+        )
+        .width(Length::Fixed(FILE_THUMBNAIL_EDGE))
+        .height(Length::Fixed(FILE_THUMBNAIL_EDGE))
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(move |t| container::Style {
+            background: Some(Background::Color(design_tokens::surface_hover(t))),
+            border: Border {
+                radius: design_tokens::RADIUS_SM.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into(),
+    };
+
+    container(content)
+        .width(Length::Fixed(FILE_THUMBNAIL_EDGE))
+        .height(Length::Fixed(FILE_THUMBNAIL_EDGE))
+        .style(move |t| container::Style {
+            border: Border {
+                color: design_tokens::border_muted(t),
+                radius: design_tokens::RADIUS_SM.into(),
+                width: 1.0,
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -2914,6 +2976,19 @@ mod tests {
     fn overflow_menu_disabled() {
         let el: Element<'static, AppMessage> =
             OverflowMenu::build(AppMessage::Noop, true, &Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn file_thumbnail_without_handle_builds_uniform_box() {
+        let el: Element<'static, AppMessage> = file_thumbnail(None, Icon::Image, &Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn file_thumbnail_with_handle_builds_uniform_box() {
+        let handle = iced::widget::image::Handle::from_bytes(vec![0xFF, 0xD8]);
+        let el = file_thumbnail(Some(&handle), Icon::Image, &Theme::Light);
         let _ = el;
     }
 }

@@ -3219,6 +3219,14 @@ pub struct IcedChat {
     /// Non-fatal load error for the Shared by Me card (renders a truthful
     /// error state instead of silently showing an empty list).
     shared_by_me_error: Option<String>,
+    /// UI-30: uniform thumbnails for image/video rows in the Shared by Me
+    /// table, keyed by content hash. Handles are generated off the UI thread
+    /// from the local source file (`image_optimizer` for pictures,
+    /// `video_poster` for poster frames) and rendered at a fixed box size.
+    shared_by_me_thumbnails: std::collections::HashMap<
+        String,
+        Option<iced::widget::image::Handle>,
+    >,
     /// Recent download activity rows (durable projection, newest first) shown
     /// in the "Recent Download Activity" card.
     dashboard_recent_activity: Vec<crate::recent_activity_view_model::RecentActivityRow>,
@@ -3998,6 +4006,13 @@ pub enum AppMessage {
             String,
         >,
     ),
+    /// UI-30: a uniform thumbnail finished generating for a Shared by Me row.
+    /// `None` means generation failed or the file is not media — the row falls
+    /// back to its type icon.
+    SharedByMeThumbnailReady {
+        content_hash: String,
+        handle: Option<iced::widget::image::Handle>,
+    },
     /// Durable transfer activity loaded for the Recent Download Activity card.
     DashboardRecentActivityLoaded(Vec<crate::recent_activity_view_model::RecentActivityRow>),
     /// The FS-13 Sharing Summary projection finished loading. `None` keeps
@@ -5348,6 +5363,54 @@ fn dashboard_card<'a>(
         .style(|t| crate::design_tokens::card_style(t))
 }
 
+/// UI-30: generate a uniform thumbnail handle for one local shared file.
+///
+/// Runs off the UI thread (spawned by `IcedChat::kick_shared_by_me_thumbnails`).
+/// Pictures are downsampled with `boru_core::image_optimizer::thumbnail_image`;
+/// videos produce a bounded poster frame via `boru_core::video_poster::generate`
+/// (ffmpeg-backed, cached under the video-posters cache dir). Returns `None`
+/// when the file is missing, unreadable, or not decodable so the table row can
+/// fall back to its type icon.
+async fn generate_shared_by_me_thumbnail(
+    storage: &Storage,
+    content_hash: &str,
+    is_video: bool,
+    cache_dir: &std::path::Path,
+) -> Option<iced::widget::image::Handle> {
+    let object = storage.get_file_object(content_hash).ok().flatten()?;
+    if is_video {
+        let path = std::path::PathBuf::from(object.source_path.as_deref()?);
+        let cache_dir = cache_dir.to_path_buf();
+        let poster = tokio::task::spawn_blocking(move || {
+            boru_core::video_poster::generate(&path, &cache_dir).ok()
+        })
+        .await
+        .ok()?;
+        let poster = poster?;
+        return Some(iced::widget::image::Handle::from_bytes(poster.bytes));
+    }
+    let raw = if let Some(path) = object.source_path.as_deref() {
+        let path = std::path::PathBuf::from(path);
+        tokio::task::spawn_blocking(move || std::fs::read(&path).ok())
+            .await
+            .ok()?
+    } else {
+        Some(object.data?)
+    };
+    let Some(raw) = raw else { return None; };
+    let thumb = tokio::task::spawn_blocking(move || {
+        boru_core::image_optimizer::thumbnail_image(
+            &raw,
+            boru_core::image_optimizer::THUMBNAIL_MAX_EDGE,
+        )
+        .ok()
+    })
+    .await
+    .ok()?;
+    let thumb = thumb?;
+    Some(iced::widget::image::Handle::from_bytes(thumb))
+}
+
 /// FS-18: one sort-control chip for the dashboard sort rows.
 ///
 /// Active chips show an arrow (↑/↓) reflecting the current direction; every
@@ -6022,6 +6085,7 @@ impl IcedChat {
             shared_by_me_loading: true,
             shared_by_me_rows: Vec::new(),
             shared_by_me_error: None,
+            shared_by_me_thumbnails: std::collections::HashMap::new(),
             dashboard_recent_activity: Vec::new(),
             dashboard_sharing_summary: None,
             downloaded_history: Vec::new(),
@@ -7335,6 +7399,7 @@ impl IcedChat {
             AppMessage::SharedByMeCancelStopSharing => "SharedByMeCancelStopSharing",
             AppMessage::SharedByMeRevokeAccess(..) => "SharedByMeRevokeAccess",
             AppMessage::SharedByMeLoaded(_) => "SharedByMeLoaded",
+            AppMessage::SharedByMeThumbnailReady { .. } => "SharedByMeThumbnailReady",
             AppMessage::DashboardRecentActivityLoaded(_) => "DashboardRecentActivityLoaded",
             AppMessage::DashboardSharingSummaryLoaded(_) => "DashboardSharingSummaryLoaded",
             AppMessage::DashboardDownloadedRefresh => "DashboardDownloadedRefresh",
@@ -17653,6 +17718,15 @@ impl IcedChat {
                 // FS-18: rebuild the filtered/sorted projection from the
                 // freshly loaded authoritative rows.
                 self.refresh_shared_by_me_filter();
+                // UI-30: kick off uniform thumbnail generation for any
+                // image/video rows that don't have a handle yet.
+                self.kick_shared_by_me_thumbnails()
+            }
+            AppMessage::SharedByMeThumbnailReady {
+                content_hash,
+                handle,
+            } => {
+                self.shared_by_me_thumbnails.insert(content_hash, handle);
                 iced::Task::none()
             }
             AppMessage::DashboardRecentActivityLoaded(rows) => {
@@ -29010,12 +29084,48 @@ impl IcedChat {
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
+        // UI-30: exit mechanism — the Shared with Me tab owns its full content
+        // area (no dashboard header/tab bar), so an explicit back button is the
+        // only visible way to return to the file sharing overview.
+        let back_button = button(
+            Row::new()
+                .push(
+                    Icon::Back
+                        .build()
+                        .size(IconSize::Sm)
+                        .color_fn(crate::design_tokens::text_secondary)
+                        .build(),
+                )
+                .push(text("Back to File Sharing").size(TYPO_SM))
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::DashboardTabSelected(
+            crate::dashboard_view_model::DashboardTab::SharedByMe,
+        ))
+        .padding([SPACE_4, SPACE_8])
+        .style(BUTTON_GHOST_BG);
+
+        let header = Row::new()
+            .push(back_button)
+            .push(Space::new().width(Length::Fill))
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+
         // Loading state — catalogue fetch in progress.
         if self.catalogue_loading && self.catalogue_error.is_none() {
             return container(
-                crate::ui_components::LoadingSkeleton::new(3)
-                    .row_height(crate::design_tokens::TABLE_ROW_HEIGHT)
-                    .build(&theme),
+                Column::new()
+                    .push(header)
+                    .push(Space::new().height(Length::Fixed(SPACE_12)))
+                    .push(
+                        crate::ui_components::LoadingSkeleton::new(3)
+                            .row_height(crate::design_tokens::TABLE_ROW_HEIGHT)
+                            .build(&theme),
+                    )
+                    .spacing(0)
+                    .width(Length::Fill),
             )
             .width(Length::Fill)
             .padding([SPACE_24, SPACE_24])
@@ -29024,14 +29134,15 @@ impl IcedChat {
 
         // Inline error with dismiss — catalogue fetch failed.
         if let Some(error) = &self.catalogue_error {
-            let error_el = crate::ui_components::InlineError::new(error)
-                .build(&theme);
+            let error_el = crate::ui_components::InlineError::new(error).build(&theme);
             let dismiss = button(text("Dismiss").size(TYPO_XS))
                 .on_press(AppMessage::CatalogueErrorDismissed)
                 .padding([SPACE_4, SPACE_8])
                 .style(BUTTON_GHOST_BG);
             return container(
                 Column::new()
+                    .push(header)
+                    .push(Space::new().height(Length::Fixed(SPACE_12)))
                     .push(error_el)
                     .push(Space::new().height(Length::Fixed(SPACE_12)))
                     .push(dismiss)
@@ -29046,14 +29157,21 @@ impl IcedChat {
         let Some((peer, files)) = self.peer_catalogue_view.as_ref() else {
             return container(
                 Column::new()
-                    .push(text("No files have been shared with you yet.").size(TYPO_MD))
+                    .push(header)
+                    .push(Space::new().height(Length::Fixed(SPACE_12)))
                     .push(
-                        text("Validated peer catalogues will appear here.")
-                            .size(TYPO_SM)
-                            .style(text_muted_style),
+                        Column::new()
+                            .push(text("No files have been shared with you yet.").size(TYPO_MD))
+                            .push(
+                                text("Validated peer catalogues will appear here.")
+                                    .size(TYPO_SM)
+                                    .style(text_muted_style),
+                            )
+                            .spacing(SPACE_8)
+                            .align_x(Alignment::Center),
                     )
-                    .spacing(SPACE_8)
-                    .align_x(Alignment::Center),
+                    .spacing(0)
+                    .width(Length::Fill),
             )
             .width(Length::Fill)
             .padding(SPACE_24)
@@ -29129,9 +29247,31 @@ impl IcedChat {
                     .padding([SPACE_6, SPACE_12])
                     .style(BUTTON_GHOST_BG)
             };
+            // UI-30: uniform-size media thumbnail for image/video rows. Remote
+            // files have no local bytes (until downloaded), so the thumbnail
+            // box shows the type icon at the same fixed size used by the
+            // Shared by Me table — every media row stays visually uniform.
+            let mime = file.mime_type.as_str();
+            let is_image = mime.starts_with("image/");
+            let is_video = mime.starts_with("video/");
+            let media_thumb: iced::Element<'_, AppMessage> = if is_image || is_video {
+                crate::ui_components::file_thumbnail(
+                    None,
+                    if is_image { Icon::Image } else { Icon::Play },
+                    &theme,
+                )
+                .into()
+            } else {
+                Space::new()
+                    .width(Length::Fixed(crate::ui_components::FILE_THUMBNAIL_EDGE))
+                    .height(Length::Fixed(crate::ui_components::FILE_THUMBNAIL_EDGE))
+                    .into()
+            };
             rows = rows.push(
                 container(
                     Row::new()
+                        .push(media_thumb)
+                        .push(Space::new().width(Length::Fixed(SPACE_12)))
                         .push(
                             Column::new()
                                 .push(text(item.display_name).size(TYPO_SM))
@@ -29180,6 +29320,8 @@ impl IcedChat {
 
         container(
             Column::new()
+                .push(header)
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
                 .push(text("Shared with Me").size(TYPO_MD))
                 .push(
                     text(format!(
@@ -29294,6 +29436,59 @@ impl IcedChat {
             .collect();
         self.dashboard_shared_by_me_sort.apply(&mut filtered);
         self.dashboard_shared_by_me_filter = filtered;
+    }
+
+    /// UI-30: spawn uniform thumbnail generation for every image/video row in
+    /// the Shared by Me table that doesn't have a handle yet.
+    ///
+    /// Each row loads its `FileObject` (source path or inline data), then
+    /// produces a bounded preview off the UI thread: `image_optimizer` for
+    /// pictures, `video_poster` for a poster frame of videos. Results arrive
+    /// as [`AppMessage::SharedByMeThumbnailReady`]; failures and unsupported
+    /// files map to `None` and fall back to the row's type icon.
+    fn kick_shared_by_me_thumbnails(&mut self) -> iced::Task<AppMessage> {
+        let Some(storage) = self.storage.clone() else {
+            return iced::Task::none();
+        };
+        let cache_dir = self.data_dir.join("cache").join("video-posters");
+        let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
+        for row in &self.shared_by_me_rows {
+            let Some(mime) = row.mime_type.as_deref() else {
+                continue;
+            };
+            let is_image = mime.starts_with("image/");
+            let is_video = mime.starts_with("video/");
+            if !is_image && !is_video {
+                continue;
+            }
+            if self.shared_by_me_thumbnails.contains_key(&row.content_hash) {
+                continue;
+            }
+            let content_hash = row.content_hash.clone();
+            let storage = storage.clone();
+            let cache_dir = cache_dir.clone();
+            tasks.push(iced::Task::perform(
+                async move {
+                    let handle = generate_shared_by_me_thumbnail(
+                        &storage,
+                        &content_hash,
+                        is_video,
+                        &cache_dir,
+                    )
+                    .await;
+                    (content_hash, handle)
+                },
+                |(content_hash, handle)| AppMessage::SharedByMeThumbnailReady {
+                    content_hash,
+                    handle,
+                },
+            ));
+        }
+        if tasks.is_empty() {
+            iced::Task::none()
+        } else {
+            iced::Task::batch(tasks)
+        }
     }
 
     /// Load the durable transfer-activity projection for the Recent Download
@@ -31649,6 +31844,7 @@ impl IcedChat {
                     load_state,
                     theme,
                     self.dark_mode,
+                    &self.shared_by_me_thumbnails,
                 )
                 .into()
             };
