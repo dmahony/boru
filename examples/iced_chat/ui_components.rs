@@ -2433,21 +2433,19 @@ pub(crate) enum NoticeSeverity {
 ///
 /// Unlike [`InlineError`], this banner is dismissible and does not take over
 /// the entire content area — usable regions remain accessible.
-pub(crate) struct ConnectivityNotice<'a> {
+pub(crate) struct ConnectivityNotice {
     message: String,
     severity: NoticeSeverity,
     dismiss_msg: Option<AppMessage>,
-    _phantom: std::marker::PhantomData<&'a ()>,
 }
 
-impl<'a> ConnectivityNotice<'a> {
+impl ConnectivityNotice {
     /// Create a connectivity notice with a severity and message.
     pub fn new(severity: NoticeSeverity, message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             severity,
             dismiss_msg: None,
-            _phantom: std::marker::PhantomData,
         }
     }
 
@@ -2458,7 +2456,7 @@ impl<'a> ConnectivityNotice<'a> {
     }
 
     /// Build the notice element.
-    pub fn build(self, theme: &Theme) -> Element<'a, AppMessage> {
+    pub fn build(self, theme: &Theme) -> Element<'static, AppMessage> {
         let (bg_color, border_color, text_color, icon) = match self.severity {
             NoticeSeverity::Offline => (
                 design_tokens::color_danger(theme).scale_alpha(0.07),
@@ -2480,10 +2478,16 @@ impl<'a> ConnectivityNotice<'a> {
             ),
         };
 
+        // color_fn requires a non-capturing fn pointer; select the token
+        // function per severity instead of capturing the computed color.
+        let icon_color: fn(&iced::Theme) -> iced::Color = match self.severity {
+            NoticeSeverity::Offline => design_tokens::color_danger,
+            NoticeSeverity::Stale | NoticeSeverity::Warning => design_tokens::color_warning,
+        };
         let icon_el = icon
             .build()
             .size(IconSize::Xs)
-            .color_fn(move |_| text_color)
+            .color_fn(icon_color)
             .build();
 
         let msg_text = text(self.message)

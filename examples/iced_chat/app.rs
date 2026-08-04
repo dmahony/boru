@@ -5376,7 +5376,7 @@ fn dashboard_sort_chip<'a>(
 fn dashboard_connectivity_notice(
     app: &IcedChat,
     theme: &iced::Theme,
-) -> Option<iced::Element<'_, AppMessage>> {
+) -> Option<iced::Element<'static, AppMessage>> {
     use crate::ui_components::{ConnectivityNotice, NoticeSeverity};
     if app.dashboard_connectivity_dismissed {
         return None;
@@ -15648,7 +15648,19 @@ impl IcedChat {
                             .map_err(|e| format!("Invalid content hash: {e}"))?;
                         let candidates =
                             boru_core::chat_core::download_candidates(peer, &neighbors);
-                        let save_path = dl_dir.join(&display_name);
+                        // FS-20 hardening: derive the destination through the
+                        // shared safe-destination helper (strip separators,
+                        // reject traversal, dedupe collisions) even though the
+                        // catalogue validation already rejects unsafe names.
+                        // Falls back to a content-hash stem when the display
+                        // name is empty or reserved.
+                        let save_path =
+                            boru_core::safe_destination::safe_destination_path(
+                                &dl_dir,
+                                &display_name,
+                                &content_hash,
+                            )
+                            .map_err(|e| format!("Unsafe download name: {e}"))?;
                         let kind = boru_core::chat_callbacks::TransferKind::File;
                         download_blob_to_file(
                             &blob_store,
@@ -31465,6 +31477,12 @@ impl IcedChat {
             ));
         }
 
+        // ── FS-19: connectivity notice at the top of the dashboard when the
+        // mesh is unhealthy or the user is offline. Dismissible — does not
+        // block interaction with unaffected regions. Built before `theme` is
+        // moved into the shared-by-me card below.
+        let connectivity_notice = dashboard_connectivity_notice(self, &theme);
+
         let file_table_card: iced::Element<'_, AppMessage> =
             if !search_query.trim().is_empty() && visible_rows.is_empty() {
                 // The query filtered everything out — a search-specific empty
@@ -31550,11 +31568,6 @@ impl IcedChat {
             .height(Length::Fill);
 
         // ── Compose full page ──
-        // FS-19: connectivity notice at the top of the dashboard when the
-        // mesh is unhealthy or the user is offline. Dismissible — does not
-        // block interaction with unaffected regions.
-        let connectivity_notice = dashboard_connectivity_notice(self, &theme);
-
         let mut page = Column::new()
             .push(header)
             .push(Space::new().height(Length::Fixed(SPACE_20)))

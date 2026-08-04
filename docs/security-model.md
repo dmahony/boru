@@ -67,6 +67,14 @@ status, file availability, expected content hash, expected size, and expected
 version. A stale catalogue therefore cannot preserve access after a permission
 or file change.
 
+Permission grants may carry an optional `expires_at_ms`. Expired grants are
+inert at request time: they neither authorize nor deny (FS-20 hardening). The
+request-time loops in `FileAccessHandler::check_permission`, the catalogue
+visibility paths, and the SQL helpers (`check_permission`,
+`count_read_grants_for_file`, `has_active_permissions_for_file`) all treat an
+expired grant as absent. Descriptor lifetime (default 60 s) is separate from
+grant expiry; the descriptor is bound to its own issue/expiry window.
+
 A successful response is an owner-signed `SignedDownloadDescriptor` bound
 to the owner, requester, shared-file ID, content/blob hash, size, timestamps,
 and random nonce. The default lifetime is 60 seconds. Descriptors are intended
