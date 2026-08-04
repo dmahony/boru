@@ -665,8 +665,10 @@ fn v2_subkeys_are_distinct_from_v1_namespace() {
 /// a DIFFERENT signature that the V1 validator would reject.
 #[test]
 fn v1_record_accepted_v2_subkey_rejected_by_v1_validator() {
-    use boru_core::discovery_record::create_discovery_record;
-    use boru_core::discovery_validation::{DiscoveryRecordValidator, ValidationConfig};
+    use boru_core::{
+        discovery_record::create_discovery_record,
+        discovery_validation::{DiscoveryRecordValidator, ValidationConfig},
+    };
     use distributed_topic_tracker::unix_minute;
 
     let secret = test_secret();
@@ -679,9 +681,8 @@ fn v1_record_accepted_v2_subkey_rejected_by_v1_validator() {
         let ep = sk.public();
         (sk, ep)
     };
-    let v1_record =
-        create_discovery_record(*secret.as_bytes(), now, &ep, &sk, None, None)
-            .expect("create V1 record");
+    let v1_record = create_discovery_record(*secret.as_bytes(), now, &ep, &sk, None, None)
+        .expect("create V1 record");
 
     // V1 validator with the raw secret as topic should accept it.
     let v1_config = ValidationConfig::new(*secret.as_bytes());

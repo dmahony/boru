@@ -10,17 +10,21 @@
 //! "DHT" that shares state via `Arc<RwLock<...>>`.  No network calls, no
 //! tickets, no invites, no live Mainline DHT.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use boru_core::discovery_backend::{
-    canonical_lobby_key, EncryptedDiscoveryRecord, InMemoryDiscoveryBackend, NamespaceId,
-    TopicDiscoveryBackend,
+use boru_core::{
+    discovery_backend::{
+        canonical_lobby_key, EncryptedDiscoveryRecord, InMemoryDiscoveryBackend, NamespaceId,
+        TopicDiscoveryBackend,
+    },
+    discovery_record::create_discovery_record,
+    public_room::{public_room_identity, PublicNetwork},
+    public_room_tracker::PublicRoomTracker,
 };
-use boru_core::discovery_record::create_discovery_record;
-use boru_core::public_room::{public_room_identity, PublicNetwork};
-use boru_core::public_room_tracker::PublicRoomTracker;
 use distributed_topic_tracker::unix_minute;
 use iroh::{EndpointId, SecretKey};
 use n0_error::Result;
@@ -342,9 +346,15 @@ async fn test_malformed_records_mixed_with_valid() -> Result<()> {
     // to a different topic, i.e. will fail signature verification).
     let (other_sk, other_ep) = make_identity();
     let wrong_topic = [0xBBu8; 32];
-    let wrong_record =
-        create_discovery_record(wrong_topic, unix_minute(0), &other_ep, &other_sk, None, None)
-            .unwrap();
+    let wrong_record = create_discovery_record(
+        wrong_topic,
+        unix_minute(0),
+        &other_ep,
+        &other_sk,
+        None,
+        None,
+    )
+    .unwrap();
     backend
         .publish(
             &namespace,
