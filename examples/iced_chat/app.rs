@@ -40504,4 +40504,288 @@ mod tests {
             "queued backlog is retained for replay after the badge clears"
         );
     }
+
+// ═════════════════════════════════════════════════════════════════
+// UI-RESTYLE-11 follow-up — PERMANENT regression harness for the
+// three creation flows (Create Group Chat / Create Public Room /
+// Create Tunnel).
+//
+// Refactored from the original UI-RESTYLE-11 temporary harness to
+// assert on OBSERVABLE OUTCOMES wherever possible:
+//   • system messages (entries with ChatKind::System)
+//   • toasts (toast_message)
+//   • store entries (conversation_store / shared_tunnels)
+//   • screen/dialog flags (show_*_dialog, share_local_service_open,
+//     room_loading)
+//   • rendered view (app.view() smoke-render)
+//
+// Remaining internal-state assertions (text-input values, member
+// selection set, expiry picker) are INTENTIONAL: iced's Element tree
+// is not introspectable in a headless test, so typed text and
+// selection state have no observable proxy other than the state that
+// renders them. Each such assertion is marked "intentional state".
+//
+// NOTE (UI-RESTYLE-07 drift): the Create Group Chat dialog no longer
+// has a search/filter field (removed during the dialog restyle), so
+// the original harness's CreateGroupSearchChanged coverage is
+// obsolete; name + description + member toggle coverage is retained.
+// ═════════════════════════════════════════════════════════════════
+
+fn vr_seed_friend(app: &mut IcedChat, peer: PublicKey, label: &str) {
+    use boru_core::friends::{FriendId, FriendRecord, FriendRelationship};
+    app.friends.upsert(
+        FriendId::from_public_key(peer),
+        FriendRecord {
+            label: Some(label.to_string()),
+            relationship: FriendRelationship::Friends,
+            ..Default::default()
+        },
+    );
+}
+
+fn vr_system_bodies(app: &IcedChat) -> Vec<String> {
+    app.entries
+        .iter()
+        .filter(|e| matches!(e.kind, ChatKind::System))
+        .map(|e| e.body.clone())
+        .collect()
+}
+
+#[test]
+fn vr_create_group_chat_opens_renders_and_accepts_input() {
+    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+    vr_seed_friend(&mut app, peer, "Bob");
+
+    // Observable: the dialog opens (screen/dialog flag).
+    assert!(!app.show_create_group_dialog);
+    let _ = app.update(AppMessage::ShowCreateGroupDialog);
+    assert!(app.show_create_group_dialog, "dialog opens (observable flag)");
+    let _ = app.view(); // renders without panic
+
+    // Intentional state: name/description inputs hold typed text; no
+    // observable proxy exists in a headless test.
+    let _ = app.update(AppMessage::CreateGroupNameChanged("Weekend Plans".into()));
+    let _ = app.update(AppMessage::CreateGroupDescriptionChanged("Beach trip".into()));
+    assert_eq!(app.create_group_name, "Weekend Plans");
+    assert_eq!(app.create_group_description, "Beach trip");
+
+    // Intentional state: member selection set renders as checkboxes in
+    // view(); toggle selects then deselects.
+    let _ = app.update(AppMessage::CreateGroupMemberToggled(peer));
+    assert!(
+        app.create_group_selected_members.contains(&peer),
+        "peer selectable and toggle selects it"
+    );
+    let _ = app.view(); // renders chip + selected row without panic
+
+    let _ = app.update(AppMessage::CreateGroupMemberToggled(peer));
+    assert!(app.create_group_selected_members.is_empty(), "toggle deselects");
+    let _ = app.view();
+}
+
+#[test]
+fn vr_create_group_chat_confirm_cancel_and_validation() {
+    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+    vr_seed_friend(&mut app, peer, "Bob");
+
+    // Observable: cancel closes the dialog (screen/dialog flag).
+    let _ = app.update(AppMessage::ShowCreateGroupDialog);
+    assert!(app.show_create_group_dialog);
+    let _ = app.update(AppMessage::HideCreateGroupDialog);
+    assert!(!app.show_create_group_dialog);
+
+    // Observable: empty-name confirm surfaces a SYSTEM MESSAGE and the
+    // dialog stays open; no async creation starts (room_loading flag
+    // stays false).
+    let _ = app.update(AppMessage::ShowCreateGroupDialog);
+    let _ = app.update(AppMessage::ConfirmCreateGroup);
+    assert!(
+        vr_system_bodies(&app).contains(&"Group name is required.".to_string()),
+        "system message surfaces for empty group name"
+    );
+    assert!(app.show_create_group_dialog, "dialog stays open on invalid submit");
+    assert!(!app.room_loading, "no async creation started");
+
+    // Observable: named confirm raises the submit loading flag and
+    // room_loading (async creation in flight); post UI-RESTYLE-07 the
+    // dialog stays open with a loading state rather than closing
+    // immediately.
+    let _ = app.update(AppMessage::CreateGroupNameChanged("Weekend Plans".into()));
+    let _ = app.update(AppMessage::ConfirmCreateGroup);
+    assert!(
+        app.create_group_submitting,
+        "submit loading flag raised on valid submit"
+    );
+    assert!(app.room_loading, "creation loading flag set");
+    assert!(
+        app.show_create_group_dialog,
+        "dialog stays open while submitting"
+    );
+    let _ = app.view(); // renders loading state without panic
+}
+
+#[test]
+fn vr_create_public_room_opens_renders_and_accepts_input() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Observable: the dialog opens (screen/dialog flag); DHT defaults on.
+    assert!(!app.show_create_room_dialog);
+    let _ = app.update(AppMessage::CreateNewRoom);
+    assert!(app.show_create_room_dialog, "dialog opens (observable flag)");
+    assert!(app.create_room_dht_enabled, "DHT discovery defaults on");
+    let _ = app.view(); // renders without panic
+
+    // Intentional state: name text and toggle switches; no observable
+    // proxy in a headless test.
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Lobby".into()));
+    let _ = app.update(AppMessage::CreateNewRoomAdvertiseToggled(true));
+    let _ = app.update(AppMessage::CreateNewRoomDhtToggled(false));
+    assert_eq!(app.create_room_name, "Lobby");
+    assert!(app.create_room_advertise, "advertise toggle accepted");
+    assert!(!app.create_room_dht_enabled, "DHT toggle accepted");
+    let _ = app.view();
+}
+
+#[test]
+fn vr_create_public_room_confirm_cancel_and_validation() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Observable: cancel closes the dialog (screen/dialog flag).
+    let _ = app.update(AppMessage::CreateNewRoom);
+    assert!(app.show_create_room_dialog);
+    let _ = app.update(AppMessage::CancelCreateRoom);
+    assert!(!app.show_create_room_dialog);
+
+    // Observable: advertised path persists a conversation-store entry
+    // with the entered name (store entry) and raises the submit loading
+    // flag; post UI-RESTYLE-07 the dialog stays open while the async
+    // create runs instead of closing immediately.
+    let _ = app.update(AppMessage::CreateNewRoom);
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Beach House".into()));
+    let _ = app.update(AppMessage::CreateNewRoomAdvertiseToggled(true));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+    assert!(
+        app.create_room_submitting,
+        "submit loading flag raised on create"
+    );
+    assert!(app.show_create_room_dialog, "dialog stays open while creating");
+    assert!(
+        app.conversation_store
+            .iter()
+            .any(|e| e.name == "Beach House"),
+        "conversation-store entry persisted with entered name"
+    );
+    let _ = app.view(); // renders loading state without panic
+
+    // Observable: empty name is ALLOWED (existing behaviour) — the
+    // display name falls back to the topic id; no error surfaces, and
+    // an archived conversation-store entry is still persisted while
+    // the submit loading flag is raised.
+    let _ = app.update(AppMessage::CreateNewRoom);
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged(String::new()));
+    let _ = app.update(AppMessage::CreateNewRoomAdvertiseToggled(true));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+    assert!(
+        app.create_room_submitting,
+        "submit loading flag raised for empty-name create"
+    );
+    assert!(
+        app.conversation_store
+            .iter()
+            .any(|e| e.archived && !e.name.is_empty() && e.name == e.topic.to_string()),
+        "empty-name fallback persists entry named by topic id"
+    );
+}
+
+#[test]
+fn vr_create_tunnel_opens_renders_picks_friend_and_configures() {
+    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+    vr_seed_friend(&mut app, peer, "Bob");
+
+    // Observable: the friend-picker dialog opens (screen/dialog flag).
+    assert!(!app.show_create_tunnel_dialog);
+    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+    assert!(app.show_create_tunnel_dialog, "picker opens (observable flag)");
+    let _ = app.view(); // renders without panic
+
+    // Observable: picking a friend routes to the share-local-service
+    // form (dialog flags + screen transition).
+    let _ = app.update(AppMessage::CreateTunnel(peer));
+    assert!(!app.show_create_tunnel_dialog, "picker closes after pick");
+    assert!(
+        app.share_local_service_open,
+        "share-local-service form opens (observable flag)"
+    );
+    assert!(
+        matches!(app.screen, Screen::FriendProfile(p) if p == peer),
+        "routes to friend profile screen"
+    );
+
+    // Intentional state: form defaults + updates; no observable proxy.
+    assert_eq!(app.share_service_name, "Development Server");
+    assert_eq!(app.share_service_port, "3000");
+    assert_eq!(
+        app.share_service_expiry,
+        boru_core::tunnel::service::TunnelDuration::OneHour
+    );
+    let _ = app.update(AppMessage::ShareLocalServiceNameChanged("Media".into()));
+    let _ = app.update(AppMessage::ShareLocalServicePortChanged("8080".into()));
+    let _ = app.update(AppMessage::ShareLocalServiceExpiryChanged(
+        boru_core::tunnel::service::TunnelDuration::EightHours,
+    ));
+    assert_eq!(app.share_service_name, "Media");
+    assert_eq!(app.share_service_port, "8080");
+    assert_eq!(
+        app.share_service_expiry,
+        boru_core::tunnel::service::TunnelDuration::EightHours
+    );
+    let _ = app.view();
+}
+
+#[test]
+fn vr_create_tunnel_confirm_cancel_and_validation() {
+    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+    vr_seed_friend(&mut app, peer, "Bob");
+
+    // Observable: cancel closes the picker (screen/dialog flag).
+    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+    assert!(app.show_create_tunnel_dialog, "picker opens");
+    let _ = app.update(AppMessage::CancelCreateTunnel);
+    assert!(!app.show_create_tunnel_dialog, "picker cancels");
+
+    // Observable: cancel closes the share-local-service form.
+    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+    let _ = app.update(AppMessage::CreateTunnel(peer));
+    assert!(app.share_local_service_open, "form opens after friend pick");
+    let _ = app.update(AppMessage::CancelShareLocalService);
+    assert!(!app.share_local_service_open, "form cancels");
+
+    // Observable: bad port → TOAST, form stays open, no tunnel
+    // registered (shared_tunnels store stays empty).
+    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+    let _ = app.update(AppMessage::CreateTunnel(peer));
+    let _ = app.update(AppMessage::ShareLocalServicePortChanged("not-a-port".into()));
+    let _ = app.update(AppMessage::ConfirmShareLocalService);
+    assert_eq!(
+        app.toast_message.as_deref(),
+        Some("Enter a valid local port (1-65535) to share."),
+        "bad port surfaces a toast"
+    );
+    assert!(app.share_local_service_open, "form stays open on invalid port");
+    assert!(app.shared_tunnels.is_empty(), "no tunnel registered");
+
+    // Observable: valid config closes the form and registers the
+    // tunnel in shared_tunnels (store entry) with the service name.
+    let _ = app.update(AppMessage::ShareLocalServiceNameChanged("Media".into()));
+    let _ = app.update(AppMessage::ShareLocalServicePortChanged("3000".into()));
+    let _ = app.update(AppMessage::ConfirmShareLocalService);
+    assert!(!app.share_local_service_open, "form closes on valid config");
+    assert_eq!(app.shared_tunnels.len(), 1, "one tunnel registered");
+    assert!(
+        app.shared_tunnels
+            .values()
+            .any(|t| t.service_name == "Media"),
+        "tunnel store entry carries the configured service name"
+    );
+}
 }
