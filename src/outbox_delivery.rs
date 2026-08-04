@@ -611,7 +611,13 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                     };
 
                     if success {
-                        let _ = storage.mark_sent(&row.msg_id, peer);
+                        let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
+                        let delay = retry_policy.delay_ms(row.attempts, jitter);
+                        let _ = storage.mark_sent(
+                            &row.msg_id,
+                            peer,
+                            now.saturating_add(delay),
+                        );
                     } else {
                         let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
                         let delay = retry_policy.delay_ms(row.attempts, jitter);
@@ -690,7 +696,9 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             Err(err) => (false, Some(err.to_string())),
         };
         if success {
-            let _ = self.storage.mark_sent(&msg_id, peer);
+            let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
+            let delay = self.retry_policy.delay_ms(row.attempts, jitter);
+            let _ = self.storage.mark_sent(&msg_id, peer, now.saturating_add(delay));
         } else {
             let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
             let delay = self.retry_policy.delay_ms(row.attempts, jitter);

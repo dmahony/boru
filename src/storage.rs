@@ -2306,8 +2306,12 @@ impl Storage {
     /// remote peer.  Transitions `Sending` → `Sent`.  This is distinct
     /// from an end-to-end ACK (see [`mark_acked`]).
     ///
-    /// `Sent` rows are still eligible for retry: after a timeout they
-    /// become claimable again via [`claim_pending_deliveries`].
+    /// `Sent` rows are still eligible for retry: they become claimable
+    /// again once `next_attempt_at_ms` (the retry delay) has passed.
+    /// Callers should pass `now + retry_policy.delay_ms(...)` so the row
+    /// is NOT instantly re-claimable by the next `run_once` batch claim —
+    /// otherwise the concurrent delivery loop re-claims the same rows
+    /// forever.
     ///
     /// Idempotent: does nothing if the row is already `Acked` or
     /// `Expired` (guarded by WHERE).
@@ -2315,14 +2319,16 @@ impl Storage {
         &self,
         msg_id: &MessageId,
         recipient_device_id: iroh::PublicKey,
+        next_attempt_at_ms: u64,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE outbox SET status = ?1
-             WHERE msg_id = ?2 AND recipient_device_id = ?3
-               AND status != ?4 AND status != ?5",
+            "UPDATE outbox SET status = ?1, next_attempt_at_ms = ?2
+             WHERE msg_id = ?3 AND recipient_device_id = ?4
+               AND status != ?5 AND status != ?6",
             params![
                 DeliveryStatus::Sent as u8,
+                next_attempt_at_ms as i64,
                 msg_id.as_slice(),
                 recipient_device_id.as_bytes(),
                 DeliveryStatus::Acked as u8,
@@ -7666,8 +7672,9 @@ mod tests {
         assert_eq!(_claimed.len(), 1);
         assert_eq!(_claimed[0].status, DeliveryStatus::Sending);
 
-        // First mark_sent: Sending → Sent
-        storage.mark_sent(&msg_id, peer).unwrap();
+        // First mark_sent: Sending → Sent (next_attempt_at_ms = 100, so
+        // the row is still immediately claimable for retry).
+        storage.mark_sent(&msg_id, peer, 100).unwrap();
 
         // Sent rows are still claimable
         let claimed_after = storage.claim_pending_deliveries(5, 100).unwrap();
@@ -7677,7 +7684,7 @@ mod tests {
         );
 
         // Second mark_sent: no-op, stays Sent
-        storage.mark_sent(&msg_id, peer).unwrap();
+        storage.mark_sent(&msg_id, peer, 100).unwrap();
     }
 
     /// `mark_sent` on an already-acked row is a no-op (guarded by WHERE).
@@ -7692,7 +7699,7 @@ mod tests {
         storage.mark_acked(&msg_id, peer).unwrap();
 
         // mark_sent on Acked row should not change status
-        storage.mark_sent(&msg_id, peer).unwrap();
+        storage.mark_sent(&msg_id, peer, 200).unwrap();
 
         // Acked rows are not claimable
         let claimed = storage.claim_pending_deliveries(5, 200).unwrap();
@@ -7737,8 +7744,9 @@ mod tests {
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].status, DeliveryStatus::Sending);
 
-        // transport delivers bytes → Sent
-        storage.mark_sent(&msg_id, peer).unwrap();
+        // transport delivers bytes → Sent (next_attempt_at_ms = 100, so
+        // the row remains claimable for retry)
+        storage.mark_sent(&msg_id, peer, 100).unwrap();
 
         // Sent rows are claimable
         let claimed_after = storage.claim_pending_deliveries(5, 100).unwrap();
@@ -7752,7 +7760,7 @@ mod tests {
         assert!(claimed_after_ack.is_empty(), "acked row not claimable");
 
         // Can't go backwards: mark_sent after acked does nothing
-        storage.mark_sent(&msg_id, peer).unwrap();
+        storage.mark_sent(&msg_id, peer, 200).unwrap();
 
         // Still not claimable
         let claimed_final = storage.claim_pending_deliveries(5, 200).unwrap();
