@@ -168,7 +168,7 @@ url = "2.4.0"
 rand = { version = "0.10", features = ["chacha"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 rusqlite = { version = "0.39", features = ["bundled"] }
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "phase23"
