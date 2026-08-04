@@ -25514,15 +25514,12 @@ impl IcedChat {
                     );
                     let key_tooltip: iced::Element<'_, AppMessage> =
                         iced::widget::tooltip::Tooltip::new(
-                            container(
-                                text(truncated_key)
-                                    .size(TYPO_XS)
-                                    .font(crate::fonts::jetbrains_mono(iced::font::Weight::Normal))
-                                    .style(move |t| iced::widget::text::Style {
-                                        color: Some(text_secondary(t)),
-                                    }),
-                            )
-                            .width(Length::Shrink),
+                            text(truncated_key)
+                                .size(TYPO_XS)
+                                .font(crate::fonts::jetbrains_mono(iced::font::Weight::Normal))
+                                .style(move |t| iced::widget::text::Style {
+                                    color: Some(text_secondary(t)),
+                                }),
                             text(full_key).size(TYPO_XS),
                             iced::widget::tooltip::Position::Bottom,
                         )
@@ -27141,15 +27138,17 @@ impl IcedChat {
 
         if timeline_lead > 0.0 {
             col = col.push(
-                container(space::Space::new().height(Length::Fixed(timeline_lead)))
-                    .width(Length::Fill),
+                space::Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fixed(timeline_lead)),
             );
         }
 
         if top_space_h > 0.0 {
             col = col.push(
-                container(space::Space::new().height(Length::Fixed(top_space_h)))
-                    .width(Length::Fill),
+                space::Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fixed(top_space_h)),
             );
         }
 
@@ -29112,14 +29111,10 @@ impl IcedChat {
             );
         }
 
-        container(
-            scrollable(container(content).width(Length::Fill).padding(SPACE_16))
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        scrollable(container(content).width(Length::Fill).padding(SPACE_16))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 }
 
@@ -29806,8 +29801,9 @@ impl IcedChat {
                     // Top spacer
                     if top_space_h > 0.0 {
                         file_rows = file_rows.push(
-                            container(space::Space::new().height(Length::Fixed(top_space_h)))
-                                .width(Length::Fill),
+                            space::Space::new()
+                                .width(Length::Fill)
+                                .height(Length::Fixed(top_space_h)),
                         );
                     }
 
@@ -29819,8 +29815,9 @@ impl IcedChat {
                     // Bottom spacer
                     if bottom_h > 0.0 {
                         file_rows = file_rows.push(
-                            container(space::Space::new().height(Length::Fixed(bottom_h)))
-                                .width(Length::Fill),
+                            space::Space::new()
+                                .width(Length::Fill)
+                                .height(Length::Fixed(bottom_h)),
                         );
                     }
                 } else {
@@ -29834,8 +29831,9 @@ impl IcedChat {
                     }
                     if bottom_h > 0.0 {
                         file_rows = file_rows.push(
-                            container(space::Space::new().height(Length::Fixed(bottom_h)))
-                                .width(Length::Fill),
+                            space::Space::new()
+                                .width(Length::Fill)
+                                .height(Length::Fixed(bottom_h)),
                         );
                     }
                 }
@@ -32771,7 +32769,10 @@ impl IcedChat {
 
         // ── Tab bar ──
         let active_tab = self.dashboard_active_tab;
-        let mut tabs_row = Row::new().spacing(SPACE_16);
+        // Build all tab widgets first, then construct the row from the full
+        // children list (avoids the incremental `.push()` chain allocating a
+        // fresh Row per tab — PERF-3).
+        let mut tab_widgets: Vec<iced::Element<'_, AppMessage>> = Vec::new();
 
         for tab in Tab::ALL.iter() {
             let is_active = *tab == active_tab;
@@ -32815,8 +32816,10 @@ impl IcedChat {
                 .spacing(0)
                 .align_x(Alignment::Center);
 
-            tabs_row = tabs_row.push(tab_widget);
+            tab_widgets.push(tab_widget.into());
         }
+
+        let tabs_row = Row::with_children(tab_widgets).spacing(SPACE_16);
 
         let tab_bar_content: iced::Element<'_, AppMessage> = if is_compact {
             scrollable(
@@ -32949,7 +32952,7 @@ impl IcedChat {
                 .into()
         };
 
-        let scrollable_content = scrollable(container(content_area).width(Length::Fill))
+        let scrollable_content = scrollable(content_area)
             .width(Length::Fill)
             .height(Length::Fill);
 
