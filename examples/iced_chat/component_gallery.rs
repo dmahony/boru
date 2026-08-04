@@ -7,6 +7,7 @@ use iced::widget::{container, scrollable, text, Column, Row, Space};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::AppMessage;
+use crate::boru_dialog::BoruDialog;
 use crate::card_shell::{CardShell, CARD_ROW_HEIGHT};
 use crate::design_tokens;
 use crate::fonts::Typography;
@@ -59,6 +60,9 @@ pub fn view_gallery() -> Element<'static, AppMessage> {
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Elevated Card (Dialog)"))
         .push(dialog_example())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("BoruDialog (Reusable Modal)"))
+        .push(boru_dialog_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Tab Strip"))
         .push(tab_strip_gallery())
@@ -983,6 +987,54 @@ fn dialog_example() -> Element<'static, AppMessage> {
 
     container(elevated_card::<AppMessage>(vec![content.into()]))
         .width(Length::Fixed(400.0))
+        .into()
+}
+
+// ── BoruDialog (reusable modal) gallery ─────────────────────────────
+
+fn boru_dialog_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    let state_label = text("The reusable BoruDialog shell: header (title + subtitle + close), body, and footer (Cancel + primary). It is generic over Message and styled entirely from design_tokens.")
+        .size(Typography::SecondaryText.size_px())
+        .style(move |_| iced::widget::text::Style {
+            color: Some(design_tokens::text_secondary(&Theme::Light)),
+        });
+
+    // Bound the full-screen modal overlay inside a fixed-height frame so the
+    // gallery can demonstrate the backdrop + centred panel without taking over
+    // the whole window.
+    let modal = BoruDialog::new("Create Group Chat")
+        .subtitle("Start a private group conversation")
+        .push_body(text_input_field("Group name…", "", |_| AppMessage::Noop, false))
+        .push_body(text_input_field(
+            "Description (optional)…",
+            "",
+            |_| AppMessage::Noop,
+            false,
+        ))
+        .push_body(
+            text("Long form content scrolls internally inside the dialog instead of growing the panel.")
+                .size(Typography::SecondaryText.size_px())
+                .into(),
+        )
+        .scroll_body(120.0)
+        .secondary("Cancel", AppMessage::Noop)
+        .primary("Create", AppMessage::Noop)
+        .on_close(AppMessage::Noop)
+        .width(560.0)
+        .build(&theme);
+
+    let framed: Element<'static, AppMessage> = container(modal)
+        .width(Length::Fill)
+        .height(Length::Fixed(340.0))
+        .into();
+
+    Column::new()
+        .push(state_label)
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_12)))
+        .push(framed)
+        .spacing(0)
         .into()
 }
 
