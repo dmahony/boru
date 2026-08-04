@@ -302,9 +302,15 @@ fn raw_failure_detail(payload_json: Option<&str>) -> Option<String> {
         parts.push(format!("error_category={category}"));
     }
     if let Some(reason) = value.get("reason").and_then(serde_json::Value::as_str) {
-        parts.push(format!("reason={}", &reason.chars().take(120).collect::<String>()));
+        parts.push(format!(
+            "reason={}",
+            &reason.chars().take(120).collect::<String>()
+        ));
     }
-    if let Some(retry) = value.get("retry_delay_ms").and_then(serde_json::Value::as_u64) {
+    if let Some(retry) = value
+        .get("retry_delay_ms")
+        .and_then(serde_json::Value::as_u64)
+    {
         parts.push(format!("retry_delay_ms={retry}"));
     }
     if let Some(duration) = value.get("duration_ms").and_then(serde_json::Value::as_u64) {
@@ -504,7 +510,14 @@ mod tests {
         event_name: &str,
         occurred_at_ms: u64,
     ) -> TransferActivityRow {
-        row(event_id, transfer_id, event_name, occurred_at_ms, None, "inbound")
+        row(
+            event_id,
+            transfer_id,
+            event_name,
+            occurred_at_ms,
+            None,
+            "inbound",
+        )
     }
 
     #[test]
@@ -541,7 +554,10 @@ mod tests {
         let (action, outcome, detail, raw) = normalize_event(event_names::FAILURE, Some(payload));
         assert_eq!(action, "Denied");
         assert_eq!(outcome, ActivityOutcome::Error);
-        assert_eq!(detail.as_deref(), Some("permission denied or grant expired"));
+        assert_eq!(
+            detail.as_deref(),
+            Some("permission denied or grant expired")
+        );
         assert!(raw.is_some());
     }
 
@@ -578,15 +594,9 @@ mod tests {
     #[test]
     fn completion_action_is_direction_aware() {
         let inbound = row_in("evt-1", "1", event_names::COMPLETION, 100);
-        let outbound = row(
-            "evt-2",
-            "2",
-            event_names::COMPLETION,
-            200,
-            None,
-            "outbound",
-        );
-        let projected = project_activity_log(vec![inbound, outbound], &ActivityLogEnrichment::default());
+        let outbound = row("evt-2", "2", event_names::COMPLETION, 200, None, "outbound");
+        let projected =
+            project_activity_log(vec![inbound, outbound], &ActivityLogEnrichment::default());
         assert_eq!(projected[0].action, "Uploaded");
         assert_eq!(projected[1].action, "Downloaded");
     }
@@ -622,8 +632,22 @@ mod tests {
     fn direction_comes_from_the_storage_column_only() {
         let rows = vec![
             row_in("evt-1", "1", event_names::TRANSFER_STARTED, 100),
-            row("evt-2", "2", event_names::TRANSFER_STARTED, 90, None, "outbound"),
-            row("evt-3", "3", event_names::TRANSFER_STARTED, 80, None, "garbage"),
+            row(
+                "evt-2",
+                "2",
+                event_names::TRANSFER_STARTED,
+                90,
+                None,
+                "outbound",
+            ),
+            row(
+                "evt-3",
+                "3",
+                event_names::TRANSFER_STARTED,
+                80,
+                None,
+                "garbage",
+            ),
         ];
         let projected = project_activity_log(rows, &ActivityLogEnrichment::default());
         // Newest first (t=100 inbound, t=90 outbound, t=80 garbage).
@@ -829,7 +853,8 @@ mod tests {
     #[test]
     fn progress_detail_reports_percent_without_fabrication() {
         let payload = r#"{"bytes_transferred":600,"total_bytes":1000,"percent_millis":600000}"#;
-        let (action, _, detail, _) = normalize_event(event_names::PROGRESS_CHECKPOINT, Some(payload));
+        let (action, _, detail, _) =
+            normalize_event(event_names::PROGRESS_CHECKPOINT, Some(payload));
         assert_eq!(action, "In progress");
         assert_eq!(detail.as_deref(), Some("60%"));
     }
