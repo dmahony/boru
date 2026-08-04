@@ -135,10 +135,10 @@ const SCOPE_LABEL: &str = "All time";
 ///
 /// `summary == None` renders the loading/unknown state (em dashes) — never a
 /// premature zero.
-pub(crate) fn view_sharing_summary_card<'a>(
-    summary: Option<&'a SharingSummary>,
+pub(crate) fn view_sharing_summary_card(
+    summary: Option<SharingSummary>,
     theme: Theme,
-) -> iced::Element<'a, crate::app::AppMessage> {
+) -> iced::Element<'static, crate::app::AppMessage> {
     let metrics = [
         ("FILES SHARED", summary.map(|value| value.files_shared)),
         (
@@ -379,7 +379,7 @@ mod tests {
             active_downloads: 1,
             peers_shared_with: 2,
         };
-        let el = view_sharing_summary_card(Some(&summary), Theme::Dark);
+        let el = view_sharing_summary_card(Some(summary), Theme::Dark);
         let _ = el;
     }
 

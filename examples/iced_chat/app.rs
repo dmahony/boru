@@ -3748,6 +3748,206 @@ pub(crate) struct FileSharingDependency {
     pub(crate) shared_by_me_error: Option<String>,
 }
 
+// ── PERF-2 (t_f6dcbb3a): per-card lazy dependencies for the File Sharing
+// dashboard ───────────────────────────────────────────────────────────
+// Each struct snapshots exactly the state slice its card renders, so
+// `iced::widget::lazy` reuses a card's built subtree unless that card's own
+// data changed. The live row types below (SharedByMeRow, RecentActivityRow,
+// CompletedDownloadItem, ...) are Eq but not Hash, so Hash is implemented
+// manually — hashing every field that participates in PartialEq keeps the
+// cache key consistent with change detection.
+
+/// Dependency for the "Downloads" (Downloaded tab) card. `active` mirrors the
+/// tab selection so the cached subtree is keyed by whether the tab owns the
+/// content area; the remaining fields are the rendered state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DownloadsCardDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) active: bool,
+    /// Completed-download history rows rendered by the tab.
+    pub(crate) history: Vec<crate::dashboard_view_model::CompletedDownloadItem>,
+    pub(crate) history_loaded: bool,
+    pub(crate) history_error: Option<String>,
+    /// Global dashboard search query (filters name + source peer).
+    pub(crate) search_query: String,
+    pub(crate) sort: crate::dashboard_filters::DownloadedSort,
+}
+
+impl std::hash::Hash for DownloadsCardDependency {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.dark_mode.hash(state);
+        self.active.hash(state);
+        self.history_loaded.hash(state);
+        self.history_error.hash(state);
+        self.search_query.hash(state);
+        std::mem::discriminant(&self.sort.key).hash(state);
+        self.sort.descending.hash(state);
+        for item in &self.history {
+            item.id.hash(state);
+            item.row_id.hash(state);
+            item.content_id.hash(state);
+            item.display_name.hash(state);
+            item.mime_type.hash(state);
+            item.size_bytes.hash(state);
+            item.source_peer.hash(state);
+            item.completed_at_ms.hash(state);
+            std::mem::discriminant(&item.local).hash(state);
+            item.destination_path.hash(state);
+        }
+    }
+}
+
+/// Dependency for the "Files I'm Sharing" table card. Includes the search
+/// query (drives the search-specific empty state), the filtered+sorted rows
+/// actually rendered, the per-row interactive state, the load state, the
+/// active sort, and the thumbnail handles keyed by content hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SharedByMeCardDependency {
+    pub(crate) dark_mode: bool,
+    /// Global dashboard search query — checked trimmed-empty for the
+    /// search-specific empty state.
+    pub(crate) search_query: String,
+    /// Number of filtered rows (matches the table count badge).
+    pub(crate) items_count: usize,
+    /// The filtered+sorted rows rendered by the table.
+    pub(crate) rows: Vec<crate::shared_by_me_table::SharedByMeRow>,
+    /// Per-row interactive state (open menus/details/confirmations).
+    pub(crate) ui: crate::shared_by_me_table::SharedByMeUiState,
+    pub(crate) load_state: crate::shared_by_me_table::SharedByMeLoadState,
+    pub(crate) sort: crate::dashboard_filters::SharedByMeSort,
+    /// Thumbnail handles for image/video rows (hashed by presence only).
+    pub(crate) thumbnails: SharedByMeThumbnails,
+}
+
+impl std::hash::Hash for SharedByMeCardDependency {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.dark_mode.hash(state);
+        self.search_query.hash(state);
+        self.items_count.hash(state);
+        std::mem::discriminant(&self.sort.key).hash(state);
+        self.sort.descending.hash(state);
+        match &self.load_state {
+            crate::shared_by_me_table::SharedByMeLoadState::Loading => 0u8.hash(state),
+            crate::shared_by_me_table::SharedByMeLoadState::Ready => 1u8.hash(state),
+            crate::shared_by_me_table::SharedByMeLoadState::Error(message) => {
+                2u8.hash(state);
+                message.hash(state);
+            }
+        }
+        self.ui.menu_open.hash(state);
+        self.ui.details_open.hash(state);
+        self.ui.confirm_stop.hash(state);
+        self.ui.share_menu_open.hash(state);
+        self.ui.sharing_status.hash(state);
+        self.thumbnails.hash(state);
+        for row in &self.rows {
+            row.id.hash(state);
+            row.content_hash.hash(state);
+            row.display_name.hash(state);
+            row.mime_type.hash(state);
+            row.size_bytes.hash(state);
+            row.shared_on_ms.hash(state);
+            row.has_explicit_recipients.hash(state);
+            row.source_available.hash(state);
+            row.downloads.hash(state);
+            for recipient in &row.recipients {
+                recipient.id.hash(state);
+                recipient.label.hash(state);
+                std::mem::discriminant(&recipient.access).hash(state);
+            }
+        }
+    }
+}
+
+/// Dependency for the "Peers Downloading from Me" card. Today the card is a
+/// placeholder, so `peers_count` is reserved for the live outbound-transfer
+/// projection and stays 0 until that projection lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PeersCardDependency {
+    pub(crate) dark_mode: bool,
+    /// Reserved for the live outbound-transfer projection; the placeholder
+    /// renders no rows, so this stays 0.
+    pub(crate) peers_count: usize,
+}
+
+impl std::hash::Hash for PeersCardDependency {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.dark_mode.hash(state);
+        self.peers_count.hash(state);
+    }
+}
+
+/// Dependency for the Recent Download Activity card. `tick` is bumped once per
+/// second by `ActivityTick` so relative timestamps re-render while idle; `rows`
+/// changes only when a real activity event is pushed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecentActivityCardDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) tick: u64,
+    pub(crate) rows: Vec<crate::recent_activity_view_model::RecentActivityRow>,
+}
+
+impl std::hash::Hash for RecentActivityCardDependency {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.dark_mode.hash(state);
+        self.tick.hash(state);
+        for row in &self.rows {
+            row.id.hash(state);
+            row.occurred_at_ms.hash(state);
+            row.peer_label.hash(state);
+            row.file_label.hash(state);
+            row.action.hash(state);
+            std::mem::discriminant(&row.status).hash(state);
+            row.detail.hash(state);
+            row.bytes.hash(state);
+        }
+    }
+}
+
+/// Dependency for the Sharing Summary card. `summary == None` renders the
+/// loading/unknown state (em dashes), so loading is distinct from a real zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SharingSummaryCardDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) summary: Option<crate::sharing_summary::SharingSummary>,
+}
+
+impl std::hash::Hash for SharingSummaryCardDependency {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.dark_mode.hash(state);
+        match &self.summary {
+            None => 0u8.hash(state),
+            Some(summary) => {
+                1u8.hash(state);
+                summary.files_shared.hash(state);
+                summary.total_downloads.hash(state);
+                summary.active_downloads.hash(state);
+                summary.peers_shared_with.hash(state);
+            }
+        }
+    }
+}
+
+/// Thumbnail handle map for the Shared by Me card. `iced::widget::image::Handle`
+/// is Eq but not Hash, so the manual Hash impl hashes only each content hash
+/// plus whether a handle is present — the presence bit is all the lazy cache
+/// key needs, while the actual handles are carried for rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SharedByMeThumbnails(
+    pub(crate) std::collections::HashMap<String, Option<iced::widget::image::Handle>>,
+);
+
+impl std::hash::Hash for SharedByMeThumbnails {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let mut keys: Vec<&String> = self.0.keys().collect();
+        keys.sort();
+        for key in keys {
+            key.hash(state);
+            self.0[key].is_some().hash(state);
+        }
+    }
+}
+
 /// Reserved cache key for the Chat screen. `view_chat_panel` is NOT wrapped
 /// in `lazy` because its `widget::responsive` message log captures `&self`
 /// and mutates the incremental `layout_cache` on every layout pass — a
@@ -29894,14 +30094,23 @@ impl IcedChat {
         )
     }
 
-    /// FS-13: render the lower-right Sharing Summary card, replacing the
-    /// placeholder. `None` renders em dashes — loading is distinct from zero.
-    fn view_sharing_summary_card(&self) -> iced::Element<'_, AppMessage> {
-        let theme = Self::theme_from_dark(self.dark_mode);
-        crate::sharing_summary::view_sharing_summary_card(
-            self.dashboard_sharing_summary.as_ref(),
-            theme,
-        )
+    /// PERF-2: snapshot selector for the Sharing Summary card. `None` renders
+    /// em dashes — loading is distinct from zero.
+    fn sharing_summary_card_dependency(&self) -> SharingSummaryCardDependency {
+        SharingSummaryCardDependency {
+            dark_mode: self.dark_mode,
+            summary: self.dashboard_sharing_summary,
+        }
+    }
+
+    /// PERF-2: static renderer for the Sharing Summary card, run inside
+    /// `iced::widget::lazy` so it is only re-invoked when the summary or theme
+    /// actually changes.
+    fn view_sharing_summary_card(
+        dep: &SharingSummaryCardDependency,
+    ) -> iced::Element<'static, AppMessage> {
+        let theme = Self::theme_from_dark(dep.dark_mode);
+        crate::sharing_summary::view_sharing_summary_card(dep.summary, theme)
     }
 
     fn view_shared_with_me(&self) -> iced::Element<'_, AppMessage> {
@@ -30569,16 +30778,30 @@ impl IcedChat {
     /// success/error/warning status with an icon plus real text so the state
     /// is never colour-only.  Rows fall back to safe historical labels when
     /// the underlying item was removed or pruned.
-    fn view_recent_download_activity_card(&self) -> iced::Element<'_, AppMessage> {
+    /// PERF-2: snapshot selector for the Recent Download Activity card.
+    fn recent_activity_card_dependency(&self) -> RecentActivityCardDependency {
+        RecentActivityCardDependency {
+            dark_mode: self.dark_mode,
+            tick: self.activity_tick,
+            rows: self.dashboard_recent_activity.clone(),
+        }
+    }
+
+    /// PERF-2: static renderer for the Recent Download Activity card, run
+    /// inside `iced::widget::lazy` so it is only re-invoked when the activity
+    /// rows or the per-second tick actually change.
+    fn view_recent_download_activity_card(
+        dep: &RecentActivityCardDependency,
+    ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Background, Border, Length};
 
-        let theme = Self::theme_from_dark(self.dark_mode);
-        let rows = &self.dashboard_recent_activity;
+        let theme = Self::theme_from_dark(dep.dark_mode);
+        let rows = &dep.rows;
 
-        let activity_rows: Vec<iced::Element<'_, AppMessage>> = rows
+        let activity_rows: Vec<iced::Element<'static, AppMessage>> = rows
             .iter()
-            .map(|event| self.recent_activity_row(event, &theme))
+            .map(|event| Self::recent_activity_row(event, &theme))
             .collect();
 
         // Header: uppercase muted title, count badge, "View full activity log"
@@ -30695,11 +30918,12 @@ impl IcedChat {
 
     /// One compact row in the Recent Download Activity card: status icon,
     /// file label, peer · action · size sub-line, and relative timestamp.
-    fn recent_activity_row<'a>(
-        &'a self,
-        event: &'a crate::recent_activity_view_model::RecentActivityRow,
+    /// Static (no `&self`) so it can run inside the lazy card builder. The
+    /// body clones every field it renders, so the element is fully `'static`.
+    fn recent_activity_row(
+        event: &crate::recent_activity_view_model::RecentActivityRow,
         theme: &iced::Theme,
-    ) -> iced::Element<'a, AppMessage> {
+    ) -> iced::Element<'static, AppMessage> {
         use crate::recent_activity_view_model::ActivityStatus;
         use iced::widget::{container, row, text, Column, Row, Space};
         use iced::{Alignment, Length};
@@ -31233,15 +31457,39 @@ impl IcedChat {
     /// name/type/size, source peer, completed time, integrity state, and safe
     /// local actions (Open / Reveal in Folder only while the file exists;
     /// Remove from history never deletes the file).
+    /// PERF-2: the Downloaded tab renders its full content through a lazy
+    /// wrapper keyed on [`DownloadsCardDependency`], so the table subtree is
+    /// cached unless the history, search query, or sort actually change.
     fn view_downloaded(&self) -> iced::Element<'_, AppMessage> {
+        iced::widget::lazy(self.downloads_card_dependency(), Self::view_downloads_card).into()
+    }
+
+    /// PERF-2: snapshot selector for the "Downloads" (Downloaded tab) card.
+    fn downloads_card_dependency(&self) -> DownloadsCardDependency {
+        DownloadsCardDependency {
+            dark_mode: self.dark_mode,
+            active: self.dashboard_active_tab
+                == crate::dashboard_view_model::DashboardTab::Downloaded,
+            history: self.downloaded_history.clone(),
+            history_loaded: self.downloaded_history_loaded,
+            history_error: self.downloaded_history_error.clone(),
+            search_query: self.dashboard_search_input.clone(),
+            sort: self.dashboard_downloaded_sort,
+        }
+    }
+
+    /// PERF-2: static renderer for the "Downloads" (Downloaded tab) card, run
+    /// inside `iced::widget::lazy` so it is only re-invoked when the history,
+    /// load flags, search query, or sort actually change.
+    fn view_downloads_card(dep: &DownloadsCardDependency) -> iced::Element<'static, AppMessage> {
         use crate::dashboard_view_model::LocalFileState;
         use iced::widget::{button, container, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Background, Border, Length};
 
-        let theme = Self::theme_from_dark(self.dark_mode);
+        let theme = Self::theme_from_dark(dep.dark_mode);
 
         // Loading skeleton on first open.
-        if !self.downloaded_history_loaded && self.downloaded_history_error.is_none() {
+        if !dep.history_loaded && dep.history_error.is_none() {
             return scrollable(
                 Column::new()
                     .push(dashboard_card(
@@ -31258,7 +31506,7 @@ impl IcedChat {
         }
 
         // Inline error with retry.
-        if let Some(error) = &self.downloaded_history_error {
+        if let Some(error) = &dep.history_error {
             let retry = crate::ui_components::InlineError::new(error)
                 .on_retry(AppMessage::DashboardDownloadedRefresh)
                 .build(&theme);
@@ -31274,7 +31522,7 @@ impl IcedChat {
         }
 
         // Empty state.
-        if self.downloaded_history.is_empty() {
+        if dep.history.is_empty() {
             return crate::ui_components::empty_state(
                 Icon::Check,
                 "No completed downloads.",
@@ -31289,9 +31537,9 @@ impl IcedChat {
         // the FS-18 normalized matcher, then apply the Downloaded tab's active
         // sort to the filtered rows only. Rows stay borrows into the
         // authoritative history buffer — nothing is copied or mutated.
-        let query = self.dashboard_search_input.as_str();
-        let mut filtered: Vec<_> = self
-            .downloaded_history
+        let query = dep.search_query.as_str();
+        let mut filtered: Vec<_> = dep
+            .history
             .iter()
             .filter(|item| {
                 crate::dashboard_filters::query_matches(
@@ -31300,7 +31548,7 @@ impl IcedChat {
                 )
             })
             .collect();
-        self.dashboard_downloaded_sort.apply_ref(&mut filtered);
+        dep.sort.apply_ref(&mut filtered);
 
         if filtered.is_empty() {
             return crate::ui_components::empty_state(
@@ -31330,7 +31578,7 @@ impl IcedChat {
             .align_y(Alignment::Center);
 
         // FS-18: sort control row (Downloaded: completed time / name / size).
-        let sort = self.dashboard_downloaded_sort;
+        let sort = dep.sort;
         let mut sort_row = Row::new()
             .push(text("Sort:").size(TYPO_XS).style(text_muted_style))
             .spacing(SPACE_6)
@@ -31359,7 +31607,7 @@ impl IcedChat {
         let mut rows = Column::new().spacing(SPACE_4);
 
         for item in filtered {
-            let row_el = self.downloaded_row(item, &theme);
+            let row_el = Self::downloaded_row(item, &theme);
             rows = rows.push(row_el);
         }
 
@@ -31377,12 +31625,13 @@ impl IcedChat {
         scrollable(dashboard_card(body.into())).width(Length::Fill).height(Length::Fill).into()
     }
 
-    /// One row of the Downloaded tab.
-    fn downloaded_row<'a>(
-        &'a self,
-        item: &'a crate::dashboard_view_model::CompletedDownloadItem,
+    /// One row of the Downloaded tab. Static (no `&self`) so it can run inside
+    /// the lazy card builder. The body clones every field it renders, so the
+    /// element is fully `'static`.
+    fn downloaded_row(
+        item: &crate::dashboard_view_model::CompletedDownloadItem,
         theme: &iced::Theme,
-    ) -> iced::Element<'a, AppMessage> {
+    ) -> iced::Element<'static, AppMessage> {
         use crate::dashboard_view_model::LocalFileState;
         use iced::widget::{button, container, text, Column, Row, Space};
         use iced::{Alignment, Border, Length};
@@ -31464,7 +31713,7 @@ impl IcedChat {
             .push(
                 Column::new()
                     .push(
-                        text(&item.display_name)
+                        text(item.display_name.clone())
                             .size(TYPO_SM)
                             .color(crate::design_tokens::text_primary(theme)),
                     )
@@ -31505,7 +31754,7 @@ impl IcedChat {
                     .width(Length::Fixed(72.0)),
             )
             .push(
-                text(&item.source_peer)
+                text(item.source_peer.clone())
                     .size(TYPO_XS)
                     .color(crate::design_tokens::text_secondary(theme))
                     .width(Length::Fixed(120.0))
@@ -32329,6 +32578,128 @@ impl IcedChat {
     }
 
     /// File Sharing screen.
+    /// PERF-2: snapshot selector for the "Files I'm Sharing" table card.
+    fn shared_by_me_card_dependency(&self) -> SharedByMeCardDependency {
+        let load_state = if let Some(message) = &self.shared_by_me_error {
+            crate::shared_by_me_table::SharedByMeLoadState::Error(message.clone())
+        } else if self.shared_by_me_loading {
+            crate::shared_by_me_table::SharedByMeLoadState::Loading
+        } else {
+            crate::shared_by_me_table::SharedByMeLoadState::Ready
+        };
+        SharedByMeCardDependency {
+            dark_mode: self.dark_mode,
+            search_query: self.dashboard_search_input.clone(),
+            items_count: self.dashboard_shared_by_me_filter.len(),
+            rows: self.dashboard_shared_by_me_filter.clone(),
+            ui: self.shared_by_me_ui.clone(),
+            load_state,
+            sort: self.dashboard_shared_by_me_sort,
+            thumbnails: SharedByMeThumbnails(self.shared_by_me_thumbnails.clone()),
+        }
+    }
+
+    /// PERF-2: static renderer for the "Files I'm Sharing" table card, run
+    /// inside `iced::widget::lazy` so it is only re-invoked when the query,
+    /// rows, interactive state, load state, sort, or thumbnails change.
+    fn view_shared_by_me_card(
+        dep: &SharedByMeCardDependency,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{container, text, Column, Row, Space};
+        use iced::{Alignment, Length};
+
+        let theme = Self::theme_from_dark(dep.dark_mode);
+
+        // FS-18: sort control row (Shared by Me: name / date shared / size /
+        // downloads). Real buttons → keyboard accessible.
+        let sort = dep.sort;
+        let mut sort_row = Row::new()
+            .push(text("Sort:").size(TYPO_XS).style(text_muted_style))
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center);
+        for key in crate::dashboard_filters::SharedByMeSortKey::ALL.iter() {
+            sort_row = sort_row.push(dashboard_sort_chip(
+                &theme,
+                key.label(),
+                sort.key == *key,
+                sort.descending,
+                AppMessage::DashboardSharedByMeSortClicked(*key),
+            ));
+        }
+
+        let file_table_card: iced::Element<'static, AppMessage> =
+            if !dep.search_query.trim().is_empty() && dep.rows.is_empty() {
+                // The query filtered everything out — a search-specific empty
+                // state is more truthful than the card's "haven't shared any
+                // files yet" copy.
+                crate::ui_components::empty_state(
+                    Icon::Search,
+                    "No matching files.",
+                    "Try a different search term.",
+                    None,
+                    None,
+                )
+                .into()
+            } else {
+                crate::shared_by_me_table::view_shared_by_me_card(
+                    &dep.rows,
+                    &dep.ui,
+                    dep.load_state.clone(),
+                    theme,
+                    dep.dark_mode,
+                    &dep.thumbnails.0,
+                )
+                .into()
+            };
+
+        Column::new()
+            .push(sort_row)
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(file_table_card)
+            .spacing(0)
+            .width(Length::Fill)
+            .into()
+    }
+
+    /// PERF-2: snapshot selector for the "Peers Downloading from Me" card.
+    fn peers_card_dependency(&self) -> PeersCardDependency {
+        PeersCardDependency {
+            dark_mode: self.dark_mode,
+            peers_count: 0,
+        }
+    }
+
+    /// PERF-2: static renderer for the "Peers Downloading from Me" card. The
+    /// card is still a placeholder, so its dependency is constant and the lazy
+    /// subtree is built only when the theme changes.
+    fn view_peers_card(_dep: &PeersCardDependency) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{container, text, Column, Space};
+        use iced::{Alignment, Length};
+
+        container(
+            Column::new()
+                .push(
+                    text("Peers Downloading from Me")
+                        .size(crate::fonts::Typography::SectionHeading.size_px())
+                        .font(crate::fonts::Typography::SectionHeading.font()),
+                )
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(
+                    text("Live peer rows with progress bars and file names will appear here.")
+                        .size(TYPO_XS)
+                        .style(text_muted_style),
+                )
+                .push(Space::new().height(Length::Fill))
+                .align_x(Alignment::Start)
+                .spacing(SPACE_4),
+        )
+        .padding(SPACE_16)
+        .width(Length::Fill)
+        .height(Length::Fixed(120.0))
+        .style(|t| crate::design_tokens::card_style(t))
+        .into()
+    }
+
     fn view_file_sharing(&self) -> iced::Element<'_, AppMessage> {
         use crate::dashboard_view_model::DashboardTab as Tab;
         use iced::widget::{button, container, scrollable, text, text_input, Column, Row, Space};
@@ -32544,38 +32915,8 @@ impl IcedChat {
         //   medium  (1024-1279): two columns, reduced padding
         //   large   (≥1280): full two-column layout
 
-        // Placeholder card builder for unimplemented regions.
-        fn placeholder_card<'a>(
-            title: &'a str,
-            subtitle: &'a str,
-        ) -> iced::Element<'a, AppMessage> {
-            use iced::widget::{container, text, Column};
-            use iced::{Alignment, Length};
-            container(
-                Column::new()
-                    .push(
-                        text(title)
-                            .size(crate::fonts::Typography::SectionHeading.size_px())
-                            .font(crate::fonts::Typography::SectionHeading.font()),
-                    )
-                    .push(Space::new().height(Length::Fixed(SPACE_8)))
-                    .push(text(subtitle).size(TYPO_XS).style(text_muted_style))
-                    .push(Space::new().height(Length::Fill))
-                    .align_x(Alignment::Start)
-                    .spacing(SPACE_4),
-            )
-            .padding(SPACE_16)
-            .width(Length::Fill)
-            .height(Length::Fixed(120.0))
-            .style(|t| crate::design_tokens::card_style(t))
-            .into()
-        }
-
-        // Content area with responsive layout.
-        // FS-21: three-tier responsive using is_compact/is_medium/is_large from design tokens.
-
-        // The Downloaded tab owns its full content area (FS-15). Other tabs
-        // share the two-column dashboard layout.
+        // The Downloaded tab owns its full content area (FS-15); its content
+        // is itself lazy-wrapped (see `view_downloaded` / `view_downloads_card`).
         if active_tab == crate::dashboard_view_model::DashboardTab::Downloaded {
             return scrollable(self.view_downloaded())
                 .width(Length::Fill)
@@ -32607,128 +32948,63 @@ impl IcedChat {
                 .into();
         }
 
-        // Real "Files I'm Sharing" card bound to the durable projection; the
-        // load state is derived from the app's loading flag / error so the
-        // skeleton, empty, and error bodies are truthful.
-        let load_state = if let Some(message) = &self.shared_by_me_error {
-            crate::shared_by_me_table::SharedByMeLoadState::Error(message.clone())
-        } else if self.shared_by_me_loading {
-            crate::shared_by_me_table::SharedByMeLoadState::Loading
-        } else {
-            crate::shared_by_me_table::SharedByMeLoadState::Ready
-        };
-
-        // FS-18: the header search query is global across tabs; on this tab it
-        // matches file display names, recipient display labels, and recipient
-        // short peer ids (the full public-key id is also a haystack, so a
-        // short prefix typed by the user matches via substring). The
-        // filtered+sorted rows are kept in `dashboard_shared_by_me_filter`
-        // (rebuilt by `refresh_shared_by_me_filter` when the query, sort, or
-        // source rows change) so the authoritative `shared_by_me_rows` buffer
-        // is never mutated and the view renders a stable slice — summary
-        // metrics stay computed from unfiltered data.
-        let visible_rows = &self.dashboard_shared_by_me_filter;
-        let search_query = self.dashboard_search_input.as_str();
-
-        // FS-18: sort control row (Shared by Me: name / date shared / size /
-        // downloads). Real buttons → keyboard accessible.
-        let sort = self.dashboard_shared_by_me_sort;
-        let mut sort_row = Row::new()
-            .push(text("Sort:").size(TYPO_XS).style(text_muted_style))
-            .spacing(SPACE_6)
-            .align_y(Alignment::Center);
-        for key in crate::dashboard_filters::SharedByMeSortKey::ALL.iter() {
-            sort_row = sort_row.push(dashboard_sort_chip(
-                &theme,
-                key.label(),
-                sort.key == *key,
-                sort.descending,
-                AppMessage::DashboardSharedByMeSortClicked(*key),
-            ));
-        }
+        // PERF-2: each dashboard card is built by a fine-grained selector (see
+        // the `*_card_dependency` methods) and wrapped in `iced::widget::lazy`.
+        // The lazy widget compares the fresh selector value — a PartialEq
+        // snapshot of exactly that card's state slice — with the previous
+        // frame and reuses the already-built subtree when nothing in the slice
+        // changed. Typing in the header search therefore rebuilds only the
+        // Shared by Me card (whose dependency carries the query); the Peers,
+        // Sharing Summary, and Recent Activity cards keep their cached
+        // subtrees unless their own data changes.
+        let shared_by_me_card =
+            iced::widget::lazy(self.shared_by_me_card_dependency(), Self::view_shared_by_me_card);
+        let peers_card = iced::widget::lazy(self.peers_card_dependency(), Self::view_peers_card);
+        let sharing_summary_card = iced::widget::lazy(
+            self.sharing_summary_card_dependency(),
+            Self::view_sharing_summary_card,
+        );
+        let recent_activity_card = iced::widget::lazy(
+            self.recent_activity_card_dependency(),
+            Self::view_recent_download_activity_card,
+        );
 
         // ── FS-19: connectivity notice at the top of the dashboard when the
         // mesh is unhealthy or the user is offline. Dismissible — does not
-        // block interaction with unaffected regions. Built before `theme` is
-        // moved into the shared-by-me card below.
+        // block interaction with unaffected regions.
         let connectivity_notice = dashboard_connectivity_notice(self, &theme);
-
-        let file_table_card: iced::Element<'_, AppMessage> =
-            if !search_query.trim().is_empty() && visible_rows.is_empty() {
-                // The query filtered everything out — a search-specific empty
-                // state is more truthful than the card's "haven't shared any
-                // files yet" copy.
-                crate::ui_components::empty_state(
-                    Icon::Search,
-                    "No matching files.",
-                    "Try a different search term.",
-                    None,
-                    None,
-                )
-                .into()
-            } else {
-                crate::shared_by_me_table::view_shared_by_me_card(
-                    visible_rows,
-                    &self.shared_by_me_ui,
-                    load_state,
-                    theme,
-                    self.dark_mode,
-                    &self.shared_by_me_thumbnails,
-                )
-                .into()
-            };
-
-        let file_table_section: iced::Element<'_, AppMessage> = Column::new()
-            .push(sort_row)
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(file_table_card)
-            .spacing(0)
-            .width(Length::Fill)
-            .into();
 
         let content_area: iced::Element<'_, AppMessage> = if !is_compact {
             // Two-column: 2/3 left + 1/3 right.
-            let peers_section = placeholder_card(
-                "Peers Downloading from Me",
-                "Live peer rows with progress bars and file names will appear here.",
-            );
-            let sharing_summary_section = self.view_sharing_summary_card();
-            let recent_activity_section = self.view_recent_download_activity_card();
             let right_column = Column::new()
-                .push(peers_section)
+                .push(peers_card)
                 .push(Space::new().height(Length::Fixed(SPACE_20)))
-                .push(sharing_summary_section)
+                .push(sharing_summary_card)
                 .spacing(0)
                 .width(Length::Fill);
             Column::new()
                 .push(
                     Row::new()
-                        .push(container(file_table_section).width(Length::FillPortion(63)))
+                        .push(container(shared_by_me_card).width(Length::FillPortion(63)))
                         .push(Space::new().width(Length::Fixed(SPACE_20)))
                         .push(container(right_column).width(Length::FillPortion(34)))
                         .width(Length::Fill),
                 )
                 .push(Space::new().height(Length::Fixed(SPACE_20)))
-                .push(recent_activity_section)
+                .push(recent_activity_card)
                 .spacing(0)
                 .width(Length::Fill)
                 .into()
         } else {
             // Single column: stack in priority order.
-            let sharing_summary_section = self.view_sharing_summary_card();
-            let peers_section = placeholder_card(
-                "Peers Downloading from Me",
-                "Live peer rows with progress bars and file names will appear here.",
-            );
-            let recent_activity_section = self.view_recent_download_activity_card();
             Column::new()
-                .push(file_table_section)
+                .push(shared_by_me_card)
                 .push(Space::new().height(Length::Fixed(SPACE_16)))
-                .push(sharing_summary_section)
+                .push(sharing_summary_card)
                 .push(Space::new().height(Length::Fixed(SPACE_16)))
-                .push(peers_section)
+                .push(peers_card)
                 .push(Space::new().height(Length::Fixed(SPACE_16)))
-                .push(recent_activity_section)
+                .push(recent_activity_card)
                 .spacing(0)
                 .width(Length::Fill)
                 .into()
@@ -39584,6 +39860,180 @@ mod tests {
         assert_eq!(peers_a, peers_b);
         assert_eq!(activity_a, activity_b);
         assert_eq!(tunnels_a, tunnels_b);
+    }
+
+    // ── File Sharing card dependency isolation (PERF-2, t_f6dcbb3a) ──
+    // Same harness as the Home-rail cards above, applied to the File Sharing
+    // dashboard: each card is rendered through `iced::widget::lazy(dep, build)`.
+    // These tests prove a change in one card's state slice changes only that
+    // card's dependency, so typing in the header search rebuilds the Shared by
+    // Me card alone while the Peers / Sharing Summary / Recent Activity cards
+    // keep their cached subtrees.
+
+    /// Typing in the header search must change only the Shared by Me card
+    /// dependency — the Peers, Sharing Summary, and Recent Activity snapshots
+    /// stay identical.
+    #[test]
+    fn dashboard_search_typing_changes_only_shared_by_me_card() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        let shared_before = app.shared_by_me_card_dependency();
+        let peers_before = app.peers_card_dependency();
+        let summary_before = app.sharing_summary_card_dependency();
+        let activity_before = app.recent_activity_card_dependency();
+
+        app.dashboard_search_input = "report".to_string();
+
+        let shared_after = app.shared_by_me_card_dependency();
+        let peers_after = app.peers_card_dependency();
+        let summary_after = app.sharing_summary_card_dependency();
+        let activity_after = app.recent_activity_card_dependency();
+
+        assert_ne!(
+            shared_before, shared_after,
+            "Shared by Me card must rebuild when the search query changes"
+        );
+        assert_eq!(
+            peers_before, peers_after,
+            "Peers card must not re-render when the search query changes"
+        );
+        assert_eq!(
+            summary_before, summary_after,
+            "Sharing Summary card must not re-render when the search query changes"
+        );
+        assert_eq!(
+            activity_before, activity_after,
+            "Recent Activity card must not re-render when the search query changes"
+        );
+    }
+
+    /// Pushing a recent-activity row must change only the Recent Activity card
+    /// dependency.
+    #[test]
+    fn dashboard_activity_push_changes_only_recent_activity_card() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        let shared_before = app.shared_by_me_card_dependency();
+        let peers_before = app.peers_card_dependency();
+        let summary_before = app.sharing_summary_card_dependency();
+        let activity_before = app.recent_activity_card_dependency();
+
+        app.dashboard_recent_activity
+            .push(crate::recent_activity_view_model::RecentActivityRow {
+                id: "evt-1".to_string(),
+                occurred_at_ms: 1_000,
+                peer_label: "Alice".to_string(),
+                file_label: "notes.txt".to_string(),
+                action: "Downloaded".to_string(),
+                status: crate::recent_activity_view_model::ActivityStatus::Success,
+                detail: None,
+                bytes: Some(2048),
+            });
+
+        let shared_after = app.shared_by_me_card_dependency();
+        let peers_after = app.peers_card_dependency();
+        let summary_after = app.sharing_summary_card_dependency();
+        let activity_after = app.recent_activity_card_dependency();
+
+        assert_ne!(
+            activity_before, activity_after,
+            "Recent Activity card must rebuild when a row is pushed"
+        );
+        assert_eq!(
+            shared_before, shared_after,
+            "Shared by Me card must not re-render on activity pushes"
+        );
+        assert_eq!(
+            peers_before, peers_after,
+            "Peers card must not re-render on activity pushes"
+        );
+        assert_eq!(
+            summary_before, summary_after,
+            "Sharing Summary card must not re-render on activity pushes"
+        );
+    }
+
+    /// Loading the Sharing Summary projection must change only the Sharing
+    /// Summary card dependency.
+    #[test]
+    fn dashboard_summary_load_changes_only_summary_card() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        let shared_before = app.shared_by_me_card_dependency();
+        let peers_before = app.peers_card_dependency();
+        let summary_before = app.sharing_summary_card_dependency();
+        let activity_before = app.recent_activity_card_dependency();
+
+        app.dashboard_sharing_summary = Some(crate::sharing_summary::SharingSummary {
+            files_shared: 7,
+            total_downloads: 3,
+            active_downloads: 1,
+            peers_shared_with: 2,
+        });
+
+        let shared_after = app.shared_by_me_card_dependency();
+        let peers_after = app.peers_card_dependency();
+        let summary_after = app.sharing_summary_card_dependency();
+        let activity_after = app.recent_activity_card_dependency();
+
+        assert_ne!(
+            summary_before, summary_after,
+            "Sharing Summary card must rebuild when the projection loads"
+        );
+        assert_eq!(
+            shared_before, shared_after,
+            "Shared by Me card must not re-render on summary loads"
+        );
+        assert_eq!(
+            peers_before, peers_after,
+            "Peers card must not re-render on summary loads"
+        );
+        assert_eq!(
+            activity_before, activity_after,
+            "Recent Activity card must not re-render on summary loads"
+        );
+    }
+
+    /// Switching to the Downloaded tab must change only the Downloads card
+    /// dependency (its `active` flag); the dashboard cards stay memoized.
+    #[test]
+    fn dashboard_tab_switch_changes_only_downloads_card() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        let downloads_before = app.downloads_card_dependency();
+        let shared_before = app.shared_by_me_card_dependency();
+        let peers_before = app.peers_card_dependency();
+        let summary_before = app.sharing_summary_card_dependency();
+        let activity_before = app.recent_activity_card_dependency();
+
+        app.dashboard_active_tab = crate::dashboard_view_model::DashboardTab::Downloaded;
+
+        let downloads_after = app.downloads_card_dependency();
+        let shared_after = app.shared_by_me_card_dependency();
+        let peers_after = app.peers_card_dependency();
+        let summary_after = app.sharing_summary_card_dependency();
+        let activity_after = app.recent_activity_card_dependency();
+
+        assert_ne!(
+            downloads_before, downloads_after,
+            "Downloads card key must flip with the active tab"
+        );
+        assert_eq!(
+            shared_before, shared_after,
+            "Shared by Me card must not re-render on a tab switch"
+        );
+        assert_eq!(
+            peers_before, peers_after,
+            "Peers card must not re-render on a tab switch"
+        );
+        assert_eq!(
+            summary_before, summary_after,
+            "Sharing Summary card must not re-render on a tab switch"
+        );
+        assert_eq!(
+            activity_before, activity_after,
+            "Recent Activity card must not re-render on a tab switch"
+        );
     }
 
     // ── Chat-log scroll state machine (t_9e9a0fcd) ────────────────────────

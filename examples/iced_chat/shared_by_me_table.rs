@@ -374,15 +374,15 @@ const CHIP_LABEL_MAX_CHARS: usize = 14;
 /// The theme and load state are taken by value so the returned element
 /// borrows only from `rows`, `ui`, and `thumbnails` (all owned by the app) —
 /// the same ownership pattern as the Sharing Summary card.
-pub(crate) fn view_shared_by_me_card<'a>(
-    rows: &'a [SharedByMeRow],
-    ui: &'a SharedByMeUiState,
+pub(crate) fn view_shared_by_me_card(
+    rows: &[SharedByMeRow],
+    ui: &SharedByMeUiState,
     load_state: SharedByMeLoadState,
     theme: Theme,
     dark_mode: bool,
-    thumbnails: &'a HashMap<String, Option<iced::widget::image::Handle>>,
-) -> Element<'a, AppMessage> {
-    let body: Element<'a, AppMessage> = match &load_state {
+    thumbnails: &HashMap<String, Option<iced::widget::image::Handle>>,
+) -> Element<'static, AppMessage> {
+    let body: Element<'static, AppMessage> = match &load_state {
         SharedByMeLoadState::Loading => skeleton_body(&theme),
         SharedByMeLoadState::Error(message) => error_body(&theme, message.clone()),
         SharedByMeLoadState::Ready => {
@@ -585,14 +585,14 @@ fn column_header(theme: &Theme) -> Element<'static, AppMessage> {
     .into()
 }
 
-fn table_body<'a>(
-    rows: &'a [SharedByMeRow],
-    ui: &'a SharedByMeUiState,
+fn table_body(
+    rows: &[SharedByMeRow],
+    ui: &SharedByMeUiState,
     theme: &Theme,
     dark_mode: bool,
-    thumbnails: &'a HashMap<String, Option<iced::widget::image::Handle>>,
-) -> Element<'a, AppMessage> {
-    let mut children: Vec<Element<'a, AppMessage>> = Vec::with_capacity(rows.len() + 1);
+    thumbnails: &HashMap<String, Option<iced::widget::image::Handle>>,
+) -> Element<'static, AppMessage> {
+    let mut children: Vec<Element<'static, AppMessage>> = Vec::with_capacity(rows.len() + 1);
     children.push(column_header(theme));
     for (index, row) in rows.iter().enumerate() {
         let menu_open = ui.menu_open.as_deref() == Some(row.content_hash.as_str());
@@ -647,15 +647,15 @@ fn footer_count(count: usize, theme: &Theme) -> Element<'static, AppMessage> {
     .into()
 }
 
-fn view_row<'a>(
-    row: &'a SharedByMeRow,
+fn view_row(
+    row: &SharedByMeRow,
     menu_open: bool,
     details_open: bool,
     confirm_stop: bool,
     theme: &Theme,
     dark_mode: bool,
-    thumbnails: &'a HashMap<String, Option<iced::widget::image::Handle>>,
-) -> Element<'a, AppMessage> {
+    thumbnails: &HashMap<String, Option<iced::widget::image::Handle>>,
+) -> Element<'static, AppMessage> {
     let name_cell = name_cell(row, theme, thumbnails);
     let shared_with_cell = shared_with_cell(row, theme, dark_mode);
     let size_cell = text(format_size(row.size_bytes))
@@ -669,7 +669,7 @@ fn view_row<'a>(
         .color(design_tokens::text_secondary(theme))
         .width(Length::Fixed(COL_SHARED_ON));
     let downloads_cell = downloads_cell(row, theme);
-    let actions_cell: Element<'a, AppMessage> = if confirm_stop {
+    let actions_cell: Element<'static, AppMessage> = if confirm_stop {
         // During inline confirmation the trailing menu is hidden so the
         // user can only Cancel or Confirm.
         Space::new()
@@ -722,11 +722,11 @@ fn view_row<'a>(
         .into()
 }
 
-fn name_cell<'a>(
-    row: &'a SharedByMeRow,
+fn name_cell(
+    row: &SharedByMeRow,
     theme: &Theme,
-    thumbnails: &'a HashMap<String, Option<iced::widget::image::Handle>>,
-) -> Element<'a, AppMessage> {
+    thumbnails: &HashMap<String, Option<iced::widget::image::Handle>>,
+) -> Element<'static, AppMessage> {
     // Image/video rows get a uniform-size thumbnail preview when a handle is
     // available (generated off the UI thread by the application layer);
     // otherwise the standard file icon keeps the row readable.
@@ -767,7 +767,7 @@ fn name_cell<'a>(
         .width(Length::Fill)
         .align_x(Alignment::Start);
 
-    let with_tooltip: Element<'a, AppMessage> = if row.display_name.chars().count() > 44 {
+    let with_tooltip: Element<'static, AppMessage> = if row.display_name.chars().count() > 44 {
         tooltip::Tooltip::new(
             name_block,
             text(full_name).size(TYPO_XS),
@@ -788,7 +788,7 @@ fn name_cell<'a>(
         .into()
 }
 
-fn file_icon<'a>(row: &'a SharedByMeRow) -> Element<'a, AppMessage> {
+fn file_icon(row: &SharedByMeRow) -> Element<'static, AppMessage> {
     let icon = match row.mime_type.as_deref().unwrap_or("") {
         value if value.starts_with("image/") => Icon::Image,
         value if value.starts_with("video/") || value.starts_with("audio/") => Icon::Play,
@@ -804,12 +804,12 @@ fn file_icon<'a>(row: &'a SharedByMeRow) -> Element<'a, AppMessage> {
         .into()
 }
 
-fn shared_with_cell<'a>(
-    row: &'a SharedByMeRow,
+fn shared_with_cell(
+    row: &SharedByMeRow,
     theme: &Theme,
     dark_mode: bool,
-) -> Element<'a, AppMessage> {
-    let chips: Vec<Element<'a, AppMessage>> = if row.has_explicit_recipients {
+) -> Element<'static, AppMessage> {
+    let chips: Vec<Element<'static, AppMessage>> = if row.has_explicit_recipients {
         row.recipients
             .iter()
             .filter(|recipient| recipient.access == RecipientAccess::Allowed)
@@ -865,11 +865,11 @@ fn shared_with_cell<'a>(
         .into()
 }
 
-fn recipient_chip<'a>(
-    recipient: &'a RecipientView,
+fn recipient_chip(
+    recipient: &RecipientView,
     theme: &Theme,
     dark_mode: bool,
-) -> Element<'a, AppMessage> {
+) -> Element<'static, AppMessage> {
     let initial = crate::presentation::initials(&recipient.label)
         .chars()
         .take(1)
@@ -944,7 +944,7 @@ fn all_friends_chip(theme: &Theme) -> Element<'static, AppMessage> {
     .into()
 }
 
-fn downloads_cell<'a>(row: &'a SharedByMeRow, theme: &Theme) -> Element<'a, AppMessage> {
+fn downloads_cell(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMessage> {
     let value = match row.downloads {
         Some(count) => format!("↓{count}"),
         // No durable per-file counter exists yet; a muted dash is truthful
@@ -959,11 +959,11 @@ fn downloads_cell<'a>(row: &'a SharedByMeRow, theme: &Theme) -> Element<'a, AppM
         .into()
 }
 
-fn actions_cell<'a>(
-    row: &'a SharedByMeRow,
+fn actions_cell(
+    row: &SharedByMeRow,
     menu_open: bool,
     theme: &Theme,
-) -> Element<'a, AppMessage> {
+) -> Element<'static, AppMessage> {
     let icon = Icon::MoreVertical
         .build()
         .size(IconSize::Sm)
@@ -994,7 +994,7 @@ fn actions_cell<'a>(
         .into()
 }
 
-fn action_menu<'a>(row: &'a SharedByMeRow, theme: &Theme) -> Element<'a, AppMessage> {
+fn action_menu(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMessage> {
     let hash = row.content_hash.clone();
     let menu_item = |label: &'static str, message: AppMessage| {
         button(text(label).size(TYPO_SM))
@@ -1053,10 +1053,10 @@ fn action_menu<'a>(row: &'a SharedByMeRow, theme: &Theme) -> Element<'a, AppMess
         .into()
 }
 
-fn stop_sharing_confirmation<'a>(
-    row: &'a SharedByMeRow,
+fn stop_sharing_confirmation(
+    row: &SharedByMeRow,
     theme: &Theme,
-) -> Element<'a, AppMessage> {
+) -> Element<'static, AppMessage> {
     let hash = row.content_hash.clone();
     let prompt_block = Column::new()
         .push(
@@ -1136,11 +1136,11 @@ fn stop_sharing_confirmation<'a>(
     .into()
 }
 
-fn details_panel<'a>(
-    row: &'a SharedByMeRow,
+fn details_panel(
+    row: &SharedByMeRow,
     theme: &Theme,
     dark_mode: bool,
-) -> Element<'a, AppMessage> {
+) -> Element<'static, AppMessage> {
     let hash = row.content_hash.clone();
     let detail_line = |label: &'static str, value: String| {
         Row::new()
@@ -1212,6 +1212,10 @@ fn details_panel<'a>(
                 RecipientAccess::Expired => ("Expired", design_tokens::text_muted(theme)),
                 RecipientAccess::Denied => ("Blocked", design_tokens::destructive(theme)),
             };
+            // Hoisted out of the style closure below: the closure must only
+            // capture the Copy `Color`, never a borrow of `recipient`, so the
+            // whole details panel stays `'static` for the lazy card builder.
+            let initial_color = crate::presentation::initials_color(&recipient.label, dark_mode);
             let mut row_builder = Row::new()
                 .push(
                     container(
@@ -1229,10 +1233,7 @@ fn details_panel<'a>(
                     .center_x(Length::Fill)
                     .center_y(Length::Fill)
                     .style(move |_t| container::Style {
-                        background: Some(Background::Color(crate::presentation::initials_color(
-                            &recipient.label,
-                            dark_mode,
-                        ))),
+                        background: Some(Background::Color(initial_color)),
                         border: Border {
                             radius: 8.0.into(),
                             ..Default::default()

@@ -2238,16 +2238,20 @@ fn skeleton_row<Message: 'static>(height: f32, theme: &Theme) -> Element<'static
 // ═══════════════════════════════════════════════════════════════════════
 
 /// An inline error message with an optional retry button.
-pub struct InlineError<'a> {
-    message: &'a str,
+///
+/// The message is owned (`String`) so `build` can return a fully `'static`
+/// element — required when the error is rendered inside an
+/// `iced::widget::lazy` content builder.
+pub struct InlineError {
+    message: String,
     retry_msg: Option<AppMessage>,
 }
 
-impl<'a> InlineError<'a> {
+impl InlineError {
     /// Create an inline error with a message.
-    pub fn new(message: &'a str) -> Self {
+    pub fn new(message: impl Into<String>) -> Self {
         Self {
-            message,
+            message: message.into(),
             retry_msg: None,
         }
     }
@@ -2259,7 +2263,7 @@ impl<'a> InlineError<'a> {
     }
 
     /// Build the error element.
-    pub fn build(self, theme: &Theme) -> Element<'a, AppMessage> {
+    pub fn build(self, theme: &Theme) -> Element<'static, AppMessage> {
         let icon = Icon::AlertTriangle
             .build()
             .size(IconSize::Xs)
@@ -2592,12 +2596,12 @@ pub(crate) const FILE_THUMBNAIL_EDGE: f32 = 40.0;
 /// When the handle is absent (still loading, unsupported, or non-media) the
 /// fallback icon is centred inside the same box, keeping every row the same
 /// height.
-pub(crate) fn file_thumbnail<'a>(
-    handle: Option<&'a iced::widget::image::Handle>,
+pub(crate) fn file_thumbnail(
+    handle: Option<&iced::widget::image::Handle>,
     fallback_icon: Icon,
     _theme: &Theme,
-) -> Element<'a, AppMessage> {
-    let content: Element<'a, AppMessage> = match handle {
+) -> Element<'static, AppMessage> {
+    let content: Element<'static, AppMessage> = match handle {
         Some(handle) => iced::widget::image(handle.clone())
             .width(Length::Fixed(FILE_THUMBNAIL_EDGE))
             .height(Length::Fixed(FILE_THUMBNAIL_EDGE))
