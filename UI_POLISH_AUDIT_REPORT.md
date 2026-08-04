@@ -452,7 +452,7 @@ This step requires manual testing on actual hardware, which cannot be fully auto
 
 This step requires the final build step which can only be verified by running:
 ```
-cargo build --features gui --example iced_chat
+cargo build --features gui --example boru
 cargo test
 ```
 

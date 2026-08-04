@@ -68,9 +68,9 @@ The process stayed alive for the 15-second timeout (exit 124 from `timeout`), wh
 Normal CLI usage documented by `examples/iced_chat/main.rs`:
 
 ```text
-cargo run --features gui --example iced_chat
-cargo run --features gui --example iced_chat open
-cargo run --features gui --example iced_chat join <ticket>
+cargo run --features gui --example boru
+cargo run --features gui --example boru open
+cargo run --features gui --example boru join <ticket>
 ```
 
 The package manifest names the actual example binary `boru` at `examples/iced_chat/main.rs` (`[[example]]`, required feature `gui`). The application supports `--data-dir`, `--no-dht`, `--no-relay`, `--mcp`, `--bind-port`, `--name`, `open`, `join`, and `logs`. `DISPLAY` or `WAYLAND_DISPLAY` is required; `main.rs` explicitly recommends `xvfb-run` for headless smoke tests.

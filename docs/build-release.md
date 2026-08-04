@@ -15,19 +15,19 @@
 cargo build
 
 # Build the GUI example (debug profile)
-cargo build --features gui --example iced_chat
+cargo build --features gui --example boru
 
 # Check compilation (faster than a full build)
-cargo check --features gui --example iced_chat
+cargo check --features gui --example boru
 
 # Build a production GUI binary (optimized, LTO, one codegen unit, stripped)
-cargo build --release --features gui --example iced_chat
+cargo build --release --features gui --example boru
 
 # Build a profiling binary (same release optimizations, with DWARF symbols)
-cargo build --profile profiling --features gui --example iced_chat
+cargo build --profile profiling --features gui --example boru
 
 # Run the profiling binary under a profiler, for example:
-# samply record target/profiling/examples/iced_chat
+# samply record target/profiling/examples/boru
 # (Use the corresponding target/profiling path for other binaries.)
 ```
 
@@ -61,8 +61,8 @@ issue.
 ### Example commands
 
 ```sh
-# iced_chat GUI
-cargo run --features gui --example iced_chat -- --name alice
+# boru GUI
+cargo run --features gui --example boru -- --name alice
 
 # doctor diagnostic tool
 cargo run --features net --example doctor
@@ -114,7 +114,7 @@ Inspect the resolved profile settings before a release or profiling run:
 
 ```sh
 cargo metadata --no-deps --format-version 1 > /tmp/boru-metadata.json
-cargo build --profile profiling --features gui --example iced_chat
+cargo build --profile profiling --features gui --example boru
 ```
 
 The release and profiling builds use the same dependency graph and optimized

@@ -8,7 +8,9 @@
 
 [alias]
 chat = "run --features examples --example chat --"
-iced-chat = "run --features gui --example iced_chat --"
+# The GUI example target is named `boru` (see Cargo.toml [[example]]).
+iced-chat = "run --features gui --example boru --"
+boru = "run --features gui --example boru --"
 
 # ── Edition note ─────────────────────────────────────────────────────────
 #
