@@ -21745,6 +21745,24 @@ impl IcedChat {
         stack![base, overlay].into()
     }
 
+    /// Friends that can currently be messaged, as `(peer, display_label)`
+    /// pairs in friends-store order. Shared by the peer-picker dialogs
+    /// (create group, create tunnel, invite member); callers sort or filter
+    /// as needed.
+    fn messageable_friends(&self) -> Vec<(PublicKey, String)> {
+        self.friends
+            .iter()
+            .filter_map(|(fid, record)| {
+                if !record.relationship.can_message() {
+                    return None;
+                }
+                let peer = fid.parse_public_key().ok()?;
+                let label = record.display_label(fid, &peer);
+                Some((peer, label))
+            })
+            .collect()
+    }
+
     /// Boru-styled dialog for creating a new public room (discoverable in the
     /// directory and over DHT).
     ///
@@ -21838,25 +21856,14 @@ impl IcedChat {
     ) -> iced::Element<'a, AppMessage> {
         use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_LARGE};
         use crate::form_components::{
-            FormSection, SelectablePeerRow, TextInput, peer_list, remove_chip, selection_summary,
+            FormSection, SelectablePeerList, SelectablePeerRow, TextInput, remove_chip,
         };
         use iced::widget::Row;
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
         // ── Available peers: friends who can be messaged, sorted by label ─
-        let mut available: Vec<(PublicKey, String)> = self
-            .friends
-            .iter()
-            .filter_map(|(fid, record)| {
-                if !record.relationship.can_message() {
-                    return None;
-                }
-                let peer = fid.parse_public_key().ok()?;
-                let label = record.display_label(fid, &peer);
-                Some((peer, label))
-            })
-            .collect();
+        let mut available = self.messageable_friends();
         available.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
 
         // Search/filter over display label and short peer id.
@@ -21920,20 +21927,20 @@ impl IcedChat {
             "No peers match your search."
         };
 
-        let mut participants = FormSection::new("Participants");
+        // Participants picker: search + chips + peer list + summary.
+        let mut picker = SelectablePeerList::new(rows, 240.0, Some(empty_text));
         if !available.is_empty() {
-            participants = participants.push(text_input_field(
+            picker = picker.search(
                 "Search participants…",
                 &self.create_group_search,
                 AppMessage::CreateGroupSearchChanged,
-                false,
-            ));
+            );
         }
         if selected_count > 0 {
-            participants = participants.push(chips.into());
+            picker = picker.chips(vec![chips.into()]);
         }
-        participants = participants.push(peer_list(rows, 240.0, Some(empty_text)));
-        participants = participants.push(selection_summary(selected_count, "participant"));
+        picker = picker.summary(selected_count, "participant");
+        let participants = FormSection::new("Participants").push(picker.build());
 
         let mut group_name_field = TextInput::new(
             "Group Name",
@@ -21991,24 +21998,13 @@ impl IcedChat {
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
         use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_STANDARD};
-        use crate::form_components::{
-            peer_list, FormSection, SelectablePeerRow,
-        };
+        use crate::form_components::{FormSection, SelectablePeerList, SelectablePeerRow};
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
         // Build friend selection list — only friends who can accept tunnels.
         let mut rows: Vec<iced::Element<'a, AppMessage>> = Vec::new();
-
-        for (fid, record) in self.friends.iter() {
-            if !record.relationship.can_message() {
-                continue;
-            }
-            let peer = match fid.parse_public_key() {
-                Ok(pk) => pk,
-                Err(_) => continue,
-            };
-            let label = record.display_label(fid, &peer);
+        for (peer, label) in self.messageable_friends() {
             rows.push(
                 SelectablePeerRow::new(label)
                     .on_toggle(AppMessage::CreateTunnel(peer))
@@ -22018,11 +22014,12 @@ impl IcedChat {
 
         let connection_section = FormSection::new("Connection Target")
             .helper("Choose a friend who will be able to connect through this tunnel.")
-            .push(peer_list(
+            .push(SelectablePeerList::new(
                 rows,
                 250.0,
                 Some("No friends available to share tunnels with yet."),
-            ))
+            )
+            .build())
             .build();
 
         let overlay = BoruDialog::new("Create Tunnel")
@@ -22037,104 +22034,46 @@ impl IcedChat {
         iced::widget::stack![base, overlay].into()
     }
 
-    /// Dialog for inviting members to the current group — shows a friend picker.
+    /// Dialog for inviting members to the current group — a friend picker
+    /// built on the shared BoruDialog + peer-list components.
     fn view_invite_member_dialog<'a>(
         &'a self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use iced::widget::{button, checkbox, column, container, scrollable, text, Column, Row};
-        use iced::{Alignment, Length};
+        use crate::boru_dialog::BoruDialog;
+        use crate::form_components::{FormSection, SelectablePeerList, SelectablePeerRow};
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
-        // Build friend selection list
-        let mut friends_list = Column::new().spacing(SPACE_4).padding(SPACE_8);
-
-        for (fid, record) in self.friends.iter() {
-            if !record.relationship.can_message() {
-                continue;
-            }
-            let peer = match fid.parse_public_key() {
-                Ok(pk) => pk,
-                Err(_) => continue,
-            };
-            let label = record.display_label(fid, &peer);
+        // Build friend selection list — only friends who can be messaged.
+        let mut rows: Vec<iced::Element<'a, AppMessage>> = Vec::new();
+        for (peer, label) in self.messageable_friends() {
             let is_selected = self.invite_member_selected.contains(&peer);
-            let cb = checkbox(is_selected)
-                .label(label)
-                .on_toggle(move |_| AppMessage::InviteMemberToggled(peer));
-            friends_list = friends_list.push(cb);
+            rows.push(
+                SelectablePeerRow::new(label)
+                    .selected(is_selected)
+                    .on_toggle(AppMessage::InviteMemberToggled(peer))
+                    .build(&theme),
+            );
         }
 
-        let dialog = column![]
-            .push(text("Invite to Group").size(18))
-            .push(
-                text("Select friends to invite:")
-                    .size(TYPO_XS)
-                    .style(move |t| iced::widget::text::Style {
-                        color: Some(text_secondary(t)),
-                    }),
+        let body = FormSection::new("Participants")
+            .push(SelectablePeerList::new(
+                rows,
+                250.0,
+                Some("No friends available to invite yet."),
             )
-            .push(
-                container(
-                    scrollable(container(friends_list).width(Length::Fill).padding(SPACE_4))
-                        .height(Length::Fixed(250.0)),
-                )
-                .width(Length::Fill)
-                .style(move |t| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgba(
-                        0.2, 0.2, 0.2, 0.3,
-                    ))),
-                    border: iced::Border {
-                        radius: SPACE_4.into(),
-                        width: 1.0,
-                        color: border_muted(t),
-                    },
-                    ..Default::default()
-                }),
-            )
-            .push(
-                iced::widget::row![]
-                    .push(
-                        button(text("Cancel"))
-                            .on_press(AppMessage::HideInviteMemberDialog)
-                            .padding(8),
-                    )
-                    .push(
-                        button(text("Send Invite"))
-                            .on_press(AppMessage::ConfirmInviteMember)
-                            .padding(8),
-                    )
-                    .spacing(12),
-            )
-            .spacing(12)
-            .align_x(Alignment::Center);
+            .build())
+            .build();
 
-        let overlay = container(dialog)
-            .width(Length::Fixed(360.0))
-            .height(Length::Shrink)
-            .padding(24)
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(iced::Color::from_rgba(
-                    0.15, 0.15, 0.15, 0.95,
-                ))),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    width: 1.0,
-                    color: iced::Color::from_rgb(0.4, 0.4, 0.4),
-                },
-                ..Default::default()
-            });
+        let overlay = BoruDialog::new("Invite to Group")
+            .subtitle("Select friends to invite:")
+            .push_body(body)
+            .secondary("Cancel", AppMessage::HideInviteMemberDialog)
+            .primary("Send Invite", AppMessage::ConfirmInviteMember)
+            .build(&theme);
 
-        iced::widget::stack![
-            base,
-            container(overlay)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        ]
-        .into()
+        iced::widget::stack![base, overlay].into()
     }
 
     // ── Sidebar ────────────────────────────────────────────────────────

@@ -23,6 +23,7 @@
 //! | Toggle / switch         | `toggle_field(…)`             | styled toggler with label          |
 //! | Selectable peer row     | `SelectablePeerRow::new(…)`   | avatar + label + checkbox row      |
 //! | Peer list panel         | `peer_list(…)`                | bordered scrollable list           |
+//! | Selectable peer list    | `SelectablePeerList::new(…)`  | search + chips + list + summary    |
 //! | Removable chip          | `remove_chip(…)`              | pill with an × remove button       |
 //! | Selection summary       | `selection_summary(…)`        | "N participant(s) selected"        |
 //! | Dialog footer           | `DialogFooter::new(…)`        | Cancel + primary action row        |
@@ -952,6 +953,98 @@ pub fn selection_summary(count: usize, noun: &str) -> Element<'static, AppMessag
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 9b. SELECTABLE PEER LIST — search + chips + list + summary
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A complete selectable-peer picker: optional search box, selected chips,
+/// the scrollable peer list, and an optional selection summary.
+///
+/// Composes the lower-level `text_input_field`, `remove_chip`, `peer_list`
+/// and `selection_summary` primitives so the creation dialogs don't rebuild
+/// the same scaffolding. Callers build the peer rows themselves (with
+/// [`SelectablePeerRow`]) so avatars/presence/secondary text stay flexible.
+pub struct SelectablePeerList<'a> {
+    rows: Vec<Element<'a, AppMessage>>,
+    max_height: f32,
+    empty_text: Option<&'a str>,
+    search: Option<(&'a str, &'a str, Box<dyn Fn(String) -> AppMessage + 'a>)>,
+    chips: Vec<Element<'a, AppMessage>>,
+    summary: Option<(usize, &'a str)>,
+}
+
+impl<'a> SelectablePeerList<'a> {
+    /// Start a peer picker with the given pre-built rows, list height, and
+    /// optional empty-state text.
+    pub fn new(
+        rows: Vec<Element<'a, AppMessage>>,
+        max_height: f32,
+        empty_text: Option<&'a str>,
+    ) -> Self {
+        Self {
+            rows,
+            max_height,
+            empty_text,
+            search: None,
+            chips: Vec::new(),
+            summary: None,
+        }
+    }
+
+    /// Add a search/filter field above the list.
+    pub fn search(
+        mut self,
+        placeholder: &'a str,
+        value: &'a str,
+        on_input: impl Fn(String) -> AppMessage + 'a,
+    ) -> Self {
+        self.search = Some((placeholder, value, Box::new(on_input)));
+        self
+    }
+
+    /// Add removable chips for the currently selected peers.
+    pub fn chips(mut self, chips: Vec<Element<'a, AppMessage>>) -> Self {
+        self.chips = chips;
+        self
+    }
+
+    /// Add an "N noun(s) selected" summary line below the list.
+    pub fn summary(mut self, count: usize, noun: &'a str) -> Self {
+        self.summary = Some((count, noun));
+        self
+    }
+
+    /// Build the picker column: search field, chips row, peer list, summary.
+    pub fn build(self) -> Element<'a, AppMessage> {
+        let mut col = Column::new().spacing(design_tokens::SPACE_8);
+
+        if let Some((placeholder, value, on_input)) = self.search {
+            col = col.push(ui_components::text_input_field(
+                placeholder,
+                value,
+                on_input,
+                false,
+            ));
+        }
+
+        if !self.chips.is_empty() {
+            let mut chip_row = Row::new().spacing(design_tokens::SPACE_4);
+            for chip in self.chips {
+                chip_row = chip_row.push(chip);
+            }
+            col = col.push(chip_row);
+        }
+
+        col = col.push(peer_list(self.rows, self.max_height, self.empty_text));
+
+        if let Some((count, noun)) = self.summary {
+            col = col.push(selection_summary(count, noun));
+        }
+
+        col.into()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // 10. DIALOG FOOTER
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1219,6 +1312,26 @@ mod tests {
         let el: Element<'static, AppMessage> = selection_summary(1, "participant");
         let _ = el;
         let el: Element<'static, AppMessage> = selection_summary(3, "participant");
+        let _ = el;
+    }
+
+    #[test]
+    fn selectable_peer_list_builds_with_and_without_extras() {
+        let theme = Theme::Light;
+        let row: Element<'static, AppMessage> =
+            SelectablePeerRow::new("Alice").build(&theme);
+        let el: Element<'static, AppMessage> =
+            SelectablePeerList::new(vec![row], 200.0, Some("No peers available")).build();
+        let _ = el;
+        let el: Element<'static, AppMessage> = SelectablePeerList::new(
+            vec![SelectablePeerRow::new("Alice").build(&theme)],
+            200.0,
+            Some("No peers available"),
+        )
+        .search("Search…", "", |_| AppMessage::Noop)
+        .chips(vec![remove_chip("Alice", Some(AppMessage::Noop))])
+        .summary(1, "participant")
+        .build();
         let _ = el;
     }
 
