@@ -39,50 +39,6 @@ pub(crate) enum MessageKind {
     Remote,
 }
 
-/// Accent palette used by system-event chips.
-///
-/// Kept as a theme-independent selector so the presentation layer stays
-/// data-only; the view maps each accent to a concrete `Color` via the active
-/// theme (green/primary/warning/error/muted tokens in `design_tokens`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SystemEventAccent {
-    Green,
-    Primary,
-    Warning,
-    Error,
-    Muted,
-}
-
-/// Map a data-layer system-event kind to the chip's compact label + accent.
-///
-/// Classification itself lives in `boru_core::system_events` (single source
-/// of truth, 16 variants, total mapping); this function only selects the
-/// restrained presentation treatment for the shared `system_event_chip`
-/// component. The original message text is never inspected or rewritten here.
-pub(crate) fn system_event_chip_meta(
-    kind: boru_core::system_events::SystemEventKind,
-) -> (&'static str, SystemEventAccent) {
-    use boru_core::system_events::SystemEventKind;
-    match kind {
-        SystemEventKind::Join => ("JOIN", SystemEventAccent::Green),
-        SystemEventKind::Leave => ("LEFT", SystemEventAccent::Muted),
-        SystemEventKind::Rename => ("NAME", SystemEventAccent::Primary),
-        SystemEventKind::FileShared => ("FILE", SystemEventAccent::Primary),
-        SystemEventKind::CommandHelp => ("HELP", SystemEventAccent::Muted),
-        SystemEventKind::Error => ("ERROR", SystemEventAccent::Error),
-        SystemEventKind::Warning => ("NOTICE", SystemEventAccent::Warning),
-        SystemEventKind::Whisper => ("WHISPER", SystemEventAccent::Primary),
-        SystemEventKind::Invite => ("INVITE", SystemEventAccent::Primary),
-        SystemEventKind::Tunnel => ("TUNNEL", SystemEventAccent::Primary),
-        SystemEventKind::Transfer => ("TRANSFER", SystemEventAccent::Primary),
-        SystemEventKind::Video => ("VIDEO", SystemEventAccent::Primary),
-        SystemEventKind::Friend => ("FRIEND", SystemEventAccent::Primary),
-        SystemEventKind::Profile => ("PROFILE", SystemEventAccent::Primary),
-        SystemEventKind::Mesh => ("MESH", SystemEventAccent::Warning),
-        SystemEventKind::Information => ("INFO", SystemEventAccent::Muted),
-    }
-}
-
 /// Whether two adjacent plain system chips should be visually grouped.
 ///
 /// Both entries must be plain system notices (no download attachment — those
@@ -350,48 +306,6 @@ mod tests {
         assert_eq!(date_divider_label(2 * 86_400_000, 2), "Today");
         assert_eq!(date_divider_label(86_400_000, 2), "Yesterday");
         assert!(date_divider_label(0, 2).contains("1970"));
-    }
-
-    #[test]
-    fn system_event_chip_meta_covers_all_variants_without_rewriting_text() {
-        use boru_core::system_events::SystemEventKind;
-        let all = [
-            SystemEventKind::Join,
-            SystemEventKind::Leave,
-            SystemEventKind::Rename,
-            SystemEventKind::FileShared,
-            SystemEventKind::CommandHelp,
-            SystemEventKind::Error,
-            SystemEventKind::Warning,
-            SystemEventKind::Whisper,
-            SystemEventKind::Invite,
-            SystemEventKind::Tunnel,
-            SystemEventKind::Transfer,
-            SystemEventKind::Video,
-            SystemEventKind::Friend,
-            SystemEventKind::Profile,
-            SystemEventKind::Mesh,
-            SystemEventKind::Information,
-        ];
-        // Total mapping: every data-layer variant gets a non-empty label and a
-        // defined accent — nothing silently discarded.
-        for kind in all {
-            let (label, accent) = system_event_chip_meta(kind);
-            assert!(!label.is_empty(), "every variant needs a chip label");
-            let _ = accent;
-        }
-        assert_eq!(
-            system_event_chip_meta(SystemEventKind::Join),
-            ("JOIN", SystemEventAccent::Green)
-        );
-        assert_eq!(
-            system_event_chip_meta(SystemEventKind::Error),
-            ("ERROR", SystemEventAccent::Error)
-        );
-        assert_eq!(
-            system_event_chip_meta(SystemEventKind::Information),
-            ("INFO", SystemEventAccent::Muted)
-        );
     }
 
     #[test]

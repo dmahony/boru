@@ -20137,7 +20137,7 @@ impl ChatCallbacks for IcedChat {
         if self.should_announce_new_peer(&peer) {
             self.known_peers.insert(peer);
             let name = self.resolve_name(&peer);
-            self.push_system(format!("🟢 {name} joined"));
+            self.push_system(format!("{name} joined"));
         }
 
         // Queue the new neighbor for ticket regeneration. The actual
@@ -20209,7 +20209,7 @@ impl ChatCallbacks for IcedChat {
         if self.should_announce_new_peer(&peer) {
             self.known_peers.insert(peer);
             let name = self.resolve_name(&peer);
-            self.push_system(format!("🟢 {name} is online"));
+            self.push_system(format!("{name} is online"));
         }
     }
 
@@ -23250,6 +23250,10 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
+        // UI-29: recent activity rows are denser than the 48 px peer rows —
+        // a compact 32 px row keeps the feed scannable without dead vertical
+        // space around the small icon + single-line title.
+        const ACTIVITY_ROW_HEIGHT: f32 = 32.0;
         let activity_rows: Vec<iced::Element<'static, AppMessage>> = dep
             .rows
             .iter()
@@ -23290,7 +23294,7 @@ impl IcedChat {
                     .spacing(SPACE_6)
                     .align_y(Alignment::Center),
                 )
-                .height(Length::Fixed(CARD_ROW_HEIGHT))
+                .height(Length::Fixed(ACTIVITY_ROW_HEIGHT))
                 .width(Length::Fill)
                 .align_y(Alignment::Center)
                 .into()
@@ -26693,32 +26697,24 @@ impl IcedChat {
                             .width(Length::Shrink)
                             .padding(iced::Padding::default().right(SPACE_12))
                     } else {
-                        // Centred system-event chip. The original body remains
-                        // intact; the data-layer semantic kind only supplies a
-                        // restrained accent and compact category label. The chip
-                        // itself is the shared presentational component (Figure 4).
-                        let event_kind =
-                            boru_core::system_events::classify_system_event(&entry.body);
-                        let (event_label, chip_accent) =
-                            crate::presentation::system_event_chip_meta(event_kind);
-                        let event_accent = match chip_accent {
-                            crate::presentation::SystemEventAccent::Green => accent_green(&theme),
-                            crate::presentation::SystemEventAccent::Primary => {
-                                accent_primary(&theme)
-                            }
-                            crate::presentation::SystemEventAccent::Warning => {
-                                color_warning(&theme)
-                            }
-                            crate::presentation::SystemEventAccent::Error => color_error(&theme),
-                            crate::presentation::SystemEventAccent::Muted => text_muted(&theme),
-                        };
+                        // UI-29: plain, subtle inline text for system notices.
+                        // No bubble surface, no label chip, no icon slot — just
+                        // the muted message, centred like the date separators,
+                        // so it reads as a system annotation rather than a
+                        // participant message.
                         Row::new()
-                            .push(crate::ui_components::system_event_chip(
-                                event_label,
-                                event_accent,
-                                &entry.body,
-                                &theme,
-                            ))
+                            .push(
+                                container(
+                                    text(&entry.body)
+                                        .size(TYPO_XS)
+                                        .color(text_muted(&theme))
+                                        .wrapping(Wrapping::WordOrGlyph),
+                                )
+                                .width(Length::Fill)
+                                .center_x(Length::Fill)
+                                .max_width(720.0)
+                                .padding([0.0, SPACE_12]),
+                            )
                             .width(Length::Fill)
                     }
                 }
