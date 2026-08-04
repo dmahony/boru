@@ -567,7 +567,11 @@ pub fn ghost_icon_button<'a>(
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Style for a text input field.
-fn text_input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+///
+/// `pub(crate)` so the shared form components (`form_components.rs`) can reuse
+/// the exact same input styling for searchable selects and multiline text
+/// areas instead of maintaining parallel style definitions.
+pub(crate) fn text_input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
     text_input::Style {
         background: Background::Color(design_tokens::bg_input(theme)),
         border: Border {
@@ -589,7 +593,9 @@ fn text_input_style(theme: &Theme, status: text_input::Status) -> text_input::St
 }
 
 /// Style for a text input in error state.
-fn text_input_error_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+///
+/// `pub(crate)` so shared form components reuse the same error styling.
+pub(crate) fn text_input_error_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let base = text_input_style(theme, status);
     text_input::Style {
         border: Border {
