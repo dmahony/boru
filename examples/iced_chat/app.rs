@@ -3641,6 +3641,366 @@ struct SidebarRequestsDependency {
     tunnel_requests: Vec<SidebarTunnelRequestRow>,
 }
 
+// ── Screen dependencies (screen-level lazy() cache keys) ─────────────────
+// Each struct holds ONLY the state slice its screen renders, as
+// Hash-compatible fields (no f32, no image bytes). `iced::widget::lazy`
+// compares a freshly computed dependency with the previous frame's value via
+// PartialEq and, when equal, reuses the already-built subtree. Screens that
+// render live per-layout state (Chat's responsive message log) are NOT
+// wrapped and are documented inline at the Screen::Chat arm.
+
+/// Hash-compatible snapshot of [`MeshHealth`] for use inside screen
+/// dependencies. The reason strings are the only data the renderers read from
+/// the enum, so capturing them here lets a static renderer rebuild the hero /
+/// mesh cards without borrowing app state.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) enum MeshHealthSnapshot {
+    Good,
+    Degraded(String),
+    Offline(String),
+}
+
+impl From<&MeshHealth> for MeshHealthSnapshot {
+    fn from(m: &MeshHealth) -> Self {
+        match m {
+            MeshHealth::Good => MeshHealthSnapshot::Good,
+            MeshHealth::Degraded(r) => MeshHealthSnapshot::Degraded(r.clone()),
+            MeshHealth::Offline(r) => MeshHealthSnapshot::Offline(r.clone()),
+        }
+    }
+}
+
+impl MeshHealthSnapshot {
+    fn as_mesh_health(&self) -> MeshHealth {
+        match self {
+            MeshHealthSnapshot::Good => MeshHealth::Good,
+            MeshHealthSnapshot::Degraded(r) => MeshHealth::Degraded(r.clone()),
+            MeshHealthSnapshot::Offline(r) => MeshHealth::Offline(r.clone()),
+        }
+    }
+}
+
+/// Dependency for the ChatList (home / empty-state) screen. Captures the
+/// hero / mesh card / action-grid state plus the rail-card selectors so the
+/// whole screen rebuilds only when any of its rendered slices change.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct ChatListDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) window_width_bits: u32,
+    pub(crate) mesh_health: MeshHealthSnapshot,
+    pub(crate) main_screen_reconnect_frame: u32,
+    pub(crate) local_label: String,
+    pub(crate) time_of_day_greeting: String,
+    pub(crate) has_peer_connections: bool,
+    pub(crate) sender_ready: bool,
+    pub(crate) direct_peers: u32,
+    pub(crate) relayed_peers: u32,
+    pub(crate) neighbors_len: u32,
+    pub(crate) connected_age_secs: Option<u64>,
+    pub(crate) online: OnlinePeersCardData,
+    pub(crate) activity: RecentActivityCardData,
+    pub(crate) tunnels: TunnelsCardData,
+}
+
+/// Dependency for the File Sharing dashboard screen. Reserved for PERF-2
+/// (t_f6dcbb3a), which decomposes `view_file_sharing` into per-card lazy
+/// components; the screen-level key is kept so the builder shape is
+/// documented and the revision counter contract is stable.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[expect(dead_code)]
+pub(crate) struct FileSharingDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) dashboard_active_tab: u8,
+    pub(crate) dashboard_search_input: String,
+    pub(crate) window_width_bits: u32,
+    /// Bumped by every dashboard data / UI state mutation so the screen
+    /// rebuilds when its rendered rows or interactive state change.
+    pub(crate) dashboard_revision: u64,
+    pub(crate) shared_by_me_loading: bool,
+    pub(crate) shared_by_me_error: Option<String>,
+}
+
+/// Reserved cache key for the Chat screen. `view_chat_panel` is NOT wrapped
+/// in `lazy` because its `widget::responsive` message log captures `&self`
+/// and mutates the incremental `layout_cache` on every layout pass — a
+/// `'static` tree (required by `lazy`) is impossible without changing the
+/// log's behavior. Kept so the cache-key shape is documented for when the
+/// log is refactored to owned rendering.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[expect(dead_code)]
+pub(crate) struct ChatDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) topic: TopicId,
+    pub(crate) entries_len: usize,
+    pub(crate) composer_text: String,
+}
+
+/// Hash-compatible snapshot of one friend-request row rendered in the Friend
+/// Requests screen. The live `FriendRequest` is not Hash, so the builder
+/// pre-resolves the display label and copies the id + message.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct FriendRequestRow {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) message: String,
+}
+
+/// Dependency for the Friend Requests screen. Holds the Hash-compatible state
+/// slice the screen renders: search input, error feedback, and pre-resolved
+/// incoming/outgoing request rows.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct FriendRequestsDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) friend_request_search_input: String,
+    pub(crate) chat_list_error: String,
+    pub(crate) incoming: Vec<FriendRequestRow>,
+    pub(crate) outgoing: Vec<FriendRequestRow>,
+}
+
+/// Hash-compatible snapshot of one SHARING tunnel row rendered in the
+/// Settings → Secure Tunnels section. The live [`TunnelDefinition`] is not
+/// Hash, so the builder pre-renders every display field into this row.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct SettingsSharingTunnelRow {
+    pub(crate) id: boru_core::tunnel::TunnelId,
+    pub(crate) name: String,
+    pub(crate) friend: String,
+    pub(crate) target: String,
+    /// 0 = expired, 1 = Active, 2 = Connecting, 3 = Connected, 4 = Revoked,
+    /// 5 = Failed, 6 = Disconnected. Mirrors `tunnel_status_color` ordering.
+    pub(crate) status_kind: u8,
+    /// Pre-rendered status label (e.g. "Expired", "Available", "Failed").
+    pub(crate) status_label: String,
+    pub(crate) remaining: String,
+    pub(crate) connection_info: Option<String>,
+}
+
+/// Hash-compatible snapshot of one CONNECTED (received) tunnel row rendered
+/// in the Settings → Secure Tunnels section.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct SettingsConnectedTunnelRow {
+    pub(crate) id: boru_core::tunnel::TunnelId,
+    pub(crate) label: String,
+    pub(crate) address: String,
+    pub(crate) route_label: String,
+    pub(crate) connection_info: Option<String>,
+}
+
+/// Dependency for the Settings screen. Delegates to the existing
+/// `SettingsCachedKey` and `ProfileIdentityCacheKey` (both already Hash) and
+/// adds Hash-compatible snapshots of the shared-files list and the Secure
+/// Tunnels section (SHARING + CONNECTED rows).
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct SettingsDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) cached_key: SettingsCachedKey,
+    pub(crate) identity_key: ProfileIdentityCacheKey,
+    pub(crate) shared_files: Vec<(String, String)>,
+    pub(crate) sharing_tunnels: Vec<SettingsSharingTunnelRow>,
+    pub(crate) connected_tunnels: Vec<SettingsConnectedTunnelRow>,
+}
+
+/// Map a [`TunnelDefinition`] to the [`SettingsSharingTunnelRow::status_kind`]
+/// discriminant, mirroring `tunnel_status_color`'s expiry check first.
+fn settings_tunnel_status_kind(
+    def: &boru_core::tunnel::service::TunnelDefinition,
+    now: u64,
+) -> u8 {
+    use boru_core::tunnel::service::TunnelStatus;
+    if def.status != TunnelStatus::Revoked && def.expires_at_ms <= now {
+        return 0; // Expired
+    }
+    match def.status {
+        TunnelStatus::Active => 1,
+        TunnelStatus::Connecting => 2,
+        TunnelStatus::Connected => 3,
+        TunnelStatus::Revoked => 4,
+        TunnelStatus::Failed => 5,
+        TunnelStatus::Disconnected => 6,
+    }
+}
+
+/// Map a [`SettingsSharingTunnelRow::status_kind`] discriminant back to the
+/// themed color used by the Settings → Secure Tunnels section, mirroring
+/// `tunnel_status_color` exactly (expired tunnels render muted).
+fn settings_tunnel_status_color(theme: &iced::Theme, status_kind: u8) -> iced::Color {
+    match status_kind {
+        0 | 4 | 6 => text_muted(theme),
+        1 => accent_primary(theme),
+        2 => color_warning(theme),
+        3 => accent_green(theme),
+        5 => color_error(theme),
+        _ => text_muted(theme),
+    }
+}
+
+/// Map a [`SettingsSharingTunnelRow::status_kind`] discriminant back to the
+/// human-readable label, mirroring `tunnel_status_label`.
+fn settings_tunnel_status_label(status_kind: u8) -> &'static str {
+    use boru_core::tunnel::service::TunnelStatus;
+    match status_kind {
+        0 => "Expired",
+        1 => TunnelStatus::Active.label(),
+        2 => TunnelStatus::Connecting.label(),
+        3 => TunnelStatus::Connected.label(),
+        4 => TunnelStatus::Revoked.label(),
+        5 => TunnelStatus::Failed.label(),
+        6 => TunnelStatus::Disconnected.label(),
+        _ => "Unknown",
+    }
+}
+
+/// Dependency for the Peer Profile screen.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct PeerProfileDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) peer: PublicKey,
+    pub(crate) display_name: String,
+}
+
+/// Hash-compatible snapshot of one catalogue file row for the Peer Catalogue
+/// screen. The live [`RemoteSharedFile`] is not Hash, so the builder copies the
+/// renderable fields (all Hash-compatible) plus the download-state discriminant
+/// and the pending flag. The static renderer reconstructs a `RemoteSharedFile`
+/// from this snapshot when an action message needs it.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct CatalogueRowSnapshot {
+    pub(crate) shared_file_id: String,
+    pub(crate) display_name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) mime_type: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) content_hash: String,
+    pub(crate) version_number: u32,
+    pub(crate) updated_at_ms: u64,
+    pub(crate) collection_ids: Vec<String>,
+    pub(crate) dl: CatalogueDownloadSnapshot,
+    pub(crate) is_pending: bool,
+}
+
+impl CatalogueRowSnapshot {
+    fn to_file(&self) -> RemoteSharedFile {
+        RemoteSharedFile {
+            shared_file_id: self.shared_file_id.clone(),
+            display_name: self.display_name.clone(),
+            description: self.description.clone(),
+            mime_type: self.mime_type.clone(),
+            size_bytes: self.size_bytes,
+            content_hash: self.content_hash.clone(),
+            version_number: self.version_number,
+            updated_at_ms: self.updated_at_ms,
+            collection_ids: self.collection_ids.clone(),
+        }
+    }
+}
+
+/// Hash-compatible projection of [`CatalogueDownloadState`] (which embeds a
+/// `PathBuf` and an error string and therefore cannot derive Hash).
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub(crate) enum CatalogueDownloadSnapshot {
+    None,
+    Pending,
+    Downloading {
+        bytes: u64,
+        total: Option<u64>,
+        speed: u64,
+    },
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl From<&CatalogueDownloadState> for CatalogueDownloadSnapshot {
+    fn from(state: &CatalogueDownloadState) -> Self {
+        match state {
+            CatalogueDownloadState::Pending => CatalogueDownloadSnapshot::Pending,
+            CatalogueDownloadState::Downloading {
+                bytes,
+                total,
+                speed,
+            } => CatalogueDownloadSnapshot::Downloading {
+                bytes: *bytes,
+                total: *total,
+                speed: *speed,
+            },
+            CatalogueDownloadState::Completed { .. } => CatalogueDownloadSnapshot::Completed,
+            CatalogueDownloadState::Failed(_) => CatalogueDownloadSnapshot::Failed,
+            CatalogueDownloadState::Cancelled => CatalogueDownloadSnapshot::Cancelled,
+        }
+    }
+}
+
+/// Dependency for the Peer Catalogue screen. Holds the full renderable file
+/// rows (Hash snapshots) plus the windowing state (scroll offset and viewport
+/// height as `u32` bits) so the static content renderer can rebuild the
+/// virtualised list exactly like the original did.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct PeerCatalogueDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) peer: PublicKey,
+    pub(crate) display_name: String,
+    pub(crate) catalogue_loading: bool,
+    pub(crate) rows: Vec<CatalogueRowSnapshot>,
+    pub(crate) catalogue_scroll_offset_bits: u32,
+    pub(crate) catalogue_viewport_height_bits: u32,
+}
+
+/// Hash-compatible snapshot of one received tunnel (shared service) row shown
+/// in the Friend Profile screen. The live `ReceivedTunnelState` is not Hash,
+/// so the builder pre-renders every display field into this row.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct FriendProfileServiceRow {
+    pub(crate) id: boru_core::tunnel::TunnelId,
+    pub(crate) service_name: String,
+    pub(crate) sharer_label: String,
+    pub(crate) is_http: bool,
+    pub(crate) expired: bool,
+    pub(crate) connection_failed: bool,
+    pub(crate) connected: bool,
+    /// Route label for connected tunnels ("Direct" / "Relay" / custom).
+    pub(crate) route_label: Option<String>,
+    /// Rendered local loopback address when connected.
+    pub(crate) local_addr: Option<String>,
+    /// Rendered expiry label (e.g. "Expires in 2h").
+    pub(crate) expiry: String,
+}
+
+/// Dependency for the Friend Profile screen. Holds the Hash-compatible state
+/// slice the base content renders: identity, presence, rename input, catalogue
+/// presence, recent message previews, and received shared-service rows. The
+/// transient overlays (menu, confirm dialogs, share dialog, toast) are NOT part
+/// of this snapshot — they contain live text inputs / combo boxes and render
+/// every frame, layered on top of the cached base.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct FriendProfileDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) peer: PublicKey,
+    pub(crate) display_name: String,
+    pub(crate) presence: PeerPresence,
+    pub(crate) has_addrs: bool,
+    pub(crate) friend_profile_rename_input: String,
+    pub(crate) friend_profile_renaming: bool,
+    pub(crate) has_catalogue: bool,
+    pub(crate) recent_messages: Vec<String>,
+    pub(crate) shared_services: Vec<FriendProfileServiceRow>,
+}
+
+/// Dependency for the Discover screen. Holds the full renderable room
+/// advertisement rows (RoomAdvertisement is Hash) plus the theme flag, so the
+/// static content renderer can rebuild the whole screen from this snapshot.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct DiscoverDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) ads: Vec<(RoomAdvertisement, PublicKey)>,
+}
+
+/// Dependency for the Groups screen.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct GroupsDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) groups: Vec<(TopicId, String)>,
+}
+
 // ── Home-rail card dependencies (fine-grained selectors) ─────────────────
 // Each struct holds ONLY the state slice its card renders. `iced::widget::lazy`
 // compares a freshly computed dependency with the previous frame's value via
@@ -21898,11 +22258,7 @@ impl IcedChat {
     }
 
     fn view_sidebar_groups(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, text, Column, Row, Space};
-        use iced::{Alignment, Length};
-
         let dark_mode = self.dark_mode;
-        let theme = Self::theme_from_dark(dark_mode);
 
         // Collect group data into owned tuples so we can return an Element
         // without borrowing local state.
@@ -21913,6 +22269,26 @@ impl IcedChat {
             .filter(|e| matches!(e.kind, ConversationKind::Group))
             .map(|e| (e.topic, e.display_name().to_string()))
             .collect();
+
+        // Groups screen + sidebar section are cached with `lazy` so switching
+        // away and back to the Groups screen reuses the built widget tree
+        // (zero diff / layout / render) unless the group list actually changed.
+        let dep = GroupsDependency {
+            dark_mode,
+            groups: group_data,
+        };
+        iced::widget::lazy(dep, Self::view_groups_section_content).into()
+    }
+
+    /// Static renderer for the Groups section/screen, driven by the
+    /// [`GroupsDependency`] snapshot so `iced::widget::lazy` can cache it.
+    fn view_groups_section_content(dep: &GroupsDependency) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, container, text, Column, Row, Space};
+        use iced::{Alignment, Length};
+
+        let dark_mode = dep.dark_mode;
+        let theme = Self::theme_from_dark(dark_mode);
+        let group_data = &dep.groups;
 
         let mut section = Column::new().spacing(SPACE_2);
 
@@ -21942,7 +22318,7 @@ impl IcedChat {
 
         // Group list — build all rows in a separate vec, then extend
         let mut rows: Vec<iced::Element<'_, AppMessage>> = Vec::new();
-        for (topic, name) in &group_data {
+        for (topic, name) in group_data {
             // Name line: clip long group names and show the full name in a tooltip.
             // `Wrapping::None` keeps the row on a single line — without it the
             // text wraps inside the clip container and the row grows taller
@@ -23511,18 +23887,55 @@ impl IcedChat {
     /// Landing screen shown when no conversation is selected.
     /// Redesigned: connection status first, then actions, then activity.
     fn view_main_empty_state(&self) -> iced::Element<'_, AppMessage> {
+        let dep = self.chat_list_dependency();
+        iced::widget::lazy(dep, Self::view_chat_list_content).into()
+    }
+
+    /// Builds the ChatList (home / empty-state) screen's renderable snapshot.
+    fn chat_list_dependency(&self) -> ChatListDependency {
+        let has_peer_connections =
+            !self.neighbors.is_empty() || self.relayed_peers > 0 || self.direct_peers > 0;
+        let connected_age_secs = self.mesh_connected_at.map(|t| {
+            Instant::now()
+                .saturating_duration_since(t)
+                .as_secs()
+        });
+        ChatListDependency {
+            dark_mode: self.dark_mode,
+            window_width_bits: (self.window_width * 100.0) as u32,
+            mesh_health: MeshHealthSnapshot::from(&self.mesh_health),
+            main_screen_reconnect_frame: self.main_screen_reconnect_frame as u32,
+            local_label: self.local_label.clone(),
+            time_of_day_greeting: self.time_of_day_greeting().to_string(),
+            has_peer_connections,
+            sender_ready: self.sender.is_some(),
+            direct_peers: self.direct_peers as u32,
+            relayed_peers: self.relayed_peers as u32,
+            neighbors_len: self.neighbors.len() as u32,
+            connected_age_secs,
+            online: self.online_peers_card_data(),
+            activity: self.recent_activity_card_data(),
+            tunnels: self.tunnels_card_data(),
+        }
+    }
+
+    /// Static renderer for the ChatList (home / empty-state) screen, driven by
+    /// [`ChatListDependency`] so `iced::widget::lazy` can cache the whole
+    /// screen while any of its rendered slices is unchanged.
+    fn view_chat_list_content(dep: &ChatListDependency) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
-        let theme = self.theme();
-        let narrow = self.window_width < 640.0;
+        let window_width = dep.window_width_bits as f32 / 100.0;
+        let theme = Self::theme_from_dark(dep.dark_mode);
+        let narrow = window_width < 640.0;
 
         // ── Connection state (single source of truth) ──
-        let has_peer_connections =
-            !self.neighbors.is_empty() || self.relayed_peers > 0 || self.direct_peers > 0;
-        let relay_reachable = self.sender.is_some() || has_peer_connections;
+        let has_peer_connections = dep.has_peer_connections;
+        let relay_reachable = dep.sender_ready || has_peer_connections;
+        let mesh_health = dep.mesh_health.as_mesh_health();
         let variant =
-            home_connection_variant(&self.mesh_health, has_peer_connections, relay_reachable);
+            home_connection_variant(&mesh_health, has_peer_connections, relay_reachable);
 
         // ── Hero variant visuals (truthful, from the pure mapping above) ──
         let (hero_icon, hero_color, headline): (&[u8], fn(&iced::Theme) -> iced::Color, String) =
@@ -23530,8 +23943,8 @@ impl IcedChat {
                 HomeConnectionVariant::Starting => {
                     const RECONNECT_DOTS: [&str; 4] =
                         ["\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}"];
-                    let dot =
-                        RECONNECT_DOTS[self.main_screen_reconnect_frame % RECONNECT_DOTS.len()];
+                    let dot = RECONNECT_DOTS
+                        [(dep.main_screen_reconnect_frame as usize) % RECONNECT_DOTS.len()];
                     (ICON_RETRY, color_warning, format!("Starting Boru {dot}"))
                 }
                 HomeConnectionVariant::Connecting => (
@@ -23545,7 +23958,7 @@ impl IcedChat {
                     "Boru is connected and ready.".to_string(),
                 ),
                 HomeConnectionVariant::Degraded => {
-                    let reason = match &self.mesh_health {
+                    let reason = match &mesh_health {
                         MeshHealth::Degraded(r) => r.clone(),
                         _ => String::new(),
                     };
@@ -23556,7 +23969,7 @@ impl IcedChat {
                     )
                 }
                 HomeConnectionVariant::Offline => {
-                    let reason = match &self.mesh_health {
+                    let reason = match &mesh_health {
                         MeshHealth::Offline(r) => r.clone(),
                         _ => String::new(),
                     };
@@ -23582,14 +23995,14 @@ impl IcedChat {
         };
 
         // ── Greeting (page header) ──
-        let display_name = if self.local_label.is_empty() {
+        let display_name = if dep.local_label.is_empty() {
             "there"
         } else {
-            &self.local_label
+            &dep.local_label
         };
         let greeting = text(format!(
             "Good {}, {display_name}",
-            self.time_of_day_greeting()
+            dep.time_of_day_greeting
         ))
         .size(crate::fonts::PAGE_TITLE)
         .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
@@ -23725,16 +24138,15 @@ impl IcedChat {
         // the connection-time indicator comes from mesh_connected_at, which
         // the mesh watchdog clears on any non-Good transition.
         let (health_label, health_color): (&str, fn(&iced::Theme) -> Color) =
-            match &self.mesh_health {
+            match &mesh_health {
                 MeshHealth::Good => ("Healthy", accent_green),
                 MeshHealth::Degraded(_) => ("Degraded", color_warning),
                 MeshHealth::Offline(_) => ("Offline", color_error),
             };
-        let mesh_has_peers =
-            !self.neighbors.is_empty() || self.relayed_peers > 0 || self.direct_peers > 0;
-        let mesh_relay_reachable = self.sender.is_some() || mesh_has_peers;
+        let mesh_has_peers = dep.has_peer_connections;
+        let mesh_relay_reachable = dep.sender_ready || mesh_has_peers;
         let mesh_variant =
-            home_connection_variant(&self.mesh_health, mesh_has_peers, mesh_relay_reachable);
+            home_connection_variant(&mesh_health, mesh_has_peers, mesh_relay_reachable);
 
         let (status_icon, status_color, status_label): (
             &[u8],
@@ -23751,14 +24163,14 @@ impl IcedChat {
             ),
             HomeConnectionVariant::Ready => (ICON_CHECK, accent_green, "Connected".to_string()),
             HomeConnectionVariant::Degraded => {
-                let reason = match &self.mesh_health {
+                let reason = match &mesh_health {
                     MeshHealth::Degraded(r) => r.clone(),
                     _ => String::new(),
                 };
                 (ICON_MESH, color_warning, format!("Degraded — {reason}"))
             }
             HomeConnectionVariant::Offline => {
-                let reason = match &self.mesh_health {
+                let reason = match &mesh_health {
                     MeshHealth::Offline(r) => r.clone(),
                     _ => String::new(),
                 };
@@ -23776,13 +24188,11 @@ impl IcedChat {
             _ => {
                 let mut parts = vec![format!(
                     "{} direct · {} relayed · {} neighbors",
-                    self.direct_peers,
-                    self.relayed_peers,
-                    self.neighbors.len(),
+                    dep.direct_peers,
+                    dep.relayed_peers,
+                    dep.neighbors_len,
                 )];
-                if let Some(connected_at) = self.mesh_connected_at {
-                    let age = Instant::now().saturating_duration_since(connected_at);
-                    let secs = age.as_secs();
+                if let Some(secs) = dep.connected_age_secs {
                     let duration = if secs < 60 {
                         format!("connected {secs}s")
                     } else if secs < 3600 {
@@ -23869,7 +24279,7 @@ impl IcedChat {
         .style(crate::design_tokens::card_style);
 
         // ── Quick actions: four equal, full-card targets (Figure 3) ──
-        let action_grid = crate::quick_actions::quick_action_grid(self.window_width, &theme);
+        let action_grid = crate::quick_actions::quick_action_grid(window_width, &theme);
 
         // ── Right rail: loading treatment decision (t_0441a1dc) ──
         // No skeleton/shimmer loading is used for the three rail cards, by
@@ -23904,12 +24314,10 @@ impl IcedChat {
         // deliberately excludes — the peers card never rebuilds on an idle
         // tick.
         let online_card =
-            iced::widget::lazy(self.online_peers_card_data(), Self::view_online_peers_card);
-        let activity_card = iced::widget::lazy(
-            self.recent_activity_card_data(),
-            Self::view_recent_activity_card,
-        );
-        let tunnels_card = iced::widget::lazy(self.tunnels_card_data(), Self::view_tunnels_card);
+            iced::widget::lazy(dep.online.clone(), Self::view_online_peers_card);
+        let activity_card =
+            iced::widget::lazy(dep.activity.clone(), Self::view_recent_activity_card);
+        let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), Self::view_tunnels_card);
 
         let right_col = Column::new()
             .push(online_card)
@@ -23936,7 +24344,7 @@ impl IcedChat {
         // ── Main content: hero left, activity rail right at wide sizes ──
         // Two-thirds content + one-third activity rail (plan §4); the Online
         // Peers panel reflows below the hero on narrower layouts.
-        let rail_stacked = self.window_width < 900.0;
+        let rail_stacked = window_width < 900.0;
         let main_content: iced::Element<'_, AppMessage> = if rail_stacked {
             // Narrow: hero first, then the activity rail reflows below it.
             Column::new()
@@ -23974,7 +24382,7 @@ impl IcedChat {
         // Encryption status is derived from actual connection state: iroh
         // always transports over QUIC (encrypted), so we report "QUIC encrypted"
         // only when a peer connection exists, avoiding a blanket E2E claim.
-        let encryption_label = if self.direct_peers > 0 || self.relayed_peers > 0 {
+        let encryption_label = if dep.direct_peers > 0 || dep.relayed_peers > 0 {
             "QUIC encrypted"
         } else {
             "Idle"
@@ -23982,16 +24390,16 @@ impl IcedChat {
         let footer = connection_footer(
             health_label,
             health_color,
-            self.direct_peers,
-            self.relayed_peers,
-            self.neighbors.len(),
+            dep.direct_peers as usize,
+            dep.relayed_peers as usize,
+            dep.neighbors_len as usize,
             encryption_label,
         );
 
         // ── Assemble with responsive canvas padding (32 large / 24 medium / 16 compact) ──
-        let content_padding = if crate::design_tokens::is_large(self.window_width) {
+        let content_padding = if crate::design_tokens::is_large(window_width) {
             SPACE_32
-        } else if crate::design_tokens::is_compact(self.window_width) {
+        } else if crate::design_tokens::is_compact(window_width) {
             SPACE_16
         } else {
             SPACE_24
@@ -27361,13 +27769,143 @@ impl IcedChat {
         }
     }
 
+    fn settings_dependency(&self) -> SettingsDependency {
+        let identity_key = ProfileIdentityCacheKey {
+            local_label: self.local_label.clone(),
+            public_key: self.local_public.to_string(),
+            friend_id_copied: self.friend_id_copied,
+            profile_image_identifier: self.profile_image_identifier.clone(),
+            profile_image_ticket: self.profile_image_ticket.clone(),
+            has_profile_image: self.profile_image_handle.is_some(),
+        };
+        let cached_key = self.settings_cached_key();
+        let shared_files: Vec<(String, String)> = self
+            .shared_files
+            .iter()
+            .map(|f| (f.display_filename.clone(), f.content_hash.clone()))
+            .collect();
+
+        // SHARING tunnels: same filter + sort as the renderer used to do, but
+        // every display field is pre-rendered into a Hash row so the static
+        // content fn needs no live TunnelService access.
+        let now = now_ms().max(0) as u64;
+        let mut sharing = self
+            .tunnel_service
+            .list_tunnels()
+            .into_iter()
+            .filter(|def| {
+                def.owner == self.local_public
+                    && def.status != boru_core::tunnel::service::TunnelStatus::Revoked
+            })
+            .collect::<Vec<_>>();
+        sharing.sort_by_key(|def| {
+            let expired = def.expires_at_ms <= now;
+            let failed = def.status == boru_core::tunnel::service::TunnelStatus::Failed;
+            (expired as u8 * 2 + failed as u8, def.expires_at_ms)
+        });
+        let sharing_tunnels = sharing
+            .into_iter()
+            .map(|def| {
+                let name = self
+                    .shared_tunnels
+                    .get(&def.id)
+                    .map(|state| state.service_name.clone())
+                    .unwrap_or_else(|| "Shared service".to_string());
+                let friend = self.resolve_name(&def.allowed_peer);
+                let target = match def.target {
+                    boru_core::tunnel::service::TunnelTarget::Tcp { host, port } => {
+                        tunnel_target_label(host, port)
+                    }
+                };
+                let status_kind = settings_tunnel_status_kind(&def, now);
+                let status_label = settings_tunnel_status_label(status_kind).to_string();
+                let remaining = tunnel_remaining_label(def.expires_at_ms);
+                let connection_info = self
+                    .tunnel_service
+                    .connection_info(def.id)
+                    .map(tunnel_connection_info_label);
+                SettingsSharingTunnelRow {
+                    id: def.id,
+                    name,
+                    friend,
+                    target,
+                    status_kind,
+                    status_label,
+                    remaining,
+                    connection_info,
+                }
+            })
+            .collect();
+
+        // CONNECTED (received) tunnels: same filter + sort as the renderer.
+        let mut connected = self
+            .received_tunnels
+            .values()
+            .filter(|state| state.connected)
+            .collect::<Vec<_>>();
+        connected.sort_by_key(|state| state.offer.expires_at_ms);
+        let connected_tunnels = connected
+            .into_iter()
+            .map(|state| {
+                let label = format!("{} — {}", state.sharer_label, state.offer.service_name);
+                let address = state
+                    .local_addr
+                    .map(|addr| tunnel_local_address(&state.offer, addr))
+                    .unwrap_or_else(|| "Connecting…".to_string());
+                let route_label = state
+                    .live_info
+                    .as_ref()
+                    .map(|live| {
+                        let snapshot = live.snapshot();
+                        tunnel_route_label(snapshot.route).to_string()
+                    })
+                    .unwrap_or_default();
+                let connection_info = state
+                    .live_info
+                    .as_ref()
+                    .map(|live| tunnel_connection_info_label(live.snapshot()));
+                SettingsConnectedTunnelRow {
+                    id: state.offer.tunnel_id,
+                    label,
+                    address,
+                    route_label,
+                    connection_info,
+                }
+            })
+            .collect();
+
+        SettingsDependency {
+            dark_mode: self.dark_mode,
+            cached_key,
+            identity_key,
+            shared_files,
+            sharing_tunnels,
+            connected_tunnels,
+        }
+    }
+
     fn view_settings_screen(&self) -> iced::Element<'_, AppMessage> {
+        let dep = self.settings_dependency();
+        let profile_image_handle = self.profile_image_handle.clone();
+        iced::widget::lazy(dep, move |dep| {
+            Self::view_settings_screen_content(dep, profile_image_handle.clone())
+        })
+        .into()
+    }
+
+    /// Static renderer for the Settings screen. Reads only from the
+    /// Hash-compatible [`SettingsDependency`] snapshot plus the (non-Hash)
+    /// profile image handle captured by the `lazy` closure.
+    fn view_settings_screen_content(
+        dep: &SettingsDependency,
+        profile_image_handle: Option<iced::widget::image::Handle>,
+    ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{
             button, column, container, lazy, row, scrollable, text, Column, Row, Space,
         };
         use iced::{Alignment, Length};
 
-        let theme = Self::theme_from_dark(self.dark_mode);
+        let theme = Self::theme_from_dark(dep.dark_mode);
 
         // ── Header row ──────────────────────────────────────────────
         let back_btn = button(text("←").size(TYPO_MD))
@@ -27392,18 +27930,10 @@ impl IcedChat {
         .style(container_header);
 
         // ── Identity section ──
-        let profile_identity_key = ProfileIdentityCacheKey {
-            local_label: self.local_label.clone(),
-            public_key: self.local_public.to_string(),
-            friend_id_copied: self.friend_id_copied,
-            profile_image_identifier: self.profile_image_identifier.clone(),
-            profile_image_ticket: self.profile_image_ticket.clone(),
-            has_profile_image: self.profile_image_handle.is_some(),
-        };
-        let profile_local_label = self.local_label.clone();
-        let profile_public_key = self.local_public.to_string();
-        let profile_friend_id_copied = self.friend_id_copied;
-        let profile_image_handle = self.profile_image_handle.clone();
+        let profile_identity_key = dep.identity_key.clone();
+        let profile_local_label = dep.identity_key.local_label.clone();
+        let profile_public_key = dep.identity_key.public_key.clone();
+        let profile_friend_id_copied = dep.identity_key.friend_id_copied;
         let identity_card: iced::Element<'static, AppMessage> =
             lazy(profile_identity_key, move |_| {
                 profile_identity_card(
@@ -27416,13 +27946,13 @@ impl IcedChat {
             .into();
 
         // ── Cacheable sections ──
-        let cached_key = self.settings_cached_key();
+        let cached_key = dep.cached_key.clone();
         let cached_sections = lazy(cached_key, Self::view_settings_screen_cached);
 
         // ── Shared files ──
-        let mut shared_file_rows: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+        let mut shared_file_rows: Vec<iced::Element<'static, AppMessage>> = Vec::new();
 
-        if self.shared_files.is_empty() {
+        if dep.shared_files.is_empty() {
             shared_file_rows.push(
                 text("No shared files. Add files to share them with your contacts.")
                     .size(TYPO_XS)
@@ -27430,16 +27960,16 @@ impl IcedChat {
                     .into(),
             );
         } else {
-            for file in &self.shared_files {
-                let hash_short = if file.content_hash.len() > 8 {
-                    &file.content_hash[..8]
+            for (display_filename, content_hash) in &dep.shared_files {
+                let hash_short = if content_hash.len() > 8 {
+                    &content_hash[..8]
                 } else {
-                    &file.content_hash
+                    content_hash
                 };
                 let file_row = Row::new()
                     .push(
                         Column::new()
-                            .push(text(&file.display_filename).size(TYPO_SM))
+                            .push(text(display_filename.clone()).size(TYPO_SM))
                             .push(
                                 text(format!("hash: {hash_short}…"))
                                     .size(TYPO_XS)
@@ -27451,7 +27981,7 @@ impl IcedChat {
                     )
                     .push(
                         button(text("Remove").size(TYPO_XS))
-                            .on_press(AppMessage::RemoveSharedFile(file.content_hash.clone()))
+                            .on_press(AppMessage::RemoveSharedFile(content_hash.clone()))
                             .padding([SPACE_2, SPACE_6])
                             .style(|t, _status| iced::widget::button::Style {
                                 background: Some(iced::Background::Color(
@@ -27490,25 +28020,11 @@ impl IcedChat {
         // Two groups: SHARING (tunnels this user created locally, live
         // metadata from the backend TunnelService) and CONNECTED (received
         // tunnel offers the user has connected a local listener to).
-        let mut tunnel_rows: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+        // Both groups are pre-rendered into the Hash snapshot by
+        // `settings_dependency()` so this renderer stays static.
+        let mut tunnel_rows: Vec<iced::Element<'static, AppMessage>> = Vec::new();
 
-        let now = now_ms().max(0) as u64;
-        let mut sharing = self
-            .tunnel_service
-            .list_tunnels()
-            .into_iter()
-            .filter(|def| {
-                def.owner == self.local_public
-                    && def.status != boru_core::tunnel::service::TunnelStatus::Revoked
-            })
-            .collect::<Vec<_>>();
-        sharing.sort_by_key(|def| {
-            // Show active/available first, then expired, then failed
-            let expired = def.expires_at_ms <= now;
-            let failed = def.status == boru_core::tunnel::service::TunnelStatus::Failed;
-            (expired as u8 * 2 + failed as u8, def.expires_at_ms)
-        });
-        let sharing_empty = sharing.is_empty();
+        let sharing_empty = dep.sharing_tunnels.is_empty();
 
         if sharing_empty {
             tunnel_rows.push(
@@ -27525,32 +28041,14 @@ impl IcedChat {
                     .style(text_muted_style)
                     .into(),
             );
-            for def in sharing {
-                let name = self
-                    .shared_tunnels
-                    .get(&def.id)
-                    .map(|state| state.service_name.clone())
-                    .unwrap_or_else(|| "Shared service".to_string());
-                let friend = self.resolve_name(&def.allowed_peer);
-                let target = match def.target {
-                    boru_core::tunnel::service::TunnelTarget::Tcp { host, port } => {
-                        tunnel_target_label(host, port)
-                    }
-                };
-                let status = tunnel_status_label(&def);
-                let status_color = tunnel_status_color(&theme, &def);
-                let remaining = tunnel_remaining_label(def.expires_at_ms);
-                let connection_info = self
-                    .tunnel_service
-                    .connection_info(def.id)
-                    .map(tunnel_connection_info_label);
-                let tunnel_id = def.id;
+            for row in &dep.sharing_tunnels {
+                let status_color = settings_tunnel_status_color(&theme, row.status_kind);
                 let mut info_column = Column::new()
                     .push(
                         Row::new()
-                            .push(text(name.clone()).size(TYPO_SM))
+                            .push(text(row.name.clone()).size(TYPO_SM))
                             .push(
-                                text(format!(" · {status}"))
+                                text(format!(" · {}", row.status_label))
                                     .size(TYPO_XS)
                                     .color(status_color),
                             )
@@ -27558,27 +28056,27 @@ impl IcedChat {
                             .align_y(Alignment::Center),
                     )
                     .push(
-                        text(format!("With {friend}"))
+                        text(format!("With {}", row.friend))
                             .size(TYPO_XS)
                             .style(text_muted_style),
                     )
                     .push(
-                        text(format!("{target}  ·  {remaining}"))
+                        text(format!("{}  ·  {}", row.target, row.remaining))
                             .size(TYPO_XS)
                             .style(text_muted_style),
                     )
                     .spacing(SPACE_2)
                     .width(Length::Fill)
                     .align_x(Alignment::Start);
-                if let Some(label) = connection_info {
+                if let Some(label) = &row.connection_info {
                     info_column =
-                        info_column.push(text(label).size(TYPO_XS).style(text_muted_style));
+                        info_column.push(text(label.clone()).size(TYPO_XS).style(text_muted_style));
                 }
-                let row = Row::new()
+                let row_el = Row::new()
                     .push(info_column)
                     .push(
                         button(text("Stop Sharing").size(TYPO_XS))
-                            .on_press(AppMessage::StopSharingTunnel(tunnel_id))
+                            .on_press(AppMessage::StopSharingTunnel(row.id))
                             .padding([SPACE_2, SPACE_8])
                             .style(move |t, _status| iced::widget::button::Style {
                                 background: Some(iced::Background::Color(color_error(t))),
@@ -27592,17 +28090,11 @@ impl IcedChat {
                     )
                     .spacing(SPACE_8)
                     .align_y(Alignment::Center);
-                tunnel_rows.push(row.into());
+                tunnel_rows.push(row_el.into());
             }
         }
 
-        let mut connected = self
-            .received_tunnels
-            .values()
-            .filter(|state| state.connected)
-            .collect::<Vec<_>>();
-        connected.sort_by_key(|state| state.offer.expires_at_ms);
-        let connected_empty = connected.is_empty();
+        let connected_empty = dep.connected_tunnels.is_empty();
 
         if !connected_empty {
             tunnel_rows.push(
@@ -27612,33 +28104,14 @@ impl IcedChat {
                     .style(text_muted_style)
                     .into(),
             );
-            for state in connected {
-                let tunnel_id = state.offer.tunnel_id;
-                let label = format!("{} — {}", state.sharer_label, state.offer.service_name);
-                let address = state
-                    .local_addr
-                    .map(|addr| tunnel_local_address(&state.offer, addr))
-                    .unwrap_or_else(|| "Connecting…".to_string());
-                let route_label = state
-                    .live_info
-                    .as_ref()
-                    .map(|live| {
-                        let snapshot = live.snapshot();
-                        tunnel_route_label(snapshot.route)
-                    })
-                    .unwrap_or("");
-                let connection_info = state
-                    .live_info
-                    .as_ref()
-                    .map(|live| tunnel_connection_info_label(live.snapshot()));
-
+            for row in &dep.connected_tunnels {
                 let mut info_column = Column::new()
                     .push(
                         Row::new()
-                            .push(text(label).size(TYPO_SM))
+                            .push(text(row.label.clone()).size(TYPO_SM))
                             .push(
-                                text(if !route_label.is_empty() {
-                                    format!(" · {route_label}")
+                                text(if !row.route_label.is_empty() {
+                                    format!(" · {}", row.route_label)
                                 } else {
                                     String::new()
                                 })
@@ -27648,24 +28121,24 @@ impl IcedChat {
                             .spacing(SPACE_4)
                             .align_y(Alignment::Center),
                     )
-                    .push(text(address).size(TYPO_XS).style(text_muted_style))
+                    .push(text(row.address.clone()).size(TYPO_XS).style(text_muted_style))
                     .spacing(SPACE_2)
                     .width(Length::Fill)
                     .align_x(Alignment::Start);
-                if let Some(info) = connection_info {
+                if let Some(info) = &row.connection_info {
                     info_column =
-                        info_column.push(text(info).size(TYPO_XS).style(text_muted_style));
+                        info_column.push(text(info.clone()).size(TYPO_XS).style(text_muted_style));
                 }
-                let row = Row::new()
+                let row_el = Row::new()
                     .push(info_column)
                     .push(
                         button(text("Disconnect").size(TYPO_XS))
-                            .on_press(AppMessage::DisconnectReceivedTunnel(tunnel_id))
+                            .on_press(AppMessage::DisconnectReceivedTunnel(row.id))
                             .padding([SPACE_2, SPACE_8]),
                     )
                     .spacing(SPACE_8)
                     .align_y(Alignment::Center);
-                tunnel_rows.push(row.into());
+                tunnel_rows.push(row_el.into());
             }
         }
 
@@ -28022,11 +28495,65 @@ impl IcedChat {
     /// 2. Incoming requests — pending requests with accept/decline buttons
     /// 3. Outgoing requests — pending outgoing requests with cancel button
     fn view_friend_requests(&self) -> iced::Element<'_, AppMessage> {
+        let dep = self.friend_requests_dependency();
+        iced::widget::lazy(dep, Self::view_friend_requests_content).into()
+    }
+
+    /// Build the Hash-compatible snapshot the Friend Requests screen renders
+    /// from. Incoming/outgoing request rows are pre-resolved to display labels
+    /// so the static content fn needs no live store access.
+    fn friend_requests_dependency(&self) -> FriendRequestsDependency {
+        let local_pk_str = self.local_public.to_string();
+        let incoming = self
+            .friend_request_store
+            .list_incoming_by_status(&local_pk_str, FriendRequestStatus::Pending)
+            .iter()
+            .map(|req| {
+                let label = self.resolve_name(
+                    &PublicKey::from_str(&req.requester)
+                        .unwrap_or_else(|_| iroh::SecretKey::generate().public()),
+                );
+                FriendRequestRow {
+                    id: req.id.clone(),
+                    label,
+                    message: req.message.clone().unwrap_or_default(),
+                }
+            })
+            .collect();
+        let outgoing = self
+            .friend_request_store
+            .list_outgoing_by_status(&local_pk_str, FriendRequestStatus::Pending)
+            .iter()
+            .map(|req| {
+                let recipient = PublicKey::from_str(&req.recipient).ok();
+                let label = recipient
+                    .as_ref()
+                    .map(|pk| self.resolve_name(pk))
+                    .unwrap_or_else(|| req.recipient.chars().take(12).collect());
+                FriendRequestRow {
+                    id: req.id.clone(),
+                    label,
+                    message: String::new(),
+                }
+            })
+            .collect();
+        FriendRequestsDependency {
+            dark_mode: self.dark_mode,
+            friend_request_search_input: self.friend_request_search_input.clone(),
+            chat_list_error: self.chat_list_error.clone(),
+            incoming,
+            outgoing,
+        }
+    }
+
+    /// Static renderer for the Friend Requests screen. Reads only from the
+    /// [`FriendRequestsDependency`] snapshot.
+    fn view_friend_requests_content(dep: &FriendRequestsDependency) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, scrollable, text, text_input, Column, Space};
         use iced::{Alignment, Color, Length};
 
-        let theme = self.theme();
-        let local_pk_str = self.local_public.to_string();
+        let theme = Self::theme_from_dark(dep.dark_mode);
+        let muted = text_muted(&theme);
 
         let mut content = Column::new().spacing(SPACE_12).padding(SPACE_24);
 
@@ -28067,12 +28594,18 @@ impl IcedChat {
                     .style(text_muted_style)
                     .into(),
                 row![
-                    text_input("Peer public key…", &self.friend_request_search_input)
+                    // The input value must be `'static` for the cached tree;
+                    // leak a clone of the search text (small, bounded by the
+                    // friend-request search input length).
+                    text_input(
+                        "Peer public key…",
+                        Box::leak(dep.friend_request_search_input.clone().into_boxed_str()),
+                    )
                         .on_input(AppMessage::FriendRequestSearchChanged)
                         .width(Length::Fill),
                     button(text("Send").size(TYPO_SM))
                         .on_press(AppMessage::FriendRequestSend(
-                            self.friend_request_search_input.clone()
+                            dep.friend_request_search_input.clone()
                         ))
                         .padding([SPACE_6, SPACE_12])
                         .style(BUTTON_PRIMARY),
@@ -28087,26 +28620,22 @@ impl IcedChat {
         content = content.push(Space::new().height(Length::Fixed(SPACE_12)));
 
         // ── Incoming Requests ──
-        let incoming: Vec<&FriendRequest> = self
-            .friend_request_store
-            .list_incoming_by_status(&local_pk_str, FriendRequestStatus::Pending);
+        let incoming = &dep.incoming;
         let incoming_section = Column::new()
             .push(
                 row![
                     text("Incoming Requests").size(TYPO_MD).width(Length::Fill),
                     text(format!("{} pending", incoming.len()))
                         .size(TYPO_XS)
-                        .color(self.color_muted()),
+                        .color(muted),
                 ]
                 .spacing(SPACE_4),
             )
             .push(Space::new().height(Length::Fixed(SPACE_8)));
 
         if incoming.is_empty() {
-            let empty_msg: iced::Element<'_, AppMessage> = text("No incoming friend requests.")
-                .size(TYPO_SM)
-                .color(self.color_muted())
-                .into();
+            let empty_msg: iced::Element<'static, AppMessage> =
+                text("No incoming friend requests.").size(TYPO_SM).color(muted).into();
             content = content.push(
                 container(
                     Column::new()
@@ -28120,22 +28649,18 @@ impl IcedChat {
             );
         } else {
             let mut list = Column::new().spacing(SPACE_4);
-            for req in &incoming {
-                let label = self.resolve_name(
-                    &PublicKey::from_str(&req.requester)
-                        .unwrap_or_else(|_| iroh::SecretKey::generate().public()),
-                );
-                let msg_display = req.message.as_deref().unwrap_or("");
+            for req in incoming {
+                let msg_display = &req.message;
                 let row_el = row![
                     Column::new()
-                        .push(text(label).size(TYPO_SM).width(Length::Fill))
+                        .push(text(req.label.clone()).size(TYPO_SM).width(Length::Fill))
                         .push(if msg_display.is_empty() {
                             iced::widget::text("").into()
                         } else {
-                            let msg: iced::Element<'_, AppMessage> =
+                            let msg: iced::Element<'static, AppMessage> =
                                 text(format!("\"{msg_display}\""))
                                     .size(TYPO_XS)
-                                    .color(self.color_muted())
+                                    .color(muted)
                                     .into();
                             msg
                         })
@@ -28170,26 +28695,22 @@ impl IcedChat {
         content = content.push(Space::new().height(Length::Fixed(SPACE_12)));
 
         // ── Outgoing Requests ──
-        let outgoing: Vec<&FriendRequest> = self
-            .friend_request_store
-            .list_outgoing_by_status(&local_pk_str, FriendRequestStatus::Pending);
+        let outgoing = &dep.outgoing;
         let outgoing_section = Column::new()
             .push(
                 row![
                     text("Outgoing Requests").size(TYPO_MD).width(Length::Fill),
                     text(format!("{} pending", outgoing.len()))
                         .size(TYPO_XS)
-                        .color(self.color_muted()),
+                        .color(muted),
                 ]
                 .spacing(SPACE_4),
             )
             .push(Space::new().height(Length::Fixed(SPACE_8)));
 
         if outgoing.is_empty() {
-            let empty_msg: iced::Element<'_, AppMessage> = text("No outgoing friend requests.")
-                .size(TYPO_SM)
-                .color(self.color_muted())
-                .into();
+            let empty_msg: iced::Element<'static, AppMessage> =
+                text("No outgoing friend requests.").size(TYPO_SM).color(muted).into();
             content = content.push(
                 container(
                     Column::new()
@@ -28203,14 +28724,9 @@ impl IcedChat {
             );
         } else {
             let mut list = Column::new().spacing(SPACE_4);
-            for req in &outgoing {
-                let recipient = PublicKey::from_str(&req.recipient).ok();
-                let label = recipient
-                    .as_ref()
-                    .map(|pk| self.resolve_name(pk))
-                    .unwrap_or_else(|| req.recipient.chars().take(12).collect());
+            for req in outgoing {
                 let row_el = row![
-                    text(label).size(TYPO_SM).width(Length::Fill),
+                    text(req.label.clone()).size(TYPO_SM).width(Length::Fill),
                     text("Pending")
                         .size(TYPO_XS)
                         .color(Color::from_rgb(0.7, 0.6, 0.0)),
@@ -28248,10 +28764,10 @@ impl IcedChat {
         }
 
         // ── Error feedback ──
-        if !self.chat_list_error.is_empty() {
+        if !dep.chat_list_error.is_empty() {
             content = content.push(Space::new().height(Length::Fixed(SPACE_8)));
             content = content.push(
-                text(&self.chat_list_error)
+                text(dep.chat_list_error.clone())
                     .color(color_error(&theme))
                     .size(TYPO_SM),
             );
@@ -28677,14 +29193,28 @@ impl IcedChat {
     /// View a peer's profile showing their display name, bio, and
     /// shared files with Download buttons.
     fn view_peer_profile(&self, peer: PublicKey) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
-        use iced::{Alignment, Length};
-
         let profile_data = self.profile_cache.get(&peer);
         let display_name = profile_data
             .as_ref()
             .map(|p| p.display_name.clone())
             .unwrap_or_else(|| "Unknown Peer".to_string());
+        let dep = PeerProfileDependency {
+            dark_mode: self.dark_mode,
+            peer,
+            display_name,
+        };
+        iced::widget::lazy(dep, Self::view_peer_profile_content).into()
+    }
+
+    /// Static renderer for the Peer Profile screen, driven by
+    /// [`PeerProfileDependency`].
+    fn view_peer_profile_content(
+        dep: &PeerProfileDependency,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::{Alignment, Length};
+
+        let display_name = dep.display_name.clone();
         let header = Row::new()
             .push(text(display_name.clone()).size(TYPO_LG).width(Length::Fill))
             .push(
@@ -28747,17 +29277,71 @@ impl IcedChat {
     }
 
     fn view_peer_catalogue(&self, peer: PublicKey) -> iced::Element<'_, AppMessage> {
+        let dep = self.peer_catalogue_dependency(peer);
+        iced::widget::lazy(dep, move |dep| Self::view_peer_catalogue_content(dep, peer)).into()
+    }
+
+    /// Build the Hash-compatible snapshot the Peer Catalogue renders from.
+    fn peer_catalogue_dependency(&self, peer: PublicKey) -> PeerCatalogueDependency {
+        let display_name = self
+            .names
+            .get(&peer)
+            .cloned()
+            .unwrap_or_else(|| "Unknown Peer".to_string());
+        let rows = match self.peer_catalogue_view.as_ref() {
+            Some((pk, files)) if *pk == peer => files
+                .iter()
+                .map(|file| {
+                    let dl = self
+                        .catalogue_downloads
+                        .get(&file.content_hash)
+                        .map(CatalogueDownloadSnapshot::from)
+                        .unwrap_or(CatalogueDownloadSnapshot::None);
+                    let is_pending = self
+                        .pending_downloads
+                        .contains(&(file.content_hash.clone(), peer));
+                    CatalogueRowSnapshot {
+                        shared_file_id: file.shared_file_id.clone(),
+                        display_name: file.display_name.clone(),
+                        description: file.description.clone(),
+                        mime_type: file.mime_type.clone(),
+                        size_bytes: file.size_bytes,
+                        content_hash: file.content_hash.clone(),
+                        version_number: file.version_number,
+                        updated_at_ms: file.updated_at_ms,
+                        collection_ids: file.collection_ids.clone(),
+                        dl,
+                        is_pending,
+                    }
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        PeerCatalogueDependency {
+            dark_mode: self.dark_mode,
+            peer,
+            display_name,
+            catalogue_loading: self.catalogue_loading,
+            rows,
+            catalogue_scroll_offset_bits: (self.catalogue_scroll_offset.max(0.0) * 100.0) as u32,
+            catalogue_viewport_height_bits: (self.catalogue_viewport_height.max(0.0) * 100.0)
+                as u32,
+        }
+    }
+
+    /// Static renderer for the Peer Catalogue screen. Reads only from the
+    /// Hash-compatible [`PeerCatalogueDependency`] snapshot.
+    fn view_peer_catalogue_content(
+        dep: &PeerCatalogueDependency,
+        peer: PublicKey,
+    ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, scrollable, space, text, Column, Row, Space};
         use iced::{Alignment, Color, Length};
 
         const CATALOGUE_ROW_HEIGHT: f32 = 52.0;
         const OVERSCAN: f32 = 800.0;
 
-        let display_name = self
-            .names
-            .get(&peer)
-            .cloned()
-            .unwrap_or_else(|| "Unknown Peer".to_string());
+        let display_name = &dep.display_name;
 
         let header = Row::new()
             .push(
@@ -28780,7 +29364,6 @@ impl IcedChat {
         let mut file_rows = Column::new().spacing(SPACE_4);
 
         // ── Open Downloads Folder button ──
-        let _dl_dir = self.boru_downloads_dir.clone();
         file_rows = file_rows.push(
             container(
                 button(
@@ -28829,7 +29412,7 @@ impl IcedChat {
             .padding([SPACE_4, SPACE_12]),
         );
 
-        if self.catalogue_loading {
+        if dep.catalogue_loading {
             file_rows = file_rows.push(
                 container(
                     text("Loading catalogue…")
@@ -28840,7 +29423,8 @@ impl IcedChat {
                 .padding(SPACE_12)
                 .style(container_surface),
             );
-        } else if let Some((_, files)) = &self.peer_catalogue_view {
+        } else if !dep.rows.is_empty() {
+            let files = &dep.rows;
             if files.is_empty() {
                 file_rows = file_rows.push(
                     container(
@@ -28854,18 +29438,21 @@ impl IcedChat {
                 );
             } else {
                 let total_h = files.len() as f32 * CATALOGUE_ROW_HEIGHT;
+                let catalogue_scroll_offset = dep.catalogue_scroll_offset_bits as f32 / 100.0;
+                let catalogue_viewport_height = dep.catalogue_viewport_height_bits as f32 / 100.0;
 
                 // ── Window calculation (only when viewport is known) ──
-                if self.catalogue_viewport_height > 0.0 && total_h > 0.0 {
-                    let so = self.catalogue_scroll_offset.max(0.0);
+                if catalogue_viewport_height > 0.0 && total_h > 0.0 {
+                    let so = catalogue_scroll_offset.max(0.0);
                     let view_top = so;
-                    let view_bot = so + self.catalogue_viewport_height.max(200.0);
+                    let view_bot = so + catalogue_viewport_height.max(200.0);
 
                     let range_top = (view_top - OVERSCAN).max(0.0);
                     let range_bot = (view_bot + OVERSCAN).min(total_h);
 
                     let first_idx = (range_top / CATALOGUE_ROW_HEIGHT) as usize;
                     let mut last_idx = (range_bot / CATALOGUE_ROW_HEIGHT) as usize;
+
                     if last_idx >= files.len() {
                         last_idx = files.len().saturating_sub(1);
                     }
@@ -28886,15 +29473,8 @@ impl IcedChat {
                     }
 
                     // Visible file rows
-                    for file in &files[first_idx..=last_idx] {
-                        let dl_state = self.catalogue_downloads.get(&file.content_hash);
-                        file_rows = file_rows.push(Self::render_catalogue_row(
-                            file,
-                            self.dark_mode,
-                            dl_state,
-                            peer,
-                            &self.pending_downloads,
-                        ));
+                    for row in &files[first_idx..=last_idx] {
+                        file_rows = file_rows.push(Self::render_catalogue_row(row, dep.dark_mode, peer));
                     }
 
                     // Bottom spacer
@@ -28910,15 +29490,8 @@ impl IcedChat {
                     let _top_space_h = 0.0;
                     let bottom_h = (total_h - initial_count as f32 * CATALOGUE_ROW_HEIGHT).max(0.0);
 
-                    for file in &files[..initial_count] {
-                        let dl_state = self.catalogue_downloads.get(&file.content_hash);
-                        file_rows = file_rows.push(Self::render_catalogue_row(
-                            file,
-                            self.dark_mode,
-                            dl_state,
-                            peer,
-                            &self.pending_downloads,
-                        ));
+                    for row in &files[..initial_count] {
+                        file_rows = file_rows.push(Self::render_catalogue_row(row, dep.dark_mode, peer));
                     }
                     if bottom_h > 0.0 {
                         file_rows = file_rows.push(
@@ -28952,56 +29525,49 @@ impl IcedChat {
         .style(container_primary)
         .into()
     }
-
     /// Render one file row in the peer catalogue view.
     #[allow(clippy::too_many_lines)]
-    fn render_catalogue_row<'a>(
-        file: &'a RemoteSharedFile,
-        dark_mode: bool,
-        dl_state: Option<&'a CatalogueDownloadState>,
+    fn render_catalogue_row(
+        row: &CatalogueRowSnapshot,
+        _dark_mode: bool,
         peer: PublicKey,
-        pending_downloads: &'a HashSet<(String, PublicKey)>,
-    ) -> iced::Element<'a, AppMessage> {
+    ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, text, Column, Row};
         use iced::{Alignment, Length};
 
-        let size_str = format_file_size(file.size_bytes);
-        let mime_display = if file.mime_type.len() > 20 {
-            format!("{}…", &file.mime_type[..18])
+        let size_str = format_file_size(row.size_bytes);
+        let mime_display = if row.mime_type.len() > 20 {
+            format!("{}…", &row.mime_type[..18])
         } else {
-            file.mime_type.clone()
+            row.mime_type.clone()
         };
 
         // ── Build file info column ──
         let info_col = Column::new()
-            .push(text(&file.display_name).size(TYPO_SM).width(Length::Fill))
+            .push(text(row.display_name.clone()).size(TYPO_SM).width(Length::Fill))
             .push(
                 text(format!("{} · {}", size_str, mime_display))
                     .size(TYPO_XS)
-                    .style(if dark_mode {
-                        text_muted_style
-                    } else {
-                        text_muted_style
-                    }),
+                    .style(text_muted_style),
             )
             .spacing(SPACE_2);
 
         // ── Action button based on download state ──
-        let action: iced::Element<'_, AppMessage> = match dl_state {
-            Some(CatalogueDownloadState::Pending) => button(text("…").size(TYPO_XS))
+        let action: iced::Element<'static, AppMessage> = match row.dl {
+            CatalogueDownloadSnapshot::Pending => button(text("…").size(TYPO_XS))
                 .padding([SPACE_2, SPACE_6])
                 .into(),
-            Some(CatalogueDownloadState::Downloading {
+            CatalogueDownloadSnapshot::Downloading {
                 bytes,
                 total,
                 speed,
-            }) => {
+            } => {
                 let pct = total
                     .filter(|t| *t > 0)
-                    .map(|t| ((*bytes as f64 / t as f64) * 100.0) as u8)
+                    .map(|t| ((bytes as f64 / t as f64) * 100.0) as u8)
                     .unwrap_or(0);
-                let speed_str = if *speed > 0 {
-                    format!("{}/s", format_file_size(*speed))
+                let speed_str = if speed > 0 {
+                    format!("{}/s", format_file_size(speed))
                 } else {
                     String::new()
                 };
@@ -29022,7 +29588,7 @@ impl IcedChat {
                             .spacing(SPACE_4),
                     )
                     .push(
-                        text(format!("{}{}", format_file_size(*bytes), speed_str))
+                        text(format!("{}{}", format_file_size(bytes), speed_str))
                             .size(TYPO_XXS)
                             .style(text_muted_style),
                     )
@@ -29030,10 +29596,10 @@ impl IcedChat {
                     .align_x(Alignment::End)
                     .into()
             }
-            Some(CatalogueDownloadState::Completed { path: _ }) => Row::new()
+            CatalogueDownloadSnapshot::Completed => Row::new()
                 .push(
                     button(text("Open").size(TYPO_XS))
-                        .on_press(AppMessage::OpenDownloadedFile(file.display_name.clone()))
+                        .on_press(AppMessage::OpenDownloadedFile(row.display_name.clone()))
                         .padding([SPACE_2, SPACE_6]),
                 )
                 .push(
@@ -29044,7 +29610,7 @@ impl IcedChat {
                 .spacing(SPACE_4)
                 .align_y(Alignment::Center)
                 .into(),
-            Some(CatalogueDownloadState::Failed(_err)) => Column::new()
+            CatalogueDownloadSnapshot::Failed => Column::new()
                 .push(
                     text("Failed")
                         .size(TYPO_XXS)
@@ -29054,29 +29620,28 @@ impl IcedChat {
                     button(text("Retry").size(TYPO_XS))
                         .on_press(AppMessage::RequestFileDownload {
                             peer,
-                            file: file.clone(),
+                            file: row.to_file(),
                         })
                         .padding([SPACE_2, SPACE_6]),
                 )
                 .spacing(SPACE_2)
                 .align_x(Alignment::End)
                 .into(),
-            Some(CatalogueDownloadState::Cancelled) => Column::new()
+            CatalogueDownloadSnapshot::Cancelled => Column::new()
                 .push(text("Cancelled").size(TYPO_XXS).style(text_muted_style))
                 .push(
                     button(text("Retry").size(TYPO_XS))
                         .on_press(AppMessage::RequestFileDownload {
                             peer,
-                            file: file.clone(),
+                            file: row.to_file(),
                         })
                         .padding([SPACE_2, SPACE_6]),
                 )
                 .spacing(SPACE_2)
                 .align_x(Alignment::End)
                 .into(),
-            None => {
-                let is_pending = pending_downloads.contains(&(file.content_hash.clone(), peer));
-                if is_pending {
+            CatalogueDownloadSnapshot::None => {
+                if row.is_pending {
                     button(text("…").size(TYPO_XS))
                         .padding([SPACE_2, SPACE_6])
                         .into()
@@ -29084,7 +29649,7 @@ impl IcedChat {
                     button(text("Download").size(TYPO_XS))
                         .on_press(AppMessage::RequestFileDownload {
                             peer,
-                            file: file.clone(),
+                            file: row.to_file(),
                         })
                         .padding([SPACE_2, SPACE_6])
                         .into()
@@ -31996,6 +32561,28 @@ impl IcedChat {
     }
 
     fn view_discover(&self) -> iced::Element<'_, AppMessage> {
+        // Cache the whole Discover screen with `lazy`: switching away and back
+        // reuses the built widget tree unless the room list actually changed.
+        let dep = self.discover_dependency();
+        iced::widget::lazy(dep, Self::view_discover_content).into()
+    }
+
+    /// Builds the Discover screen's renderable snapshot.
+    fn discover_dependency(&self) -> DiscoverDependency {
+        let ads: Vec<(RoomAdvertisement, PublicKey)> = {
+            let store = self.directory_store.lock().unwrap();
+            let mut list = store.list_active();
+            list.sort_by(|(a, _), (b, _)| b.last_activity.cmp(&a.last_activity));
+            list
+        };
+        DiscoverDependency {
+            dark_mode: self.dark_mode,
+            ads,
+        }
+    }
+
+    /// Static renderer for the Discover screen, driven by [`DiscoverDependency`].
+    fn view_discover_content(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, scrollable, text, Column, Row, Space};
         use iced::{Alignment, Background, Length};
 
@@ -32018,12 +32605,7 @@ impl IcedChat {
 
         let mut main_content = Column::new().spacing(SPACE_8).padding(SPACE_16);
 
-        let ads: Vec<(RoomAdvertisement, PublicKey)> = {
-            let store = self.directory_store.lock().unwrap();
-            let mut list = store.list_active();
-            list.sort_by(|(a, _), (b, _)| b.last_activity.cmp(&a.last_activity));
-            list
-        };
+        let ads = &dep.ads;
 
         if ads.is_empty() {
             main_content = main_content.push(
@@ -32048,8 +32630,8 @@ impl IcedChat {
                 .padding(SPACE_16),
             );
         } else {
-            let theme = Self::theme_from_dark(self.dark_mode);
-            for (ad, _author) in ads.into_iter() {
+            let theme = Self::theme_from_dark(dep.dark_mode);
+            for (ad, _author) in ads {
                 let theme = theme.clone();
                 let ad_for_join = ad.clone();
                 let room_name = ad.room_name.clone();
@@ -32122,14 +32704,160 @@ impl IcedChat {
             .into()
     }
     /// Redesigned friend profile view with clean layout, context menu, and action buttons.
+    /// Redesigned friend profile view with clean layout, context menu, and action buttons.
+    ///
+    /// The deterministic base content (header, status, shared files, recent
+    /// messages, shared services, actions) is cached with `lazy()` keyed on a
+    /// Hash snapshot. The transient overlays (three-dot menu, confirm dialogs,
+    /// share dialog, toast) layer on top and re-render every frame because they
+    /// contain live text inputs and combo boxes.
     fn view_friend_profile(&self, peer: PublicKey) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, row, scrollable, text, text_input, Column, Space};
+        use iced::widget::{button, container, row, text, text_input, Column, Space};
         use iced::{Alignment, Length};
 
-        let theme = self.theme();
-        let dark_mode = self.dark_mode;
+        let dep = self.friend_profile_dependency(peer);
+        let display_name = dep.display_name.clone();
+        let dark_mode = dep.dark_mode;
+        let base: iced::widget::Container<'_, AppMessage> = iced::widget::container(
+            iced::widget::lazy(dep, move |dep| Self::view_friend_profile_content(dep, peer)),
+        );
 
-        // ── Gather data ──
+        // ── Three-dot context menu overlay ──
+        if self.friend_profile_menu_open {
+            let menu_items: Vec<(&str, AppMessage)> = vec![
+                ("View Profile", AppMessage::ToggleFriendProfileMenu),
+                ("Browse Files", AppMessage::BrowsePeerCatalogue(peer)),
+                ("Rename Friend", AppMessage::ShowRenameFriendInput),
+                ("Share local service", AppMessage::OpenShareLocalService),
+                ("Copy Public Key", AppMessage::CopyPeerId(peer)),
+                ("Remove Friend", AppMessage::ShowRemoveFriendConfirm),
+                ("Block Friend", AppMessage::ShowBlockFriendConfirm),
+            ];
+
+            let mut menu_col = Column::new()
+                .spacing(SPACE_2)
+                .padding(SPACE_4)
+                .width(Length::Fixed(200.0));
+
+            for (label, msg) in &menu_items {
+                let is_destructive = *label == "Remove Friend" || *label == "Block Friend";
+                let item = button(text(*label).size(TYPO_SM).color(if is_destructive {
+                    Color::from_rgb(0.8, 0.2, 0.2)
+                } else {
+                    text_remote_body(&Self::theme_from_dark(dark_mode))
+                }))
+                .on_press(msg.clone())
+                .width(Length::Fill)
+                .padding([SPACE_6, SPACE_8])
+                .style(move |_t, status| {
+                    let bg = match status {
+                        iced::widget::button::Status::Hovered => {
+                            iced::Color::from_rgba(0.3, 0.3, 0.3, 0.3)
+                        }
+                        _ => iced::Color::TRANSPARENT,
+                    };
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        border: iced::Border {
+                            radius: SPACE_4.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                });
+                menu_col = menu_col.push(item);
+            }
+
+            let menu_panel = container(menu_col)
+                .style(move |t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(bg_surface(t))),
+                    border: iced::Border {
+                        color: border_muted(t),
+                        width: 1.0,
+                        radius: SPACE_8.into(),
+                    },
+                    ..Default::default()
+                })
+                .padding(SPACE_4);
+
+            // Position menu in top-right area — we push it into the header area
+            let menu_overlay = container(menu_panel)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Alignment::End)
+                .align_y(iced::Alignment::Start)
+                .padding(iced::Padding {
+                    top: 60.0,
+                    right: 12.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                });
+
+            // Click-outside handler: the full backdrop closes the menu
+            let backdrop = button(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(AppMessage::ToggleFriendProfileMenu)
+                .style(|_t, _status| iced::widget::button::Style {
+                    background: None,
+                    border: iced::Border::default(),
+                    text_color: iced::Color::TRANSPARENT,
+                    ..Default::default()
+                });
+
+            return iced::widget::stack![base, backdrop, menu_overlay].into();
+        }
+
+        // ── Confirmation dialogs ──
+        if self.friend_remove_confirm {
+            return self.view_remove_confirm_overlay(peer, &display_name, base);
+        }
+        if self.friend_block_confirm {
+            return self.view_block_confirm_overlay(peer, &display_name, base);
+        }
+        if self.share_local_service_open {
+            return self.view_share_local_service_dialog(peer, display_name.clone(), base);
+        }
+
+        // ── Toast overlay ──
+        if let Some(msg) = &self.toast_message {
+            let toast = container(text(msg).size(TYPO_SM).color(Color::WHITE))
+                .padding(iced::Padding {
+                    top: SPACE_8,
+                    right: SPACE_16,
+                    bottom: SPACE_8,
+                    left: SPACE_16,
+                })
+                .style(move |t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.1, 0.1, 0.1, 0.85,
+                    ))),
+                    border: iced::Border {
+                        radius: SPACE_8.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+
+            return iced::widget::stack![
+                base,
+                container(toast)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding(iced::Padding {
+                        top: 16.0,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: 0.0,
+                    }),
+            ]
+            .into();
+        }
+
+        base.into()
+    }
+
+    /// Build the Hash-compatible snapshot the Friend Profile base content
+    /// renders from. Every field is owned and Hash so `lazy()` can diff it.
+    fn friend_profile_dependency(&self, peer: PublicKey) -> FriendProfileDependency {
         let fid = boru_core::friends::FriendId::from_public_key(peer);
         let friend_record = self.friends.get(&fid);
         let profile_data = self.profile_cache.get(&peer);
@@ -32140,19 +32868,9 @@ impl IcedChat {
             .unwrap_or_else(|| "Unknown Friend".to_string());
 
         let presence = self.peer_presence(&peer);
-        let is_online = presence != PeerPresence::Offline;
         let has_addrs = friend_record
             .map(|r| !r.known_addrs.is_empty())
             .unwrap_or(false);
-        let last_seen_str = if is_online {
-            if has_addrs {
-                "Connected locally.".to_string()
-            } else {
-                "Online".to_string()
-            }
-        } else {
-            "Offline".to_string()
-        };
 
         // Check for shared catalogue files
         let has_catalogue = self
@@ -32186,11 +32904,82 @@ impl IcedChat {
             }
         };
 
+        // Received shared services (tunnels) from this friend, pre-rendered
+        // into Hash rows so the static content fn needs no live state.
+        let shared_services = self
+            .received_tunnels
+            .values()
+            .filter(|state| state.sharer == peer)
+            .map(|state| {
+                let route_label = state.live_info.as_ref().map(|live| {
+                    let snapshot = live.snapshot();
+                    tunnel_route_label(snapshot.route).to_string()
+                });
+                let local_addr = state
+                    .local_addr
+                    .map(|addr| tunnel_local_address(&state.offer, addr));
+                FriendProfileServiceRow {
+                    id: state.offer.tunnel_id,
+                    service_name: state.offer.service_name.clone(),
+                    sharer_label: state.sharer_label.clone(),
+                    is_http: state.offer.is_http,
+                    expired: state.offer.expires_at_ms <= now_ms().max(0) as u64,
+                    connection_failed: state.connection_failed,
+                    connected: state.connected,
+                    route_label,
+                    local_addr,
+                    expiry: tunnel_expiry_label(state.offer.expires_at_ms),
+                }
+            })
+            .collect();
+
+        FriendProfileDependency {
+            dark_mode: self.dark_mode,
+            peer,
+            display_name,
+            presence,
+            has_addrs,
+            friend_profile_rename_input: self.friend_profile_rename_input.clone(),
+            friend_profile_renaming: self.friend_profile_renaming,
+            has_catalogue,
+            recent_messages,
+            shared_services,
+        }
+    }
+
+    /// Static renderer for the Friend Profile base content. Reads only from the
+    /// [`FriendProfileDependency`] snapshot (plus the peer key for messages).
+    fn view_friend_profile_content(
+        dep: &FriendProfileDependency,
+        peer: PublicKey,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, container, row, scrollable, text, text_input, Column, Space};
+        use iced::{Alignment, Length};
+
+        let theme = Self::theme_from_dark(dep.dark_mode);
+        let dark_mode = dep.dark_mode;
+        let display_name = dep.display_name.clone();
+        let presence = dep.presence;
+        let is_online = presence != PeerPresence::Offline;
+        let has_addrs = dep.has_addrs;
+        let last_seen_str = if is_online {
+            if has_addrs {
+                "Connected locally.".to_string()
+            } else {
+                "Online".to_string()
+            }
+        } else {
+            "Offline".to_string()
+        };
+
+        let has_catalogue = dep.has_catalogue;
+        let recent_messages = &dep.recent_messages;
+
         // ── Header row: name (or rename input) + three-dot menu + close ──
-        let name_element: iced::Element<'_, AppMessage> = if self.friend_profile_renaming {
+        let name_element: iced::Element<'static, AppMessage> = if dep.friend_profile_renaming {
             row![]
                 .push(
-                    text_input("Friend's name…", &self.friend_profile_rename_input)
+                    text_input("Friend's name…", &dep.friend_profile_rename_input)
                         .on_input(AppMessage::FriendRenameInputChanged)
                         .on_submit(AppMessage::FriendRenameConfirm)
                         .size(TYPO_MD)
@@ -32343,14 +33132,14 @@ impl IcedChat {
         // ── Recent Messages section ──
         let recent_header = text("Recent Messages").size(TYPO_SM).width(Length::Fill);
 
-        let recent_body: iced::Element<'_, AppMessage> = if recent_messages.is_empty() {
+        let recent_body: iced::Element<'static, AppMessage> = if recent_messages.is_empty() {
             text("No recent messages.")
                 .size(TYPO_XS)
                 .style(text_muted_style)
                 .into()
         } else {
             let mut col = Column::new().spacing(SPACE_4);
-            for msg in &recent_messages {
+            for msg in recent_messages {
                 col = col.push(text(msg.clone()).size(TYPO_XS).style(text_muted_style));
             }
             // Make entire section clickable to open chat
@@ -32448,20 +33237,16 @@ impl IcedChat {
         body = body.push(status_section);
 
         // ── Shared Services section (received tunnel offers) ──
-        let shared_services = self
-            .received_tunnels
-            .values()
-            .filter(|state| state.sharer == peer)
-            .collect::<Vec<_>>();
+        let shared_services = &dep.shared_services;
         if !shared_services.is_empty() {
             let mut services_col = Column::new().spacing(SPACE_4);
             for state in shared_services {
-                let tunnel_id = state.offer.tunnel_id;
-                let service_name = state.offer.service_name.clone();
+                let tunnel_id = state.id;
+                let service_name = state.service_name.clone();
                 let sharer_label = state.sharer_label.clone();
-                let is_http = state.offer.is_http;
-                let expired = state.offer.expires_at_ms <= now_ms().max(0) as u64;
-                let expiry = tunnel_expiry_label(state.offer.expires_at_ms);
+                let is_http = state.is_http;
+                let expired = state.expired;
+                let expiry = state.expiry.clone();
                 let mut card = Column::new().spacing(SPACE_4);
 
                 // Status badge: Connected (direct/relay), Failed, or Expired
@@ -32470,10 +33255,7 @@ impl IcedChat {
                 } else if state.connection_failed {
                     card = card.push(text("Failed").size(TYPO_XS).color(color_error(&theme)));
                 } else if state.connected {
-                    let route = state.live_info.as_ref().map(|live| {
-                        let snapshot = live.snapshot();
-                        tunnel_route_label(snapshot.route)
-                    });
+                    let route = state.route_label.as_deref();
                     card = card.push(
                         text(match route {
                             Some("Direct") => "Connected · Direct".to_string(),
@@ -32488,8 +33270,7 @@ impl IcedChat {
                 card = card.push(text(sharer_label).size(TYPO_XS).style(text_muted_style));
                 card = card.push(text(service_name).size(TYPO_MD));
 
-                if let Some(local_addr) = state.local_addr {
-                    let display = tunnel_local_address(&state.offer, local_addr);
+                if let Some(display) = &state.local_addr {
                     card = card.push(
                         text(format!("Available at: {display}"))
                             .size(TYPO_XS)
@@ -32610,145 +33391,13 @@ impl IcedChat {
         // ── Wrap in scrollable ──
         let content = Column::new().push(header).push(body).push(actions_section);
 
-        let base = container(scrollable(content))
+        container(scrollable(content))
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(container_primary);
-
-        // ── Three-dot context menu overlay ──
-        if self.friend_profile_menu_open {
-            let menu_items: Vec<(&str, AppMessage)> = vec![
-                ("View Profile", AppMessage::ToggleFriendProfileMenu),
-                ("Browse Files", AppMessage::BrowsePeerCatalogue(peer)),
-                ("Rename Friend", AppMessage::ShowRenameFriendInput),
-                ("Share local service", AppMessage::OpenShareLocalService),
-                ("Copy Public Key", AppMessage::CopyPeerId(peer)),
-                ("Remove Friend", AppMessage::ShowRemoveFriendConfirm),
-                ("Block Friend", AppMessage::ShowBlockFriendConfirm),
-            ];
-
-            let mut menu_col = Column::new()
-                .spacing(SPACE_2)
-                .padding(SPACE_4)
-                .width(Length::Fixed(200.0));
-
-            for (label, msg) in &menu_items {
-                let is_destructive = *label == "Remove Friend" || *label == "Block Friend";
-                let item = button(text(*label).size(TYPO_SM).color(if is_destructive {
-                    Color::from_rgb(0.8, 0.2, 0.2)
-                } else {
-                    text_remote_body(&Self::theme_from_dark(dark_mode))
-                }))
-                .on_press(msg.clone())
-                .width(Length::Fill)
-                .padding([SPACE_6, SPACE_8])
-                .style(move |_t, status| {
-                    let bg = match status {
-                        iced::widget::button::Status::Hovered => {
-                            iced::Color::from_rgba(0.3, 0.3, 0.3, 0.3)
-                        }
-                        _ => iced::Color::TRANSPARENT,
-                    };
-                    iced::widget::button::Style {
-                        background: Some(iced::Background::Color(bg)),
-                        border: iced::Border {
-                            radius: SPACE_4.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }
-                });
-                menu_col = menu_col.push(item);
-            }
-
-            let menu_panel = container(menu_col)
-                .style(move |t| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(bg_surface(t))),
-                    border: iced::Border {
-                        color: border_muted(t),
-                        width: 1.0,
-                        radius: SPACE_8.into(),
-                    },
-                    ..Default::default()
-                })
-                .padding(SPACE_4);
-
-            // Position menu in top-right area — we push it into the header area
-            let menu_overlay = container(menu_panel)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(iced::Alignment::End)
-                .align_y(iced::Alignment::Start)
-                .padding(iced::Padding {
-                    top: 60.0,
-                    right: 12.0,
-                    bottom: 0.0,
-                    left: 0.0,
-                });
-
-            // Click-outside handler: the full backdrop closes the menu
-            let backdrop = button(Space::new().width(Length::Fill).height(Length::Fill))
-                .on_press(AppMessage::ToggleFriendProfileMenu)
-                .style(|_t, _status| iced::widget::button::Style {
-                    background: None,
-                    border: iced::Border::default(),
-                    text_color: iced::Color::TRANSPARENT,
-                    ..Default::default()
-                });
-
-            return iced::widget::stack![base, backdrop, menu_overlay].into();
-        }
-
-        // ── Confirmation dialogs ──
-        if self.friend_remove_confirm {
-            return self.view_remove_confirm_overlay(peer, &display_name, base);
-        }
-        if self.friend_block_confirm {
-            return self.view_block_confirm_overlay(peer, &display_name, base);
-        }
-        if self.share_local_service_open {
-            return self.view_share_local_service_dialog(peer, display_name.clone(), base);
-        }
-
-        // ── Toast overlay ──
-        if let Some(msg) = &self.toast_message {
-            let toast = container(text(msg).size(TYPO_SM).color(Color::WHITE))
-                .padding(iced::Padding {
-                    top: SPACE_8,
-                    right: SPACE_16,
-                    bottom: SPACE_8,
-                    left: SPACE_16,
-                })
-                .style(move |t| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgba(
-                        0.1, 0.1, 0.1, 0.85,
-                    ))),
-                    border: iced::Border {
-                        radius: SPACE_8.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                });
-
-            return iced::widget::stack![
-                base,
-                container(toast)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .padding(iced::Padding {
-                        top: 16.0,
-                        right: 0.0,
-                        bottom: 0.0,
-                        left: 0.0,
-                    }),
-            ]
-            .into();
-        }
-
-        base.into()
+            .style(container_primary)
+            .into()
     }
 
-    /// Dialog for sharing a local service with a friend via a secure tunnel.
     fn view_share_local_service_dialog<'a>(
         &'a self,
         _peer: PublicKey,
