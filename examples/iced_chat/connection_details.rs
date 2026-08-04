@@ -318,7 +318,7 @@ where
             state,
             announcement,
             vec![text(message.as_str())
-                .font(crate::fonts::inter(Weight::Normal))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_SM)
                 .into()],
             on_action,
@@ -328,7 +328,7 @@ where
             state,
             announcement,
             vec![text(message.as_str())
-                .font(crate::fonts::inter(Weight::Normal))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_SM)
                 .style(text_muted_style)
                 .into()],
@@ -339,7 +339,7 @@ where
             state,
             announcement,
             vec![text(message.as_str())
-                .font(crate::fonts::inter(Weight::Normal))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_SM)
                 .style(|theme| iced::widget::text::Style {
                     color: Some(color_error(theme)),
@@ -437,7 +437,7 @@ where
     Message: 'a + Clone,
 {
     let label_widget = text(label)
-        .font(crate::fonts::inter(Weight::Semibold))
+        .font(crate::fonts::source_sans(Weight::Semibold))
         .size(TYPO_SM)
         .width(Length::Fill)
         .style(|theme| iced::widget::text::Style {
@@ -475,7 +475,7 @@ where
         line = line.push(
             button(
                 text("Copy")
-                    .font(crate::fonts::inter(Weight::Medium))
+                    .font(crate::fonts::source_sans(Weight::Medium))
                     .size(TYPO_SM),
             )
             .on_press(on_action(ConnectionDetailsDialogAction::CopyValue {
@@ -504,7 +504,7 @@ where
     Message: 'a + Clone,
 {
     let title = text(state.title())
-        .font(crate::fonts::inter(Weight::Bold))
+        .font(crate::fonts::source_sans(Weight::Bold))
         .size(TYPO_XL)
         .width(Length::Fill);
 
@@ -512,7 +512,7 @@ where
     if let Some(message) = announcement {
         header = header.push(
             text(message)
-                .font(crate::fonts::inter(Weight::Normal))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_XS)
                 .style(text_muted_style)
                 .width(Length::Fill),
@@ -537,7 +537,7 @@ where
         footer = footer.push(
             button(
                 text("Copy details")
-                    .font(crate::fonts::inter(Weight::Medium))
+                    .font(crate::fonts::source_sans(Weight::Medium))
                     .size(TYPO_SM),
             )
             .on_press(on_action(ConnectionDetailsDialogAction::CopyDetails))
@@ -548,7 +548,7 @@ where
     footer = footer.push(
         button(
             text("Close")
-                .font(crate::fonts::inter(Weight::Medium))
+                .font(crate::fonts::source_sans(Weight::Medium))
                 .size(TYPO_SM),
         )
         .on_press(on_action(ConnectionDetailsDialogAction::Close))

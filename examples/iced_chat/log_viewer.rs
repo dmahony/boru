@@ -41,10 +41,10 @@ impl LogViewer {
 
         let header = row![
             text("Boru logs")
-                .font(crate::fonts::inter(Weight::Bold))
+                .font(crate::fonts::source_sans(Weight::Bold))
                 .size(TYPO_LG),
             text(format!(" {}", app::version_tag()))
-                .font(crate::fonts::inter(Weight::Normal))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_XXS)
                 .style(text_muted_style)
         ]
@@ -52,7 +52,7 @@ impl LogViewer {
         .push(
             button(
                 text("Reload")
-                    .font(crate::fonts::inter(Weight::Medium))
+                    .font(crate::fonts::source_sans(Weight::Medium))
                     .size(TYPO_SM),
             )
             .on_press(Message::Refresh),
@@ -63,7 +63,7 @@ impl LogViewer {
                 "No log output yet.\n\nThe log file is:\n{}",
                 self.log_path.display()
             ))
-            .font(crate::fonts::inter(Weight::Normal))
+            .font(crate::fonts::source_sans(Weight::Normal))
             .size(TYPO_SM)
         } else {
             text(&self.contents)
@@ -75,7 +75,7 @@ impl LogViewer {
         column![
             header,
             text(self.log_path.display().to_string())
-                .font(crate::fonts::inter(Weight::Normal))
+                .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_XS)
                 .style(text_muted_style),
             scrollable(container(body).width(Length::Fill)).height(Length::Fill),

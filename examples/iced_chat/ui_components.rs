@@ -1565,7 +1565,7 @@ pub fn system_event_chip<'a, Message: 'a>(
                     .push(
                         text(label)
                             .size(Typography::Timestamp.size_px())
-                            .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                            .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                             .color(accent),
                     )
                     .push(

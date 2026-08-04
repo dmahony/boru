@@ -24257,7 +24257,7 @@ impl IcedChat {
                 ContextMenuKind::Image => "Image",
             })
             .size(TYPO_SM)
-            .font(crate::fonts::inter(iced::font::Weight::Semibold))
+            .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
             .color(text_muted(&theme)),
             iced::widget::Space::new().width(iced::Length::Fill),
             close_btn,
@@ -24557,7 +24557,7 @@ impl IcedChat {
                     .size(TYPO_SM)
                     .width(Length::Fill)
                     .wrapping(iced::widget::text::Wrapping::None)
-                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
                 text(member_label)
                     .size(TYPO_XS)
                     .style(move |t| iced::widget::text::Style {
@@ -24674,7 +24674,7 @@ impl IcedChat {
                         .size(TYPO_SM)
                         .width(Length::Fill)
                         .wrapping(iced::widget::text::Wrapping::None)
-                        .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                        .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
                     peer_key_row,
                 ]
                 .spacing(SPACE_4)
@@ -24873,7 +24873,7 @@ impl IcedChat {
         let header = row![
             text("Search in conversation")
                 .size(TYPO_SM)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
             iced::widget::Space::new().width(Length::Fill),
             close_btn,
         ]
@@ -25035,7 +25035,7 @@ impl IcedChat {
         let header = row![
             text("Group Members")
                 .size(TYPO_SM)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
             Space::new().width(Length::Fill),
             iced::widget::tooltip::Tooltip::new(
                 button(icon_svg(ICON_CLOSE, TYPO_SM))
@@ -25188,7 +25188,7 @@ impl IcedChat {
             // ── Room name ──
             text(room_name.clone())
                 .size(TYPO_LG)
-                .font(crate::fonts::inter(iced::font::Weight::Bold)),
+                .font(crate::fonts::source_sans(iced::font::Weight::Bold)),
             // ── Back button ──
             button(text("← Back to chats").size(TYPO_SM))
                 .on_press(AppMessage::GoToChatList)
@@ -25349,7 +25349,7 @@ impl IcedChat {
             row![
                 text(dn)
                     .size(TYPO_SM)
-                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
                 Space::new().width(Length::Fixed(SPACE_8)),
                 kind_badge,
             ]
@@ -25498,12 +25498,12 @@ impl IcedChat {
             // Heading
             text("Details")
                 .size(TYPO_SM)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
             Space::new().height(Length::Fixed(SPACE_8)),
             // Info section
             text("Group info")
                 .size(TYPO_XS)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(info_items).spacing(SPACE_4),
@@ -25511,7 +25511,7 @@ impl IcedChat {
             // Members section
             text("Members")
                 .size(TYPO_XS)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(member_rows).spacing(SPACE_8),
@@ -25631,7 +25631,7 @@ impl IcedChat {
             row![
                 text(dn)
                     .size(TYPO_SM)
-                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
                 Space::new().width(Length::Fixed(SPACE_8)),
                 kind_badge,
             ]
@@ -25833,32 +25833,32 @@ impl IcedChat {
         let panel_body = column![
             text("Details")
                 .size(TYPO_SM)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
             Space::new().height(Length::Fixed(SPACE_8)),
             text("Contact")
                 .size(TYPO_XS)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(contact_items).spacing(SPACE_4),
             divider(&theme),
             text("Connection")
                 .size(TYPO_XS)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(conn_items).spacing(SPACE_4),
             divider(&theme),
             text("Security")
                 .size(TYPO_XS)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(security_items).spacing(SPACE_4),
             divider(&theme),
             text("Tools")
                 .size(TYPO_XS)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(tool_btns).spacing(SPACE_4),
@@ -25905,7 +25905,7 @@ impl IcedChat {
             row![
                 text(display_name.clone())
                     .size(TYPO_SM)
-                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
                 text("Group").size(TYPO_XXS).color(accent_primary(&theme)),
             ]
             .spacing(SPACE_8)
@@ -25975,7 +25975,7 @@ impl IcedChat {
                 container(
                     text("Owner Controls")
                         .size(TYPO_XS)
-                        .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                        .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                         .color(text_secondary(&theme)),
                 )
                 .padding([SPACE_4, 0.0])
@@ -26056,12 +26056,12 @@ impl IcedChat {
             // Heading
             text("Group Info")
                 .size(TYPO_SM)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
             Space::new().height(Length::Fixed(SPACE_8)),
             // Group Info section
             text("About")
                 .size(TYPO_XS)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(info_items).spacing(SPACE_4),
@@ -26069,7 +26069,7 @@ impl IcedChat {
             // Members section
             text("Members")
                 .size(TYPO_XS)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(member_items).spacing(SPACE_4),
@@ -26077,7 +26077,7 @@ impl IcedChat {
             // Advanced section
             text("Advanced")
                 .size(TYPO_XS)
-                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(advanced_items).spacing(SPACE_4),
@@ -26097,7 +26097,7 @@ impl IcedChat {
             column![
                 text("Actions")
                     .size(TYPO_XS)
-                    .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                     .color(text_secondary(&theme)),
                 Space::new().height(Length::Fixed(SPACE_2)),
                 column(action_items).spacing(SPACE_4),
@@ -26388,7 +26388,7 @@ impl IcedChat {
                                 .push(
                                     text(label_text)
                                         .size(TYPO_SM)
-                                        .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                                        .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                                         .color(label_color),
                                 )
                                 .spacing(SPACE_4)
@@ -26401,7 +26401,7 @@ impl IcedChat {
                     } else {
                         text(label_text)
                             .size(TYPO_SM)
-                            .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                            .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                             .color(label_color)
                             .into()
                     }
@@ -26414,7 +26414,7 @@ impl IcedChat {
                         button(
                             text(label_text)
                                 .size(TYPO_SM)
-                                .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                                 .color(label_color),
                         )
                         .on_press(AppMessage::RetryOutgoingMessage(event_id))
@@ -26424,7 +26424,7 @@ impl IcedChat {
                     } else {
                         text(label_text)
                             .size(TYPO_SM)
-                            .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                            .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                             .color(label_color)
                             .into()
                     }
@@ -27246,7 +27246,7 @@ impl IcedChat {
                 back_btn,
                 text("Settings")
                     .size(TYPO_SM)
-                    .font(crate::fonts::inter(iced::font::Weight::Semibold)),
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
                 Space::new().width(Length::Fill),
             ]
             .spacing(SPACE_8)
@@ -27387,7 +27387,7 @@ impl IcedChat {
             tunnel_rows.push(
                 text("SHARING")
                     .size(TYPO_XS)
-                    .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                     .style(text_muted_style)
                     .into(),
             );
@@ -27474,7 +27474,7 @@ impl IcedChat {
             tunnel_rows.push(
                 text("CONNECTED")
                     .size(TYPO_XS)
-                    .font(crate::fonts::inter(iced::font::Weight::Semibold))
+                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                     .style(text_muted_style)
                     .into(),
             );
