@@ -567,7 +567,11 @@ pub fn ghost_icon_button<'a>(
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Style for a text input field.
-fn text_input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+///
+/// `pub(crate)` so the shared form components (`form_components.rs`) can reuse
+/// the exact same input styling for searchable selects and multiline text
+/// areas instead of maintaining parallel style definitions.
+pub(crate) fn text_input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
     text_input::Style {
         background: Background::Color(design_tokens::bg_input(theme)),
         border: Border {
@@ -589,7 +593,9 @@ fn text_input_style(theme: &Theme, status: text_input::Status) -> text_input::St
 }
 
 /// Style for a text input in error state.
-fn text_input_error_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+///
+/// `pub(crate)` so shared form components reuse the same error styling.
+pub(crate) fn text_input_error_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let base = text_input_style(theme, status);
     text_input::Style {
         border: Border {
@@ -611,11 +617,35 @@ pub fn text_input_field<'a, 'b>(
     on_input: impl Fn(String) -> AppMessage + 'a,
     has_error: bool,
 ) -> Element<'a, AppMessage> {
-    let input = text_input(placeholder, value)
+    text_input_field_opts(placeholder, value, on_input, has_error, None, None)
+}
+
+/// A styled text input field with optional focus [`Id`] and Enter-to-submit.
+///
+/// `id` is used by the global Tab/focus machinery and by auto-focus on dialog
+/// open (`iced::widget::operation::focus`). `on_submit` fires on Enter so a
+/// dialog's primary field can submit the form from the keyboard. When
+/// `on_submit` is `None`, Enter is a no-op (e.g. search/filter fields).
+pub fn text_input_field_opts<'a, 'b>(
+    placeholder: &'b str,
+    value: &'b str,
+    on_input: impl Fn(String) -> AppMessage + 'a,
+    has_error: bool,
+    id: Option<&'static str>,
+    on_submit: Option<AppMessage>,
+) -> Element<'a, AppMessage> {
+    let mut input = text_input(placeholder, value)
         .on_input(on_input)
         .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
         .size(Typography::Body.size_px())
         .font(Typography::Body.font());
+
+    if let Some(id) = id {
+        input = input.id(id);
+    }
+    if let Some(on_submit) = on_submit {
+        input = input.on_submit(on_submit);
+    }
 
     if has_error {
         input.style(text_input_error_style).into()

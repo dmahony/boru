@@ -6,6 +6,7 @@
 //!   cargo run --features gui --example boru join <ticket>  # join room
 
 mod app;
+mod boru_dialog;
 mod card_shell;
 mod component_gallery;
 mod connection_details;
@@ -18,6 +19,7 @@ mod downloading_view_model;
 mod peers_downloading_view_model;
 mod activity_log_view_model;
 mod fonts;
+mod form_components;
 mod gui_test_actions;
 mod icon_system;
 mod link_preview;

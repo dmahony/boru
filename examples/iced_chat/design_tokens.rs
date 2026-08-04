@@ -468,6 +468,31 @@ pub fn bg_input(theme: &Theme) -> Color {
     }
 }
 
+/// Modal dialog backdrop — dims the content behind a centred dialog.
+/// Matches the help-panel overlay spec (DESIGN_SYSTEM.md §4.9):
+/// light `rgba(0,0,0,0.35)`, dark `rgba(0,0,0,0.55)`.
+pub fn dialog_backdrop(theme: &Theme) -> Color {
+    if dark(theme) {
+        Color::from_rgba(0.0, 0.0, 0.0, 0.55)
+    } else {
+        Color::from_rgba(0.0, 0.0, 0.0, 0.35)
+    }
+}
+
+/// Dialog panel style — elevated surface with dialog shadow.
+pub fn dialog_style(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(surface(theme))),
+        border: iced::Border {
+            color: border_muted(theme),
+            width: BORDER_WIDTH,
+            radius: RADIUS_LG.into(),
+        },
+        shadow: shadow_dialog(theme),
+        ..Default::default()
+    }
+}
+
 // ── Deprecated aliases (backward compat during migration) ────────────
 // These keep existing app.rs code compiling. New code should use the
 // canonical names above.

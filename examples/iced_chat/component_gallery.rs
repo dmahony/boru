@@ -7,6 +7,7 @@ use iced::widget::{container, scrollable, text, Column, Row, Space};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::AppMessage;
+use crate::boru_dialog::BoruDialog;
 use crate::card_shell::{CardShell, CARD_ROW_HEIGHT};
 use crate::design_tokens;
 use crate::fonts::Typography;
@@ -60,6 +61,9 @@ pub fn view_gallery() -> Element<'static, AppMessage> {
         .push(gallery_section("Elevated Card (Dialog)"))
         .push(dialog_example())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("BoruDialog (Reusable Modal)"))
+        .push(boru_dialog_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Tab Strip"))
         .push(tab_strip_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
@@ -86,6 +90,9 @@ pub fn view_gallery() -> Element<'static, AppMessage> {
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Overflow Menu"))
         .push(overflow_menu_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Form Primitives (UI-RESTYLE-03)"))
+        .push(form_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_32)))
         .spacing(0);
 
@@ -986,6 +993,54 @@ fn dialog_example() -> Element<'static, AppMessage> {
         .into()
 }
 
+// ── BoruDialog (reusable modal) gallery ─────────────────────────────
+
+fn boru_dialog_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    let state_label = text("The reusable BoruDialog shell: header (title + subtitle + close), body, and footer (Cancel + primary). It is generic over Message and styled entirely from design_tokens.")
+        .size(Typography::SecondaryText.size_px())
+        .style(move |_| iced::widget::text::Style {
+            color: Some(design_tokens::text_secondary(&Theme::Light)),
+        });
+
+    // Bound the full-screen modal overlay inside a fixed-height frame so the
+    // gallery can demonstrate the backdrop + centred panel without taking over
+    // the whole window.
+    let modal = BoruDialog::new("Create Group Chat")
+        .subtitle("Start a private group conversation")
+        .push_body(text_input_field("Group name…", "", |_| AppMessage::Noop, false))
+        .push_body(text_input_field(
+            "Description (optional)…",
+            "",
+            |_| AppMessage::Noop,
+            false,
+        ))
+        .push_body(
+            text("Long form content scrolls internally inside the dialog instead of growing the panel.")
+                .size(Typography::SecondaryText.size_px())
+                .into(),
+        )
+        .scroll_body(120.0)
+        .secondary("Cancel", AppMessage::Noop)
+        .primary("Create", AppMessage::Noop)
+        .on_close(AppMessage::Noop)
+        .width(560.0)
+        .build(&theme);
+
+    let framed: Element<'static, AppMessage> = container(modal)
+        .width(Length::Fill)
+        .height(Length::Fixed(340.0))
+        .into();
+
+    Column::new()
+        .push(state_label)
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_12)))
+        .push(framed)
+        .spacing(0)
+        .into()
+}
+
 // ── Tab strip gallery ─────────────────────────────────────────────────
 
 fn tab_strip_gallery() -> Element<'static, AppMessage> {
@@ -1261,6 +1316,181 @@ fn overflow_menu_gallery() -> Element<'static, AppMessage> {
                 .push(state_label("Disabled"))
                 .push(OverflowMenu::build(AppMessage::Noop, true, &theme))
                 .width(Length::FillPortion(1)),
+        )
+        .spacing(0)
+        .into()
+}
+
+// ── Form primitives gallery (UI-RESTYLE-03) ───────────────────────────
+
+fn form_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    // Labels / helper / error text
+    let labels = Column::new()
+        .push(state_label("Field label"))
+        .push(crate::form_components::form_label("Room name"))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Helper text"))
+        .push(crate::form_components::helper_text("Alphanumeric, 3–40 chars."))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Error text"))
+        .push(crate::form_components::error_text("Group name is required."))
+        .width(Length::FillPortion(1));
+
+    // Labelled text input — default / with value / error
+    let text_inputs = Column::new()
+        .push(state_label("Labelled text input — default"))
+        .push(
+            crate::form_components::TextInput::new(
+                "Room name",
+                "Room name…",
+                "",
+                |_| AppMessage::Noop,
+            )
+            .build(),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("With value + helper"))
+        .push(
+            crate::form_components::TextInput::new(
+                "Description",
+                "Optional description…",
+                "Weekly sync",
+                |_| AppMessage::Noop,
+            )
+            .helper("Shown in the room directory.")
+            .build(),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Error state"))
+        .push(
+            crate::form_components::TextInput::new(
+                "Group name",
+                "Group name…",
+                "",
+                |_| AppMessage::Noop,
+            )
+            .error("Group name is required.")
+            .build(),
+        )
+        .width(Length::FillPortion(1));
+
+    let toggles = Column::new()
+        .push(state_label("Checkbox"))
+        .push(crate::form_components::checkbox_field(
+            "Enable DHT discovery",
+            true,
+            |_| AppMessage::Noop,
+            None,
+        ))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Toggle / switch"))
+        .push(crate::form_components::toggle_field(
+            "Advertise in Directory",
+            true,
+            |_| AppMessage::Noop,
+            None,
+        ))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Chips (selected peers)"))
+        .push(
+            Row::new()
+                .push(crate::form_components::remove_chip("Alice", Some(AppMessage::Noop)))
+                .push(crate::form_components::remove_chip("Bob", None))
+                .spacing(design_tokens::SPACE_4),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Selection summary"))
+        .push(crate::form_components::selection_summary(3, "participant"))
+        .width(Length::FillPortion(1));
+
+    let selectable_rows = Column::new()
+        .push(state_label("Selectable peer list (bordered panel)"))
+        .push(
+            crate::form_components::peer_list(
+                vec![
+                    crate::form_components::SelectablePeerRow::new("Alice")
+                        .secondary("abc123…")
+                        .selected(true)
+                        .on_toggle(AppMessage::Noop)
+                        .build(&theme),
+                    crate::form_components::SelectablePeerRow::new("Bob")
+                        .secondary("def456…")
+                        .on_toggle(AppMessage::Noop)
+                        .build(&theme),
+                    crate::form_components::SelectablePeerRow::new("Carol")
+                        .secondary("7890ab…")
+                        .on_toggle(AppMessage::Noop)
+                        .build(&theme),
+                ],
+                160.0,
+                Some("No peers available to add right now."),
+            ),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Dialog footer"))
+        .push(
+            crate::form_components::DialogFooter::new()
+                .cancel("Cancel", AppMessage::Noop)
+                .confirm("Create", AppMessage::Noop)
+                .build(),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Destructive button"))
+        .push(crate::form_components::destructive_button(
+            "Remove",
+            Some(AppMessage::Noop),
+            false,
+        ))
+        .width(Length::FillPortion(1));
+
+    // Form section wrapping a couple of fields
+    let section = crate::form_components::FormSection::new("Room Details")
+        .helper("These settings control who can find and join the room.")
+        .push(
+            crate::form_components::TextInput::new(
+                "Room name",
+                "Room name…",
+                "Design Sync",
+                |_| AppMessage::Noop,
+            )
+            .build(),
+        )
+        .push(crate::form_components::checkbox_field(
+            "Advertise in Directory",
+            true,
+            |_| AppMessage::Noop,
+            None,
+        ))
+        .build();
+
+    Column::new()
+        .push(state_label("Form section"))
+        .push(section)
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
+        .push(
+            Row::new()
+                .push(labels)
+                .push(
+                    Space::new()
+                        .width(Length::Fixed(design_tokens::SPACE_16))
+                        .height(Length::Shrink),
+                )
+                .push(text_inputs)
+                .push(
+                    Space::new()
+                        .width(Length::Fixed(design_tokens::SPACE_16))
+                        .height(Length::Shrink),
+                )
+                .push(toggles)
+                .push(
+                    Space::new()
+                        .width(Length::Fixed(design_tokens::SPACE_16))
+                        .height(Length::Shrink),
+                )
+                .push(selectable_rows)
+                .align_y(Alignment::Start),
         )
         .spacing(0)
         .into()
