@@ -53,8 +53,15 @@ pub struct BoruDialog<'a, Message> {
     on_close: Option<Message>,
     /// Secondary (Cancel) footer action: `(label, message)`.
     secondary: Option<(&'a str, Message)>,
+    /// Whether the secondary footer action is enabled (defaults to true).
+    /// Disabled buttons render without `on_press` (iced disabled state).
+    secondary_enabled: bool,
     /// Primary (Create / Continue / Start / Save) footer action: `(label, message)`.
     primary: Option<(&'a str, Message)>,
+    /// Whether the primary footer action is enabled (defaults to true).
+    /// Callers set this to `false` until required inputs are valid, and while
+    /// a submit is in flight, so the button renders disabled.
+    primary_enabled: bool,
     /// When set, clicking the dimmed backdrop emits this message.
     on_backdrop: Option<Message>,
 }
@@ -70,7 +77,9 @@ impl<'a, Message: Clone + 'a> BoruDialog<'a, Message> {
             max_body_height: None,
             on_close: None,
             secondary: None,
+            secondary_enabled: true,
             primary: None,
+            primary_enabled: true,
             on_backdrop: None,
         }
     }
@@ -118,8 +127,27 @@ impl<'a, Message: Clone + 'a> BoruDialog<'a, Message> {
         self
     }
 
+    /// Enable/disable the secondary footer action (default: enabled).
+    ///
+    /// While a submit is in flight the secondary action (Cancel) should be
+    /// disabled so the dialog cannot be dismissed mid-processing — Escape,
+    /// backdrop click and the Cancel button all become no-ops for safety.
+    pub fn secondary_enabled(mut self, enabled: bool) -> Self {
+        self.secondary_enabled = enabled;
+        self
+    }
+
+    /// Enable/disable the primary footer action (default: enabled).
+    ///
+    /// Set to `false` until the form's required inputs are valid, and again
+    /// while the submit is in flight, so the user cannot double-submit or
+    /// submit an invalid form.
+    pub fn primary_enabled(mut self, enabled: bool) -> Self {
+        self.primary_enabled = enabled;
+        self
+    }
+
     /// Emit `message` when the dimmed backdrop is clicked (click-outside closes).
-    #[expect(dead_code)] // opt-in per flow; consumed by UI-RESTYLE-04..06
     pub fn on_backdrop(mut self, message: Message) -> Self {
         self.on_backdrop = Some(message);
         self
@@ -144,7 +172,9 @@ impl<'a, Message: Clone + 'a> BoruDialog<'a, Message> {
             max_body_height,
             on_close,
             secondary,
+            secondary_enabled,
             primary,
+            primary_enabled,
             on_backdrop,
         } = self;
 
@@ -190,7 +220,7 @@ impl<'a, Message: Clone + 'a> BoruDialog<'a, Message> {
         };
 
         // ── Footer: secondary (Cancel) + primary (Create/…) ─────────────
-        let footer = footer_row(secondary, primary);
+        let footer = footer_row(secondary, secondary_enabled, primary, primary_enabled);
 
         let dialog = Column::new()
             .push(header)
@@ -246,9 +276,16 @@ fn close_button<'a, Message: Clone + 'a>(message: Message) -> Element<'a, Messag
 }
 
 /// Footer row: spacer, then secondary + primary actions, right-aligned.
+///
+/// Buttons are only given `on_press` when their enabled flag is true; iced
+/// renders a button without `on_press` in its disabled state (muted, no
+/// hover), which is how "primary disabled until valid" and "loading"
+/// states are expressed.
 fn footer_row<'a, Message: Clone + 'a>(
     secondary: Option<(&'a str, Message)>,
+    secondary_enabled: bool,
     primary: Option<(&'a str, Message)>,
+    primary_enabled: bool,
 ) -> Element<'a, Message> {
     let mut row = Row::new()
         .push(Space::new().width(Length::Fill).height(Length::Shrink))
@@ -256,29 +293,31 @@ fn footer_row<'a, Message: Clone + 'a>(
         .align_y(Alignment::Center);
 
     if let Some((label, msg)) = secondary {
-        row = row.push(
-            button(
-                text(label)
-                    .font(Typography::ButtonLabel.font())
-                    .size(Typography::ButtonLabel.size_px()),
-            )
-            .on_press(msg)
-            .padding([design_tokens::SPACE_8, design_tokens::SPACE_16])
-            .style(button_secondary_style),
-        );
+        let mut btn = button(
+            text(label)
+                .font(Typography::ButtonLabel.font())
+                .size(Typography::ButtonLabel.size_px()),
+        )
+        .padding([design_tokens::SPACE_8, design_tokens::SPACE_16])
+        .style(button_secondary_style);
+        if secondary_enabled {
+            btn = btn.on_press(msg);
+        }
+        row = row.push(btn);
     }
 
     if let Some((label, msg)) = primary {
-        row = row.push(
-            button(
-                text(label)
-                    .font(Typography::ButtonLabel.font())
-                    .size(Typography::ButtonLabel.size_px()),
-            )
-            .on_press(msg)
-            .padding([design_tokens::SPACE_8, design_tokens::SPACE_16])
-            .style(button_primary_style),
-        );
+        let mut btn = button(
+            text(label)
+                .font(Typography::ButtonLabel.font())
+                .size(Typography::ButtonLabel.size_px()),
+        )
+        .padding([design_tokens::SPACE_8, design_tokens::SPACE_16])
+        .style(button_primary_style);
+        if primary_enabled {
+            btn = btn.on_press(msg);
+        }
+        row = row.push(btn);
     }
 
     row.into()

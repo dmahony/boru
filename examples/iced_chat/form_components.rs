@@ -185,6 +185,11 @@ pub struct TextInput<'a> {
     on_input: Box<dyn Fn(String) -> AppMessage + 'a>,
     helper: Option<String>,
     error: Option<String>,
+    /// Optional focus [`iced::widget::text_input::Id`] (static str) so the
+    /// dialog can auto-focus this field on open and Tab can reach it.
+    id: Option<&'static str>,
+    /// Optional Enter-to-submit message for the dialog's primary field.
+    on_submit: Option<AppMessage>,
 }
 
 impl<'a> TextInput<'a> {
@@ -202,6 +207,8 @@ impl<'a> TextInput<'a> {
             on_input: Box::new(on_input),
             helper: None,
             error: None,
+            id: None,
+            on_submit: None,
         }
     }
 
@@ -217,15 +224,30 @@ impl<'a> TextInput<'a> {
         self
     }
 
+    /// Give the field a stable focus id (static str) so the dialog can
+    /// auto-focus it on open and Tab order is deterministic.
+    pub fn id(mut self, id: &'static str) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    /// Submit the dialog form when Enter is pressed in this field.
+    pub fn on_submit(mut self, message: AppMessage) -> Self {
+        self.on_submit = Some(message);
+        self
+    }
+
     /// Build the labelled field.
     pub fn build(self) -> Element<'a, AppMessage> {
         let has_error = self.error.is_some();
 
-        let input = ui_components::text_input_field(
+        let input = ui_components::text_input_field_opts(
             &self.placeholder,
             &self.value,
             self.on_input,
             has_error,
+            self.id,
+            self.on_submit,
         );
 
         let mut col = Column::new()

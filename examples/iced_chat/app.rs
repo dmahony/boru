@@ -294,6 +294,14 @@ fn invitation_endpoint_addr(
 const CHAT_LOG: &str = "chat_log";
 /// Stable widget ID used to focus the chat composer from the `/` shortcut.
 const COMPOSER_INPUT: &str = "chat_composer";
+/// Stable widget ID used to focus the room-name field in the create-room dialog.
+const CREATE_ROOM_NAME_INPUT: &str = "create-room-name-input";
+/// Stable widget ID used to focus the group-name field in the create-group dialog.
+const CREATE_GROUP_NAME_INPUT: &str = "create-group-name-input";
+/// Stable widget ID used to focus the tunnel-name field in the share-local-service dialog.
+const SHARE_SERVICE_NAME_INPUT: &str = "share-service-name-input";
+/// Stable widget ID used to focus the local-port field in the share-local-service dialog.
+const SHARE_SERVICE_PORT_INPUT: &str = "share-service-port-input";
 /// Stable widget ID used to focus the first value field in the connection-details dialog.
 const CONNECTION_DETAILS_FIRST_VALUE_INPUT: &str = "connection-details-first-value";
 /// Stable widget ID used to restore focus to the settings-page details trigger.
@@ -3094,8 +3102,20 @@ pub struct IcedChat {
     room_trackers: HashMap<TopicId, SharedTracker>,
     /// Whether the create-room dialog is currently shown.
     show_create_room_dialog: bool,
+    /// Whether the create-room submit is in flight (async subscribe).
+    /// While true the Create button shows a loading state, is disabled, and
+    /// the dialog cannot be dismissed (Escape/backdrop/Cancel are no-ops).
+    create_room_submitting: bool,
+    /// Inline error shown inside the create-room dialog (name field area).
+    create_room_error: Option<String>,
     /// Whether the group creation dialog is currently shown.
     show_create_group_dialog: bool,
+    /// Whether the group-creation submit is in flight (async gossip
+    /// subscription + metadata/roster docs). While true the Create Group
+    /// button shows a loading state and the dialog cannot be dismissed.
+    create_group_submitting: bool,
+    /// Inline error shown inside the create-group dialog (name field area).
+    create_group_error: Option<String>,
     /// Group name text input in the group creation dialog.
     create_group_name: String,
     /// Group description text input in the group creation dialog.
@@ -3125,6 +3145,12 @@ pub struct IcedChat {
     friend_remove_confirm: bool,
     /// Whether the "Share local service" dialog is open.
     share_local_service_open: bool,
+    /// Whether the share-local-service submit is in flight. The tunnel is
+    /// created synchronously, but the flag guards Escape/backdrop/Cancel
+    /// during processing and disables the primary button.
+    share_service_submitting: bool,
+    /// Inline error shown inside the share-local-service dialog (port field).
+    share_service_error: Option<String>,
     /// Service name entered in the share dialog.
     share_service_name: String,
     /// Local TCP port entered in the share dialog.
@@ -6396,6 +6422,8 @@ impl IcedChat {
             show_invite_menu: false,
             invite_whisper_input: String::new(),
             show_create_group_dialog: false,
+            create_group_submitting: false,
+            create_group_error: None,
             create_group_name: String::new(),
             create_group_description: String::new(),
             create_group_selected_members: HashSet::new(),
@@ -6408,6 +6436,8 @@ impl IcedChat {
             create_room_name: String::new(),
             room_trackers: HashMap::new(),
             show_create_room_dialog: false,
+            create_room_submitting: false,
+            create_room_error: None,
             connection_details_dialog: None,
             connection_details_announcement: None,
             connection_details_focus_target: None,
@@ -6418,6 +6448,8 @@ impl IcedChat {
             friend_remove_confirm: false,
             friend_block_confirm: false,
             share_local_service_open: false,
+            share_service_submitting: false,
+            share_service_error: None,
             share_service_name: "Development Server".to_string(),
             share_service_port: "3000".to_string(),
             share_service_expiry: boru_core::tunnel::service::TunnelDuration::OneHour,
@@ -9313,6 +9345,9 @@ impl IcedChat {
                 self.show_create_room_dialog = true;
                 self.create_room_dht_enabled = true;
                 self.create_room_name = String::new();
+                self.create_room_advertise = true;
+                self.create_room_submitting = false;
+                self.create_room_error = None;
                 if let Some(action_id) = self.pending_create_room_action.take() {
                     let _ = self
                         .gui_action_history
@@ -9321,11 +9356,19 @@ impl IcedChat {
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::Completed);
                 }
-                iced::Task::none()
+                // Auto-focus the first meaningful field (room name) so the
+                // user can type immediately after opening the dialog.
+                iced::widget::operation::focus(CREATE_ROOM_NAME_INPUT)
             }
 
             AppMessage::CancelCreateRoom => {
+                // A dialog mid-submit must not be dismissed (Escape, backdrop
+                // click and Cancel all route here); the submit is in flight.
+                if self.create_room_submitting {
+                    return iced::Task::none();
+                }
                 self.show_create_room_dialog = false;
+                self.create_room_error = None;
                 self.complete_close_dialog_action();
                 iced::Task::none()
             }
@@ -9336,10 +9379,19 @@ impl IcedChat {
                 self.create_group_description = String::new();
                 self.create_group_selected_members.clear();
                 self.create_group_search = String::new();
-                iced::Task::none()
+                self.create_group_submitting = false;
+                self.create_group_error = None;
+                // Auto-focus the group name field.
+                iced::widget::operation::focus(CREATE_GROUP_NAME_INPUT)
             }
             AppMessage::HideCreateGroupDialog => {
+                // Mid-submit: the dialog cannot be dismissed until the async
+                // group creation completes.
+                if self.create_group_submitting {
+                    return iced::Task::none();
+                }
                 self.show_create_group_dialog = false;
+                self.create_group_error = None;
                 iced::Task::none()
             }
             AppMessage::CreateGroupNameChanged(name) => {
@@ -9380,7 +9432,10 @@ impl IcedChat {
                 self.share_service_port = "3000".to_string();
                 self.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
                 self.share_service_is_http = true;
-                iced::Task::none()
+                self.share_service_submitting = false;
+                self.share_service_error = None;
+                // Auto-focus the first meaningful field (tunnel name).
+                iced::widget::operation::focus(SHARE_SERVICE_NAME_INPUT)
             }
             AppMessage::CancelCreateTunnel => {
                 self.show_create_tunnel_dialog = false;
@@ -9447,16 +9502,29 @@ impl IcedChat {
             }
 
             AppMessage::ConfirmCreateGroup => {
+                // Guard: never re-enter while a submit is in flight.
+                if self.create_group_submitting {
+                    return iced::Task::none();
+                }
                 let group_name = std::mem::take(&mut self.create_group_name);
                 let group_description = std::mem::take(&mut self.create_group_description);
                 let selected_members: Vec<PublicKey> =
                     self.create_group_selected_members.drain().collect();
-                self.show_create_group_dialog = false;
 
                 if group_name.trim().is_empty() {
+                    // Keep the dialog open and show the error inline under
+                    // the name field instead of only logging/toasting it.
+                    self.create_group_name = group_name;
+                    self.create_group_error = Some("Group name is required.".to_string());
                     self.push_system("Group name is required.".to_string());
                     return iced::Task::none();
                 }
+                self.create_group_error = None;
+
+                // Keep the dialog open while the async gossip subscription +
+                // metadata/roster creation runs; the primary button shows a
+                // loading state and Escape/backdrop/Cancel are disabled.
+                self.create_group_submitting = true;
 
                 // ── Generate group identifiers ────────────────────────
                 let group_id = GroupId::generate();
@@ -9676,7 +9744,15 @@ impl IcedChat {
             }
 
             AppMessage::ConfirmCreateNewRoom => {
-                self.show_create_room_dialog = false;
+                // Guard: never re-enter while a submit is in flight.
+                if self.create_room_submitting {
+                    return iced::Task::none();
+                }
+                // Keep the dialog open while the room is created (async
+                // subscribe + open); the primary button shows a loading state
+                // and Escape/backdrop/Cancel are disabled until completion.
+                self.create_room_submitting = true;
+                self.create_room_error = None;
                 let dht_enabled = self.create_room_dht_enabled && !self.private_dht_disabled;
                 let room_name = std::mem::take(&mut self.create_room_name);
                 let advertise = self.create_room_advertise;
@@ -10442,6 +10518,13 @@ impl IcedChat {
                 neighbor_ids,
                 generation,
             } => {
+                // If this completion settles an in-flight create-room submit,
+                // close the dialog and clear the loading state.
+                if self.create_room_submitting {
+                    self.create_room_submitting = false;
+                    self.show_create_room_dialog = false;
+                    self.create_room_error = None;
+                }
                 info!("RoomOpened FIRED topic={topic} neighbor_count={neighbor_count}");
                 // State-safety: this completion was spawned under
                 // `generation`. If the user has since initiated a newer
@@ -10949,6 +11032,19 @@ impl IcedChat {
             }
 
             AppMessage::RoomJoinFailed { error, generation } => {
+                // If the failure came from an in-flight create-room or
+                // create-group submit, keep that dialog open and surface the
+                // error inline so the user can retry or cancel.
+                if self.create_group_submitting {
+                    self.create_group_submitting = false;
+                    self.create_group_error = Some(format!("Group creation failed: {error}"));
+                    return iced::Task::none();
+                }
+                if self.create_room_submitting {
+                    self.create_room_submitting = false;
+                    self.create_room_error = Some(format!("Room creation failed: {error}"));
+                    return iced::Task::none();
+                }
                 // State-safety: a stale join failure for a superseded room
                 // must not yank the UI out of a newer room the user opened
                 // while the failed join was in flight. Detect in debug builds.
@@ -11610,6 +11706,11 @@ impl IcedChat {
                 members: friend_keys,
                 generation,
             } => {
+                // The async creation completed: clear the in-flight flag and
+                // close the dialog so navigation to the new group proceeds.
+                self.create_group_submitting = false;
+                self.show_create_group_dialog = false;
+                self.create_group_error = None;
                 // State-safety: if the user opened another room while the
                 // group-creation task was in flight, this completion is stale
                 // and must not navigate the UI away from that room. Detect in
@@ -12500,6 +12601,13 @@ impl IcedChat {
             // ── Global keyboard shortcuts ───────────────────────────
             AppMessage::Shortcut(Shortcut::Escape) => {
                 // Close any open overlay/dialog, outermost first.
+                //
+                // Safety: a dialog that is mid-submit must NOT be dismissed
+                // by Escape — the submit button shows a loading state and the
+                // user would otherwise lose track of the in-flight operation.
+                // The cancel handlers below also guard on the submitting
+                // flags, so backdrop clicks and Cancel buttons are equally
+                // safe.
                 #[cfg(feature = "video-playback")]
                 if self.inline_video_expanded {
                     self.inline_video_expanded = false;
@@ -12510,7 +12618,26 @@ impl IcedChat {
                     return iced::Task::done(AppMessage::CloseImageLightbox);
                 }
                 if self.show_create_room_dialog {
-                    return iced::Task::done(AppMessage::CancelCreateRoom);
+                    // Safe close: never dismiss a mid-submit dialog (the
+                    // cancel handlers apply the same guard for backdrop
+                    // clicks and the Cancel button).
+                    if !self.create_room_submitting {
+                        self.show_create_room_dialog = false;
+                        self.create_room_error = None;
+                        self.complete_close_dialog_action();
+                    }
+                    return iced::Task::none();
+                }
+                if self.show_create_tunnel_dialog {
+                    self.show_create_tunnel_dialog = false;
+                    return iced::Task::none();
+                }
+                if self.share_local_service_open {
+                    if !self.share_service_submitting {
+                        self.share_local_service_open = false;
+                        self.share_service_error = None;
+                    }
+                    return iced::Task::none();
                 }
                 if self.connection_details_dialog.is_some() {
                     return iced::Task::done(AppMessage::CloseConnectionDetails);
@@ -12519,7 +12646,10 @@ impl IcedChat {
                     self.show_invite_menu = false;
                     self.invite_whisper_input.clear();
                 } else if self.show_create_group_dialog {
-                    self.show_create_group_dialog = false;
+                    if !self.create_group_submitting {
+                        self.show_create_group_dialog = false;
+                        self.create_group_error = None;
+                    }
                 } else if self.help_visible {
                     self.help_visible = false;
                 } else if matches!(self.screen, Screen::Settings) {
@@ -15224,14 +15354,19 @@ impl IcedChat {
                 self.share_service_port = "3000".to_string();
                 self.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
                 self.share_service_is_http = true;
-                iced::Task::none()
+                self.share_service_submitting = false;
+                self.share_service_error = None;
+                // Auto-focus the tunnel name field.
+                iced::widget::operation::focus(SHARE_SERVICE_NAME_INPUT)
             }
             AppMessage::ShareLocalServiceNameChanged(value) => {
                 self.share_service_name = value;
+                self.share_service_error = None;
                 iced::Task::none()
             }
             AppMessage::ShareLocalServicePortChanged(value) => {
                 self.share_service_port = value;
+                self.share_service_error = None;
                 iced::Task::none()
             }
             AppMessage::ShareLocalServiceExpiryChanged(value) => {
@@ -15243,27 +15378,46 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::CancelShareLocalService => {
+                // Mid-submit: cannot dismiss until the (synchronous) tunnel
+                // creation completes.
+                if self.share_service_submitting {
+                    return iced::Task::none();
+                }
                 self.share_local_service_open = false;
+                self.share_service_error = None;
                 iced::Task::none()
             }
             AppMessage::ConfirmShareLocalService => {
+                // Guard: never re-enter while a submit is in flight.
+                if self.share_service_submitting {
+                    return iced::Task::none();
+                }
                 let Screen::FriendProfile(peer) = &self.screen else {
                     self.share_local_service_open = false;
                     return iced::Task::none();
                 };
-                // Validate the local port.
+                // Validate the local port; keep the dialog open and show the
+                // error inline under the port field.
                 let Ok(port) = self.share_service_port.trim().parse::<u16>() else {
+                    self.share_service_error =
+                        Some("Enter a valid local port (1-65535) to share.".to_string());
                     self.toast_message =
                         Some("Enter a valid local port (1-65535) to share.".to_string());
                     self.toast_counter = 120;
                     return iced::Task::none();
                 };
                 if port == 0 {
+                    self.share_service_error =
+                        Some("Enter a valid local port (1-65535) to share.".to_string());
                     self.toast_message =
                         Some("Enter a valid local port (1-65535) to share.".to_string());
                     self.toast_counter = 120;
                     return iced::Task::none();
                 }
+                self.share_service_error = None;
+                // Tunnel creation is synchronous; the flag guards against
+                // re-entrancy and disables dismissal while processing.
+                self.share_service_submitting = true;
                 let service_name = self.share_service_name.trim().to_string();
                 let service_name = if service_name.is_empty() {
                     "Development Server".to_string()
@@ -15286,7 +15440,9 @@ impl IcedChat {
                 );
                 match result {
                     Ok(def) => {
+                        self.share_service_submitting = false;
                         self.share_local_service_open = false;
+                        self.share_service_error = None;
                         self.shared_tunnels.insert(
                             tunnel_id,
                             SharedTunnelState {
@@ -15343,9 +15499,14 @@ impl IcedChat {
                             send_task,
                         ])
                     }
-                    Err(err) => iced::Task::done(AppMessage::TunnelShareFailed {
-                        message: format!("{err:?}"),
-                    }),
+                    Err(err) => {
+                        self.share_service_submitting = false;
+                        self.share_service_error =
+                            Some(format!("Failed to create tunnel: {err:?}"));
+                        iced::Task::done(AppMessage::TunnelShareFailed {
+                            message: format!("{err:?}"),
+                        })
+                    }
                 }
             }
             AppMessage::TunnelShared {
@@ -21289,6 +21450,13 @@ impl IcedChat {
         stack![base, overlay].into()
     }
 
+    /// Responsive dialog width: the preferred width, capped so the dialog
+    /// stays fully inside smaller desktop windows (48 px of horizontal
+    /// margin, with a 320 px floor).
+    fn dialog_width(&self, preferred: f32) -> f32 {
+        preferred.min((self.window_width - 48.0).max(320.0))
+    }
+
     /// Wrap the base layout in an overlay showing the advanced connection details.
     fn view_connection_details_dialog<'a>(
         &'a self,
@@ -21389,22 +21557,30 @@ impl IcedChat {
         &self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use crate::boru_dialog::BoruDialog;
+        use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_STANDARD};
         use crate::form_components::{FormSection, TextInput, checkbox_field, helper_text};
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
         // ── Room Details ────────────────────────────────────────────────
-        let room_details = FormSection::new("Room Details").push(
-            TextInput::new(
-                "Room Name",
-                "Room name…",
-                &self.create_room_name,
-                AppMessage::CreateNewRoomNameChanged,
-            )
-            .helper("A short name others will see in the directory.")
-            .build(),
-        );
+        let name_valid = !self.create_room_name.trim().is_empty();
+        let submitting = self.create_room_submitting;
+        let mut name_field = TextInput::new(
+            "Room Name",
+            "Room name…",
+            &self.create_room_name,
+            AppMessage::CreateNewRoomNameChanged,
+        )
+        .id(CREATE_ROOM_NAME_INPUT)
+        .helper("A short name others will see in the directory.");
+        if let Some(error) = &self.create_room_error {
+            name_field = name_field.error(error.clone());
+        }
+        // Enter submits only when the form is valid and not mid-submit.
+        if name_valid && !submitting {
+            name_field = name_field.on_submit(AppMessage::ConfirmCreateNewRoom);
+        }
+        let room_details = FormSection::new("Room Details").push(name_field.build());
 
         // ── Visibility / Discovery ──────────────────────────────────────
         let visibility = FormSection::new("Visibility / Discovery")
@@ -21437,12 +21613,19 @@ impl IcedChat {
 
         let overlay = BoruDialog::new("Create Public Room")
             .subtitle("Create a room others can discover and join.")
+            .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD))
             .push_body(room_details.build())
             .push_body(visibility.build())
             .push_body(access.build())
             .push_body(info.build())
             .secondary("Cancel", AppMessage::CancelCreateRoom)
-            .primary("Create Room", AppMessage::ConfirmCreateNewRoom)
+            .secondary_enabled(!submitting)
+            .primary(
+                if submitting { "Creating…" } else { "Create Room" },
+                AppMessage::ConfirmCreateNewRoom,
+            )
+            .primary_enabled(name_valid && !submitting)
+            .on_backdrop(AppMessage::CancelCreateRoom)
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -21552,35 +21735,49 @@ impl IcedChat {
         participants = participants.push(peer_list(rows, 240.0, Some(empty_text)));
         participants = participants.push(selection_summary(selected_count, "participant"));
 
+        let mut group_name_field = TextInput::new(
+            "Group Name",
+            "Group name…",
+            &self.create_group_name,
+            AppMessage::CreateGroupNameChanged,
+        )
+        .id(CREATE_GROUP_NAME_INPUT);
+        if let Some(error) = &self.create_group_error {
+            group_name_field = group_name_field.error(error.clone());
+        }
+        let group_name_valid = !self.create_group_name.trim().is_empty();
+        let group_submitting = self.create_group_submitting;
+        if group_name_valid && !group_submitting {
+            group_name_field =
+                group_name_field.on_submit(AppMessage::ConfirmCreateGroup);
+        }
+        let description_field = TextInput::new(
+            "Description",
+            "Description (optional)…",
+            &self.create_group_description,
+            AppMessage::CreateGroupDescriptionChanged,
+        )
+        .build();
+
         let overlay = BoruDialog::new("Create Group Chat")
             .subtitle("Start a private conversation with multiple selected peers.")
-            .width(BORU_DIALOG_WIDTH_LARGE)
+            .width(self.dialog_width(BORU_DIALOG_WIDTH_LARGE))
             .push_body(
                 FormSection::new("Group Details")
-                    .push(
-                        TextInput::new(
-                            "Group Name",
-                            "Group name…",
-                            &self.create_group_name,
-                            AppMessage::CreateGroupNameChanged,
-                        )
-                        .build(),
-                    )
-                    .push(
-                        TextInput::new(
-                            "Description",
-                            "Description (optional)…",
-                            &self.create_group_description,
-                            AppMessage::CreateGroupDescriptionChanged,
-                        )
-                        .build(),
-                    )
+                    .push(group_name_field.build())
+                    .push(description_field)
                     .build(),
             )
             .push_body(participants.build())
             .secondary("Cancel", AppMessage::HideCreateGroupDialog)
-            .primary("Create Group", AppMessage::ConfirmCreateGroup)
+            .secondary_enabled(!group_submitting)
+            .primary(
+                if group_submitting { "Creating…" } else { "Create Group" },
+                AppMessage::ConfirmCreateGroup,
+            )
+            .primary_enabled(group_name_valid && !group_submitting)
             .on_close(AppMessage::HideCreateGroupDialog)
+            .on_backdrop(AppMessage::HideCreateGroupDialog)
             .scroll_body(520.0)
             .build(&theme);
 
@@ -21593,7 +21790,7 @@ impl IcedChat {
         &'a self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use crate::boru_dialog::BoruDialog;
+        use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_STANDARD};
         use crate::form_components::{
             peer_list, FormSection, SelectablePeerRow,
         };
@@ -21630,9 +21827,11 @@ impl IcedChat {
 
         let overlay = BoruDialog::new("Create Tunnel")
             .subtitle("Securely route traffic between peers.")
+            .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD))
             .push_body(connection_section)
             .secondary("Cancel", AppMessage::CancelCreateTunnel)
             .on_close(AppMessage::CancelCreateTunnel)
+            .on_backdrop(AppMessage::CancelCreateTunnel)
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -33405,7 +33604,7 @@ impl IcedChat {
         display_name: String,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
-        use crate::boru_dialog::BoruDialog;
+        use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_STANDARD};
         use crate::form_components::{
             form_label, helper_text, FormSection, SearchableSelect, SelectablePeerRow, TextInput,
         };
@@ -33413,33 +33612,50 @@ impl IcedChat {
         let theme = Self::theme_from_dark(self.dark_mode);
 
         // Tunnel Details — the service name the friend sees.
+        let mut name_field = TextInput::new(
+            "Tunnel name",
+            "Development Server",
+            &self.share_service_name,
+            AppMessage::ShareLocalServiceNameChanged,
+        )
+        .id(SHARE_SERVICE_NAME_INPUT)
+        .helper("A descriptive name so your friend knows what this service is.");
+        let port_valid = self
+            .share_service_port
+            .trim()
+            .parse::<u16>()
+            .map(|p| p != 0)
+            .unwrap_or(false);
+        let share_submitting = self.share_service_submitting;
+        if let Some(error) = &self.share_service_error {
+            name_field = name_field.error(error.clone());
+        }
+        if port_valid && !share_submitting {
+            name_field = name_field.on_submit(AppMessage::ConfirmShareLocalService);
+        }
         let details_section = FormSection::new("Tunnel Details")
-            .push(
-                TextInput::new(
-                    "Tunnel name",
-                    "Development Server",
-                    &self.share_service_name,
-                    AppMessage::ShareLocalServiceNameChanged,
-                )
-                .helper("A descriptive name so your friend knows what this service is.")
-                .build(),
-            )
+            .push(name_field.build())
             .build();
 
         // Connection Target — who it is shared with + the local port exposed.
+        let mut port_field = TextInput::new(
+            "Local port",
+            "3000",
+            &self.share_service_port,
+            AppMessage::ShareLocalServicePortChanged,
+        )
+        .id(SHARE_SERVICE_PORT_INPUT)
+        .helper("Port of the local service on this computer to expose.");
+        if let Some(error) = &self.share_service_error {
+            port_field = port_field.error(error.clone());
+        }
+        if port_valid && !share_submitting {
+            port_field = port_field.on_submit(AppMessage::ConfirmShareLocalService);
+        }
         let target_section = FormSection::new("Connection Target")
             .push(form_label("Share with"))
             .push(SelectablePeerRow::new(display_name.clone()).selected(true).build(&theme))
-            .push(
-                TextInput::new(
-                    "Local port",
-                    "3000",
-                    &self.share_service_port,
-                    AppMessage::ShareLocalServicePortChanged,
-                )
-                .helper("Port of the local service on this computer to expose.")
-                .build(),
-            )
+            .push(port_field.build())
             .build();
 
         // Permissions / Options — access duration.
@@ -33466,13 +33682,20 @@ impl IcedChat {
 
         let overlay = BoruDialog::new("Create Tunnel")
             .subtitle("Securely route traffic between peers.")
+            .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD))
             .push_body(details_section)
             .push_body(target_section)
             .push_body(options_section)
             .push_body(guidance_section)
             .secondary("Cancel", AppMessage::CancelShareLocalService)
-            .primary("Create Tunnel", AppMessage::ConfirmShareLocalService)
+            .secondary_enabled(!share_submitting)
+            .primary(
+                if share_submitting { "Creating…" } else { "Create Tunnel" },
+                AppMessage::ConfirmShareLocalService,
+            )
+            .primary_enabled(port_valid && !share_submitting)
             .on_close(AppMessage::CancelShareLocalService)
+            .on_backdrop(AppMessage::CancelShareLocalService)
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -33988,6 +34211,294 @@ mod tests {
             "room delete confirm cleared"
         );
         assert!(app.connection_details_dialog.is_some());
+        drop(runtime);
+    }
+
+    #[test]
+    fn escape_closes_tunnel_and_share_dialogs_when_idle() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Tunnel picker closes on Escape.
+        app.show_create_tunnel_dialog = true;
+        let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
+        drop(task);
+        assert!(
+            !app.show_create_tunnel_dialog,
+            "Escape closes the create-tunnel picker"
+        );
+
+        // Share-local-service form closes on Escape when not submitting.
+        app.share_local_service_open = true;
+        app.share_service_submitting = false;
+        let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
+        drop(task);
+        assert!(
+            !app.share_local_service_open,
+            "Escape closes the share-local-service form"
+        );
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn escape_does_not_close_dialog_while_submitting() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        app.show_create_room_dialog = true;
+        app.create_room_submitting = true;
+        let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
+        drop(task);
+        assert!(
+            app.show_create_room_dialog,
+            "Escape must not dismiss a mid-submit create-room dialog"
+        );
+        assert!(app.create_room_submitting);
+
+        app.show_create_group_dialog = true;
+        app.create_group_submitting = true;
+        let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
+        drop(task);
+        assert!(
+            app.show_create_group_dialog,
+            "Escape must not dismiss a mid-submit create-group dialog"
+        );
+
+        app.share_local_service_open = true;
+        app.share_service_submitting = true;
+        let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
+        drop(task);
+        assert!(
+            app.share_local_service_open,
+            "Escape must not dismiss a mid-submit share dialog"
+        );
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn cancel_handlers_are_ignored_while_submitting() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        app.show_create_room_dialog = true;
+        app.create_room_submitting = true;
+        let task = app.update(AppMessage::CancelCreateRoom);
+        drop(task);
+        assert!(
+            app.show_create_room_dialog,
+            "CancelCreateRoom must be a no-op mid-submit"
+        );
+
+        app.show_create_group_dialog = true;
+        app.create_group_submitting = true;
+        let task = app.update(AppMessage::HideCreateGroupDialog);
+        drop(task);
+        assert!(
+            app.show_create_group_dialog,
+            "HideCreateGroupDialog must be a no-op mid-submit"
+        );
+
+        app.share_local_service_open = true;
+        app.share_service_submitting = true;
+        let task = app.update(AppMessage::CancelShareLocalService);
+        drop(task);
+        assert!(
+            app.share_local_service_open,
+            "CancelShareLocalService must be a no-op mid-submit"
+        );
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn cancel_handlers_close_dialogs_when_idle_and_clear_errors() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        app.show_create_room_dialog = true;
+        app.create_room_error = Some("boom".to_string());
+        let task = app.update(AppMessage::CancelCreateRoom);
+        drop(task);
+        assert!(!app.show_create_room_dialog);
+        assert!(app.create_room_error.is_none(), "inline error cleared");
+
+        app.show_create_group_dialog = true;
+        app.create_group_error = Some("boom".to_string());
+        let task = app.update(AppMessage::HideCreateGroupDialog);
+        drop(task);
+        assert!(!app.show_create_group_dialog);
+        assert!(app.create_group_error.is_none(), "inline error cleared");
+
+        app.share_local_service_open = true;
+        app.share_service_error = Some("boom".to_string());
+        let task = app.update(AppMessage::CancelShareLocalService);
+        drop(task);
+        assert!(!app.share_local_service_open);
+        assert!(app.share_service_error.is_none(), "inline error cleared");
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn confirm_group_with_empty_name_keeps_dialog_open_with_inline_error() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.show_create_group_dialog = true;
+        app.create_group_name = "   ".to_string();
+
+        let task = app.update(AppMessage::ConfirmCreateGroup);
+        drop(task);
+
+        assert!(
+            app.show_create_group_dialog,
+            "dialog stays open when the name is empty"
+        );
+        assert!(
+            app.create_group_error.is_some(),
+            "inline error set for empty group name"
+        );
+        assert!(!app.create_group_submitting, "no submit started");
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn confirm_group_valid_keeps_dialog_open_while_submitting() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.show_create_group_dialog = true;
+        app.create_group_name = "Squad".to_string();
+
+        let task = app.update(AppMessage::ConfirmCreateGroup);
+        drop(task);
+
+        assert!(
+            app.create_group_submitting,
+            "submit flag raised while async creation runs"
+        );
+        assert!(
+            app.show_create_group_dialog,
+            "dialog stays open (loading state) while creation runs"
+        );
+        assert!(app.create_group_error.is_none());
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn confirm_share_local_service_invalid_port_sets_inline_error_and_keeps_open() {
+        let (runtime, mut app, _local, peer) = build_join_request_test_app();
+        app.screen = Screen::FriendProfile(peer);
+        app.share_local_service_open = true;
+        app.share_service_port = "not-a-port".to_string();
+
+        let task = app.update(AppMessage::ConfirmShareLocalService);
+        drop(task);
+
+        assert!(
+            app.share_local_service_open,
+            "dialog stays open on invalid port"
+        );
+        assert!(
+            app.share_service_error.is_some(),
+            "inline port error set"
+        );
+        assert!(!app.share_service_submitting);
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn confirm_share_local_service_zero_port_sets_inline_error() {
+        let (runtime, mut app, _local, peer) = build_join_request_test_app();
+        app.screen = Screen::FriendProfile(peer);
+        app.share_local_service_open = true;
+        app.share_service_port = "0".to_string();
+
+        let task = app.update(AppMessage::ConfirmShareLocalService);
+        drop(task);
+
+        assert!(app.share_local_service_open);
+        assert!(app.share_service_error.is_some());
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn dialog_width_responsive_helper_caps_to_window() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.window_width = 600.0;
+        assert_eq!(
+            app.dialog_width(760.0),
+            552.0,
+            "wide dialog capped to window minus 48 px margin"
+        );
+        app.window_width = 1200.0;
+        assert_eq!(
+            app.dialog_width(760.0),
+            760.0,
+            "preferred width kept when the window is large"
+        );
+        drop(runtime);
+    }
+
+    #[test]
+    fn room_join_failed_while_group_submitting_keeps_dialog_with_inline_error() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.show_create_group_dialog = true;
+        app.create_group_submitting = true;
+        let generation = app.room_generation;
+
+        let task = app.update(AppMessage::RoomJoinFailed {
+            error: "timeout".to_string(),
+            generation,
+        });
+        drop(task);
+
+        assert!(
+            !app.create_group_submitting,
+            "submit flag cleared after failure"
+        );
+        assert!(
+            app.show_create_group_dialog,
+            "group dialog stays open after failure"
+        );
+        assert!(
+            app.create_group_error.is_some(),
+            "inline group error surfaces the failure"
+        );
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn room_join_failed_while_room_submitting_keeps_dialog_with_inline_error() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.show_create_room_dialog = true;
+        app.create_room_submitting = true;
+        let generation = app.room_generation;
+
+        let task = app.update(AppMessage::RoomJoinFailed {
+            error: "timeout".to_string(),
+            generation,
+        });
+        drop(task);
+
+        assert!(!app.create_room_submitting);
+        assert!(
+            app.show_create_room_dialog,
+            "create-room dialog stays open after failure"
+        );
+        assert!(app.create_room_error.is_some());
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn dialog_width_responsive_helper_floors_at_320() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.window_width = 200.0;
+        assert_eq!(
+            app.dialog_width(560.0),
+            320.0,
+            "dialog width floors at 320 px even on tiny windows"
+        );
         drop(runtime);
     }
 
