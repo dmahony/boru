@@ -128,7 +128,7 @@ impl ChatCallbacks for TestChat {
         name: String,
         ticket: String,
         _size: u64,
-        _thumbnail: Option<Vec<u8>>,
+        _thumbnail: Option<MessageHash>,
     ) {
         self.pending_file = Some((name, ticket));
     }
@@ -1188,7 +1188,7 @@ fn all_message_variants_handle_gracefully() {
             name: "f.txt".into(),
             ticket: "tkt".into(),
             size: 0,
-            thumbnail: None,
+            thumbnail_hash: None,
         },
         Message::Leave,
         Message::Presence,

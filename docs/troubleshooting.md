@@ -136,6 +136,68 @@ Check the logs for `incoming_message_result` entries.
 
 ---
 
+## File Sharing
+
+### The file picker never appears (Linux)
+
+The native OS picker is provided by `xdg-desktop-portal`. Check:
+
+```sh
+ps aux | grep -E "xdg-desktop-portal"
+```
+
+and confirm a portal backend (e.g. `xdg-desktop-portal-gtk`) is running. In a
+bare Xvfb / headless session the portal must be started explicitly and the
+D-Bus activation environment must carry `DISPLAY` — see
+`scripts/fs23_launch.sh` for the exact recipe used by the multi-peer test
+harness.
+
+### "Could not open downloads folder"
+
+The OS open-command (`open::that`) failed, or the downloads directory could
+not be created. Check permissions on `<data-dir>` and that a file manager is
+installed.
+
+### A download stays in "Downloading" without progress
+
+**Causes:**
+- The source peer went offline — the row transitions to *disconnected* once
+  the transfer/chunk timeout elapses.
+- The owner revoked access mid-transfer — the backend refuses the
+  request-time permission re-check and the row fails with a permission error.
+- The descriptor expired (issued/expiry TTL) — the client re-requests a fresh
+  recipient-bound descriptor.
+
+### A peer cannot see a file I shared
+
+- Confirm the row is in **Shared by Me** and marked offered/available.
+- Confirm the peer is a friend or covered by an explicit read grant, and is
+  not blocked.
+- The catalogue is requester-filtered and signed per requester — a peer only
+  sees files it is allowed to see, and only after a fresh catalogue fetch.
+
+### "The owner may have revoked access or blocked your account" on download
+
+The request-time permission check refused the transfer: the owner revoked
+access, blocked you, or your grant expired. Ask the owner to re-grant or
+re-share.
+
+### Files vanish from Shared by Me after restart
+
+Shared offers persist in SQLite. A row is filtered out when its source file
+is no longer available (`source_available = false`) — the file was moved or
+deleted on disk, or the referenced path is missing. Re-import the file to
+re-offer it.
+
+### Activity Log is empty
+
+The log records transfer lifecycle events only, not general app events. If no
+transfers have been attempted since upgrade, the log is empty by design.
+`list_transfer_activity` is bounded to the newest 1,000 rows; older rows are
+removed by `prune_transfer_activity`.
+
+---
+
 ## Crash Recovery
 
 ### After a crash, are messages lost?

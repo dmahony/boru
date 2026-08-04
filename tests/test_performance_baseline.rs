@@ -141,7 +141,7 @@ impl ChatCallbacks for BenchPeer {
         _name: String,
         _ticket: String,
         _size: u64,
-        _thumbnail: Option<Vec<u8>>,
+        _thumbnail: Option<[u8; 32]>,
     ) {
     }
 

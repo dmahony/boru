@@ -69,7 +69,7 @@ impl ChatCallbacks for TestPeer {
         _name: String,
         _ticket: String,
         _size: u64,
-        _thumbnail: Option<Vec<u8>>,
+        _thumbnail: Option<[u8; 32]>,
     ) {
     }
     fn set_pending_image(&mut self, _name: String, _hash: MessageHash, _from: PublicKey) {}

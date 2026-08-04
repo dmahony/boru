@@ -91,7 +91,37 @@ tests/
 ├── test_offline_delivery_integration.rs  # Offline message delivery
 ├── test_resume_integration.rs          # Download resume integration
 ├── test_performance_regression.rs      # Performance regression detection
-└── test_performance_baseline.rs        # Performance baseline
+├── test_performance_baseline.rs        # Performance baseline
+│                                       #
+│   ── File Sharing Dashboard (FS-22) ──#
+├── fs22_dashboard_coverage.rs          # 66 dashboard projection/security tests
+└── (multi-peer harness)                # scripts/fs23_launch.sh, fs23_mcp.py,
+                                        #   fs23_seed.py — see "Multi-peer smoke
+                                        #   test (FS-23)" below
+```
+
+## Multi-peer smoke test (FS-23)
+
+The FS-23 harness launches two real Boru GUI instances (sender + receiver)
+under an isolated Xvfb display with a private D-Bus session, the
+`xdg-desktop-portal` stack (so the native OS file picker path works), and
+loopback MCP servers. Profiles are seeded deterministically
+(`scripts/fs23_seed.py`) with known addresses and friendship.
+
+```sh
+# From the repo root, after a debug build:
+cargo build --features gui --example boru
+bash scripts/fs23_launch.sh start   # launches both peers
+bash scripts/fs23_launch.sh status  # check MCP liveness
+bash scripts/fs23_launch.sh stop    # tear down Xvfb, portal, peers
+```
+
+`fs23_mcp.py` is a small JSON-RPC client used by the launcher to wait for MCP
+readiness; it can also be driven manually:
+
+```sh
+python3 scripts/fs23_mcp.py 19101 boru_ping '{}'
+python3 scripts/fs23_mcp.py 19101 boru_get_node_status '{}'
 ```
 
 ## Running Tests

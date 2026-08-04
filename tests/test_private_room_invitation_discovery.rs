@@ -680,7 +680,8 @@ fn v1_record_accepted_v2_subkey_rejected_by_v1_validator() {
         (sk, ep)
     };
     let v1_record =
-        create_discovery_record(*secret.as_bytes(), now, &ep, &sk).expect("create V1 record");
+        create_discovery_record(*secret.as_bytes(), now, &ep, &sk, None, None)
+            .expect("create V1 record");
 
     // V1 validator with the raw secret as topic should accept it.
     let v1_config = ValidationConfig::new(*secret.as_bytes());

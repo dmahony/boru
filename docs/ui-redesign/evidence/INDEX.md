@@ -44,7 +44,7 @@ implementation plan (PDF, section 5).
 | 3 — Sidebar/functional | `evidence/ui-12/` | Chat header/toolbar, functional states |
 | 4 — Chat | `evidence/ui-13/`, `ui-13-fixture/`, `ui-14/`, `ui-15/`, `ui-16/` | Timeline (UI-13), bubbles + grouping (UI-14), composer (UI-15), footer + composition (UI-16) vs Figure 4 |
 | 5 — Integration | `evidence/ui-17/`, `ui-18/`, `ui-19/` | Real-state integration, responsive/DPI matrix, keyboard/accessibility |
-| Supplementary | `evidence/ui-activity/`, `ui-cardshell/`, `ui-event-grouping/`, `ui-online-peers/`, `ui-skeletons/`, `ui-timeline-items/`, `ui-timeline-region/`, `ui-tunnels-card/`, `fs-09/` | Component-level and file-sharing dashboard evidence |
+| Supplementary | `evidence/ui-activity/`, `ui-cardshell/`, `ui-event-grouping/`, `ui-online-peers/`, `ui-skeletons/`, `ui-timeline-items/`, `ui-timeline-region/`, `ui-tunnels-card/`, `fs-09/`, `fs-24/` | Component-level and file-sharing dashboard evidence |
 
 Worker report template used across phases: `ui-18-worker-report.md` and the
 per-folder `README.md` files.
@@ -96,6 +96,20 @@ against Figure 4.
 | `docs/ui-redesign/ui-visual-qa-checklist.md` | Visual QA checklist for every capture |
 | `docs/ui-redesign/scroll-behavior-investigation.md` | Scroll behaviour investigation |
 | `docs/ui-redesign/home-cards-reactivity.md` | Home-rail lazy-reactivity design |
+
+## 4a. File Sharing dashboard evidence (FS epic)
+
+The File Sharing dashboard visual QA (FS-24) and its user/architecture docs:
+
+| File | Content |
+|---|---|
+| `evidence/fs-24/t_f4f6f34d_file_sharing_1440x900.png` | Dashboard, wide viewport |
+| `evidence/fs-24/t_f4f6f34d_file_sharing_1280x800.png` | Dashboard, reference viewport |
+| `evidence/fs-24/t_f4f6f34d_file_sharing_1024x720.png` | Dashboard, narrow viewport |
+| `evidence/fs-24/FS-24-handoff.md` | FS-24 visual QA handoff + checklist |
+| `docs/file-sharing-guide.md` | File Sharing user guide |
+| `docs/fs-06-persistence-projections.md` | Projection/subscription/persistence architecture |
+| `docs/fs-25-release-note.md` | FS release note + rollback guidance |
 
 ## 5. How to regenerate
 

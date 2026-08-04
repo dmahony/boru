@@ -343,7 +343,8 @@ async fn test_malformed_records_mixed_with_valid() -> Result<()> {
     let (other_sk, other_ep) = make_identity();
     let wrong_topic = [0xBBu8; 32];
     let wrong_record =
-        create_discovery_record(wrong_topic, unix_minute(0), &other_ep, &other_sk).unwrap();
+        create_discovery_record(wrong_topic, unix_minute(0), &other_ep, &other_sk, None, None)
+            .unwrap();
     backend
         .publish(
             &namespace,
@@ -391,6 +392,8 @@ async fn test_stale_peer_plus_valid_peer() -> Result<()> {
         0, // unix_minute 0 = epoch, very stale
         &stale_ep,
         &stale_sk,
+        None,
+        None,
     )
     .unwrap();
     backend

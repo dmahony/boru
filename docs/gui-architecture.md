@@ -115,8 +115,28 @@ Automated actions for integration testing, exposed via the MCP server. Includes:
 │  │ │ doc.pdf     Missing              │  │  │
 │  │ └──────────────────────────────────┘  │  │
 │  └────────────────────────────────────────┘  │
+├──────────────────────────────────────────────┤
+│  File Sharing (dashboard)                    │
+│  [File Sharing]  [search…]  [Open Downloads  │
+│   Folder]                                    │
+│  Shared by Me | Downloading | Downloaded |   │
+│  Shared with Me | Activity Log               │
+│  ┌──────────────────────────┬───────────────┐│
+│  │ File table (per tab)     │ Peers         ││
+│  │ - name / MIME / size     │ Downloading   ││
+│  │ - status chips           │ from Me       ││
+│  │ - progress bars          ├───────────────┤│
+│  │ - action menu            │ Sharing       ││
+│  ├──────────────────────────┤ Summary       ││
+│  │ Recent Activity (card)   │               ││
+│  └──────────────────────────┴───────────────┘│
 └──────────────────────────────────────────────┘
 ```
+
+The File Sharing screen is documented in detail in
+`docs/fs-02-file-sharing-dashboard-spec.md` (design-system spec),
+`docs/file-sharing-guide.md` (user guide), and
+`docs/fs-06-persistence-projections.md` (data flow).
 
 ## Networking Integration
 
@@ -135,7 +155,7 @@ no-ops that log deprecation warnings.
 
 | Store | Backend | Purpose | Status |
 |---|---|---|---|
-| `Storage` (SQLite) | `boru.db` (V10) | **Authoritative** — inbox, outbox, file objects, file library, operations progress, DM messages, outgoing messages | **Active** |
+| `Storage` (SQLite) | `boru.db` (V17) | **Authoritative** — inbox, outbox, file objects, file library, shared files, permissions, downloads, transfer activity, operations progress, DM messages, outgoing messages | **Active** |
 | `ChatHistoryStore` (JSON) | `chat_history.json` | Per-room chat history | Legacy (reads only) |
 | `OutboxStore` (JSON) | `outbox.json` | Outgoing message delivery state | Legacy (reads only); replaced by SQLite `outgoing_messages` table (V10) |
 | `ConversationStore` (JSON) | `conversations.json` | Conversation metadata | Legacy (reads only) |

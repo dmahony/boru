@@ -10,8 +10,28 @@ see the [git log](https://github.com/dmahony/boru/commits/main/).
 
 ## Unreleased
 
+### Added
+
+- File Sharing dashboard screen with five tabs — Shared by Me, Downloading,
+  Downloaded, Shared with Me, and Activity Log — backed by live transfer
+  projections and durable SQLite projections. Includes a per-tab search,
+  per-tab sorting, the Open Downloads Folder action, share/revoke flows with
+  inline destructive confirmation, and reference-aware cleanup. No messaging,
+  networking, or command behaviour changed. See `docs/file-sharing-guide.md`.
+- Multi-peer E2E test harness (`scripts/fs23_launch.sh`, `scripts/fs23_mcp.py`,
+  `scripts/fs23_seed.py`) for deterministic two-peer smoke runs.
+- FS-22 dashboard coverage suite (`tests/fs22_dashboard_coverage.rs`).
+
 ### Changed
 
+- Storage schema now at v17: v16 adds `shared_files.version` and the
+  `transfer_activity` event log; v17 adds the activity `direction` column.
+  Migrations are forward-only and idempotent (see
+  `docs/fs-06-persistence-projections.md`).
+- Security hardening: expired permission grants are inert in all
+  authorization loops, dashboard downloads route through a backend
+  `validate_download_request` gate, and download writes use the
+  `safe_destination_path` helper (see `docs/fs-20-security-review.md`).
 - Redesigned the home and chat screens with a modern visual system: a
   cleaner sidebar, card-based home layout with quick actions and an
   activity rail, and a refreshed conversation view with grouped message

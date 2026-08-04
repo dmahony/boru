@@ -78,7 +78,7 @@ impl ChatCallbacks for RxTestPeer {
         name: String,
         ticket: String,
         _size: u64,
-        _thumbnail: Option<Vec<u8>>,
+        _thumbnail: Option<[u8; 32]>,
     ) {
         self.pending_file = Some((name, ticket));
     }

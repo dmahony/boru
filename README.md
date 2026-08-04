@@ -49,4 +49,9 @@ BORU_DATA_DIR=~/.boru cargo run --example boru --features gui -- --name <nicknam
 cargo run --example boru --features gui -- --help
 ```
 
-See [`docs/`](docs/) for architecture, storage, discovery, security model, and networking details.
+See [`docs/`](docs/) for architecture, storage, discovery, security model, and
+networking details. The File Sharing dashboard is documented in
+[`docs/file-sharing-guide.md`](docs/file-sharing-guide.md) (user guide) and
+[`docs/fs-06-persistence-projections.md`](docs/fs-06-persistence-projections.md)
+(architecture), with the release note and rollback guidance in
+[`docs/fs-25-release-note.md`](docs/fs-25-release-note.md).

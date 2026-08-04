@@ -563,7 +563,7 @@ async fn test_many_messages_handle_net_event_scaling() -> n0_error::Result<()> {
             _name: String,
             _ticket: String,
             _size: u64,
-            _thumbnail: Option<Vec<u8>>,
+            _thumbnail: Option<[u8; 32]>,
         ) {
         }
         fn set_pending_image(&mut self, _name: String, _hash: MessageHash, _from: PublicKey) {}
@@ -1163,6 +1163,7 @@ fn test_chat_history_push_scaling() {
                     delivery_state: boru_core::chat_history::DeliveryState::Sent,
                     image_bytes: None,
                     image_identifier: None,
+                    media_metadata: None,
                 });
             }
         },
@@ -1187,6 +1188,7 @@ fn test_chat_history_push_scaling() {
                     delivery_state: boru_core::chat_history::DeliveryState::Sent,
                     image_bytes: None,
                     image_identifier: None,
+                    media_metadata: None,
                 });
             }
         },
