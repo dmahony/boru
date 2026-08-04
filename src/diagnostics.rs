@@ -1850,8 +1850,85 @@ pub struct IcedStateSnapshot {
     pub dialog_open: bool,
     /// Total number of unread messages across all conversations.
     pub unread_count: usize,
+    /// File Sharing dashboard data when the File Sharing screen is active.
+    /// `None` when the dashboard is not open (or diagnostics are disabled).
+    ///
+    /// This gives automated E2E harnesses actionable per-tab data —
+    /// file names, transfer progress, download states, and peer lists —
+    /// without needing to parse screenshots.
+    pub dashboard: Option<DashboardSnapshot>,
     /// Wall-clock timestamp of the snapshot.
     pub timestamp: DateTime<Utc>,
+}
+
+/// A compact, serializable view of the File Sharing dashboard state.
+///
+/// Populated by the iced frontend whenever the File Sharing screen is
+/// active.  Contains only display-safe fields (file names, byte counts,
+/// states, peer identifiers) — never local paths, tokens, or tickets.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DashboardSnapshot {
+    /// The active dashboard tab name (`files_sharing`, `downloading`,
+    /// `downloaded`, `shared_with_me`, `activity`).
+    pub active_tab: String,
+    /// Files this node has registered for sharing (Shared by Me tab).
+    pub shared_by_me_files: Vec<FileSummary>,
+    /// In-progress inbound transfers (Downloading tab).
+    pub downloading: Vec<TransferSummary>,
+    /// Completed downloads (Downloaded tab).
+    pub downloaded: Vec<DownloadSummary>,
+    /// Files shared to this node by peers (Shared with Me tab).
+    pub shared_with_me_files: Vec<FileSummary>,
+    /// Recent activity log entries (Activity tab).
+    pub activity: Vec<ActivitySummary>,
+}
+
+/// Display-safe summary of a file shown in a dashboard tab.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileSummary {
+    /// Display filename (no path components).
+    pub name: String,
+    /// Size in bytes when known.
+    pub size_bytes: Option<u64>,
+}
+
+/// Display-safe summary of an in-progress transfer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferSummary {
+    /// Display filename (no path components).
+    pub name: String,
+    /// Remote peer public key (hex) when known.
+    pub peer_id: Option<String>,
+    /// Bytes transferred so far.
+    pub bytes: u64,
+    /// Total bytes when known.
+    pub total_bytes: Option<u64>,
+    /// Transfer state (`active`, `verifying`, `completed`, `failed`,
+    /// `cancelled`, `disconnected`).
+    pub state: String,
+}
+
+/// Display-safe summary of a completed download.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DownloadSummary {
+    /// Display filename (no path components).
+    pub name: String,
+    /// Total size in bytes.
+    pub size_bytes: u64,
+    /// Source peer display label (safe; never a raw public key or path).
+    pub source_peer: String,
+}
+
+/// Display-safe summary of a recent activity log entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivitySummary {
+    /// Human-safe label (file/peer display label).
+    pub label: String,
+    /// Normalized action (Requested, Authorized, Started, Downloaded,
+    /// Uploaded, Failed, Cancelled, Denied, ...).
+    pub action: String,
+    /// Local observation timestamp in Unix milliseconds.
+    pub occurred_at_ms: u64,
 }
 
 /// Combined failure analysis across all diagnostic layers.
@@ -2844,8 +2921,73 @@ pub const MAX_ACTION_STATE_TIMEOUT_MS: i64 = 30_000;
 /// - No secrets (keys, tickets, tokens) are exposed.
 /// - String parameters are bounded at [`GUI_TEST_COMMAND_MAX_STRING_LEN`] chars.
 /// - No arbitrary widget IDs, coordinates, or shell commands.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardTabName {
+    /// The "Shared by Me" tab of the File Sharing dashboard (files this
+    /// node registers for sharing).
+    FilesSharing,
+    /// The "Downloading" tab (in-progress downloads from peers).
+    Downloading,
+    /// The "Downloaded" tab (completed downloads).
+    Downloaded,
+    /// The "Shared with Me" tab (files shared to this node).
+    SharedWithMe,
+    /// The "Activity Log" tab (transfer lifecycle events).
+    Activity,
+}
+
+impl DashboardTabName {
+    /// Return the JSON string representation of this tab.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DashboardTabName::FilesSharing => "files_sharing",
+            DashboardTabName::Downloading => "downloading",
+            DashboardTabName::Downloaded => "downloaded",
+            DashboardTabName::SharedWithMe => "shared_with_me",
+            DashboardTabName::Activity => "activity",
+        }
+    }
+
+    /// Parse a tab name string into a [`DashboardTabName`].
+    ///
+    /// Returns `None` if the string is not one of the allowed values.
+    pub fn from_str(s: &str) -> Option<DashboardTabName> {
+        match s {
+            "files_sharing" => Some(DashboardTabName::FilesSharing),
+            "downloading" => Some(DashboardTabName::Downloading),
+            "downloaded" => Some(DashboardTabName::Downloaded),
+            "shared_with_me" => Some(DashboardTabName::SharedWithMe),
+            "activity" => Some(DashboardTabName::Activity),
+            _ => None,
+        }
+    }
+
+    /// Iterate over all supported tab name strings.
+    pub fn all_names() -> &'static [&'static str] {
+        &[
+            "files_sharing",
+            "downloading",
+            "downloaded",
+            "shared_with_me",
+            "activity",
+        ]
+    }
+}
+
+impl std::fmt::Display for DashboardTabName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
+/// Commands that drive the GUI through test harness or MCP integration.
+///
+/// Each variant maps to a specific user-facing action (navigation,
+/// screen selection, composer control, etc.) and is gated behind
+/// the `--enable-gui-test-actions` flag for safety.
 pub enum GuiTestCommand {
     /// Navigate to the chat list (home) screen.
     GoToChatList,
@@ -2931,6 +3073,25 @@ pub enum GuiTestCommand {
     },
     /// Confirm and create the room from the dialog's current settings.
     ConfirmCreateNewRoom,
+    /// Switch the File Sharing dashboard to a specific tab.
+    ///
+    /// The File Sharing screen is opened first if it is not already active.
+    /// This lets test harnesses inspect a specific dashboard tab without
+    /// clicking through the sidebar.
+    OpenDashboardTab {
+        /// Which dashboard tab to activate.
+        tab: DashboardTabName,
+    },
+    /// Register a local file for sharing by absolute path.
+    ///
+    /// Test-only shortcut that bypasses the native OS file picker
+    /// (rfd / xdg-desktop-portal) and routes directly through the same
+    /// [`crate::diagnostics::GuiTestCommand`] pipeline as the production
+    /// share flow.  The path must exist and be readable.
+    TestShareFile {
+        /// Absolute path to the file to register for sharing.
+        path: String,
+    },
     /// Wait for a GUI condition to be satisfied.
     Wait {
         /// The condition to evaluate.
@@ -3018,6 +3179,12 @@ impl GuiTestCommand {
             GuiTestCommand::SetPeerPresence { peer_id, .. } => {
                 validate_gui_identifier(peer_id, "peer_id")
             }
+            GuiTestCommand::OpenDashboardTab { tab } => {
+                // The tab is a closed serde enum — every value is valid.
+                let _ = tab;
+                Ok(())
+            }
+            GuiTestCommand::TestShareFile { path } => validate_gui_text(path, "path"),
             GuiTestCommand::Wait {
                 condition,
                 timeout_ms,
@@ -3130,6 +3297,16 @@ impl GuiTestCommand {
             GuiTestCommand::SetCreateRoomName { .. } => None,
             GuiTestCommand::SetCreateRoomAdvertise { .. } => None,
             GuiTestCommand::ConfirmCreateNewRoom => Some(ExpectedState::MessageSent),
+            // OpenDashboardTab: opens the File Sharing screen and selects the
+            // tab. The post-condition is tracked via the generic
+            // "dashboard_tab_<name>" marker completed by the tab handler.
+            GuiTestCommand::OpenDashboardTab { tab } => {
+                Some(ExpectedState::Generic(format!("dashboard_tab_{tab}")))
+            }
+            // TestShareFile: depends on the file existing and being readable —
+            // completed by the SharedFileAdded handler when registration
+            // succeeds.
+            GuiTestCommand::TestShareFile { .. } => None,
         }
     }
 }
@@ -5292,6 +5469,7 @@ mod tests {
             composer_text: String::new(),
             dialog_open: false,
             unread_count: 0,
+            dashboard: None,
             timestamp: Utc::now(),
         }
     }
@@ -6925,6 +7103,7 @@ mod tests {
             composer_text: String::new(),
             dialog_open: false,
             unread_count: 0,
+            dashboard: None,
             timestamp: chrono::Utc::now(),
         };
         let journal = IcedMessageJournal::new();
@@ -6953,6 +7132,7 @@ mod tests {
             composer_text: String::new(),
             dialog_open: false,
             unread_count: 0,
+            dashboard: None,
             timestamp: chrono::Utc::now(),
         };
         let journal = IcedMessageJournal::new();
@@ -6979,6 +7159,7 @@ mod tests {
             composer_text: String::new(),
             dialog_open: false,
             unread_count: 0,
+            dashboard: None,
             timestamp: chrono::Utc::now(),
         };
         let journal = IcedMessageJournal::new();
@@ -7007,6 +7188,7 @@ mod tests {
             composer_text: String::new(),
             dialog_open: false,
             unread_count: 0,
+            dashboard: None,
             timestamp: chrono::Utc::now(),
         };
         let journal = IcedMessageJournal::with_capacity(10);
@@ -7099,6 +7281,7 @@ mod tests {
             composer_text: String::new(),
             dialog_open: false,
             unread_count: 0,
+            dashboard: None,
             timestamp: chrono::Utc::now(),
         };
         let json = serde_json::to_string(&snapshot).unwrap();

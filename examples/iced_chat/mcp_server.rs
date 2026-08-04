@@ -36,6 +36,9 @@
 //! | `boru_run_gui_message_test` | Verify the local GUI message pipeline without claiming remote delivery (requires `--enable-gui-test-actions`) |
 //! | `boru_browse_peer_catalogue` | Fetch and return a remote peer's signed file catalogue |
 //! | `boru_download_file` | Initiate a durable file download from a remote peer |
+//! | `boru_get_download_status` | Read the durable download row for an id (state, progress, errors) |
+//! | `boru_add_peer_address` | Inject a peer's node id + socket address for direct connection |
+//! | `boru_gui_test_share_file` | Register a local file for sharing by path, bypassing the OS picker (requires `--enable-gui-test-actions`) |
 //!
 //! # Security
 //!
@@ -58,19 +61,25 @@ use std::time::Duration;
 
 use crate::gui_test_actions::{GuiActionHistory, GuiActionRateLimiter};
 use boru_core::catalogue_client::fetch_remote_catalogue;
-use boru_core::chat_core::{broadcast_diagnostic_probe, message_hash, Message, SignedMessage};
+use boru_core::chat_callbacks::TransferKind;
+use boru_core::chat_core::{
+    broadcast_diagnostic_probe, download_blob_to_file, message_hash, Message, SignedMessage,
+};
 use boru_core::conversations::ConversationNetEvent;
 use boru_core::diagnostics::{
     self, classify_discovery_test, classify_failures, generate_probe_id, ConnectionDiagnosticState,
-    DiagnosticEvent, DiagnosticEventKind, DiagnosticStageState, Diagnostics, DiscoveryTestResult,
-    GuiWaitCondition, IcedMessageJournal, IcedStateSnapshot, PeerDiagnosticState, ProbeTestResult,
+    DashboardTabName, DiagnosticEvent, DiagnosticEventKind, DiagnosticStageState, Diagnostics,
+    DiscoveryTestResult, GuiWaitCondition, IcedMessageJournal, IcedStateSnapshot,
+    PeerDiagnosticState, ProbeTestResult,
 };
 use boru_core::directory::DirectoryStore;
 use boru_core::download_initiation::initiate_download;
 use boru_core::net::Gossip;
 use boru_core::proto::TopicId;
+use boru_core::safe_destination::safe_destination_path;
 use bytes::Bytes;
-use iroh::{Endpoint, SecretKey};
+use iroh::address_lookup::memory::MemoryLookup;
+use iroh::{Endpoint, EndpointAddr, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -313,6 +322,15 @@ pub struct McpAppState {
     /// Persistent storage for file catalogues and download state.
     /// `None` when storage is unavailable (e.g. ephemeral mode).
     pub storage: Option<boru_core::storage::Storage>,
+    /// Shared in-memory address lookup for manually injected peer addresses
+    /// (`boru_add_peer_address`).  Registered with the endpoint at startup.
+    pub peer_lookup: Option<MemoryLookup>,
+    /// Blob store used to drive actual transfer progress for
+    /// `boru_download_file`. `None` when blob storage is unavailable.
+    pub blob_store: Option<iroh_blobs::api::Store>,
+    /// Directory where completed downloads are written by
+    /// `boru_download_file`.
+    pub downloads_dir: Option<std::path::PathBuf>,
     /// Public-room advertisements loaded from and persisted to SQLite.
     pub directory_store: Arc<Mutex<DirectoryStore>>,
     /// Shared gossip sender for the directory topic.
@@ -508,7 +526,9 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
         "boru_get_failure_analysis" => handle_get_failure_analysis(req, state),
 
         "boru_browse_peer_catalogue" => handle_browse_peer_catalogue(req, state).await,
-        "boru_download_file" => handle_download_file(req, state),
+        "boru_download_file" => handle_download_file(req, state).await,
+        "boru_add_peer_address" => handle_add_peer_address(req, state),
+        "boru_get_download_status" => handle_get_download_status(req, state),
 
         // `boru_gui_wait_for_state` is read-only and does not require the action queue.
         "boru_gui_wait_for_state" => {
@@ -539,7 +559,8 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
         | "boru_gui_submit_composer"
         | "boru_gui_toggle_dark_mode"
         | "boru_gui_close_dialog"
-        | "boru_gui_set_peer_presence" => {
+        | "boru_gui_set_peer_presence"
+        | "boru_gui_test_share_file" => {
             if !state.gui_test_actions_enabled || state.gui_action_tx.is_none() {
                 return jsonrpc_error(
                     req.id.clone(),
@@ -568,7 +589,8 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                 | "boru_gui_submit_composer"
                 | "boru_gui_toggle_dark_mode"
                 | "boru_gui_close_dialog"
-                | "boru_gui_set_peer_presence" => {
+                | "boru_gui_set_peer_presence"
+                | "boru_gui_test_share_file" => {
                     if let Err(e) = check_gui_action_rate_limit(&state.gui_action_rate_limiter) {
                         return jsonrpc_error(req.id.clone(), -32000, "Rate limit exceeded", &e);
                     }
@@ -584,6 +606,7 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                         "boru_gui_toggle_dark_mode" => handle_gui_toggle_dark_mode(req, tx),
                         "boru_gui_close_dialog" => handle_gui_close_dialog(tx),
                         "boru_gui_set_peer_presence" => handle_gui_set_peer_presence(req, tx),
+                        "boru_gui_test_share_file" => handle_gui_test_share_file(req, tx),
                         _ => unreachable!(),
                     }
                 }
@@ -809,6 +832,7 @@ fn validate_gui_tool_params(method: &str, params: &Value) -> Result<(), String> 
         ("boru_gui_toggle_dark_mode", &["enabled"], &[]),
         ("boru_gui_close_dialog", &[], &[]),
         ("boru_gui_set_peer_presence", &["peer_id", "online"], &[]),
+        ("boru_gui_test_share_file", &["path"], &[]),
         ("boru_gui_wait_for_state", &["condition"], &["timeout_ms"]),
         (
             "boru_run_gui_message_test",
@@ -1060,16 +1084,28 @@ async fn handle_gui_wait_for_state(
 }
 
 /// `boru_get_gui_snapshot` — snapshot of current GUI application state.
+///
+/// Returns journal/diagnostic counts plus the latest live
+/// [`IcedStateSnapshot`] (which carries the File Sharing dashboard section
+/// when the dashboard screen is active — file names, transfer progress,
+/// download states, and peer lists).
 fn handle_get_gui_snapshot(state: &McpAppState) -> Result<Value, String> {
     let journal = &state.iced_diagnostics;
-    Ok(serde_json::json!({
+    let live_snapshot = state.gui_state_rx.as_ref().map(|rx| rx.borrow().clone());
+    let mut payload = serde_json::json!({
         "journal_entry_count": journal.entry_count(),
         "journal_latest_sequence": journal.latest_sequence(),
         "diagnostics_event_count": state.diagnostics.event_count(),
         "diagnostics_latest_sequence": state.diagnostics.latest_sequence(),
         "active_rooms": state.diagnostics.joined_rooms(),
         "gui_test_actions_enabled": state.gui_test_actions_enabled,
-    }))
+    });
+    if let Some(snapshot) = live_snapshot {
+        payload["active_screen"] = serde_json::json!(snapshot.active_screen);
+        payload["active_room"] = serde_json::json!(snapshot.active_room);
+        payload["dashboard"] = serde_json::json!(snapshot.dashboard);
+    }
+    Ok(payload)
 }
 
 /// `boru_gui_set_composer` — set the composer (message input) text without
@@ -1674,7 +1710,9 @@ async fn handle_run_local_gui_message_test(
 /// ```json
 /// {
 ///   "type": "string",
-///   "enum": ["chat_list", "friends", "settings"],
+///   "enum": ["chat_list", "friends", "settings", "file_sharing",
+///            "files_sharing", "peers_downloading", "downloading",
+///            "downloaded", "shared_with_me", "activity"],
 ///   "description": "Target GUI screen to navigate to"
 /// }
 /// ```
@@ -1682,7 +1720,9 @@ async fn handle_run_local_gui_message_test(
 /// # TypeScript
 ///
 /// ```typescript
-/// type GuiNavigateDestination = "chat_list" | "friends" | "settings";
+/// type GuiNavigateDestination = "chat_list" | "friends" | "settings"
+///   | "file_sharing" | "files_sharing" | "peers_downloading"
+///   | "downloading" | "downloaded" | "shared_with_me" | "activity";
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -1693,19 +1733,49 @@ pub enum GuiNavigateDestination {
     Friends,
     /// Navigate to the settings screen.
     Settings,
+    /// Navigate to the File Sharing dashboard screen.
+    FileSharing,
+    /// Navigate to the "Shared by Me" tab of the File Sharing dashboard.
+    FilesSharing,
+    /// Alias for the "Downloading" tab (peers downloading from this node).
+    PeersDownloading,
+    /// Navigate to the "Downloading" tab of the File Sharing dashboard.
+    Downloading,
+    /// Navigate to the "Downloaded" tab of the File Sharing dashboard.
+    Downloaded,
+    /// Navigate to the "Shared with Me" tab of the File Sharing dashboard.
+    SharedWithMe,
+    /// Navigate to the "Activity Log" tab of the File Sharing dashboard.
+    Activity,
 }
 
 impl GuiNavigateDestination {
     /// Convert this destination to the corresponding [`GuiTestCommand`].
     pub fn to_gui_test_command(&self) -> crate::gui_test_actions::GuiTestCommand {
+        use crate::gui_test_actions::GuiTestCommand;
+        use boru_core::diagnostics::DashboardTabName;
         match self {
-            GuiNavigateDestination::ChatList => {
-                crate::gui_test_actions::GuiTestCommand::GoToChatList
+            GuiNavigateDestination::ChatList => GuiTestCommand::GoToChatList,
+            GuiNavigateDestination::Friends => GuiTestCommand::OpenFriends,
+            GuiNavigateDestination::Settings => GuiTestCommand::OpenSettings,
+            GuiNavigateDestination::FileSharing => GuiTestCommand::OpenFileSharing,
+            GuiNavigateDestination::FilesSharing => GuiTestCommand::OpenDashboardTab {
+                tab: DashboardTabName::FilesSharing,
+            },
+            GuiNavigateDestination::PeersDownloading | GuiNavigateDestination::Downloading => {
+                GuiTestCommand::OpenDashboardTab {
+                    tab: DashboardTabName::Downloading,
+                }
             }
-            GuiNavigateDestination::Friends => crate::gui_test_actions::GuiTestCommand::OpenFriends,
-            GuiNavigateDestination::Settings => {
-                crate::gui_test_actions::GuiTestCommand::OpenSettings
-            }
+            GuiNavigateDestination::Downloaded => GuiTestCommand::OpenDashboardTab {
+                tab: DashboardTabName::Downloaded,
+            },
+            GuiNavigateDestination::SharedWithMe => GuiTestCommand::OpenDashboardTab {
+                tab: DashboardTabName::SharedWithMe,
+            },
+            GuiNavigateDestination::Activity => GuiTestCommand::OpenDashboardTab {
+                tab: DashboardTabName::Activity,
+            },
         }
     }
 
@@ -1717,6 +1787,13 @@ impl GuiNavigateDestination {
             "chat_list" => Some(GuiNavigateDestination::ChatList),
             "friends" => Some(GuiNavigateDestination::Friends),
             "settings" => Some(GuiNavigateDestination::Settings),
+            "file_sharing" => Some(GuiNavigateDestination::FileSharing),
+            "files_sharing" => Some(GuiNavigateDestination::FilesSharing),
+            "peers_downloading" => Some(GuiNavigateDestination::PeersDownloading),
+            "downloading" => Some(GuiNavigateDestination::Downloading),
+            "downloaded" => Some(GuiNavigateDestination::Downloaded),
+            "shared_with_me" => Some(GuiNavigateDestination::SharedWithMe),
+            "activity" => Some(GuiNavigateDestination::Activity),
             _ => None,
         }
     }
@@ -1727,13 +1804,31 @@ impl GuiNavigateDestination {
             GuiNavigateDestination::ChatList => "chat_list",
             GuiNavigateDestination::Friends => "friends",
             GuiNavigateDestination::Settings => "settings",
+            GuiNavigateDestination::FileSharing => "file_sharing",
+            GuiNavigateDestination::FilesSharing => "files_sharing",
+            GuiNavigateDestination::PeersDownloading => "peers_downloading",
+            GuiNavigateDestination::Downloading => "downloading",
+            GuiNavigateDestination::Downloaded => "downloaded",
+            GuiNavigateDestination::SharedWithMe => "shared_with_me",
+            GuiNavigateDestination::Activity => "activity",
         }
     }
 
     /// Iterate over all supported destination strings.
     #[expect(dead_code)]
     pub fn all_destinations() -> &'static [&'static str] {
-        &["chat_list", "friends", "settings"]
+        &[
+            "chat_list",
+            "friends",
+            "settings",
+            "file_sharing",
+            "files_sharing",
+            "peers_downloading",
+            "downloading",
+            "downloaded",
+            "shared_with_me",
+            "activity",
+        ]
     }
 }
 
@@ -1871,7 +1966,9 @@ pub struct GuiNavigateResponse {
 /// ```typescript
 /// // Request
 /// interface NavigateRequest {
-///   destination: "chat_list" | "friends" | "settings";
+///   destination: "chat_list" | "friends" | "settings" | "file_sharing"
+///     | "files_sharing" | "peers_downloading" | "downloading"
+///     | "downloaded" | "shared_with_me" | "activity";
 /// }
 ///
 /// // Response
@@ -1908,8 +2005,9 @@ fn handle_gui_navigate(
     // Convert validated string to the typed destination enum
     let dest = GuiNavigateDestination::from_str(destination).ok_or_else(|| {
         format!(
-            "Invalid destination '{}'. Supported destinations: \"chat_list\", \"friends\", \"settings\"",
-            sanitize_for_log(destination, 64)
+            "Invalid destination '{}'. Supported destinations: {}",
+            sanitize_for_log(destination, 64),
+            GuiNavigateDestination::all_destinations().join(", ")
         )
     })?;
 
@@ -1945,6 +2043,97 @@ fn handle_gui_navigate(
     };
 
     serde_json::to_value(&response).map_err(|e| format!("Serialize response: {e}"))
+}
+
+/// `boru_gui_test_share_file` — register a local file for sharing by
+/// absolute path, bypassing the native OS file picker.
+///
+/// Test-only convenience used by automated E2E harnesses.  The path is
+/// routed through the same production [`GuiTestCommand::TestShareFile`]
+/// pipeline as a real file-picker selection: the Iced application reads
+/// the file, computes its blake3 hash, and stores it as a shared file.
+///
+/// # Parameters
+///
+/// * `path` (string, required) — absolute path to the file to register.
+///
+/// # Response (success)
+///
+/// ```json
+/// {
+///   "sent": true,
+///   "action_id": "gui_action_...",
+///   "path_length": 42
+/// }
+/// ```
+///
+/// # Security
+///
+/// - Only loopback clients can reach this tool (requires
+///   `--enable-gui-test-actions`, which forces a loopback bind).
+/// - The path is validated (bounded length, no control characters) and
+///   never logged in full.
+/// - Rate-limited by the shared `GuiActionRateLimiter`.
+fn handle_gui_test_share_file(
+    req: &JsonRpcRequest,
+    tx: boru_core::diagnostics::GuiTestHandle,
+) -> Result<Value, String> {
+    let path = req
+        .params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required argument: path".to_string())?;
+
+    if path.is_empty() {
+        return Err("path must not be empty".to_string());
+    }
+
+    // Bounded length + no control characters (mirrors validate_gui_text).
+    if path.len() > crate::gui_test_actions::MAX_STRING_LEN {
+        return Err(format!(
+            "path too long ({} bytes, max {})",
+            path.len(),
+            crate::gui_test_actions::MAX_STRING_LEN
+        ));
+    }
+    if path.chars().any(|c| c.is_control() && c != ' ') {
+        return Err("path must not contain control characters".to_string());
+    }
+
+    info!(
+        "boru_gui_test_share_file: TestShareFile action queued ({} chars)",
+        path.chars().count()
+    );
+
+    let idempotency_key = crate::gui_test_actions::generate_action_key();
+
+    let command = boru_core::diagnostics::GuiTestCommand::TestShareFile {
+        path: path.to_string(),
+    };
+    let command_json =
+        serde_json::to_string(&command).map_err(|e| format!("Failed to serialize command: {e}"))?;
+
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(idempotency_key.clone()),
+        requested_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64,
+        command: command_json,
+    };
+
+    tx.enqueue(request).map_err(|e| match e.code {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+            format!("GUI action queue is full (capacity: {})", tx.capacity())
+        }
+        _ => format!("GUI action channel error: {}", e.message),
+    })?;
+
+    Ok(serde_json::json!({
+        "sent": true,
+        "action_id": idempotency_key,
+        "path_length": path.chars().count(),
+    }))
 }
 
 /// `boru_gui_toggle_dark_mode` — toggle dark mode on/off.
@@ -2793,14 +2982,21 @@ async fn handle_run_discovery_test(
 /// `boru_get_iced_state` — snapshot of the current Iced application state.
 fn handle_get_iced_state(state: &McpAppState) -> Result<Value, String> {
     let journal = &state.iced_diagnostics;
-    Ok(serde_json::json!({
+    let live_snapshot = state.gui_state_rx.as_ref().map(|rx| rx.borrow().clone());
+    let mut payload = serde_json::json!({
         "message": "Iced diagnostics available",
         "journal_entry_count": journal.entry_count(),
         "journal_latest_sequence": journal.latest_sequence(),
         "diagnostics_event_count": state.diagnostics.event_count(),
         "diagnostics_latest_sequence": state.diagnostics.latest_sequence(),
         "active_rooms": state.diagnostics.joined_rooms(),
-    }))
+    });
+    if let Some(snapshot) = live_snapshot {
+        payload["active_screen"] = serde_json::json!(snapshot.active_screen);
+        payload["active_room"] = serde_json::json!(snapshot.active_room);
+        payload["dashboard"] = serde_json::json!(snapshot.dashboard);
+    }
+    Ok(payload)
 }
 
 /// `boru_get_iced_message_journal` — recent Iced AppMessage processing history.
@@ -2956,11 +3152,136 @@ async fn handle_browse_peer_catalogue(
     }))
 }
 
-/// `boru_download_file` — initiate a durable file download from a remote peer.
+/// `boru_add_peer_address` — inject a peer's addressing information directly.
+///
+/// Registers `node_id` + socket address (and optionally a relay URL) in the
+/// endpoint's in-memory address lookup.  This gives test harnesses a direct
+/// connection path when DHT/mDNS discovery is disabled (`--no-dht
+/// --no-relay`) or otherwise slow, without waiting for neighbour discovery.
+///
+/// # Parameters
+///
+/// * `node_id` (string, required) — the peer's public key (hex).
+/// * `addr` (string, required) — socket address (`host:port`).
+/// * `relay_url` (string, optional) — relay URL to associate with the peer.
+///
+/// # Returns
+///
+/// ```json
+/// {
+///   "node_id": "...",
+///   "addr": "127.0.0.1:4242",
+///   "relay_url": null,
+///   "registered": true
+/// }
+/// ```
+fn handle_add_peer_address(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
+    let node_id = req
+        .params
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required argument: node_id".to_string())?;
+    let addr = req
+        .params
+        .get("addr")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required argument: addr".to_string())?;
+    let relay_url = req.params.get("relay_url").and_then(|v| v.as_str());
+
+    validate_bounded(node_id, MAX_PEER_ID_LEN, "node_id")?;
+    validate_bounded(addr, 256, "addr")?;
+    validate_no_control_chars(node_id, "node_id")?;
+    validate_no_control_chars(addr, "addr")?;
+    if let Some(url) = relay_url {
+        validate_bounded(url, 512, "relay_url")?;
+        validate_no_control_chars(url, "relay_url")?;
+    }
+
+    let peer_pk: iroh::PublicKey = node_id
+        .parse()
+        .map_err(|e| format!("Invalid node_id '{node_id}': {e}"))?;
+    let socket_addr: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|e| format!("Invalid addr '{addr}': {e}"))?;
+
+    let mut endpoint_addr = EndpointAddr::new(peer_pk).with_ip_addr(socket_addr);
+    if let Some(url) = relay_url {
+        let relay: iroh::RelayUrl = url
+            .parse()
+            .map_err(|e| format!("Invalid relay_url '{url}': {e}"))?;
+        endpoint_addr = endpoint_addr.with_relay_url(relay);
+    }
+
+    let lookup = state
+        .peer_lookup
+        .clone()
+        .ok_or_else(|| "Peer address lookup is not available on this node".to_string())?;
+    lookup.add_endpoint_info(endpoint_addr.clone());
+
+    info!(
+        node_id = %peer_pk.fmt_short(),
+        addr = %socket_addr,
+        "boru_add_peer_address: registered peer address in memory lookup"
+    );
+
+    Ok(serde_json::json!({
+        "node_id": peer_pk.to_string(),
+        "addr": socket_addr.to_string(),
+        "relay_url": relay_url.map(|s| s.to_string()),
+        "registered": true,
+    }))
+}
+
+/// `boru_get_download_status` — read the durable download row for an id.
+///
+/// Returns the current state (`queued`, `downloading`, `complete`, `failed`,
+/// ...), byte progress, and error details so test harnesses can poll an
+/// in-flight download started by `boru_download_file`.
+///
+/// # Parameters
+///
+/// * `download_id` (number, required) — the download row id returned by
+///   `boru_download_file`.
+fn handle_get_download_status(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
+    let download_id = req
+        .params
+        .get("download_id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "Missing required argument: download_id (integer)".to_string())?;
+
+    let storage = state.storage.as_ref().ok_or_else(|| {
+        "Storage not available. Download management requires persistent storage.".to_string()
+    })?;
+
+    let Some(download) = storage
+        .get_download(download_id)
+        .map_err(|e| format!("Failed to read download status: {e}"))?
+    else {
+        return Err(format!("Download {download_id} not found"));
+    };
+
+    Ok(serde_json::json!({
+        "download_id": download.id,
+        "content_hash": download.content_hash,
+        "peer_id": download.remote_peer,
+        "state": download.state,
+        "bytes_downloaded": download.bytes_downloaded,
+        "total_bytes": download.total_bytes,
+        "created_at_ms": download.created_at_ms,
+        "updated_at_ms": download.updated_at_ms,
+        "last_error": download.last_error,
+    }))
+}
+
+/// `boru_download_file` — initiate a durable file download from a remote peer
+/// and drive the actual transfer.
 ///
 /// Validates preconditions (catalogue fetched, file exists in catalogue,
-/// no conflicting active download) and creates a new download row in
-/// `queued` state.
+/// no conflicting active download), creates a durable download row, then
+/// immediately starts the real transfer through the same blob-download path
+/// the GUI uses (`download_blob_to_file`).  The durable row is updated as
+/// bytes arrive and marked `complete` or `failed` when the transfer ends.
+/// Progress can be polled with `boru_get_download_status`.
 ///
 /// # Parameters
 ///
@@ -2976,7 +3297,8 @@ async fn handle_browse_peer_catalogue(
 ///   "download_id": 42,
 ///   "content_hash": "...",
 ///   "peer_id": "...",
-///   "total_bytes": 1024
+///   "total_bytes": 1024,
+///   "state": "downloading"
 /// }
 /// ```
 ///
@@ -2988,7 +3310,8 @@ async fn handle_browse_peer_catalogue(
 /// - Catalogue not fetched for peer
 /// - File not found in catalogue
 /// - Conflicting download already active
-fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
+/// - Blob store or downloads directory unavailable (transfer cannot start)
+async fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Result<Value, String> {
     let content_hash = req
         .params
         .get("content_hash")
@@ -3014,12 +3337,109 @@ fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Result<Val
 
     let result = initiate_download(storage, content_hash, peer_id, known_size)
         .map_err(|e| format!("Failed to initiate download: {e}"))?;
+    let download_id = result.download_id;
+
+    // ── Resolve the pieces needed to drive the actual transfer ─────────
+    let blob_store = state.blob_store.clone().ok_or_else(|| {
+        "Blob store not available — cannot start the transfer. Downloads are queued for restart recovery only."
+            .to_string()
+    })?;
+    let downloads_dir = state.downloads_dir.clone().ok_or_else(|| {
+        "Downloads directory not available — cannot start the transfer. Downloads are queued for restart recovery only."
+            .to_string()
+    })?;
+    let peer_pk: iroh::PublicKey = peer_id
+        .parse()
+        .map_err(|e| format!("Invalid peer_id '{peer_id}': {e}"))?;
+
+    // Display name comes from the stored remote catalogue (shared_files row
+    // keyed by the remote peer). Fall back to the content-hash stem.
+    let display_name = storage
+        .list_shared_files(peer_id, true)
+        .ok()
+        .and_then(|rows| {
+            rows.into_iter()
+                .find(|r| r.content_hash == content_hash)
+                .map(|r| r.display_filename)
+        })
+        .unwrap_or_else(|| {
+            let stem: String = content_hash.chars().take(16).collect();
+            format!("{stem}.bin")
+        });
+
+    let hash: iroh_blobs::Hash = content_hash
+        .parse()
+        .map_err(|e| format!("Invalid content_hash '{content_hash}': {e}"))?;
+    let max_bytes = if result.total_bytes > 0 {
+        Some(result.total_bytes)
+    } else {
+        None
+    };
+
+    let endpoint = state.endpoint.clone();
+    let storage_task = storage.clone();
+    let display_name_task = display_name.clone();
+    let peer_pk_task = peer_pk;
+    let save_path = safe_destination_path(&downloads_dir, &display_name, content_hash)
+        .map_err(|e| format!("Unsafe download name: {e}"))?;
+
+    // Mark the durable row as actively downloading, then run the transfer in
+    // the background. The MCP response returns immediately so the harness can
+    // poll progress via `boru_get_download_status`.
+    let _ = storage.update_download_progress(download_id, 0, "downloading");
+    tokio::spawn(async move {
+        let progress_storage = storage_task.clone();
+        let result = download_blob_to_file(
+            &blob_store,
+            &endpoint,
+            hash,
+            vec![peer_pk_task],
+            display_name_task.clone(),
+            TransferKind::File,
+            &save_path,
+            move |ev: boru_core::chat_callbacks::TransferProgress| {
+                use boru_core::chat_callbacks::TransferProgress;
+                match ev {
+                    TransferProgress::Progress { bytes, .. } => {
+                        let _ = progress_storage
+                            .update_download_progress(download_id, bytes, "downloading");
+                    }
+                    _ => {}
+                }
+            },
+            max_bytes,
+        )
+        .await;
+
+        match result {
+            Ok(()) => {
+                if let Err(e) = storage_task.complete_download(download_id, max_bytes.unwrap_or(0)) {
+                    tracing::warn!(
+                        download_id,
+                        "boru_download_file: complete_download failed: {e}"
+                    );
+                }
+                tracing::info!(download_id, "boru_download_file: transfer completed");
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if let Err(e2) = storage_task.fail_download(download_id, &msg, None) {
+                    tracing::warn!(
+                        download_id,
+                        "boru_download_file: fail_download failed: {e2}"
+                    );
+                }
+                tracing::warn!(download_id, "boru_download_file: transfer failed: {msg}");
+            }
+        }
+    });
 
     Ok(serde_json::json!({
         "download_id": result.download_id,
         "content_hash": result.content_hash,
         "peer_id": result.remote_peer,
         "total_bytes": result.total_bytes,
+        "state": "downloading",
     }))
 }
 
@@ -4367,9 +4787,28 @@ mod tests {
         assert_eq!(GuiNavigateDestination::Settings.as_str(), "settings");
         assert_eq!(format!("{}", GuiNavigateDestination::Settings), "settings");
 
+        assert_eq!(GuiNavigateDestination::FileSharing.as_str(), "file_sharing");
+        assert_eq!(GuiNavigateDestination::FilesSharing.as_str(), "files_sharing");
+        assert_eq!(GuiNavigateDestination::PeersDownloading.as_str(), "peers_downloading");
+        assert_eq!(GuiNavigateDestination::Downloading.as_str(), "downloading");
+        assert_eq!(GuiNavigateDestination::Downloaded.as_str(), "downloaded");
+        assert_eq!(GuiNavigateDestination::SharedWithMe.as_str(), "shared_with_me");
+        assert_eq!(GuiNavigateDestination::Activity.as_str(), "activity");
+
         assert_eq!(
             GuiNavigateDestination::all_destinations(),
-            &["chat_list", "friends", "settings"]
+            &[
+                "chat_list",
+                "friends",
+                "settings",
+                "file_sharing",
+                "files_sharing",
+                "peers_downloading",
+                "downloading",
+                "downloaded",
+                "shared_with_me",
+                "activity",
+            ]
         );
     }
 
@@ -5107,6 +5546,9 @@ mod tests {
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
             storage: Some(boru_core::storage::Storage::memory().expect("test storage")),
+            peer_lookup: None,
+            blob_store: None,
+            downloads_dir: None,
             directory_store: Arc::new(std::sync::Mutex::new(
                 boru_core::directory::DirectoryStore::new(),
             )),
@@ -5761,6 +6203,9 @@ mod tests {
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
             storage: None,
+            peer_lookup: None,
+            blob_store: None,
+            downloads_dir: None,
             directory_store: Arc::new(std::sync::Mutex::new(
                 boru_core::directory::DirectoryStore::new(),
             )),
@@ -5824,6 +6269,9 @@ mod tests {
             gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
             gui_state_rx: None,
             storage: None,
+            peer_lookup: None,
+            blob_store: None,
+            downloads_dir: None,
             directory_store: Arc::new(std::sync::Mutex::new(
                 boru_core::directory::DirectoryStore::new(),
             )),
@@ -6254,6 +6702,614 @@ mod tests {
         assert!(
             response.error.is_some(),
             "Control chars in peer_id should produce error"
+        );
+    }
+
+    // ── boru_download_file transfer-driving tests ──────────────────────
+
+    /// Helper: build a McpAppState with an in-memory blob store, a seeded
+    /// remote catalogue, and a scratch downloads directory so
+    /// `boru_download_file` can drive a real transfer to completion.
+    async fn make_download_test_state() -> (
+        McpAppState,
+        tokio::sync::mpsc::Receiver<ConversationNetEvent>,
+        iroh::PublicKey,
+        String,
+        u64,
+        std::path::PathBuf,
+    ) {
+        use boru_core::catalogue_model::{RemoteSharedFile, SignedFileCatalogue};
+        use iroh::address_lookup::memory::MemoryLookup;
+        use iroh::endpoint::presets;
+        use std::net::{Ipv4Addr, SocketAddrV4};
+
+        let secret_key = SecretKey::generate();
+        let peer_sk = SecretKey::generate();
+        let peer_pk = peer_sk.public();
+
+        let endpoint = Endpoint::builder(presets::N0DisableRelay)
+            .secret_key(secret_key.clone())
+            .address_lookup(MemoryLookup::new())
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind_addr(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .expect("test endpoint bind");
+        let gossip = boru_core::net::Gossip::builder().spawn(endpoint.clone());
+        let (gossip_tx, gossip_rx) = tokio::sync::mpsc::channel(64);
+
+        let storage = boru_core::storage::Storage::memory().expect("test storage");
+        let blob_store: iroh_blobs::api::Store = iroh_blobs::store::mem::MemStore::new().into();
+        let content: Vec<u8> = b"hello boru transfer".to_vec();
+        let hash = iroh_blobs::Hash::new(&content);
+        let hash_hex = hash.to_hex().to_string();
+        blob_store
+            .blobs()
+            .add_bytes(content.clone())
+            .await
+            .expect("add blob to store");
+
+        let file = RemoteSharedFile::new(
+            hash_hex.clone(),
+            "hello.txt",
+            Some("test transfer".to_string()),
+            content.len() as u64,
+            "text/plain",
+            None,
+            1,
+        );
+        let catalogue = SignedFileCatalogue::sign(&peer_sk, 1, 0, vec![], vec![file]);
+        storage.replace_remote_catalogue(&catalogue).expect("seed catalogue");
+
+        let downloads_dir = std::env::temp_dir().join(format!(
+            "boru-mcp-dl-{}-{}",
+            std::process::id(),
+            hash_hex[..12].to_string()
+        ));
+        let _ = std::fs::remove_dir_all(&downloads_dir);
+        std::fs::create_dir_all(&downloads_dir).unwrap();
+
+        let state = McpAppState {
+            diagnostics: Diagnostics::new(),
+            iced_diagnostics: IcedMessageJournal::new(),
+            endpoint,
+            rooms: Arc::new(Mutex::new(Vec::new())),
+            node_id: secret_key.public().to_string(),
+            version: "test".to_string(),
+            gossip_tx,
+            secret_key,
+            gossip,
+            gui_test_actions_enabled: true,
+            gui_action_tx: Some(boru_core::diagnostics::GuiTestHandle::channel(256).0),
+            gui_action_history: GuiActionHistory::new(),
+            gui_action_lifecycle: boru_core::diagnostics::GuiActionHistory::default(),
+            gui_action_rate_limiter: Arc::new(Mutex::new(GuiActionRateLimiter::new())),
+            gui_state_rx: None,
+            storage: Some(storage),
+            peer_lookup: None,
+            blob_store: Some(blob_store),
+            downloads_dir: Some(downloads_dir.clone()),
+            directory_store: Arc::new(std::sync::Mutex::new(
+                boru_core::directory::DirectoryStore::new(),
+            )),
+            directory_sender: Arc::new(std::sync::Mutex::new(None)),
+        };
+        (state, gossip_rx, peer_pk, hash_hex, content.len() as u64, downloads_dir)
+    }
+
+    #[tokio::test]
+    async fn test_download_file_drives_transfer_to_completion_when_blob_local() {
+        let (state, _rx, peer_pk, hash_hex, size, _dl_dir) = make_download_test_state().await;
+        let mut request = make_generic_request("boru_download_file");
+        request.params = json!({
+            "content_hash": hash_hex,
+            "peer_id": peer_pk.to_string(),
+        });
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_none(), "Unexpected error: {:?}", response.error);
+        let result = response.result.clone().expect("download result");
+        assert_eq!(result.get("state").and_then(|v| v.as_str()), Some("downloading"));
+        let download_id = result
+            .get("download_id")
+            .and_then(|v| v.as_i64())
+            .expect("download_id in result");
+
+        // The transfer runs in the background; poll the durable row until it
+        // reaches a terminal state.
+        let storage = state.storage.as_ref().unwrap().clone();
+        let mut terminal_state: Option<String> = None;
+        for _ in 0..200 {
+            let row = storage
+                .get_download(download_id)
+                .expect("read download row")
+                .expect("download row exists");
+            if row.state == "complete" || row.state == "failed" {
+                terminal_state = Some(row.state);
+                assert_eq!(
+                    row.total_bytes, size,
+                    "completed download should record the seeded file size"
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            terminal_state.as_deref(),
+            Some("complete"),
+            "boru_download_file should drive the transfer to complete (blob is local)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_download_file_queues_when_blob_store_unavailable() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        // Seed a valid catalogue so the only failure is the missing blob store.
+        use boru_core::catalogue_model::{RemoteSharedFile, SignedFileCatalogue};
+        let peer_sk = SecretKey::generate();
+        let peer_pk = peer_sk.public();
+        let content: Vec<u8> = b"hello".to_vec();
+        let hash = iroh_blobs::Hash::new(&content);
+        let hash_hex = hash.to_hex().to_string();
+        let file = RemoteSharedFile::new(
+            hash_hex.clone(),
+            "hello.txt",
+            None,
+            content.len() as u64,
+            "text/plain",
+            None,
+            1,
+        );
+        let catalogue = SignedFileCatalogue::sign(&peer_sk, 1, 0, vec![], vec![file]);
+        state
+            .storage
+            .as_ref()
+            .unwrap()
+            .replace_remote_catalogue(&catalogue)
+            .expect("seed catalogue");
+
+        let mut request = make_generic_request("boru_download_file");
+        request.params = json!({
+            "content_hash": hash_hex,
+            "peer_id": peer_pk.to_string(),
+        });
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Expected error without a blob store");
+        let data = response
+            .error
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            data.contains("Blob store not available"),
+            "Error should mention missing blob store, got: {data}"
+        );
+    }
+
+    // ── boru_get_download_status tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_download_status_not_found() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_get_download_status");
+        request.params = json!({"download_id": 42});
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Unknown id should error");
+        let data = response
+            .error
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(data.contains("not found"), "Expected 'not found', got: {data}");
+    }
+
+    #[tokio::test]
+    async fn test_get_download_status_missing_download_id() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let request = make_generic_request("boru_get_download_status");
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Missing download_id should error");
+    }
+
+    // ── boru_gui_test_share_file tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_gui_share_file_success() {
+        let (mut state, _rx) = make_gate_test_state(true, true).await;
+        // Replace the closed channel with one whose receiver stays alive.
+        let (gui_handle, _gui_rx) = boru_core::diagnostics::GuiTestHandle::channel(256);
+        state.gui_action_tx = Some(gui_handle);
+        let mut request = make_generic_request("boru_gui_test_share_file");
+        request.params = json!({"path": "/tmp/some-file.txt"});
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_none(), "Unexpected error: {:?}", response.error);
+        let result = response.result.expect("share result");
+        assert_eq!(result.get("sent").and_then(|v| v.as_bool()), Some(true));
+        let action_id = result.get("action_id").and_then(|v| v.as_str()).expect("action_id");
+        assert!(!action_id.is_empty());
+        assert_eq!(
+            result.get("path_length").and_then(|v| v.as_u64()),
+            Some(18),
+            "path_length should be the character count of '/tmp/some-file.txt'"
+        );
+    }
+
+    #[test]
+    fn test_gui_share_file_command_roundtrips_path() {
+        // Verify the produced command matches the semantic request even though
+        // the wire response omits the command body.
+        let command = boru_core::diagnostics::GuiTestCommand::TestShareFile {
+            path: "/tmp/some-file.txt".to_string(),
+        };
+        let json = serde_json::to_string(&command).expect("serialize");
+        let parsed: boru_core::diagnostics::GuiTestCommand =
+            serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            boru_core::diagnostics::GuiTestCommand::TestShareFile { path } => {
+                assert_eq!(path, "/tmp/some-file.txt");
+            }
+            other => panic!("Expected TestShareFile, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gui_share_file_missing_path() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let request = make_generic_request("boru_gui_test_share_file");
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Missing path should error");
+        let data = response
+            .error
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            data.contains("Missing required argument"),
+            "Expected missing argument error, got: {data}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gui_share_file_control_chars() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_gui_test_share_file");
+        request.params = json!({"path": "/tmp/bad\npath"});
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Control chars in path should error");
+    }
+
+    #[tokio::test]
+    async fn test_gui_share_file_too_long() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let mut request = make_generic_request("boru_gui_test_share_file");
+        request.params = json!({"path": "a".repeat(crate::gui_test_actions::MAX_STRING_LEN + 5)});
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Oversized path should error");
+    }
+
+    #[tokio::test]
+    async fn test_gui_share_file_gated_when_test_mode_disabled() {
+        let (state, _rx) = make_gate_test_state(false, true).await;
+        let mut request = make_generic_request("boru_gui_test_share_file");
+        request.params = json!({"path": "/tmp/some-file.txt"});
+        let response = handle_request(&request, &state).await;
+        assert_gui_method_not_found(&response);
+    }
+
+    // ── boru_add_peer_address tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_add_peer_address_success() {
+        let (mut state, _rx) = make_gate_test_state(true, true).await;
+        use iroh::address_lookup::memory::MemoryLookup;
+        state.peer_lookup = Some(MemoryLookup::new());
+        let peer_sk = SecretKey::generate();
+        let peer_pk = peer_sk.public();
+        let mut request = make_generic_request("boru_add_peer_address");
+        request.params = json!({
+            "node_id": peer_pk.to_string(),
+            "addr": "127.0.0.1:4040",
+            "relay_url": "https://relay.example.com",
+        });
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_none(), "Unexpected error: {:?}", response.error);
+        let result = response.result.expect("add_peer result");
+        assert_eq!(result.get("registered").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            result.get("addr").and_then(|v| v.as_str()),
+            Some("127.0.0.1:4040")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_peer_address_without_relay() {
+        let (mut state, _rx) = make_gate_test_state(true, true).await;
+        use iroh::address_lookup::memory::MemoryLookup;
+        state.peer_lookup = Some(MemoryLookup::new());
+        let peer_sk = SecretKey::generate();
+        let peer_pk = peer_sk.public();
+        let mut request = make_generic_request("boru_add_peer_address");
+        request.params = json!({
+            "node_id": peer_pk.to_string(),
+            "addr": "10.0.0.5:9000",
+        });
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_none(), "Unexpected error: {:?}", response.error);
+        let result = response.result.expect("add_peer result");
+        assert_eq!(result.get("relay_url").and_then(|v| v.as_str()), None);
+    }
+
+    #[tokio::test]
+    async fn test_add_peer_address_invalid_node_id() {
+        let (mut state, _rx) = make_gate_test_state(true, true).await;
+        use iroh::address_lookup::memory::MemoryLookup;
+        state.peer_lookup = Some(MemoryLookup::new());
+        let mut request = make_generic_request("boru_add_peer_address");
+        request.params = json!({
+            "node_id": "not-a-valid-node-id",
+            "addr": "127.0.0.1:4040",
+        });
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Invalid node_id should error");
+    }
+
+    #[tokio::test]
+    async fn test_add_peer_address_invalid_addr() {
+        let (mut state, _rx) = make_gate_test_state(true, true).await;
+        use iroh::address_lookup::memory::MemoryLookup;
+        state.peer_lookup = Some(MemoryLookup::new());
+        let peer_sk = SecretKey::generate();
+        let peer_pk = peer_sk.public();
+        let mut request = make_generic_request("boru_add_peer_address");
+        request.params = json!({
+            "node_id": peer_pk.to_string(),
+            "addr": "999.999.1.1",
+        });
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Invalid addr should error");
+    }
+
+    #[tokio::test]
+    async fn test_add_peer_address_missing_args() {
+        let (mut state, _rx) = make_gate_test_state(true, true).await;
+        use iroh::address_lookup::memory::MemoryLookup;
+        state.peer_lookup = Some(MemoryLookup::new());
+        let request = make_generic_request("boru_add_peer_address");
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Missing args should error");
+    }
+
+    #[tokio::test]
+    async fn test_add_peer_address_no_lookup_available() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let peer_sk = SecretKey::generate();
+        let peer_pk = peer_sk.public();
+        let mut request = make_generic_request("boru_add_peer_address");
+        request.params = json!({
+            "node_id": peer_pk.to_string(),
+            "addr": "127.0.0.1:4040",
+        });
+        let response = handle_request(&request, &state).await;
+        assert!(response.error.is_some(), "Missing peer_lookup should error");
+        let data = response
+            .error
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            data.contains("not available"),
+            "Error should mention lookup unavailable, got: {data}"
+        );
+    }
+
+    // ── boru_gui_navigate dashboard destination tests ──────────────────
+
+    #[test]
+    fn test_navigate_dashboard_destinations_map_to_valid_commands() {
+        for destination in [
+            "file_sharing",
+            "files_sharing",
+            "peers_downloading",
+            "downloading",
+            "downloaded",
+            "shared_with_me",
+            "activity",
+        ] {
+            let dest = GuiNavigateDestination::from_str(destination)
+                .unwrap_or_else(|| panic!("'{destination}' should parse"));
+            let command = dest.to_gui_test_command();
+            match command {
+                boru_core::diagnostics::GuiTestCommand::OpenDashboardTab { tab } => {
+                    assert!(!tab.as_str().is_empty());
+                }
+                boru_core::diagnostics::GuiTestCommand::OpenFileSharing => {
+                    assert_eq!(destination, "file_sharing");
+                }
+                other => panic!(
+                    "destination '{destination}' mapped to unexpected command {other:?}"
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_navigate_dashboard_destinations_are_accepted_by_dispatch() {
+        let (mut state, _rx) = make_gate_test_state(true, true).await;
+        // Replace the closed channel with one whose receiver stays alive.
+        let (gui_handle, _gui_rx) = boru_core::diagnostics::GuiTestHandle::channel(256);
+        state.gui_action_tx = Some(gui_handle);
+        for destination in [
+            "file_sharing",
+            "files_sharing",
+            "peers_downloading",
+            "downloading",
+            "downloaded",
+            "shared_with_me",
+            "activity",
+        ] {
+            let mut request = make_generic_request("boru_gui_navigate");
+            request.params = json!({"destination": destination});
+            let response = handle_request(&request, &state).await;
+            assert!(
+                response.error.is_none(),
+                "destination '{destination}' should succeed, got error: {:?}",
+                response.error
+            );
+            let result = response.result.clone().expect("navigate result");
+            assert_eq!(result.get("accepted").and_then(|v| v.as_bool()), Some(true));
+            assert!(
+                result
+                    .get("action_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| !id.is_empty()),
+                "destination '{destination}' should get an action_id"
+            );
+            // Stay under the 10 actions/sec rate limit.
+            tokio::time::sleep(std::time::Duration::from_millis(110)).await;
+        }
+    }
+
+    #[test]
+    fn test_navigate_file_sharing_maps_to_open_file_sharing() {
+        let dest = GuiNavigateDestination::from_str("file_sharing").expect("parse");
+        assert!(matches!(
+            dest.to_gui_test_command(),
+            boru_core::diagnostics::GuiTestCommand::OpenFileSharing
+        ));
+    }
+
+    #[test]
+    fn test_all_gui_navigate_destinations_roundtrip() {
+        for destination in GuiNavigateDestination::all_destinations() {
+            let parsed = GuiNavigateDestination::from_str(destination)
+                .unwrap_or_else(|| panic!("'{destination}' should parse"));
+            assert_eq!(parsed.as_str(), *destination);
+        }
+    }
+
+    // ── Dashboard GUI state inspection tests ────────────────────────────
+
+    /// Build a state whose live snapshot carries a dashboard section, then
+    /// assert both read-only tools surface the per-tab data.
+    #[tokio::test]
+    async fn test_gui_snapshot_surfaces_dashboard_data() {
+        let (mut state, _rx) = make_gate_test_state(true, true).await;
+        use boru_core::diagnostics::{
+            ActivitySummary, DashboardSnapshot, DownloadSummary, FileSummary, TransferSummary,
+        };
+        let (tx, _rx_watch) = tokio::sync::watch::channel(boru_core::diagnostics::IcedStateSnapshot {
+            node_id: "node".to_string(),
+            version: "test".to_string(),
+            active_screen: "FileSharing".to_string(),
+            active_room: None,
+            conversation_count: 0,
+            neighbor_count: 0,
+            direct_peer_count: 0,
+            relayed_peer_count: 0,
+            mesh_health: "Good".to_string(),
+            online_friend_count: 0,
+            friend_count: 0,
+            total_entry_count: 0,
+            dark_mode: false,
+            composer_text: String::new(),
+            dialog_open: false,
+            unread_count: 0,
+            dashboard: Some(DashboardSnapshot {
+                active_tab: "downloading".to_string(),
+                shared_by_me_files: vec![FileSummary {
+                    name: "photo.png".to_string(),
+                    size_bytes: Some(2048),
+                }],
+                downloading: vec![TransferSummary {
+                    name: "archive.zip".to_string(),
+                    peer_id: Some("peer-abc".to_string()),
+                    bytes: 512,
+                    total_bytes: Some(1024),
+                    state: "active".to_string(),
+                }],
+                downloaded: vec![DownloadSummary {
+                    name: "readme.txt".to_string(),
+                    size_bytes: 128,
+                    source_peer: "Alice".to_string(),
+                }],
+                shared_with_me_files: vec![FileSummary {
+                    name: "notes.md".to_string(),
+                    size_bytes: Some(4096),
+                }],
+                activity: vec![ActivitySummary {
+                    label: "archive.zip".to_string(),
+                    action: "Started".to_string(),
+                    occurred_at_ms: 1000,
+                }],
+            }),
+            timestamp: chrono::Utc::now(),
+        });
+        state.gui_state_rx = Some(tx.subscribe());
+
+        let req = make_generic_request("boru_get_gui_snapshot");
+        let resp = handle_request(&req, &state).await;
+        assert!(resp.error.is_none(), "snapshot should succeed");
+        let result = resp.result.expect("result");
+        assert_eq!(
+            result.get("active_screen").and_then(|v| v.as_str()),
+            Some("FileSharing")
+        );
+        let dashboard = result.get("dashboard").expect("dashboard section");
+        assert_eq!(
+            dashboard.get("active_tab").and_then(|v| v.as_str()),
+            Some("downloading")
+        );
+        let files = dashboard.get("shared_by_me_files").and_then(|v| v.as_array());
+        assert_eq!(files.map(|v| v.len()), Some(1), "shared_by_me file listed");
+        assert_eq!(
+            files.and_then(|v| v.first()).and_then(|f| f.get("name")).and_then(|v| v.as_str()),
+            Some("photo.png")
+        );
+        let downloading = dashboard.get("downloading").and_then(|v| v.as_array());
+        assert_eq!(downloading.map(|v| v.len()), Some(1), "download listed");
+        assert_eq!(
+            downloading
+                .and_then(|v| v.first())
+                .and_then(|f| f.get("state"))
+                .and_then(|v| v.as_str()),
+            Some("active")
+        );
+
+        // The Iced-state tool exposes the same section.
+        let req = make_generic_request("boru_get_iced_state");
+        let resp = handle_request(&req, &state).await;
+        assert!(resp.error.is_none(), "iced state should succeed");
+        let result = resp.result.expect("result");
+        let dashboard = result.get("dashboard").expect("dashboard section");
+        assert_eq!(
+            dashboard.get("downloaded").and_then(|v| v.as_array()).map(|v| v.len()),
+            Some(1),
+            "downloaded history listed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gui_snapshot_dashboard_absent_when_no_live_snapshot() {
+        let (state, _rx) = make_gate_test_state(true, true).await;
+        let req = make_generic_request("boru_get_gui_snapshot");
+        let resp = handle_request(&req, &state).await;
+        assert!(resp.error.is_none());
+        let result = resp.result.expect("result");
+        assert!(
+            result.get("dashboard").is_none(),
+            "no dashboard without a live snapshot"
         );
     }
 

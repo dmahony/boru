@@ -63,6 +63,13 @@ def main() -> int:
     sender_dir = os.path.join(base, "sender")
     receiver_dir = os.path.join(base, "receiver")
 
+    # Fixed QUIC bind ports — two iroh endpoints on one host conflict on the
+    # mDNS port 5353, so direct address seeding (known_addrs) with a fixed
+    # port is the deterministic connection path (see seed_two_instances.py).
+    # The launcher passes the same ports via --bind-port.
+    sender_port = int(os.environ.get("FS23_SENDER_PORT", "41001"))
+    receiver_port = int(os.environ.get("FS23_RECEIVER_PORT", "41002"))
+
     # Derive both keys first so each friends.json can reference the other.
     sender_secret, sender_pk = make_key_pair(0x51)  # 0x51 = 'Q'… deterministic
     receiver_secret, receiver_pk = make_key_pair(0x52)
@@ -87,7 +94,12 @@ def main() -> int:
                             "label": "Receiver",
                             "status": {"online": False, "last_seen_at_unix_ms": 0},
                             "relationship": "friends",
-                            "known_addrs": [],
+                            # Direct QUIC address on the fixed bind port. JSON
+                            # shape mirrors EndpointAddr serde:
+                            # { "id": <pk hex>, "addrs": [ { "Ip": "127.0.0.1:<port>" } ] }
+                            "known_addrs": [
+                                {"id": receiver_pk, "addrs": [{"Ip": f"127.0.0.1:{receiver_port}"}]}
+                            ],
                             "addrs_updated_at_unix_ms": 0,
                             "rooms": [],
                         }
@@ -114,7 +126,9 @@ def main() -> int:
                             "label": "Sender",
                             "status": {"online": False, "last_seen_at_unix_ms": 0},
                             "relationship": "friends",
-                            "known_addrs": [],
+                            "known_addrs": [
+                                {"id": sender_pk, "addrs": [{"Ip": f"127.0.0.1:{sender_port}"}]}
+                            ],
                             "addrs_updated_at_unix_ms": 0,
                             "rooms": [],
                         }

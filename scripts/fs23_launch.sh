@@ -26,7 +26,13 @@ start_env() {
   disp=$(pick_display)
   DISPLAY_NUM=$disp
   echo "using display :$disp"
-  Xvfb ":$disp" -screen 0 1280x800x24 -nolisten tcp >"$BASE/xvfb.log" 2>&1 &
+  # Plain Xvfb without the GLX extension flags. Earlier runs added
+  # `+extension GLX +render` which crashes the X server itself after ~4 min
+  # (killing every X client with it). wgpu/iced renders fine via llvmpipe
+  # software GL with LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe set on
+  # the app (see launch_app).
+  Xvfb ":$disp" -screen 0 2000x800x24 -nolisten tcp -noreset \
+    >"$BASE/xvfb.log" 2>&1 &
   echo $! >"$PID_DIR/xvfb.pid"
   sleep 1
   kill -0 "$(cat "$PID_DIR/xvfb.pid")" 2>/dev/null || { echo "Xvfb failed"; exit 1; }
@@ -36,6 +42,14 @@ start_env() {
   export DBUS_SESSION_BUS_ADDRESS="unix:path=$BUS_PATH"
   export DISPLAY=":$disp"
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  # Propagate DISPLAY into the bus activation environment so D-Bus-activated
+  # services (xdg-desktop-portal-gtk → rfd native file picker) can init GTK.
+  # Without this, StartServiceByName spawns portal-gtk with no DISPLAY and it
+  # exits status 1, so the native OS picker never appears.
+  if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment DISPLAY=":$disp" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+      DBUS_SESSION_BUS_ADDRESS="unix:path=$BUS_PATH" 2>/dev/null || true
+  fi
 
   DISPLAY=":$disp" DBUS_SESSION_BUS_ADDRESS="unix:path=$BUS_PATH" \
     /usr/libexec/xdg-desktop-portal >"$BASE/portal.log" 2>&1 &
@@ -47,10 +61,12 @@ start_env() {
   sleep 1
 }
 
-launch_app() { # $1=name $2=datadir $3=mcp_port
-  local name=$1 data=$2 port=$3
+launch_app() { # $1=name $2=datadir $3=mcp_port $4=bind_port
+  local name=$1 data=$2 port=$3 bind_port=$4
   DISPLAY=":$DISPLAY_NUM" DBUS_SESSION_BUS_ADDRESS="unix:path=$BUS_PATH" \
+    LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe \
     "$BIN" --data-dir "$data" --no-dht --no-relay --name "$name" \
+    --bind-port "$bind_port" \
     --mcp --enable-gui-test-actions --mcp-bind "127.0.0.1:$port" \
     >"$data/app.log" 2>&1 &
   echo $! >"$PID_DIR/$name.pid"
@@ -67,9 +83,15 @@ wait_mcp() { # $1=port $2=name
 
 start() {
   start_env
-  launch_app sender "$BASE/sender" $MCP_SENDER
-  launch_app receiver "$BASE/receiver" $MCP_RECEIVER
+  # Staggered launches: mDNS announcements race when both peers start within
+  # the same second, and iroh's mDNS service does not replay cached
+  # advertisements to subscribers created after the event. Starting the
+  # sender first lets its announcement settle so the receiver (whose lobby
+  # subscription registers before its endpoint binds) observes it.
+  launch_app sender "$BASE/sender" $MCP_SENDER 41001
   wait_mcp $MCP_SENDER sender
+  sleep 4
+  launch_app receiver "$BASE/receiver" $MCP_RECEIVER 41002
   wait_mcp $MCP_RECEIVER receiver
   echo "DISPLAY_NUM=$DISPLAY_NUM MCP_SENDER=$MCP_SENDER MCP_RECEIVER=$MCP_RECEIVER"
   echo "$DISPLAY_NUM" >"$PID_DIR/display"

@@ -36,6 +36,7 @@ fn test_iced_state_snapshot_serialization_no_secrets() {
         composer_text: String::new(),
         dialog_open: false,
         unread_count: 0,
+        dashboard: None,
         timestamp: Utc::now(),
     };
 
@@ -199,6 +200,7 @@ fn test_iced_state_snapshot_has_no_secret_fields() {
         composer_text: String::new(),
         dialog_open: false,
         unread_count: 0,
+        dashboard: None,
         timestamp: Utc::now(),
     };
     // Compile-time check: these should be the only fields allowed.

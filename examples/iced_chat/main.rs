@@ -1430,6 +1430,7 @@ fn main() -> Result<()> {
         composer_text: String::new(),
         dialog_open: false,
         unread_count: 0,
+        dashboard: None,
         timestamp: chrono::Utc::now(),
     });
 
@@ -1497,6 +1498,9 @@ fn main() -> Result<()> {
             )),
             gui_state_rx: Some(_gui_state_rx.clone()),
             storage: boru_core::storage::Storage::open(&data_dir).ok(),
+            blob_store: Some(blob_store.clone().into()),
+            downloads_dir: Some(data_dir.clone()),
+            peer_lookup: Some(memory_lookup.clone()),
             directory_store: shared_directory_store.clone(),
             directory_sender: mcp_directory_sender,
         };

@@ -526,7 +526,7 @@ fn blob_ticket_string(
 pub(crate) const SPACE_2: f32 = 2.0;
 pub(crate) use crate::design_tokens::{AVATAR_MD, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
-    DETAILS_PANEL_WIDTH, RADIUS_LG, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_18,
+    DETAILS_PANEL_WIDTH, RADIUS_LG, RADIUS_SM, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_18,
     SPACE_20, SPACE_24, SPACE_32, SPACE_4, SPACE_8,
 };
 pub(crate) use crate::icon_system::{Icon, IconSize};
@@ -1006,7 +1006,7 @@ pub(crate) const BUTTON_PRIMARY_GREEN: fn(
         background: Some(iced::Background::Color(bg)),
         text_color: Color::WHITE,
         border: iced::Border {
-            radius: SPACE_6.into(),
+            radius: RADIUS_SM.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -2449,7 +2449,7 @@ impl ChatEntry {
 pub enum Screen {
     /// No chat selected — empty state shown in the main panel.
     ChatList,
-    /// File sharing dashboard (placeholder panel; full dashboard in FS-04+).
+    /// File sharing dashboard — five-tab screen (see docs/file-sharing-guide.md).
     FileSharing,
     /// An individual chat room with a given topic.
     Chat { topic: TopicId },
@@ -3294,6 +3294,10 @@ pub struct IcedChat {
     pending_open_settings_action: Option<GuiActionId>,
     /// OpenFileSharing action waiting for the normal file-sharing navigation path.
     pending_open_file_sharing_action: Option<GuiActionId>,
+    /// OpenDashboardTab action waiting for the dashboard tab to become active.
+    pending_dashboard_tab_action: Option<GuiActionId>,
+    /// TestShareFile action waiting for the shared-file registration to finish.
+    pending_share_file_action: Option<GuiActionId>,
     /// CloseDialog action waiting for the normal dialog-cancel message path.
     pending_close_dialog_action: Option<GuiActionId>,
     /// ToggleHelp action waiting for the normal help-overlay toggle path.
@@ -4654,6 +4658,35 @@ fn gui_navigation_message(command: &GuiTestCommand) -> Option<AppMessage> {
         GuiTestCommand::OpenSettings => Some(AppMessage::OpenSettings),
         GuiTestCommand::OpenFileSharing => Some(AppMessage::OpenFileSharing),
         _ => None,
+    }
+}
+
+/// Map the semantic dashboard-tab test command to the concrete dashboard tab
+/// the File Sharing screen renders.
+fn dashboard_tab_from_name(
+    name: boru_core::diagnostics::DashboardTabName,
+) -> crate::dashboard_view_model::DashboardTab {
+    use crate::dashboard_view_model::DashboardTab;
+    match name {
+        boru_core::diagnostics::DashboardTabName::FilesSharing => DashboardTab::SharedByMe,
+        boru_core::diagnostics::DashboardTabName::Downloading => DashboardTab::Downloading,
+        boru_core::diagnostics::DashboardTabName::Downloaded => DashboardTab::Downloaded,
+        boru_core::diagnostics::DashboardTabName::SharedWithMe => DashboardTab::SharedWithMe,
+        boru_core::diagnostics::DashboardTabName::Activity => DashboardTab::ActivityLog,
+    }
+}
+
+/// Serialize a [`TransferState`] to the snake_case name used in the
+/// [`DashboardSnapshot`] (and understood by the MCP wait conditions).
+fn transfer_state_name(state: boru_core::transfer_state_projection::TransferState) -> String {
+    use boru_core::transfer_state_projection::TransferState;
+    match state {
+        TransferState::Active => "active".to_string(),
+        TransferState::Verifying => "verifying".to_string(),
+        TransferState::Completed => "completed".to_string(),
+        TransferState::Failed => "failed".to_string(),
+        TransferState::Cancelled => "cancelled".to_string(),
+        TransferState::Disconnected => "disconnected".to_string(),
     }
 }
 
@@ -6018,6 +6051,8 @@ impl IcedChat {
             pending_open_friends_action: None,
             pending_open_settings_action: None,
             pending_open_file_sharing_action: None,
+            pending_dashboard_tab_action: None,
+            pending_share_file_action: None,
             pending_close_dialog_action: None,
             pending_toggle_help_action: None,
             pending_select_peer_action: None,
@@ -8588,6 +8623,7 @@ impl IcedChat {
                 || self.room_delete_confirm_topic.is_some()
                 || self.help_visible,
             unread_count: 0,
+            dashboard: self.build_dashboard_snapshot(),
             timestamp: chrono::Utc::now(),
         };
 
@@ -8609,6 +8645,7 @@ impl IcedChat {
                 && last.composer_text == snapshot.composer_text
                 && last.dialog_open == snapshot.dialog_open
                 && last.unread_count == snapshot.unread_count
+                && last.dashboard == snapshot.dashboard
             {
                 return; // No meaningful change — skip publish.
             }
@@ -8631,6 +8668,119 @@ impl IcedChat {
         let boxed = Box::new(snapshot.clone());
         let _ = self.gui_state_tx.send(snapshot);
         self.last_snapshot = Some(boxed);
+    }
+
+    /// Build a display-safe [`DashboardSnapshot`] from current in-memory
+    /// dashboard state. Returns `None` when the File Sharing screen is not
+    /// the active screen (the snapshot then omits the dashboard section).
+    ///
+    /// All data comes from already-loaded in-memory structures (the same
+    /// buffers the dashboard view renders) — no SQLite reads, no filesystem
+    /// access, no local paths.  File names are display labels only.
+    fn build_dashboard_snapshot(&self) -> Option<boru_core::diagnostics::DashboardSnapshot> {
+        use boru_core::diagnostics::{
+            ActivitySummary, DashboardSnapshot, DownloadSummary, FileSummary, TransferSummary,
+        };
+
+        if !matches!(self.screen, Screen::FileSharing) {
+            return None;
+        }
+
+        // Active tab name — mirrors the DashboardTabName serialization used
+        // by the MCP navigate destinations.
+        let active_tab = match self.dashboard_active_tab {
+            crate::dashboard_view_model::DashboardTab::SharedByMe => "files_sharing",
+            crate::dashboard_view_model::DashboardTab::Downloading => "downloading",
+            crate::dashboard_view_model::DashboardTab::Downloaded => "downloaded",
+            crate::dashboard_view_model::DashboardTab::SharedWithMe => "shared_with_me",
+            crate::dashboard_view_model::DashboardTab::ActivityLog => "activity",
+        }
+        .to_string();
+
+        // Shared by Me tab: files this node registered for sharing.
+        let shared_by_me_files: Vec<FileSummary> = self
+            .shared_by_me_rows
+            .iter()
+            .map(|row| FileSummary {
+                name: row.display_name.clone(),
+                size_bytes: row.size_bytes,
+            })
+            .collect();
+
+        // Downloading tab: in-progress inbound transfers with live progress.
+        let item_labels = self
+            .inbound_item_labels
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let mut downloading: Vec<TransferSummary> = self
+            .inbound_active
+            .values()
+            .map(|record| {
+                let name = item_labels
+                    .get(&record.item_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let prefix: String = record.item_id.chars().take(12).collect();
+                        format!("file {prefix}…")
+                    });
+                TransferSummary {
+                    name,
+                    peer_id: record.peer_id.clone(),
+                    bytes: record.bytes,
+                    total_bytes: record.total_bytes,
+                    state: transfer_state_name(record.state),
+                }
+            })
+            .collect();
+        downloading.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+
+        // Downloaded tab: completed downloads with source peer labels.
+        let downloaded: Vec<DownloadSummary> = self
+            .downloaded_history
+            .iter()
+            .map(|item| DownloadSummary {
+                name: item.display_name.clone(),
+                size_bytes: item.size_bytes,
+                source_peer: item.source_peer.clone(),
+            })
+            .collect();
+
+        // Shared with Me tab: validated remote catalogue files.
+        let shared_with_me_files: Vec<FileSummary> = self
+            .peer_catalogue_view
+            .as_ref()
+            .map(|(_peer, files)| {
+                files
+                    .iter()
+                    .map(|file| FileSummary {
+                        name: file.display_name.clone(),
+                        size_bytes: Some(file.size_bytes),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Activity tab: recent lifecycle events.
+        let activity: Vec<ActivitySummary> = self
+            .activity_log_rows
+            .iter()
+            .take(50)
+            .map(|row| ActivitySummary {
+                label: row.file_label.clone(),
+                action: row.action.clone(),
+                occurred_at_ms: row.occurred_at_ms,
+            })
+            .collect();
+
+        Some(DashboardSnapshot {
+            active_tab,
+            shared_by_me_files,
+            downloading,
+            downloaded,
+            shared_with_me_files,
+            activity,
+        })
     }
 
     pub fn update(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
@@ -15853,6 +16003,42 @@ impl IcedChat {
                     );
                 }
 
+                if let GuiTestCommand::OpenDashboardTab { tab } = &command {
+                    // Mirror the real sidebar flow: open the File Sharing screen
+                    // first, then select the requested tab.
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_core::diagnostics::ExpectedState::Generic(format!(
+                            "dashboard_tab_{}",
+                            tab.as_str()
+                        )),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_dashboard_tab_action = Some(action_id);
+                    return iced::Task::batch(vec![
+                        iced::Task::done(AppMessage::OpenFileSharing),
+                        iced::Task::done(AppMessage::DashboardTabSelected(
+                            dashboard_tab_from_name(*tab),
+                        )),
+                    ]);
+                }
+
+                if let GuiTestCommand::TestShareFile { path } = &command {
+                    let _ = self.gui_action_history.set_expected_state(
+                        &action_id,
+                        boru_core::diagnostics::ExpectedState::Generic(
+                            "file_shared".to_string(),
+                        ),
+                    );
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    self.pending_share_file_action = Some(action_id);
+                    return iced::Task::done(AppMessage::SharedFilePicked(path.clone()));
+                }
+
                 if matches!(command, GuiTestCommand::CloseDialog) {
                     let close_message = match self.close_current_dialog() {
                         Ok(message) => message,
@@ -17510,6 +17696,16 @@ impl IcedChat {
             }
             AppMessage::DashboardTabSelected(tab) => {
                 self.dashboard_active_tab = tab;
+                // Complete a GUI test action that requested this tab once the
+                // dashboard actually shows it.
+                if let Some(action_id) = self.pending_dashboard_tab_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
                 // The Sharing Summary card is only visible on the Shared by Me
                 // tab; refresh it there so a freshly completed download or a
                 // newly granted share is reflected without a manual reload.
@@ -17858,6 +18054,16 @@ impl IcedChat {
             AppMessage::SharedFileAdded(msg) => {
                 self.shared_by_me_ui.sharing_status = None;
                 self.shared_by_me_ui.close_share_menu();
+                // Complete a GUI test share-file action once the file has been
+                // registered through the normal sharing path.
+                if let Some(action_id) = self.pending_share_file_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
                 self.push_system(msg);
                 // Refresh the shared files list
                 if let Some(ref stg) = self.storage {
@@ -29442,7 +29648,7 @@ impl IcedChat {
             .spacing(SPACE_6)
             .align_y(Alignment::Center)
             .push(
-                text("RECENT DOWNLOAD ACTIVITY")
+                text("Recent Activity")
                     .size(TYPO_XS)
                     .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                     .color(crate::design_tokens::text_muted(&theme)),
@@ -31323,7 +31529,7 @@ impl IcedChat {
             let tab_label = tab.label();
             let tab_msg = AppMessage::DashboardTabSelected(*tab);
 
-            let tab_button = button(text(tab_label).size(TYPO_SM))
+            let tab_btn = button(text(tab_label).size(TYPO_SM))
                 .on_press(tab_msg)
                 .padding([SPACE_4, SPACE_2])
                 .style(move |t, status| {
@@ -31337,30 +31543,52 @@ impl IcedChat {
                     button::Style {
                         background: None,
                         text_color: color,
-                        border: if is_active {
-                            Border {
-                                color: crate::design_tokens::primary(t),
-                                width: 2.0,
-                                radius: 0.0.into(),
-                            }
-                        } else {
-                            Border::default()
-                        },
+                        border: Border::default(),
                         ..Default::default()
                     }
                 });
 
-            tabs_row = tabs_row.push(tab_button);
+            let underline = container(Space::new().width(Length::Shrink).height(Length::Fixed(2.0)))
+                .width(Length::Shrink)
+                .height(Length::Fixed(2.0))
+                .style(move |t| container::Style {
+                    background: if is_active {
+                        Some(Background::Color(crate::design_tokens::primary(t)))
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                });
+
+            let tab_widget = Column::new()
+                .push(tab_btn)
+                .push(underline)
+                .spacing(0)
+                .align_x(Alignment::Center);
+
+            tabs_row = tabs_row.push(tab_widget);
         }
 
-        let tab_bar = container(
+        let tab_bar_content: iced::Element<'_, AppMessage> = if is_compact {
+            scrollable(
+                Row::new()
+                    .push(tabs_row)
+                    .push(Space::new().width(Length::Fixed(SPACE_24)))
+                    .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .into()
+        } else {
             Row::new()
                 .push(tabs_row)
                 .push(Space::new().width(Length::Fill))
-                .align_y(Alignment::Center),
-        )
-        .padding([SPACE_8, 0.0])
-        .width(Length::Fill);
+                .align_y(Alignment::Center)
+                .into()
+        };
+
+        let tab_bar = container(tab_bar_content)
+            .padding([SPACE_8, SPACE_24])
+            .width(Length::Fill);
 
         // Full-width muted separator below tabs.
         let tab_separator = container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
@@ -31388,8 +31616,8 @@ impl IcedChat {
                 Column::new()
                     .push(
                         text(title)
-                            .size(TYPO_MD)
-                            .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
+                            .size(crate::fonts::Typography::SectionHeading.size_px())
+                            .font(crate::fonts::Typography::SectionHeading.font()),
                     )
                     .push(Space::new().height(Length::Fixed(SPACE_8)))
                     .push(text(subtitle).size(TYPO_XS).style(text_muted_style))
@@ -35207,6 +35435,7 @@ mod tests {
                 composer_text: String::new(),
                 dialog_open: false,
                 unread_count: 0,
+                dashboard: None,
                 timestamp: chrono::Utc::now(),
             })
             .0,
