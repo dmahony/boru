@@ -423,3 +423,8 @@ path = "tests/test_branding_rename.rs"
 name = "test_outbox_throughput"
 path = "tests/test_outbox_throughput.rs"
 
+[[test]]
+name = "fs22_dashboard_coverage"
+path = "tests/fs22_dashboard_coverage.rs"
+required-features = ["net"]
+

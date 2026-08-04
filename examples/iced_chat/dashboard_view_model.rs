@@ -830,4 +830,141 @@ mod tests {
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["download:3", "download:2", "download:1"]);
     }
+
+    #[test]
+    fn remote_item_status_precedence_is_invalid_then_revoked_then_expired() {
+        // An invalid descriptor wins over everything — an untrusted or
+        // malformed offer never renders as available even when every other
+        // signal looks fresh.
+        assert_eq!(
+            remote_item_status(false, true, false, false, false),
+            RemoteItemStatus::Invalid
+        );
+        assert_eq!(
+            remote_item_status(false, true, true, true, true),
+            RemoteItemStatus::Invalid
+        );
+        // Revoked beats expired; both beat availability/downloaded state.
+        assert_eq!(
+            remote_item_status(true, true, false, true, true),
+            RemoteItemStatus::Revoked
+        );
+        assert_eq!(
+            remote_item_status(true, true, false, true, false),
+            RemoteItemStatus::Expired
+        );
+        // Already downloaded beats online/offline signals.
+        assert_eq!(
+            remote_item_status(true, false, true, false, false),
+            RemoteItemStatus::AlreadyDownloaded
+        );
+        // Online → Available; offline → OfflineCached (fetchable on return).
+        assert_eq!(
+            remote_item_status(true, true, false, false, false),
+            RemoteItemStatus::Available
+        );
+        assert_eq!(
+            remote_item_status(true, false, false, false, false),
+            RemoteItemStatus::OfflineCached
+        );
+    }
+
+    #[test]
+    fn validated_remote_projection_rejects_malformed_or_untrusted_descriptors() {
+        let remote = |name: &str, id: &str| RemoteSharedFile {
+            shared_file_id: id.into(),
+            display_name: name.into(),
+            description: None,
+            mime_type: "image/png".into(),
+            size_bytes: 99,
+            content_hash: "b".repeat(64),
+            version_number: 1,
+            updated_at_ms: 12,
+            collection_ids: vec![],
+        };
+        // Missing display name → never renders.
+        assert!(
+            project_validated_remote_shared_file("peer-z", &remote("", "shared-7"), true).is_none()
+        );
+        // Missing stable shared-file id → never renders.
+        assert!(
+            project_validated_remote_shared_file("peer-z", &remote("photo.png", ""), true)
+                .is_none()
+        );
+        // Whitespace-only display name is also rejected.
+        assert!(
+            project_validated_remote_shared_file("peer-z", &remote("   ", "shared-7"), true)
+                .is_none()
+        );
+        // Valid descriptor projects with a stable owner-scoped id.
+        let item =
+            project_validated_remote_shared_file("peer-z", &remote("photo.png", "shared-7"), true)
+                .expect("valid descriptor projects");
+        assert_eq!(item.id.as_str(), "remote:peer-z:shared-7");
+        assert_eq!(item.remote_status, Some(RemoteItemStatus::Available));
+        // Offline peers still project as cached, not invalid or fake-available.
+        let item =
+            project_validated_remote_shared_file("peer-z", &remote("photo.png", "shared-7"), false)
+                .expect("valid descriptor projects offline");
+        assert_eq!(item.remote_status, Some(RemoteItemStatus::OfflineCached));
+    }
+
+    #[test]
+    fn metrics_definitions_count_offered_files_bytes_and_unique_peers() {
+        let shared = shared_file();
+        let mut offered_a = project_local_shared_file(&shared, None, vec![]);
+        offered_a.offered = true;
+        let mut offered_b = project_local_shared_file(&shared, None, vec![]);
+        offered_b.offered = true;
+        let mut not_offered = project_local_shared_file(&shared, None, vec![]);
+        not_offered.offered = false;
+
+        let download = |id: i64, bytes: u64, total: u64| Download {
+            id,
+            content_hash: format!("hash-{id}"),
+            remote_peer: "peer-a".into(),
+            state: "downloading".into(),
+            bytes_downloaded: bytes,
+            total_bytes: total,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            last_error: None,
+            retry_count: 0,
+            next_retry_at_ms: None,
+        };
+        let determinate = project_download(&download(1, 10, 100), Some("a.bin"), None);
+        let indeterminate = project_download(&download(2, 20, 0), Some("b.bin"), None);
+        let unknown = project_download(&download(3, 0, 0), Some("c.bin"), None);
+
+        let mut peer_row = |peer: &str| {
+            let record = boru_core::transfer_state_projection::TransferRecord {
+                transfer_id: format!("t-{peer}"),
+                item_id: "item-1".into(),
+                direction: boru_core::transfer_state_projection::TransferDirection::Outbound,
+                peer_id: Some(peer.into()),
+                bytes: 0,
+                total_bytes: None,
+                state: boru_core::transfer_state_projection::TransferState::Active,
+                started_at_ms: 1,
+                updated_at_ms: 2,
+                error: None,
+                attempt: 1,
+            };
+            outbound_row(&record, &std::collections::HashMap::new())
+        };
+        // peer-b appears twice but must count once in the unique-peer metric.
+        let peers = vec![peer_row("peer-a"), peer_row("peer-b"), peer_row("peer-b")];
+
+        let metrics = metrics(
+            &[offered_a, offered_b, not_offered],
+            &peers,
+            &[determinate, indeterminate, unknown],
+        );
+        assert_eq!(metrics.shared_file_count, 2, "only offered items count");
+        assert_eq!(
+            metrics.transferred_bytes, 30,
+            "determinate + indeterminate bytes"
+        );
+        assert_eq!(metrics.active_peer_count, 2, "unique peers only");
+    }
 }

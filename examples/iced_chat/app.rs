@@ -26310,10 +26310,13 @@ impl IcedChat {
             let body_el: iced::Element<'_, AppMessage> = if segments.len() == 1
                 && matches!(&segments[0], link_preview::TextSegment::Text(_))
             {
-                // No URLs — simple text element
+                // No URLs — simple text element. `WordOrGlyph` wraps at word
+                // boundaries and falls back to glyph-level breaking for
+                // unbreakable words (public keys, pasted tokens, very long
+                // single words) so the bubble never overflows its width cap.
                 text(&entry.body)
                     .size(self.chat_text_size)
-                    .wrapping(Wrapping::Word)
+                    .wrapping(Wrapping::WordOrGlyph)
                     .color(body_color)
                     .into()
             } else {
@@ -26325,7 +26328,7 @@ impl IcedChat {
                             row = row.push(
                                 text(t)
                                     .size(self.chat_text_size)
-                                    .wrapping(Wrapping::Word)
+                                    .wrapping(Wrapping::WordOrGlyph)
                                     .color(body_color),
                             );
                         }
@@ -26336,7 +26339,7 @@ impl IcedChat {
                                 button(
                                     text(display)
                                         .size(self.chat_text_size)
-                                        .wrapping(Wrapping::Word)
+                                        .wrapping(Wrapping::WordOrGlyph)
                                         .color(accent_primary(&theme)),
                                 )
                                 .on_press(AppMessage::OpenUrl(url_for_click))
@@ -26429,7 +26432,7 @@ impl IcedChat {
                     preview_children.push(
                         text(title)
                             .size(TYPO_SM)
-                            .wrapping(Wrapping::Word)
+                            .wrapping(Wrapping::WordOrGlyph)
                             .color(accent_primary(&theme))
                             .into(),
                     );
@@ -26438,7 +26441,7 @@ impl IcedChat {
                     preview_children.push(
                         text(desc)
                             .size(TYPO_XS)
-                            .wrapping(Wrapping::Word)
+                            .wrapping(Wrapping::WordOrGlyph)
                             .color(text_muted(&theme))
                             .into(),
                     );
@@ -26457,7 +26460,7 @@ impl IcedChat {
                     preview_children.push(
                         text(display_url)
                             .size(TYPO_XXS)
-                            .wrapping(Wrapping::Word)
+                            .wrapping(Wrapping::WordOrGlyph)
                             .color(text_muted(&theme))
                             .into(),
                     );
@@ -26699,7 +26702,7 @@ impl IcedChat {
                         text(error_text)
                             .size(TYPO_XS)
                             .color(color_error(&theme))
-                            .wrapping(Wrapping::Word),
+                            .wrapping(Wrapping::WordOrGlyph),
                     )
                     .spacing(SPACE_2);
                 col = col.push(
@@ -26717,7 +26720,7 @@ impl IcedChat {
                         text(reactions_text)
                             .color(text_muted(&theme))
                             .size(TYPO_SM)
-                            .wrapping(Wrapping::Word)
+                            .wrapping(Wrapping::WordOrGlyph)
                             .width(Length::Fill),
                     )
                     .spacing(0)

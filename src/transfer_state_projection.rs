@@ -485,4 +485,110 @@ mod tests {
             .iter()
             .any(|item| item.transfer_id == "transfer-1"));
     }
+
+    #[test]
+    fn cancelled_transfer_reaches_terminal_state_and_rejects_followups() {
+        let mut projection = TransferProjection::new(0);
+        projection.apply(event("start", 0, EventName::Started, 0, 10));
+        projection.apply(event("cancel", 1, EventName::Cancelled, 0, 20));
+        let record = projection.get("transfer-1").unwrap();
+        assert_eq!(record.state, TransferState::Cancelled);
+        assert!(record.state.is_terminal());
+        // Post-terminal progress must never resurrect the record.
+        assert!(projection
+            .apply(event("late", 2, EventName::Progress, 50, 30))
+            .is_none());
+        assert_eq!(projection.get("transfer-1").unwrap().bytes, 0);
+        assert_eq!(
+            projection.get("transfer-1").unwrap().state,
+            TransferState::Cancelled
+        );
+    }
+
+    #[test]
+    fn failed_transfer_records_bounded_error_and_ignores_later_events() {
+        let mut projection = TransferProjection::new(0);
+        projection.apply(event("start", 0, EventName::Started, 0, 10));
+        let mut fail = event("fail", 1, EventName::Failed, 0, 20);
+        fail.error = Some("e".repeat(1000));
+        projection.apply(fail);
+        let record = projection.get("transfer-1").unwrap();
+        assert_eq!(record.state, TransferState::Failed);
+        // Error summaries are bounded so a hostile producer cannot bloat rows.
+        assert_eq!(record.error.as_deref().unwrap().len(), 256);
+        assert!(projection
+            .apply(event("late", 2, EventName::Progress, 90, 30))
+            .is_none());
+        assert_eq!(projection.get("transfer-1").unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn retry_bumps_attempt_without_regressing_state() {
+        let mut projection = TransferProjection::new(0);
+        projection.apply(event("start", 0, EventName::Started, 0, 10));
+        let mut retry = event("retry-progress", 1, EventName::Progress, 5, 20);
+        retry.attempt = 2;
+        projection.apply(retry);
+        let record = projection.get("transfer-1").unwrap();
+        assert_eq!(record.attempt, 2);
+        assert_eq!(record.state, TransferState::Active);
+        // A lower attempt on a later sequence must not lower the counter.
+        let mut stale = event("stale-attempt", 2, EventName::Progress, 10, 30);
+        stale.attempt = 1;
+        projection.apply(stale);
+        assert_eq!(projection.get("transfer-1").unwrap().attempt, 2);
+        assert_eq!(projection.get("transfer-1").unwrap().bytes, 10);
+    }
+
+    #[test]
+    fn disconnected_transfer_restarts_on_newer_event() {
+        let mut projection = TransferProjection::with_progress_interval(0);
+        projection.apply(event("start", 0, EventName::Started, 4, 10));
+        projection.disconnect_peer("peer-a", 20);
+        assert_eq!(
+            projection.get("transfer-1").unwrap().state,
+            TransferState::Disconnected
+        );
+        // The peer returns: a newer progress event resumes the same record
+        // and keeps the authenticated peer identity.
+        let resume = projection
+            .apply(event("resume", 1, EventName::Progress, 40, 30))
+            .unwrap();
+        assert!(resume.immediate);
+        let record = projection.get("transfer-1").unwrap();
+        assert_eq!(record.state, TransferState::Active);
+        assert_eq!(record.peer_id.as_deref(), Some("peer-a"));
+        assert_eq!(record.bytes, 40);
+    }
+
+    #[test]
+    fn terminal_records_are_retained_in_archive() {
+        let mut projection = TransferProjection::new(0);
+        projection.apply(event("start", 0, EventName::Started, 0, 10));
+        projection.apply(event("done", 1, EventName::Completed, 100, 20));
+        let archived: Vec<_> = projection.archive().collect();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].state, TransferState::Completed);
+        assert_eq!(archived[0].bytes, 100);
+    }
+
+    #[test]
+    fn post_terminal_events_never_regress_an_archived_transfer() {
+        let mut projection = TransferProjection::new(0);
+        projection.apply(event("start", 0, EventName::Started, 0, 10));
+        projection.apply(event("done", 1, EventName::Completed, 100, 20));
+        // A replayed terminal event with a different event id but stale seq.
+        assert!(projection
+            .apply(event("done-copy", 1, EventName::Completed, 100, 20))
+            .is_none());
+        // Newer event ids after a terminal outcome are also ignored.
+        assert!(projection
+            .apply(event("newer", 2, EventName::Progress, 100, 30))
+            .is_none());
+        assert_eq!(
+            projection.get("transfer-1").unwrap().state,
+            TransferState::Completed
+        );
+        assert_eq!(projection.archive().count(), 1);
+    }
 }
