@@ -106,6 +106,14 @@ pub mod private_room_tracker;
 #[cfg(feature = "net")]
 pub mod chat_core;
 
+/// Deflate compression with a preshared dictionary for the gossip wire
+/// format.
+///
+/// Always compiled in (no feature gate) — the `compression` byte on
+/// [`SignedMessage`](crate::chat_core::SignedMessage) selects at runtime
+/// whether a message uses it.
+pub mod wire_compression;
+
 /// Semantic event-type mapping for chat system messages.
 ///
 /// Classifies the plain-text system messages produced by

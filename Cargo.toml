@@ -71,6 +71,7 @@ postcard = { version = "1", default-features = false, features = [
     "use-std",
     "experimental-derive",
 ] }
+flate2 = { version = "1", features = ["zlib"] }
 rand = { version = "0.10.1", features = ["std_rng"] }
 serde = { version = "1.0.164", features = ["derive"] }
 rfd = { version = "0.15", optional = true }
@@ -173,6 +174,11 @@ criterion = "0.5"
 [[bench]]
 name = "phase23"
 harness = false
+
+[[bench]]
+name = "compression_bench"
+harness = false
+required-features = ["net"]
 
 [features]
 default = ["net", "metrics"]

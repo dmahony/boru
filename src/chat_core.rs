@@ -1089,13 +1089,78 @@ const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;
 type Signature = ByteArray<SIGNATURE_LENGTH>;
 
 /// A signed message envelope with sender identity and signature.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct SignedMessage {
     from: PublicKey,
     data: Bytes,
     signature: Signature,
     /// Unix epoch seconds when the message was sent.
     sent_at: u64,
+    /// Compression applied to `data`: `0` = none (legacy), `1` = deflate
+    /// with the shared dictionary.  Envelopes produced before this field
+    /// existed omit the byte entirely and decode as `0`.
+    compression: u8,
+}
+
+/// Manual [`Deserialize`] so legacy envelopes (no trailing `compression`
+/// byte) still decode.
+///
+/// Postcard's sequence access returns `Err(EOF)` — not `Ok(None)` — when the
+/// buffer is exhausted before the declared field count, so `#[serde(default)]`
+/// alone cannot backfill the missing byte.  We read the four original fields,
+/// then treat an end-of-buffer on the fifth as `compression = 0`.
+impl<'de> Deserialize<'de> for SignedMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SignedMessageVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SignedMessageVisitor {
+            type Value = SignedMessage;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a signed message envelope")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let from = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::custom("missing `from`"))?;
+                let data = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::custom("missing `data`"))?;
+                let signature = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::custom("missing `signature`"))?;
+                let sent_at = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::custom("missing `sent_at`"))?;
+                // `compression` is a single byte, so the only way its read can
+                // fail is an empty buffer — i.e. a legacy 4-field envelope.
+                let compression = match seq.next_element() {
+                    Ok(Some(c)) => c,
+                    Ok(None) | Err(_) => 0,
+                };
+                Ok(SignedMessage {
+                    from,
+                    data,
+                    signature,
+                    sent_at,
+                    compression,
+                })
+            }
+        }
+
+        deserializer.deserialize_struct(
+            "SignedMessage",
+            &["from", "data", "signature", "sent_at", "compression"],
+            SignedMessageVisitor,
+        )
+    }
 }
 
 impl SignedMessage {
@@ -1109,16 +1174,55 @@ impl SignedMessage {
             &iroh::Signature::from_bytes(&signed_message.signature),
         )
         .std_context("verify signature")?;
-        let message: Message =
-            postcard::from_bytes(&signed_message.data).std_context("decode message")?;
+        // The signature covers the `data` bytes as stored on the wire, so we
+        // inflate *after* verifying: tampering with either the compressed
+        // payload or the `compression` byte is caught here.
+        let raw = match signed_message.compression {
+            0 => signed_message.data.to_vec(),
+            1 => crate::wire_compression::decompress(&signed_message.data)?,
+            other => bail_any!("unsupported compression value {other}"),
+        };
+        let message: Message = postcard::from_bytes(&raw).std_context("decode message")?;
         Ok((signed_message.from, message, signed_message.sent_at))
     }
 
     /// Sign a [`Message`] and encode it into a `Bytes` payload ready for gossip broadcast.
+    ///
+    /// Uses the legacy uncompressed wire format (`compression = 0`), which
+    /// every peer can decode.  Use [`Self::sign_and_encode_compressed`] to
+    /// enable deflate compression with the shared dictionary.
     pub fn sign_and_encode(secret_key: &SecretKey, message: &Message) -> Result<Bytes> {
-        let data: Bytes = postcard::to_stdvec(&message)
-            .std_context("encode message")?
-            .into();
+        Self::encode(secret_key, message, false)
+    }
+
+    /// Sign a [`Message`] and encode it with deflate compression
+    /// (`compression = 1`) using the shared dictionary from
+    /// [`crate::wire_compression`].
+    ///
+    /// The signature covers the *compressed* `data` bytes.  Receivers that
+    /// do not know compression value `1` reject the message with a clear
+    /// error rather than mis-decoding it.
+    pub fn sign_and_encode_compressed(secret_key: &SecretKey, message: &Message) -> Result<Bytes> {
+        Self::encode(secret_key, message, true)
+    }
+
+    fn encode(secret_key: &SecretKey, message: &Message, compress: bool) -> Result<Bytes> {
+        let raw = postcard::to_stdvec(&message).std_context("encode message")?;
+        let (data, compression): (Bytes, u8) = if compress {
+            let compressed = crate::wire_compression::compress(&raw);
+            if compressed.len() < raw.len() {
+                // Deflate actually shrank the payload — store it compressed.
+                (compressed.into(), 1u8)
+            } else {
+                // Deflate framing exceeds tiny payloads (unit variants like
+                // Presence/Heartbeat/Leave are 1-6 bytes).  Fall back to raw
+                // postcard so compression never makes the wire message
+                // larger — every peer can still decode it (compression = 0).
+                (raw.into(), 0u8)
+            }
+        } else {
+            (raw.into(), 0u8)
+        };
         let signature = secret_key.sign(&data);
         let key: PublicKey = secret_key.public();
         let sent_at = SystemTime::now()
@@ -1130,6 +1234,7 @@ impl SignedMessage {
             data,
             signature: ByteArray::new(signature.to_bytes()),
             sent_at,
+            compression,
         };
         let encoded = postcard::to_stdvec(&signed_message).std_context("encode signed message")?;
         Ok(encoded.into())
@@ -3242,6 +3347,384 @@ mod tests {
         // that a message signed by one key cannot be claimed as having
         // come from a different key after verification.
         let (_pk, _, _sent_at) = SignedMessage::verify_and_decode(&encoded).unwrap();
+    }
+
+    #[test]
+    fn signed_message_compressed_roundtrip_and_shorter() {
+        let key = SecretKey::generate();
+        // Repetitive content compresses well against the shared dictionary.
+        let text = "hello hello hello hello hello hello hello hello hello hello hello hello";
+        let msg = Message::Message { text: text.into() };
+
+        let plain = SignedMessage::sign_and_encode(&key, &msg).unwrap();
+        let compressed = SignedMessage::sign_and_encode_compressed(&key, &msg).unwrap();
+
+        assert!(
+            compressed.len() < plain.len(),
+            "compressed ({} bytes) should be shorter than plain ({} bytes)",
+            compressed.len(),
+            plain.len()
+        );
+
+        let (pk, decoded, sent_at) = SignedMessage::verify_and_decode(&compressed).unwrap();
+        assert_eq!(pk, key.public());
+        assert!(sent_at > 0);
+        assert!(matches!(decoded, Message::Message { text: ref t } if *t == text));
+
+        // The uncompressed path still decodes too.
+        let (_, decoded_plain, _) = SignedMessage::verify_and_decode(&plain).unwrap();
+        assert!(matches!(decoded_plain, Message::Message { text: ref t } if *t == text));
+    }
+
+    #[test]
+    fn signed_message_unknown_compression_rejected() {
+        let key = SecretKey::generate();
+        let msg = Message::Message { text: "x".into() };
+        let mut encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap().to_vec();
+        // The final byte is the `compression` field (0).  Flip it to an
+        // unknown value — the signature covers only `data`, so verification
+        // passes and the compression check must produce a clear error.
+        if let Some(b) = encoded.last_mut() {
+            *b = 7;
+        }
+        let err = SignedMessage::verify_and_decode(&encoded)
+            .err()
+            .expect("unknown compression must be an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("compression"),
+            "error should mention compression: {msg}"
+        );
+    }
+
+    #[test]
+    fn signed_message_backward_compat_without_compression_field() {
+        // Simulate an envelope produced by a pre-compression peer: identical
+        // fields but no trailing `compression` byte.  New peers must decode
+        // it as compression = 0.
+        #[derive(Serialize)]
+        struct LegacyEnvelope {
+            from: PublicKey,
+            data: Bytes,
+            signature: Signature,
+            sent_at: u64,
+        }
+
+        let key = SecretKey::generate();
+        let msg = Message::Message {
+            text: "legacy".into(),
+        };
+        let data: Bytes = postcard::to_stdvec(&msg).unwrap().into();
+        let signature = key.sign(&data);
+        let legacy = LegacyEnvelope {
+            from: key.public(),
+            data,
+            signature: ByteArray::new(signature.to_bytes()),
+            sent_at: 42,
+        };
+        let encoded = postcard::to_stdvec(&legacy).unwrap();
+
+        let (pk, decoded, sent_at) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        assert_eq!(pk, key.public());
+        assert_eq!(sent_at, 42);
+        assert!(matches!(decoded, Message::Message { ref text } if text == "legacy"));
+    }
+
+    #[test]
+    fn new_compression_zero_message_decodes_with_legacy_struct() {
+        // The reverse of `signed_message_backward_compat_without_compression_field`:
+        // a *new* peer signs a message with compression = 0 (5-field envelope),
+        // and an *old* peer using the pre-compression 4-field struct must still
+        // deserialize it.  Postcard ignores the trailing `compression` byte.
+        #[derive(Deserialize)]
+        struct LegacyEnvelope {
+            from: PublicKey,
+            data: Bytes,
+            signature: Signature,
+            sent_at: u64,
+        }
+
+        let key = SecretKey::generate();
+        let msg = Message::Message {
+            text: "new code, compression off".into(),
+        };
+        let encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
+
+        let legacy: LegacyEnvelope = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(legacy.from, key.public());
+        assert!(legacy.sent_at > 0);
+        let decoded: Message = postcard::from_bytes(&legacy.data).unwrap();
+        assert!(matches!(
+            decoded,
+            Message::Message { ref text } if text == "new code, compression off"
+        ));
+    }
+
+    #[test]
+    fn compressed_message_old_code_postcard_decode_fails_cleanly() {
+        // Old code (pre-compression) has no `compression` field and calls
+        // postcard directly on the raw `data` bytes without inflating.  A
+        // deflate stream is not a valid postcard Message, so this must fail
+        // with a clean error — never panic and never silently decode into a
+        // *different* message.
+        let key = SecretKey::generate();
+        let text = "hello hello hello hello compression must fail on old code";
+        let msg = Message::Message { text: text.into() };
+
+        let encoded = SignedMessage::sign_and_encode_compressed(&key, &msg).unwrap();
+
+        // New code decodes it fine.
+        let (pk, decoded, _) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        assert_eq!(pk, key.public());
+        assert!(matches!(decoded, Message::Message { text: ref t } if *t == text));
+
+        // Simulate old code: postcard on the raw data field, no inflate.
+        let envelope: SignedMessage = postcard::from_bytes(&encoded).unwrap();
+        match postcard::from_bytes::<Message>(&envelope.data) {
+            Err(e) => {
+                // Clean rejection — this is the expected path.
+                assert!(
+                    !e.to_string().is_empty(),
+                    "decode error must carry a message"
+                );
+            }
+            Ok(decoded_raw) => {
+                // If postcard somehow parses the deflate bytes into some
+                // Message, it must NOT equal the original — silent
+                // corruption would let old code show a wrong message.
+                let orig_bytes = postcard::to_stdvec(&msg).unwrap();
+                let got_bytes = postcard::to_stdvec(&decoded_raw).unwrap();
+                assert_ne!(
+                    got_bytes, orig_bytes,
+                    "compressed bytes must not silently decode as the original message"
+                );
+            }
+        }
+    }
+
+    /// A representative value for every `Message` variant.
+    fn all_message_variants() -> Vec<(&'static str, Message)> {
+        let key = SecretKey::generate();
+        let peer = crate::group_encryption::types::PeerId::from(key.public());
+        vec![
+            (
+                "AboutMe",
+                Message::AboutMe {
+                    name: "alice".into(),
+                    profile_image_ticket: Some(
+                        "blob:iroh:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666:1:1:200".into(),
+                    ),
+                },
+            ),
+            (
+                "Message",
+                Message::Message {
+                    text: "hello world, this is a regular chat message".into(),
+                },
+            ),
+            (
+                "FileShare",
+                Message::FileShare {
+                    name: "report.pdf".into(),
+                    ticket: "blob:iroh:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666:3:200:1000"
+                        .into(),
+                    size: 42_000,
+                    thumbnail_hash: Some([0xab; 32]),
+                },
+            ),
+            ("Leave", Message::Leave),
+            ("Presence", Message::Presence),
+            (
+                "PresenceWithTicket",
+                Message::PresenceWithTicket {
+                    ticket: "blob:iroh:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666:3:200:1000"
+                        .into(),
+                },
+            ),
+            (
+                "ReadReceipt",
+                Message::ReadReceipt {
+                    message_hash: [0x11; 32],
+                },
+            ),
+            (
+                "Edit",
+                Message::Edit {
+                    original_hash: [0x22; 32],
+                    new_text: "the corrected message text".into(),
+                },
+            ),
+            (
+                "Delete",
+                Message::Delete {
+                    message_hash: [0x33; 32],
+                },
+            ),
+            (
+                "Reaction",
+                Message::Reaction {
+                    message_hash: [0x44; 32],
+                    emoji: "👍".into(),
+                },
+            ),
+            (
+                "ImageShare",
+                Message::ImageShare {
+                    name: "photo.png".into(),
+                    hash: [0x55; 32],
+                },
+            ),
+            (
+                "RoomAdvertisement",
+                Message::RoomAdvertisement {
+                    ad: RoomAdvertisement {
+                        room_name: "Boru Public Room".into(),
+                        description: "A public room for testing compression".into(),
+                        topic: TopicId::from_bytes([7; 32]),
+                        ticket:
+                            "blob:iroh:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666:3:200:1000"
+                                .into(),
+                        member_count: 3,
+                        last_activity: 1_700_000_000_000,
+                    },
+                    signature: vec![0xcc; 64],
+                },
+            ),
+            ("Heartbeat", Message::Heartbeat),
+            ("LatencyPing", Message::LatencyPing { sent_at_ms: 123 }),
+            ("LatencyPong", Message::LatencyPong { sent_at_ms: 123 }),
+            (
+                "DiagnosticProbe",
+                Message::DiagnosticProbe(crate::diagnostics::DiagnosticProbe {
+                    probe_id: "probe-1".into(),
+                    sender_id: "peer-a".into(),
+                    room_id: "room-1".into(),
+                    sent_at_ms: 123,
+                    payload: Some("hello".into()),
+                }),
+            ),
+            (
+                "ContactControl",
+                Message::ContactControl {
+                    payload: vec![0xde; 128],
+                },
+            ),
+            (
+                "ProfileUpdate",
+                Message::ProfileUpdate(UserProfile::default()),
+            ),
+            (
+                "EncryptedGroupMessage",
+                Message::EncryptedGroupMessage {
+                    group_id: [0xee; 32],
+                    envelope: crate::group_encryption::message::EncryptedGroupEnvelope::new_control(
+                        peer,
+                        p2panda_encryption::message_scheme::ControlMessage::Create {
+                            initial_members: vec![peer],
+                        },
+                        vec![],
+                    ),
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn compressed_envelope_never_larger_than_plain() {
+        // The wire message is the SignedMessage envelope, not the raw
+        // postcard payload.  For every Message variant, the compressed
+        // envelope must never be larger than the plain envelope — deflate's
+        // framing overhead on tiny unit variants must fall back to raw.
+        let key = SecretKey::generate();
+        for (label, msg) in all_message_variants() {
+            let plain = SignedMessage::sign_and_encode(&key, &msg)
+                .unwrap_or_else(|e| panic!("{label}: plain encode failed: {e}"));
+            let compressed = SignedMessage::sign_and_encode_compressed(&key, &msg)
+                .unwrap_or_else(|e| panic!("{label}: compressed encode failed: {e}"));
+            assert!(
+                compressed.len() <= plain.len(),
+                "{label}: compressed envelope ({} bytes) larger than plain ({} bytes)",
+                compressed.len(),
+                plain.len()
+            );
+            // And the compressed envelope must still decode correctly.
+            let (pk, decoded, _) = SignedMessage::verify_and_decode(&compressed).unwrap();
+            assert_eq!(pk, key.public(), "{label}: wrong sender");
+            assert_eq!(
+                postcard::to_stdvec(&decoded).unwrap(),
+                postcard::to_stdvec(&msg).unwrap(),
+                "{label}: decoded message differs from original"
+            );
+        }
+    }
+
+    #[test]
+    fn compressed_roundtrip_all_message_variants() {
+        let key = SecretKey::generate();
+        for (label, msg) in all_message_variants() {
+            let encoded = SignedMessage::sign_and_encode_compressed(&key, &msg)
+                .unwrap_or_else(|e| panic!("{label}: sign_and_encode_compressed failed: {e}"));
+            let (pk, decoded, sent_at) = SignedMessage::verify_and_decode(&encoded)
+                .unwrap_or_else(|e| panic!("{label}: verify_and_decode failed: {e}"));
+            assert_eq!(pk, key.public(), "{label}: wrong sender");
+            assert!(sent_at > 0, "{label}: sent_at not set");
+            // `Message` does not derive PartialEq, so compare postcard bytes.
+            assert_eq!(
+                postcard::to_stdvec(&decoded).unwrap(),
+                postcard::to_stdvec(&msg).unwrap(),
+                "{label}: decoded message differs from original"
+            );
+        }
+    }
+
+    #[test]
+    fn compressed_roundtrip_edge_cases() {
+        let key = SecretKey::generate();
+        let cases: Vec<(&str, String)> = vec![
+            ("empty_text", String::new()),
+            ("single_char", "x".into()),
+            ("max_length_10k", "y".repeat(10_000)),
+            ("emoji_only", "👍🏽🎉🔥🚀😀".into()),
+            ("mixed_emoji_text", "Great job! 🎉✨ Well done 👏".into()),
+            ("rtl_hebrew", "שלום עולם, איך הולך?".into()),
+            ("rtl_arabic", "مرحبا بالعالم".into()),
+            ("cjk", "你好，世界！こんにちは世界".into()),
+            (
+                "combining_marks",
+                "cafe\u{301} na\u{303}ve e\u{301}te\u{301}".into(),
+            ),
+            ("control_chars", "\u{0}\t\n\u{1b}\u{7f}".into()),
+            ("zalgotext", "h̷̢̛e̶̢̛l̸̢̛l̵̢̛ơ̶̢".into()),
+        ];
+        for (label, text) in cases {
+            let msg = Message::Message { text };
+            let encoded = SignedMessage::sign_and_encode_compressed(&key, &msg)
+                .unwrap_or_else(|e| panic!("{label}: sign_and_encode_compressed failed: {e}"));
+            let (_, decoded, _) = SignedMessage::verify_and_decode(&encoded)
+                .unwrap_or_else(|e| panic!("{label}: verify_and_decode failed: {e}"));
+            assert_eq!(
+                postcard::to_stdvec(&decoded).unwrap(),
+                postcard::to_stdvec(&msg).unwrap(),
+                "{label}: decoded message differs from original"
+            );
+        }
+    }
+
+    #[test]
+    fn compressed_roundtrip_empty_file_share_and_big_ticket() {
+        let key = SecretKey::generate();
+        let msg = Message::FileShare {
+            name: String::new(),
+            ticket: "blob:iroh:".repeat(20),
+            size: 0,
+            thumbnail_hash: None,
+        };
+        let encoded = SignedMessage::sign_and_encode_compressed(&key, &msg).unwrap();
+        let (_, decoded, _) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        assert_eq!(
+            postcard::to_stdvec(&decoded).unwrap(),
+            postcard::to_stdvec(&msg).unwrap()
+        );
     }
 
     // ── Ticket serialization tests ───────────────────────────────────────
