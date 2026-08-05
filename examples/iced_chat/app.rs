@@ -24439,7 +24439,7 @@ impl IcedChat {
     /// Build the Online Peers card subtree. Runs inside `iced::widget::lazy`,
     /// so it is only re-invoked when `OnlinePeersCardData` actually changes.
     fn view_online_peers_card(dep: &OnlinePeersCardData) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, text, Row, Space};
+        use iced::widget::{button, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
@@ -24459,10 +24459,12 @@ impl IcedChat {
                     .push(avatar.build())
                     .push(Space::new().width(Length::Fixed(SPACE_8)))
                     .push(
-                        text(row.name.clone())
-                            .size(TYPO_SM)
-                            .color(text_system(&theme))
-                            .width(Length::Fill),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Body,
+                            row.name.clone(),
+                        )
+                        .color(text_system(&theme))
+                        .width(Length::Fill),
                     )
                     .spacing(0)
                     .align_y(Alignment::Center);
@@ -24502,7 +24504,7 @@ impl IcedChat {
     fn view_recent_activity_card(
         dep: &RecentActivityCardData,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{container, row, text, Row, Space};
+        use iced::widget::{container, row, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
@@ -24537,15 +24539,21 @@ impl IcedChat {
                                 }),
                             }
                         }),
-                        text(crate::presentation::truncate_with_ellipsis(
-                            &event.description,
-                            40,
-                        ))
-                        .size(TYPO_SM)
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Body,
+                            crate::presentation::truncate_with_ellipsis(
+                                &event.description,
+                                40,
+                            ),
+                        )
                         .color(text_system(&theme))
                         .wrapping(iced::widget::text::Wrapping::None),
                         Space::new().width(Length::Fill),
-                        text(ago).size(TYPO_XXS).color(text_muted(&theme)),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            ago,
+                        )
+                        .color(text_muted(&theme)),
                     ]
                     .spacing(SPACE_6)
                     .align_y(Alignment::Center),
@@ -24566,7 +24574,7 @@ impl IcedChat {
 
     /// Build the Tunnels card subtree (memoized via lazy).
     fn view_tunnels_card(dep: &TunnelsCardData) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, text, Column, Space};
+        use iced::widget::{button, container, row, Column, Space};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
@@ -24600,19 +24608,28 @@ impl IcedChat {
                         }),
                         Column::new()
                             .push(
-                                text(tunnel.name.clone())
-                                    .size(TYPO_SM)
-                                    .color(text_system(&theme)),
+                                crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::Body,
+                                    tunnel.name.clone(),
+                                )
+                                .color(text_system(&theme)),
                             )
                             .push(
-                                text(tunnel.endpoint.clone())
-                                    .size(TYPO_XXS)
-                                    .color(text_muted(&theme)),
+                                // host:port — genuine technical value → JetBrains Mono.
+                                crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::TechnicalValue,
+                                    tunnel.endpoint.clone(),
+                                )
+                                .color(text_muted(&theme)),
                             )
                             .spacing(SPACE_2)
                             .align_x(Alignment::Start),
                         Space::new().width(Length::Fill),
-                        text(status).size(TYPO_XXS).color(status_color),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            status,
+                        )
+                        .color(status_color),
                         button(
                             Icon::Close
                                 .build()
@@ -24683,7 +24700,7 @@ impl IcedChat {
     /// [`ChatListDependency`] so `iced::widget::lazy` can cache the whole
     /// screen while any of its rendered slices is unchanged.
     fn view_chat_list_content(dep: &ChatListDependency) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, text, Column, Row, Space};
+        use iced::widget::{button, container, row, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let window_width = dep.window_width_bits as f32 / 100.0;
@@ -24755,23 +24772,28 @@ impl IcedChat {
         };
 
         // ── Greeting (page header) ──
+        // UI-HOME-12: display_heading — Manrope Bold 32 px, 1.2 line height.
         let display_name = if dep.local_label.is_empty() {
             "there"
         } else {
             &dep.local_label
         };
-        let greeting = text(format!(
-            "Good {}, {display_name}",
-            dep.time_of_day_greeting
-        ))
-        .size(crate::fonts::HOME_GREETING)
-        .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+        let greeting = crate::fonts::type_role_text_lh(
+            crate::fonts::TypeRole::DisplayHeading,
+            format!("Good {}, {display_name}", dep.time_of_day_greeting),
+            1.2,
+        )
         .color(crate::design_tokens::text_primary(&theme))
         .width(Length::Fill);
-        let welcome_line = text("Welcome to Boru")
-            .size(crate::fonts::HOME_SUBTITLE)
-            .color(text_secondary(&theme))
-            .width(Length::Fill);
+        // Subtitle — Source Sans 3 Regular at the UI-HOME-02 size token
+        // (16 px; the canonical `body` role is 15 px, plan band 15–17 px).
+        let welcome_line = crate::fonts::type_role_text(
+            crate::fonts::TypeRole::Body,
+            "Welcome to Boru",
+        )
+        .size(crate::fonts::HOME_SUBTITLE)
+        .color(text_secondary(&theme))
+        .width(Length::Fill);
 
         // ── Status pill (page header right, compact) ──
         // ~36 px tall (10 px vertical padding + 16 px content) per the
@@ -24782,7 +24804,8 @@ impl IcedChat {
                     color: Some(hero_color(t)),
                 }),
                 Space::new().width(Length::Fixed(SPACE_6)),
-                text(pill_label).size(TYPO_XS).color(hero_color(&theme)),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, pill_label)
+                    .color(hero_color(&theme)),
             ]
             .spacing(0)
             .align_y(Alignment::Center),
@@ -24819,33 +24842,45 @@ impl IcedChat {
         let mut hero_actions = Row::new().spacing(SPACE_8);
         if show_retry {
             hero_actions = hero_actions.push(
-                button(text("Retry").size(TYPO_SM))
-                    .on_press(AppMessage::RetryConnection)
-                    .padding([SPACE_6, SPACE_12])
-                    .style(BUTTON_PRIMARY),
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Retry",
+                ))
+                .on_press(AppMessage::RetryConnection)
+                .padding([SPACE_6, SPACE_12])
+                .style(BUTTON_PRIMARY),
             );
         }
         if show_details {
             hero_actions = hero_actions.push(
-                button(text("Details").size(TYPO_SM))
-                    .on_press(AppMessage::OpenConnectionDetails)
-                    .padding([SPACE_6, SPACE_12])
-                    .style(BUTTON_OUTLINE),
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Details",
+                ))
+                .on_press(AppMessage::OpenConnectionDetails)
+                .padding([SPACE_6, SPACE_12])
+                .style(BUTTON_OUTLINE),
             );
         }
 
         let mut hero_text = Column::new()
             .push(
-                text(headline.clone())
-                    .size(TYPO_LG)
-                    .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
-                    .color(hero_color(&theme)),
+                // Connection heading — section_title (Source Sans 3 SemiBold 20).
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SectionTitle,
+                    headline.clone(),
+                )
+                .color(hero_color(&theme)),
             )
             .push(Space::new().height(Length::Fixed(SPACE_4)))
             .push(
-                text("Private communication, peer to peer.")
-                    .size(TYPO_SM)
-                    .color(text_secondary(&theme)),
+                // Body copy — Source Sans 3 Regular 15, 1.45 line height.
+                crate::fonts::type_role_text_lh(
+                    crate::fonts::TypeRole::Body,
+                    "Private communication, peer to peer.",
+                    1.45,
+                )
+                .color(text_secondary(&theme)),
             );
         if show_retry || show_details {
             hero_text = hero_text
@@ -24981,22 +25016,30 @@ impl IcedChat {
                         .push(
                             Column::new()
                                 .push(
-                                    text("Mesh Activity")
-                                        .size(TYPO_MD)
-                                        .color(text_system(&theme)),
+                                    // Card title — card_title (Source Sans 3 SemiBold 18).
+                                    crate::fonts::type_role_text(
+                                        crate::fonts::TypeRole::CardTitle,
+                                        "Mesh Activity",
+                                    )
+                                    .color(text_system(&theme)),
                                 )
                                 .push(
-                                    text("Current connection status")
-                                        .size(TYPO_XS)
-                                        .color(text_muted(&theme)),
+                                    crate::fonts::type_role_text(
+                                        crate::fonts::TypeRole::SupportingText,
+                                        "Current connection status",
+                                    )
+                                    .color(text_muted(&theme)),
                                 ),
                         )
                         .push(Space::new().width(Length::Fill))
                         .push(
-                            button(text("View details").size(TYPO_XXS))
-                                .on_press(AppMessage::OpenConnectionDetails)
-                                .padding([SPACE_2, SPACE_6])
-                                .style(BUTTON_GHOST),
+                            button(crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::ButtonLabel,
+                                "View details",
+                            ))
+                            .on_press(AppMessage::OpenConnectionDetails)
+                            .padding([SPACE_2, SPACE_6])
+                            .style(BUTTON_GHOST),
                         )
                         .align_y(Alignment::Center)
                         .width(Length::Fill),
@@ -25013,17 +25056,18 @@ impl IcedChat {
                         .push(
                             Column::new()
                                 .push(
-                                    text(status_label.clone())
-                                        .size(TYPO_MD)
-                                        .font(crate::fonts::source_sans(
-                                            iced::font::Weight::Semibold,
-                                        ))
-                                        .color(status_color(&theme)),
+                                    crate::fonts::type_role_text(
+                                        crate::fonts::TypeRole::BodyEmphasised,
+                                        status_label.clone(),
+                                    )
+                                    .color(status_color(&theme)),
                                 )
                                 .push(
-                                    text(status_detail)
-                                        .size(TYPO_XS)
-                                        .color(text_muted(&theme)),
+                                    crate::fonts::type_role_text(
+                                        crate::fonts::TypeRole::SupportingText,
+                                        status_detail,
+                                    )
+                                    .color(text_muted(&theme)),
                                 ),
                         )
                         .spacing(0)
@@ -36356,6 +36400,100 @@ mod tests {
         );
         assert_eq!(TypeRole::TechnicalValue.weight(), iced::font::Weight::Normal);
         assert_eq!(TypeRole::TechnicalValue.size_px(), 12.0);
+    }
+
+    // ── UI-HOME-12: home screen typography regression guards ──
+
+    #[test]
+    fn home_screen_uses_type_role_roles() {
+        // UI-HOME-12 approved mapping: greeting -> display_heading (Manrope
+        // Bold 32), subtitle -> body@16, pill -> metadata, hero headline ->
+        // section_title, hero body -> body lh 1.45, Retry/Details ->
+        // button_label, mesh card -> card_title / supporting_text /
+        // body_emphasised / button_label. The whole home screen must resolve
+        // fonts through the central TypeRole roles — no local font
+        // declarations (Manrope may only arrive via DisplayHeading).
+        let src = include_str!("app.rs");
+        let home = method_source(src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        assert!(
+            home.contains("TypeRole::DisplayHeading"),
+            "greeting must use TypeRole::DisplayHeading (Manrope Bold 32)"
+        );
+        assert!(
+            home.contains("TypeRole::SectionTitle"),
+            "hero headline must use TypeRole::SectionTitle (SS3 SemiBold 20)"
+        );
+        assert!(
+            home.contains("TypeRole::ButtonLabel"),
+            "hero Retry/Details must use TypeRole::ButtonLabel"
+        );
+        assert!(
+            home.contains("TypeRole::CardTitle"),
+            "mesh card title must use TypeRole::CardTitle (SS3 SemiBold 18)"
+        );
+        assert!(
+            home.contains("TypeRole::BodyEmphasised"),
+            "mesh status label must use TypeRole::BodyEmphasised"
+        );
+        assert!(
+            home.contains("TypeRole::SupportingText"),
+            "mesh supporting text must use TypeRole::SupportingText"
+        );
+        assert!(
+            home.contains("TypeRole::Metadata"),
+            "status pill must use TypeRole::Metadata"
+        );
+        assert!(
+            home.contains("type_role_text_lh("),
+            "home screen must use the line-height helper (display 1.2 / body 1.45)"
+        );
+        // The helper itself applies the relative line height (fonts.rs) —
+        // the literal lives in the helper, not in the call sites.
+        let fonts_src = include_str!("fonts.rs");
+        assert!(
+            fonts_src.contains("LineHeight::Relative(line_height)"),
+            "type_role_text_lh must apply a relative line height"
+        );
+        assert!(
+            !home.contains("manrope("),
+            "home screen must not declare Manrope locally; use TypeRole::DisplayHeading"
+        );
+    }
+
+    #[test]
+    fn home_rail_cards_use_type_role_roles() {
+        // UI-HOME-12: rail card rows resolve through TypeRole — friendly
+        // names as body, timestamps as metadata, and only genuine technical
+        // values (tunnel host:port endpoints) as JetBrains Mono.
+        let src = include_str!("app.rs");
+        let peers = method_source(src, "fn view_online_peers_card(", "fn view_recent_activity_card(");
+        assert!(
+            peers.contains("TypeRole::Body"),
+            "peer row name must use TypeRole::Body (SS3 Regular 15)"
+        );
+        let activity =
+            method_source(src, "fn view_recent_activity_card(", "fn view_tunnels_card(");
+        assert!(
+            activity.contains("TypeRole::Body"),
+            "activity description must use TypeRole::Body"
+        );
+        assert!(
+            activity.contains("TypeRole::Metadata"),
+            "activity timestamp must use TypeRole::Metadata"
+        );
+        let tunnels = method_source(src, "fn view_tunnels_card(", "fn view_main_empty_state(");
+        assert!(
+            tunnels.contains("TypeRole::Body"),
+            "tunnel name must use TypeRole::Body"
+        );
+        assert!(
+            tunnels.contains("TypeRole::TechnicalValue"),
+            "tunnel endpoint must use TypeRole::TechnicalValue (JetBrains Mono)"
+        );
+        assert!(
+            tunnels.contains("TypeRole::Metadata"),
+            "tunnel status must use TypeRole::Metadata"
+        );
     }
 
     // ── Direct-chat request state tests ────────────────────────────────

@@ -535,6 +535,19 @@ pub fn type_role_text<'a>(
     text(content).font(role.font()).size(role.size_px())
 }
 
+/// Build a text widget for a canonical role with an explicit relative
+/// line-height (plan UI-HOME-12: display headings ~1.2, body copy ~1.45).
+pub fn type_role_text_lh<'a>(
+    role: TypeRole,
+    content: impl text::IntoFragment<'a>,
+    line_height: f32,
+) -> text::Text<'a, iced::Theme, iced::Renderer> {
+    text(content)
+        .font(role.font())
+        .size(role.size_px())
+        .line_height(text::LineHeight::Relative(line_height))
+}
+
 // ── Widget constructors ──────────────────────────────────────────────
 
 /// Build an `Element` with the correct typography applied.
@@ -749,6 +762,16 @@ mod tests {
                 "fallback weight {fw:?} not registered for SS3"
             );
         }
+    }
+
+    #[test]
+    fn type_role_text_lh_builds_text_widget() {
+        // The helper must produce a usable text widget with the role's
+        // font/size and the requested relative line-height (private fields,
+        // so the check is an API-level smoke test; the role mapping itself
+        // is covered by the TypeRole tests above).
+        let widget = type_role_text_lh(TypeRole::DisplayHeading, "Good evening", 1.2);
+        let _ = widget;
     }
 
     #[test]

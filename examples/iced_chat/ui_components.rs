@@ -76,22 +76,49 @@ pub fn connection_footer<'a>(
     container(
         Row::new()
             .push(mesh_icon)
-            .push(text(format!("Mesh {health_label}")))
-            .push(text("·").style(|theme| iced::widget::text::Style {
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                format!("Mesh {health_label}"),
+            ))
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                "·",
+            )
+            .style(|theme| iced::widget::text::Style {
                 color: Some(design_tokens::text_muted(theme)),
             }))
-            .push(text(format!("{direct_peers} direct")))
-            .push(text("·").style(|theme| iced::widget::text::Style {
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                format!("{direct_peers} direct"),
+            ))
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                "·",
+            )
+            .style(|theme| iced::widget::text::Style {
                 color: Some(design_tokens::text_muted(theme)),
             }))
-            .push(text(format!("{relayed_peers} relayed")))
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                format!("{relayed_peers} relayed"),
+            ))
             .push(Space::new().width(Length::Fill))
             .push(lock_icon)
-            .push(text(encryption_status))
-            .push(text("·").style(|theme| iced::widget::text::Style {
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                encryption_status,
+            ))
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                "·",
+            )
+            .style(|theme| iced::widget::text::Style {
                 color: Some(design_tokens::text_muted(theme)),
             }))
-            .push(text(format!("{neighbor_count} neighbors")))
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                format!("{neighbor_count} neighbors"),
+            ))
             .spacing(design_tokens::SPACE_8)
             .align_y(Alignment::Center)
             .width(Length::Fill),

@@ -12,18 +12,18 @@
 //!   UI-04 empty-state typography.
 //!
 //! All spacing, radii, borders, shadows, and colours come from
-//! [`crate::design_tokens`]; typography comes from [`crate::fonts::Typography`].
-//! Rows built by callers should target [`CARD_ROW_HEIGHT`] (48 px) so every
-//! card in the rail shares the same rhythm.
+//! [`crate::design_tokens`]; typography comes from the central
+//! [`crate::fonts::TypeRole`] roles. Rows built by callers should target
+//! [`CARD_ROW_HEIGHT`] (48 px) so every card in the rail shares the same
+//! rhythm.
 //!
 //! The shell is intentionally data-agnostic: it never constructs list rows
 //! and holds no sample data — the caller owns the children.
 
-use iced::widget::{button, container, text, Column, Row, Space};
+use iced::widget::{button, container, Column, Row, Space};
 use iced::{Alignment, Background, Border, Element, Length, Theme};
 
 use crate::design_tokens;
-use crate::fonts::Typography;
 
 /// Consistent height for a single list row inside a card shell (48 px).
 ///
@@ -131,10 +131,13 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             .spacing(design_tokens::SPACE_6)
             .align_y(Alignment::Center)
             .push(
-                text(self.title.to_uppercase())
-                    .font(Typography::SecondaryText.font())
-                    .size(Typography::SecondaryText.size_px())
-                    .color(design_tokens::text_muted(theme)),
+                // Card title — card_title (Source Sans 3 SemiBold 18);
+                // uppercase + muted per the Fig 3 rail look.
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::CardTitle,
+                    self.title.to_uppercase(),
+                )
+                .color(design_tokens::text_muted(theme)),
             );
 
         if let Some(count) = self.count {
@@ -149,11 +152,10 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
 
         if let Some(msg) = self.on_view_all {
             header = header.push(
-                button(
-                    text("View all")
-                        .font(Typography::SecondaryText.font())
-                        .size(Typography::SecondaryText.size_px()),
-                )
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "View all",
+                ))
                 .on_press(msg)
                 .padding([design_tokens::SPACE_2, design_tokens::SPACE_6])
                 .style(view_all_button_style),
@@ -166,10 +168,12 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
         let body: Element<'a, Message> = if self.children.is_empty() {
             if let Some(message) = self.empty_message {
                 container(
-                    text(message)
-                        .font(Typography::SecondaryText.font())
-                        .size(Typography::SecondaryText.size_px())
-                        .color(design_tokens::text_muted(theme)),
+                    // Empty state — supporting_text (Source Sans 3 Regular 13).
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        message,
+                    )
+                    .color(design_tokens::text_muted(theme)),
                 )
                 .width(Length::Fill)
                 .padding([design_tokens::SPACE_6, 0.0])
@@ -211,9 +215,9 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
 /// values (including "online/total" pairs) never borrow from locals inside `build`.
 fn count_badge<'a, Message: 'a>(label: String) -> Element<'a, Message> {
     container(
-        text(label)
-            .font(Typography::SecondaryText.font())
-            .size(Typography::SecondaryText.size_px()),
+        // Count badge — metadata (Source Sans 3 Regular 12); the primary
+        // colour comes from the container style below.
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label),
     )
     .padding([2.0, design_tokens::SPACE_8])
     .style(move |t| container::Style {
@@ -350,5 +354,36 @@ mod tests {
     fn card_shell_row_spacing_defaults_to_token() {
         let shell: CardShell<'static, ()> = CardShell::new("Peers", vec![]);
         assert_eq!(shell.row_spacing, design_tokens::SPACE_2);
+    }
+
+    #[test]
+    fn card_shell_text_uses_type_role() {
+        // UI-HOME-12: the shared shell's header title, count badge,
+        // "View all" action and empty message must resolve through the
+        // central TypeRole roles — never legacy Typography tokens. Only the
+        // production part of this file is checked (the test's own messages
+        // mention the same identifiers).
+        let src = include_str!("card_shell.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains("TypeRole::CardTitle"),
+            "header title must use TypeRole::CardTitle (SS3 SemiBold 18)"
+        );
+        assert!(
+            prod.contains("TypeRole::Metadata"),
+            "count badge must use TypeRole::Metadata (SS3 Regular 12)"
+        );
+        assert!(
+            prod.contains("TypeRole::ButtonLabel"),
+            "\"View all\" action must use TypeRole::ButtonLabel (SS3 SemiBold 14)"
+        );
+        assert!(
+            prod.contains("TypeRole::SupportingText"),
+            "empty message must use TypeRole::SupportingText (SS3 Regular 13)"
+        );
+        assert!(
+            !prod.contains("Typography::"),
+            "card shell must not use legacy Typography tokens"
+        );
     }
 }

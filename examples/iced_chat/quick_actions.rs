@@ -7,7 +7,8 @@
 //! Visual notes (Figure 3 target):
 //! - Icons match the mockup semantics: chat bubble (public room), two people
 //!   (group chat), person + plus (add friend), upload arrow (share files).
-//! - Labels use the Semibold page-label weight; descriptions stay muted 12 px.
+//! - Labels use the card-title role (Source Sans 3 SemiBold 18); descriptions
+//!   stay muted 13 px supporting text at the plan's 1.45 line height.
 //! - The card radius matches the rail `CardShell` cards (`RADIUS_LG`) so every
 //!   home card shares the same corner rhythm instead of the generic 8 px
 //!   `BUTTON_CARD`.
@@ -15,7 +16,7 @@
 use iced::widget::{button, Column, Space};
 use iced::{Alignment, Element, Length, Theme};
 
-use crate::app::{AppMessage, SPACE_12, SPACE_16, SPACE_4, SPACE_8, TYPO_MD, TYPO_XS};
+use crate::app::{AppMessage, SPACE_12, SPACE_16, SPACE_4, SPACE_8};
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
 use crate::ui_components::icon_tile;
@@ -67,16 +68,23 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
         .push(icon_tile::<AppMessage>(action.icon, IconSize::Lg, None))
         .push(Space::new().height(Length::Fixed(SPACE_8)))
         .push(
-            iced::widget::text(action.label)
-                .size(TYPO_MD)
-                .font(crate::fonts::source_sans(iced::font::Weight::Semibold)),
+            // Quick-action title — card_title (Source Sans 3 SemiBold 18).
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                action.label,
+            ),
         )
         .push(Space::new().height(Length::Fixed(SPACE_4)))
         .push(
-            iced::widget::text(action.description)
-                .size(TYPO_XS)
-                .color(design_tokens::text_muted(theme))
-                .width(Length::Fill),
+            // Supporting description — supporting_text (Source Sans 3
+            // Regular 13) at the plan's 1.45 body line height.
+            crate::fonts::type_role_text_lh(
+                crate::fonts::TypeRole::SupportingText,
+                action.description,
+                1.45,
+            )
+            .color(design_tokens::text_muted(theme))
+            .width(Length::Fill),
         )
         .spacing(0)
         .align_x(Alignment::Center)
@@ -85,7 +93,9 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
     button(content)
         .on_press(action.message.clone())
         .padding([SPACE_12, SPACE_16])
-        .height(Length::Fixed(132.0))
+        // Content-driven height (UI-HOME-12): the old fixed 132 px box
+        // clipped the 18 px title + 13 px description once real font
+        // metrics were applied (see `quick_action_natural_height_exceeds_old_fixed_box`).
         .width(Length::Fill)
         .style(quick_action_card_style)
         .into()
@@ -167,6 +177,10 @@ pub fn quick_action_grid<'a>(window_width: f32, theme: &Theme) -> Element<'a, Ap
     for actions in ACTIONS.chunks(columns) {
         let mut row = iced::widget::Row::new()
             .spacing(SPACE_8)
+            // Top-align cards so a wrapped description in one card never
+            // shifts its neighbours' icons/titles vertically (content-driven
+            // heights differ per card, UI-HOME-12).
+            .align_y(Alignment::Start)
             .width(Length::Fill);
         for action in actions {
             row = row.push(quick_action_card(action, theme));
@@ -236,5 +250,59 @@ mod tests {
                 "width {width} produced unexpected column count {columns}"
             );
         }
+    }
+
+    #[test]
+    fn quick_action_cards_are_content_driven_not_fixed_height() {
+        // UI-HOME-12: the old fixed 132 px card height clipped the 18 px
+        // card-title label + 13 px supporting description once real font
+        // metrics were applied. Cards must size to their content (no fixed
+        // 132 px height), rows must top-align so a wrapped description never
+        // pushes a taller neighbour out of line, and the label/description
+        // must resolve through the central TypeRole roles. Only the
+        // production part of this file is checked (the test's own messages
+        // mention the same identifiers).
+        let src = include_str!("quick_actions.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !prod.contains("Length::Fixed(132.0)"),
+            "quick-action cards must not force a fixed 132 px height"
+        );
+        assert!(
+            prod.contains("TypeRole::CardTitle"),
+            "quick-action labels must use TypeRole::CardTitle (SS3 SemiBold 18)"
+        );
+        assert!(
+            prod.contains("TypeRole::SupportingText"),
+            "quick-action descriptions must use TypeRole::SupportingText (SS3 Regular 13)"
+        );
+        assert!(
+            prod.contains("type_role_text_lh("),
+            "quick-action descriptions must use the line-height helper (plan 1.45)"
+        );
+    }
+
+    #[test]
+    fn quick_action_natural_height_exceeds_old_fixed_box() {
+        // Clipping-math regression (UI-HOME-01 audit root cause + UI-HOME-12):
+        // with real role metrics the tallest quick-action content — icon
+        // tile + 18 px title + a two-line 13 px description at 1.45 line
+        // height + vertical padding — needs more than the removed 132 px
+        // fixed height, which is why cards must be content-driven.
+        use crate::design_tokens::{SPACE_12, SPACE_16, SPACE_4, SPACE_8};
+        use crate::fonts::TypeRole;
+        use crate::icon_system::IconSize;
+
+        let tile = IconSize::Lg.px() + SPACE_16; // icon_tile diameter
+        let title = TypeRole::CardTitle.size_px() * 1.2; // single-line heading
+        let description_two_lines = TypeRole::SupportingText.size_px() * 1.45 * 2.0;
+        let vertical_padding = 2.0 * SPACE_12;
+        let gaps = SPACE_8 + SPACE_4;
+        let natural = tile + gaps + title + description_two_lines + vertical_padding;
+        assert!(
+            natural > 132.0,
+            "content-driven quick-action card needs {natural:.1} px > old fixed 132 px; \
+             a fixed-height card would clip the description"
+        );
     }
 }
