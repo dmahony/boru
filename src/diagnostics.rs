@@ -3059,6 +3059,12 @@ pub enum GuiTestCommand {
         /// `true` = online (fresh last-seen timestamp), `false` = offline.
         online: bool,
     },
+    /// Clear the in-memory mesh event log shown on the home Mesh Health card.
+    ///
+    /// Test-only: lets screenshot harnesses capture the intentional no-events
+    /// state of the card without waiting for a real network lifecycle. It
+    /// never fabricates events — it only removes the real log lines.
+    ClearMeshEventLog,
     /// Open the create-room dialog.
     CreateNewRoom,
     /// Set the room name in the create-room dialog.
@@ -3179,6 +3185,7 @@ impl GuiTestCommand {
             GuiTestCommand::SetPeerPresence { peer_id, .. } => {
                 validate_gui_identifier(peer_id, "peer_id")
             }
+            GuiTestCommand::ClearMeshEventLog => Ok(()),
             GuiTestCommand::OpenDashboardTab { tab } => {
                 // The tab is a closed serde enum — every value is valid.
                 let _ = tab;
@@ -3291,6 +3298,9 @@ impl GuiTestCommand {
             // SetPeerPresence: the resulting header state depends on the peer and
             // the current presence map — verified by screenshot, not statically.
             GuiTestCommand::SetPeerPresence { .. } => None,
+            // ClearMeshEventLog: the resulting card state is verified by
+            // screenshot, not statically.
+            GuiTestCommand::ClearMeshEventLog => None,
             GuiTestCommand::CreateNewRoom => {
                 Some(ExpectedState::Generic("create_room_dialog_open".into()))
             }
@@ -6480,6 +6490,16 @@ mod tests {
         assert!(GuiTestCommand::SelectPeer { peer_id: long }
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn test_gui_test_command_clear_mesh_event_log_validates_and_round_trips() {
+        assert!(GuiTestCommand::ClearMeshEventLog.validate().is_ok());
+        assert_eq!(GuiTestCommand::ClearMeshEventLog.expected_state(), None);
+        let encoded = serde_json::to_string(&GuiTestCommand::ClearMeshEventLog).expect("serialize");
+        assert!(encoded.contains("clear_mesh_event_log"));
+        let decoded: GuiTestCommand = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded, GuiTestCommand::ClearMeshEventLog);
     }
 
     #[test]

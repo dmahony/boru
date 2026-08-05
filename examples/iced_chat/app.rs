@@ -1459,6 +1459,46 @@ fn is_transient_mesh_event(message: &str) -> bool {
         || lower.contains("subscribing to")
 }
 
+/// Tone used to pick the small status icon + colour for a mesh event row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MeshEventTone {
+    Success,
+    Warning,
+    Danger,
+    Neutral,
+}
+
+/// Classify a mesh event log message into a status tone for the Mesh Health
+/// card's recent-events list. Pure content-based classification of real log
+/// lines — it never invents an event, and unknown future messages fall back
+/// to a neutral tone instead of being misrepresented.
+fn mesh_event_tone(message: &str) -> MeshEventTone {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("offline") {
+        MeshEventTone::Danger
+    } else if lower.contains("degraded") {
+        MeshEventTone::Warning
+    } else if lower.contains("recovered") {
+        MeshEventTone::Success
+    } else if lower.contains("discovered") || lower.contains("connected") {
+        MeshEventTone::Success
+    } else {
+        MeshEventTone::Neutral
+    }
+}
+
+/// Map a mesh event tone to its (icon, colour) pair for the home card.
+fn mesh_event_visual(
+    tone: MeshEventTone,
+) -> (&'static [u8], fn(&iced::Theme) -> Color) {
+    match tone {
+        MeshEventTone::Success => (ICON_ONLINE, accent_green),
+        MeshEventTone::Warning => (ICON_MESH, color_warning),
+        MeshEventTone::Danger => (ICON_OFFLINE, color_error),
+        MeshEventTone::Neutral => (ICON_ACTIVITY, text_muted),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChatKind {
     System,
@@ -4011,9 +4051,24 @@ pub(crate) struct ChatListDependency {
     pub(crate) relayed_peers: u32,
     pub(crate) neighbors_len: u32,
     pub(crate) connected_age_secs: Option<u64>,
+    /// Newest mesh event log rows (message + age at snapshot time) rendered
+    /// in the Mesh Health card. `age_secs` is captured when the dependency is
+    /// built so the snapshot stays Hash/Eq-compatible (the log stores
+    /// `Instant`, which is not Hash); the per-second `ActivityTick` already
+    /// rebuilds this screen via the rail-card `tick`, so ages stay fresh.
+    pub(crate) mesh_events: Vec<MeshEventRow>,
     pub(crate) online: OnlinePeersCardData,
     pub(crate) activity: RecentActivityCardData,
     pub(crate) tunnels: TunnelsCardData,
+}
+
+/// One mesh event log row, snapshot for the home dependency.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct MeshEventRow {
+    /// Event message text (e.g. "Discovered 2 direct, 1 relayed peers").
+    pub(crate) message: String,
+    /// Whole seconds since the event was recorded, at snapshot time.
+    pub(crate) age_secs: u64,
 }
 
 /// Dependency for the File Sharing dashboard screen (default Files tab).
@@ -17499,6 +17554,20 @@ impl IcedChat {
                     return iced::Task::none();
                 }
 
+                if let GuiTestCommand::ClearMeshEventLog = &command {
+                    // Test-only: clear the live mesh event log so evidence
+                    // harnesses can capture the card's intentional no-events
+                    // state. This never fabricates events.
+                    self.mesh_event_log.clear();
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::none();
+                }
+
                 let GuiTestCommand::OpenRoom { room_id } = command else {
                     if let GuiTestCommand::SelectPeer { ref peer_id } = command {
                         if let Err(error) = self.validate_gui_test_command(&command) {
@@ -24868,6 +24937,21 @@ impl IcedChat {
                 .saturating_duration_since(t)
                 .as_secs()
         });
+        // Newest mesh events first (the log pushes to the back), capped at the
+        // number the card renders. Age is captured here so the snapshot stays
+        // Hash/Eq-compatible; the per-second ActivityTick rebuild keeps ages
+        // fresh.
+        let now = Instant::now();
+        let mesh_events: Vec<MeshEventRow> = self
+            .mesh_event_log
+            .iter()
+            .rev()
+            .take(4)
+            .map(|event| MeshEventRow {
+                message: event.message.clone(),
+                age_secs: now.saturating_duration_since(event.recorded_at).as_secs(),
+            })
+            .collect();
         ChatListDependency {
             dark_mode: self.dark_mode,
             window_width_bits: (self.window_width * 100.0) as u32,
@@ -24881,6 +24965,7 @@ impl IcedChat {
             relayed_peers: self.relayed_peers as u32,
             neighbors_len: self.neighbors.len() as u32,
             connected_age_secs,
+            mesh_events,
             online: self.online_peers_card_data(),
             activity: self.recent_activity_card_data(),
             tunnels: self.tunnels_card_data(),
@@ -25154,15 +25239,17 @@ impl IcedChat {
                 style
             });
 
-        // ── Mesh Activity card ──
-        // UI-28: this card shows ONLY the current connection status. The
-        // scrolling "recent events" log was removed so transient startup
-        // messages ("Starting up...", "Connecting to lobby...") can never
-        // linger after the mesh connects. Status derives from the same
-        // truthful mapping used by the hero (home_connection_variant), so
-        // the card never invents a state the network layer has not reported;
-        // the connection-time indicator comes from mesh_connected_at, which
-        // the mesh watchdog clears on any non-Good transition.
+        // ── Mesh Health card ──
+        // UI-HOME-05: full dashboard card. Header carries a mesh glyph +
+        // title + real status badge + the existing "View details" action.
+        // Body shows the live status row, three real connection counts
+        // (neighbors / direct / relayed), lobby state + connection duration
+        // when available, and a short recent-events list fed from the same
+        // bounded mesh event log the rest of the app uses — no invented
+        // statistics. UI-28 keeps transient startup lines from lingering:
+        // the watchdog clears "Starting up...", "Connecting to lobby...",
+        // "Connected to lobby..." and "Subscribing to..." once the mesh is
+        // Good, so the log stays truthful.
         let (health_label, health_color): (&str, fn(&iced::Theme) -> Color) =
             match &mesh_health {
                 MeshHealth::Good => ("Healthy", accent_green),
@@ -25239,6 +25326,7 @@ impl IcedChat {
             MeshHealth::Degraded(_) => StatusBadgeKind::Warning,
             MeshHealth::Offline(_) => StatusBadgeKind::Danger,
         };
+
         // Body: status icon + label + detail (content-driven — grows with
         // the status detail text instead of clipping).
         let mesh_status_row = Row::new()
@@ -25268,12 +25356,199 @@ impl IcedChat {
             .spacing(0)
             .align_y(Alignment::Center)
             .width(Length::Fill);
-        let mesh_card = CardShell::new("Mesh Activity", vec![])
+
+        // Live connection-count stat blocks (neighbors / direct / relayed).
+        // Values come straight from the dependency snapshot — no fabricated
+        // numbers; three labelled tiles make the real counts readable at a
+        // glance instead of hiding them inside a sentence.
+        let mesh_stat_block = |label: &'static str, value: u32| -> iced::Element<'static, AppMessage> {
+            let tile = Column::new()
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::BodyEmphasised,
+                        value.to_string(),
+                    )
+                    .color(crate::design_tokens::text_primary(&theme)),
+                )
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        label,
+                    )
+                    .color(text_muted(&theme)),
+                )
+                .spacing(SPACE_2)
+                .align_x(Alignment::Center)
+                .width(Length::Fill);
+            container(tile)
+                .padding([SPACE_6, SPACE_4])
+                .width(Length::Fill)
+                .style(move |t| container::Style {
+                    background: Some(iced::Background::Color(
+                        crate::design_tokens::surface_hover(t),
+                    )),
+                    border: iced::Border {
+                        radius: crate::design_tokens::RADIUS_SM.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+        };
+        let mesh_stats_row = Row::new()
+            .push(mesh_stat_block("Neighbors", dep.neighbors_len))
+            .push(Space::new().width(Length::Fixed(SPACE_6)))
+            .push(mesh_stat_block("Direct", dep.direct_peers))
+            .push(Space::new().width(Length::Fixed(SPACE_6)))
+            .push(mesh_stat_block("Relayed", dep.relayed_peers))
+            .spacing(0)
+            .width(Length::Fill);
+
+        // Lobby state + connection duration line. Lobby state derives from
+        // the real gossip sender: when the sender subscription is up the app
+        // is in the lobby, otherwise it is still joining. Duration is shown
+        // only when the watchdog has a connected timestamp.
+        let lobby_label = if dep.sender_ready {
+            "Lobby: connected".to_string()
+        } else {
+            "Lobby: connecting…".to_string()
+        };
+        let mut lobby_parts = vec![lobby_label];
+        if let Some(secs) = dep.connected_age_secs {
+            let duration = if secs < 60 {
+                format!("connected {secs}s")
+            } else if secs < 3600 {
+                format!("connected {}m {}s", secs / 60, secs % 60)
+            } else {
+                format!("connected {}h {}m", secs / 3600, (secs % 3600) / 60)
+            };
+            lobby_parts.push(duration);
+        }
+        let mesh_lobby_row = Row::new()
+            .push(icon_svg(ICON_MESH, TYPO_XS).style(move |t, _| {
+                iced::widget::svg::Style {
+                    color: Some(text_muted(t)),
+                }
+            }))
+            .push(Space::new().width(Length::Fixed(SPACE_6)))
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    lobby_parts.join("  ·  "),
+                )
+                .color(text_muted(&theme)),
+            )
+            .spacing(0)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+
+        // Recent mesh events — a short, readable list from the real bounded
+        // log. Each row: small status icon + description + relative time.
+        // `dep.mesh_events` is already newest-first and capped at 4 in the
+        // dependency selector, so the card stays content-driven (no fixed
+        // heights, no hidden overflow).
+        let events_header = crate::fonts::type_role_text(
+            crate::fonts::TypeRole::Metadata,
+            "Recent events".to_uppercase(),
+        )
+        .color(text_muted(&theme));
+        let event_rows: Vec<iced::Element<'static, AppMessage>> = dep
+            .mesh_events
+            .iter()
+            .map(|event| {
+                let tone = mesh_event_tone(&event.message);
+                let (event_icon, event_color) = mesh_event_visual(tone);
+                let ago =
+                    crate::presentation::relative_age_secs(event.age_secs, 10);
+                container(
+                    Row::new()
+                        .push(icon_svg(event_icon, TYPO_SM).style(move |t, _| {
+                            iced::widget::svg::Style {
+                                color: Some(event_color(t)),
+                            }
+                        }))
+                        .push(Space::new().width(Length::Fixed(SPACE_6)))
+                        .push(
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Body,
+                                crate::presentation::truncate_with_ellipsis(
+                                    &event.message,
+                                    40,
+                                ),
+                            )
+                            .color(text_system(&theme))
+                            .width(Length::Fill)
+                            .wrapping(iced::widget::text::Wrapping::None),
+                        )
+                        .push(
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Metadata,
+                                ago,
+                            )
+                            .color(text_muted(&theme)),
+                        )
+                        .spacing(SPACE_6)
+                        .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding([SPACE_2, 0.0])
+                .into()
+            })
+            .collect();
+        let events_body: iced::Element<'static, AppMessage> = if event_rows.is_empty() {
+            // Intentional no-events state: keep the connection summary and
+            // explain that there are no recent mesh events (UI-HOME-16 copy).
+            Row::new()
+                .push(icon_svg(ICON_ACTIVITY, TYPO_SM).style(move |t, _| {
+                    iced::widget::svg::Style {
+                        color: Some(text_muted(t)),
+                    }
+                }))
+                .push(Space::new().width(Length::Fixed(SPACE_6)))
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        "No recent mesh events",
+                    )
+                    .color(text_muted(&theme)),
+                )
+                .spacing(0)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into()
+        } else {
+            Column::with_children(event_rows)
+                .spacing(SPACE_2)
+                .width(Length::Fill)
+                .into()
+        };
+
+        let mesh_body = Column::new()
+            .push(mesh_status_row)
+            .push(Space::new().height(Length::Fixed(SPACE_10)))
+            .push(mesh_stats_row)
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(mesh_lobby_row)
+            .push(Space::new().height(Length::Fixed(SPACE_10)))
+            .push(crate::ui_components::divider())
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(events_header)
+            .push(Space::new().height(Length::Fixed(SPACE_4)))
+            .push(events_body)
+            .spacing(0)
+            .width(Length::Fill);
+
+        let mesh_card = CardShell::new("Mesh Health", vec![])
             .title_case(false)
+            .header_icon(icon_svg(ICON_MESH, TYPO_MD).style(move |t, _| {
+                iced::widget::svg::Style {
+                    color: Some(health_color(t)),
+                }
+            }).into())
             .subtitle("Current connection status")
             .status_badge(health_label, mesh_badge_kind)
             .header_action("View details", AppMessage::OpenConnectionDetails)
-            .body(mesh_status_row.into())
+            .body(mesh_body.into())
             .build(&theme);
 
         // ── Quick actions: four equal, full-card targets (Figure 3) ──
@@ -35426,6 +35701,36 @@ mod tests {
     }
 
     #[test]
+    fn mesh_event_tone_classifies_real_log_lines_truthfully() {
+        // Lifecycle transitions from the watchdog.
+        assert_eq!(mesh_event_tone("Mesh degraded: No peers in the mesh"), MeshEventTone::Warning);
+        assert_eq!(mesh_event_tone("Mesh offline: Not connected to any room"), MeshEventTone::Danger);
+        assert_eq!(mesh_event_tone("Mesh recovered: all peers active."), MeshEventTone::Success);
+        // Discovery / connection summaries are positive but not fabrications.
+        assert_eq!(mesh_event_tone("Discovered 2 direct, 1 relayed peers"), MeshEventTone::Success);
+        assert_eq!(mesh_event_tone("Connected to lobby — 3 peers online"), MeshEventTone::Success);
+        // Unknown future messages fall back to neutral rather than lying.
+        assert_eq!(mesh_event_tone("Some unexpected future event"), MeshEventTone::Neutral);
+    }
+
+    #[test]
+    fn mesh_event_visual_covers_every_tone() {
+        let (icon, color) = mesh_event_visual(MeshEventTone::Success);
+        assert!(!icon.is_empty());
+        let _ = color(&iced::Theme::Light);
+        for tone in [
+            MeshEventTone::Success,
+            MeshEventTone::Warning,
+            MeshEventTone::Danger,
+            MeshEventTone::Neutral,
+        ] {
+            let (icon, color) = mesh_event_visual(tone);
+            assert!(!icon.is_empty(), "{tone:?} must map to a real icon");
+            let _ = color(&iced::Theme::Light);
+        }
+    }
+
+    #[test]
     fn inline_playback_errors_map_to_recoverable_categories() {
         assert!(matches!(
             InlinePlaybackError::from_backend("GStreamer: missing decoder for H265 codec").kind,
@@ -37047,11 +37352,11 @@ mod tests {
         );
         assert!(
             home.contains("TypeRole::CardTitle")
-                || home.contains("CardShell::new(\"Mesh Activity\""),
+                || home.contains("CardShell::new(\"Mesh Health\""),
             "mesh card title must resolve through TypeRole::CardTitle — either inline or via the shared CardShell foundation (card_shell.rs renders the title with TypeRole::CardTitle)"
         );
         assert!(
-            home.contains("CardShell::new(\"Mesh Activity\""),
+            home.contains("CardShell::new(\"Mesh Health\""),
             "mesh card must be built from the shared CardShell dashboard-card foundation"
         );
         assert!(

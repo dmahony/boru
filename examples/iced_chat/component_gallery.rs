@@ -407,7 +407,7 @@ fn card_shell_gallery() -> Element<'static, AppMessage> {
         .size(Typography::SecondaryText.size_px())
         .color(design_tokens::text_muted(&Theme::Light))
         .into();
-    let full_shell = CardShell::new("Mesh Activity", vec![])
+    let full_shell = CardShell::new("Mesh Health", vec![])
         .title_case(false)
         .subtitle("Current connection status")
         .count(3)

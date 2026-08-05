@@ -88,7 +88,7 @@ pub enum StatusBadgeKind {
 ///
 /// Example (arbitrary content body, subtitle, status badge and footer):
 /// ```
-/// let shell = CardShell::new("Mesh Activity", vec![])
+/// let shell = CardShell::new("Mesh Health", vec![])
 ///     .title_case(false)
 ///     .subtitle("Current connection status")
 ///     .status_badge("Healthy", StatusBadgeKind::Success)
@@ -101,6 +101,8 @@ pub struct CardShell<'a, Message> {
     /// Header title — rendered uppercase per the Fig 3 rail look unless
     /// [`Self::title_case`] is disabled.
     title: String,
+    /// Optional icon element rendered to the left of the title column.
+    header_icon: Option<Element<'a, Message>>,
     /// Optional muted subtitle rendered below the title.
     subtitle: Option<String>,
     /// Optional count badge shown next to the title.
@@ -138,6 +140,7 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
     pub fn new(title: impl Into<String>, children: Vec<Element<'a, Message>>) -> Self {
         Self {
             title: title.into(),
+            header_icon: None,
             subtitle: None,
             count: None,
             count_total: None,
@@ -151,6 +154,15 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             footer: None,
             children,
         }
+    }
+
+    /// Show an icon element at the start of the header, before the title.
+    ///
+    /// The caller owns the element (e.g. an [`crate::app::icon_svg`] mesh
+    /// glyph), so the shell stays data-agnostic.
+    pub fn header_icon(mut self, element: Element<'a, Message>) -> Self {
+        self.header_icon = Some(element);
+        self
     }
 
     /// Show a muted subtitle under the header title.
@@ -265,8 +277,13 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
 
         let mut header = Row::new()
             .spacing(design_tokens::SPACE_6)
-            .align_y(Alignment::Center)
-            .push(title_col);
+            .align_y(Alignment::Center);
+
+        if let Some(icon) = self.header_icon {
+            header = header.push(icon);
+        }
+
+        header = header.push(title_col);
 
         if let Some(count) = self.count {
             let label = match self.count_total {
@@ -529,6 +546,28 @@ mod tests {
         assert_eq!(shell.empty_message.as_deref(), Some("No peers online"));
         let shell: CardShell<'static, ()> = CardShell::new("Peers", vec![]);
         assert_eq!(shell.empty_message, None, "no empty message by default");
+    }
+
+    #[test]
+    fn card_shell_stores_header_icon() {
+        let shell: CardShell<'static, ()> =
+            CardShell::new("Mesh Health", vec![]).header_icon(text("icon").into());
+        assert!(
+            shell.header_icon.is_some(),
+            "header icon must be stored when provided"
+        );
+        let shell: CardShell<'static, ()> = CardShell::new("Mesh Health", vec![]);
+        assert!(shell.header_icon.is_none(), "no header icon by default");
+    }
+
+    #[test]
+    fn card_shell_build_with_header_icon_does_not_panic() {
+        let shell: CardShell<'static, ()> = CardShell::new("Mesh Health", vec![])
+            .header_icon(text("icon").into())
+            .status_badge("Healthy", StatusBadgeKind::Success)
+            .header_action("View details", ());
+        let el = shell.build(&Theme::Light);
+        let _ = el;
     }
 
     #[test]

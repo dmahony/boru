@@ -310,7 +310,7 @@ Used for "Cancel", "Remove" actions in download cards.
 
 #### Dashboard Card (shared foundation, UI-HOME-03)
 
-The home-screen card surface. All dashboard cards — hero, Mesh Activity,
+The home-screen card surface. All dashboard cards — hero, Mesh Health,
 right-rail cards (Online Peers / Recent Activity / Tunnels) and quick-action
 buttons — share one style and one shell primitive:
 

@@ -246,6 +246,25 @@ pub(crate) fn count_label(count: usize, singular: &str, plural: &str) -> String 
     format!("{count} {}", if count == 1 { singular } else { plural })
 }
 
+/// Format an elapsed age (whole seconds) as a short relative label.
+///
+/// Mirrors [`relative_time_at`]'s thresholds for consistency between wall-clock
+/// timestamps and monotonic-age event rows (mesh health events record an
+/// `Instant`, so the age is captured at snapshot time rather than a unix ms).
+pub(crate) fn relative_age_secs(age_secs: u64, just_now_seconds: u64) -> String {
+    if age_secs < just_now_seconds {
+        "just now".to_string()
+    } else if age_secs < 60 {
+        format!("{age_secs}s ago")
+    } else if age_secs < 3_600 {
+        format!("{}m ago", age_secs / 60)
+    } else if age_secs < 86_400 {
+        format!("{}h ago", age_secs / 3_600)
+    } else {
+        format!("{}d ago", age_secs / 86_400)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +450,28 @@ mod tests {
         assert_eq!(relative_time_at(now - 119_000, now, 10), "1m ago");
         assert_eq!(relative_time_at(now - 7_199_000, now, 10), "1h ago");
         assert_eq!(relative_time_at(now - 172_799_000, now, 10), "1d ago");
+    }
+
+    #[test]
+    fn relative_age_secs_matches_wall_clock_thresholds() {
+        assert_eq!(relative_age_secs(4, 10), "just now");
+        assert_eq!(relative_age_secs(10, 10), "10s ago");
+        assert_eq!(relative_age_secs(59, 10), "59s ago");
+        assert_eq!(relative_age_secs(60, 10), "1m ago");
+        assert_eq!(relative_age_secs(3599, 10), "59m ago");
+        assert_eq!(relative_age_secs(3600, 10), "1h ago");
+        assert_eq!(relative_age_secs(86_399, 10), "23h ago");
+        assert_eq!(relative_age_secs(86_400, 10), "1d ago");
+        assert_eq!(relative_age_secs(172_799, 10), "1d ago");
+        // Consistency with the wall-clock formatter at the same elapsed time.
+        let now = 200_000_000u64;
+        for elapsed_ms in [5_000u64, 30_000, 120_000, 3_700_000, 50_000_000] {
+            assert_eq!(
+                relative_age_secs(elapsed_ms / 1000, 10),
+                relative_time_at(now.saturating_sub(elapsed_ms), now, 10),
+                "age and wall-clock labels must agree at {elapsed_ms}ms"
+            );
+        }
     }
 
     #[test]
