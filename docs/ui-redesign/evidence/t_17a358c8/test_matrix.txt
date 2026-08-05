@@ -1,0 +1,15 @@
+UI-HOME-17 action-by-action verification matrix
+================================================
+Every row: action -> expected target -> OCR evidence on capture.
+
+| 1. Create Public Room        | Create Public Room                     | t_17a358c8_action_1_create_public_room.png   | OK
+| 2. Create Group Chat         | Create Group Chat                      | t_17a358c8_action_2_create_group_chat.png    | OK
+| 3. Add Friend                | Friend Requests                        | t_17a358c8_action_3_add_friend.png           | OK
+| 4. Share Files (MCP path)    | Files I'm Sharing                      | t_17a358c8_action_4_share_files_dashboard.png | OK
+| 5a. Peer row -> Chat         | End-to-end encrypted                   | t_17a358c8_rail_5a_peer_row_chat.png         | OK
+| 5b. Online Peers View all    | Friend Requests                        | t_17a358c8_rail_5b_online_peers_view_all.png | OK
+| 5c. Mesh View details        | Connection Details                     | t_17a358c8_rail_5c_mesh_view_details.png     | OK
+| 5d. Tunnels Create tunnel    | Create Tunnel                          | t_17a358c8_rail_5d_tunnels_view_all.png      | OK
+| 7. Ctrl+N opens dialog       | Room Name                              | t_17a358c8_kb_ctrln_room_dialog.png          | OK
+| 7. Auto-focus name input     | Keyboard Room                          | t_17a358c8_kb_typed_name_autofocus.png       | OK
+| 7. Tab focus order (desc)    | Focus Description                      | t_17a358c8_kb_tab_focus_order_group.png      | OK
