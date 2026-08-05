@@ -87,7 +87,7 @@ the existing dependency-isolation tests).
   populated capture (seeded fixture + real `boru_gui_set_peer_presence`
   events through the production `handle_friend_event → push_activity`
   path) proving the live transition out of empty.
-- Evidence under `docs/ui-redesign/evidence/t_4186e7f9/`: 10 PNGs +
+- Evidence under `docs/ui-redesign/evidence/t_4186e7f9/`: 9 PNGs +
   `ocr.txt` + `README.md`.
 
 ## Verification
@@ -122,7 +122,7 @@ the existing dependency-isolation tests).
 - `DESIGN_SYSTEM.md` — empty-state convention note
 - `scripts/ui_home16_empty_states_evidence.sh` — new evidence harness
 - `docs/ui-redesign/UI-HOME-16-report.md` — this report
-- `docs/ui-redesign/evidence/t_4186e7f9/` — 10 PNGs + `ocr.txt` + `README.md`
+- `docs/ui-redesign/evidence/t_4186e7f9/` — 9 PNGs + `ocr.txt` + `README.md`
 
 No networking/discovery/chat/room/group/file-sharing/tunnel business logic
 touched.
